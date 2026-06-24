@@ -29,11 +29,13 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_BIN" --version
 "$SOUC_BIN" info
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
-Neste snapshot do repositório, `bin/souc` é o padrão conservador para trabalho local a partir do checkout. Ele resolve o artefato do host automaticamente, expõe comandos de compatibilidade para `check`/`run`/`compile`/`build` e ainda suporta a interface bruta do compilador self-hosted quando você deseja uma invocação explícita de `<origem> <destino>`.
+Neste snapshot do repositório, `bin/souc` é o padrão conservador para trabalho local e roteia para **Madaros**.
+Se você precisar da engine legado de bootstrap para checagens de compatibilidade, use `SOUNIO_SOUC_ENGINE=lean_single` na invocação.
+Ele resolve o artefato do host automaticamente, expõe comandos de compatibilidade para `check`/`run`/`compile`/`build` e ainda suporta a interface bruta do compilador self-hosted quando você deseja uma invocação explícita de `<origem> <destino>`.
 
 Há também um artefato separado de GPU/JIT para Linux `x86_64` específico para fluxos de trabalho com GPU:
 
@@ -56,7 +58,7 @@ A maneira mais confiável de validar o artefato self-hosted é usar os comandos 
 
 ```bash
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 ```
 

@@ -6930,6 +6930,55 @@ discharge, finite-cover certificate, and global-flowpipe claim masks at zero.
    layer is still a real high-order producer plus a small replay checker for
    per-step remainder bounds.
 
+## 2026-06-23 interrupted child-1 Y-axis witness v175 handoff
+
+An attempted v175 continuation was interrupted by a concurrent checkout/reset
+of `/workspace/sounio` from `fix/equiv-theory-ci-followup` to
+`fix/docs-registry-missing-audit-files` at `2026-06-23 19:03 UTC`
+(`git reflog`: checkout followed by reset to `HEAD`). That reset displaced the
+untracked Lorenz/portfolio lane from branch-tracked truth. The current worktree
+may contain untracked copies of `stdlib/systems/lorenz_i256_cert.sio`,
+`stdlib/theorem/portfolio.sio`, and related run-pass tests, but they were not
+used as accepted v175 evidence in this checkout.
+
+The v175 work below was therefore not completed or validated in the live
+checkout. Treat it as a precise resumption packet, not as accepted evidence.
+
+- Intended system layer: child `1`, slots `(1, 0, 0)`, Y axis `1`, axis witness
+  mask `2`, artifact kind `46`, witness status `54`.
+- Intended anchors: v173 child-1 validation-guard artifact/audit
+  `399287919`/`812182729`, v173 portfolio entry/manifest/readiness
+  `595323045`/`136253071`/`701839377`, v172 child-1 containment-obligation
+  artifact/audit `697916891`/`284547222`, v172 portfolio
+  entry/manifest/readiness `227808528`/`413882488`/`793575105`, and the five
+  step containment-obligation artifact/audit pairs
+  `473585568`/`790380830`, `311696236`/`301485983`,
+  `360827572`/`456885748`, `37368367`/`94030837`, and
+  `291436394`/`876674722`.
+- Derived system constants for resumption: instance `452101076`, certificate
+  `32468837`, artifact `597632301`, audit `85858631`.
+- Intended portfolio v175 kind/checker: `178`.
+- Derived portfolio constants for resumption: receipt `549267660`, audit
+  `219936520`, entry `961194039`, manifest `398024434`, result coverage
+  `765863019`, family coverage `907265898`, acceptance receipt `147594670`,
+  audit receipt `473727672`, readiness `52794647`.
+- Target counter values: `10 + 167 + 1 + 1 = 179` for result coverage and
+  `6 + 4 + 3 + 2 + 162 + 2 = 179` for family coverage.
+- Intended non-claims: `axis_validated_mask = 0`,
+  `local_flowpipe_proof_mask = 0`, `child_validated_mask = 0`,
+  `child_discharge_mask = 0`, `global_cover_certificate_mask = 0`, and
+  `global_flowpipe_claim_mask = 0`.
+- Required resumption gates: restore the v174 Lorenz/portfolio lane in an
+  isolated or coordinated worktree, add the v175 system/portfolio blocks, add
+  tiny/imported tests for
+  `lorenz_i256_cover_child1_y_axis_validation_witness` and
+  `solver_portfolio_lorenz_i256_cover_child1_y_axis_validation_witness_v175`,
+  then run `./bin/souc check stdlib/systems/lorenz_i256_cert.sio`,
+  `./bin/souc check stdlib/theorem/portfolio.sio`, checks for the four v175
+  tests, tiny test runs, the two focused suites, offload review, and diff
+  hygiene. The old full-portfolio timeout blocker remains separate unless the
+  full portfolio suite is rerun and proven.
+
 ## Non-claims
 
 - This does not claim Sounio beats Kissat, CaDiCaL, cvc5, Bitwuzla, or Z3.

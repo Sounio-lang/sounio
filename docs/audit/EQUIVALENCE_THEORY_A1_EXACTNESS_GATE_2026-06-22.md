@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.equivalence-theory-a1-exactness-gate-2026-06-22
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-a1-exactness-gate-2026-06-22
+-->
+
 # Equivalence Theory — Feature A-1: carrier-exactness gate on e-graph float reassociation
 ## Teoria da Equivalência — Recurso A-1: porta de exatidão do portador na reassociação de ponto flutuante do e-graph
 

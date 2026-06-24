@@ -5809,6 +5809,11 @@ fn nc_emit_load_rax_mem_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8B); nc_emit_byte(nc, 0x00)
 }
 
+fn nc_emit_store_rbx_to_mem_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // 48 89 18  (mov [rax], rbx)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x18)
+}
+
 fn nc_emit_addsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
     // F2 0F 58 C1
     nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x58); nc_emit_byte(nc, 0xC1)
@@ -6476,9 +6481,29 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 (*nc).code = emit_not_bool_rax((*nc).code)
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                 nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            } else if uop == UnaryOp::OpDeref {
+                // *p of a true reference: load the pointer value, then load from [p].
+                // (Box deref is lowered to IrFieldGet(0) earlier, so this is a raw ref.)
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_emit_load_rax_mem_rax(nc)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            } else if uop == UnaryOp::OpRef || uop == UnaryOp::OpRefMut {
+                // &x / &!x : address of x's stack slot. Escape safety (returning/leaking a
+                // ref to a frame-local) is enforced by the checker's escape analysis (E091);
+                // the common param-rooted case (&n passed to a fn) is sound.
+                nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset((*func).instrs[i as usize].src1))
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
             } else {
                 return false
             }
+        } else if instr_op == IrOpcode::IrStorePtr {
+            // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_rbx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_emit_store_rbx_to_mem_rax(nc)
         } else if instr_op == IrOpcode::IrAlloc {
             if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
                 return false

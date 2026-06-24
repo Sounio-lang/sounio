@@ -18,6 +18,11 @@ struct LowerLocalStack {
     global_bss_offsets: [i64; 4096],
     global_bss_sizes: [i64; 4096],
     is_global: [i64; 4096],
+    // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
+    scalar_kind: [i64; 4096],
+    // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
+    // must be injected when this local is called (closures step 2).
+    closure_fn_id: [i64; 4096],
     count: i64,
 }
 
@@ -33,8 +38,70 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_offsets: [0; 4096],
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
+        scalar_kind: [0; 4096],
+        closure_fn_id: [-1; 4096],
         count: 0,
     }
+}
+
+// --- Capturing-closure support (closures step 2) ---
+// A capturing closure is lowered as a synthetic fn whose LEADING params are the captured
+// values, followed by the lambda's own params. The closure is never given a first-class
+// runtime value (it stays out of the bare fn-ref representation, so #418 zero-capture
+// closures + fn-pointer interop are untouched); instead the captured enclosing regs are
+// injected at a direct call site. All stores use the extract-Box-first / copy-modify-
+// writeback idiom to dodge the by-value-aggregate-store miscompile.
+struct CaptureList {
+    names: [Name; 8],
+    regs: [i64; 8],
+    count: i64,
+}
+fn empty_capture_list() -> CaptureList {
+    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0 }
+}
+fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with Mut, Panic, Div {
+    var c = caps
+    var i: i64 = 0
+    while i < c.count {
+        if ir_name_eq(c.names[i as usize], name) { return c }
+        i = i + 1
+    }
+    if c.count < 8 {
+        let idx = c.count
+        c.names[idx as usize] = name
+        c.regs[idx as usize] = reg
+        c.count = idx + 1
+    }
+    c
+}
+
+struct ClosureCapEntry {
+    fn_id: i64,
+    cap_count: i64,
+    caps: [i64; 8],
+}
+struct ClosureCapTable {
+    entries: [ClosureCapEntry; 256],
+    count: i64,
+}
+fn empty_closure_cap_table() -> ClosureCapTable {
+    ClosureCapTable {
+        entries: [ClosureCapEntry { fn_id: -1, cap_count: 0, caps: [IR_INVALID_REG; 8] }; 256],
+        count: 0,
+    }
+}
+fn lower_name_in_closure_params(params: &Option<Box<ClosureParamList>>, name: Name) -> bool with Mut, Panic, Div {
+    var cur = params
+    while true {
+        match *cur {
+            Some(pl) => {
+                if ir_name_eq((*pl).head.name, name) { return true }
+                cur = &(*pl).tail
+            }
+            _ => break
+        }
+    }
+    false
 }
 
 struct LowerLoopLabels {
@@ -71,6 +138,11 @@ struct Lowerer {
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
     probe_mode: bool,
+    // Closures step 2: captured-reg table keyed by synthetic closure fn_id, and a
+    // side-channel set by lower_closure_expr_ref and consumed by the let-binding so the
+    // bound local knows it is a capturing closure.
+    closure_caps: Box<ClosureCapTable>,
+    pending_closure_fn_id: i64,
 }
 
 struct IrPreparedCallArgs {
@@ -176,6 +248,8 @@ fn lowerer_new() -> Lowerer with Alloc {
         array_elem_float_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
     }
 }
 
@@ -1228,12 +1302,18 @@ fn ir_fast_summary_register_struct_fields_owned(
             }
             let fc = table_value.entries[layout_idx as usize].field_count
             if fc < 64 {
-                table_value.entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                // Two-level nested store `table.entries[i].fields[fc] = …` is dropped by
+                // the lean_single by-value-aggregate miscompile, so the field never lands
+                // and field-index resolution later falls back to a name hash (OOB access).
+                // Build in a local entry, then assign it back once (single level).
+                var lay_entry = table_value.entries[layout_idx as usize]
+                lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                 }
-                table_value.entries[layout_idx as usize].field_count = fc + 1
+                lay_entry.field_count = fc + 1
+                table_value.entries[layout_idx as usize] = lay_entry
             }
             ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
         }
@@ -1536,6 +1616,27 @@ fn lowerer_bind_local_mut(
     }
 }
 
+// *mut analogue of bind_local_struct_type: record a local/param's struct type so
+// `recv.method()` and `recv.field` resolve the receiver type. Single-level store through
+// the Box (safe under the by-value-aggregate miscompile). No-op for non-struct types.
+fn lowerer_bind_local_struct_type_mut(
+    lo: &! Lowerer,
+    name: Name,
+    type_name: Name
+) with Mut, Alloc, Panic, Div {
+    if type_name.len <= 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).struct_types[i as usize] = type_name
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_global_mut(
     lo: &! Lowerer,
     name: Name,
@@ -1620,6 +1721,7 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
+                lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
                 }
@@ -1954,6 +2056,19 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
         }
         None => ir_empty_name(),
     }
+}
+
+// Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
+// `self.method()` (and `param.method()`) can resolve the receiver's type — params were
+// previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
+fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeNamed {
+        return ir_path_first_name((*ty).path)
+    }
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        return lower_opt_type_named_name(&(*ty).inner)
+    }
+    ir_empty_name()
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -3029,6 +3144,33 @@ impl Lowerer {
         lo
     }
 
+    // Mark a local as a capturing closure bound to synthetic fn `fn_id` (closures step 2).
+    fn bind_local_closure_fn_id(self, name: Name, fn_id: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.closure_fn_id[i as usize] = fn_id
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_closure_fn_id(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).closure_fn_id[i as usize]
+            }
+            i = i - 1
+        }
+        -1
+    }
+
     fn bind_local_wide_type(self, name: Name, bits: i64, signed: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if bits <= 64 { return lo }
@@ -3110,6 +3252,56 @@ impl Lowerer {
             i = i - 1
         }
         false
+    }
+
+    fn bind_local_scalar_kind(self, name: Name, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.scalar_kind[i as usize] = kind
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_scalar_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).scalar_kind[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Returns the print builtin name for println's first argument.
+    //   int literal / i64 var (scalar_kind=1) → print_int  (itoa+write)
+    //   everything else                        → print      (strlen+write, safe fallback)
+    // Note: f64 vars (scalar_kind=2) intentionally fall through to print here because
+    // emit_builtin_print_f64 reads its argument from RDI (integer ABI) but our inline
+    // println call path passes floats via XMM0 (float ABI), causing a mismatch.
+    // Wiring up f64 dispatch requires threading the float-arg ABI into println lowering.
+    fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
+        match *args {
+            Some(list) => {
+                let hk = (*list).head.kind
+                if hk == ExprKind::ExprIntLit {
+                    make_name("print_int")
+                } else if hk == ExprKind::ExprIdent {
+                    let sk = self.lookup_local_scalar_kind((*list).head.name)
+                    if sk == 1 { make_name("print_int") } else { make_name("print") }
+                } else {
+                    make_name("print")
+                }
+            }
+            _ => make_name("print"),
+        }
     }
 
     fn bind_reg_array_elem_float(self, reg: i64) -> Lowerer with Mut, Panic, Div {
@@ -3743,12 +3935,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -3840,12 +4036,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -4543,7 +4743,7 @@ impl Lowerer {
                         locals.names[idx as usize] = (*list).head.name
                         locals.regs[idx as usize] = preg
                         locals.depths[idx as usize] = lo.scope_depth
-                        locals.struct_types[idx as usize] = ir_empty_name()
+                        locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
@@ -5221,6 +5421,12 @@ impl Lowerer {
         var lo = pair.0
         let reg = pair.1
         lo = lo.bind_local(s.name, reg, is_mut)
+        // Closures step 2: if the RHS was a capturing closure, mark this local so a later
+        // `name(args)` call injects the captured regs (direct call to the synthetic fn).
+        if lo.pending_closure_fn_id >= 0 {
+            lo = lo.bind_local_closure_fn_id(s.name, lo.pending_closure_fn_id)
+            lo.pending_closure_fn_id = -1
+        }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
         } else {
@@ -5228,6 +5434,20 @@ impl Lowerer {
                 Some(expr_box_arr) => {
                     if lower_expr_is_f64_array_literal_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        if lower_opt_type_is_f64(&s.ty) {
+            lo = lo.bind_local_scalar_kind(s.name, 2)
+        } else {
+            match s.expr {
+                Some(expr_box_sk) => {
+                    if (*expr_box_sk).kind == ExprKind::ExprFloatLit {
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprIntLit {
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
                     }
                 }
                 _ => {}
@@ -5332,6 +5552,9 @@ impl Lowerer {
                             (lo, dst)
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
+                        // Escape safety for `obj.field = &local` (and array/deref store
+                        // escapes) is enforced by the checker's escape analysis (E091) at
+                        // store sites, so lowering stores unconditionally here.
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
                         match base_opt {
                             Some(base_expr) => {
@@ -5353,6 +5576,33 @@ impl Lowerer {
                         let idx_reg = pair_idx.1
                         lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
                         (lo, rhs)
+                } else if (*target_expr).kind == ExprKind::ExprUnary {
+                        if (*target_expr).un_op == UnaryOp::OpDeref {
+                            // `*p = val`: a Box stores into field 0 (handle-resolved); a true
+                            // reference stores through the raw pointer.
+                            let is_box_t = match (*target_expr).left {
+                                Some(op) => {
+                                    if (*op).kind == ExprKind::ExprIdent {
+                                        ir_name_is_box(lo.lookup_local_struct_type((*op).name))
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            }
+                            let ptr_pair = lo.lower_opt_expr_ref(&(*target_expr).left)
+                            lo = ptr_pair.0
+                            let ptr_reg = ptr_pair.1
+                            if is_box_t {
+                                lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
+                            } else {
+                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                            }
+                            (lo, rhs)
+                        } else {
+                            lo = lo.report_error()
+                            (lo, rhs)
+                        }
                 } else {
                     lo = lo.report_error()
                     (lo, rhs)
@@ -6472,12 +6722,13 @@ impl Lowerer {
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
-            // Lower println(x) -> print_kind(x); print_char('\n') so the native-v2
-            // backend does not need a dedicated println builtin. print_kind is print_int
-            // when x is an integer literal (decimal itoa+write) and otherwise print
-            // (=print_str, strlen+write). Routing an int literal to print_str would
-            // dereference the integer value as a char* and SIGSEGV.
-            let pl_print_name = if lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { make_name("print") }
+            // Lower println(x) -> print_kind(x); print_char('\n'). Dispatch rules:
+            //   int literal / i64 var  → print_int   (itoa+write)
+            //   float literal / f64 var → print_f64   (dtoa+write)
+            //   anything else          → print        (strlen+write, safe fallback for strings)
+            // print_str treats its argument as a char*; routing a numeric value to it
+            // causes a SIGSEGV. The scalar_kind table tracks annotated i64/f64 locals.
+            let pl_print_name = self.println_dispatch_name(&e.args)
             var lo_pl = self
             let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, pl_print_name)
             let pair_args_pl: LowerExprArgsResult = lo_pl.lower_expr_args_ref(&e.args)
@@ -6564,8 +6815,54 @@ impl Lowerer {
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
         }
+        // Inline expression callee (e.g. `(|x| x)(n)`): no resolvable name — lower the
+        // callee expression to a fn-ref reg and dispatch indirectly, rather than falling
+        // through to find_or_add_fn_id(empty) (which calls a body-less fn -> crash).
+        if callee_name.len <= 0 {
+            match *callee_opt_ref {
+                Some(_) => {
+                    let pair_cal = self.lower_opt_expr_ref(&e.left)
+                    let lo_cal = pair_cal.0
+                    let callee_reg = pair_cal.1
+                    let pair_args_x: LowerExprArgsResult = lo_cal.lower_expr_args_ref(&e.args)
+                    let lo_x = pair_args_x.lowerer
+                    let args_x: Option<Box<IrRegList>> = if pair_args_x.count <= 0 { None } else { Some(Box::new(pair_args_x.regs)) }
+                    let argc_x = pair_args_x.count
+                    let pair_dx = lo_x.fresh_reg()
+                    let lo_dx = pair_dx.0
+                    let dst_x = pair_dx.1
+                    let lo_cx = lo_dx.emit(ir_call_indirect(dst_x, callee_reg, args_x, argc_x))
+                    return (lo_cx, dst_x)
+                }
+                _ => {}
+            }
+        }
         let callee_local_reg = self.lookup_local(callee_name)
         if callee_local_reg >= 0 {
+            // Capturing closure (closures step 2): direct-call the synthetic fn with
+            // [captured_regs..., args...]. IrCall relocs by fn_id, so the name is unused.
+            let ccap_fn = self.lookup_local_closure_fn_id(callee_name)
+            if ccap_fn >= 0 {
+                let pair_args_c: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
+                let lo_c = pair_args_c.lowerer
+                var arglist_c: Option<Box<IrRegList>> = if pair_args_c.count <= 0 { None } else { Some(Box::new(pair_args_c.regs)) }
+                var total_c = pair_args_c.count
+                let cidx = lo_c.find_closure_cap_idx(ccap_fn)
+                if cidx >= 0 {
+                    let ccount = (*lo_c.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist_c = ir_reg_list_prepend((*lo_c.closure_caps).entries[cidx as usize].caps[jc as usize], arglist_c)
+                        jc = jc - 1
+                    }
+                    total_c = total_c + ccount
+                }
+                let pair_dc = lo_c.fresh_reg()
+                let lo_dc = pair_dc.0
+                let dst_c = pair_dc.1
+                let lo_cc = lo_dc.emit(ir_call(dst_c, ccap_fn, ir_empty_name(), arglist_c, total_c))
+                return (lo_cc, dst_c)
+            }
             let pair_args_i: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
             let lo_i = pair_args_i.lowerer
             let args_i: Option<Box<IrRegList>> = if pair_args_i.count <= 0 { None } else { Some(Box::new(pair_args_i.regs)) }
@@ -6684,6 +6981,34 @@ impl Lowerer {
             print(" field_array_float=")
             print_int(if field_array_elem_is_float { 1 } else { 0 })
             print("\n")
+        }
+        if str_eq(read_env("SOUNIO_DUMP_LAYOUTS"), "1") {
+            print("DUMP field=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" idx=")
+            print_int(fidx)
+            print(" layouts.count=")
+            print_int((*self.struct_layouts).count)
+            print("\n")
+            var di: i64 = 0
+            while di < (*self.struct_layouts).count {
+                print("  [")
+                print_int(di)
+                print("] ")
+                print(str_from_bytes((*self.struct_layouts).entries[di as usize].type_name.buf, (*self.struct_layouts).entries[di as usize].type_name.len))
+                print(" fc=")
+                print_int((*self.struct_layouts).entries[di as usize].field_count)
+                var dj: i64 = 0
+                while dj < (*self.struct_layouts).entries[di as usize].field_count {
+                    print(" ")
+                    print(str_from_bytes((*self.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*self.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(":")
+                    print_int((*self.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    dj = dj + 1
+                }
+                print("\n")
+                di = di + 1
+            }
         }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
@@ -6828,7 +7153,27 @@ impl Lowerer {
         (lo3, dst)
     }
 
+    // Receiver struct type for a method call, when the receiver is a simple local
+    // (e.g. `c.method()` -> type of `c`). Used to mangle the call to the same name the
+    // impl method was registered under. Empty when the type can't be determined here.
+    fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_struct_type((*recv).name)
+                }
+                ir_empty_name()
+            }
+            _ => ir_empty_name()
+        }
+    }
+
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
+        // A `recv.method()` call must resolve to that SAME mangled name; using the bare
+        // method name finds/creates a body-less fn -> codegen crash.
+        let recv_type = self.lower_method_recv_type(&e.left)
+        let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base_reg = pair_b.1
@@ -6837,7 +7182,7 @@ impl Lowerer {
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
         let args2 = lo2.prepend_arg(base_reg, arg_list)
-        let pair_fn = lo2.find_or_add_fn_id(e.name)
+        let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
         let fn_id = pair_fn.1
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
@@ -6847,7 +7192,7 @@ impl Lowerer {
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
-        var call_instr_m = ir_call(dst, fn_id, e.name, final_args, final_argc)
+        var call_instr_m = ir_call(dst, fn_id, call_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             if (*lo5.module).functions[fn_id as usize].returns_float == 1 {
                 call_instr_m.imm_flags = IR_FLOAT_REG_MARKER_FLAG
@@ -7220,6 +7565,16 @@ impl Lowerer {
             }
             let src = self.lookup_local(e.name)
             if src >= 0 {
+                // Closures step 2: a capturing closure used as a VALUE (passed to a fn,
+                // returned, aliased) would lose its captures — the synthetic fn has leading
+                // capture params the receiver can't fill — yielding a silent wrong result.
+                // Reject loudly instead. (Direct calls are handled in lower_call_expr_ref
+                // before reaching here, so this only fires for non-callee uses.)
+                if self.lookup_local_closure_fn_id(e.name) >= 0 {
+                    print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
+                    let loe = self.report_error()
+                    return (loe, src)
+                }
                 (self, src)
             } else {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
@@ -7406,12 +7761,91 @@ impl Lowerer {
 
     // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.
     // Returns (Lowerer, fn_ref_reg) where fn_ref_reg holds the fn_id.
+    // Recursive free-variable scan (closures step 2): collect idents in `body` that resolve
+    // as enclosing locals and are not closure params (= captures). Self-recursive; uses
+    // self.lookup_local for the enclosing scope (no &LowerLocalStack arg).
+    fn scan_captures_expr(self, body: &Expr, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
+        var c = caps
+        if (*body).kind == ExprKind::ExprIdent {
+            let nm = (*body).name
+            if !lower_name_in_closure_params(params, nm) {
+                let r = self.lookup_local(nm)
+                if r >= 0 { c = capture_list_add(c, nm, r) }
+            }
+            return c
+        }
+        match (*body).left {
+            Some(l) => { c = self.scan_captures_expr(&(*l), params, c) }
+            _ => {}
+        }
+        match (*body).right {
+            Some(r) => { c = self.scan_captures_expr(&(*r), params, c) }
+            _ => {}
+        }
+        match (*body).else_expr {
+            Some(eo) => { c = self.scan_captures_expr(&(*eo), params, c) }
+            _ => {}
+        }
+        var cur = &(*body).args
+        while true {
+            match *cur {
+                Some(el) => {
+                    c = self.scan_captures_expr(&(*el).head, params, c)
+                    cur = &(*el).tail
+                }
+                _ => break
+            }
+        }
+        c
+    }
+    fn scan_captures_opt(self, body: &Option<Box<Expr>>, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
+        match *body {
+            Some(b) => { self.scan_captures_expr(&(*b), params, caps) }
+            _ => { caps }
+        }
+    }
+
+    // Index of the closure-capture entry for `fn_id` (-1 if none). Method form avoids
+    // passing &(*self.closure_caps) (ref of a deref of a field-accessed Box), which the
+    // parser rejects.
+    fn find_closure_cap_idx(self, fn_id: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var i: i64 = 0
+        while i < (*self.closure_caps).count {
+            if (*self.closure_caps).entries[i as usize].fn_id == fn_id { return i }
+            i = i + 1
+        }
+        -1
+    }
+
+    // Record a capturing closure's captured enclosing regs, keyed by its synthetic fn_id.
+    // Copy-modify-writeback on the whole table (like bind_local_struct_type) — no
+    // &!ClosureCapTable free-function param.
+    fn record_closure_caps(self, fn_id: i64, caps: CaptureList) -> Lowerer with Mut, Panic, Div, Alloc {
+        var lo = self
+        var tbl = *lo.closure_caps
+        if tbl.count < 256 {
+            let idx = tbl.count
+            var e = ClosureCapEntry { fn_id: fn_id, cap_count: caps.count, caps: [IR_INVALID_REG; 8] }
+            var i: i64 = 0
+            while i < caps.count {
+                e.caps[i as usize] = caps.regs[i as usize]
+                i = i + 1
+            }
+            tbl.entries[idx as usize] = e
+            tbl.count = idx + 1
+            lo.closure_caps = Box::new(tbl)
+        }
+        lo
+    }
+
     fn lower_closure_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        // 1. Create a unique name and register the synthetic function
-        let closure_name = self.make_closure_name()
-        let pair_fn = self.find_or_add_fn_id(closure_name)
-        var lo = pair_fn.0
-        let closure_fn_id = pair_fn.1
+        var lo = self
+        // 1. Create a unique name and register the synthetic function. Use the *mut
+        // find_or_add (like regular calls): the functional find_or_add_fn_id ADD path
+        // builds + returns a 128 KB IrFunction by value, which the by-value-aggregate
+        // miscompile turned into a lowering SIGSEGV.
+        let closure_name = lo.make_closure_name()
+        let closure_fn_id = lowerer_find_or_add_fn_id_mut(&! lo, closure_name)
 
         if closure_fn_id < 0 {
             return lo.emit_unit()
@@ -7423,14 +7857,44 @@ impl Lowerer {
         let saved_locals = lo.locals
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
+        let saved_loaded = lo.current_func_loaded
 
-        // 3. Switch to the closure function context
+        // 2b. Scan the closure body for captured free variables (idents bound in the
+        // enclosing scope, not lambda params) BEFORE wiping locals. Captures become LEADING
+        // params on the synthetic fn and are injected at the (direct) call site.
+        var captures = empty_capture_list()
+        captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+
+        // 3. Switch to the closure function context. current_func_loaded MUST be true so
+        // the functional lowering (current_fn_validated_reg / param resolution) reads from
+        // lo.current_func — not the empty module placeholder, which is what zeroed
+        // param_count and produced a malformed closure body.
         lo.current_fn = closure_fn_id
         lo.current_func = Box::new(ir_empty_function())
         (*lo.current_func).name = closure_name
+        lo.current_func_loaded = true
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
+
+        // 3b. Bind captured variables as LEADING params of the synthetic fn, so the body's
+        // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
+        // injected at the call site; here we only allocate param regs + bind the names.
+        var ci: i64 = 0
+        while ci < captures.count {
+            let cap_pair = lo.fresh_reg()
+            lo = cap_pair.0
+            let cap_preg = cap_pair.1
+            var cf_box_cap = lo.current_func
+            if (*cf_box_cap).param_count < IR_MAX_PARAMS {
+                let pcc = (*cf_box_cap).param_count
+                (*cf_box_cap).param_regs[pcc as usize] = cap_preg
+                (*cf_box_cap).param_count = pcc + 1
+            }
+            lo.current_func = cf_box_cap
+            lo = lo.bind_local(captures.names[ci as usize], cap_preg, false)
+            ci = ci + 1
+        }
 
         // 4. Set up closure parameters from ClosureParamList
         var params: &Option<Box<ClosureParamList>> = &e.closure_params
@@ -7440,11 +7904,19 @@ impl Lowerer {
                     let preg_pair = lo.fresh_reg()
                     lo = preg_pair.0
                     let preg = preg_pair.1
-                    if (*lo.current_func).param_count < IR_MAX_PARAMS {
-                        let pc = (*lo.current_func).param_count
-                        (*lo.current_func).param_regs[pc as usize] = preg
-                        (*lo.current_func).param_count = pc + 1
+                    // Extract the current_func Box to a local before mutating: the direct
+                    // `(*lo.current_func).param_count = …` store (deref a field-accessed Box)
+                    // is dropped by the by-value-aggregate miscompile — the same reason
+                    // fresh_reg copies `lo.current_func` to a local first. Without this,
+                    // param_count stayed 0, the codegen emitted no parameter prologue, and
+                    // the closure SIGSEGV'd when called.
+                    var cf_box = lo.current_func
+                    if (*cf_box).param_count < IR_MAX_PARAMS {
+                        let pc = (*cf_box).param_count
+                        (*cf_box).param_regs[pc as usize] = preg
+                        (*cf_box).param_count = pc + 1
                     }
+                    lo.current_func = cf_box
                     lo = lo.bind_local((*plist).head.name, preg, false)
                     params = &(*plist).tail
                 }
@@ -7457,17 +7929,30 @@ impl Lowerer {
         lo = body_pair.0
         lo = lo.emit(ir_return(body_pair.1))
 
-        // 7. Flush the completed closure function back to the module
-        var module = *lo.module
-        module.functions[closure_fn_id as usize] = *lo.current_func
-        lo.module = Box::new(module)
+        // 7. Flush the completed closure function back to the module. Extract the module
+        // Box to a local first (as lowerer_flush_current_func_mut does) — the direct
+        // `(*lo.module).functions[id] = …` store derefs a field-accessed Box and is
+        // dropped/partial under the by-value-aggregate miscompile, which lost the body
+        // instrs (the closure returned its param instead of the body's result).
+        var flush_mod_box = lo.module
+        (*flush_mod_box).functions[closure_fn_id as usize] = *lo.current_func
+        lo.module = flush_mod_box
 
         // 8. Restore the original function context
         lo.current_fn = saved_fn
         lo.current_func = saved_func
+        lo.current_func_loaded = saved_loaded
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+
+        // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
+        // flag the pending closure so the let-binding marks its local. (Zero-capture closures
+        // stay bare fn-refs — unchanged from #418.) Extract the Box to a local first.
+        if captures.count > 0 {
+            lo = lo.record_closure_caps(closure_fn_id, captures)
+            lo.pending_closure_fn_id = closure_fn_id
+        }
 
         // 9. In the original function, emit IrLoadFnRef to return the fn_id
         let ref_pair = lo.fresh_reg()
