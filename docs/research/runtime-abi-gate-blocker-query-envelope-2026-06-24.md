@@ -17,10 +17,13 @@ owned by the madaros native-lowering lane) and is **not** runtime evidence.
 - Imported smoke test: `tests/run-pass/runtime_abi_gate_blocker_query_envelope_imported.sio`
 - Blocker artifact (returned by a valid query): `584291376`
 - Query mask: `63`
-- Envelope fingerprint: `584297307`
+- Envelope fingerprint: `584298578`
 - Query artifact fingerprint: `426913058`
-- Status code: `93` (unambiguously unused: profile family `88`-`91`, child4
-  `84`-`90`, trajectory2 `117`-`122`; `93` is free).
+- Status code: `124` (free: the lane maintains a coordinated status registry — `88`
+  profile, `91` verifier-preflight, `92` runtime-ABI-blocker, `93`
+  kernel-replay-router, `94`-`101` private-envelope/lift/family/microkernels,
+  `102`-`122` Lorenz bridges, `123` solver proof-profile dispatch — so `93` is
+  taken and `124` is the first free code above the registry).
 
 ## Query Mask
 
@@ -67,12 +70,12 @@ blocker_artifact_fp = 584291376
 query_mask = 63
 known_madaros_runtime_blocker_mask = 7
 runtime_evidence_private_level = 2
-bridge_status = 93
-envelope_fp = 584297307
+bridge_status = 124
+envelope_fp = 584298578
 ```
 
 The envelope fingerprint is derived from (and strictly larger than) the blocker
-artifact, recording clean lineage `584291376 -> 584297307`.
+artifact, recording clean lineage `584291376 -> 584298578`.
 
 ## Anchors
 
@@ -81,7 +84,7 @@ instance `265813904`, certificate `718406529`, audit `936740152`, the shared
 solver proof-profile artifact `964210753`, and the Lorenz replay-verifier
 preflight `391742608`. The query artifact fingerprint is `426913058`.
 
-Status `93` is a local decimal-limb audit status code, not a theorem number,
+Status `124` is a local decimal-limb audit status code, not a theorem number,
 not an older portfolio version number, and not a public mathematical milestone.
 `known_madaros_runtime_blocker_mask = 7` records three active blockers as state,
 **not** as evidence — lifting it requires the multimodule witness and imported

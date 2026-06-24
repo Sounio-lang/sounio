@@ -20,10 +20,13 @@ i256 claim.
 - Imported smoke test: `tests/run-pass/solver_proof_profile_dispatch_envelope_imported.sio`
 - Profile artifact (returned by a valid query): `964210753`
 - Dispatch mask: `63`
-- Envelope fingerprint: `964220032`
+- Envelope fingerprint: `964221344`
 - Dispatch artifact fingerprint: `382940617`
-- Status code: `91` (free in the profile family: `88` profile, `89` solver-profile
-  bridge, `90` child-4 replay manifest; `91` is unused).
+- Status code: `123` (free: the lane maintains a coordinated status registry — `88`
+  profile, `91` verifier-preflight, `92` runtime-ABI-blocker, `93`
+  kernel-replay-router, `94`-`101` private-envelope/lift/family/microkernels,
+  `102`-`122` Lorenz bridges — so `91`/`93` are taken and `123` is the first free
+  code above the registry).
 
 ## Dispatch Mask
 
@@ -66,12 +69,12 @@ profile_artifact_fp = 964210753
 dispatch_mask = 63
 accepted_profile_mask = 15
 profile_status = 88
-bridge_status = 91
-envelope_fp = 964220032
+bridge_status = 123
+envelope_fp = 964221344
 ```
 
 The envelope fingerprint is derived from (and strictly larger than) the profile
-artifact, recording clean lineage `964210753 -> 964220032`.
+artifact, recording clean lineage `964210753 -> 964221344`.
 
 ## Anchors
 
@@ -80,7 +83,7 @@ instance `710284936`, certificate `295748103`, audit `526184309`,
 `accepted_profile_mask=15`, `rejected_profile_mask=48`, status `88`. The
 dispatch artifact fingerprint is `382940617`.
 
-Status `91` is a local decimal-limb audit status code, not a theorem number,
+Status `123` is a local decimal-limb audit status code, not a theorem number,
 not an older portfolio version number, and not a public mathematical milestone.
 
 ## Boundary
