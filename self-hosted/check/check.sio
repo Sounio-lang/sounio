@@ -6439,6 +6439,25 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    // Raw-reference escape (store sites): a reference may not be stored into a struct field,
+    // an array element, or through a pointer — doing so lets it outlive its referent → a
+    // dangling reference. References are second-class: pass them to functions and read/write
+    // through them, but do not store them. This catches both a frame-local reference
+    // (provenance) and a reference-typed value of unknown origin such as a stored ref param
+    // (interproc), the latter via the value type. Return escapes are caught at return sites.
+    match s.target {
+        Some(stgt) => {
+            let stk = (*stgt).kind
+            let is_store_place = stk == ExprKind::ExprFieldAccess
+                || stk == ExprKind::ExprIndex
+                || (stk == ExprKind::ExprUnary && (*stgt).un_op == UnaryOp::OpDeref)
+            let rhs_is_ref = val_ty.kind == TypeKind::TyRef || val_ty.kind == TypeKind::TyRefMut
+            if is_store_place && (rhs_is_ref || checker_expr_provenance_opt(c, s.expr) == 1) {
+                checker_report_error_at_inplace(c, s.span, 91, 0, 0, 0)
+            }
+        }
+        None => {}
+    }
     match s.target {
         Some(target) => {
             if (*target).kind == ExprKind::ExprIdent {

@@ -34,38 +34,46 @@ needed a new store op.
 Aliasing works because native_v2 round-trips every temp through its rbp-relative slot, so
 `&n` (the slot address) and a later read of `n` refer to the same memory.
 
-## Escape safety — MEASURED, and weak (read this before relying on it)
+## Escape safety — second-class references, enforced at compile time
 
-References here are effectively **second-class with weak enforcement**. The only sound,
-enforced guarantee is no-return; **store-escapes are largely unguarded and can silently
-dangle.** Measured behaviour of address-of-a-local flowing into storage:
+References are **second-class**: pass them to functions and read/write through them, but they
+may **not be returned or stored**. The checker's escape analysis (E091) now enforces this at
+**both return sites and store sites**, so every measured escape route is a hard compile error
+(no ELF), not a dangling pointer. The store-site check (in `checker_check_assign_stmt_inplace`)
+rejects assigning a reference into a struct field, an array element, or through a pointer,
+when either the value is a frame-local reference (binary provenance) **or** the value's type
+is a reference (`TyRef`/`TyRefMut`) — the latter covers a stored *reference parameter*, i.e.
+the interproc case.
 
-| Escape route | Observed |
-|---|---|
-| `return &x` | **rejected by E091** (checker, on `main` via #397) — sound |
-| `h.p = &x` (direct field store) | prints an `error:` **but still emits an exit-0 ELF** (madaros leniency) — *loud, not blocked* |
-| `arr[i] = &x` (array element store) | **compiles and runs — silent dangling** (reads a dead slot) |
-| `*pp = &x` (store address through a deref) | **compiles and runs — silent dangling** |
-| `&x` passed to a fn that stores it (interproc) | compiles, **crashes at runtime** (undefined) |
+| Escape route | Before | Now |
+|---|---|---|
+| `return &x` | E091 (return site, #397) | E091 |
+| `h.p = &x` (field store) | silent / printed warning | **E091, no ELF** |
+| `arr[i] = &x` (array store) | silently dangled | **E091, no ELF** |
+| `*pp = &x` (store through deref) | silently dangled | **E091, no ELF** |
+| `&x` → fn that stores its ref param (interproc) | compiled, crashed | **E091, no ELF** |
 
-So: E091 enforces no-return; the lowering guard catches only the *direct* `obj.field = &x`
-form and only as a printed warning; **all other store-escape routes are unguarded** and
-range from silent-dangling to crash. The safe, intended use is **passing a reference
-directly to a function and reading/writing through it within the callee's lifetime** — that
-is sound (the referent outlives the call).
+The intended, sound use — passing a reference to a function and reading/mutating through it
+within the callee — is unaffected.
 
-## Honest scope / known gaps
-- The proper fix for store-escapes is to extend the escape analysis (E091) to **store sites**
-  (provenance check on field/index/deref assignments and across calls), or to enforce true
-  second-class references (no reference may be stored at all). Neither is done here.
-- Reference fields in structs and arrays-of-references are mechanically possible but **not
-  escape-safe** — see the table.
+## Honest scope
+- Enforcement is by **value type / provenance at the assignment**, not full lifetime
+  inference: it conservatively rejects *all* reference stores (the second-class rule), so a
+  hypothetical safe pattern like storing a reference to a longer-lived global is also
+  rejected. This is sound (never a dangling ref), not complete.
+- Store-site check covers field/index/deref assignment targets. A reference stored into a
+  bare `ident` target is not separately checked, but a *local* `let r = &x` only escapes when
+  `r` is itself later returned or stored (both covered), and Sounio has no first-class global
+  reference variables.
 - Multi-level refs (`&&T`) and references to temporaries are not addressed.
 
 ## Verified (madaros from this source, `ulimit -s unlimited`)
-- `rd(&n)*p`→42, `(*p).a` of `&P`→42, `mutref *p=*p+1`→42 (alias write-back).
-- `escret`→E091; `dangle2` (direct field-store of `&x`)→loud error.
-- No-regression: 26/50 run-pass = prebuilt main (0 regressed); madaros self-builds.
+- Functionality: `rd(&n)*p`→42, `(*p).a` of `&P`→42, `mutref *p=*p+1`→42 (alias write-back).
+- Escape safety (all **E091, no ELF**): `return &x`, `h.p=&x`, `arr[i]=&x`, `*pp=&x`,
+  interproc `store(h,&x)`.
+- No over-rejection: the three functionality cases still compile and run.
+- No-regression: 34/60 run-pass = prebuilt main +1 (a raw-ref test now passes), 0 regressed;
+  madaros self-builds.
 
 ## AI disclosure
 Implementation by AI agent (Claude) under human direction, on advisor guidance to gate the
