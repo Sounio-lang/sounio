@@ -6681,6 +6681,28 @@ impl Lowerer {
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
         }
+        // Inline expression callee (e.g. `(|x| x)(n)`): no resolvable name — lower the
+        // callee expression to a fn-ref reg and dispatch indirectly, rather than falling
+        // through to find_or_add_fn_id(empty) (which calls a body-less fn -> crash).
+        if callee_name.len <= 0 {
+            match *callee_opt_ref {
+                Some(_) => {
+                    let pair_cal = self.lower_opt_expr_ref(&e.left)
+                    let lo_cal = pair_cal.0
+                    let callee_reg = pair_cal.1
+                    let pair_args_x: LowerExprArgsResult = lo_cal.lower_expr_args_ref(&e.args)
+                    let lo_x = pair_args_x.lowerer
+                    let args_x: Option<Box<IrRegList>> = if pair_args_x.count <= 0 { None } else { Some(Box::new(pair_args_x.regs)) }
+                    let argc_x = pair_args_x.count
+                    let pair_dx = lo_x.fresh_reg()
+                    let lo_dx = pair_dx.0
+                    let dst_x = pair_dx.1
+                    let lo_cx = lo_dx.emit(ir_call_indirect(dst_x, callee_reg, args_x, argc_x))
+                    return (lo_cx, dst_x)
+                }
+                _ => {}
+            }
+        }
         let callee_local_reg = self.lookup_local(callee_name)
         if callee_local_reg >= 0 {
             let pair_args_i: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
@@ -7572,11 +7594,13 @@ impl Lowerer {
     // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.
     // Returns (Lowerer, fn_ref_reg) where fn_ref_reg holds the fn_id.
     fn lower_closure_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        // 1. Create a unique name and register the synthetic function
-        let closure_name = self.make_closure_name()
-        let pair_fn = self.find_or_add_fn_id(closure_name)
-        var lo = pair_fn.0
-        let closure_fn_id = pair_fn.1
+        var lo = self
+        // 1. Create a unique name and register the synthetic function. Use the *mut
+        // find_or_add (like regular calls): the functional find_or_add_fn_id ADD path
+        // builds + returns a 128 KB IrFunction by value, which the by-value-aggregate
+        // miscompile turned into a lowering SIGSEGV.
+        let closure_name = lo.make_closure_name()
+        let closure_fn_id = lowerer_find_or_add_fn_id_mut(&! lo, closure_name)
 
         if closure_fn_id < 0 {
             return lo.emit_unit()
@@ -7622,10 +7646,33 @@ impl Lowerer {
         lo = body_pair.0
         lo = lo.emit(ir_return(body_pair.1))
 
-        // 7. Flush the completed closure function back to the module
-        var module = *lo.module
-        module.functions[closure_fn_id as usize] = *lo.current_func
-        lo.module = Box::new(module)
+        // Re-assert the param metadata on the final closure func. The functional body
+        // lowering copies the 128 KB IrFunction by value (`var func = *lo.current_func`),
+        // and the by-value-aggregate miscompile zeroes param_count/param_regs (reg_count
+        // survives only because the body re-grows it). Without this the codegen emits no
+        // parameter-load prologue and the closure crashes when called. Closure params are
+        // the first regs (0..pcount-1), allocated before the body.
+        var pcount: i64 = 0
+        var pc_cur: &Option<Box<ClosureParamList>> = &e.closure_params
+        while true {
+            match *pc_cur {
+                Some(pl) => {
+                    pcount = pcount + 1
+                    pc_cur = &(*pl).tail
+                }
+                _ => break
+            }
+        }
+        (*lo.current_func).param_count = pcount
+        var pri: i64 = 0
+        while pri < pcount {
+            (*lo.current_func).param_regs[pri as usize] = pri
+            pri = pri + 1
+        }
+
+        // 7. Flush the completed closure function back to the module — single-level store
+        // through the Box, avoiding a 25 MB by-value IrModule copy on the stack.
+        (*lo.module).functions[closure_fn_id as usize] = *lo.current_func
 
         // 8. Restore the original function context
         lo.current_fn = saved_fn
