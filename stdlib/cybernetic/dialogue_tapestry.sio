@@ -1,0 +1,180 @@
+// stdlib/cybernetic/dialogue_tapestry.sio
+//
+// Dialogue Tapestry — the functor F (Phase A), bit-exact in f64.
+//
+// F lifts an annotated dyadic conversational TRAJECTORY (a sequence of turns,
+// each a speaker + a content vector + an affect-uncertainty vector) into a
+// sedenion-valued dynamical sequence, and reads off three correspondences per
+// turn — the construction the O-CSSM/Tapestry program needs to convert its
+// novelty from *asserted* to *constructed*:
+//
+//   (i)   associator coherence : ‖[o_{t-1}, o_t, o_{t+1}]‖  (octonion associator
+//         magnitude — a measurable cross-turn coherence telemetry, not a parsing
+//         constraint). The defensibly-novel pillar uses MAGNITUDE, not presence.
+//   (ii)  L/R speaker asymmetry: ‖o_a·o_b − o_b·o_a‖  (commutator norm), with the
+//         active Fano-line subalgebra label(a,b)=e_{(a+b) mod 7 + 1} as the mode.
+//   (iii) zero-divisor proximity: distance of the per-turn sedenion to the
+//         zero-divisor variety (balanced-norm + orthogonal halves) = dissociative
+//         / rupture candidate. Computed in EXACT f64 (resolves the J_n/FP64 point:
+//         the load-bearing zd signal is never an FP artifact of an approximate path).
+//
+// Everything here is pure and deterministic. The embedding→8-coord projection is
+// upstream (Phase B); F operates on the lifted content+uncertainty, exactly as
+// `patient_as_sedenion` does, so the construction is the algebra, not the encoder.
+
+// --- octonion over f64 (self-contained for bit-exactness) ---
+
+pub struct Oct8 {
+    a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64,
+}
+
+pub fn oct8(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> Oct8 {
+    Oct8 { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h }
+}
+
+fn oct8_sub(x: Oct8, y: Oct8) -> Oct8 {
+    Oct8 { a: x.a - y.a, b: x.b - y.b, c: x.c - y.c, d: x.d - y.d,
+           e: x.e - y.e, f: x.f - y.f, g: x.g - y.g, h: x.h - y.h }
+}
+
+fn oct8_norm_sq(o: Oct8) -> f64 {
+    o.a*o.a + o.b*o.b + o.c*o.c + o.d*o.d + o.e*o.e + o.f*o.f + o.g*o.g + o.h*o.h
+}
+
+// Cayley-Dickson octonion product (f64, bit-exact — same table as nn/octonion).
+fn oct8_mul(x: Oct8, y: Oct8) -> Oct8 {
+    let c0 = x.a*y.a - x.b*y.b - x.c*y.c - x.d*y.d - x.e*y.e - x.f*y.f - x.g*y.g - x.h*y.h
+    let c1 = x.a*y.b + x.b*y.a + x.c*y.d - x.d*y.c + x.e*y.f - x.f*y.e - x.g*y.h + x.h*y.g
+    let c2 = x.a*y.c - x.b*y.d + x.c*y.a + x.d*y.b + x.e*y.g + x.f*y.h - x.g*y.e - x.h*y.f
+    let c3 = x.a*y.d + x.b*y.c - x.c*y.b + x.d*y.a + x.e*y.h - x.f*y.g + x.g*y.f - x.h*y.e
+    let c4 = x.a*y.e - x.b*y.f - x.c*y.g - x.d*y.h + x.e*y.a + x.f*y.b + x.g*y.c + x.h*y.d
+    let c5 = x.a*y.f + x.b*y.e - x.c*y.h + x.d*y.g - x.e*y.b + x.f*y.a - x.g*y.d + x.h*y.c
+    let c6 = x.a*y.g + x.b*y.h + x.c*y.e - x.d*y.f - x.e*y.c + x.f*y.d + x.g*y.a - x.h*y.b
+    let c7 = x.a*y.h - x.b*y.g + x.c*y.f + x.d*y.e - x.e*y.d - x.f*y.c + x.g*y.b + x.h*y.a
+    Oct8 { a: c0, b: c1, c: c2, d: c3, e: c4, f: c5, g: c6, h: c7 }
+}
+
+fn tapestry_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+
+fn tapestry_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// --- per-turn lift ---
+
+// Lift an 8-coord content vector to a PURE-IMAGINARY octonion: real part 0,
+// the 7 imaginary slots carry content[1..7] normalized (content[0] is the scalar
+// channel, dropped from the imaginary embedding). Pure-imaginary is what makes
+// the associator a coherence signal rather than a scale artifact.
+fn content_to_octonion(content: [f64; 8]) -> Oct8 with Mut, Div, Panic {
+    var n2: f64 = 0.0
+    var i = 1
+    while i < 8 { n2 = n2 + content[i] * content[i]; i = i + 1 }
+    let n = tapestry_sqrt(n2)
+    if n < 0.000001 { return oct8(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    oct8(0.0, content[1]/n, content[2]/n, content[3]/n,
+         content[4]/n, content[5]/n, content[6]/n, content[7]/n)
+}
+
+// (i) Associator coherence: ‖[o_prev, o_cur, o_next]‖ = ‖(o_prev·o_cur)·o_next −
+// o_prev·(o_cur·o_next)‖. Zero iff the triple re-parenthesizes associatively.
+pub fn assoc_coherence(o_prev: Oct8, o_cur: Oct8, o_next: Oct8) -> f64 with Mut, Div {
+    let left = oct8_mul(oct8_mul(o_prev, o_cur), o_next)
+    let right = oct8_mul(o_prev, oct8_mul(o_cur, o_next))
+    tapestry_sqrt(oct8_norm_sq(oct8_sub(left, right)))
+}
+
+// (ii) Speaker-directional asymmetry: ‖o_a·o_b − o_b·o_a‖. Nonzero because 𝕆 is
+// non-commutative; the swap is observable and attributed by who spoke first.
+pub fn lr_asymmetry(o_a: Oct8, o_b: Oct8) -> f64 with Mut, Div {
+    tapestry_sqrt(oct8_norm_sq(oct8_sub(oct8_mul(o_a, o_b), oct8_mul(o_b, o_a))))
+}
+
+// Active Fano-line subalgebra for the ordered exchange: the dominant imaginary
+// coordinate of each turn indexes a basis direction; label(a,b)=e_{(a+b) mod 7+1}.
+fn dominant_imag(o: Oct8) -> i64 with Mut, Panic {
+    let v: [f64; 7] = [tapestry_abs(o.b), tapestry_abs(o.c), tapestry_abs(o.d),
+                       tapestry_abs(o.e), tapestry_abs(o.f), tapestry_abs(o.g), tapestry_abs(o.h)]
+    var best = 0
+    var bestv = v[0]
+    var i = 1
+    while i < 7 { if v[i] > bestv { bestv = v[i]; best = i } ; i = i + 1 }
+    best
+}
+
+pub fn fano_mode(o_a: Oct8, o_b: Oct8) -> i64 with Mut, Div, Panic {
+    let a = dominant_imag(o_a)
+    let b = dominant_imag(o_b)
+    ((a + b) % 7) + 1
+}
+
+// (iii) Zero-divisor proximity of the per-turn sedenion (octonion half =
+// normalized content, sedenion half = normalized affect-uncertainty). Distance to
+// the zero-divisor variety: 0 = balanced norms AND orthogonal halves = the exact
+// `ab=0` regime = dissociation. Identical geometry to `zero_divisor_proximity`,
+// computed here in exact f64 over the raw lift.
+pub fn zd_proximity(content: [f64; 8], uncertainty: [f64; 8]) -> f64 with Mut, Div, Panic {
+    var oct_sq: f64 = 0.0
+    var sed_sq: f64 = 0.0
+    var inner: f64 = 0.0
+    var i = 0
+    while i < 8 {
+        oct_sq = oct_sq + content[i] * content[i]
+        sed_sq = sed_sq + uncertainty[i] * uncertainty[i]
+        inner = inner + content[i] * uncertainty[i]
+        i = i + 1
+    }
+    let oct_n = tapestry_sqrt(oct_sq)
+    let sed_n = tapestry_sqrt(sed_sq)
+    let imbalance = if oct_n + sed_n > 0.001 {
+        tapestry_abs(oct_n - sed_n) / (oct_n + sed_n)
+    } else { 1.0 }
+    let ortho = if oct_n * sed_n > 0.001 {
+        tapestry_abs(inner) / (oct_n * sed_n)
+    } else { 1.0 }
+    tapestry_sqrt(imbalance * imbalance + ortho * ortho)
+}
+
+// A single turn of the dyad and the telemetry F emits for it.
+pub struct DialogueTurn {
+    speaker: i64,            // 0 = self, 1 = other
+    content: [f64; 8],       // lifted content (post-projection)
+    uncertainty: [f64; 8],   // affect-uncertainty
+}
+
+pub struct TurnTelemetry {
+    idx: i64,
+    speaker: i64,
+    coherence: f64,          // (i)   0 at the endpoints (no triple)
+    lr: f64,                 // (ii)  0 for the first turn (no prior exchange)
+    fano: i64,               // (ii)  active subalgebra; 0 for the first turn
+    zd: f64,                 // (iii)
+    rupture: bool,           // zd below threshold
+}
+
+// F over one interior turn (needs prev/cur/next for coherence, prev for the
+// exchange). The driver below handles the endpoints.
+pub fn tapestry_turn(idx: i64, prev: DialogueTurn, cur: DialogueTurn, next: DialogueTurn,
+                     has_prev: bool, has_next: bool, rupture_thresh: f64) -> TurnTelemetry with Mut, Div, Panic {
+    let o_cur = content_to_octonion(cur.content)
+    var coh: f64 = 0.0
+    if has_prev && has_next {
+        coh = assoc_coherence(content_to_octonion(prev.content), o_cur,
+                              content_to_octonion(next.content))
+    }
+    var lr: f64 = 0.0
+    var fano: i64 = 0
+    if has_prev {
+        let o_prev = content_to_octonion(prev.content)
+        lr = lr_asymmetry(o_prev, o_cur)
+        fano = fano_mode(o_prev, o_cur)
+    }
+    let zd = zd_proximity(cur.content, cur.uncertainty)
+    TurnTelemetry { idx: idx, speaker: cur.speaker, coherence: coh, lr: lr,
+                    fano: fano, zd: zd, rupture: zd < rupture_thresh }
+}
