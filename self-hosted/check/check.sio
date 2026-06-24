@@ -3504,6 +3504,92 @@ fn checker_expr_provenance(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div
             }
         }
         prov
+    } else if e.kind == ExprKind::ExprIf {
+        // An `if` used as a value/return tail escapes if either branch tail yields a
+        // frame-local reference: `if c { &x } else { &x }`. Recurse into the else expression
+        // (also covers else-if chains) and the then-block's tail expression.
+        var iprov = 0
+        match e.else_expr {
+            Some(ee) => { if checker_expr_provenance(c, *ee) == 1 { iprov = 1 } }
+            _ => {}
+        }
+        match e.block {
+            Some(blk) => {
+                var bcur = (*blk).stmts
+                var bg = 0
+                while bg < 4096 {
+                    bg = bg + 1
+                    match bcur {
+                        Some(list) => {
+                            match (*list).tail {
+                                None => {
+                                    if (*list).head.kind == StmtKind::StmtExpr {
+                                        match (*list).head.expr {
+                                            Some(te) => { if checker_expr_provenance(c, *te) == 1 { iprov = 1 } }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            bcur = (*list).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            _ => {}
+        }
+        iprov
+    } else if e.kind == ExprKind::ExprMatch {
+        // A `match` used as a value/return tail escapes if any arm body yields a frame-local
+        // reference: `match c { _ => &x }`.
+        var mprov = 0
+        var mcur = e.arms
+        var mg = 0
+        while mg < 4096 {
+            mg = mg + 1
+            match mcur {
+                Some(list) => {
+                    if checker_expr_provenance(c, (*list).head.body) == 1 { mprov = 1 }
+                    mcur = (*list).tail
+                }
+                None => break
+            }
+        }
+        mprov
+    } else if e.kind == ExprKind::ExprBlock {
+        // A block as a value/return tail (e.g. a block-bodied match arm or `if` branch)
+        // escapes if its tail expression yields a frame-local reference.
+        var bprov = 0
+        match e.block {
+            Some(blk) => {
+                var bc = (*blk).stmts
+                var bgg = 0
+                while bgg < 4096 {
+                    bgg = bgg + 1
+                    match bc {
+                        Some(list) => {
+                            match (*list).tail {
+                                None => {
+                                    if (*list).head.kind == StmtKind::StmtExpr {
+                                        match (*list).head.expr {
+                                            Some(te) => { if checker_expr_provenance(c, *te) == 1 { bprov = 1 } }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            bc = (*list).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            _ => {}
+        }
+        bprov
     } else {
         0
     }
@@ -6414,6 +6500,44 @@ fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr
 
 // *mut StmtAssign handler — transcription of check_assign_stmt (14136). The target and
 // value exprs go through the *mut spine (was: by-value check_opt_expr -> SRET-smash).
+// True if `ty` is a reference, or transitively contains one (array element, struct field).
+// Used to reject storing a value that smuggles a reference inside an aggregate (a struct
+// field or array element), which the bare-ref-type / provenance checks miss. Self-recursive,
+// depth-bounded; conservative (an unregistered named type is treated as ref-free).
+fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut
+        || ty.kind == TypeKind::TySlice || ty.kind == TypeKind::TySliceMut {
+        return true
+    }
+    if ty.kind == TypeKind::TyArray {
+        match ty.inner {
+            Some(el) => { return checker_type_has_ref(c, *el, depth + 1) }
+            None => { return false }
+        }
+    }
+    if ty.kind == TypeKind::TyNamed {
+        let sidx = (*c).structs.find(ty.name)
+        if sidx >= 0 && sidx < (*c).structs.count {
+            let si = (*c).structs.get(sidx)
+            var cur = si.fields
+            var guard = 0
+            while guard < 1024 {
+                guard = guard + 1
+                match cur {
+                    Some(list) => {
+                        if checker_type_has_ref(c, (*list).head.ty, depth + 1) { return true }
+                        cur = (*list).tail
+                    }
+                    None => break
+                }
+            }
+        }
+        return false
+    }
+    false
+}
+
 fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let target_ty = checker_check_opt_expr_inplace(c, s.target)
     let val_ty = checker_check_opt_expr_inplace(c, s.expr)
@@ -6439,6 +6563,28 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    // Raw-reference escape (store sites): a reference may not be stored into a struct field,
+    // an array element, or through a pointer — doing so lets it outlive its referent → a
+    // dangling reference. References are second-class: pass them to functions and read/write
+    // through them, but do not store them. This catches both a frame-local reference
+    // (provenance) and a reference-typed value of unknown origin such as a stored ref param
+    // (interproc), the latter via the value type. Return escapes are caught at return sites.
+    match s.target {
+        Some(stgt) => {
+            let stk = (*stgt).kind
+            let is_store_place = stk == ExprKind::ExprFieldAccess
+                || stk == ExprKind::ExprIndex
+                || (stk == ExprKind::ExprUnary && (*stgt).un_op == UnaryOp::OpDeref)
+            // A reference value (or an aggregate transitively containing a reference, e.g.
+            // a stored ref parameter, or `H{p:r}`) may not be stored; or a frame-local
+            // reference by provenance.
+            let rhs_is_ref = checker_type_has_ref(c, val_ty, 0)
+            if is_store_place && (rhs_is_ref || checker_expr_provenance_opt(c, s.expr) == 1) {
+                checker_report_error_at_inplace(c, s.span, 91, 0, 0, 0)
+            }
+        }
+        None => {}
+    }
     match s.target {
         Some(target) => {
             if (*target).kind == ExprKind::ExprIdent {
