@@ -4,7 +4,7 @@ This guide describes the installation path that matches the current repository s
 
 ## Recommended Path For This Checkout
 
-This repository already contains checked-in self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` under `artifacts/self-hosted/`. If you are working directly from this checkout, use the launcher at `bin/souc`; it selects the matching host artifact automatically.
+This repository already contains checked-in self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` under `artifacts/self-hosted/`. If you are working directly from this checkout, use the launcher at `bin/souc`; it is the official entrypoint and routes by default to Madaros.
 
 ```bash
 cd /path/to/sounio
@@ -19,10 +19,11 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
-On this repo snapshot, `bin/souc` is a host-aware launcher around the checked self-hosted artifacts:
+On this repo snapshot, `bin/souc` is a host-aware launcher around the checked self-hosted artifacts and the official compiler lane:
 
 - It provides compatibility commands: `check`, `compile`, `build`, `run`, `info`, and `--version`
 - It also supports the raw self-hosted compiler interface: `<source.sio> <output> [flags]`
+- To use the compatibility legacy engine, set `SOUNIO_SOUC_ENGINE=lean_single`.
 - `--target aarch64-macos` and `--target x86_64-macos` emit Mach-O binaries
 - `--target aarch64-linux` emits Linux ARM64 ELF binaries
 - It still does not provide the broader omega-only workflows such as `repl`, `gpu-emit`, or the full pinned-release tool surface
@@ -35,9 +36,15 @@ Run the conservative smoke tests:
 
 ```bash
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-next
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
+```
+
+To run the legacy bootstrap path intentionally, force it explicitly:
+
+```bash
+SOUNIO_SOUC_ENGINE=lean_single "$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
 ```
 
 Expected behavior:

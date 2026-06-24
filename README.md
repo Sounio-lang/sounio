@@ -108,7 +108,7 @@ The current published dataset lives in the maintainer namespace as a public mirr
 
 **Epistemic types as first-class citizens.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system includes `Knowledge[T]` with built-in confidence, provenance tracking, and automatic GUM-compliant uncertainty propagation. The compiler can enforce confidence thresholds at compile time — a function requiring `ε >= 0.82` rejects under-confident data before any code runs. No equivalent system exists in any production language.
 
-**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The default workflow is now native-only: `bin/souc` compiles `.sio` sources to temporary or named ELFs via the self-hosted compiler and executes those binaries directly.
+**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The default workflow is now native-only: `bin/souc` compiles `.sio` sources to temporary or named ELFs via the Madaros self-hosted engine and executes those binaries directly.
 
 **Not a Rust/Julia dialect.** Own syntax (`&!` not `&mut`, `var` not `let mut`), own semantics (algebraic effects, linear types, dimensional analysis), own philosophy (epistemic computing for science).
 
@@ -236,7 +236,7 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher. No Rust build step is required for the default workflow.
+This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher, which is the official compiler entrypoint and routes to Madaros by default. No Rust build step is required for the default workflow.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -248,9 +248,16 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 $SOUC --version                              # souc 1.0.0-beta.6
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
-$SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+$SOUC compile examples/hello.sio -o /tmp/souc-next
 $SOUC run self-hosted/compiler/native_print_f64_smoke.sio
 $SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
+```
+
+If you need the legacy bootstrap path explicitly:
+
+```bash
+SOUNIO_SOUC_ENGINE=lean_single \
+  $SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
 ```
 
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
