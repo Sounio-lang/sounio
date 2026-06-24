@@ -5515,6 +5515,13 @@ impl Lowerer {
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
                         lo = lo.bind_local_struct_type(s.name, callee_struct_name)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprIdent {
+                    // `let b = nx`: propagate the source variable's struct type (e.g. a Box
+                    // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
+                    let src_st = lo.lookup_local_struct_type((*expr_box).name)
+                    if src_st.len > 0 {
+                        lo = lo.bind_local_struct_type(s.name, src_st)
+                    }
                 }
             }
             _ => {}
@@ -6743,7 +6750,15 @@ impl Lowerer {
             Some(list) => {
                 let inner = (*list).head
                 if inner.kind == PatternKind::PatBinding {
-                    self.bind_local(inner.name, scrut, inner.is_mut)
+                    var lo = self.bind_local(inner.name, scrut, inner.is_mut)
+                    // The payload of `Some(nx)` on an Option<Box<T>> is a Box handle, so mark
+                    // the bound variable as a Box: `*nx` then lowers to the box-handle deref
+                    // (IrFieldGet 0) instead of raw-dereferencing the handle (which crashed —
+                    // the recursive-data root). Safe for non-Box payloads: marking only
+                    // changes how `*nx` lowers, and deref/field-access of a non-Box payload
+                    // (e.g. Option<i64>) is not valid code anyway.
+                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"))
+                    lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
                     self
