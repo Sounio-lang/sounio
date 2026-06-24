@@ -34,22 +34,33 @@ needed a new store op.
 Aliasing works because native_v2 round-trips every temp through its rbp-relative slot, so
 `&n` (the slot address) and a later read of `n` refer to the same memory.
 
-## Escape safety
-- **Return-escape** (`fn bad() -> &i64 { let x=5; &x }`) → rejected by the checker's escape
-  analysis **E091** (already on `main`, PR #397).
-- **Direct field-store escape** (`h.p = &x`, storing a ref-to-local into a struct field) →
-  new **loud lowering error** ("storing a reference into a struct field is not supported").
-  Before this, enabling `OpRef` would have let it compile to a dangling pointer.
+## Escape safety — MEASURED, and weak (read this before relying on it)
+
+References here are effectively **second-class with weak enforcement**. The only sound,
+enforced guarantee is no-return; **store-escapes are largely unguarded and can silently
+dangle.** Measured behaviour of address-of-a-local flowing into storage:
+
+| Escape route | Observed |
+|---|---|
+| `return &x` | **rejected by E091** (checker, on `main` via #397) — sound |
+| `h.p = &x` (direct field store) | prints an `error:` **but still emits an exit-0 ELF** (madaros leniency) — *loud, not blocked* |
+| `arr[i] = &x` (array element store) | **compiles and runs — silent dangling** (reads a dead slot) |
+| `*pp = &x` (store address through a deref) | **compiles and runs — silent dangling** |
+| `&x` passed to a fn that stores it (interproc) | compiles, **crashes at runtime** (undefined) |
+
+So: E091 enforces no-return; the lowering guard catches only the *direct* `obj.field = &x`
+form and only as a printed warning; **all other store-escape routes are unguarded** and
+range from silent-dangling to crash. The safe, intended use is **passing a reference
+directly to a function and reading/writing through it within the callee's lifetime** — that
+is sound (the referent outlives the call).
 
 ## Honest scope / known gaps
-- **Indirect field-store escapes** (`let r = &x; h.p = r`) are **not** caught — E091 tracks
-  provenance at return sites, not store sites, and the lowering guard only catches a direct
-  address-of. Such a program can still produce a dangling pointer. The proper fix is
-  extending E091 to store sites (a follow-up); this PR ships the common, safe cases
-  (references passed to functions, read/written through) plus guards for the two most common
-  escape vectors.
-- Reference fields in structs are otherwise minimally supported; multi-level refs
-  (`&&T`) and references to temporaries are not addressed here.
+- The proper fix for store-escapes is to extend the escape analysis (E091) to **store sites**
+  (provenance check on field/index/deref assignments and across calls), or to enforce true
+  second-class references (no reference may be stored at all). Neither is done here.
+- Reference fields in structs and arrays-of-references are mechanically possible but **not
+  escape-safe** — see the table.
+- Multi-level refs (`&&T`) and references to temporaries are not addressed.
 
 ## Verified (madaros from this source, `ulimit -s unlimited`)
 - `rd(&n)*p`→42, `(*p).a` of `&P`→42, `mutref *p=*p+1`→42 (alias write-back).
