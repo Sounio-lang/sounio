@@ -5552,17 +5552,31 @@ impl Lowerer {
                             (lo, dst)
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
-                        let base_opt: Option<Box<Expr>> = (*target_expr).left
-                        match base_opt {
-                            Some(base_expr) => {
-                                let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
-                                let pair_base = lo.lower_expr_ref(&(*base_expr))
-                                lo = pair_base.0
-                                let base_reg = pair_base.1
-                                lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
-                                (lo, rhs)
+                        // Escape guard: storing a reference into a struct field can let it
+                        // outlive its referent. The checker's escape analysis (E091) covers
+                        // return-escapes but does not yet track field-store escapes, so reject
+                        // a direct address-of stored into a field rather than risk a dangling
+                        // pointer. References passed directly to functions remain allowed.
+                        let rhs_is_addr_of = match s.expr {
+                            Some(re) => (*re).kind == ExprKind::ExprUnary && ((*re).un_op == UnaryOp::OpRef || (*re).un_op == UnaryOp::OpRefMut),
+                            _ => false,
+                        }
+                        if rhs_is_addr_of {
+                            print("error: storing a reference into a struct field is not supported (escape safety); pass references directly to functions instead\n")
+                            (lo.report_error(), rhs)
+                        } else {
+                            let base_opt: Option<Box<Expr>> = (*target_expr).left
+                            match base_opt {
+                                Some(base_expr) => {
+                                    let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                    let pair_base = lo.lower_expr_ref(&(*base_expr))
+                                    lo = pair_base.0
+                                    let base_reg = pair_base.1
+                                    lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                    (lo, rhs)
+                                }
+                                _ => (lo.report_error(), rhs),
                             }
-                            _ => (lo.report_error(), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
                         let pair_base = lo.lower_opt_expr_ref(&(*target_expr).left)
@@ -5573,6 +5587,33 @@ impl Lowerer {
                         let idx_reg = pair_idx.1
                         lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
                         (lo, rhs)
+                } else if (*target_expr).kind == ExprKind::ExprUnary {
+                        if (*target_expr).un_op == UnaryOp::OpDeref {
+                            // `*p = val`: a Box stores into field 0 (handle-resolved); a true
+                            // reference stores through the raw pointer.
+                            let is_box_t = match (*target_expr).left {
+                                Some(op) => {
+                                    if (*op).kind == ExprKind::ExprIdent {
+                                        ir_name_is_box(lo.lookup_local_struct_type((*op).name))
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            }
+                            let ptr_pair = lo.lower_opt_expr_ref(&(*target_expr).left)
+                            lo = ptr_pair.0
+                            let ptr_reg = ptr_pair.1
+                            if is_box_t {
+                                lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
+                            } else {
+                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                            }
+                            (lo, rhs)
+                        } else {
+                            lo = lo.report_error()
+                            (lo, rhs)
+                        }
                 } else {
                     lo = lo.report_error()
                     (lo, rhs)
