@@ -7612,11 +7612,16 @@ impl Lowerer {
         let saved_locals = lo.locals
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
+        let saved_loaded = lo.current_func_loaded
 
-        // 3. Switch to the closure function context
+        // 3. Switch to the closure function context. current_func_loaded MUST be true so
+        // the functional lowering (current_fn_validated_reg / param resolution) reads from
+        // lo.current_func — not the empty module placeholder, which is what zeroed
+        // param_count and produced a malformed closure body.
         lo.current_fn = closure_fn_id
         lo.current_func = Box::new(ir_empty_function())
         (*lo.current_func).name = closure_name
+        lo.current_func_loaded = true
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
@@ -7629,11 +7634,19 @@ impl Lowerer {
                     let preg_pair = lo.fresh_reg()
                     lo = preg_pair.0
                     let preg = preg_pair.1
-                    if (*lo.current_func).param_count < IR_MAX_PARAMS {
-                        let pc = (*lo.current_func).param_count
-                        (*lo.current_func).param_regs[pc as usize] = preg
-                        (*lo.current_func).param_count = pc + 1
+                    // Extract the current_func Box to a local before mutating: the direct
+                    // `(*lo.current_func).param_count = …` store (deref a field-accessed Box)
+                    // is dropped by the by-value-aggregate miscompile — the same reason
+                    // fresh_reg copies `lo.current_func` to a local first. Without this,
+                    // param_count stayed 0, the codegen emitted no parameter prologue, and
+                    // the closure SIGSEGV'd when called.
+                    var cf_box = lo.current_func
+                    if (*cf_box).param_count < IR_MAX_PARAMS {
+                        let pc = (*cf_box).param_count
+                        (*cf_box).param_regs[pc as usize] = preg
+                        (*cf_box).param_count = pc + 1
                     }
+                    lo.current_func = cf_box
                     lo = lo.bind_local((*plist).head.name, preg, false)
                     params = &(*plist).tail
                 }
@@ -7646,37 +7659,19 @@ impl Lowerer {
         lo = body_pair.0
         lo = lo.emit(ir_return(body_pair.1))
 
-        // Re-assert the param metadata on the final closure func. The functional body
-        // lowering copies the 128 KB IrFunction by value (`var func = *lo.current_func`),
-        // and the by-value-aggregate miscompile zeroes param_count/param_regs (reg_count
-        // survives only because the body re-grows it). Without this the codegen emits no
-        // parameter-load prologue and the closure crashes when called. Closure params are
-        // the first regs (0..pcount-1), allocated before the body.
-        var pcount: i64 = 0
-        var pc_cur: &Option<Box<ClosureParamList>> = &e.closure_params
-        while true {
-            match *pc_cur {
-                Some(pl) => {
-                    pcount = pcount + 1
-                    pc_cur = &(*pl).tail
-                }
-                _ => break
-            }
-        }
-        (*lo.current_func).param_count = pcount
-        var pri: i64 = 0
-        while pri < pcount {
-            (*lo.current_func).param_regs[pri as usize] = pri
-            pri = pri + 1
-        }
-
-        // 7. Flush the completed closure function back to the module — single-level store
-        // through the Box, avoiding a 25 MB by-value IrModule copy on the stack.
-        (*lo.module).functions[closure_fn_id as usize] = *lo.current_func
+        // 7. Flush the completed closure function back to the module. Extract the module
+        // Box to a local first (as lowerer_flush_current_func_mut does) — the direct
+        // `(*lo.module).functions[id] = …` store derefs a field-accessed Box and is
+        // dropped/partial under the by-value-aggregate miscompile, which lost the body
+        // instrs (the closure returned its param instead of the body's result).
+        var flush_mod_box = lo.module
+        (*flush_mod_box).functions[closure_fn_id as usize] = *lo.current_func
+        lo.module = flush_mod_box
 
         // 8. Restore the original function context
         lo.current_fn = saved_fn
         lo.current_func = saved_func
+        lo.current_func_loaded = saved_loaded
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
