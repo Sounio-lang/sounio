@@ -20,6 +20,9 @@ struct LowerLocalStack {
     is_global: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
+    // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
+    // must be injected when this local is called (closures step 2).
+    closure_fn_id: [i64; 4096],
     count: i64,
 }
 
@@ -36,8 +39,69 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
         scalar_kind: [0; 4096],
+        closure_fn_id: [-1; 4096],
         count: 0,
     }
+}
+
+// --- Capturing-closure support (closures step 2) ---
+// A capturing closure is lowered as a synthetic fn whose LEADING params are the captured
+// values, followed by the lambda's own params. The closure is never given a first-class
+// runtime value (it stays out of the bare fn-ref representation, so #418 zero-capture
+// closures + fn-pointer interop are untouched); instead the captured enclosing regs are
+// injected at a direct call site. All stores use the extract-Box-first / copy-modify-
+// writeback idiom to dodge the by-value-aggregate-store miscompile.
+struct CaptureList {
+    names: [Name; 8],
+    regs: [i64; 8],
+    count: i64,
+}
+fn empty_capture_list() -> CaptureList {
+    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0 }
+}
+fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with Mut, Panic, Div {
+    var c = caps
+    var i: i64 = 0
+    while i < c.count {
+        if ir_name_eq(c.names[i as usize], name) { return c }
+        i = i + 1
+    }
+    if c.count < 8 {
+        let idx = c.count
+        c.names[idx as usize] = name
+        c.regs[idx as usize] = reg
+        c.count = idx + 1
+    }
+    c
+}
+
+struct ClosureCapEntry {
+    fn_id: i64,
+    cap_count: i64,
+    caps: [i64; 8],
+}
+struct ClosureCapTable {
+    entries: [ClosureCapEntry; 256],
+    count: i64,
+}
+fn empty_closure_cap_table() -> ClosureCapTable {
+    ClosureCapTable {
+        entries: [ClosureCapEntry { fn_id: -1, cap_count: 0, caps: [IR_INVALID_REG; 8] }; 256],
+        count: 0,
+    }
+}
+fn lower_name_in_closure_params(params: &Option<Box<ClosureParamList>>, name: Name) -> bool with Mut, Panic, Div {
+    var cur = params
+    while true {
+        match *cur {
+            Some(pl) => {
+                if ir_name_eq((*pl).head.name, name) { return true }
+                cur = &(*pl).tail
+            }
+            _ => break
+        }
+    }
+    false
 }
 
 struct LowerLoopLabels {
@@ -74,6 +138,11 @@ struct Lowerer {
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
     probe_mode: bool,
+    // Closures step 2: captured-reg table keyed by synthetic closure fn_id, and a
+    // side-channel set by lower_closure_expr_ref and consumed by the let-binding so the
+    // bound local knows it is a capturing closure.
+    closure_caps: Box<ClosureCapTable>,
+    pending_closure_fn_id: i64,
 }
 
 struct IrPreparedCallArgs {
@@ -179,6 +248,8 @@ fn lowerer_new() -> Lowerer with Alloc {
         array_elem_float_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
     }
 }
 
@@ -3073,6 +3144,33 @@ impl Lowerer {
         lo
     }
 
+    // Mark a local as a capturing closure bound to synthetic fn `fn_id` (closures step 2).
+    fn bind_local_closure_fn_id(self, name: Name, fn_id: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.closure_fn_id[i as usize] = fn_id
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_closure_fn_id(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).closure_fn_id[i as usize]
+            }
+            i = i - 1
+        }
+        -1
+    }
+
     fn bind_local_wide_type(self, name: Name, bits: i64, signed: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if bits <= 64 { return lo }
@@ -5323,6 +5421,12 @@ impl Lowerer {
         var lo = pair.0
         let reg = pair.1
         lo = lo.bind_local(s.name, reg, is_mut)
+        // Closures step 2: if the RHS was a capturing closure, mark this local so a later
+        // `name(args)` call injects the captured regs (direct call to the synthetic fn).
+        if lo.pending_closure_fn_id >= 0 {
+            lo = lo.bind_local_closure_fn_id(s.name, lo.pending_closure_fn_id)
+            lo.pending_closure_fn_id = -1
+        }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
         } else {
@@ -6705,6 +6809,30 @@ impl Lowerer {
         }
         let callee_local_reg = self.lookup_local(callee_name)
         if callee_local_reg >= 0 {
+            // Capturing closure (closures step 2): direct-call the synthetic fn with
+            // [captured_regs..., args...]. IrCall relocs by fn_id, so the name is unused.
+            let ccap_fn = self.lookup_local_closure_fn_id(callee_name)
+            if ccap_fn >= 0 {
+                let pair_args_c: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
+                let lo_c = pair_args_c.lowerer
+                var arglist_c: Option<Box<IrRegList>> = if pair_args_c.count <= 0 { None } else { Some(Box::new(pair_args_c.regs)) }
+                var total_c = pair_args_c.count
+                let cidx = lo_c.find_closure_cap_idx(ccap_fn)
+                if cidx >= 0 {
+                    let ccount = (*lo_c.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist_c = ir_reg_list_prepend((*lo_c.closure_caps).entries[cidx as usize].caps[jc as usize], arglist_c)
+                        jc = jc - 1
+                    }
+                    total_c = total_c + ccount
+                }
+                let pair_dc = lo_c.fresh_reg()
+                let lo_dc = pair_dc.0
+                let dst_c = pair_dc.1
+                let lo_cc = lo_dc.emit(ir_call(dst_c, ccap_fn, ir_empty_name(), arglist_c, total_c))
+                return (lo_cc, dst_c)
+            }
             let pair_args_i: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
             let lo_i = pair_args_i.lowerer
             let args_i: Option<Box<IrRegList>> = if pair_args_i.count <= 0 { None } else { Some(Box::new(pair_args_i.regs)) }
@@ -7407,6 +7535,16 @@ impl Lowerer {
             }
             let src = self.lookup_local(e.name)
             if src >= 0 {
+                // Closures step 2: a capturing closure used as a VALUE (passed to a fn,
+                // returned, aliased) would lose its captures — the synthetic fn has leading
+                // capture params the receiver can't fill — yielding a silent wrong result.
+                // Reject loudly instead. (Direct calls are handled in lower_call_expr_ref
+                // before reaching here, so this only fires for non-callee uses.)
+                if self.lookup_local_closure_fn_id(e.name) >= 0 {
+                    print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
+                    let loe = self.report_error()
+                    return (loe, src)
+                }
                 (self, src)
             } else {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
@@ -7593,6 +7731,83 @@ impl Lowerer {
 
     // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.
     // Returns (Lowerer, fn_ref_reg) where fn_ref_reg holds the fn_id.
+    // Recursive free-variable scan (closures step 2): collect idents in `body` that resolve
+    // as enclosing locals and are not closure params (= captures). Self-recursive; uses
+    // self.lookup_local for the enclosing scope (no &LowerLocalStack arg).
+    fn scan_captures_expr(self, body: &Expr, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
+        var c = caps
+        if (*body).kind == ExprKind::ExprIdent {
+            let nm = (*body).name
+            if !lower_name_in_closure_params(params, nm) {
+                let r = self.lookup_local(nm)
+                if r >= 0 { c = capture_list_add(c, nm, r) }
+            }
+            return c
+        }
+        match (*body).left {
+            Some(l) => { c = self.scan_captures_expr(&(*l), params, c) }
+            _ => {}
+        }
+        match (*body).right {
+            Some(r) => { c = self.scan_captures_expr(&(*r), params, c) }
+            _ => {}
+        }
+        match (*body).else_expr {
+            Some(eo) => { c = self.scan_captures_expr(&(*eo), params, c) }
+            _ => {}
+        }
+        var cur = &(*body).args
+        while true {
+            match *cur {
+                Some(el) => {
+                    c = self.scan_captures_expr(&(*el).head, params, c)
+                    cur = &(*el).tail
+                }
+                _ => break
+            }
+        }
+        c
+    }
+    fn scan_captures_opt(self, body: &Option<Box<Expr>>, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
+        match *body {
+            Some(b) => { self.scan_captures_expr(&(*b), params, caps) }
+            _ => { caps }
+        }
+    }
+
+    // Index of the closure-capture entry for `fn_id` (-1 if none). Method form avoids
+    // passing &(*self.closure_caps) (ref of a deref of a field-accessed Box), which the
+    // parser rejects.
+    fn find_closure_cap_idx(self, fn_id: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var i: i64 = 0
+        while i < (*self.closure_caps).count {
+            if (*self.closure_caps).entries[i as usize].fn_id == fn_id { return i }
+            i = i + 1
+        }
+        -1
+    }
+
+    // Record a capturing closure's captured enclosing regs, keyed by its synthetic fn_id.
+    // Copy-modify-writeback on the whole table (like bind_local_struct_type) — no
+    // &!ClosureCapTable free-function param.
+    fn record_closure_caps(self, fn_id: i64, caps: CaptureList) -> Lowerer with Mut, Panic, Div, Alloc {
+        var lo = self
+        var tbl = *lo.closure_caps
+        if tbl.count < 256 {
+            let idx = tbl.count
+            var e = ClosureCapEntry { fn_id: fn_id, cap_count: caps.count, caps: [IR_INVALID_REG; 8] }
+            var i: i64 = 0
+            while i < caps.count {
+                e.caps[i as usize] = caps.regs[i as usize]
+                i = i + 1
+            }
+            tbl.entries[idx as usize] = e
+            tbl.count = idx + 1
+            lo.closure_caps = Box::new(tbl)
+        }
+        lo
+    }
+
     fn lower_closure_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // 1. Create a unique name and register the synthetic function. Use the *mut
@@ -7614,6 +7829,12 @@ impl Lowerer {
         let saved_loop = lo.loop_depth
         let saved_loaded = lo.current_func_loaded
 
+        // 2b. Scan the closure body for captured free variables (idents bound in the
+        // enclosing scope, not lambda params) BEFORE wiping locals. Captures become LEADING
+        // params on the synthetic fn and are injected at the (direct) call site.
+        var captures = empty_capture_list()
+        captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
         // the functional lowering (current_fn_validated_reg / param resolution) reads from
         // lo.current_func — not the empty module placeholder, which is what zeroed
@@ -7625,6 +7846,25 @@ impl Lowerer {
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
+
+        // 3b. Bind captured variables as LEADING params of the synthetic fn, so the body's
+        // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
+        // injected at the call site; here we only allocate param regs + bind the names.
+        var ci: i64 = 0
+        while ci < captures.count {
+            let cap_pair = lo.fresh_reg()
+            lo = cap_pair.0
+            let cap_preg = cap_pair.1
+            var cf_box_cap = lo.current_func
+            if (*cf_box_cap).param_count < IR_MAX_PARAMS {
+                let pcc = (*cf_box_cap).param_count
+                (*cf_box_cap).param_regs[pcc as usize] = cap_preg
+                (*cf_box_cap).param_count = pcc + 1
+            }
+            lo.current_func = cf_box_cap
+            lo = lo.bind_local(captures.names[ci as usize], cap_preg, false)
+            ci = ci + 1
+        }
 
         // 4. Set up closure parameters from ClosureParamList
         var params: &Option<Box<ClosureParamList>> = &e.closure_params
@@ -7675,6 +7915,14 @@ impl Lowerer {
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+
+        // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
+        // flag the pending closure so the let-binding marks its local. (Zero-capture closures
+        // stay bare fn-refs — unchanged from #418.) Extract the Box to a local first.
+        if captures.count > 0 {
+            lo = lo.record_closure_caps(closure_fn_id, captures)
+            lo.pending_closure_fn_id = closure_fn_id
+        }
 
         // 9. In the original function, emit IrLoadFnRef to return the fn_id
         let ref_pair = lo.fresh_reg()
