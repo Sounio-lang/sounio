@@ -34,44 +34,43 @@ needed a new store op.
 Aliasing works because native_v2 round-trips every temp through its rbp-relative slot, so
 `&n` (the slot address) and a later read of `n` refer to the same memory.
 
-## Escape safety — second-class references, enforced for the DIRECT forms (not fully sound)
+## Escape safety — second-class references, enforced (all measured routes caught)
 
-References are treated as second-class: pass them to functions and read/write through them,
-but do not return or store them. The escape analysis (E091) now covers **store sites** in
-addition to return sites, but enforcement is **provenance/value-type based, not full
-lifetime inference** — sound for the direct reference forms, with **measured gaps** for
-references hidden inside aggregate values and for non-direct return tails. Read the table.
-
-The store-site check (in `checker_check_assign_stmt_inplace`) rejects assigning into a struct
-field, array element, or through a pointer when the value is a frame-local reference
-(provenance) **or** its type is a reference (`TyRef`/`TyRefMut`, which catches a stored ref
-*parameter* — the interproc case).
+References are second-class: pass them to functions and read/write through them, but they may
+not be returned or stored. The escape analysis (E091) covers **return sites and store sites**,
+including references hidden inside aggregates and yielded from `if`/`match`/block tails. Every
+measured escape route is a hard compile error (no ELF), not a dangling pointer. The two
+mechanisms:
+- **Stores** (`checker_check_assign_stmt_inplace`): reject assigning into a struct field, array
+  element, or through a pointer when the value **transitively contains a reference**
+  (`checker_type_has_ref`: a ref, slice, array-of-ref, or struct with a ref field, recursively)
+  **or** is a frame-local reference by provenance. The type clause catches a stored ref
+  *parameter* (interproc) and references buried in nested structs.
+- **Returns / value tails** (`checker_expr_provenance`): a frame-local reference yielded
+  directly, through a struct literal, or via an `if`/`match`/block **tail** expression.
 
 | Escape route | Status (measured) |
 |---|---|
-| `return &x` (direct) | **E091** (return site, #397) |
+| `return &x` / `return r` (direct) | **E091** |
+| `return` via `if`/`match`/block tail yielding `&local` | **E091** |
 | `h.p = &x` / `arr[i] = &x` / `*pp = &x` | **E091, no ELF** |
-| interproc: `&x` → fn that stores its ref param | **E091, no ELF** (value-type clause) |
-| store/return `H{ p: &local }` (aggregate of a **local** ref) | **E091** (struct-literal provenance taint) |
-| **store `H{ p: r }` where `r` is a ref PARAM** | ❌ **NOT caught — can silently dangle** |
-| **`return …` via an `if`/block tail** that yields `&local` | ❌ **NOT caught** (E091's if/block-tail deferral) |
+| interproc: `&x` → fn that stores its ref param | **E091, no ELF** |
+| store `H{ p: &local }` / `H{ p: <ref param> }` (aggregate) | **E091, no ELF** |
+| store a nested `Outer{ Inner{ p: r } }` | **E091, no ELF** |
+| no over-rejection: `rd(&n)*p`, `inc(&!n)`, `(*p).a`, **return a param ref** | compile + run / OK |
 
-## Honest scope / known gaps (measured, not assumed)
-- **Aggregate-embedded parameter reference, then stored** (`fn f(out:&!H, r:&i64){ (*out) =
-  H{p:r} }`): the stored value's type is the struct (not `TyRef`) and its provenance is
-  first-class (the embedded ref is a parameter), so neither clause fires → **silent dangling**.
-  Closing it needs structural type analysis (a value whose type transitively contains a
-  reference) or disallowing reference-typed struct fields outright.
-- **`if`/block-tail returns** of a local reference are not caught — `checker_expr_provenance`
-  does not recurse into `if`/block tail expressions (a pre-existing E091 deferral). Direct
-  `return &local` and `return r` are caught.
-- Conservative second-class rule otherwise: it rejects *all* direct reference stores, so a
-  hypothetical safe store of a longer-lived reference is also rejected (sound-direction, not
-  complete). A reference stored into a bare `ident` target is not separately checked.
+## Honest scope
+- Enforcement is **provenance + structural-type** based, not full lifetime inference, so it is
+  conservative: it rejects *all* stores of a reference-containing value (the second-class
+  rule), including the hypothetical safe store of a longer-lived reference. Sound direction,
+  not complete.
+- `checker_type_has_ref` recursion is depth-bounded (16) and treats an unregistered named type
+  as ref-free; tuple element types are not walked (a tuple literal embedding a reference
+  loud-fails earlier as **E005**, so it is not a silent hole).
+- A reference stored into a bare `ident` target is not separately checked, but a local
+  `let r = &x` only escapes when `r` is later returned or stored (both covered), and Sounio
+  has no first-class global reference variables.
 - Multi-level refs (`&&T`) and references to temporaries are not addressed.
-
-The honest one-line model: **direct reference store/return/interproc escapes are caught;
-references smuggled through aggregate values or `if`/block-tail returns are not yet.**
 
 ## Verified (madaros from this source, `ulimit -s unlimited`)
 - Functionality: `rd(&n)*p`→42, `(*p).a` of `&P`→42, `mutref *p=*p+1`→42 (alias write-back).
