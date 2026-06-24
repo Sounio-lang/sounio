@@ -6681,6 +6681,28 @@ impl Lowerer {
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
         }
+        // Inline expression callee (e.g. `(|x| x)(n)`): no resolvable name — lower the
+        // callee expression to a fn-ref reg and dispatch indirectly, rather than falling
+        // through to find_or_add_fn_id(empty) (which calls a body-less fn -> crash).
+        if callee_name.len <= 0 {
+            match *callee_opt_ref {
+                Some(_) => {
+                    let pair_cal = self.lower_opt_expr_ref(&e.left)
+                    let lo_cal = pair_cal.0
+                    let callee_reg = pair_cal.1
+                    let pair_args_x: LowerExprArgsResult = lo_cal.lower_expr_args_ref(&e.args)
+                    let lo_x = pair_args_x.lowerer
+                    let args_x: Option<Box<IrRegList>> = if pair_args_x.count <= 0 { None } else { Some(Box::new(pair_args_x.regs)) }
+                    let argc_x = pair_args_x.count
+                    let pair_dx = lo_x.fresh_reg()
+                    let lo_dx = pair_dx.0
+                    let dst_x = pair_dx.1
+                    let lo_cx = lo_dx.emit(ir_call_indirect(dst_x, callee_reg, args_x, argc_x))
+                    return (lo_cx, dst_x)
+                }
+                _ => {}
+            }
+        }
         let callee_local_reg = self.lookup_local(callee_name)
         if callee_local_reg >= 0 {
             let pair_args_i: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
@@ -7572,11 +7594,13 @@ impl Lowerer {
     // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.
     // Returns (Lowerer, fn_ref_reg) where fn_ref_reg holds the fn_id.
     fn lower_closure_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        // 1. Create a unique name and register the synthetic function
-        let closure_name = self.make_closure_name()
-        let pair_fn = self.find_or_add_fn_id(closure_name)
-        var lo = pair_fn.0
-        let closure_fn_id = pair_fn.1
+        var lo = self
+        // 1. Create a unique name and register the synthetic function. Use the *mut
+        // find_or_add (like regular calls): the functional find_or_add_fn_id ADD path
+        // builds + returns a 128 KB IrFunction by value, which the by-value-aggregate
+        // miscompile turned into a lowering SIGSEGV.
+        let closure_name = lo.make_closure_name()
+        let closure_fn_id = lowerer_find_or_add_fn_id_mut(&! lo, closure_name)
 
         if closure_fn_id < 0 {
             return lo.emit_unit()
@@ -7588,11 +7612,16 @@ impl Lowerer {
         let saved_locals = lo.locals
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
+        let saved_loaded = lo.current_func_loaded
 
-        // 3. Switch to the closure function context
+        // 3. Switch to the closure function context. current_func_loaded MUST be true so
+        // the functional lowering (current_fn_validated_reg / param resolution) reads from
+        // lo.current_func — not the empty module placeholder, which is what zeroed
+        // param_count and produced a malformed closure body.
         lo.current_fn = closure_fn_id
         lo.current_func = Box::new(ir_empty_function())
         (*lo.current_func).name = closure_name
+        lo.current_func_loaded = true
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
@@ -7605,11 +7634,19 @@ impl Lowerer {
                     let preg_pair = lo.fresh_reg()
                     lo = preg_pair.0
                     let preg = preg_pair.1
-                    if (*lo.current_func).param_count < IR_MAX_PARAMS {
-                        let pc = (*lo.current_func).param_count
-                        (*lo.current_func).param_regs[pc as usize] = preg
-                        (*lo.current_func).param_count = pc + 1
+                    // Extract the current_func Box to a local before mutating: the direct
+                    // `(*lo.current_func).param_count = …` store (deref a field-accessed Box)
+                    // is dropped by the by-value-aggregate miscompile — the same reason
+                    // fresh_reg copies `lo.current_func` to a local first. Without this,
+                    // param_count stayed 0, the codegen emitted no parameter prologue, and
+                    // the closure SIGSEGV'd when called.
+                    var cf_box = lo.current_func
+                    if (*cf_box).param_count < IR_MAX_PARAMS {
+                        let pc = (*cf_box).param_count
+                        (*cf_box).param_regs[pc as usize] = preg
+                        (*cf_box).param_count = pc + 1
                     }
+                    lo.current_func = cf_box
                     lo = lo.bind_local((*plist).head.name, preg, false)
                     params = &(*plist).tail
                 }
@@ -7622,14 +7659,19 @@ impl Lowerer {
         lo = body_pair.0
         lo = lo.emit(ir_return(body_pair.1))
 
-        // 7. Flush the completed closure function back to the module
-        var module = *lo.module
-        module.functions[closure_fn_id as usize] = *lo.current_func
-        lo.module = Box::new(module)
+        // 7. Flush the completed closure function back to the module. Extract the module
+        // Box to a local first (as lowerer_flush_current_func_mut does) — the direct
+        // `(*lo.module).functions[id] = …` store derefs a field-accessed Box and is
+        // dropped/partial under the by-value-aggregate miscompile, which lost the body
+        // instrs (the closure returned its param instead of the body's result).
+        var flush_mod_box = lo.module
+        (*flush_mod_box).functions[closure_fn_id as usize] = *lo.current_func
+        lo.module = flush_mod_box
 
         // 8. Restore the original function context
         lo.current_fn = saved_fn
         lo.current_func = saved_func
+        lo.current_func_loaded = saved_loaded
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
