@@ -193,7 +193,7 @@ fn struct_table_get_defining_module(t: *mut StructTable, idx: i64) -> AstPath wi
 }
 
 fn struct_table_alloc() -> *mut StructTable with Mut, Panic, Div, Alloc {
-    heap_alloc(16777216) as *mut StructTable
+    heap_alloc(8388608) as *mut StructTable
 }
 
 // ============================================================
@@ -369,7 +369,7 @@ fn enum_table_find_variant_enum(t: *mut EnumTable, variant_name: Name) -> i64 wi
 }
 
 fn enum_table_alloc() -> *mut EnumTable with Mut, Panic, Div, Alloc {
-    heap_alloc(2097152) as *mut EnumTable
+    heap_alloc(524288) as *mut EnumTable
 }
 
 // ============================================================
@@ -1280,115 +1280,158 @@ fn empty_fn_sig() -> FnSig {
 // FnSig table
 // ============================================================
 
+// FnSigTable (CHUNKED, heap-indirect): the table lives behind a `*mut FnSigTable`
+// in the Checker so by-value Checker copies share ONE table. Storage is a linked
+// list of fixed-size chunks rather than one giant `[FnSig; N]` array. A per-module
+// checker with a handful of signatures uses a single ~0.75MB chunk; the cross-module
+// accumulator grows chunks on demand. This BOUNDS memory under the multi-module
+// frontend (which holds many checkers at once) -- a fixed huge cap allocated the
+// full array in every checker and exhausted memory on the self-compile. Chunks hold
+// inline `[FnSig; 512]` arrays, so element access is a single deref + array index
+// (Sounio has no raw-pointer `p[i]` and no sizeof, so neither flat-growable storage).
+
+pub struct FnSigChunk {
+    entries: [FnSig; 512],
+    next: *mut FnSigChunk,    // 0 == last chunk
+}
+
 pub struct FnSigTable {
-    entries: [FnSig; 32768],
+    head: *mut FnSigChunk,    // 0 == empty
     count: i64,
 }
 
-fn fn_sig_table_new() -> FnSigTable {
-    FnSigTable {
-        entries: [empty_fn_sig(); 32768],
-        count: 0,
-    }
+// One zeroed chunk via heap_alloc (calloc): entries start empty, next == 0.
+// 512 * <=1.5KB/FnSig ~= 0.75MB; over-provisioned, mmap-lazy.
+fn fn_sig_chunk_alloc() -> *mut FnSigChunk with Alloc {
+    heap_alloc(786432) as *mut FnSigChunk
 }
 
-// FnSigTable accessors (heap-indirect): the table lives behind a `*mut FnSigTable`
-// in the Checker so by-value Checker copies share ONE table (both `entries` and
-// `count`). That eliminates the count-desync that arose when `entries` was shared
-// but `count` was copied, and keeps the Checker frame small when the cap grows.
-// All access goes through the pointer. NEVER bind `(*t)` to a value — that copies
-// the whole table back onto the stack, defeating the indirection.
+// Small table header (head ptr + count); calloc zeroes head to 0 and count to 0.
+fn fn_sig_table_alloc() -> *mut FnSigTable with Alloc {
+    heap_alloc(64) as *mut FnSigTable
+}
 
-fn fn_sig_table_add(t: *mut FnSigTable, sig: FnSig) -> i64 with Mut, Panic, Div {
-    // Overflow safety (Bug A): on a full table return a -1 sentinel instead of
-    // `count` (== cap). Returning the cap let callers index entries[cap] / get(cap)
-    // one past the end of [FnSig; 32768] -> OOB. Below the cap this is unchanged.
-    let idx = (*t).count
-    if idx < 32768 {
-        (*t).entries[idx as usize] = sig
-        (*t).count = idx + 1
-        idx
-    } else {
-        0 - 1
+// Walk to (allocating chunks as needed) the chunk holding global index `gi`.
+fn fn_sig_table_chunk_for(t: *mut FnSigTable, gi: i64) -> *mut FnSigChunk with Mut, Panic, Div, Alloc {
+    if (*t).head == (0 as *mut FnSigChunk) {
+        (*t).head = fn_sig_chunk_alloc()
     }
+    let chunk_no = gi / 512
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        if (*cur).next == (0 as *mut FnSigChunk) {
+            (*cur).next = fn_sig_chunk_alloc()
+        }
+        cur = (*cur).next
+        n = n + 1
+    }
+    cur
+}
+
+fn fn_sig_table_add(t: *mut FnSigTable, sig: FnSig) -> i64 with Mut, Panic, Div, Alloc {
+    let idx = (*t).count
+    // Bound runaway growth (never reached by a well-formed program).
+    if idx >= 1048576 {
+        return 0 - 1
+    }
+    let chunk = fn_sig_table_chunk_for(t, idx)
+    (*chunk).entries[(idx % 512) as usize] = sig
+    (*t).count = idx + 1
+    idx
+}
+
+fn fn_sig_table_get(t: *mut FnSigTable, idx: i64) -> FnSig with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        return empty_fn_sig()
+    }
+    let chunk_no = idx / 512
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        if cur == (0 as *mut FnSigChunk) {
+            return empty_fn_sig()
+        }
+        cur = (*cur).next
+        n = n + 1
+    }
+    if cur == (0 as *mut FnSigChunk) {
+        return empty_fn_sig()
+    }
+    (*cur).entries[(idx % 512) as usize]
 }
 
 fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < (*t).count {
-        if name_eq((*t).entries[i].name, name) && !(*t).entries[i].is_method {
-            return i
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if name_eq((*cur).entries[local as usize].name, name) && !(*cur).entries[local as usize].is_method {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
         }
-        i = i + 1
+        cur = (*cur).next
     }
     0 - 1
 }
 
 fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < (*t).count {
-        if (*t).entries[i].is_method && name_eq((*t).entries[i].self_type_name, type_name) && name_eq((*t).entries[i].name, method_name) {
-            return i
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if (*cur).entries[local as usize].is_method && name_eq((*cur).entries[local as usize].self_type_name, type_name) && name_eq((*cur).entries[local as usize].name, method_name) {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
         }
-        i = i + 1
+        cur = (*cur).next
     }
     0 - 1
 }
 
 // Semantic method lookup: matches by TypeEntry kind+name instead of Name alone.
-// Resolves ambiguity when two types in different modules share a name.
 fn fn_sig_table_find_method_semantic(t: *mut FnSigTable, receiver_ty: TypeEntry, method_name: Name) -> i64 with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < (*t).count {
-        if (*t).entries[i].is_method && name_eq((*t).entries[i].name, method_name) {
-            // Semantic match: compare type kind and name
-            let sig_ty = (*t).entries[i].self_type_entry
-            if sig_ty.kind == receiver_ty.kind && name_eq(sig_ty.name, receiver_ty.name) {
-                return i
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if (*cur).entries[local as usize].is_method && name_eq((*cur).entries[local as usize].name, method_name) {
+                let sig_ty = (*cur).entries[local as usize].self_type_entry
+                if sig_ty.kind == receiver_ty.kind && name_eq(sig_ty.name, receiver_ty.name) {
+                    return gi
+                }
             }
+            local = local + 1
+            gi = gi + 1
         }
-        i = i + 1
+        cur = (*cur).next
     }
     // Fallback to string-based lookup for backward compatibility
     fn_sig_table_find_method(t, receiver_ty.name, method_name)
 }
 
-fn fn_sig_table_get(t: *mut FnSigTable, idx: i64) -> FnSig with Mut, Panic, Div {
-    // Overflow safety (Bug A): never read outside [0, count). A -1 sentinel from a
-    // full-table add(), or any stale/OOB sig-id, returns an empty signature instead
-    // of corrupting memory one past the array end.
-    if idx < 0 || idx >= (*t).count {
-        empty_fn_sig()
-    } else {
-        (*t).entries[idx as usize]
-    }
-}
-
 fn fn_sig_table_get_visibility(t: *mut FnSigTable, idx: i64) -> Visibility with Mut, Panic, Div {
     if idx < 0 || idx >= (*t).count {
-        visibility_private()
-    } else {
-        (*t).entries[idx as usize].visibility
+        return visibility_private()
     }
+    fn_sig_table_get(t, idx).visibility
 }
 
 fn fn_sig_table_get_defining_module(t: *mut FnSigTable, idx: i64) -> AstPath with Mut, Panic, Div {
     if idx < 0 || idx >= (*t).count {
-        empty_path()
-    } else {
-        (*t).entries[idx as usize].defining_module
+        return empty_path()
     }
-}
-
-// Heap storage for the indirect FnSigTable. Allocate ZEROED bytes via heap_alloc
-// (calloc) and cast -- NOT Box::new(fn_sig_table_new()), which would SRET-materialise
-// the whole [FnSig; cap] on the stack before copying (a ~16-64MB frame at the raised
-// cap -> SIGSEGV under the default 8MB stack on the raw-gate path). calloc zeroes, so
-// count starts 0 and unfilled slots are never read (bounds-guarded get). Size is
-// over-provisioned (cap 32768 * <=2KB/FnSig ~= 64MB; 128MB has 2x slack); mmap is lazy
-// so untouched pages cost nothing. Same idiom as check_mod_alloc_checker.
-fn fn_sig_table_alloc() -> *mut FnSigTable with Mut, Panic, Div, Alloc {
-    heap_alloc(134217728) as *mut FnSigTable
+    fn_sig_table_get(t, idx).defining_module
 }
 
 // ============================================================

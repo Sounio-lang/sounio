@@ -1428,13 +1428,11 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         visibility: visibility_pub(),
         defining_module: empty_path(),
     }
-    let sig_id = (*(*c).fn_sigs).count
-    if sig_id >= 32768 {
+    let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+    if sig_id < 0 {
         checker_note_type_error_mut(c)
         return ty_error()
     }
-    (*(*c).fn_sigs).entries[sig_id as usize] = sig
-    (*(*c).fn_sigs).count = sig_id + 1
     ty_fn(sig_id)
 }
 
@@ -2662,11 +2660,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
-            let sig_id = (*(*c).fn_sigs).count
-            if sig_id < 32768 {
-                (*(*c).fn_sigs).entries[sig_id as usize] = sig
-                (*(*c).fn_sigs).count = sig_id + 1
-            }
+            let _sig_id = fn_sig_table_add((*c).fn_sigs, sig)
             // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
             let benv_idx = (*c).env.count
             if benv_idx < 4096 {
@@ -5472,16 +5466,7 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
 }
 
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
-    var i: i64 = 0
-    while i < (*(*c).fn_sigs).count {
-        let sig_name = (*(*c).fn_sigs).entries[i].name
-        let sig_is_method = (*(*c).fn_sigs).entries[i].is_method
-        if name_eq(sig_name, name) && !sig_is_method {
-            return i
-        }
-        i = i + 1
-    }
-    -1
+    fn_sig_table_find((*c).fn_sigs, name)
 }
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -5620,16 +5605,17 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
+        let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
-            fn_param_list_handle((*(*c).fn_sigs).entries[direct_sig_id].params),
-            (*(*c).fn_sigs).entries[direct_sig_id].param_count,
+            fn_param_list_handle(direct_sig.params),
+            direct_sig.param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, (*(*c).fn_sigs).entries[direct_sig_id].effects, (*(*c).fn_sigs).entries[direct_sig_id].effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, (*(*c).fn_sigs).entries[direct_sig_id].params, call_start_borrows)
-        return (*(*c).fn_sigs).entries[direct_sig_id].return_type
+        checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_release_call_arg_borrows_inplace(c, e.args, direct_sig.params, call_start_borrows)
+        return direct_sig.return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
