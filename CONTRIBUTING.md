@@ -45,6 +45,24 @@ bash scripts/run_sio_test_suite.sh
 bash scripts/run_sio_test_suite.sh vancomycin --verbose
 ```
 
+### Local Git Setup (one-time)
+
+Some tracked files are generated — notably the `docs/governance/` metadata
+produced by `scripts/docs/sync_governance_metadata.mjs`. A textual 3-way merge
+of these is meaningless and conflicts on nearly every merge from an active
+`main`. After cloning, install the repo's git merge driver once so they
+auto-resolve:
+
+```bash
+bash scripts/dev/install-git-merge-drivers.sh
+```
+
+This registers the `governance-regen` merge driver plus a `post-merge` hook
+that regenerate the generated `docs/governance/` artifacts from the merged doc
+set instead of conflicting on them. It is opt-in per clone (git keeps
+merge-driver commands in local config, which is not committed) and will not
+overwrite a pre-existing `post-merge` hook.
+
 ---
 
 ## Development Workflow
