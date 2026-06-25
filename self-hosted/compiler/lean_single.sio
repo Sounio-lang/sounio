@@ -8576,7 +8576,7 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
     emit_load_var(slot_res)
 }
 
-fn emit_read_file() with Mut {
+fn emit_read_file() with Mut, Panic {
     // Simpler: rax=path. open → save fd → mmap → read → close → return buf
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
     em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi
@@ -8590,6 +8590,10 @@ fn emit_read_file() with Mut {
     em(0x49); em(0xc7); em(0xc0); em32(-1)  // r8=-1
     em(0x4d); em(0x31); em(0xc9)  // r9=0
     em(0xb8); em32(9); em(0x0f); em(0x05)  // mmap → buf in rax
+    // MAP_FAILED check: rax in [-4095,-1] -> graceful exit 42 (was unchecked; on OOM the
+    // zero-store below at `mov byte [rax+rcx],0` wrote to the -errno address -> SIGSEGV).
+    em(0x48); em(0x3d); em32(0 - 4096)  // cmp rax, -4096
+    em(0x0f); em(0x87); let rf_abort = CL; em32(0)  // ja rf_abort (unsigned: MAP_FAILED)
     em(0x50)  // push buf; stack=[fd, buf]
     // read(fd, buf, 16MB)
     em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (buf)
@@ -8608,6 +8612,12 @@ fn emit_read_file() with Mut {
     // return buf
     em(0x58)  // pop rax (buf)
     em(0x48); em(0x83); em(0xc4); em(0x08)  // add rsp, 8 (discard fd)
+    em(0xe9); let rf_done = CL; em32(0)  // jmp rf_done (skip abort; rax already = buf)
+    patch32(rf_abort, CL)
+    em(0xbf); em32(42)  // mov edi, 42 (distinct OOM exit code, mirrors arena)
+    em(0xb8); em32(60)  // mov eax, 60 (SYS_exit)
+    em(0x0f); em(0x05)  // syscall
+    patch32(rf_done, CL)
 }
 
 fn emit_file_size() with Mut, Panic {
