@@ -5,7 +5,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr, mk_expr}
 
 // Lean compiler safety: keep assignment targets out of the local frame while
 // recursively parsing the RHS. Holding both Boxes locally corrupts some nested
@@ -26,6 +26,101 @@ fn stmt_take_assign_target() -> Box<Expr> with Mut, Alloc {
             LAST_ASSIGN_TARGET = None
             Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
         },
+    }
+}
+
+// ============================================================
+// Tuple-let desugaring side table.
+//
+// `let (a, b) = e` cannot be represented by a single Stmt (which has one `name`
+// field), so the parser desugars it to a primary `let __tupN = e` (returned as
+// the statement) plus per-element `let a = __tupN.0` / `let b = __tupN.1`
+// bindings pushed here and drained by parse_block in source order. This reuses
+// the fully-proven single-name let and tuple-`.N` indexing paths on BOTH the
+// checker and codegen sides — unlike carrying a pattern on Stmt, which would
+// typecheck but never destructure in lowering. Mirrors the LAST_ASSIGN_TARGET
+// idiom (keep the large Stmt nodes off the parse frame).
+//
+// Defined as free helpers before `impl Parser` so callers (parse_let_stmt,
+// parse_block) satisfy the define-before-use rule without depending on
+// stmt_list_append / reverse_stmt_list_opt (which appear later in this file).
+// ============================================================
+var TPLET_PENDING: Option<Box<StmtList>> = None
+var TPLET_COUNTER: i64 = 0
+
+// Name holding the decimal ascii of a non-negative integer (tuple index 0,1,..).
+fn tplet_index_name(n: i64) -> Name with Mut, Panic, Div {
+    var name = empty_name()
+    if n <= 0 {
+        name.buf[0] = 48 as i8
+        name.len = 1
+        return name
+    }
+    var digits: [i8; 24] = [0; 24]
+    var cnt: i64 = 0
+    var v = n
+    while v > 0 {
+        digits[cnt as usize] = (48 + (v % 10)) as i8
+        v = v / 10
+        cnt = cnt + 1
+    }
+    var i: i64 = 0
+    while i < cnt {
+        name.buf[i as usize] = digits[(cnt - 1 - i) as usize]
+        i = i + 1
+    }
+    name.len = cnt
+    name
+}
+
+// Unique temp Name `__tupN` for the desugared tuple value (N = call counter).
+fn tplet_temp_name(ctr: i64) -> Name with Mut, Panic, Div {
+    var name = make_name("__tup")
+    let d = tplet_index_name(ctr)
+    var i: i64 = 0
+    while i < d.len {
+        name.buf[(name.len + i) as usize] = d.buf[i as usize]
+        i = i + 1
+    }
+    name.len = name.len + d.len
+    name
+}
+
+// Push an element binding to the FIFO pending queue. Implemented as a LIFO cons;
+// tplet_emit_elems recurses-before-push so source order ends up FIFO at the head.
+fn tplet_push(s: Stmt) with Mut, Alloc {
+    let prev = TPLET_PENDING
+    TPLET_PENDING = Some(Box::new(StmtList { head: s, tail: prev }))
+}
+
+// Emit `let <binder> = __tup.<idx>` for each sub-pattern of a tuple let.
+// Wildcards / non-binding sub-patterns are skipped (no variable to bind).
+// Recurses on the tail BEFORE pushing the head so that, combined with the LIFO
+// tplet_push, the pending list reads head->tail in source order (FIFO).
+fn tplet_emit_elems(opt: Option<Box<PatternList>>, temp: Name, span: Span, idx: i64) with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let sub = (*list).head
+            tplet_emit_elems((*list).tail, temp, span, idx + 1)
+            if sub.kind == PatternKind::PatBinding {
+                var ident = mk_expr(ExprKind::ExprIdent, span)
+                ident.name = temp
+                var field = mk_expr(ExprKind::ExprFieldAccess, span)
+                field.name = tplet_index_name(idx)
+                field.left = Some(Box::new(ident))
+                let elem = Stmt {
+                    kind: StmtKind::StmtLet,
+                    span: span,
+                    name: sub.name,
+                    ty: None,
+                    expr: Some(Box::new(field)),
+                    target: None,
+                    assign_op: AssignOp::AssignEq,
+                }
+                tplet_push(elem)
+            }
+        },
+        None => {},
     }
 }
 
@@ -92,6 +187,21 @@ impl Parser {
 
             rev_stmts_opt = Some(Box::new(StmtList { head: stmt, tail: rev_stmts_opt }))
 
+            // Drain tuple-let element bindings desugared by parse_let_stmt. The
+            // pending list reads head->tail in source order; consing each onto
+            // the reverse-built rev_stmts_opt keeps them right after their
+            // primary `let __tupN = e` once the block list is reversed.
+            while true {
+                match TPLET_PENDING {
+                    Some(node) => {
+                        let elem = (*node).head
+                        TPLET_PENDING = (*node).tail
+                        rev_stmts_opt = Some(Box::new(StmtList { head: elem, tail: rev_stmts_opt }))
+                    },
+                    None => break,
+                }
+            }
+
             // Skip optional semicolons between statements
             while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
@@ -151,6 +261,27 @@ impl Parser {
         let init_box = parser_take_expr_box()
 
         let span = p.span_from(start)
+
+        // Tuple-destructuring let: `let (a, b) = e`. The pattern cannot live on
+        // the single-name Stmt, so desugar to `let __tupN = e` (returned here)
+        // plus `let a = __tupN.0` / `let b = __tupN.1` pushed to TPLET_PENDING
+        // and drained by parse_block. See the tuple-let side table above.
+        if pat.kind == PatternKind::PatTuple {
+            let ctr = TPLET_COUNTER
+            TPLET_COUNTER = TPLET_COUNTER + 1
+            let temp = tplet_temp_name(ctr)
+            tplet_emit_elems(pat.sub_patterns, temp, span, 0)
+            return (p, Stmt {
+                kind: StmtKind::StmtLet,
+                span: span,
+                name: temp,
+                ty: ty_opt,
+                expr: Some(init_box),
+                target: None,
+                assign_op: AssignOp::AssignEq,
+            })
+        }
+
         (p, Stmt {
             kind: StmtKind::StmtLet,
             span: span,
