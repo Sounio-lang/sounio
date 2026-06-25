@@ -3212,14 +3212,167 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 // Dedicated leaf for the by-value check_impl_item bridge. Isolating it here
 // keeps its 8MB SRET frame OUT of checker_check_item_inplace (which else would
 // carry the frame at compile time even for impl-free programs like `fn main(){}`).
+// *mut in-place impl-method BODY check. Eliminates the ~8MB by-value Checker SRET of the
+// old check_impl_def chain (the analogous module-76 crash in the CHECK pass). Mirrors
+// checker_check_fn_item_inplace but resolves the sig via find_method + current_impl_type.
+fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let saved_multitest_count = (*c).multitest_count
+            let saved_multitest_corrected = (*c).multitest_corrected
+            let sig_id = fn_sig_table_find_method((*c).fn_sigs, (*c).current_impl_type.name, (*fd).name)
+            if sig_id >= 0 {
+                let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+                (*c).current_return_type = sig.return_type
+                (*c).current_effects = sig.effects
+                (*c).current_effect_count = sig.effect_count
+            }
+            (*c).multitest_count = 0
+            (*c).multitest_corrected = false
+            (*c).env = (*c).env.push_scope()
+            (*c).borrows = (*c).borrows.push_scope()
+            checker_push_const_scope_inplace(c)
+            checker_bind_fn_params_inplace(c, (*fd).params)
+            let body_ty = checker_check_block_inplace(c, (*fd).body)
+            if sig_id >= 0 {
+                let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
+                if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
+                    checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                }
+            }
+            if (*c).multitest_count > 1 && !(*c).multitest_corrected {
+                checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
+            }
+            checker_pop_const_scope_inplace(c)
+            (*c).borrows = (*c).borrows.pop_scope()
+            (*c).env = (*c).env.pop_scope()
+            (*c).current_return_type = ty_unit()
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            (*c).multitest_count = saved_multitest_count
+            (*c).multitest_corrected = saved_multitest_corrected
+        }
+        None => {}
+    }
+}
+
+fn checker_check_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_check_impl_method_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_check_impl_methods_inplace(c, (*id).methods)
+            (*c).current_impl_type = ty_error()
+        }
+        None => {}
+    }
+}
+
 fn checker_check_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
-    checker_store_from_value(c, (*c).check_impl_item(opt))
+    // *mut in-place (no SRET); replaces the by-value `checker_store_from_value(c, (*c).check_impl_item(opt))`.
+    checker_check_impl_def_inplace(c, opt)
 }
 
 // Dedicated leaf for the by-value collect_impl_def bridge (registers impl method
 // signatures). Same isolation rationale as the check bridge above.
+// *mut in-place impl-method collection. Eliminates the ~8MB by-value Checker SRET of the
+// old collect_impl_def chain (the module-76 self-compile crash: a method's collection
+// copied + returned the whole Checker, corrupting the stack). Mirrors
+// checker_collect_fn_def_inplace + the self-param skip from collect_method_params, using
+// the existing *mut spine (checker_collect_fn_params_mut / _lower_type_expr_mut /
+// _extract_effects_mut). No copy or return of the Checker.
+fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            // Skip the self param for method signatures (mirror collect_method_params).
+            let params_pair = match (*fd).params {
+                Some(pl) => {
+                    if (*pl).head.is_self {
+                        checker_collect_fn_params_mut(c, (*pl).tail)
+                    } else {
+                        checker_collect_fn_params_mut(c, (*fd).params)
+                    }
+                }
+                None => checker_collect_fn_params_mut(c, None)
+            }
+            let params = params_pair.params
+            let param_count = params_pair.count
+            let ret_ty = match (*fd).return_type {
+                Some(te) => checker_lower_type_expr_mut(c, *te)
+                None => ty_unknown()
+            }
+            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            let fn_effects = eff_pair.effects
+            let fn_effect_count = eff_pair.count
+            let sig = FnSig {
+                name: item.name,
+                params: params,
+                param_count: param_count,
+                return_type: ret_ty,
+                is_method: true,
+                self_type_name: type_name,
+                self_type_entry: (*c).current_impl_type,
+                effects: fn_effects,
+                effect_count: fn_effect_count,
+                is_kernel: false,
+                is_epistemic_kernel: false,
+                is_linear_closure: false,
+                linear_capture_count: 0,
+                epistemic_epsilon: 0.0 - 1.0,
+                visibility_kind: item.visibility.kind,
+                defining_module_seg_count: (*c).current_module.seg_count,
+                defining_module_id: (*c).current_module_id,
+                visibility: item.visibility,
+                defining_module: (*c).current_module,
+            }
+            let _added = fn_sig_table_add((*c).fn_sigs, sig)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList> >, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_collect_impl_method_inplace(c, (*list).head, type_name)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_collect_impl_methods_inplace(c, (*id).methods, impl_ty.name)
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
-    checker_store_from_value(c, (*c).collect_impl_def(opt))
+    // *mut in-place (no SRET); replaces the by-value `checker_store_from_value(c, (*c).collect_impl_def(opt))`.
+    checker_collect_impl_def_inplace(c, opt)
 }
 
 fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
