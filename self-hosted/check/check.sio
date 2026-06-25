@@ -2661,17 +2661,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
             let _sig_id = fn_sig_table_add((*c).fn_sigs, sig)
-            // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
-            let benv_idx = (*c).env.count
-            if benv_idx < 4096 {
-                (*c).env.bindings[benv_idx as usize] = TypeBinding {
-                    name: name,
-                    ty: ty_fn(sig_id),
-                    is_mutable: false,
-                    scope_depth: (*c).env.scope_depth,
-                }
-                (*c).env.count = benv_idx + 1
-            }
+            // Functions are NOT bound in env — they live in the chunked fn_sigs and resolve via
+            // the fn_sigs fallback in checker_check_ident_expr_inplace. Binding ~15K module-level
+            // fns into the ONE shared env (check_modules_verdict_boot4) overflowed bindings[4096],
+            // so function-body LOCALS could not bind -> E137. Keeping env for locals only avoids it.
             checker_const_int_bind_unknown_inplace(c, name)
         }
         None => {}
@@ -4027,8 +4020,18 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             ty_named(ei.name)
         } else {
-            // Look up in env as a regular binding
-            (*c).env.lookup(first_name)
+            // Look up in env as a regular binding; functions live in fn_sigs (not env), so
+            // fall back to fn_sigs for a bare function reference before yielding ty_error.
+            if !(*c).env.has_binding(first_name) {
+                let fn_sig_id = checker_fn_sigs_find_inplace(c, first_name)
+                if fn_sig_id >= 0 {
+                    ty_fn(fn_sig_id)
+                } else {
+                    (*c).env.lookup(first_name)
+                }
+            } else {
+                (*c).env.lookup(first_name)
+            }
         }
     }
 }
@@ -6170,6 +6173,12 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !(*c).env.has_binding(e.name) {
+        // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
+        // function reference via the chunked fn_sigs before reporting E137.
+        let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
+        if fn_sig_id >= 0 {
+            return ty_fn(fn_sig_id)
+        }
         checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
         return ty_error()
     }
@@ -17234,6 +17243,11 @@ impl Checker {
             ExprKind::ExprCharLit => (c, ty_char())
             ExprKind::ExprIdent => {
                 if !c.env.has_binding(e.name) {
+                    // Functions live in fn_sigs (not env) — resolve a bare fn reference there.
+                    let fn_sig_id = fn_sig_table_find(c.fn_sigs, e.name)
+                    if fn_sig_id >= 0 {
+                        return (c, ty_fn(fn_sig_id))
+                    }
                     let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
                     return (c_err, ty_error())
                 }
