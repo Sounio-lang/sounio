@@ -112,13 +112,13 @@ fn empty_struct_info() -> StructInfo {
 // ============================================================
 
 pub struct StructTable {
-    entries: [StructInfo; 128],
+    entries: [StructInfo; 4096],
     count: i64,
 }
 
 fn struct_table_new() -> StructTable {
     StructTable {
-        entries: [empty_struct_info(); 128],
+        entries: [empty_struct_info(); 4096],
         count: 0,
     }
 }
@@ -129,7 +129,7 @@ fn struct_table_new() -> StructTable {
 
 fn struct_table_add(t: *mut StructTable, info: StructInfo) with Mut, Panic, Div {
     let idx = (*t).count
-    if idx < 128 {
+    if idx < 4096 {
         (*t).entries[idx as usize] = info
         (*t).count = idx + 1
     }
@@ -193,7 +193,7 @@ fn struct_table_get_defining_module(t: *mut StructTable, idx: i64) -> AstPath wi
 }
 
 fn struct_table_alloc() -> *mut StructTable with Mut, Panic, Div, Alloc {
-    Box::new(struct_table_new()) as *mut StructTable
+    heap_alloc(16777216) as *mut StructTable
 }
 
 // ============================================================
@@ -300,13 +300,13 @@ fn empty_enum_info() -> EnumInfo {
 // ============================================================
 
 pub struct EnumTable {
-    entries: [EnumInfo; 32],
+    entries: [EnumInfo; 256],
     count: i64,
 }
 
 fn enum_table_new() -> EnumTable {
     EnumTable {
-        entries: [empty_enum_info(); 32],
+        entries: [empty_enum_info(); 256],
         count: 0,
     }
 }
@@ -316,7 +316,7 @@ fn enum_table_new() -> EnumTable {
 
 fn enum_table_add(t: *mut EnumTable, info: EnumInfo) with Mut, Panic, Div {
     let idx = (*t).count
-    if idx < 32 {
+    if idx < 256 {
         (*t).entries[idx as usize] = info
         (*t).count = idx + 1
     }
@@ -369,7 +369,7 @@ fn enum_table_find_variant_enum(t: *mut EnumTable, variant_name: Name) -> i64 wi
 }
 
 fn enum_table_alloc() -> *mut EnumTable with Mut, Panic, Div, Alloc {
-    Box::new(enum_table_new()) as *mut EnumTable
+    heap_alloc(2097152) as *mut EnumTable
 }
 
 // ============================================================
@@ -1281,13 +1281,13 @@ fn empty_fn_sig() -> FnSig {
 // ============================================================
 
 pub struct FnSigTable {
-    entries: [FnSig; 4096],
+    entries: [FnSig; 32768],
     count: i64,
 }
 
 fn fn_sig_table_new() -> FnSigTable {
     FnSigTable {
-        entries: [empty_fn_sig(); 4096],
+        entries: [empty_fn_sig(); 32768],
         count: 0,
     }
 }
@@ -1302,9 +1302,9 @@ fn fn_sig_table_new() -> FnSigTable {
 fn fn_sig_table_add(t: *mut FnSigTable, sig: FnSig) -> i64 with Mut, Panic, Div {
     // Overflow safety (Bug A): on a full table return a -1 sentinel instead of
     // `count` (== cap). Returning the cap let callers index entries[cap] / get(cap)
-    // one past the end of [FnSig; 4096] -> OOB. Below the cap this is unchanged.
+    // one past the end of [FnSig; 32768] -> OOB. Below the cap this is unchanged.
     let idx = (*t).count
-    if idx < 4096 {
+    if idx < 32768 {
         (*t).entries[idx as usize] = sig
         (*t).count = idx + 1
         idx
@@ -1380,10 +1380,15 @@ fn fn_sig_table_get_defining_module(t: *mut FnSigTable, idx: i64) -> AstPath wit
     }
 }
 
-// Heap allocation for the indirect FnSigTable. Box memory is never freed (no-free
-// arena), so the raw pointer stays valid for the Checker's lifetime.
+// Heap storage for the indirect FnSigTable. Allocate ZEROED bytes via heap_alloc
+// (calloc) and cast -- NOT Box::new(fn_sig_table_new()), which would SRET-materialise
+// the whole [FnSig; cap] on the stack before copying (a ~16-64MB frame at the raised
+// cap -> SIGSEGV under the default 8MB stack on the raw-gate path). calloc zeroes, so
+// count starts 0 and unfilled slots are never read (bounds-guarded get). Size is
+// over-provisioned (cap 32768 * <=2KB/FnSig ~= 64MB; 128MB has 2x slack); mmap is lazy
+// so untouched pages cost nothing. Same idiom as check_mod_alloc_checker.
 fn fn_sig_table_alloc() -> *mut FnSigTable with Mut, Panic, Div, Alloc {
-    Box::new(fn_sig_table_new()) as *mut FnSigTable
+    heap_alloc(134217728) as *mut FnSigTable
 }
 
 // ============================================================
