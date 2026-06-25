@@ -123,60 +123,77 @@ fn struct_table_new() -> StructTable {
     }
 }
 
-impl StructTable {
-    fn add(self, info: StructInfo) -> StructTable with Mut, Panic, Div {
-        var tbl = self
-        if tbl.count < 128 {
-            tbl.entries[tbl.count] = info
-            tbl.count = tbl.count + 1
-        }
-        tbl
-    }
+// StructTable accessors (heap-indirect): table lives behind a `*mut StructTable`
+// in the Checker so by-value Checker copies share ONE table. See the FnSigTable
+// note above; same rationale and the same "never bind (*t) to a value" rule.
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) {
-                return i
+fn struct_table_add(t: *mut StructTable, info: StructInfo) with Mut, Panic, Div {
+    let idx = (*t).count
+    if idx < 128 {
+        (*t).entries[idx as usize] = info
+        (*t).count = idx + 1
+    }
+}
+
+fn struct_table_find(t: *mut StructTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn struct_table_find_by_buf8(t: *mut StructTable, buf: [i8; 128]) -> i64 with Mut, Panic, Div {
+    // Match structs whose name matches the first min(len,8) bytes of buf.
+    // Called from checker_lower_ref_like_type_mut where only name.buf[0..7]
+    // (TypeEntry bytes 8-15, the *mut SRET window) are reliable.
+    var i: i64 = 0
+    while i < (*t).count {
+        let en = (*t).entries[i as usize]
+        if en.name.len > 0 {
+            let cmp_len = if en.name.len < 8 { en.name.len } else { 8 }
+            var ok: bool = true
+            var j: i64 = 0
+            while j < cmp_len {
+                if en.name.buf[j as usize] != buf[j as usize] { ok = false }
+                j = j + 1
             }
-            i = i + 1
+            if ok { return i }
         }
-        -1
+        i = i + 1
     }
+    0 - 1
+}
 
-    fn find_by_buf8(self, buf: [i8; 128]) -> i64 with Mut, Panic, Div {
-        // Match structs whose name matches the first min(len,8) bytes of buf.
-        // Called from checker_lower_ref_like_type_mut where only name.buf[0..7]
-        // (TypeEntry bytes 8-15, the *mut SRET window) are reliable.
-        var i: i64 = 0
-        while i < self.count {
-            let en = self.entries[i as usize]
-            if en.name.len > 0 {
-                let cmp_len = if en.name.len < 8 { en.name.len } else { 8 }
-                var ok: bool = true
-                var j: i64 = 0
-                while j < cmp_len {
-                    if en.name.buf[j as usize] != buf[j as usize] { ok = false }
-                    j = j + 1
-                }
-                if ok { return i }
-            }
-            i = i + 1
-        }
-        -1
+fn struct_table_get(t: *mut StructTable, idx: i64) -> StructInfo with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_struct_info()
+    } else {
+        (*t).entries[idx as usize]
     }
+}
 
-    fn get(self, idx: i64) -> StructInfo with Panic, Div {
-        self.entries[idx]
+fn struct_table_get_visibility(t: *mut StructTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        visibility_private()
+    } else {
+        (*t).entries[idx as usize].visibility
     }
+}
 
-    fn get_visibility(self, idx: i64) -> Visibility with Panic, Div {
-        self.entries[idx].visibility
+fn struct_table_get_defining_module(t: *mut StructTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_path()
+    } else {
+        (*t).entries[idx as usize].defining_module
     }
+}
 
-    fn get_defining_module(self, idx: i64) -> AstPath with Panic, Div {
-        self.entries[idx].defining_module
-    }
+fn struct_table_alloc() -> *mut StructTable with Mut, Panic, Div, Alloc {
+    Box::new(struct_table_new()) as *mut StructTable
 }
 
 // ============================================================
@@ -294,49 +311,65 @@ fn enum_table_new() -> EnumTable {
     }
 }
 
-impl EnumTable {
-    fn add(self, info: EnumInfo) -> EnumTable with Mut, Panic, Div {
-        var tbl = self
-        if tbl.count < 32 {
-            tbl.entries[tbl.count] = info
-            tbl.count = tbl.count + 1
+// EnumTable accessors (heap-indirect): table behind a `*mut EnumTable` in the
+// Checker; by-value Checker copies share ONE table. See FnSigTable note above.
+
+fn enum_table_add(t: *mut EnumTable, info: EnumInfo) with Mut, Panic, Div {
+    let idx = (*t).count
+    if idx < 32 {
+        (*t).entries[idx as usize] = info
+        (*t).count = idx + 1
+    }
+}
+
+fn enum_table_find(t: *mut EnumTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i].name, name) {
+            return i
         }
-        tbl
+        i = i + 1
     }
+    0 - 1
+}
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) {
-                return i
-            }
-            i = i + 1
+fn enum_table_get(t: *mut EnumTable, idx: i64) -> EnumInfo with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_enum_info()
+    } else {
+        (*t).entries[idx as usize]
+    }
+}
+
+fn enum_table_get_visibility(t: *mut EnumTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        visibility_private()
+    } else {
+        (*t).entries[idx as usize].visibility
+    }
+}
+
+fn enum_table_get_defining_module(t: *mut EnumTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_path()
+    } else {
+        (*t).entries[idx as usize].defining_module
+    }
+}
+
+fn enum_table_find_variant_enum(t: *mut EnumTable, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < (*t).count {
+        if variant_info_list_has((*t).entries[i].variants, variant_name) {
+            return i
         }
-        -1
+        i = i + 1
     }
+    0 - 1
+}
 
-    fn get(self, idx: i64) -> EnumInfo with Panic, Div {
-        self.entries[idx]
-    }
-
-    fn get_visibility(self, idx: i64) -> Visibility with Panic, Div {
-        self.entries[idx].visibility
-    }
-
-    fn get_defining_module(self, idx: i64) -> AstPath with Panic, Div {
-        self.entries[idx].defining_module
-    }
-
-    fn find_variant_enum(self, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
-        var i: i64 = 0
-        while i < self.count {
-            if variant_info_list_has(self.entries[i].variants, variant_name) {
-                return i
-            }
-            i = i + 1
-        }
-        -1
-    }
+fn enum_table_alloc() -> *mut EnumTable with Mut, Panic, Div, Alloc {
+    Box::new(enum_table_new()) as *mut EnumTable
 }
 
 // ============================================================
