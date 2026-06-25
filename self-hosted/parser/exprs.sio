@@ -60,7 +60,11 @@ impl Parser {
                 continue
             }
 
+            // A `[` after a newline is NOT an index -- it starts a new expression
+            // statement (array literal), mirroring the LParen guard above. Without
+            // this, `let x = foo\n[a, b]` glues into `foo[a, b]`.
             if op_kind == TokenKind::LBracket || op_code == 178 {
+                if p.had_newline_before() { break }
                 p = p.parse_index_expr_box(lhs)
                 lhs = parser_take_expr_box()
                 continue
@@ -103,6 +107,19 @@ impl Parser {
             // newline sits before the rhs, not before the operator.
             if p.had_newline_before()
                 && (op_kind == TokenKind::Star || op_kind == TokenKind::Amp || op_kind == TokenKind::AmpBang)
+                && p.pos + 1 < p.token_count
+                && PT_END[p.pos as usize] == PT_START[(p.pos + 1) as usize] {
+                break
+            }
+
+            // `!`/`~` carry a postfix precedence (13) but are also prefix operators
+            // (logical-not / bitwise-not). At the start of a line, a *tight* one
+            // (`!b`, `~x`: no space before its operand) begins a NEW statement -- without
+            // this `let b = x\n!b` glues into `x ! b`, which references `b` inside its own
+            // initializer (E137 undeclared). A real postfix `x!` has the newline AFTER the
+            // operand, so `had_newline_before` at the operator is false and is unaffected.
+            if p.had_newline_before()
+                && (op_kind == TokenKind::Bang || op_kind == TokenKind::Tilde)
                 && p.pos + 1 < p.token_count
                 && PT_END[p.pos as usize] == PT_START[(p.pos + 1) as usize] {
                 break
@@ -1118,6 +1135,7 @@ impl Parser {
                     p = p.parse_call_expr_box(lhs)
                     lhs = parser_take_expr_box()
                 } else if parser_peek(p) == TokenKind::LBracket || post_code == 178 {
+                    if p.had_newline_before() { break }
                     p = p.parse_index_expr_box(lhs)
                     lhs = parser_take_expr_box()
                 } else if parser_peek(p) == TokenKind::Dot || post_code == 183 {
@@ -1291,7 +1309,12 @@ impl Parser {
             method_type_args = Some(Box::new(ta_pair.1))
         }
 
-        if parser_peek(p) == TokenKind::LParen {
+        // A `(` after a newline is NOT method-call args -- it starts a new
+        // expression statement (mirrors the infix-loop LParen guard). Without this,
+        // `let after_len = nc.code.len\n(after_len - before_len) > 50` glues into
+        // `nc.code.len(after_len - before_len)`, referencing after_len before it is
+        // bound (E137 undeclared).
+        if parser_peek(p) == TokenKind::LParen && !p.had_newline_before() {
             // Method call: base.method(args) or base.method::<T>(args)
             p = parser_advance(p)  // skip (
             var args_opt: Option<Box<ExprList>> = None
