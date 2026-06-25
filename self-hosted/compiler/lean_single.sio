@@ -918,6 +918,15 @@ var B5_RET_VSHADOW_BSS_OFF: i64 = 0
 // callee prologue reads them into parameter VAR_VSHADOW slots.
 var B5_ARG_VSHADOW_BSS_OFF: i64 = 0
 
+// Box::new bump-arena state (emitted-binary runtime). Replaces the per-Box mmap(4096)
+// allocator (no-free, page-rounded -> 42GB RSS during self-host bodies lowering, job 2478).
+// Three i64 globals: arena chunk base, bump cursor (next free addr), and current chunk limit.
+// emit_arena_alloc_x86 bumps cursor; on overflow it re-reserves a fresh chunk (no free, like
+// Box semantics; RSS == total packed allocations regardless of chunk count).
+var AST_ARENA_BASE_BSS_OFF: i64 = 0
+var AST_ARENA_CURSOR_BSS_OFF: i64 = 0
+var AST_ARENA_LIMIT_BSS_OFF: i64 = 0
+
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
 
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
@@ -3423,8 +3432,12 @@ fn box_alloc_bytes(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     } else if ty == 6 || knowledge_hash_is(ty_hash) {
         bytes = struct_like_nslots(ty_hash) * 8
     }
-    if bytes < box_page_bytes() { bytes = box_page_bytes() }
-    return ((bytes + box_page_bytes() - 1) / box_page_bytes()) * box_page_bytes()
+    // Arena packing: round to 8 bytes (was: page-rounded to 4096). Matched branches above
+    // (array/option/struct) carry their exact size and now pack tightly; an unmatched
+    // fall-through type keeps the conservative box_page_bytes() default set above, so it is
+    // never under-allocated. (Paired with the emit_arena_alloc_x86 redirect in Box::new.)
+    if bytes < 8 { bytes = 8 }
+    return (bytes + 7) / 8 * 8
 }
 
 // Per-function error tracking for import-tolerant compilation.
@@ -8382,6 +8395,109 @@ fn emit_heap_realloc_x86() with Mut {
     em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (return user ptr)
 }
 
+// ============================================================================
+// Box::new bump arena (x86) — replaces the per-Box mmap(4096) no-free allocator.
+// Each Box::new used to mmap a whole 4KB page (min) and never free it; during a
+// self-host build's bodies-lowering phase that accumulated to 42GB RSS -> SIGSEGV
+// (job 2478). The arena packs Box allocations 8-byte-aligned into large mmap'd
+// chunks; on overflow it re-reserves a fresh chunk (still no free — RSS == total
+// packed allocations, independent of chunk count). Chunks are demand-paged, so
+// reserving big costs ~0 RSS until touched. emit_heap_alloc_x86 (heap_vec/map,
+// explicitly freed) is intentionally NOT routed here.
+// ============================================================================
+fn arena_chunk_bytes() -> i64 { return 8589934592 }  // 8 GiB per chunk
+
+// Emit (into the produced binary) the one-time arena reservation. Called at main's
+// entry, before any Box::new. Aborts the process (exit 42) if the initial mmap fails.
+fn emit_ast_arena_init_x86() with Mut, Panic {
+    // mmap(NULL, CHUNK, PROT_RW, MAP_PRIVATE|ANON, -1, 0) -> rax = base or MAP_FAILED
+    em(0x48); em(0x31); em(0xff)                    // xor rdi, rdi
+    em(0x48); em(0xbe); em64(arena_chunk_bytes())   // movabs rsi, CHUNK
+    em(0xba); em32(3)                               // mov edx, 3 (PROT_READ|PROT_WRITE)
+    em(0x41); em(0xba); em32(0x22)                  // mov r10d, 0x22 (MAP_PRIVATE|MAP_ANON)
+    em(0x49); em(0xc7); em(0xc0); em32(0 - 1)       // mov r8, -1 (fd)
+    em(0x4d); em(0x31); em(0xc9)                     // xor r9, r9 (offset)
+    em(0xb8); em32(9)                               // mov eax, 9 (SYS_mmap)
+    em(0x0f); em(0x05)                              // syscall
+    em(0x48); em(0x3d); em32(0 - 4096)              // cmp rax, -4096
+    em(0x0f); em(0x87)                              // ja abort (MAP_FAILED in [-4095,-1])
+    let init_abort = CL
+    em32(0)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax (rax preserved)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = rax
+    em(0x48); em(0xb9); em64(arena_chunk_bytes())   // movabs rcx, CHUNK
+    em(0x48); em(0x01); em(0xc8)                     // add rax, rcx -> rax = base + CHUNK
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
+    em(0xe9)                                        // jmp done
+    let init_done = CL
+    em32(0)
+    patch32(init_abort, CL)
+    em(0xbf); em32(42)                              // mov edi, 42 (distinct exit code)
+    em(0xb8); em32(60)                              // mov eax, 60 (SYS_exit)
+    em(0x0f); em(0x05)                              // syscall
+    patch32(init_done, CL)
+}
+
+// Emit a bump allocation of `alloc_size` bytes (8-aligned). Returns the pointer in rax.
+// Fast path bumps the cursor; slow path re-reserves a fresh chunk (MAP_FAILED -> exit 42).
+fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
+    var sz = alloc_size
+    if sz < 8 { sz = 8 }
+    sz = (sz + 7) / 8 * 8
+    // rax = cursor (candidate alloc base / return value)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+    em(0x48); em(0x89); em(0xc2)                     // mov rdx, rax (rdx = base)
+    em(0x48); em(0x81); em(0xc2); em32(sz)           // add rdx, sz  (rdx = end = new cursor)
+    em(0x50)                                        // push rax (base)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)  // rax = limit
+    em(0x48); em(0x39); em(0xc2)                     // cmp rdx, rax (end - limit)
+    em(0x58)                                        // pop rax (base) — flags preserved
+    em(0x0f); em(0x87)                              // ja slow (end > limit, unsigned)
+    let slow = CL
+    em32(0)
+    // FAST PATH: [cursor] = rdx (new cursor); rax already holds base
+    em(0x50)                                        // push rax (base)
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)   // rax = &cursor
+    em(0x48); em(0x89); em(0x10)                     // mov [rax], rdx
+    em(0x58)                                        // pop rax (base = return)
+    em(0xe9)                                        // jmp done
+    let fast_done = CL
+    em32(0)
+    // SLOW PATH: re-reserve a fresh chunk
+    patch32(slow, CL)
+    em(0x48); em(0x31); em(0xff)                     // xor rdi, rdi
+    em(0x48); em(0xbe); em64(arena_chunk_bytes())    // movabs rsi, CHUNK
+    em(0xba); em32(3)                                // mov edx, 3
+    em(0x41); em(0xba); em32(0x22)                   // mov r10d, 0x22
+    em(0x49); em(0xc7); em(0xc0); em32(0 - 1)        // mov r8, -1
+    em(0x4d); em(0x31); em(0xc9)                      // xor r9, r9
+    em(0xb8); em32(9)                                // mov eax, 9 (SYS_mmap)
+    em(0x0f); em(0x05)                               // syscall -> rax = new base or MAP_FAILED
+    em(0x48); em(0x3d); em32(0 - 4096)               // cmp rax, -4096
+    em(0x0f); em(0x87)                               // ja abort
+    let slow_abort = CL
+    em32(0)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax
+    em(0x50)                                        // push rax (chunk base)
+    em(0x48); em(0xb9); em64(arena_chunk_bytes())    // movabs rcx, CHUNK
+    em(0x48); em(0x01); em(0xc8)                      // add rax, rcx -> rax = base + CHUNK
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
+    em(0x58)                                        // pop rax (chunk base)
+    em(0x50)                                        // push rax (return base)
+    em(0x48); em(0x05); em32(sz)                     // add rax, sz
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = base + sz
+    em(0x58)                                        // pop rax (return base = alloc base)
+    em(0xe9)                                        // jmp done
+    let slow_done = CL
+    em32(0)
+    patch32(slow_abort, CL)
+    em(0xbf); em32(42)                              // mov edi, 42
+    em(0xb8); em32(60)                              // mov eax, 60 (SYS_exit)
+    em(0x0f); em(0x05)                              // syscall
+    patch32(fast_done, CL)
+    patch32(slow_done, CL)
+}
+
 fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut {
     let slot_len_a = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -10745,28 +10861,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             compile_or()  // value in rax
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
             if EXPR_TY == 8 || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
-                em(0x50)                             // push src ptr
-                em(0x48); em(0x31); em(0xff)        // xor rdi, rdi
-                em(0xbe); em32(box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))
-                em(0xba); em32(3)                   // mov edx, 3 (PROT_RW)
-                em(0x41); em(0xba); em32(0x22)      // mov r10d, 0x22
-                em(0x49); em(0xc7); em(0xc0); em32(-1)
-                em(0x4d); em(0x31); em(0xc9)
-                em(0xb8); em32(9)
-                em(0x0f); em(0x05)
+                em(0x50)                             // push src ptr (value from compile_or in rax)
+                emit_arena_alloc_x86(box_alloc_bytes(EXPR_TY, EXPR_TY_HASH))  // rax = arena slot
                 em(0x5a)                             // pop rdx (src ptr)
                 emit_copy_agg_to_ptr_x86(EXPR_TY, EXPR_TY_HASH)
             } else {
                 em(0x50)  // push value
-                // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
-                em(0x48); em(0x31); em(0xff)           // xor rdi, rdi
-                em(0xbe); em32(box_page_bytes())       // mov esi, 4096
-                em(0xba); em32(3)                      // mov edx, 3 (PROT_RW)
-                em(0x41); em(0xba); em32(0x22)         // mov r10d, 0x22
-                em(0x49); em(0xc7); em(0xc0); em32(-1) // mov r8, -1
-                em(0x4d); em(0x31); em(0xc9)           // xor r9, r9
-                em(0xb8); em32(9)                      // mov eax, 9 (SYS_mmap)
-                em(0x0f); em(0x05)                     // syscall
+                emit_arena_alloc_x86(8)   // rax = 8-byte arena slot (scalar)
                 em(0x59)  // pop rcx (value)
                 em(0x48); em(0x89); em(0x08)  // mov [rax], rcx
             }
@@ -25886,6 +25987,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF = bss_alloc_aligned(8)
     B5_RET_VSHADOW_BSS_OFF = bss_alloc_aligned(8)
     B5_ARG_VSHADOW_BSS_OFF = bss_alloc_aligned(128)
+    AST_ARENA_BASE_BSS_OFF = bss_alloc_aligned(8)
+    AST_ARENA_CURSOR_BSS_OFF = bss_alloc_aligned(8)
+    AST_ARENA_LIMIT_BSS_OFF = bss_alloc_aligned(8)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
     // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
@@ -26807,6 +26911,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let save_expr_ty = EXPR_TY
             let save_expr_ty_hash = EXPR_TY_HASH
             let save_expr_is_f64 = EXPR_IS_F64
+            // Reserve the Box::new bump arena before any global init or body runs
+            // (global inits may themselves Box-allocate). Emitted once, at main's entry.
+            emit_ast_arena_init_x86()
             emit_global_inits_x86()
             EP = save_ep
             EXPR_TY = save_expr_ty
