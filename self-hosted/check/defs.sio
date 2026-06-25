@@ -1259,68 +1259,98 @@ fn fn_sig_table_new() -> FnSigTable {
     }
 }
 
-impl FnSigTable {
-    fn add(self, sig: FnSig) -> (FnSigTable, i64) with Mut, Panic, Div {
-        var tbl = self
-        let idx = tbl.count
-        if tbl.count < 4096 {
-            tbl.entries[tbl.count] = sig
-            tbl.count = tbl.count + 1
-        }
-        (tbl, idx)
-    }
+// FnSigTable accessors (heap-indirect): the table lives behind a `*mut FnSigTable`
+// in the Checker so by-value Checker copies share ONE table (both `entries` and
+// `count`). That eliminates the count-desync that arose when `entries` was shared
+// but `count` was copied, and keeps the Checker frame small when the cap grows.
+// All access goes through the pointer. NEVER bind `(*t)` to a value — that copies
+// the whole table back onto the stack, defeating the indirection.
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) && !self.entries[i].is_method {
+fn fn_sig_table_add(t: *mut FnSigTable, sig: FnSig) -> i64 with Mut, Panic, Div {
+    // Overflow safety (Bug A): on a full table return a -1 sentinel instead of
+    // `count` (== cap). Returning the cap let callers index entries[cap] / get(cap)
+    // one past the end of [FnSig; 4096] -> OOB. Below the cap this is unchanged.
+    let idx = (*t).count
+    if idx < 4096 {
+        (*t).entries[idx as usize] = sig
+        (*t).count = idx + 1
+        idx
+    } else {
+        0 - 1
+    }
+}
+
+fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i].name, name) && !(*t).entries[i].is_method {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if (*t).entries[i].is_method && name_eq((*t).entries[i].self_type_name, type_name) && name_eq((*t).entries[i].name, method_name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Semantic method lookup: matches by TypeEntry kind+name instead of Name alone.
+// Resolves ambiguity when two types in different modules share a name.
+fn fn_sig_table_find_method_semantic(t: *mut FnSigTable, receiver_ty: TypeEntry, method_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if (*t).entries[i].is_method && name_eq((*t).entries[i].name, method_name) {
+            // Semantic match: compare type kind and name
+            let sig_ty = (*t).entries[i].self_type_entry
+            if sig_ty.kind == receiver_ty.kind && name_eq(sig_ty.name, receiver_ty.name) {
                 return i
             }
-            i = i + 1
         }
-        -1
+        i = i + 1
     }
+    // Fallback to string-based lookup for backward compatibility
+    fn_sig_table_find_method(t, receiver_ty.name, method_name)
+}
 
-    fn find_method(self, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if self.entries[i].is_method && name_eq(self.entries[i].self_type_name, type_name) && name_eq(self.entries[i].name, method_name) {
-                return i
-            }
-            i = i + 1
-        }
-        -1
+fn fn_sig_table_get(t: *mut FnSigTable, idx: i64) -> FnSig with Mut, Panic, Div {
+    // Overflow safety (Bug A): never read outside [0, count). A -1 sentinel from a
+    // full-table add(), or any stale/OOB sig-id, returns an empty signature instead
+    // of corrupting memory one past the array end.
+    if idx < 0 || idx >= (*t).count {
+        empty_fn_sig()
+    } else {
+        (*t).entries[idx as usize]
     }
+}
 
-    // Semantic method lookup: matches by TypeEntry kind+name instead of Name alone.
-    // Resolves ambiguity when two types in different modules share a name.
-    fn find_method_semantic(self, receiver_ty: TypeEntry, method_name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if self.entries[i].is_method && name_eq(self.entries[i].name, method_name) {
-                // Semantic match: compare type kind and name
-                let sig_ty = self.entries[i].self_type_entry
-                if sig_ty.kind == receiver_ty.kind && name_eq(sig_ty.name, receiver_ty.name) {
-                    return i
-                }
-            }
-            i = i + 1
-        }
-        // Fallback to string-based lookup for backward compatibility
-        self.find_method(receiver_ty.name, method_name)
+fn fn_sig_table_get_visibility(t: *mut FnSigTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        visibility_private()
+    } else {
+        (*t).entries[idx as usize].visibility
     }
+}
 
-    fn get(self, idx: i64) -> FnSig with Panic, Div {
-        self.entries[idx]
+fn fn_sig_table_get_defining_module(t: *mut FnSigTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_path()
+    } else {
+        (*t).entries[idx as usize].defining_module
     }
+}
 
-    fn get_visibility(self, idx: i64) -> Visibility with Panic, Div {
-        self.entries[idx].visibility
-    }
-
-    fn get_defining_module(self, idx: i64) -> AstPath with Panic, Div {
-        self.entries[idx].defining_module
-    }
+// Heap allocation for the indirect FnSigTable. Box memory is never freed (no-free
+// arena), so the raw pointer stays valid for the Checker's lifetime.
+fn fn_sig_table_alloc() -> *mut FnSigTable with Mut, Panic, Div, Alloc {
+    Box::new(fn_sig_table_new()) as *mut FnSigTable
 }
 
 // ============================================================

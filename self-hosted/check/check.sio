@@ -177,7 +177,7 @@ pub struct Checker {
     refinements: RefinementTable,
     structs: StructTable,
     enums: EnumTable,
-    fn_sigs: FnSigTable,
+    fn_sigs: *mut FnSigTable,
     algebras: AlgebraTable,
     studies: StudyTable,
     ontologies: OntologyTable,
@@ -667,7 +667,7 @@ fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic
     }
 }
 
-fn checker_new() -> Checker with Mut, Panic, Div {
+fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
@@ -675,7 +675,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         refinements: refinement_table_new(),
         structs: struct_table_new(),
         enums: enum_table_new(),
-        fn_sigs: fn_sig_table_new(),
+        fn_sigs: fn_sig_table_alloc(),
         algebras: empty_algebra_table(),
         studies: empty_study_table(),
         ontologies: empty_ontology_table(),
@@ -771,7 +771,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).refinements = refinement_table_new()
     (*raw).structs = struct_table_new()
     (*raw).enums = enum_table_new()
-    (*raw).fn_sigs = fn_sig_table_new()
+    (*raw).fn_sigs = fn_sig_table_alloc()
     (*raw).algebras = empty_algebra_table()
     (*raw).studies = empty_study_table()
     (*raw).ontologies = empty_ontology_table()
@@ -1428,13 +1428,13 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         visibility: visibility_pub(),
         defining_module: empty_path(),
     }
-    let sig_id = (*c).fn_sigs.count
+    let sig_id = (*(*c).fn_sigs).count
     if sig_id >= 4096 {
         checker_note_type_error_mut(c)
         return ty_error()
     }
-    (*c).fn_sigs.entries[sig_id as usize] = sig
-    (*c).fn_sigs.count = sig_id + 1
+    (*(*c).fn_sigs).entries[sig_id as usize] = sig
+    (*(*c).fn_sigs).count = sig_id + 1
     ty_fn(sig_id)
 }
 
@@ -2662,10 +2662,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
-            let sig_id = (*c).fn_sigs.count
+            let sig_id = (*(*c).fn_sigs).count
             if sig_id < 4096 {
-                (*c).fn_sigs.entries[sig_id as usize] = sig
-                (*c).fn_sigs.count = sig_id + 1
+                (*(*c).fn_sigs).entries[sig_id as usize] = sig
+                (*(*c).fn_sigs).count = sig_id + 1
             }
             // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
             let benv_idx = (*c).env.count
@@ -3369,14 +3369,14 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let saved_multitest_corrected = (*c).multitest_corrected
             // Proven by-value reads: .find/.get copy only the ~38KB FnSigTable,
             // never the 8MB Checker, so they're harmless against the 8MB budget.
-            // Direct (*c).fn_sigs.entries[idx].field reads were tried but CANNOT
+            // Direct (*(*c).fn_sigs).entries[idx].field reads were tried but CANNOT
             // be validated this session — no checkable program reaches the
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
-            let sig_id = (*c).fn_sigs.find((*fd).name)
+            let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
             if sig_id >= 0 {
-                let sig = (*c).fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
@@ -3399,7 +3399,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).escape_provenance = 0
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
-                let sig2 = (*c).fn_sigs.get(sig_id)
+                let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
@@ -5058,9 +5058,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         visibility: visibility_private(),
         defining_module: (*c).current_module,
     }
-    let add_result = (*c).fn_sigs.add(closure_sig)
-    (*c).fn_sigs = add_result.0
-    let sig_id = add_result.1
+    let sig_id = fn_sig_table_add((*c).fn_sigs, closure_sig)
     ty_fn(sig_id)
 }
 
@@ -5138,9 +5136,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
-        let sig_id = (*c).fn_sigs.find_method_semantic(base_ty, e.name)
+        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
-            let sig = (*c).fn_sigs.get(sig_id)
+            let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
             checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
@@ -5475,9 +5473,9 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
 
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
     var i: i64 = 0
-    while i < (*c).fn_sigs.count {
-        let sig_name = (*c).fn_sigs.entries[i].name
-        let sig_is_method = (*c).fn_sigs.entries[i].is_method
+    while i < (*(*c).fn_sigs).count {
+        let sig_name = (*(*c).fn_sigs).entries[i].name
+        let sig_is_method = (*(*c).fn_sigs).entries[i].is_method
         if name_eq(sig_name, name) && !sig_is_method {
             return i
         }
@@ -5487,7 +5485,7 @@ fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Pa
 }
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let sig = (*c).fn_sigs.get(sig_id)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
     let vis_kind = sig.visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
@@ -5625,13 +5623,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
-            fn_param_list_handle((*c).fn_sigs.entries[direct_sig_id].params),
-            (*c).fn_sigs.entries[direct_sig_id].param_count,
+            fn_param_list_handle((*(*c).fn_sigs).entries[direct_sig_id].params),
+            (*(*c).fn_sigs).entries[direct_sig_id].param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, (*c).fn_sigs.entries[direct_sig_id].effects, (*c).fn_sigs.entries[direct_sig_id].effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, (*c).fn_sigs.entries[direct_sig_id].params, call_start_borrows)
-        return (*c).fn_sigs.entries[direct_sig_id].return_type
+        checker_check_callee_effects_inplace(c, e.span, (*(*c).fn_sigs).entries[direct_sig_id].effects, (*(*c).fn_sigs).entries[direct_sig_id].effect_count)
+        checker_release_call_arg_borrows_inplace(c, e.args, (*(*c).fn_sigs).entries[direct_sig_id].params, call_start_borrows)
+        return (*(*c).fn_sigs).entries[direct_sig_id].return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -5678,7 +5676,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-        let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
@@ -6815,7 +6813,7 @@ fn checker_warning_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Al
 }
 
 fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
-    (*c).fn_sigs.count
+    (*(*c).fn_sigs).count
 }
 
 fn checker_refine_static_proved_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -11978,7 +11976,7 @@ fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic,
     true
 }
 
-fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_fn_types_structurally_compatible_table(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
         return false
     }
@@ -11988,11 +11986,11 @@ fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry,
     if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
         return false
     }
-    if a.fn_sig_id >= tbl.count || b.fn_sig_id >= tbl.count {
+    if a.fn_sig_id >= (*tbl).count || b.fn_sig_id >= (*tbl).count {
         return false
     }
-    let asig = tbl.get(a.fn_sig_id)
-    let bsig = tbl.get(b.fn_sig_id)
+    let asig = fn_sig_table_get(tbl, a.fn_sig_id)
+    let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
     if !types_compatible(asig.return_type, bsig.return_type) {
         return false
     }
@@ -12002,14 +12000,14 @@ fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry,
     checker_fn_sig_effects_compatible(asig, bsig)
 }
 
-fn checker_types_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_types_compatible_table(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(a, b) {
         return true
     }
     checker_fn_types_structurally_compatible_table(tbl, a, b)
 }
 
-fn checker_call_arg_types_compatible_table(tbl: FnSigTable, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_call_arg_types_compatible_table(tbl: *mut FnSigTable, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if checker_types_compatible_table(tbl, arg_ty, param_ty) {
         return true
     }
@@ -12042,13 +12040,13 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
         return false
     }
-    if a.fn_sig_id >= (*c).fn_sigs.count || b.fn_sig_id >= (*c).fn_sigs.count {
+    if a.fn_sig_id >= (*(*c).fn_sigs).count || b.fn_sig_id >= (*(*c).fn_sigs).count {
         return false
     }
     let ai = a.fn_sig_id
     let bi = b.fn_sig_id
-    let asig = (*c).fn_sigs.get(ai)
-    let bsig = (*c).fn_sigs.get(bi)
+    let asig = fn_sig_table_get((*c).fn_sigs, ai)
+    let bsig = fn_sig_table_get((*c).fn_sigs, bi)
     if !types_compatible(asig.return_type, bsig.return_type) {
         return false
     }
@@ -13419,9 +13417,7 @@ impl Checker {
             visibility: visibility_pub(),
             defining_module: empty_path(),
         }
-        let add_result = c.fn_sigs.add(sig)
-        c.fn_sigs = add_result.0
-        let sig_id = add_result.1
+        let sig_id = fn_sig_table_add(c.fn_sigs, sig)
         (c, ty_fn(sig_id))
     }
 
@@ -15508,9 +15504,7 @@ impl Checker {
                     visibility: visibility,
                     defining_module: defining_module,
                 }
-                let add_result = c.fn_sigs.add(sig)
-                c.fn_sigs = add_result.0
-                let sig_id = add_result.1
+                let sig_id = fn_sig_table_add(c.fn_sigs, sig)
                 c.env = c.env.bind(name, ty_fn(sig_id), false)
                 c = c.const_int_bind_unknown(name)
                 c
@@ -16503,8 +16497,7 @@ impl Checker {
                     visibility: item.visibility,
                     defining_module: c.current_module,
                 }
-                let add_result = c.fn_sigs.add(sig)
-                c.fn_sigs = add_result.0
+                let _added = fn_sig_table_add(c.fn_sigs, sig)
                 c
             }
             None => self
@@ -16592,9 +16585,9 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = c.fn_sigs.find((*fd).name)
+                let sig_id = fn_sig_table_find(c.fn_sigs, (*fd).name)
                 if sig_id >= 0 {
-                    let sig = c.fn_sigs.get(sig_id)
+                    let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
@@ -16611,7 +16604,7 @@ impl Checker {
                 // Check return type compatibility (allow integer-literal narrowing and
                 // fieldless-enum↔int coercion, matching let/var assignment).
                 if sig_id >= 0 {
-                    let sig2 = c.fn_sigs.get(sig_id)
+                    let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
                     let int_lit_narrow = c.last_literal_kind == 1
                         && body_ty.kind == TypeKind::TyI64
                         && is_integer_type(sig2.return_type)
@@ -16712,9 +16705,9 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = c.fn_sigs.find_method(c.current_impl_type.name, (*fd).name)
+                let sig_id = fn_sig_table_find_method(c.fn_sigs, c.current_impl_type.name, (*fd).name)
                 if sig_id >= 0 {
-                    let sig = c.fn_sigs.get(sig_id)
+                    let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
@@ -16729,7 +16722,7 @@ impl Checker {
                 c = pair.0
                 let body_ty = pair.1
                 if sig_id >= 0 {
-                    let sig2 = c.fn_sigs.get(sig_id)
+                    let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
                     if !c.types_compatible_structural(body_ty, sig2.return_type) {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
@@ -17862,9 +17855,9 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = c.fn_sigs.find_method_semantic(base_ty, e.name)
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
-                let sig = c.fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
@@ -17977,9 +17970,9 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = c.fn_sigs.find_method_semantic(base_ty, e.name)
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
-                let sig = c.fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
@@ -18214,7 +18207,7 @@ impl Checker {
             }
         }
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-            let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
+            let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
@@ -21369,9 +21362,7 @@ impl Checker {
         }
 
         // Add to fn_sigs table
-        let add_result = c.fn_sigs.add(closure_sig)
-        c.fn_sigs = add_result.0
-        let sig_id = add_result.1
+        let sig_id = fn_sig_table_add(c.fn_sigs, closure_sig)
 
         (c, ty_fn(sig_id))
     }
