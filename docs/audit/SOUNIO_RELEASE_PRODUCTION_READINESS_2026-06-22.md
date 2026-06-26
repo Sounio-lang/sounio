@@ -73,7 +73,7 @@ These claim IDs currently block broad release-production-ready status:
 |---|---|---|
 | `binary.source` | `prototype` / `downgraded` | The checked binary still depends on `lean_single` as the source path; modular source-swap parity is not closed. |
 | `direct_driver` | `prototype` / `downgraded` | Large-surface direct-driver execution remains a maturity frontier. |
-| `stdlib.surface` | `prototype` / `downgraded` | Broad stdlib callability is explicitly not claimed. |
+| `stdlib.surface` | `validated_research` / `closed` | Bounded stdlib support contract is checked; broad all-file stdlib callability remains explicitly not claimed. |
 | `tooling.package` | `prototype` / `downgraded` | There is no public package registry/support contract. |
 | `tooling.editor` | `prototype` / `downgraded` | Formatter, REPL, and editor tooling are prototype surfaces. |
 | `install` | `prototype` / `downgraded` | Installation is repo-artifact based, not a broad supported distribution path. |
