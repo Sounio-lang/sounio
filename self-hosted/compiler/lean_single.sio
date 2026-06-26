@@ -4572,6 +4572,36 @@ fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// (*<complex-expr>).field[idx] = expr — indexed field store through a deref whose base is an
+// arbitrary parenthesized expression (e.g. (*(*c).w).data[i]). Discriminated from the
+// simple-name form by TK[p0+2]==6 (the inner is itself parenthesized). Paren-matches the
+// outer ( to locate .field[ ... ] = . Handled by compile_deref_complex_field_array_store_x86,
+// which evaluates the base with compile_or (so any nesting works).
+fn stmt_is_deref_complex_field_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }        // (
+    if TK[(p0 + 1) as usize] != 19 { return false } // *
+    if TK[(p0 + 2) as usize] != 6 { return false }  // ( — parenthesized (complex) inner base
+    var p = p0 + 1
+    var pdepth: i64 = 1
+    while p < TC && pdepth > 0 {
+        if TK[p as usize] == 6 { pdepth = pdepth + 1 }
+        if TK[p as usize] == 7 { pdepth = pdepth - 1 }
+        p = p + 1
+    }
+    if p + 2 >= TC { return false }
+    if TK[p as usize] != 50 { return false }         // .
+    if TK[(p + 1) as usize] != 3 { return false }    // field name
+    if TK[(p + 2) as usize] != 41 { return false }   // [
+    var q = p + 3
+    var bdepth: i64 = 1
+    while q < TC && bdepth > 0 {
+        if TK[q as usize] == 41 { bdepth = bdepth + 1 }
+        if TK[q as usize] == 42 { bdepth = bdepth - 1 }
+        q = q + 1
+    }
+    return q < TC && TK[q as usize] == 16            // =
+}
+
 // (*name).f1.f2 = expr  — TWO-level nested store through an explicit deref.
 // Tokens: ( * name ) . f1 . f2 =  →  6 19 3 7 50 3 50 3 16
 // lean_single had detectors for (*p).f= and (*p).f[i]= but NOT the two-hop forms,
@@ -18862,6 +18892,80 @@ fn compile_deref_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// (*<expr>).field[idx] = expr — indexed field store through a deref of an ARBITRARY
+// pointer expression (not just a simple var). The base pointer is produced by evaluating
+// the inner expression with compile_or, so any nesting works — e.g. (*(*c).w).data[i] or
+// (*(*c).fn_sigs.entries).data[i]. lean_single previously had no general lvalue-address
+// path: every deref store hardcoded a simple-name root via var_find, so a complex base
+// fell through and the store was silently dropped. This closes the whole complex-base
+// indexed-store class.
+fn compile_deref_complex_field_array_store_x86() with IO, Mut, Panic, Div {
+    EP = EP + 2  // skip outer ( *
+    compile_or()  // inner expr -> base pointer in rax
+    let base_ty = EXPR_TY
+    let base_hash = EXPR_TY_HASH
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip outer )
+    if type_is_pointer_like(base_ty, base_hash) == false {
+        tc_error(EP, "indexed field store through deref requires pointer base")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(base_hash)
+    let inner_hash = ptr_hash_inner_hash(base_hash)
+    if inner_ty != 6 {
+        tc_error(EP, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si = st_find(inner_hash)
+    if si < 0 {
+        tc_error(EP, "unknown field access")
+        return
+    }
+    em(0x50)  // push base pointer
+    if TK[EP as usize] == 50 { EP = EP + 1 }  // skip .
+    let field_tok = EP
+    let fns = TS[EP as usize]
+    let fne = TE[EP as usize]
+    let fh = gl_name_hash(fns, fne)
+    EP = EP + 1  // skip field name
+    if TK[EP as usize] == 41 { EP = EP + 1 }  // skip [
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    compile_or()  // index in rax
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // as usize
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+    em(0x50)  // push index
+    compile_or()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        em(0x59); em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (rhs)
+    em(0x59)  // pop rcx (index)
+    em(0x58)  // pop rax (base pointer)
+    if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }  // lea rax, [rax + foff]
+    if arr_hash_esiz(fhash) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
 // (*name).f1.f2 = expr — two-level nested scalar/aggregate store through a deref.
 // Mirrors the single-field stmt_is_deref_field_store path, but resolves a second
 // inline struct hop and sums both field offsets. f1 must be an inline struct field.
@@ -19056,6 +19160,74 @@ fn compile_autoderef_field_field_store_x86() with IO, Mut, Panic, Div {
         return
     }
     let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_x86(lslot, foff1 + foff2, fty2, fhash2)
+}
+
+// name.f1.f2 = expr — VALUE two-level scalar store (value-struct root). Mirrors
+// compile_autoderef_field_field_store_x86 but resolves the root struct from the var's own
+// (value) struct type instead of a pointer pointee — a value-struct local's slot holds a
+// pointer to the struct, so emit_store_to_pointer_offset_x86 stores correctly. Without this
+// handler `o.inner.b = v` on a value struct fell through, the `=` was skipped, and the store
+// was silently dropped.
+fn compile_value_field_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    EP = EP + 6  // skip name . f1 . f2 =
+    compile_or()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let si1 = resolve_field_struct_index(ns, ne, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
     if si1 < 0 {
         tc_error(f1_tok, "unknown field access")
         return
@@ -20873,10 +21045,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         return
     }
-    // name.f1.f2 = expr through a pointer var (auto-deref). Value-struct roots fall
-    // through to the generic path unchanged.
-    if stmt_is_field_field_store_shape(EP) && token_chain_root_is_pointer(EP) {
-        compile_autoderef_field_field_store_x86()
+    // name.f1.f2 = expr through a pointer var (auto-deref) OR an inline value struct.
+    if stmt_is_field_field_store_shape(EP) {
+        if token_chain_root_is_pointer(EP) {
+            compile_autoderef_field_field_store_x86()
+        } else {
+            compile_value_field_field_store_x86()
+        }
         return
     }
     // x.field[idx] = expr
@@ -21176,6 +21351,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
     if stmt_is_deref_field_array_store(EP) {
         compile_deref_field_array_store_x86()
+        return
+    }
+    // (*<complex-expr>).field[idx] = expr  (e.g. (*(*c).w).data[i]) — general deref base
+    if stmt_is_deref_complex_field_array_store(EP) {
+        compile_deref_complex_field_array_store_x86()
         return
     }
     // (*ARRAY_PTR)[idx] = expr
