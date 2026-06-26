@@ -243,20 +243,28 @@ fn enqueue(lit: i64, rs: i32) with Mut, Panic {
     lrb_part[v] = 0
 }
 
+// S3: inlined propagate — litval/litidx/pick_blocker expanded to direct assign[] access.
+// Eliminates 1.2B function calls + prof_litval global writes on G529.
 fn propagate() -> i32 with Mut, Panic {
     while qhead < trail_len {
         let p = trail_lit[qhead]
         qhead = qhead + 1
         prof_props = prof_props + 1
+        // inline litidx(0 - p): falsified literal's watch index
         let f = 0 - p
-        let fi = litidx(f)
+        var fi: i32 = 0
+        if f < 0 { fi = (0 - f) * 2 + 1 } else { fi = f * 2 }
         var prev: i32 = 0 - 1
         var node = whead[fi]
         while node != (0 - 1) {
-            prof_watch_nodes = prof_watch_nodes + 1
             let nextnode = wnext[node]
             let blk = wblk[node]
-            if litval(blk) == 1 {
+            // inline litval(blk): is blocker satisfied?
+            var bv = blk
+            var bva = if bv < 0 { 0 - bv } else { bv }
+            var ba = assign[bva]
+            if bv < 0 { ba = 0 - ba }
+            if ba == 1 {
                 prof_block_skips = prof_block_skips + 1
                 prev = node
                 node = nextnode
@@ -264,10 +272,14 @@ fn propagate() -> i32 with Mut, Panic {
             let c = node / 2
             let s = node - 2 * c
             let st = cstart[c]
-            prof_clause_refs = prof_clause_refs + 1
             let other = clits[st + (1 - s)]
+            // inline litval(other): is the other watched literal true?
+            var ov = other
+            var ova = if ov < 0 { 0 - ov } else { ov }
+            var oa = assign[ova]
+            if ov < 0 { oa = 0 - oa }
             var handled: i32 = 0
-            if litval(other) == 1 {
+            if oa == 1 {
                 wblk[node] = other
                 prev = node
                 handled = 1
@@ -277,8 +289,12 @@ fn propagate() -> i32 with Mut, Panic {
                 var found: i32 = 0 - 1
                 var k: i32 = 2
                 while k < ln {
-                    prof_clause_refs = prof_clause_refs + 1
-                    if litval(clits[st + k]) != (0 - 1) { found = k  k = ln }
+                    // inline litval(clits[st + k]): find non-false literal
+                    let kl = clits[st + k]
+                    var klv = if kl < 0 { 0 - kl } else { kl }
+                    var kla = assign[klv]
+                    if kl < 0 { kla = 0 - kla }
+                    if kla != (0 - 1) { found = k  k = ln }
                     else { k = k + 1 }
                 }
                 if found != (0 - 1) {
@@ -287,17 +303,22 @@ fn propagate() -> i32 with Mut, Panic {
                     clits[st + s] = clits[st + found]
                     clits[st + found] = tmp
                     let newlit = clits[st + s]
-                    wblk[node] = pick_blocker(c, s)
-                    wblk[2 * c + (1 - s)] = pick_blocker(c, 1 - s)
+                    // inline pick_blocker(c, s) = clits[st + (1-s)]
+                    wblk[node] = clits[st + (1 - s)]
+                    wblk[2 * c + (1 - s)] = clits[st + s]
                     if prev == (0 - 1) { whead[fi] = nextnode } else { wnext[prev] = nextnode }
-                    let ni = litidx(newlit)
+                    // inline litidx(newlit)
+                    var niv = newlit
+                    var ni: i32 = 0
+                    if niv < 0 { ni = (0 - niv) * 2 + 1 } else { ni = niv * 2 }
                     wnext[node] = whead[ni]
                     whead[ni] = node
                     handled = 1
                 }
             }
             if handled == 0 {
-                if litval(other) == (0 - 1) { return c }
+                // inline litval(other) again for conflict check
+                if oa == (0 - 1) { return c }
                 enqueue(other, c)
                 prev = node
             }
