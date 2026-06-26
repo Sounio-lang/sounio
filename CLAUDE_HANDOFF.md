@@ -39,6 +39,50 @@ If the host-level control docs are also visible in the environment, consult thes
 - `/home/devsounio/projects/sounio/DEV_WORKFLOW.md`
 - `/home/devsounio/projects/sounio/WORKSPACE_K8S.md`
 
+## Active Lane Status
+
+### Solver lane (SAT/SMT/PB/UNSAT) — updated 2026-06-26
+
+Branch: `fix/madaros-tuple-let-desugar` (operational branch; tip `6b7ddf406`).
+Claim boundary doc: `docs/research/solver-novelty-readiness-2026-06-25.md`.
+
+**Status: Level 2 (private novelty candidate).** Feature surfaces exist
+(`stdlib/theorem/smt.sio`: GUM activity, Wilson/LRB, Thompson scoring,
+Beta-Bernoulli polarity, regime-gated restarts; `solver_proof_profile.sio` gates).
+Imported `theorem::smt` runtime is unblocked and green on the canonical `bin/souc`
+(madaros) path. **Not** Level 3 — no external benchmarks, no full
+LRAT/FRAT/Alethe/VeriPB checker (only tiny local replay scaffolds), lit review
+incomplete. Safe wording: "candidate epistemic variable-score/polarity-sampling
+DPLL(T) experiment with proof-profile instrumentation." Unsafe: any "first Thompson
+Sampling DPLL/CDCL", "SOTA", or `χ(R^2) >= 6`.
+
+**Landed (merged into the operational branch):**
+- PR #436 (merge `401837e79`) — imported-SMT lowering/native substrate (native-v2
+  f64 call metadata, IR cap 512→1024, native `.text` mirror, `SOUNIO_STDLIB_PATH`
+  resolver, borrow cleanups, env-gated `SOUNIO_LOWER_*_TRACE`), the SMT lane
+  (`stdlib/theorem/smt.sio` + `test_smt_*`), the multimodule witness, the Level-2
+  research scaffolding/docs, the seed resync, and two ultrareview fixes
+  (`ir_opt_append` 128→1024 bound; mirror-aware legacy ELF/`.so` finalizers).
+- PR #446 (merge `6b7ddf406`) — deflake `door1_too_many_globals` (`//@ timeout: 90`)
+  + refresh its LoRA `train.jsonl` completion.
+
+**Verified green** on madaros `e54b4e01`: `test_smt` 6/6, `solver_novelty_readiness`
+1/1, multimodule witness 5/5, canonical fixed-point gate PASS. Rebuild madaros via
+`scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros` (self-locks; ~3 min).
+
+**Load-bearing caveat — do not "fix" without reading the dispatch:** the imported-body
+`ir_patch_validated_calls` skip in `self-hosted/ir/lower.sio` is intentional. Removing
+it (sibling-mirror) regresses the whole imported-SMT path to SIGSEGV. Evidence + the
+proper fix are in `docs/audit/MADAROS_VALIDATED_CALL_IMPORTED_BYPASS_2026-06-26.md`.
+
+**Open follow-ups:**
+- Issue #444 — `door1_too_many_globals` is deflaked but madaros still SIGSEGVs on the
+  globals cap instead of emitting `too many globals`; the compile-fail harness counts
+  the segfault as a pass. Proper fix pending (assert `error-pattern`; clean diagnostic;
+  reconcile `BSS_MAX_GLOBALS=128` vs `global_cap()=2048`).
+- Level 3 frontier: external benchmark slices, independent proof/certificate checker
+  path, paper-grade literature review.
+
 ## What Happened
 
 ### 1. The old VM was abandoned
