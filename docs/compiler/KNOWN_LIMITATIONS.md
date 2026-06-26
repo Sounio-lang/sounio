@@ -69,11 +69,11 @@ Editor-tooling details:
   diagnostics. No pure-Sounio LSP rebuild under current Madaros is claimed or
   demonstrated; that server source remains a separate rebuild blocker.
 
-### Prototype (registry: prototype / downgraded)
+### Bounded validated research surfaces and prototypes
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
-| **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
+| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1252 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 155 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
 | **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
