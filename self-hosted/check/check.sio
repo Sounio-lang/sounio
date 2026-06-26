@@ -175,9 +175,9 @@ pub struct Checker {
     borrows: BorrowEnv,
     units: UnitRegistry,
     refinements: RefinementTable,
-    structs: StructTable,
-    enums: EnumTable,
-    fn_sigs: FnSigTable,
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    fn_sigs: *mut FnSigTable,
     algebras: AlgebraTable,
     studies: StudyTable,
     ontologies: OntologyTable,
@@ -667,15 +667,15 @@ fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic
     }
 }
 
-fn checker_new() -> Checker with Mut, Panic, Div {
+fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
         units: register_builtin_units(unit_registry_new()),
         refinements: refinement_table_new(),
-        structs: struct_table_new(),
-        enums: enum_table_new(),
-        fn_sigs: fn_sig_table_new(),
+        structs: struct_table_alloc(),
+        enums: enum_table_alloc(),
+        fn_sigs: fn_sig_table_alloc(),
         algebras: empty_algebra_table(),
         studies: empty_study_table(),
         ontologies: empty_ontology_table(),
@@ -769,9 +769,9 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
     (*raw).refinements = refinement_table_new()
-    (*raw).structs = struct_table_new()
-    (*raw).enums = enum_table_new()
-    (*raw).fn_sigs = fn_sig_table_new()
+    (*raw).structs = struct_table_alloc()
+    (*raw).enums = enum_table_alloc()
+    (*raw).fn_sigs = fn_sig_table_alloc()
     (*raw).algebras = empty_algebra_table()
     (*raw).studies = empty_study_table()
     (*raw).ontologies = empty_ontology_table()
@@ -1343,7 +1343,7 @@ fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_te: TypeExpr, is_mut_r
     // inner_ty.name.buf[0..7] = first 8 chars of struct name (TypeEntry bytes 8-15 — SRET window).
     // Look up the struct table now (while the full Checker is accessible) and encode the index
     // in name.buf[0] so the field-access handler can find the struct without relying on name.len.
-    let struct_idx = (*c).structs.find_by_buf8(inner_ty.name.buf)
+    let struct_idx = struct_table_find_by_buf8((*c).structs, inner_ty.name.buf)
     if is_mut_ref {
         ty_ref_mut_with_idx(inner_ty, struct_idx)
     } else {
@@ -1428,13 +1428,11 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         visibility: visibility_pub(),
         defining_module: empty_path(),
     }
-    let sig_id = (*c).fn_sigs.count
-    if sig_id >= 4096 {
+    let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+    if sig_id < 0 {
         checker_note_type_error_mut(c)
         return ty_error()
     }
-    (*c).fn_sigs.entries[sig_id as usize] = sig
-    (*c).fn_sigs.count = sig_id + 1
     ty_fn(sig_id)
 }
 
@@ -2481,9 +2479,9 @@ fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut,
 
 fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
     if ty.kind == TypeKind::TyNamed {
-        let idx = (*c).structs.find(ty.name)
+        let idx = struct_table_find((*c).structs, ty.name)
         if idx >= 0 {
-            return (*c).structs.entries[idx].is_linear
+            return (*(*c).structs).entries[idx].is_linear
         }
     }
     false
@@ -2662,22 +2660,11 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
-            let sig_id = (*c).fn_sigs.count
-            if sig_id < 4096 {
-                (*c).fn_sigs.entries[sig_id as usize] = sig
-                (*c).fn_sigs.count = sig_id + 1
-            }
-            // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
-            let benv_idx = (*c).env.count
-            if benv_idx < 4096 {
-                (*c).env.bindings[benv_idx as usize] = TypeBinding {
-                    name: name,
-                    ty: ty_fn(sig_id),
-                    is_mutable: false,
-                    scope_depth: (*c).env.scope_depth,
-                }
-                (*c).env.count = benv_idx + 1
-            }
+            let _sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+            // Functions are NOT bound in env — they live in the chunked fn_sigs and resolve via
+            // the fn_sigs fallback in checker_check_ident_expr_inplace. Binding ~15K module-level
+            // fns into the ONE shared env (check_modules_verdict_boot4) overflowed bindings[4096],
+            // so function-body LOCALS could not bind -> E137. Keeping env for locals only avoids it.
             checker_const_int_bind_unknown_inplace(c, name)
         }
         None => {}
@@ -2840,6 +2827,16 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
+    // Runtime memory / float / string intrinsics emitted directly by codegen (no .sio
+    // definition), referenced across the self-hosted compiler. The per-module frontend
+    // resolves these; the imported all-modules typecheck must register them too or they
+    // surface as E137 undeclared (heap_free, f64_to_bits, ...).
+    checker_bind_import_unknown_inplace(c, make_name("heap_alloc"))
+    checker_bind_import_unknown_inplace(c, make_name("heap_free"))
+    checker_bind_import_unknown_inplace(c, make_name("f64_to_bits"))
+    checker_bind_import_unknown_inplace(c, make_name("bits_to_f64"))
+    checker_bind_import_unknown_inplace(c, make_name("starts_with"))
+    checker_bind_import_unknown_inplace(c, make_name("read_byte"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -2892,7 +2889,7 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
                 visibility: visibility,
                 defining_module: defining_module,
             }
-            (*c).structs = (*c).structs.add(info)
+            struct_table_add((*c).structs, info)
         }
         None => {}
     }
@@ -2953,7 +2950,7 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
                 visibility: visibility,
                 defining_module: defining_module,
             }
-            (*c).enums = (*c).enums.add(info)
+            enum_table_add((*c).enums, info)
             checker_bind_enum_variant_constructors_inplace(c, vr.variants)
         }
         None => {}
@@ -3218,14 +3215,167 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 // Dedicated leaf for the by-value check_impl_item bridge. Isolating it here
 // keeps its 8MB SRET frame OUT of checker_check_item_inplace (which else would
 // carry the frame at compile time even for impl-free programs like `fn main(){}`).
+// *mut in-place impl-method BODY check. Eliminates the ~8MB by-value Checker SRET of the
+// old check_impl_def chain (the analogous module-76 crash in the CHECK pass). Mirrors
+// checker_check_fn_item_inplace but resolves the sig via find_method + current_impl_type.
+fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let saved_multitest_count = (*c).multitest_count
+            let saved_multitest_corrected = (*c).multitest_corrected
+            let sig_id = fn_sig_table_find_method((*c).fn_sigs, (*c).current_impl_type.name, (*fd).name)
+            if sig_id >= 0 {
+                let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+                (*c).current_return_type = sig.return_type
+                (*c).current_effects = sig.effects
+                (*c).current_effect_count = sig.effect_count
+            }
+            (*c).multitest_count = 0
+            (*c).multitest_corrected = false
+            (*c).env = (*c).env.push_scope()
+            (*c).borrows = (*c).borrows.push_scope()
+            checker_push_const_scope_inplace(c)
+            checker_bind_fn_params_inplace(c, (*fd).params)
+            let body_ty = checker_check_block_inplace(c, (*fd).body)
+            if sig_id >= 0 {
+                let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
+                if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
+                    checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                }
+            }
+            if (*c).multitest_count > 1 && !(*c).multitest_corrected {
+                checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
+            }
+            checker_pop_const_scope_inplace(c)
+            (*c).borrows = (*c).borrows.pop_scope()
+            (*c).env = (*c).env.pop_scope()
+            (*c).current_return_type = ty_unit()
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            (*c).multitest_count = saved_multitest_count
+            (*c).multitest_corrected = saved_multitest_corrected
+        }
+        None => {}
+    }
+}
+
+fn checker_check_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_check_impl_method_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_check_impl_methods_inplace(c, (*id).methods)
+            (*c).current_impl_type = ty_error()
+        }
+        None => {}
+    }
+}
+
 fn checker_check_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
-    checker_store_from_value(c, (*c).check_impl_item(opt))
+    // *mut in-place (no SRET); replaces the by-value `checker_store_from_value(c, (*c).check_impl_item(opt))`.
+    checker_check_impl_def_inplace(c, opt)
 }
 
 // Dedicated leaf for the by-value collect_impl_def bridge (registers impl method
 // signatures). Same isolation rationale as the check bridge above.
+// *mut in-place impl-method collection. Eliminates the ~8MB by-value Checker SRET of the
+// old collect_impl_def chain (the module-76 self-compile crash: a method's collection
+// copied + returned the whole Checker, corrupting the stack). Mirrors
+// checker_collect_fn_def_inplace + the self-param skip from collect_method_params, using
+// the existing *mut spine (checker_collect_fn_params_mut / _lower_type_expr_mut /
+// _extract_effects_mut). No copy or return of the Checker.
+fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            // Skip the self param for method signatures (mirror collect_method_params).
+            let params_pair = match (*fd).params {
+                Some(pl) => {
+                    if (*pl).head.is_self {
+                        checker_collect_fn_params_mut(c, (*pl).tail)
+                    } else {
+                        checker_collect_fn_params_mut(c, (*fd).params)
+                    }
+                }
+                None => checker_collect_fn_params_mut(c, None)
+            }
+            let params = params_pair.params
+            let param_count = params_pair.count
+            let ret_ty = match (*fd).return_type {
+                Some(te) => checker_lower_type_expr_mut(c, *te)
+                None => ty_unknown()
+            }
+            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            let fn_effects = eff_pair.effects
+            let fn_effect_count = eff_pair.count
+            let sig = FnSig {
+                name: item.name,
+                params: params,
+                param_count: param_count,
+                return_type: ret_ty,
+                is_method: true,
+                self_type_name: type_name,
+                self_type_entry: (*c).current_impl_type,
+                effects: fn_effects,
+                effect_count: fn_effect_count,
+                is_kernel: false,
+                is_epistemic_kernel: false,
+                is_linear_closure: false,
+                linear_capture_count: 0,
+                epistemic_epsilon: 0.0 - 1.0,
+                visibility_kind: item.visibility.kind,
+                defining_module_seg_count: (*c).current_module.seg_count,
+                defining_module_id: (*c).current_module_id,
+                visibility: item.visibility,
+                defining_module: (*c).current_module,
+            }
+            let _added = fn_sig_table_add((*c).fn_sigs, sig)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList> >, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_collect_impl_method_inplace(c, (*list).head, type_name)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_collect_impl_methods_inplace(c, (*id).methods, impl_ty.name)
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
-    checker_store_from_value(c, (*c).collect_impl_def(opt))
+    // *mut in-place (no SRET); replaces the by-value `checker_store_from_value(c, (*c).collect_impl_def(opt))`.
+    checker_collect_impl_def_inplace(c, opt)
 }
 
 fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
@@ -3266,9 +3416,9 @@ fn checker_type_byte_size_inplace(c: *mut Checker, ty: TypeEntry, depth: i64) ->
         if name_matches_str3(ty.name, 66, 111, 120) {
             return 8
         }
-        let sidx = (*c).structs.find(ty.name)
+        let sidx = struct_table_find((*c).structs, ty.name)
         if sidx >= 0 {
-            let si = (*c).structs.get(sidx)
+            let si = struct_table_get((*c).structs, sidx)
             return checker_fieldlist_byte_size_inplace(c, si.fields, depth + 1)
         }
         // Enums / opaque named types: conservative pointer-sized estimate.
@@ -3369,14 +3519,14 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let saved_multitest_corrected = (*c).multitest_corrected
             // Proven by-value reads: .find/.get copy only the ~38KB FnSigTable,
             // never the 8MB Checker, so they're harmless against the 8MB budget.
-            // Direct (*c).fn_sigs.entries[idx].field reads were tried but CANNOT
+            // Direct (*(*c).fn_sigs).entries[idx].field reads were tried but CANNOT
             // be validated this session — no checkable program reaches the
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
-            let sig_id = (*c).fn_sigs.find((*fd).name)
+            let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
             if sig_id >= 0 {
-                let sig = (*c).fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
@@ -3399,7 +3549,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).escape_provenance = 0
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
-                let sig2 = (*c).fn_sigs.get(sig_id)
+                let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
@@ -3863,25 +4013,35 @@ fn checker_check_continue_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wi
 // populated. See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
 fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_name = checker_copy_string_list_to_name(e.path.segments)
-    let enum_idx = (*c).enums.find(first_name)
+    let enum_idx = enum_table_find((*c).enums, first_name)
     if enum_idx >= 0 {
-        let ei = (*c).enums.get(enum_idx)
+        let ei = enum_table_get((*c).enums, enum_idx)
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
             checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
         }
         ty_named(first_name)
     } else {
         // Could be a variant name directly (e.g. None, Some)
-        let variant_enum_idx = (*c).enums.find_variant_enum(first_name)
+        let variant_enum_idx = enum_table_find_variant_enum((*c).enums, first_name)
         if variant_enum_idx >= 0 {
-            let ei = (*c).enums.get(variant_enum_idx)
+            let ei = enum_table_get((*c).enums, variant_enum_idx)
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
                 checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
             }
             ty_named(ei.name)
         } else {
-            // Look up in env as a regular binding
-            (*c).env.lookup(first_name)
+            // Look up in env as a regular binding; functions live in fn_sigs (not env), so
+            // fall back to fn_sigs for a bare function reference before yielding ty_error.
+            if !(*c).env.has_binding(first_name) {
+                let fn_sig_id = checker_fn_sigs_find_inplace(c, first_name)
+                if fn_sig_id >= 0 {
+                    ty_fn(fn_sig_id)
+                } else {
+                    (*c).env.lookup(first_name)
+                }
+            } else {
+                (*c).env.lookup(first_name)
+            }
         }
     }
 }
@@ -4079,8 +4239,8 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     }
     var result = binary_result_type(e.bin_op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-        let l_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.find(left_ty.name) >= 0
-        let r_enum = right_ty.kind == TypeKind::TyNamed && (*c).enums.find(right_ty.name) >= 0
+        let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
+        let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, right_ty.name) >= 0
         if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
             result = ty_bool()
         }
@@ -4439,9 +4599,9 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
 fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
     if base_ty.kind == TypeKind::TyNamed {
-        let struct_idx = (*c).structs.find(base_ty.name)
+        let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
-            let si = (*c).structs.get(struct_idx)
+            let si = struct_table_get((*c).structs, struct_idx)
             let field_ty = field_info_list_find(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
@@ -4564,9 +4724,11 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         // name.buf[0] (TypeEntry byte 8 — within the *mut SRET window) holds the struct_idx
         // encoded by ty_ref_with_idx / ty_ref_mut_with_idx at signature-lowering time.
         // -1 means "not a struct ref" (primitive, slice, etc.) → return ty_error() silently.
-        let struct_idx = base_ty.name.buf[0] as i64
-        if struct_idx >= 0 && struct_idx < (*c).structs.count {
-            let si = (*c).structs.get(struct_idx)
+        let dec_lo = (base_ty.name.buf[0] as i64 + 256) % 256
+        let dec_hi = (base_ty.name.buf[1] as i64 + 256) % 256
+        let struct_idx = dec_lo + dec_hi * 256 - 1
+        if struct_idx >= 0 && struct_idx < (*(*c).structs).count {
+            let si = struct_table_get((*c).structs, struct_idx)
             let field_ty = field_info_list_find(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
@@ -4676,13 +4838,13 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // and dodges the by-value check_path_expr / check_call ~164KB-self SRET crash. The two
 // recursive Checker-copying field-init helpers are replaced by interleaved per-field
 // lookup-then-check loops over the StructFieldList (no fixed-size array → no field truncation).
-// The generic path is INLINED here (StructInfo obtained as a local via (*c).structs.get, NOT
+// The generic path is INLINED here (StructInfo obtained as a local via struct_table_get, NOT
 // passed as a by-value arg into a new helper — large-struct-by-value arg passing is the crash
 // model; the EnumInfo read in checker_check_path_expr_inplace proves the get-into-local form is
 // safe). mangle_generic_name / monomorphize_fields are reused verbatim (pure free fns).
-// NOTE (runtime-risk, see review issues): the generic leg's `(*c).structs = (*c).structs.add(...)`
-// is the ONE move with no proven *mut precedent — a ~160KB StructTable SRET-store-back into a
-// (*c) field; smoke-test a generic struct literal before trusting the generic path.
+// NOTE: the generic leg's `struct_table_add((*c).structs, ...)` is now an in-place insert
+// through the heap-indirect *mut StructTable — no whole-table SRET-store-back (the prior
+// ~160KB store-back risk is gone). The mono add is idempotent-guarded by a prior find.
 // Fidelity: codes 15 (not-found) / 16 (field compat) / 46 (count mismatch); returns
 // ty_named(struct_name) | ty_named(mangled) | ty_error(); per-field order = lookup-then-check;
 // count mismatch returns ty_named(struct_name) (NOT ty_error — the outer by-value wraps it so);
@@ -4690,9 +4852,9 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
-    let struct_idx = (*c).structs.find(struct_name)
+    let struct_idx = struct_table_find((*c).structs, struct_name)
     if struct_idx >= 0 {
-        let si = (*c).structs.get(struct_idx)
+        let si = struct_table_get((*c).structs, struct_idx)
         if (*c).enforce_visibility && !checker_struct_visible_inplace(c, struct_idx) {
             checker_report_error_at_inplace(c, e.span, 176, 0, 0, 0)
         }
@@ -4746,7 +4908,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     // Mangled name (finalize 16683-16684).
                     let mangled = mangle_generic_name(si.name, args)
                     // Monomorphize if not already present (finalize 16687-16702).
-                    let existing_idx = (*c).structs.find(mangled)
+                    let existing_idx = struct_table_find((*c).structs, mangled)
                     if existing_idx < 0 {
                         let mono_fields = monomorphize_fields(si.fields, si.type_param_count, si.type_param_names, args)
                         let mono_info = StructInfo {
@@ -4763,14 +4925,14 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             defining_module: si.defining_module,
                         }
                         // RUNTIME-RISK: ~160KB StructTable by-value SRET-store-back (see review).
-                        (*c).structs = (*c).structs.add(mono_info)
+                        struct_table_add((*c).structs, mono_info)
                     }
                     // Pass 2: validate fields against the monomorphized struct (finalize
                     // 16705-16709 → check_struct_field_inits 16715). Count check first (E046),
                     // then interleaved per-field lookup-then-check (E016), all via the *mut spine.
-                    let mono_idx = (*c).structs.find(mangled)
+                    let mono_idx = struct_table_find((*c).structs, mangled)
                     if mono_idx >= 0 {
-                        let mono_si = (*c).structs.get(mono_idx)
+                        let mono_si = struct_table_get((*c).structs, mono_idx)
                         let init_count = struct_field_list_count(e.fields)
                         if init_count != mono_si.field_count {
                             checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
@@ -4841,11 +5003,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         // segment. If head is an enum AND last is a struct-variant of it, validate the field
         // inits against the variant's declared fields and yield ty_named(enum_name) — matching
         // how checker_check_path_expr_inplace types a variant path, so a later
-        // `match c { Event::C { x: cx } => .. }` resolves via (*c).enums.find(scrut_ty.name). ----
-        let enum_idx = (*c).enums.find(struct_name)
+        // `match c { Event::C { x: cx } => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name). ----
+        let enum_idx = enum_table_find((*c).enums, struct_name)
         if enum_idx >= 0 {
             let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
-            let ei = (*c).enums.get(enum_idx)
+            let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
                 // Count check first (E046), mirroring the non-generic struct branch:
@@ -5058,9 +5220,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         visibility: visibility_private(),
         defining_module: (*c).current_module,
     }
-    let add_result = (*c).fn_sigs.add(closure_sig)
-    (*c).fn_sigs = add_result.0
-    let sig_id = add_result.1
+    let sig_id = fn_sig_table_add((*c).fn_sigs, closure_sig)
     ty_fn(sig_id)
 }
 
@@ -5138,9 +5298,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
-        let sig_id = (*c).fn_sigs.find_method_semantic(base_ty, e.name)
+        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
-            let sig = (*c).fn_sigs.get(sig_id)
+            let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
             checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
@@ -5458,12 +5618,12 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
                 return -1
             }
             let head_name = checker_copy_string_list_to_name((*expr).path.segments)
-            let enum_idx = (*c).enums.find(head_name)
+            let enum_idx = enum_table_find((*c).enums, head_name)
             if enum_idx < 0 {
                 return -1
             }
             let variant_name = checker_copy_string_list_tail_to_name((*expr).path.segments)
-            let ei = (*c).enums.get(enum_idx)
+            let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 return enum_idx
             }
@@ -5474,20 +5634,11 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
 }
 
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
-    var i: i64 = 0
-    while i < (*c).fn_sigs.count {
-        let sig_name = (*c).fn_sigs.entries[i].name
-        let sig_is_method = (*c).fn_sigs.entries[i].is_method
-        if name_eq(sig_name, name) && !sig_is_method {
-            return i
-        }
-        i = i + 1
-    }
-    -1
+    fn_sig_table_find((*c).fn_sigs, name)
 }
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let sig = (*c).fn_sigs.get(sig_id)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
     let vis_kind = sig.visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
@@ -5512,7 +5663,7 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
 }
 
 fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let vis_kind = (*c).structs.entries[struct_idx as usize].visibility_kind
+    let vis_kind = (*(*c).structs).entries[struct_idx as usize].visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
     }
@@ -5523,20 +5674,20 @@ fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with
         return true
     }
     if vis_kind == VISIBILITY_PRIVATE {
-        if (*c).structs.entries[struct_idx as usize].defining_module_id == (*c).current_module_id {
+        if (*(*c).structs).entries[struct_idx as usize].defining_module_id == (*c).current_module_id {
             return true
         }
     }
     visibility_allows_access(
-        (*c).structs.entries[struct_idx as usize].visibility,
-        (*c).structs.entries[struct_idx as usize].defining_module,
+        (*(*c).structs).entries[struct_idx as usize].visibility,
+        (*(*c).structs).entries[struct_idx as usize].defining_module,
         (*c).current_module,
         (*c).crate_root,
     )
 }
 
 fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let vis_kind = (*c).enums.entries[enum_idx as usize].visibility_kind
+    let vis_kind = (*(*c).enums).entries[enum_idx as usize].visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
     }
@@ -5547,13 +5698,13 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
         return true
     }
     if vis_kind == VISIBILITY_PRIVATE {
-        if (*c).enums.entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
+        if (*(*c).enums).entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
             return true
         }
     }
     visibility_allows_access(
-        (*c).enums.entries[enum_idx as usize].visibility,
-        (*c).enums.entries[enum_idx as usize].defining_module,
+        (*(*c).enums).entries[enum_idx as usize].visibility,
+        (*(*c).enums).entries[enum_idx as usize].defining_module,
         (*c).current_module,
         (*c).crate_root,
     )
@@ -5622,16 +5773,17 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
+        let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
-            fn_param_list_handle((*c).fn_sigs.entries[direct_sig_id].params),
-            (*c).fn_sigs.entries[direct_sig_id].param_count,
+            fn_param_list_handle(direct_sig.params),
+            direct_sig.param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, (*c).fn_sigs.entries[direct_sig_id].effects, (*c).fn_sigs.entries[direct_sig_id].effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, (*c).fn_sigs.entries[direct_sig_id].params, call_start_borrows)
-        return (*c).fn_sigs.entries[direct_sig_id].return_type
+        checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_release_call_arg_borrows_inplace(c, e.args, direct_sig.params, call_start_borrows)
+        return direct_sig.return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -5678,7 +5830,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-        let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
@@ -5696,10 +5848,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
         // ty_named(enum_name) (not TyFn), so it would otherwise hit E017. Check the args for
         // side effects / nested diagnostics and yield ty_named(enum_name) so a later
-        // `match b { Event::B(n) => .. }` resolves via (*c).enums.find(scrut_ty.name).
+        // `match b { Event::B(n) => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name).
         let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
         if variant_enum_idx >= 0 {
-            let ei = (*c).enums.get(variant_enum_idx)
+            let ei = enum_table_get((*c).enums, variant_enum_idx)
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
@@ -6033,6 +6185,12 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !(*c).env.has_binding(e.name) {
+        // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
+        // function reference via the chunked fn_sigs before reporting E137.
+        let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
+        if fn_sig_id >= 0 {
+            return ty_fn(fn_sig_id)
+        }
         checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
         return ty_error()
     }
@@ -6187,14 +6345,14 @@ fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFi
             Some(list) => {
                 var field_ty = ty_unknown()
                 if scrut_ty.kind == TypeKind::TyNamed {
-                    let struct_idx = (*c).structs.find(scrut_ty.name)
+                    let struct_idx = struct_table_find((*c).structs, scrut_ty.name)
                     if struct_idx >= 0 {
-                        let si = (*c).structs.get(struct_idx)
+                        let si = struct_table_get((*c).structs, struct_idx)
                         field_ty = field_info_list_find(si.fields, (*list).head.name)
                     } else {
-                        let enum_idx = (*c).enums.find(scrut_ty.name)
+                        let enum_idx = enum_table_find((*c).enums, scrut_ty.name)
                         if enum_idx >= 0 {
-                            let ei = (*c).enums.get(enum_idx)
+                            let ei = enum_table_get((*c).enums, enum_idx)
                             field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
                         }
                     }
@@ -6396,8 +6554,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
         // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
         // rule; this *mut fn has (*c).enums to detect enum-named types.
-        let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
-        let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
+        let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0
+        let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
         if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
@@ -6524,9 +6682,9 @@ fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with
         }
     }
     if ty.kind == TypeKind::TyNamed {
-        let sidx = (*c).structs.find(ty.name)
-        if sidx >= 0 && sidx < (*c).structs.count {
-            let si = (*c).structs.get(sidx)
+        let sidx = struct_table_find((*c).structs, ty.name)
+        if sidx >= 0 && sidx < (*(*c).structs).count {
+            let si = struct_table_get((*c).structs, sidx)
             var cur = si.fields
             var guard = 0
             while guard < 1024 {
@@ -6815,7 +6973,7 @@ fn checker_warning_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Al
 }
 
 fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
-    (*c).fn_sigs.count
+    (*(*c).fn_sigs).count
 }
 
 fn checker_refine_static_proved_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -11978,7 +12136,7 @@ fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic,
     true
 }
 
-fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_fn_types_structurally_compatible_table(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
         return false
     }
@@ -11988,11 +12146,11 @@ fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry,
     if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
         return false
     }
-    if a.fn_sig_id >= tbl.count || b.fn_sig_id >= tbl.count {
+    if a.fn_sig_id >= (*tbl).count || b.fn_sig_id >= (*tbl).count {
         return false
     }
-    let asig = tbl.get(a.fn_sig_id)
-    let bsig = tbl.get(b.fn_sig_id)
+    let asig = fn_sig_table_get(tbl, a.fn_sig_id)
+    let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
     if !types_compatible(asig.return_type, bsig.return_type) {
         return false
     }
@@ -12002,14 +12160,14 @@ fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry,
     checker_fn_sig_effects_compatible(asig, bsig)
 }
 
-fn checker_types_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_types_compatible_table(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(a, b) {
         return true
     }
     checker_fn_types_structurally_compatible_table(tbl, a, b)
 }
 
-fn checker_call_arg_types_compatible_table(tbl: FnSigTable, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn checker_call_arg_types_compatible_table(tbl: *mut FnSigTable, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if checker_types_compatible_table(tbl, arg_ty, param_ty) {
         return true
     }
@@ -12042,13 +12200,13 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
         return false
     }
-    if a.fn_sig_id >= (*c).fn_sigs.count || b.fn_sig_id >= (*c).fn_sigs.count {
+    if a.fn_sig_id >= (*(*c).fn_sigs).count || b.fn_sig_id >= (*(*c).fn_sigs).count {
         return false
     }
     let ai = a.fn_sig_id
     let bi = b.fn_sig_id
-    let asig = (*c).fn_sigs.get(ai)
-    let bsig = (*c).fn_sigs.get(bi)
+    let asig = fn_sig_table_get((*c).fn_sigs, ai)
+    let bsig = fn_sig_table_get((*c).fn_sigs, bi)
     if !types_compatible(asig.return_type, bsig.return_type) {
         return false
     }
@@ -12964,8 +13122,8 @@ fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry
     let int_lit_narrow = (*c).last_literal_kind == 1
         && body_ty.kind == TypeKind::TyI64
         && is_integer_type(return_ty)
-    let body_enum = body_ty.kind == TypeKind::TyNamed && (*c).enums.find(body_ty.name) >= 0
-    let ret_enum = return_ty.kind == TypeKind::TyNamed && (*c).enums.find(return_ty.name) >= 0
+    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, body_ty.name) >= 0
+    let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, return_ty.name) >= 0
     let enum_int_ok = (body_enum && is_numeric_type(return_ty)) || (is_numeric_type(body_ty) && ret_enum)
     int_lit_narrow || enum_int_ok
 }
@@ -13174,9 +13332,9 @@ impl Checker {
                     return (c, te)
                 }
 
-                let tmpl_idx = self.structs.find(name)
+                let tmpl_idx = struct_table_find(self.structs, name)
                 if tmpl_idx >= 0 {
-                    let tmpl = self.structs.get(tmpl_idx)
+                    let tmpl = struct_table_get(self.structs, tmpl_idx)
                     if tmpl.is_generic_template {
                         // Lower the type arguments
                         let args_result = self.lower_type_expr_list(*args)
@@ -13187,7 +13345,7 @@ impl Checker {
                         let mangled = mangle_generic_name(name, lowered_args)
 
                         // Check if already monomorphized
-                        let existing_idx = c.structs.find(mangled)
+                        let existing_idx = struct_table_find(c.structs, mangled)
                         if existing_idx >= 0 {
                             (c, ty_named(mangled))
                         } else {
@@ -13206,7 +13364,7 @@ impl Checker {
                             visibility: tmpl.visibility,
                             defining_module: tmpl.defining_module,
                             }
-                            c.structs = c.structs.add(mono_info)
+                            struct_table_add(c.structs, mono_info)
                             (c, ty_named(mangled))
                         }
                     } else {
@@ -13419,9 +13577,7 @@ impl Checker {
             visibility: visibility_pub(),
             defining_module: empty_path(),
         }
-        let add_result = c.fn_sigs.add(sig)
-        c.fn_sigs = add_result.0
-        let sig_id = add_result.1
+        let sig_id = fn_sig_table_add(c.fn_sigs, sig)
         (c, ty_fn(sig_id))
     }
 
@@ -15508,9 +15664,7 @@ impl Checker {
                     visibility: visibility,
                     defining_module: defining_module,
                 }
-                let add_result = c.fn_sigs.add(sig)
-                c.fn_sigs = add_result.0
-                let sig_id = add_result.1
+                let sig_id = fn_sig_table_add(c.fn_sigs, sig)
                 c.env = c.env.bind(name, ty_fn(sig_id), false)
                 c = c.const_int_bind_unknown(name)
                 c
@@ -15584,7 +15738,7 @@ impl Checker {
                     visibility: visibility,
                     defining_module: defining_module,
                 }
-                c.structs = c.structs.add(info)
+                struct_table_add(c.structs, info)
                 c
             }
             None => self
@@ -15655,7 +15809,7 @@ impl Checker {
                     visibility: visibility,
                     defining_module: defining_module,
                 }
-                c.enums = c.enums.add(info)
+                enum_table_add(c.enums, info)
                 c = c.bind_enum_variant_constructors(variants)
                 c
             }
@@ -16503,8 +16657,7 @@ impl Checker {
                     visibility: item.visibility,
                     defining_module: c.current_module,
                 }
-                let add_result = c.fn_sigs.add(sig)
-                c.fn_sigs = add_result.0
+                let _added = fn_sig_table_add(c.fn_sigs, sig)
                 c
             }
             None => self
@@ -16592,9 +16745,9 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = c.fn_sigs.find((*fd).name)
+                let sig_id = fn_sig_table_find(c.fn_sigs, (*fd).name)
                 if sig_id >= 0 {
-                    let sig = c.fn_sigs.get(sig_id)
+                    let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
@@ -16611,12 +16764,12 @@ impl Checker {
                 // Check return type compatibility (allow integer-literal narrowing and
                 // fieldless-enum↔int coercion, matching let/var assignment).
                 if sig_id >= 0 {
-                    let sig2 = c.fn_sigs.get(sig_id)
+                    let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
                     let int_lit_narrow = c.last_literal_kind == 1
                         && body_ty.kind == TypeKind::TyI64
                         && is_integer_type(sig2.return_type)
-                    let body_enum = body_ty.kind == TypeKind::TyNamed && c.enums.find(body_ty.name) >= 0
-                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && c.enums.find(sig2.return_type.name) >= 0
+                    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, body_ty.name) >= 0
+                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0
                     let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
                         || (is_numeric_type(body_ty) && ret_enum)
                     if !c.types_compatible_structural(body_ty, sig2.return_type)
@@ -16712,9 +16865,9 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = c.fn_sigs.find_method(c.current_impl_type.name, (*fd).name)
+                let sig_id = fn_sig_table_find_method(c.fn_sigs, c.current_impl_type.name, (*fd).name)
                 if sig_id >= 0 {
-                    let sig = c.fn_sigs.get(sig_id)
+                    let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
@@ -16729,7 +16882,7 @@ impl Checker {
                 c = pair.0
                 let body_ty = pair.1
                 if sig_id >= 0 {
-                    let sig2 = c.fn_sigs.get(sig_id)
+                    let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
                     if !c.types_compatible_structural(body_ty, sig2.return_type) {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
@@ -16942,9 +17095,9 @@ impl Checker {
 
     fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
         if ty.kind == TypeKind::TyNamed {
-            let idx = self.structs.find(ty.name)
+            let idx = struct_table_find(self.structs, ty.name)
             if idx >= 0 {
-                return self.structs.entries[idx].is_linear
+                return (*self.structs).entries[idx].is_linear
             }
         }
         false
@@ -17102,6 +17255,11 @@ impl Checker {
             ExprKind::ExprCharLit => (c, ty_char())
             ExprKind::ExprIdent => {
                 if !c.env.has_binding(e.name) {
+                    // Functions live in fn_sigs (not env) — resolve a bare fn reference there.
+                    let fn_sig_id = fn_sig_table_find(c.fn_sigs, e.name)
+                    if fn_sig_id >= 0 {
+                        return (c, ty_fn(fn_sig_id))
+                    }
                     let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
                     return (c_err, ty_error())
                 }
@@ -17160,9 +17318,9 @@ impl Checker {
         // First segment is enum/type name, last is variant
         // For now, look up first segment as enum name
         let first_name = checker_copy_string_list_to_name(e.path.segments)
-        let enum_idx = self.enums.find(first_name)
+        let enum_idx = enum_table_find(self.enums, first_name)
         if enum_idx >= 0 {
-            let ei = self.enums.get(enum_idx)
+            let ei = enum_table_get(self.enums, enum_idx)
             if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
                 let c = self.report_error_at(e.span, 177, 0, 0, 0)
                 return (c, ty_named(first_name))
@@ -17170,9 +17328,9 @@ impl Checker {
             (self, ty_named(first_name))
         } else {
             // Could be a variant name directly (e.g. None, Some)
-            let variant_enum_idx = self.enums.find_variant_enum(first_name)
+            let variant_enum_idx = enum_table_find_variant_enum(self.enums, first_name)
             if variant_enum_idx >= 0 {
-                let ei = self.enums.get(variant_enum_idx)
+                let ei = enum_table_get(self.enums, variant_enum_idx)
                 if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
                     let c = self.report_error_at(e.span, 177, 0, 0, 0)
                     return (c, ty_named(ei.name))
@@ -17273,8 +17431,8 @@ impl Checker {
         // and only enum-vs-numeric (enum-vs-same-enum already passes via name_eq in
         // binary_result_type; arithmetic stays rejected → matches canonical's `E::A + 1`).
         if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-            let l_enum = left_ty.kind == TypeKind::TyNamed && c.enums.find(left_ty.name) >= 0
-            let r_enum = right_ty.kind == TypeKind::TyNamed && c.enums.find(right_ty.name) >= 0
+            let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, left_ty.name) >= 0
+            let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, right_ty.name) >= 0
             if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
                 result = ty_bool()
             }
@@ -17609,9 +17767,9 @@ impl Checker {
         var c = pair.0
         let base_ty = pair.1
         if base_ty.kind == TypeKind::TyNamed {
-            let struct_idx = c.structs.find(base_ty.name)
+            let struct_idx = struct_table_find(c.structs, base_ty.name)
             if struct_idx >= 0 {
-                let si = c.structs.get(struct_idx)
+                let si = struct_table_get(c.structs, struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
                 if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                     c = c.report_error_at(e.span, 12, 0, 0, 0)
@@ -17726,9 +17884,9 @@ impl Checker {
         } else if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
             let inner = call_ref_inner_or_self(base_ty)
             if inner.kind == TypeKind::TyNamed {
-                let struct_idx = c.structs.find(inner.name)
+                let struct_idx = struct_table_find(c.structs, inner.name)
                 if struct_idx >= 0 {
-                    let si = c.structs.get(struct_idx)
+                    let si = struct_table_get(c.structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
                     if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                         c = c.report_error_at(e.span, 12, 0, 0, 0)
@@ -17862,9 +18020,9 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = c.fn_sigs.find_method_semantic(base_ty, e.name)
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
-                let sig = c.fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
@@ -17977,9 +18135,9 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = c.fn_sigs.find_method_semantic(base_ty, e.name)
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
-                let sig = c.fn_sigs.get(sig_id)
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
@@ -18214,7 +18372,7 @@ impl Checker {
             }
         }
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-            let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
+            let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
@@ -20719,15 +20877,15 @@ impl Checker {
                 var field_ty = ty_unknown()
                 if scrut_ty.kind == TypeKind::TyNamed {
                     // First try: look up as struct
-                    let struct_idx = c.structs.find(scrut_ty.name)
+                    let struct_idx = struct_table_find(c.structs, scrut_ty.name)
                     if struct_idx >= 0 {
-                        let si = c.structs.get(struct_idx)
+                        let si = struct_table_get(c.structs, struct_idx)
                         field_ty = field_info_list_find(si.fields, (*list).head.name)
                     } else {
                         // Second try: look up as enum — find which variant has this field
-                        let enum_idx = c.enums.find(scrut_ty.name)
+                        let enum_idx = enum_table_find(c.enums, scrut_ty.name)
                         if enum_idx >= 0 {
-                            let ei = c.enums.get(enum_idx)
+                            let ei = enum_table_get(c.enums, enum_idx)
                             // Search all variants for one that has this field
                             field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
                         }
@@ -20870,9 +21028,9 @@ impl Checker {
 
     fn check_struct_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let struct_name = checker_copy_string_list_to_name(e.path.segments)
-        let struct_idx = self.structs.find(struct_name)
+        let struct_idx = struct_table_find(self.structs, struct_name)
         if struct_idx >= 0 {
-            let si = self.structs.get(struct_idx)
+            let si = struct_table_get(self.structs, struct_idx)
             if self.enforce_visibility && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
                 let c = self.report_error_at(e.span, 176, 0, 0, 0)
                 return (c, ty_named(struct_name))
@@ -20946,7 +21104,7 @@ impl Checker {
 
                 // Check if already monomorphized
                 var c = self
-                let existing_idx = c.structs.find(mangled)
+                let existing_idx = struct_table_find(c.structs, mangled)
                 if existing_idx < 0 {
                     // Monomorphize
                     let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, args)
@@ -20963,13 +21121,13 @@ impl Checker {
                     visibility: tmpl.visibility,
                     defining_module: tmpl.defining_module,
                     }
-                    c.structs = c.structs.add(mono_info)
+                    struct_table_add(c.structs, mono_info)
                 }
 
                 // Now validate fields against the monomorphized struct
-                let mono_idx = c.structs.find(mangled)
+                let mono_idx = struct_table_find(c.structs, mangled)
                 if mono_idx >= 0 {
-                    let mono_si = c.structs.get(mono_idx)
+                    let mono_si = struct_table_get(c.structs, mono_idx)
                     c = c.check_struct_field_inits(e.fields, mono_si, e.span)
                 }
                 (c, ty_named(mangled))
@@ -21369,9 +21527,7 @@ impl Checker {
         }
 
         // Add to fn_sigs table
-        let add_result = c.fn_sigs.add(closure_sig)
-        c.fn_sigs = add_result.0
-        let sig_id = add_result.1
+        let sig_id = fn_sig_table_add(c.fn_sigs, closure_sig)
 
         (c, ty_fn(sig_id))
     }

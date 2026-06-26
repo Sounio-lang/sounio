@@ -127,6 +127,8 @@ Before submitting any Pull Request:
 - Ensure all automated checks pass: `bash scripts/run_sio_test_suite.sh`
 - Ensure documentation registry is aligned: `node scripts/docs/check_docs_registry.mjs` (sync with `node scripts/docs/sync_governance_metadata.mjs` if needed)
 
+The repository's default compiler surface is `bin/souc` as the official entrypoint (Madaros by default).
+
 ### 4. Commit Message Guidelines
 
 We follow a strict semantic and component-scoped commit convention. Commit messages must be structured as:
