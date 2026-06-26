@@ -1,0 +1,145 @@
+//@ run-pass
+//@ description: Medium deterministic SMT heuristic ablation emitter for solver-readiness evidence
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+fn add_php(ctx: &!SmtContext, pigeons: i32, holes: i32) with Mut, Div {
+    var lits: [i32; 8] = [0 as i32; 8]
+    var i: i32 = 0
+    while i < pigeons {
+        var h: i32 = 0
+        while h < holes {
+            lits[h] = (i * holes + h) * 2
+            h = h + 1
+        }
+        smt_add_clause(ctx, &lits, holes)
+        i = i + 1
+    }
+
+    var j: i32 = 0
+    while j < holes {
+        var i1: i32 = 0
+        while i1 < pigeons {
+            var i2: i32 = i1 + 1
+            while i2 < pigeons {
+                lits[0] = (i1 * holes + j) * 2 + 1
+                lits[1] = (i2 * holes + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+fn add_mixed_2_5(ctx: &!SmtContext, seed: i64, n_vars: i32, binary_count: i32, wide_count: i32) with Mut, Div {
+    var st: i64 = seed
+    var ci: i32 = 0
+    while ci < binary_count {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var li: i32 = 0
+        while li < 2 {
+            let raw = lcg_next(&! st)
+            lits[li] = ((raw % (n_vars as i64)) as i32) * 2 + (((raw / 65536) % 2) as i32)
+            li = li + 1
+        }
+        smt_add_clause(ctx, &lits, 2)
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < wide_count {
+        var lits2: [i32; 8] = [0 as i32; 8]
+        var li2: i32 = 0
+        while li2 < 5 {
+            let raw2 = lcg_next(&! st)
+            lits2[li2] = ((raw2 % (n_vars as i64)) as i32) * 2 + (((raw2 / 65536) % 2) as i32)
+            li2 = li2 + 1
+        }
+        smt_add_clause(ctx, &lits2, 5)
+        ci = ci + 1
+    }
+}
+
+fn print_csv_i64(v: i64, last: i32) with IO {
+    print_int(v)
+    if last == 0 { print(",") } else { print("\n") }
+}
+
+fn emit_instance(ctx: &!SmtContext, instance_id: i32, seed: i64) with Mut, Div {
+    if instance_id == 1 {
+        add_mixed_2_5(ctx, seed, 20, 40, 20)
+    } else if instance_id == 2 {
+        add_php(ctx, 5, 4)
+    } else if instance_id == 3 {
+        add_mixed_2_5(ctx, seed, 28, 70, 30)
+    } else {
+        add_php(ctx, 6, 5)
+    }
+}
+
+fn emit_row(instance_id: i32, seed: i64, rep: i32, score_mode: i32, phase_mode: i32, restart_budget: i32) -> i32 with IO, Mut, Div {
+    var ctx = smt_new()
+    emit_instance(&! ctx, instance_id, seed)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, score_mode)
+    smt_set_phase_mode(&! ctx, phase_mode)
+    smt_set_restart_budget(&! ctx, restart_budget)
+    let result = smt_solve(&! ctx)
+
+    print_csv_i64(instance_id as i64, 0)
+    print_csv_i64(seed, 0)
+    print_csv_i64(rep as i64, 0)
+    print_csv_i64(score_mode as i64, 0)
+    print_csv_i64(phase_mode as i64, 0)
+    print_csv_i64(restart_budget as i64, 0)
+    print_csv_i64(result as i64, 0)
+    print_csv_i64(smt_get_decisions(&ctx) as i64, 0)
+    print_csv_i64(smt_get_conflicts(&ctx) as i64, 0)
+    print_csv_i64(smt_get_restarts(&ctx) as i64, 0)
+    print_csv_i64(smt_get_stat_total_d(&ctx) as i64, 0)
+    print_csv_i64(smt_get_stat_max_d(&ctx) as i64, 1)
+    return result
+}
+
+fn emit_config_set(instance_id: i32, seed: i64, rep: i32) with IO, Mut, Div {
+    let _m1 = emit_row(instance_id, seed, rep, 1, 0, 0)  // mean-only
+    let _m0 = emit_row(instance_id, seed, rep, 0, 0, 0)  // adaptive GUM-UCB
+    let _m2 = emit_row(instance_id, seed, rep, 2, 0, 0)  // Wilson/LRB
+    let _m3 = emit_row(instance_id, seed, rep, 3, 0, 0)  // Thompson score
+    let _m31 = emit_row(instance_id, seed, rep, 3, 1, 0) // Thompson score + Beta polarity
+    let _m31r = emit_row(instance_id, seed, rep, 3, 1, 3) // same, warm restarts
+    let _m4 = emit_row(instance_id, seed, rep, 4, 0, 0)  // epistemic LRB
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    println("# schema=sounio.solver.smt_ablation_medium.v1")
+    println("# instance_id: 1=mixed_20v_60c_random, 2=php5_4_unsat, 3=mixed_28v_100c_random, 4=php6_5_unsat")
+    println("# score_mode: 0=adaptive_gum_ucb, 1=mean_only, 2=wilson_lrb, 3=thompson_score, 4=epistemic_lrb")
+    println("# phase_mode: 0=saved_phase, 1=beta_polarity_ts")
+    println("instance_id,seed,rep,score_mode,phase_mode,restart_budget,result,decisions,conflicts,restarts,stat_total_d,stat_max_d")
+
+    var rep: i32 = 0
+    while rep < 4 {
+        var si: i32 = 0
+        while si < 12 {
+            emit_config_set(1, 5000 + (si as i64), rep)
+            emit_config_set(3, 7000 + (si as i64), rep)
+            si = si + 1
+        }
+        emit_config_set(2, 0, rep)
+        emit_config_set(4, 0, rep)
+        rep = rep + 1
+    }
+    return 0
+}

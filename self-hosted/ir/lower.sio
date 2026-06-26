@@ -7,6 +7,19 @@ use ir::ir::*
 use io::trace::*
 use io::env::{read_env}
 
+var LOWER_SUMMARY_DIAG_INIT: bool = false
+var LOWER_SUMMARY_DIAG_VALUE: bool = false
+var LOWER_LIVE_DIAG_INIT: bool = false
+var LOWER_LIVE_DIAG_VALUE: bool = false
+var LOWER_BODY_DIAG_INIT: bool = false
+var LOWER_BODY_DIAG_VALUE: bool = false
+var LOWER_ORDERED_DIAG_INIT: bool = false
+var LOWER_ORDERED_DIAG_VALUE: bool = false
+var LOWER_AGG_DIAG_INIT: bool = false
+var LOWER_AGG_DIAG_VALUE: bool = false
+var LOWER_DUMP_LAYOUTS_INIT: bool = false
+var LOWER_DUMP_LAYOUTS_VALUE: bool = false
+
 struct LowerLocalStack {
     names: [Name; 4096],
     regs: [i64; 4096],
@@ -18,6 +31,7 @@ struct LowerLocalStack {
     global_bss_offsets: [i64; 4096],
     global_bss_sizes: [i64; 4096],
     is_global: [i64; 4096],
+    is_ref: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -38,6 +52,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_offsets: [0; 4096],
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
+        is_ref: [0; 4096],
         scalar_kind: [0; 4096],
         closure_fn_id: [-1; 4096],
         count: 0,
@@ -270,15 +285,24 @@ fn lowerer_new_probe() -> Lowerer with Alloc, Mut, Panic, Div {
 }
 
 fn lower_summary_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_SUMMARY_TRACE"), "1")
+    if LOWER_SUMMARY_DIAG_INIT { return LOWER_SUMMARY_DIAG_VALUE }
+    LOWER_SUMMARY_DIAG_VALUE = str_eq(read_env("SOUNIO_LOWER_SUMMARY_TRACE"), "1")
+    LOWER_SUMMARY_DIAG_INIT = true
+    LOWER_SUMMARY_DIAG_VALUE
 }
 
 fn lower_live_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_LIVE_TRACE"), "1")
+    if LOWER_LIVE_DIAG_INIT { return LOWER_LIVE_DIAG_VALUE }
+    LOWER_LIVE_DIAG_VALUE = str_eq(read_env("SOUNIO_LOWER_LIVE_TRACE"), "1")
+    LOWER_LIVE_DIAG_INIT = true
+    LOWER_LIVE_DIAG_VALUE
 }
 
 fn lower_body_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_BODY_TRACE"), "1")
+    if LOWER_BODY_DIAG_INIT { return LOWER_BODY_DIAG_VALUE }
+    LOWER_BODY_DIAG_VALUE = str_eq(read_env("SOUNIO_LOWER_BODY_TRACE"), "1")
+    LOWER_BODY_DIAG_INIT = true
+    LOWER_BODY_DIAG_VALUE
 }
 
 fn lower_body_trace_path() -> string {
@@ -294,15 +318,28 @@ fn lower_body_trace_append(msg: string) with IO, Mut, Panic, Div {
     let pair1 = io_trace_append_byte(buf, p, 10)
     buf = pair1.0
     p = pair1.1
-    let _ok = io_write_bytes_to_file(lower_body_trace_path(), buf, p)
+    let _ok = append_file(lower_body_trace_path(), buf, p)
 }
 
 fn lower_ordered_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_ORDERED_TRACE"), "1")
+    if LOWER_ORDERED_DIAG_INIT { return LOWER_ORDERED_DIAG_VALUE }
+    LOWER_ORDERED_DIAG_VALUE = str_eq(read_env("SOUNIO_LOWER_ORDERED_TRACE"), "1")
+    LOWER_ORDERED_DIAG_INIT = true
+    LOWER_ORDERED_DIAG_VALUE
 }
 
 fn lower_aggregate_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_AGG_TRACE"), "1")
+    if LOWER_AGG_DIAG_INIT { return LOWER_AGG_DIAG_VALUE }
+    LOWER_AGG_DIAG_VALUE = str_eq(read_env("SOUNIO_LOWER_AGG_TRACE"), "1")
+    LOWER_AGG_DIAG_INIT = true
+    LOWER_AGG_DIAG_VALUE
+}
+
+fn lower_dump_layouts_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_DUMP_LAYOUTS_INIT { return LOWER_DUMP_LAYOUTS_VALUE }
+    LOWER_DUMP_LAYOUTS_VALUE = str_eq(read_env("SOUNIO_DUMP_LAYOUTS"), "1")
+    LOWER_DUMP_LAYOUTS_INIT = true
+    LOWER_DUMP_LAYOUTS_VALUE
 }
 
 fn ir_normalize_string_literal_name(n: Name) -> Name {
@@ -747,7 +784,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name: (*flist).head.name,
                                                 index: fc,
-                                                is_float: 0,
+                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else { 0 },
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -779,40 +816,44 @@ fn lowerer_register_struct_fields_mut(
 ) with Mut, Panic, Div, Alloc {
     var current = fields
     var field_idx = idx
+    var struct_layouts = *(*lo).struct_layouts
     while true {
         match *current {
             Some(list) => {
                 var layout_idx: i64 = -1
                 var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
+                while si < struct_layouts.count {
+                    if ir_name_eq(struct_layouts.entries[si as usize].type_name, type_name) {
                         layout_idx = si
                     }
                     si = si + 1
                 }
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
+                    if struct_layouts.count < 256 {
+                        layout_idx = struct_layouts.count
+                        struct_layouts.entries[layout_idx as usize] = StructLayoutEntry {
                             type_name: type_name,
                             fields: [empty_struct_field_entry(); 64],
                             field_count: 0,
                         }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
+                        struct_layouts.count = layout_idx + 1
                     } else {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
+                        (*lo).struct_layouts = Box::new(struct_layouts)
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                let fc = struct_layouts.entries[layout_idx as usize].field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    var lay_entry = struct_layouts.entries[layout_idx as usize]
+                    lay_entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    lay_entry.field_count = fc + 1
+                    struct_layouts.entries[layout_idx as usize] = lay_entry
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -823,6 +864,7 @@ fn lowerer_register_struct_fields_mut(
             _ => break
         }
     }
+    (*lo).struct_layouts = Box::new(struct_layouts)
 }
 
 fn lowerer_preseed_impl_method_summaries_mut(
@@ -1609,6 +1651,7 @@ fn lowerer_bind_local_mut(
         (*locals_box).global_bss_offsets[idx as usize] = 0
         (*locals_box).global_bss_sizes[idx as usize] = 0
         (*locals_box).is_global[idx as usize] = 0
+        (*locals_box).is_ref[idx as usize] = 0
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
@@ -1674,6 +1717,8 @@ fn lowerer_lower_fn_params_mut(
     params: &Option<Box<ParamList>>
 ) with IO, Mut, Panic, Div, Alloc {
     var current = params
+    var current_func = *(*lo).current_func
+    var locals = *(*lo).locals
     while true {
         match *current {
             Some(list) => {
@@ -1686,21 +1731,20 @@ fn lowerer_lower_fn_params_mut(
                     print_int((*(*lo).module).fn_count)
                     print("\n")
                 }
-                let preg = lowerer_fresh_reg_mut(lo)
+                let preg = current_func.reg_count
+                current_func.reg_count = preg + 1
 
                 let fn_id = (*lo).current_fn
                 if fn_id < 0 || fn_id >= (*(*lo).module).fn_count {
                     lowerer_mark_error(lo)
                 } else {
-                    var current_func_box = (*lo).current_func
-                    if (*current_func_box).param_count < IR_MAX_PARAMS {
-                        let param_count = (*current_func_box).param_count
-                        (*current_func_box).param_regs[param_count as usize] = preg
-                        (*current_func_box).param_count = param_count + 1
-                        (*lo).current_func = current_func_box
+                    if current_func.param_count < IR_MAX_PARAMS {
+                        let param_count = current_func.param_count
+                        current_func.param_regs[param_count as usize] = preg
+                        current_func.param_count = param_count + 1
                         if lower_live_diag_enabled() {
                             print("lower_live: param_count_now=")
-                            print_int((*current_func_box).param_count)
+                            print_int(current_func.param_count)
                             print("\n")
                         }
                     } else {
@@ -1709,27 +1753,42 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 if lower_type_expr_is_f64(&(*list).head.ty) {
-                    var current_func_box2 = (*lo).current_func
-                    let instr_count = (*current_func_box2).instr_count
+                    let instr_count = current_func.instr_count
                     if instr_count < IR_MAX_INSTRS {
-                        (*current_func_box2).instrs[instr_count as usize] = ir_mark_float_reg(preg)
-                        (*current_func_box2).instr_count = instr_count + 1
-                        (*lo).current_func = current_func_box2
+                        current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                        current_func.instr_count = instr_count + 1
                     } else {
                         lowerer_mark_error(lo)
                     }
                 }
 
-                lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
-                lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
-                if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
-                    (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
+                let _is_mut = (*list).head.is_self_mut
+                if locals.count < 4096 {
+                    let idx = locals.count
+                    locals.names[idx as usize] = (*list).head.name
+                    locals.regs[idx as usize] = preg
+                    locals.depths[idx as usize] = (*lo).scope_depth
+                    locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
+                    locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
+                    locals.wide_bits[idx as usize] = 0
+                    locals.wide_signed[idx as usize] = 0
+                    locals.global_bss_offsets[idx as usize] = 0
+                    locals.global_bss_sizes[idx as usize] = 0
+                    locals.is_global[idx as usize] = 0
+                    locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                    locals.scalar_kind[idx as usize] = 0
+                    locals.closure_fn_id[idx as usize] = -1
+                    locals.count = idx + 1
+                } else {
+                    lowerer_mark_error(lo)
                 }
                 current = &(*list).tail
             }
             _ => break
         }
     }
+    (*lo).current_func = Box::new(current_func)
+    (*lo).locals = Box::new(locals)
 }
 
 fn lowerer_lower_fn_item_mut(
@@ -1756,6 +1815,9 @@ fn lowerer_lower_fn_item_mut(
         return
     }
 
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("fn_mut_begin name=" + str_from_bytes(name.buf, name.len) + " fn_id=" + io_trace_i64_string(fn_id))
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_begin name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1782,6 +1844,7 @@ fn lowerer_lower_fn_item_mut(
     var rst_locals = (*lo).locals
     (*rst_locals).count = 0
     (*lo).locals = rst_locals
+    (*lo).array_elem_float_reg_count = 0
     (*lo).scope_depth = 0
     (*lo).loop_depth = 0
     if lower_live_diag_enabled() {
@@ -1839,6 +1902,9 @@ fn lowerer_lower_fn_item_mut(
     if ir_param_list_count_ref(&fd.params) > 0 {
         lowerer_lower_fn_params_mut(lo, &fd.params)
     }
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("fn_mut_after_params name=" + str_from_bytes(name.buf, name.len) + " param_count=" + io_trace_i64_string((*(*lo).current_func).param_count))
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_params name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1852,6 +1918,9 @@ fn lowerer_lower_fn_item_mut(
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
     let result_reg = bpair.1
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("fn_mut_after_block name=" + str_from_bytes(name.buf, name.len) + " result_reg=" + io_trace_i64_string(result_reg))
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_block name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1882,6 +1951,9 @@ fn lowerer_lower_fn_item_mut(
     }
     lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = IR_INVALID_FN
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("fn_mut_done name=" + str_from_bytes(name.buf, name.len))
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_done name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1912,6 +1984,95 @@ fn lowerer_lower_impl_methods_mut(
             }
             _ => break
         }
+    }
+}
+
+fn lowerer_lower_impl_methods_ref_mut(
+    lo: &! Lowerer,
+    type_name: Name,
+    methods: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    let mangled = ir_mangle_method_name(type_name, head.name)
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            lowerer_lower_fn_item_mut(lo, mangled, &(*fd))
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+fn lowerer_lower_program_bodies_ref_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    var item_idx: i64 = 0
+    while true {
+        if lower_body_diag_enabled() {
+            lower_body_trace_append("body_mut top idx=" + io_trace_i64_string(item_idx))
+        }
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                let kind = (*head).kind
+                if lower_body_diag_enabled() {
+                    lower_body_trace_append("body_mut kind=" + io_trace_i64_string(kind as i64))
+                    lower_body_trace_append("body_mut before_name")
+                }
+                let name = (*head).name
+                if kind == ItemKind::ItemFn {
+                    if lower_body_diag_enabled() {
+                        lower_body_trace_append("body_mut_fn name=" + str_from_bytes(name.buf, name.len))
+                    }
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &(*head).fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                            if lower_body_diag_enabled() {
+                                lower_body_trace_append("body_mut_fn after_lower_fn")
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &(*head).impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => { lowerer_lower_impl_methods_ref_mut(lo, name, &(*id).methods) }
+                        _ => {}
+                    }
+                }
+                if lower_body_diag_enabled() {
+                    lower_body_trace_append("body_mut before_tail")
+                }
+                current = &(*list).tail
+                item_idx = item_idx + 1
+                if lower_body_diag_enabled() {
+                    lower_body_trace_append("body_mut after_tail")
+                }
+            }
+            _ => {
+                if lower_body_diag_enabled() {
+                    lower_body_trace_append("body_mut none")
+                }
+                break
+            }
+        }
+    }
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("body_mut done")
     }
 }
 
@@ -2048,27 +2209,29 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 
 fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
     match *opt {
-        Some(te) => {
-            if (*te).kind == TypeExprKind::TypeNamed {
-                return ir_path_first_name((*te).path)
-            }
-            ir_empty_name()
-        }
+        Some(te) => lower_param_struct_type_name(&(*te)),
         None => ir_empty_name(),
     }
 }
 
-// Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
-// `self.method()` (and `param.method()`) can resolve the receiver's type — params were
-// previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
+// Struct-type name of a parameter, unwrapping nested `&T` / `&!T`. Used so a method
+// body's `self.method()` (and `param.method()`) can resolve the receiver's type;
+// imported mutable references can arrive as layered reference nodes.
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*ty).kind == TypeExprKind::TypeNamed {
         return ir_path_first_name((*ty).path)
     }
     if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
-        return lower_opt_type_named_name(&(*ty).inner)
+        match (*ty).inner {
+            Some(inner) => return lower_param_struct_type_name(&(*inner)),
+            None => return ir_empty_name(),
+        }
     }
     ir_empty_name()
+}
+
+fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
+    (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -3106,6 +3269,12 @@ impl Lowerer {
                 stk.array_elem_float[idx as usize] = 0
                 stk.wide_bits[idx as usize] = 0
                 stk.wide_signed[idx as usize] = 0
+                stk.global_bss_offsets[idx as usize] = 0
+                stk.global_bss_sizes[idx as usize] = 0
+                stk.is_global[idx as usize] = 0
+                stk.is_ref[idx as usize] = 0
+                stk.scalar_kind[idx as usize] = 0
+                stk.closure_fn_id[idx as usize] = -1
                 stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -3204,6 +3373,17 @@ impl Lowerer {
         while i >= 0 {
             if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
                 return (*self.locals).is_global[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn lookup_local_is_ref(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).is_ref[i as usize] == 1
             }
             i = i - 1
         }
@@ -3620,9 +3800,10 @@ impl Lowerer {
             // that emptied enum_variants), so loop labels were never recorded and
             // every break/continue then failed current_break/continue_label and
             // reported an error (ir_bodies_failed) in both for and while loops.
-            var ll_box = lo.loop_labels
-            (*ll_box).continue_labels[lo.loop_depth as usize] = continue_label
-            (*ll_box).break_labels[lo.loop_depth as usize] = break_label
+            var labels = *lo.loop_labels
+            labels.continue_labels[lo.loop_depth as usize] = continue_label
+            labels.break_labels[lo.loop_depth as usize] = break_label
+            lo.loop_labels = Box::new(labels)
             lo.loop_depth = lo.loop_depth + 1
             lo
         } else {
@@ -4771,6 +4952,12 @@ impl Lowerer {
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
+                        locals.global_bss_offsets[idx as usize] = 0
+                        locals.global_bss_sizes[idx as usize] = 0
+                        locals.is_global[idx as usize] = 0
+                        locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        locals.scalar_kind[idx as usize] = 0
+                        locals.closure_fn_id[idx as usize] = -1
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -5272,14 +5459,19 @@ impl Lowerer {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
         lo.scope_depth = lo.scope_depth + 1
-        let saved_local_count = lo.locals.count
+        let saved_local_count = (*lo.locals).count
         var current = &blk.stmts
         var reg = IR_INVALID_REG
         var saw_stmt = false
+        var stmt_idx: i64 = 0
         while true {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    let next_ref = &(*list).tail
+                    if lower_body_diag_enabled() {
+                        lower_body_trace_append("block_stmt_begin idx=" + io_trace_i64_string(stmt_idx) + " kind=" + io_trace_i64_string(stmt_ref.kind as i64))
+                    }
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         lo.lower_let_stmt_ref(stmt_ref, false)
                     } else if stmt_ref.kind == StmtKind::StmtVar {
@@ -5300,24 +5492,58 @@ impl Lowerer {
                     lo = pair.0
                     reg = pair.1
                     saw_stmt = true
-                    current = &(*list).tail
+                    if lower_body_diag_enabled() {
+                        lower_body_trace_append("block_stmt_done idx=" + io_trace_i64_string(stmt_idx) + " reg=" + io_trace_i64_string(reg))
+                    }
+                    stmt_idx = stmt_idx + 1
+                    current = next_ref
                 }
                 _ => break
             }
         }
+        if lower_body_diag_enabled() {
+            var saw_stmt_i: i64 = 0
+            if saw_stmt {
+                saw_stmt_i = 1
+            }
+            lower_body_trace_append("block_loop_done saw=" + io_trace_i64_string(saw_stmt_i) + " reg=" + io_trace_i64_string(reg))
+        }
         if !saw_stmt {
+            if lower_body_diag_enabled() {
+                lower_body_trace_append("block_emit_unit_begin")
+            }
             let unit_pair = lo.emit_unit()
             lo = unit_pair.0
             reg = unit_pair.1
+            if lower_body_diag_enabled() {
+                lower_body_trace_append("block_emit_unit_done reg=" + io_trace_i64_string(reg))
+            }
         }
         if lo.scope_depth > 0 {
+            if lower_body_diag_enabled() {
+                lower_body_trace_append("block_scope_dec_begin depth=" + io_trace_i64_string(lo.scope_depth))
+            }
             lo.scope_depth = lo.scope_depth - 1
+            if lower_body_diag_enabled() {
+                lower_body_trace_append("block_scope_dec_done depth=" + io_trace_i64_string(lo.scope_depth))
+            }
         }
-        lo.locals.count = saved_local_count
+        if lower_body_diag_enabled() {
+            lower_body_trace_append("block_locals_restore_begin current=" + io_trace_i64_string((*lo.locals).count) + " saved=" + io_trace_i64_string(saved_local_count))
+        }
+        var locals_restore = *lo.locals
+        locals_restore.count = saved_local_count
+        lo.locals = Box::new(locals_restore)
+        if lower_body_diag_enabled() {
+            lower_body_trace_append("block_locals_restore_done current=" + io_trace_i64_string((*lo.locals).count))
+        }
         if lower_live_diag_enabled() {
             print("lower_live: block_end reg=")
             print_int(reg)
             print("\n")
+        }
+        if lower_body_diag_enabled() {
+            lower_body_trace_append("block_return reg=" + io_trace_i64_string(reg))
         }
         (lo, reg)
     }
@@ -5545,10 +5771,10 @@ impl Lowerer {
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
-        let target_opt: Option<Box<Expr>> = s.target
+        let target_opt_ref: &Option<Box<Expr>> = &s.target
 
         if s.assign_op != AssignOp::AssignEq {
-            let old_pair = lo.lower_opt_expr_ref(&target_opt)
+            let old_pair = lo.lower_opt_expr_ref(target_opt_ref)
             lo = old_pair.0
             let old_val = old_pair.1
             let bin_op = if s.assign_op == AssignOp::AssignAdd {
@@ -5563,7 +5789,7 @@ impl Lowerer {
             rhs = compound_reg
         }
 
-        match target_opt {
+        match *target_opt_ref {
             Some(target_expr) => {
                 if (*target_expr).kind == ExprKind::ExprIdent {
                         let dst = lo.lookup_local((*target_expr).name)
@@ -5589,32 +5815,68 @@ impl Lowerer {
                         // Escape safety for `obj.field = &local` (and array/deref store
                         // escapes) is enforced by the checker's escape analysis (E091) at
                         // store sites, so lowering stores unconditionally here.
-                        let base_opt: Option<Box<Expr>> = (*target_expr).left
-                        match base_opt {
+                        let base_opt_ref: &Option<Box<Expr>> = &(*target_expr).left
+                        match *base_opt_ref {
                             Some(base_expr) => {
+                                let base_is_ref = if (*base_expr).kind == ExprKind::ExprIdent {
+                                    lo.lookup_local_is_ref((*base_expr).name)
+                                } else {
+                                    false
+                                }
                                 let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
                                 let pair_base = lo.lower_expr_ref(&(*base_expr))
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
-                                lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                var set_instr = ir_field_set(base_reg, fidx, rhs, (*target_expr).name)
+                                if base_is_ref {
+                                    set_instr.label_id = 1
+                                }
+                                lo = lo.emit(set_instr)
                                 (lo, rhs)
                             }
                             _ => (lo.report_error(), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let target_base_is_ref = match (*target_expr).left {
+                            Some(target_base_expr) => {
+                                if (*target_base_expr).kind == ExprKind::ExprIdent {
+                                    lo.lookup_local_is_ref((*target_base_expr).name)
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        }
+                        if lower_body_diag_enabled() {
+                            lower_body_trace_append("assign_index before_base")
+                        }
                         let pair_base = lo.lower_opt_expr_ref(&(*target_expr).left)
                         lo = pair_base.0
                         let base_reg = pair_base.1
+                        if lower_body_diag_enabled() {
+                            lower_body_trace_append("assign_index after_base base=" + io_trace_i64_string(base_reg))
+                        }
                         let pair_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
-                        lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
+                        if lower_body_diag_enabled() {
+                            lower_body_trace_append("assign_index after_idx idx=" + io_trace_i64_string(idx_reg) + " rhs=" + io_trace_i64_string(rhs))
+                        }
+                        var index_set_instr = ir_index_set(base_reg, idx_reg, rhs)
+                        if target_base_is_ref {
+                            index_set_instr.label_id = 1
+                        }
+                        lo = lo.emit(index_set_instr)
+                        if lower_body_diag_enabled() {
+                            lower_body_trace_append("assign_index after_emit")
+                        }
                         (lo, rhs)
                 } else if (*target_expr).kind == ExprKind::ExprUnary {
                         if (*target_expr).un_op == UnaryOp::OpDeref {
                             // `*p = val`: a Box stores into field 0 (handle-resolved); a true
                             // reference stores through the raw pointer.
-                            let is_box_t = match (*target_expr).left {
+                            let target_left_ref: &Option<Box<Expr>> = &(*target_expr).left
+                            let is_box_t = match *target_left_ref {
                                 Some(op) => {
                                     if (*op).kind == ExprKind::ExprIdent {
                                         ir_name_is_box(lo.lookup_local_struct_type((*op).name))
@@ -7054,6 +7316,16 @@ impl Lowerer {
         let fidx = self.field_idx_for_base_ref(&e.left, e.name)
         let field_is_float = self.field_is_float_for_base_ref(&e.left, e.name) || self.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = self.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let base_is_ref = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    self.lookup_local_is_ref((*base_expr_ref).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
         if lower_aggregate_diag_enabled() {
             print("lower_agg: field name=")
             print(str_from_bytes(e.name.buf, e.name.len))
@@ -7065,7 +7337,7 @@ impl Lowerer {
             print_int(if field_array_elem_is_float { 1 } else { 0 })
             print("\n")
         }
-        if str_eq(read_env("SOUNIO_DUMP_LAYOUTS"), "1") {
+        if lower_dump_layouts_enabled() {
             print("DUMP field=")
             print(str_from_bytes(e.name.buf, e.name.len))
             print(" idx=")
@@ -7100,7 +7372,10 @@ impl Lowerer {
         let lo2 = pair_d.0
         let dst = pair_d.1
         var instr = ir_field_get(dst, base, fidx, e.name)
-        if field_is_float || field_array_elem_is_float {
+        if base_is_ref {
+            instr.label_id = 1
+        }
+        if field_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
         }
         var lo3 = lo2.emit(instr)
@@ -7115,6 +7390,16 @@ impl Lowerer {
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
+        let base_is_ref = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    self.lookup_local_is_ref((*base_expr_ref).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base = pair_b.1
@@ -7137,6 +7422,9 @@ impl Lowerer {
         let lo3 = pair_d.0
         let dst = pair_d.1
         var instr = ir_index_get(dst, base, idx)
+        if base_is_ref {
+            instr.label_id = 1
+        }
         if index_elem_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
         }
@@ -7305,8 +7593,8 @@ impl Lowerer {
 
         var lo = lo4.emit(ir_branch_false(cond, l_else))
 
-        let then_block_opt: Option<Box<Block>> = e.block
-        let pair_then = match then_block_opt {
+        let then_block_opt_ref: &Option<Box<Block>> = &e.block
+        let pair_then = match *then_block_opt_ref {
             Some(blk) => lo.lower_block_ref(&(*blk)),
             None => lo.emit_unit(),
         }
@@ -7316,8 +7604,8 @@ impl Lowerer {
         lo = lo.emit(ir_jump(l_end))
         lo = lo.emit(ir_label(l_else))
 
-        let else_expr_opt: Option<Box<Expr>> = e.else_expr
-        let pair_else = match else_expr_opt {
+        let else_expr_opt_ref: &Option<Box<Expr>> = &e.else_expr
+        let pair_else = match *else_expr_opt_ref {
             Some(ee) => lo.lower_expr_ref(&(*ee)),
             None => lo.emit_unit(),
         }
@@ -7358,8 +7646,8 @@ impl Lowerer {
         let cond = pair_cond.1
         lo = lo.emit(ir_branch_false(cond, l_end))
         lo = lo.push_loop_labels(l_top, l_end)
-        let while_block_opt: Option<Box<Block>> = e.block
-        match while_block_opt {
+        let while_block_opt_ref: &Option<Box<Block>> = &e.block
+        match *while_block_opt_ref {
             Some(blk) => {
                 let pair_body = lo.lower_block_ref(&(*blk))
                 lo = pair_body.0
@@ -7382,8 +7670,8 @@ impl Lowerer {
 
         var lo = lo2.emit(ir_label(l_top))
         lo = lo.push_loop_labels(l_top, l_end)
-        let loop_block_opt: Option<Box<Block>> = e.block
-        match loop_block_opt {
+        let loop_block_opt_ref: &Option<Box<Block>> = &e.block
+        match *loop_block_opt_ref {
             Some(blk) => {
                 let pair_body = lo.lower_block_ref(&(*blk))
                 lo = pair_body.0
@@ -7406,8 +7694,8 @@ impl Lowerer {
         //   l_end:
         // Only integer range iterables (ExprRange) are supported; any other
         // iterable reports an error rather than silently miscompiling.
-        let iter_opt: Option<Box<Expr>> = e.left
-        match iter_opt {
+        let iter_opt_ref: &Option<Box<Expr>> = &e.left
+        match *iter_opt_ref {
             Some(iter_box) => {
                 if (*iter_box).kind != ExprKind::ExprRange {
                     return (self.report_error(), IR_INVALID_REG)
@@ -7451,8 +7739,8 @@ impl Lowerer {
                 lo = lo.emit(ir_branch_false(cond, l_end))
 
                 lo = lo.push_loop_labels(l_cont, l_end)
-                let for_block_opt: Option<Box<Block>> = e.block
-                match for_block_opt {
+                let for_block_opt_ref: &Option<Box<Block>> = &e.block
+                match *for_block_opt_ref {
                     Some(blk) => {
                         let pair_body = lo.lower_block_ref(&(*blk))
                         lo = pair_body.0
@@ -7480,8 +7768,8 @@ impl Lowerer {
     }
 
     fn lower_block_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let block_opt: Option<Box<Block>> = e.block
-        match block_opt {
+        let block_opt_ref: &Option<Box<Block>> = &e.block
+        match *block_opt_ref {
             Some(blk) => self.lower_block_ref(&(*blk)),
             None => self.emit_unit(),
         }
@@ -8214,15 +8502,15 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
     var callee_param_counts: [i64; 2048] = [0; 2048]
     var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
-    while i < module.fn_count {
-        callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
-        callee_param_counts[i as usize] = module.functions[i as usize].param_count
+    while i < (*module).fn_count {
+        callee_strategies[i as usize] = (*module).functions[i as usize].compile_strategy
+        callee_param_counts[i as usize] = (*module).functions[i as usize].param_count
         i = i + 1
     }
 
     i = 0
-    while i < module.fn_count {
-        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
+    while i < (*module).fn_count {
+        ir_patch_validated_calls_in_function((*module).fn_count, callee_strategies, callee_param_counts, &! (*module).functions[i as usize], &! stats)
         i = i + 1
     }
     stats
@@ -8296,8 +8584,12 @@ pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div,
 }
 
 fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic: &IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_program_items_to_ir_summary_box_with_epistemic_ref(&prog.items, epistemic)
+}
+
+fn lower_program_items_to_ir_summary_box_with_epistemic_ref(items: &Option<Box<ItemList>>, epistemic: &IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_with_epistemic(epistemic)
-    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    lowerer_preseed_program_items_mut(&! lo, items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)
@@ -8318,7 +8610,17 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
 // right field_idx.
 fn lower_program_to_ir_summary_box_with_externs_ref(
     prog: &Program,
-    programs: &[Program; 256],
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_program_items_to_ir_summary_box_with_externs_ref(&prog.items, programs, program_count, self_index, epistemic)
+}
+
+fn lower_program_items_to_ir_summary_box_with_externs_ref(
+    items: &Option<Box<ItemList>>,
+    programs: &! [Program; 256],
     program_count: i64,
     self_index: i64,
     epistemic: &IrEpistemicSection
@@ -8327,12 +8629,12 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
-            let ext_prog = (*programs)[i as usize]
-            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+            let ext_items = (*programs)[i as usize].items
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
         }
         i = i + 1
     }
-    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    lowerer_preseed_program_items_mut(&! lo, items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)
@@ -8576,14 +8878,31 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     summary: &IrProgramSummary,
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(&prog.items, summary, epistemic)
+}
+
+fn lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(
+    items: &Option<Box<ItemList>>,
+    summary: &IrProgramSummary,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo2 = lowerer_new_from_program_summary(summary, epistemic)
+    lo2 = lo2.lower_program_bodies_ref(items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("body_stage after_body_lower")
     }
+    if !lo2.had_error {
+        if lower_body_diag_enabled() {
+            lower_body_trace_append("body_stage skip_patch_for_imported_probe")
+        }
+    }
+    if lower_body_diag_enabled() {
+        lower_body_trace_append("body_stage before_result")
+    }
+    var module_box = lo2.module
     IrLowerBoxResult {
-        module: lo2.module,
+        module: module_box,
         error_count: lo2.error_count,
         had_error: lo2.had_error,
         patch_stats: patch_stats,
