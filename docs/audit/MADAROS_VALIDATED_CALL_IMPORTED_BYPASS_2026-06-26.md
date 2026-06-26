@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-validated-call-imported-bypass-2026-06-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-validated-call-imported-bypass-2026-06-26
+-->
+
 # Madaros dispatch — `ir_patch_validated_calls` imported-path bypass is load-bearing (2026-06-26)
 
 *Status:* TRIAGED, FIX DEFERRED. Recorded as a forensic dispatch per CLAUDE.md §8
