@@ -155,6 +155,9 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
   run_live_step stdlib-surface-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_stdlib_surface_support_gate.sh"
+  run_live_step direct-driver-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+    -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+    bash "$ROOT_DIR/scripts/ci/sounio_direct_driver_support_gate.sh"
   run_live_step editor-tooling-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_editor_tooling_support_gate.sh"
@@ -179,13 +182,18 @@ registry = Path(sys.argv[1])
 blocker_tsv = Path(sys.argv[2])
 summary_json = Path(sys.argv[3])
 
-# Release-critical means the surface is part of a broad "production-ready
-# language/product" claim rather than a research/prototype support contract.
-# A surface may remain prototype in the repo, but then the broad release claim
-# must fail until the surface is closed or removed from the release contract.
+# Release-critical means the surface is part of the checked release support
+# contract. Some broader research-frontier claims deliberately remain prototype
+# in the repo, but then the release contract must cite a narrower closed support
+# claim and public docs must keep the broader frontier explicitly out of scope.
+# `direct_driver` is one such broad frontier; `direct_driver.support` is the
+# bounded release-support claim. Requiring this support gate does not imply
+# general direct-driver readiness or stability. It only locks in the named
+# 24-fixture research cohort while broad direct_driver remains explicitly
+# prototype/downgraded and unsupported for release purposes.
 release_critical = {
     "binary.source": "checked modular Madaros prebuilt source-build evidence is not closed",
-    "direct_driver": "large-surface direct-driver execution remains a maturity frontier",
+    "direct_driver.support": "checked bounded direct-driver support contract is not closed",
     "stdlib.surface": "checked bounded stdlib support contract is not closed",
     "tooling.package": "local package support contract is not closed",
     "tooling.editor": "checked editor-tooling support contract is not closed",
