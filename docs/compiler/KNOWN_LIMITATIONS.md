@@ -47,18 +47,33 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | Refinement Types + SMT | Validated research | Static engine handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic. |
 | Module imports across files | Validated research | Registry: `modules.imports = validated_research`. |
 | Ownership / borrowing examples | Validated research | Registry: `ownership.borrowing = validated_research`; avoid Rust equivalence. |
-| LSP | Validated research → Prototype (per registry) | Real (`tools/lsp/sounio-lsp.sh`, JSON-RPC, 8 methods); registry row `tooling.editor` says **prototype**. |
+| Editor tooling preview | Validated research | Registry: `tooling.editor = validated_research/closed`. `scripts/ci/sounio_editor_tooling_support_gate.sh` proves public `bin/souc format`/`fmt`, file-backed `bin/souc repl`, preview `bin/souc lsp --stdio`, G5a/G5b, bash LSP smoke, initialize capability smoke, and VS Code/Helix/Neovim static wiring. This is a SOTA-preview support contract, not mature IDE support. |
+| LSP pure-Sounio server rebuild | Prototype blocker | `self-hosted/lsp/server.sio` currently fails to rebuild under the active Madaros path; the checked preview LSP route is `tools/lsp/sounio-lsp.sh` via `bin/souc lsp --stdio`. Do not claim the pure-Sounio LSP rebuild until `tools/lsp/test_protocol.sh` or an equivalent gate is green. |
 | GPU PTX backend | Validated research | Registry: `gpu.ptx = validated_research`. Named gate covers L4 fixtures; out-of-fixture behavior is research. |
 | 168 / Cayley-Dickson algebra | Validated research | Registry: `algebra.168 = validated_research`. Algebraic/formal artifacts only — no biological or EEG advantage claims. |
 | Ontology subsystem | Validated research | Registry: `ontology = validated_research`. Rebuilt ontology validation surfaces only. |
+
+Editor-tooling details:
+
+- Formatter: `souc format <file>` / `souc fmt` dispatches to
+  `tools/fmt/sounio-fmt.sh`. Phase 1 is token-level and idempotent for the
+  G5a corpus; it does not claim AST round-trip formatting or full style
+  configuration.
+- REPL: `souc repl` dispatches to `tools/repl.sh`, a file-backed eval loop
+  that accumulates definitions and runs expressions through the active `souc`
+  wrapper. A fully Sounio-native eval loop remains deferred until process-spawn
+  primitives are available.
+- LSP: `souc lsp --stdio` dispatches to the preview `tools/lsp/sounio-lsp.sh`
+  server. It is smoke-tested for JSON-RPC framing, compiler-backed diagnostics,
+  hover/definition roundtrips, multi-document isolation, timeouts, and failure
+  diagnostics. No pure-Sounio LSP rebuild under current Madaros is claimed or
+  demonstrated; that server source remains a separate rebuild blocker.
 
 ### Prototype (registry: prototype / downgraded)
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
 | **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
-| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **G5a landed 2026-05-28.** `souc format <file>` / `souc fmt` dispatches to `tools/fmt/sounio-fmt.sh`. Phase 1 rules (tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` + `->` spacing) normalised outside strings/comments. Idempotency gate `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
-| **REPL** | `tooling.editor = prototype` | **G5b landed 2026-05-28.** `souc repl` dispatches to `tools/repl.sh`, a souc-native file-based eval loop (each input is compiled and executed by *this* `souc` binary, not a separate Rust reimplementation). Gate: `scripts/gates/g5b_repl_eval.sh` PASS. Open: fully-Sounio eval loop in `self-hosted/repl/` deferred (needs process-spawn primitives). |
 | **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
