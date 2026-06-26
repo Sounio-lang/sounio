@@ -149,6 +149,9 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
   run_live_step website-docs-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_website_docs_support_gate.sh"
+  run_live_step package-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+    -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+    bash "$ROOT_DIR/scripts/ci/sounio_package_support_gate.sh"
   run_live_step install-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_install_support_gate.sh"
@@ -178,7 +181,7 @@ release_critical = {
     "binary.source": "checked modular Madaros prebuilt source-build evidence is not closed",
     "direct_driver": "large-surface direct-driver execution remains a maturity frontier",
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
-    "tooling.package": "package manager has no public registry launch/support contract",
+    "tooling.package": "local package support contract is not closed",
     "tooling.editor": "formatter, REPL, and editor tooling are prototype surfaces",
     "install": "installation is repo-artifact based, not a broad supported distribution path",
     "website.docs": "checked website/docs support contract is not closed",

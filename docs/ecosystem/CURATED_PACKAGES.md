@@ -9,7 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.cura
 
 # Pacotes Curados do Ecossistema Sounio (v1.0)
 
-Este documento define a **lista inicial de pacotes oficiais** que devem ser desenvolvidos e mantidos com alto padrão de qualidade epistêmica.
+Status: roadmap/design list; these are not published public-registry packages.
+
+Este documento define uma lista inicial de pacotes candidatos que devem ser desenvolvidos e mantidos com alto padrão de qualidade epistêmica antes de qualquer lançamento público.
 
 ## Critérios de Pacote Curado
 
@@ -129,4 +131,4 @@ Todo pacote curado deve ter:
 
 **Recomendação:** Começar o desenvolvimento por `epistemic-core` seguido de `darwin-pbpk`, pois são os de maior valor científico e regulatório imediato.
 
-**Próximo:** Arquitetura do Registry Público.
+**Próximo:** Arquitetura do registry público futuro.
