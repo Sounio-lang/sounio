@@ -965,6 +965,17 @@ fn name_is_print(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_assert(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 6 { return false }
+    if n.buf[0] != 97 as i8 { return false }      // 'a'
+    if n.buf[1] != 115 as i8 { return false }     // 's'
+    if n.buf[2] != 115 as i8 { return false }     // 's'
+    if n.buf[3] != 101 as i8 { return false }     // 'e'
+    if n.buf[4] != 114 as i8 { return false }     // 'r'
+    if n.buf[5] != 116 as i8 { return false }     // 't'
+    true
+}
+
 fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 9 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1008,6 +1019,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_int(name) { return 1 }
     if name_ref_is_print_char(name) { return 2 }
     if name_ref_is_print(name) { return 3 }
+    if name_is_assert(*name) { return 21 }
     0
 }
 
@@ -1071,6 +1083,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_log((*func).name) { return 17 }
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
+    if name_is_assert((*func).name) { return 21 }
     0
 }
 
@@ -3185,6 +3198,24 @@ fn emit_builtin_print_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_ret(nc)
 }
 
+fn emit_builtin_assert(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_test_rdi_rdi(c.code)
+    c.code = emit_jnz_rel8(c.code, 16)
+    c.code = emit_exit(c.code, 1)
+    c.code = emit_mov_rax_imm(c.code, 0)
+    c.code = emit_ret(c.code)
+    c
+}
+
+fn emit_builtin_assert_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_test_rdi_rdi(nc)
+    nc_emit_jnz_rel8(nc, 16)
+    nc_emit_exit_code(nc, 1)
+    nc_emit_mov_rax_imm(nc, 0)
+    nc_emit_ret(nc)
+}
+
 // ============================================================================
 // M4: argv access builtins
 // ============================================================================
@@ -4709,6 +4740,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_log(func.name) { return emit_builtin_log(c) }
     if name_is_sin(func.name) { return emit_builtin_sin(c) }
     if name_is_cos(func.name) { return emit_builtin_cos(c) }
+    if name_is_assert(func.name) { return emit_builtin_assert(c) }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -5457,6 +5489,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_log(name) { return 17 }
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
+    if name_is_assert(name) { return 21 }
     0
 }
 
@@ -5490,6 +5523,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 17 { native_v2_persist_builtin_emit_into(nc, emit_builtin_log((*nc))); return }
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
+    if builtin_id == 21 { emit_builtin_assert_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5542,6 +5576,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if name_is_log(func.name) { return emit_builtin_log(c) }
     if name_is_sin(func.name) { return emit_builtin_sin(c) }
     if name_is_cos(func.name) { return emit_builtin_cos(c) }
+    if name_is_assert(func.name) { return emit_builtin_assert(c) }
 
     c.current_strategy = func.compile_strategy
 
@@ -6369,6 +6404,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                 nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
             }
+        } else if instr_op == IrOpcode::IrLoadBool {
+            nc_emit_mov_rax_imm(nc, (*func).instrs[i as usize].imm_i64)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrLoadFloat {
             nc_emit_mov_rax_imm(nc, f64_to_bits((*func).instrs[i as usize].imm_f64))
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
@@ -7299,6 +7338,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
     if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
     if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
+    if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)

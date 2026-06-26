@@ -28,6 +28,36 @@ trim_before_main() {
   ' "$1"
 }
 
+emit_sio_decl() {
+  local file="$1"
+  local kind="$2"
+  local name="$3"
+  awk -v kind="$kind" -v name="$name" '
+    function is_target_decl(line) {
+      if (kind == "fn") {
+        return line ~ ("^fn " name "\\(")
+      }
+      return line ~ ("^" kind " " name "([ {]|$)")
+    }
+
+    function is_top_level_decl(line) {
+      return line ~ /^(fn|struct) /
+    }
+
+    is_target_decl($0) {
+      printing = 1
+    }
+
+    printing && is_top_level_decl($0) && !is_target_decl($0) {
+      exit
+    }
+
+    printing {
+      print
+    }
+  ' "$file"
+}
+
 emit_i64_to_string_stub() {
   cat <<'SIO'
 fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
@@ -137,9 +167,23 @@ SIO
 
 {
   emit_i64_to_string_stub
-  sed -n '1,123p' "$METAL_PATH"
-  sed -n '1330,1408p' "$METAL_PATH"
-  sed -n '1548,1596p' "$METAL_PATH"
+  emit_sio_decl "$METAL_PATH" struct MetalBuf
+  emit_sio_decl "$METAL_PATH" fn metal_buf_new
+  emit_sio_decl "$METAL_PATH" fn metal_push_byte
+  emit_sio_decl "$METAL_PATH" fn metal_push_str
+  emit_sio_decl "$METAL_PATH" fn metal_buf_contains
+  emit_sio_decl "$METAL_PATH" fn metal_emit_sqrt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_rsqrt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_exp2
+  emit_sio_decl "$METAL_PATH" fn metal_emit_log2
+  emit_sio_decl "$METAL_PATH" fn metal_emit_sin
+  emit_sio_decl "$METAL_PATH" fn metal_emit_cos
+  emit_sio_decl "$METAL_PATH" fn metal_emit_abs
+  emit_sio_decl "$METAL_PATH" fn metal_emit_rcp
+  emit_sio_decl "$METAL_PATH" fn metal_emit_setp_gt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_setp_ne
+  emit_sio_decl "$METAL_PATH" fn metal_emit_bra
+  emit_sio_decl "$METAL_PATH" fn metal_emit_exit
   cat <<'SIO'
 
 fn omega_metal_opcode_pattern_smoke() -> bool with Mut, Panic, Div, Alloc {
