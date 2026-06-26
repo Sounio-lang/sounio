@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-tuple-let-desugar-2026-06-25
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-tuple-let-desugar-2026-06-25
+-->
+
 ---
 docs:meta
 title: Madaros tuple-let binding desugar (parser)
