@@ -94,15 +94,60 @@ var proof_over: i32 = 0
 // on the unassigned var with max Q. USE_LRB=0 falls back to VSIDS for A/B
 // measurement; the choice is search-only (drat-trim verifies either way).
 var USE_LRB: i32 = 1
-// F2 symmetry breaking: precolour a known clique. Colours are interchangeable,
-// so any proper colouring can be permuted to give clique vertex i colour i —
-// satisfiability-preserving, hence F∧SB UNSAT ⟹ F UNSAT. SB=1 enables it.
+// USE_LRB=0: VSIDS, =1: LRB, =2: Epistemic Thompson Sampling [first-in-class]
 var SB: i32 = 0
 var Q: [i64; 8192] = [0; 8192]
 var lrb_assigned: [i64; 8192] = [0; 8192]
 var lrb_part: [i64; 8192] = [0; 8192]
-var lrb_alpha: i64 = 400          // alpha * 1000, decays 0.40 -> 0.06
+var lrb_alpha: i64 = 400
 var LRB_SCALE: i64 = 1048576
+
+// Epistemic Thompson Sampling (score_mode=3 in smt.sio)
+// act_mean[v] = accumulated blame (first moment)
+// act_var[v]  = accumulated uncertainty (second moment, GUM propagation)
+// Score = act_mean + sign·|z|·sqrt(act_var)  where z ~ Rayleigh via hash
+var act_mean: [f64; 8192] = [0.0; 8192]
+var act_var:  [f64; 8192] = [0.0; 8192]
+var ts_step: i32 = 0
+var ts_var_inc: f64 = 1.0
+var ts_sigma: [f64; 8192] = [0.0; 8192]
+
+fn ts_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r)  i = i + 1 }
+    return r
+}
+
+fn ts_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = (x - 1.0) / (x + 1.0)
+    var y2 = y * y
+    var r = 0.0
+    var k = 1.0
+    var i = 0
+    while i < 30 {
+        r = r + y / k
+        y = y * y2
+        k = k + 2.0
+        i = i + 1
+    }
+    return 2.0 * r
+}
+
+fn ts_hash(seed: i32) -> f64 with Mut, Div, Panic {
+    // xorshift32 → [0,1)
+    var s: i32 = seed * 2654435761
+    s = s ^ (s >> 13)
+    s = s * 1597334677
+    s = s ^ (s >> 17)
+    var u = (s as f64) / 2147483648.0
+    if u < 0.0 { u = 0.0 - u }
+    if u < 0.0001 { u = 0.0001 }
+    if u > 0.9999 { u = 0.9999 }
+    return u
+}
 
 // E1 measurement: learned literals before/after minimisation
 var lits_before: i64 = 0
@@ -334,12 +379,26 @@ fn rescale() with Mut, Panic {
     while i <= nvars { activity[i] = activity[i] / 1000000000  i = i + 1 }
     var_inc = var_inc / 1000000000
     if var_inc < 1 { var_inc = 1 }
+    if USE_LRB == 2 {
+        var j: i32 = 1
+        while j <= nvars { act_mean[j] = act_mean[j] / 1000000000.0  act_var[j] = act_var[j] / 1000000000000000000.0  j = j + 1 }
+        ts_var_inc = ts_var_inc / 1000000000.0
+    }
     pick_best = 0
     pick_best_key = 0 - 1
 }
 fn bump(v: i32) with Mut, Panic {
     activity[v] = activity[v] + var_inc
     if activity[v] > 1000000000000000000 { rescale() }
+    if USE_LRB == 2 {
+        // Epistemic bump: mean += inc, var += inc²·(L-1)/L
+        // L (clause length) is approximated from current LEARNT fill
+        var L: f64 = 3.0
+        if llen > 1 { L = llen as f64 }
+        var diffusion = (L - 1.0) / L
+        act_mean[v] = act_mean[v] + ts_var_inc
+        act_var[v] = act_var[v] + ts_var_inc * ts_var_inc * diffusion
+    }
     if assign[v] == 0 {
         var key = activity[v]
         if USE_LRB == 1 { key = Q[v] }
@@ -599,6 +658,7 @@ fn analyze(confl: i32) -> i32 with IO, Mut, Panic, Div {
         btlevel = maxl
     }
     var_inc = var_inc + var_inc / 20
+    ts_var_inc = ts_var_inc * 1.05
     if var_inc > 1000000000000000 { rescale() }
     last_lbd = comp_lbd()
     emit_proof_clause()
@@ -728,7 +788,41 @@ fn want_restart() -> i32 with Mut, Panic {
     return 0
 }
 
-fn pick() -> i32 with Mut, Panic {
+fn pick() -> i32 with Mut, Panic, Div {
+    if USE_LRB == 2 {
+        // Epistemic Thompson Sampling — O(1) per var via cached sigma
+        // Periodically refresh sigma[v] = sqrt(act_var[v])
+        // Per decision: score = act_mean[v] + noise·sigma_cached[v]
+        // noise = single Rayleigh sample shared across vars
+        if n_conflicts % 500 == 0 {
+            var vv: i32 = 1
+            while vv <= nvars { ts_sigma[vv] = ts_sqrt(act_var[vv])  vv = vv + 1 }
+        }
+        ts_step = ts_step + 1
+        // Single noise sample for this decision
+        var u = ts_hash(ts_step * 7919 + 13)
+        var z_mag = ts_sqrt(0.0 - 2.0 * ts_ln(u))
+        var u2 = ts_hash(ts_step * 3947 + 29)
+        var noise: f64 = z_mag
+        if u2 < 0.5 { noise = 0.0 - z_mag }
+        // Adaptive beta: high early (explore), low late (exploit)
+        var beta = 0.6
+        var density = n_conflicts as f64 / (n_conflicts as f64 + n_decisions as f64 + 1.0)
+        beta = 0.6 * (1.0 - density) * (1.0 - density)
+        var n = noise * beta
+        var best: i32 = 0
+        var bestkey: f64 = 0.0 - 1.0
+        var v: i32 = 1
+        while v <= nvars {
+            if assign[v] == 0 {
+                var score = act_mean[v] + n * ts_sigma[v]
+                if score > bestkey { bestkey = score  best = v }
+            }
+            v = v + 1
+        }
+        pick_best = best
+        return best
+    }
     if pick_best != 0 {
         if assign[pick_best] == 0 {
             var ckey = activity[pick_best]
@@ -1577,7 +1671,7 @@ fn add_value_precedence(nverts: i64, k: i64) with Mut, Div, Panic {
 
 fn reset_all() with Mut, Panic {
     var i: i32 = 0
-    while i < 8192 { assign[i]=0 vlevel[i]=0 reason[i]=0 seen[i]=0 phase[i]=0 activity[i]=0 Q[i]=0 lrb_assigned[i]=0 lrb_part[i]=0 i=i+1 }
+    while i < 8192 { assign[i]=0 vlevel[i]=0 reason[i]=0 seen[i]=0 phase[i]=0 activity[i]=0 Q[i]=0 lrb_assigned[i]=0 lrb_part[i]=0 act_mean[i]=0.0 act_var[i]=0.0 ts_sigma[i]=0.0 i=i+1 }
     var li: i32 = 0
     while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
     nvars=0 nclauses=0 trail_len=0 cur_level=0 qhead=0
