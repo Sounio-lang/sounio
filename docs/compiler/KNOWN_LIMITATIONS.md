@@ -67,11 +67,11 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
 | **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution is a maturity frontier. |
 | **Windows target** | `platform.windows = prototype` | PE/COFF lane wired; not stable. |
-| **`binary.source` (modular self-hosted tree)** | `prototype` | `lean_single.sio` remains the checked binary source until parity gates prove a swap. See "Multi-Module Bundle Gap" below. |
+| **`binary.source` (modular self-hosted tree)** | `validated_research` | The checked x86-64 Madaros prebuilt is built from `self-hosted/compiler/main.sio` and covered by the named Madaros source-to-ELF/full gates. This claim applies to `bin/madaros-linux-x86_64`, not the legacy `bin/souc-linux-x86_64`; `lean_single.sio` remains the bootstrap seed and escape hatch. |
 
 ### Active Known Bugs / Architectural Gaps
 
-**Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The gate to "modular source replaces `lean_single.sio`" is open.
+**Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The checked x86-64 Madaros prebuilt is source-built from that modular tree and covered by `scripts/ci/madaros_full_gate.sh` plus `scripts/ci/madaros_source_to_elf_gate.sh`. This is a validated-research source-built Madaros lane, not a claim that `lean_single.sio` has been retired as the bootstrap seed.
 
 Previously tracked G1 roots, all closed:
 
@@ -195,13 +195,13 @@ Cross-compiled binaries must be executed on the target OS. The compiler runs on 
 
 ---
 
-## Single-source build path (`lean_single.sio`)
+## Legacy bootstrap seed (`lean_single.sio`)
 
-**Status:** active constraint. Not a bug; a maturity-stage reality that contributors must know about before editing type-system logic.
+**Status:** bootstrap seed and escape hatch. Not a bug; a maturity-stage reality that contributors must know about before editing compiler logic.
 
 ### What the situation actually is
 
-The shipped compiler binary (`bin/souc-linux-x86_64`, consumed by the `bin/souc` launcher) is produced today from a **single self-hosted source file**:
+The preserved bootstrap compiler binary (`bin/souc-linux-x86_64`, also available through `SOUNIO_SOUC_ENGINE=lean_single`) is produced from a **single self-hosted source file**:
 
 - `self-hosted/compiler/lean_single.sio`
 
@@ -214,7 +214,7 @@ The modular directory layout most readers expect —
 - `self-hosted/ir/`
 - `self-hosted/native/`
 
-— does exist, is kept in sync by hand, and describes the architectural decomposition we aim to bootstrap from. **It is not yet the source the binary is built from.** The 2-stage bootstrap recipe below uses `lean_single.sio` exclusively:
+— is now the source for the checked x86-64 Madaros prebuilt (`bin/madaros-linux-x86_64`). The 2-stage bootstrap recipe below remains the legacy seed/escape-hatch path and uses `lean_single.sio` exclusively:
 
 ```bash
 ./bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio /tmp/souc-stage1
@@ -224,7 +224,7 @@ cp /tmp/souc-stage2 bin/souc-linux-x86_64
 
 ### Implication for contributors
 
-Any change to the type system, effects table, error codes, or surface syntax **must be made in `lean_single.sio`** to reach the binary. Changes made only to the modular tree are silently absent from the shipped compiler, even if the repo builds green and the tests pass against the stale binary.
+Changes to the default user-facing compiler path must land in the modular tree and be proven through the Madaros gates before refreshing `bin/madaros-linux-x86_64`. Changes needed for the legacy seed or explicit `SOUNIO_SOUC_ENGINE=lean_single` path still need the corresponding `lean_single.sio` update.
 
 Examples of this pattern in recent history:
 
@@ -233,14 +233,14 @@ Examples of this pattern in recent history:
 
 ### Risk of silent divergence
 
-Because the two universes are kept in lock-step by discipline rather than by a test, a change that touches only one side can pass CI without any signal. Until an operational-parity harness lands under `tests/parity/`, reviewers of a PR that modifies type-system logic should explicitly confirm that `lean_single.sio` was touched and that a 2-stage bootstrap was run.
+Because the modular compiler and legacy seed are no longer the same source file, reviewers should check which lane a PR affects. Default Madaros changes need the modular-source build plus named Madaros gates; legacy-seed changes still need a `lean_single.sio` bootstrap proof.
 
 ### Planned resolution
 
 1. **Parity harness (`tests/parity/`, planned near-term).** For a fixed set of `.sio` programs drawn from `examples/` and `tests/compile-fail/`, compile via both paths and diff the stdout/stderr and exit codes (not the binaries — timestamps and symbol ordering make binary-equality unreliable). Divergence flips CI red.
-2. **Source swap (roadmap, long term).** Rebuild `bin/souc-linux-x86_64` from the modular tree and retire `lean_single.sio`. This is a multi-week refactor and is not a Wave 9 target.
+2. **Bootstrap retirement (roadmap, long term).** Retire `lean_single.sio` as an escape hatch once the modular compiler has enough fixed-point and parity evidence.
 
-Until both land, treat `lean_single.sio` as the source of truth for the binary and treat the modular tree as the maintained future target.
+Until that lands, treat the modular tree as the source for the default Madaros prebuilt and `lean_single.sio` as the seed/escape-hatch source.
 
 ---
 

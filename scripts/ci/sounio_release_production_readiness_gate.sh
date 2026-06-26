@@ -172,7 +172,7 @@ summary_json = Path(sys.argv[3])
 # A surface may remain prototype in the repo, but then the broad release claim
 # must fail until the surface is closed or removed from the release contract.
 release_critical = {
-    "binary.source": "checked binary still depends on lean_single as source; modular source-swap parity is not closed",
+    "binary.source": "checked modular Madaros prebuilt source-build evidence is not closed",
     "direct_driver": "large-surface direct-driver execution remains a maturity frontier",
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
     "tooling.package": "package manager has no public registry launch/support contract",
