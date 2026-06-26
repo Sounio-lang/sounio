@@ -1,5 +1,7 @@
 # Sounio Package Manager
 
+Legacy experimental prototype; not part of the release support contract.
+
 A lightweight package manager for the Sounio programming language.
 
 ## Overview

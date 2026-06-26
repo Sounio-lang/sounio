@@ -69,7 +69,7 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Claim | Level | Current evidence | Safe wording |
 |---|---|---|---|
 | Installation | `prototype` | `INSTALL.md`; `docs/guide/installation.md`; checked artifacts | "For conferences, use the checked repo artifact path instead of promising broad package-manager installation." |
-| Package manager | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` beta table | "The package manager has local-registry functionality; no public registry launch should be promised." |
+| Package manager | `validated research` | `scripts/ci/sounio_package_support_gate.sh`; `docs/compiler/PACKAGE_IMPORT_RESOLUTION.md` | "Local package manifests, imports, package-tool smoke, and local registry design are checked; no public registry launch should be promised." |
 | Website/docs | `prototype` | CI website job; docs registry checks | "Docs are extensive but must be filtered through the readiness ledger before external reuse." |
 | Paper bundle | `prototype` | `docs/serious-language/paper-bundle.md`; `scripts/paper/build_serious_language_bundle.sh` | "The paper bundle exists as a reproducibility scaffold; each generated bundle must be reviewed before submission." |
 
