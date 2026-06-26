@@ -1,9 +1,9 @@
 <!-- docs:meta
 topic_id: repo.docs.audit.madaros-selfhost-typeenv-sret-2026-06-25
 authority: repo_only
-audience: maintainer
-last_validated: 2026-06-25
-validated_by: claude
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-selfhost-typeenv-sret-2026-06-25
 -->
 
