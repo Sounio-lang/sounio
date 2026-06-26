@@ -920,6 +920,156 @@ fn bve_preprocess() -> i32 with IO, Mut, Div, Panic {
     return oc_bve_count
 }
 
+// ============================================================================
+// Vivification — clause shortening via failed-literal propagation (lever A)
+// ============================================================================
+// For each clause C with len>=3: assign all literals except one to false,
+// propagate via full-clause-scan (no watch list mutation), check if the
+// remaining literal is forced false. If so, it's redundant — remove it.
+//
+// Soundness: if C\{l} ⊢ ¬l, then C ≡ C\{l} (resolution subsumption).
+
+var viv_count: i32 = 0
+var viv_lits_removed: i64 = 0
+
+fn viv_propagate_scan() -> i32 with Mut, Panic {
+    // Propagate using full clause scan (O(nclauses × avg_len) per call).
+    // Returns conflict clause index or -1.
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < nclauses {
+            if clen[c] > 0 {
+                let st = cstart[c]
+                var false_count: i32 = 0
+                var unassigned_lit: i64 = 0
+                var has_unassigned: i32 = 0
+                var j: i32 = 0
+                while j < clen[c] {
+                    let l = clits[st + j]
+                    let v = lit_var(l)
+                    var va = assign[v]
+                    if l < 0 { va = 0 - va }
+                    if va == (0 - 1) { false_count = false_count + 1 }
+                    else if va == 0 { has_unassigned = 1  unassigned_lit = l }
+                    else { false_count = 0 - 99  j = clen[c] }
+                    j = j + 1
+                }
+                if false_count == clen[c] { return c }
+                if false_count == clen[c] - 1 {
+                    if has_unassigned == 1 {
+                        let v = lit_var(unassigned_lit)
+                        assign[v] = if unassigned_lit > 0 { 1 } else { 0 - 1 }
+                        vlevel[v] = 0
+                        reason[v] = c
+                        trail_lit[trail_len] = unassigned_lit
+                        trail_len = trail_len + 1
+                        changed = 1
+                    }
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0 - 1
+}
+
+fn vivify_clause(c: i32) with IO, Mut, Panic, Div {
+    if clen[c] < 3 { return }
+    let st = cstart[c]
+    var removed: i32 = 0
+    var pos: i32 = 0
+    while pos < clen[c] {
+        if clen[c] < 3 { break }
+        let save_len = trail_len
+
+        // Assign all literals except pos to false
+        var j: i32 = 0
+        while j < clen[c] {
+            if j != pos {
+                let l = clits[st + j]
+                let v = lit_var(l)
+                assign[v] = if l > 0 { 0 - 1 } else { 1 }
+                vlevel[v] = 0
+                reason[v] = c
+                trail_lit[trail_len] = 0 - l
+                trail_len = trail_len + 1
+            }
+            j = j + 1
+        }
+
+        // Propagate
+        let confl = viv_propagate_scan()
+
+        // Check if the pos literal is forced false
+        var redundant: i32 = 0
+        if confl >= 0 {
+            redundant = 1
+        } else {
+            let target = clits[st + pos]
+            let tv = lit_var(target)
+            var tva = assign[tv]
+            if target < 0 { tva = 0 - tva }
+            if tva == (0 - 1) { redundant = 1 }
+        }
+
+        // Undo trail
+        var k = save_len
+        while k < trail_len {
+            let v = lit_var(trail_lit[k])
+            assign[v] = 0
+            reason[v] = 0 - 1
+            vlevel[v] = 0
+            k = k + 1
+        }
+        trail_len = save_len
+
+        if redundant == 1 {
+            // Remove literal at pos
+            var s = pos
+            while s < clen[c] - 1 {
+                clits[st + s] = clits[st + s + 1]
+                s = s + 1
+            }
+            clen[c] = clen[c] - 1
+            removed = removed + 1
+        } else {
+            pos = pos + 1
+        }
+    }
+
+    if removed > 0 {
+        viv_count = viv_count + 1
+        viv_lits_removed = viv_lits_removed + removed
+        var i: i32 = 0
+        while i < clen[c] { LEARNT[i] = clits[st + i]  i = i + 1 }
+        llen = clen[c]
+        emit_proof_clause()
+    }
+}
+
+fn vivify_preprocess() -> i32 with IO, Mut, Div, Panic {
+    var c: i32 = 0
+    while c < nclauses {
+        if clen[c] >= 3 { vivify_clause(c) }
+        c = c + 1
+    }
+    var li: i32 = 0
+    while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
+    c = 0
+    while c < nclauses {
+        if clen[c] >= 2 { watch_clause(c) }
+        c = c + 1
+    }
+    trail_len = 0
+    qhead = 0
+    cur_level = 0
+    var vi: i32 = 0
+    while vi <= nvars { assign[vi] = 0  reason[vi] = 0 - 1  vlevel[vi] = 0  vi = vi + 1 }
+    return viv_count
+}
+
 fn solve() -> i32 with IO, Mut, Div, Panic {
     cur_level = 0
     trail_lim[0] = 0
@@ -1600,6 +1750,12 @@ fn worker_main() -> i32 with IO, Mut, Div, Panic {
     bve_vars = bve_preprocess()
     if bve_vars > 0 {
         print("[BVE eliminated ")  print_dec(bve_vars as i64)  print(" vars  clauses now=")  print_dec(nclauses as i64)  print("]\n")
+        n_orig = nclauses
+    }
+    var viv_cls: i32 = 0
+    viv_cls = vivify_preprocess()
+    if viv_cls > 0 {
+        print("[VIV shortened ")  print_dec(viv_cls as i64)  print(" clauses  lits removed=")  print_dec(viv_lits_removed)  print("]\n")
         n_orig = nclauses
     }
     let s = solve()
