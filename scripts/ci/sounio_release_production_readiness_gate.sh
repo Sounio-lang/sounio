@@ -152,6 +152,9 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
   run_live_step package-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_package_support_gate.sh"
+  run_live_step editor-tooling-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+    -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+    bash "$ROOT_DIR/scripts/ci/sounio_editor_tooling_support_gate.sh"
   run_live_step install-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
     -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
     bash "$ROOT_DIR/scripts/ci/sounio_install_support_gate.sh"
@@ -182,7 +185,7 @@ release_critical = {
     "direct_driver": "large-surface direct-driver execution remains a maturity frontier",
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
     "tooling.package": "local package support contract is not closed",
-    "tooling.editor": "formatter, REPL, and editor tooling are prototype surfaces",
+    "tooling.editor": "checked editor-tooling support contract is not closed",
     "install": "installation is repo-artifact based, not a broad supported distribution path",
     "website.docs": "checked website/docs support contract is not closed",
 }
