@@ -80,7 +80,8 @@ Editor-tooling details:
 | **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
 | **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
-| **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution is a maturity frontier. |
+| **Direct-driver support cohort** | `direct_driver.support = validated_research` | Claim only the bounded support cohort checked by `scripts/ci/sounio_direct_driver_support_gate.sh`: 24/24 `tests/selfhost-driver-output/*.sio` fixtures compile to ELF and execute with expected stdout/exit. **NOT PROVED:** large-surface direct-driver execution, ontology-sized semantic truth, wrapper-provenance replacement, native-v2 driver self-compile/fixed-point closure, direct-driver negative-truth restoration, or broad production readiness. |
+| **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution remains a maturity frontier. The bounded support cohort above does not promote direct-driver semantic authority on ontology-sized or compiler-sized surfaces. |
 | **Windows target** | `platform.windows = prototype` | PE/COFF lane wired; not stable. |
 | **`binary.source` (modular self-hosted tree)** | `validated_research` | The checked x86-64 Madaros prebuilt is built from `self-hosted/compiler/main.sio` and covered by the named Madaros source-to-ELF/full gates. This claim applies to `bin/madaros-linux-x86_64`, not the legacy `bin/souc-linux-x86_64`; `lean_single.sio` remains the bootstrap seed and escape hatch. |
 

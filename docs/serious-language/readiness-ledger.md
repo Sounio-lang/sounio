@@ -38,7 +38,8 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | macOS artifact support | `validated research` | CI `native-selfhost-macos-arm64`; `docs/guide/MINIMUM_VIABLE_SOUNIO.md` | "macOS has checked artifact lanes, but Apple support should not be described as JIT or native-v2 parity." |
 | Windows target | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` platform table | "The repository contains PE/COFF target support, but no public Windows binary should be promised from this checkout." |
 | Native-v2 | `validated research` | `scripts/ci/native_v2_epistemic_science_spine_gate.sh`; `docs/guide/MINIMUM_VIABLE_SOUNIO.md` | "native-v2 is a preview research lane for scalar-core and science-spine contracts." |
-| Large-surface direct-driver closure | `prototype` | `docs/architecture/compiler-maturity-blueprint.md` M9 frontier | "Large-surface execution is still a compiler-maturity frontier; failures must be classified, not hidden." |
+| Direct-driver support cohort | `validated research` | `scripts/ci/sounio_direct_driver_support_gate.sh`; `tests/selfhost-driver-output/*.sio`; `docs/architecture/compiler-maturity-blueprint.md` M9 frontier | "The bounded direct-driver support cohort compiles and executes 24/24 small selfhost driver-output fixtures. This is not large-surface execution, semantic authority, ontology negative-truth restoration, or wrapper replacement." |
+| Large-surface direct-driver closure | `prototype` | `docs/architecture/compiler-maturity-blueprint.md` M9 frontier; `docs/architecture/truth-frontier.md` | "Large-surface execution is still a compiler-maturity frontier; failures must be classified, not hidden." |
 
 ## Language Feature Claims
 
