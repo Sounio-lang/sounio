@@ -3294,21 +3294,27 @@ impl Lowerer {
     }
 
     // Returns the print builtin name for println's first argument.
-    //   int literal / i64 var (scalar_kind=1) → print_int  (itoa+write)
-    //   everything else                        → print      (strlen+write, safe fallback)
-    // Note: f64 vars (scalar_kind=2) intentionally fall through to print here because
-    // emit_builtin_print_f64 reads its argument from RDI (integer ABI) but our inline
-    // println call path passes floats via XMM0 (float ABI), causing a mismatch.
-    // Wiring up f64 dispatch requires threading the float-arg ABI into println lowering.
+    //   int literal / i64 var (scalar_kind=1) → print_int
+    //   f64-valued expression                 → print_f64
+    //   everything else                       → print
+    // Routing f64 through print treats the IEEE bits as a char* and segfaults.
+    // The native backend's print_f64 builtin consumes the lowered f64 payload
+    // through the same integer slot convention used by emitted call arguments.
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
                 let hk = (*list).head.kind
                 if hk == ExprKind::ExprIntLit {
                     make_name("print_int")
+                } else if self.expr_result_is_float_ref(&(*list).head) {
+                    make_name("print_f64")
                 } else if hk == ExprKind::ExprIdent {
                     let sk = self.lookup_local_scalar_kind((*list).head.name)
-                    if sk == 1 { make_name("print_int") } else { make_name("print") }
+                    if sk == 1 {
+                        make_name("print_int")
+                    } else {
+                        make_name("print")
+                    }
                 } else {
                     make_name("print")
                 }
@@ -3905,8 +3911,24 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprFloatLit {
             return true
         }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 2
+        }
         if (*e).kind == ExprKind::ExprCast {
             return lower_cast_type_is_f64(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        return self.module.functions[fn_id as usize].returns_float == 1
+                    }
+                }
+                None => {}
+            }
+            return false
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
             return self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name)
@@ -5481,7 +5503,7 @@ impl Lowerer {
         } else {
             match s.expr {
                 Some(expr_box_sk) => {
-                    if (*expr_box_sk).kind == ExprKind::ExprFloatLit {
+                    if lo.expr_result_is_float_ref(&(*expr_box_sk)) {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
                     } else if (*expr_box_sk).kind == ExprKind::ExprIntLit {
                         lo = lo.bind_local_scalar_kind(s.name, 1)
