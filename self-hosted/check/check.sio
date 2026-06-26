@@ -3111,6 +3111,20 @@ fn onto_prop_pred(p: OntologyPropertyDecl) -> RefinementPred with Mut, Panic, Di
     }
 }
 
+// Field-wise RefinementPred constructor — the weakening check builds a predicate
+// from scalar fields read directly off the inline property array (no struct copy).
+fn onto_prop_pred_fields(op: i64, rhs_int: i64, rhs_float: f64, is_float: bool) -> RefinementPred with Mut, Panic, Div {
+    RefinementPred {
+        op: op,
+        var_name: empty_name(),
+        rhs_int: rhs_int,
+        rhs_float: rhs_float,
+        is_float: is_float,
+        left: None,
+        right: None,
+    }
+}
+
 fn checker_onto_check_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >, classes: Option<Box<OntologyClassDeclList> >) with Mut, Panic, Div, Alloc, IO {
     var cur = roles
     var k: i64 = 0
@@ -3145,12 +3159,12 @@ fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<Ont
     while true {
         match ci {
             Some(clist) => {
-                // Do NOT copy (*clist).head into a local: OntologyClassDecl contains
-                // `properties: [OntologyPropertyDecl; 8]` (an array of structs), and
-                // copying that struct misaligns the array under Madaros codegen
-                // (struct-array offset bug) — reads of properties[a].pred_op then
-                // come back 0. Access fields directly through the list pointer and
-                // copy out only a single (array-free) OntologyPropertyDecl at a time.
+                // Read property predicate fields DIRECTLY off the inline array
+                // elements — do NOT copy the whole OntologyPropertyDecl (two embedded
+                // [i8;128] Names). The large-boxed-struct codegen was fixed by the
+                // bump-arena Box::new rework (#430); a direct
+                // `(*clist).head.properties[a].pred_op` through the boxed list is now
+                // correct, while copying the ~290 B struct out is unreliable.
                 var si: i64 = 0
                 while si < (*clist).head.superclass_count && si < 8 {
                     let sname = (*clist).head.superclass_names[si as usize]
@@ -3161,16 +3175,29 @@ fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<Ont
                                 if name_eq((*plist).head.name, sname) {
                                     var a: i64 = 0
                                     while a < (*clist).head.property_count && a < 8 {
-                                        let cp = (*clist).head.properties[a as usize]
-                                        var b: i64 = 0
-                                        while b < (*plist).head.property_count && b < 8 {
-                                            let pp = (*plist).head.properties[b as usize]
-                                            if name_eq(cp.name, pp.name) && cp.pred_op > 0 && pp.pred_op > 0 {
-                                                if !pred_implies(onto_prop_pred(cp), onto_prop_pred(pp)) {
-                                                    checker_report_error_at_inplace(c, cp.span, 41, 0, 0, 0)
+                                        let c_op = (*clist).head.properties[a as usize].pred_op
+                                        if c_op > 0 {
+                                            let c_name = (*clist).head.properties[a as usize].name
+                                            var b: i64 = 0
+                                            while b < (*plist).head.property_count && b < 8 {
+                                                let p_op = (*plist).head.properties[b as usize].pred_op
+                                                if p_op > 0 && name_eq(c_name, (*plist).head.properties[b as usize].name) {
+                                                    let child_pred = onto_prop_pred_fields(
+                                                        c_op,
+                                                        (*clist).head.properties[a as usize].pred_rhs_int,
+                                                        (*clist).head.properties[a as usize].pred_rhs_float,
+                                                        (*clist).head.properties[a as usize].is_float)
+                                                    let parent_pred = onto_prop_pred_fields(
+                                                        p_op,
+                                                        (*plist).head.properties[b as usize].pred_rhs_int,
+                                                        (*plist).head.properties[b as usize].pred_rhs_float,
+                                                        (*plist).head.properties[b as usize].is_float)
+                                                    if !pred_implies(child_pred, parent_pred) {
+                                                        checker_report_error_at_inplace(c, (*clist).head.properties[a as usize].span, 41, 0, 0, 0)
+                                                    }
                                                 }
+                                                b = b + 1
                                             }
-                                            b = b + 1
                                         }
                                         a = a + 1
                                     }
