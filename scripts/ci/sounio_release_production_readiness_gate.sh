@@ -146,6 +146,9 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
     bash "$ROOT_DIR/scripts/dev/madaros_readiness_status.sh" --no-audit --production-ready
   run_live_step docs-registry bash "$ROOT_DIR/scripts/dev/check_docs_registry.sh"
   run_live_step docs-consistency bash "$ROOT_DIR/scripts/dev/check_docs_consistency.sh"
+  run_live_step install-support env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+    -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+    bash "$ROOT_DIR/scripts/ci/sounio_install_support_gate.sh"
   run_live_step serious-language-claim-closure env -u SOUC_BIN -u SOUNIO_STDLIB_PATH \
     bash "$ROOT_DIR/scripts/ci/serious_language_claim_closure_gate.sh"
   write_live_tsv
