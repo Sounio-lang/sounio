@@ -9127,14 +9127,25 @@ fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrR
 
 fn ir_call_needs_validated_patch(
     fn_count: i64,
-    callee_strategies: [i64; 2048],
-    callee_param_counts: [i64; 2048],
+    callee_strategies: &[i64; 2048],
+    callee_param_counts: &[i64; 2048],
     instr: IrInstr
 ) -> bool with Mut, Panic, Div {
     if instr.op != IrOpcode::IrCall { return false }
     if instr.fn_id < 0 || instr.fn_id >= fn_count { return false }
     callee_strategies[instr.fn_id as usize] == IR_STRATEGY_INSTRUMENTED &&
     instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
+}
+
+fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Panic, Div {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if module.functions[i as usize].compile_strategy == IR_STRATEGY_INSTRUMENTED {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
@@ -9184,8 +9195,8 @@ fn ir_patch_validated_call_instr(instr: &! IrInstr, validated_reg: i64) with Mut
 
 fn ir_patch_validated_calls_in_function(
     fn_count: i64,
-    callee_strategies: [i64; 2048],
-    callee_param_counts: [i64; 2048],
+    callee_strategies: &[i64; 2048],
+    callee_param_counts: &[i64; 2048],
     func: &! IrFunction,
     stats: &! IrValidatedPatchStats
 ) with Mut, Panic, Div, Alloc {
@@ -9241,9 +9252,13 @@ fn ir_patch_validated_calls_in_function(
 }
 
 fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with Mut, Panic, Div, Alloc {
+    var stats = ir_empty_validated_patch_stats()
+    if !ir_module_has_instrumented_strategy(module) {
+        return stats
+    }
+
     var callee_strategies: [i64; 2048] = [IR_STRATEGY_STANDARD; 2048]
     var callee_param_counts: [i64; 2048] = [0; 2048]
-    var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
     while i < module.fn_count {
         callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
@@ -9253,7 +9268,7 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
 
     i = 0
     while i < module.fn_count {
-        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
+        ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! module.functions[i as usize], &! stats)
         i = i + 1
     }
     stats
@@ -9611,7 +9626,9 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
+        var module_box = lo2.module
+        patch_stats = ir_patch_validated_calls(&! (*module_box))
+        lo2.module = module_box
     }
     IrLowerBoxResult {
         module: lo2.module,
