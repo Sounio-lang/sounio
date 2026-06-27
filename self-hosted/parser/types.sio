@@ -31,31 +31,21 @@ impl Parser {
             p = pair.0
             let inner_ty = pair.1
             let span = p.span_from(start)
-            if is_mut {
-                (p, TypeExpr {
-                    kind: TypeExprKind::TypeRefMut,
-                    span: span,
-                    path: empty_path(),
-                    type_args: None,
-                    inner: Some(Box::new(inner_ty)),
-                    array_size: None,
-                    effects: None,
-                    knowledge_info: None,
-                    refinement_info: None,
-                })
-            } else {
-                (p, TypeExpr {
-                    kind: TypeExprKind::TypeReference,
-                    span: span,
-                    path: empty_path(),
-                    type_args: None,
-                    inner: Some(Box::new(inner_ty)),
-                    array_size: None,
-                    effects: None,
-                    knowledge_info: None,
-                    refinement_info: None,
-                })
+            var raw_ty = TypeExpr {
+                kind: TypeExprKind::TypeRawPtr,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: Some(Box::new(inner_ty)),
+                array_size: None,
+                effects: None,
+                knowledge_info: None,
+                refinement_info: None,
             }
+            if is_mut {
+                raw_ty.array_size = Some(Box::new(mk_expr(ExprKind::ExprIntLit, span)))
+            }
+            (p, raw_ty)
         } else if k == TokenKind::Amp {
             self.parse_ref_type()
         } else if k == TokenKind::AmpBang {
@@ -453,10 +443,56 @@ impl Parser {
             p = p.advance()
         }
 
-        // The current checker stores one simple bound, but corpus syntax allows
-        // compound predicates such as `n > 0 && n < 100` and `p >= 0 || p <= 1`.
-        // Preserve the first bound above and consume the rest of the predicate
-        // so parsing reaches the checker boundary instead of splitting items.
+        var compound_op: i64 = 0
+        var pred2_op: i64 = 0
+        var pred2_int_val: i64 = 0
+        var pred2_float_val: f64 = 0.0
+        var pred2_is_float = false
+
+        if parser_peek(p) == TokenKind::AmpAmp || parser_peek(p) == TokenKind::PipePipe {
+            if parser_peek(p) == TokenKind::AmpAmp {
+                compound_op = 7
+            } else {
+                compound_op = 8
+            }
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                p = p.advance()
+            }
+            let op2 = parser_peek(p)
+            if op2 == TokenKind::Gt {
+                pred2_op = 1
+                p = p.advance()
+            } else if op2 == TokenKind::GtEq {
+                pred2_op = 2
+                p = p.advance()
+            } else if op2 == TokenKind::Lt {
+                pred2_op = 3
+                p = p.advance()
+            } else if op2 == TokenKind::LtEq {
+                pred2_op = 4
+                p = p.advance()
+            } else if op2 == TokenKind::EqEq || op2 == TokenKind::Eq {
+                pred2_op = 5
+                p = p.advance()
+            } else if op2 == TokenKind::BangEq {
+                pred2_op = 6
+                p = p.advance()
+            }
+            if parser_peek(p) == TokenKind::FloatLit {
+                pred2_float_val = p.current().float_value
+                pred2_is_float = true
+                p = p.advance()
+            } else if parser_peek(p) == TokenKind::IntLit {
+                pred2_int_val = p.current().int_value
+                pred2_float_val = p.current().int_value as f64
+                pred2_is_float = false
+                p = p.advance()
+            }
+        }
+
+        // Consume any additional predicate syntax beyond the first binary
+        // connective so parsing reaches the checker boundary cleanly.
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             p = p.advance()
         }
@@ -470,6 +506,11 @@ impl Parser {
             pred_int_val: pred_int_val,
             pred_float_val: pred_float_val,
             pred_is_float: pred_is_float,
+            compound_op: compound_op,
+            pred2_op: pred2_op,
+            pred2_int_val: pred2_int_val,
+            pred2_float_val: pred2_float_val,
+            pred2_is_float: pred2_is_float,
         }
         (p, TypeExpr {
             kind: TypeExprKind::TypeRefinement,
