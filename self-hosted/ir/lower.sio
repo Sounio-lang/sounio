@@ -149,6 +149,7 @@ struct Lowerer {
     // bound local knows it is a capturing closure.
     closure_caps: Box<ClosureCapTable>,
     pending_closure_fn_id: i64,
+    allow_direct_capturing_closure_literal: bool,
     pending_variance_reg: i64,
 }
 
@@ -260,6 +261,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
         pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
     }
 }
@@ -5811,8 +5813,18 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_opt_expr_ref(&s.expr)
+        var lhs_lo = self
+        match s.expr {
+            Some(expr_box_closure) => {
+                if (*expr_box_closure).kind == ExprKind::ExprClosure {
+                    lhs_lo.allow_direct_capturing_closure_literal = true
+                }
+            }
+            _ => {}
+        }
+        let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
+        lo.allow_direct_capturing_closure_literal = false
         let reg = pair.1
         lo = lo.bind_local(s.name, reg, is_mut)
         // Closures step 2: if the RHS was a capturing closure, mark this local so a later
@@ -8378,6 +8390,7 @@ impl Lowerer {
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
         let saved_loaded = lo.current_func_loaded
+        let saved_allow_direct_capture = lo.allow_direct_capturing_closure_literal
 
         // 2b. Scan the closure body for captured free variables (idents bound in the
         // enclosing scope, not lambda params) BEFORE wiping locals. Captures become LEADING
@@ -8385,9 +8398,11 @@ impl Lowerer {
         var captures = empty_capture_list()
         captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
         if captures.count > 0 {
-            print("error: native-v2 capturing closure literals are not yet supported; use a named function or a noncapturing closure\n")
-            let loe = lo.report_error()
-            return loe.emit_unit()
+            if !lo.allow_direct_capturing_closure_literal {
+                print("error: native-v2 capturing closure literals are not yet supported as values; bind and call directly, use a named function, or use a noncapturing closure\n")
+                let loe = lo.report_error()
+                return loe.emit_unit()
+            }
         }
 
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
@@ -8401,6 +8416,7 @@ impl Lowerer {
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
+        lo.allow_direct_capturing_closure_literal = false
 
         // 3b. Bind captured variables as LEADING params of the synthetic fn, so the body's
         // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
@@ -8470,6 +8486,7 @@ impl Lowerer {
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+        lo.allow_direct_capturing_closure_literal = saved_allow_direct_capture
 
         // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
         // flag the pending closure so the let-binding marks its local. (Zero-capture closures
