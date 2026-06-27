@@ -12686,7 +12686,34 @@ fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Panic, Div
     true
 }
 
-fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic, Div, Alloc {
+fn checker_types_compatible_table_deep(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(a, b) {
+        return true
+    }
+    if depth > 16 {
+        return false
+    }
+    if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
+        return false
+    }
+    if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
+        return false
+    }
+    if a.fn_sig_id >= (*tbl).count || b.fn_sig_id >= (*tbl).count {
+        return false
+    }
+    let asig = fn_sig_table_get(tbl, a.fn_sig_id)
+    let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
+    if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, depth + 1) {
+        return false
+    }
+    if !checker_fn_sig_params_compatible_table_deep(tbl, asig, bsig, depth + 1) {
+        return false
+    }
+    checker_fn_sig_effects_compatible(asig, bsig)
+}
+
+fn checker_fn_sig_params_compatible_table_deep(tbl: *mut FnSigTable, a: FnSig, b: FnSig, depth: i64) -> bool with Mut, Panic, Div, Alloc {
     if a.param_count != b.param_count {
         return false
     }
@@ -12696,7 +12723,7 @@ fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic,
     while i < a.param_count {
         let ap = fn_param_list_handle_get(ah, i)
         let bp = fn_param_list_handle_get(bh, i)
-        if !types_compatible(ap.ty, bp.ty) {
+        if !checker_types_compatible_table_deep(tbl, ap.ty, bp.ty, depth + 1) {
             return false
         }
         i = i + 1
@@ -12719,10 +12746,10 @@ fn checker_fn_types_structurally_compatible_table(tbl: *mut FnSigTable, a: TypeE
     }
     let asig = fn_sig_table_get(tbl, a.fn_sig_id)
     let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
-    if !types_compatible(asig.return_type, bsig.return_type) {
+    if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, 0) {
         return false
     }
-    if !checker_fn_sig_params_compatible(asig, bsig) {
+    if !checker_fn_sig_params_compatible_table_deep(tbl, asig, bsig, 0) {
         return false
     }
     checker_fn_sig_effects_compatible(asig, bsig)
@@ -12771,17 +12798,7 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     if a.fn_sig_id >= (*(*c).fn_sigs).count || b.fn_sig_id >= (*(*c).fn_sigs).count {
         return false
     }
-    let ai = a.fn_sig_id
-    let bi = b.fn_sig_id
-    let asig = fn_sig_table_get((*c).fn_sigs, ai)
-    let bsig = fn_sig_table_get((*c).fn_sigs, bi)
-    if !types_compatible(asig.return_type, bsig.return_type) {
-        return false
-    }
-    if !checker_fn_sig_params_compatible(asig, bsig) {
-        return false
-    }
-    checker_fn_sig_effects_compatible(asig, bsig)
+    checker_types_compatible_table_deep((*c).fn_sigs, a, b, 0)
 }
 
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
