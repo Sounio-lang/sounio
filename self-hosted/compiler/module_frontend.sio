@@ -1159,6 +1159,37 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
+fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    var fi: i64 = 0
+    var found: i64 = 0 - 1
+    while fi < (*module).fn_count {
+        if ir_name_eq((*module).functions[fi as usize].name, name) {
+            found = fi
+        }
+        fi = fi + 1
+    }
+    found
+}
+
+fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &IrModule) -> IrFunction with Mut, Panic, Div {
+    var out = func
+    var ii: i64 = 0
+    while ii < out.instr_count {
+        if out.instrs[ii as usize].op == IrOpcode::IrCall || out.instrs[ii as usize].op == IrOpcode::IrCallSret {
+            let old_id = out.instrs[ii as usize].fn_id
+            if old_id >= 0 && old_id < (*src).fn_count {
+                let target_name = (*src).functions[old_id as usize].name
+                let new_id = ir_merge_find_function_name_index(dst, target_name)
+                if new_id >= 0 {
+                    out.instrs[ii as usize].fn_id = new_id
+                }
+            }
+        }
+        ii = ii + 1
+    }
+    out
+}
+
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
 // to their position in the merged module. Operates through &! to avoid large-local JIT writes.
 fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
@@ -3489,7 +3520,7 @@ fn module_frontend_lower_programs_array_boxed(
                 print_int(i)
                 print("\n")
                 let dep_prog_copy = (*programs)[i as usize]
-                let dep_lower = module_frontend_lower_program_box_traced(&dep_prog_copy, i, trace)
+                let dep_lower = module_frontend_lower_program_box_traced_with_externs(&dep_prog_copy, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
                 print("\n")
@@ -3516,7 +3547,12 @@ fn module_frontend_lower_programs_array_boxed(
                                 sfi = sfi + 1
                             }
                             if stub_idx >= 0 && dep_ic > 0 {
-                                (*acc_box).functions[stub_idx as usize] = (*dep_box).functions[mfi as usize]
+                                let remapped_func = ir_merge_remap_existing_call_targets(
+                                    (*dep_box).functions[mfi as usize],
+                                    &(*dep_box),
+                                    &(*acc_box)
+                                )
+                                (*acc_box).functions[stub_idx as usize] = remapped_func
                             } else {
                                 ir_merge_append_function_into_box(&! (*acc_box), &(*dep_box), mfi)
                             }
@@ -3577,7 +3613,7 @@ fn module_frontend_lower_programs_array_compile_to_file(
                 print_int(i)
                 print("\n")
                 let dep_prog_copy = (*programs)[i as usize]
-                let dep_lower = module_frontend_lower_program_box_traced(&dep_prog_copy, i, trace)
+                let dep_lower = module_frontend_lower_program_box_traced_with_externs(&dep_prog_copy, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
                 print("\n")
@@ -3604,7 +3640,12 @@ fn module_frontend_lower_programs_array_compile_to_file(
                                 sfi = sfi + 1
                             }
                             if stub_idx >= 0 && dep_ic > 0 {
-                                (*acc_box).functions[stub_idx as usize] = (*dep_box).functions[mfi as usize]
+                                let remapped_func = ir_merge_remap_existing_call_targets(
+                                    (*dep_box).functions[mfi as usize],
+                                    &(*dep_box),
+                                    &(*acc_box)
+                                )
+                                (*acc_box).functions[stub_idx as usize] = remapped_func
                             } else {
                                 ir_merge_append_function_into_box(&! (*acc_box), &(*dep_box), mfi)
                             }
