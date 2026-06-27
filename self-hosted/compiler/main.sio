@@ -48,7 +48,7 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
@@ -2879,12 +2879,58 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
 // lost on SIGSEGV). Content is irrelevant — file existence is the signal. Uses a
 // zero-fill init ([0;N] is the codegen-safe array-fill form).
 var NV2_MARKER_BUF: [i8; 4] = [0; 4]
+var NV2_RUN_ARGV: [i64; 32] = [0; 32]
+var NV2_RUN_ENVP: [i64; 1] = [0; 1]
+
+fn native_v2_wait_exit_code(status: i64) -> i64 {
+    if (status & 127) == 0 {
+        return (status >> 8) & 255
+    }
+    128 + (status & 127)
+}
+
+fn native_v2_run_elf_and_exit(path: string, args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    syscall6(90, path, 493, 0, 0, 0, 0)
+    NV2_RUN_ARGV[0] = path as i64
+    var argv_len: i64 = 1
+    var passthrough: bool = false
+    var i: i64 = flag_index + 1
+    while i < args.len && argv_len < 31 {
+        let arg = arg_list_get(args, i)
+        if passthrough {
+            NV2_RUN_ARGV[argv_len as usize] = arg as i64
+            argv_len = argv_len + 1
+        } else if arg == "--" {
+            passthrough = true
+        }
+        i = i + 1
+    }
+    NV2_RUN_ARGV[argv_len as usize] = 0
+    NV2_RUN_ENVP[0] = 0
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
+    if pid < 0 {
+        print("native_v2_compile: run fork failed\n")
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+        return
+    }
+    if pid == 0 {
+        syscall6(59, path as i64, &! NV2_RUN_ARGV, &! NV2_RUN_ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+        return
+    }
+
+    var status: i64 = 0
+    syscall6(61, pid, &! status, 0, 0, 0, 0)
+    syscall6(60, native_v2_wait_exit_code(status), 0, 0, 0, 0, 0)
+}
 
 // Bridge: real .sio SOURCE -> multimodule front-half -> IrModule -> native-v2 -> ELF.
 // Keep this on load_multimodule_ir_traced, the same front-half exercised by
 // --probe-load-ir-trace. The older boxed single-module bridge is fragile in
 // native-built Madaros before the first crash marker on trivial programs.
 fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let execute_after_compile = arg_list_get(args, flag_index) == "run"
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
     // Output path resolution: `-o <out>` wins; otherwise honor a second
     // positional argument (`mc --native-v2-compile src.sio out.elf`); else a.out.
@@ -2894,6 +2940,20 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     let out_path = compiler_mode_output_path(args, out_positional)
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
+    }
+    if module_frontend_file_maybe_has_use(source_path) {
+        let imported_rc = module_frontend_compile_imported_to_file(source_path, out_path)
+        if imported_rc != 0 {
+            print("native_v2_compile: front-half failed: imported_compile\n")
+            panic("native-v2-compile failed: imported front-half errors")
+        }
+        print("native_v2_compile: emitted path=")
+        print(out_path)
+        print("\n")
+        if execute_after_compile {
+            native_v2_run_elf_and_exit(out_path, args, flag_index)
+        }
+        return
     }
     var trace = empty_load_multimodule_ir_trace()
     let ir_result = load_multimodule_ir_traced(source_path, &! trace)
@@ -2920,6 +2980,9 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print("native_v2_compile: emitted path=")
     print(out_path)
     print("\n")
+    if execute_after_compile {
+        native_v2_run_elf_and_exit(out_path, args, flag_index)
+    }
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
