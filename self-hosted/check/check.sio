@@ -639,8 +639,8 @@ fn substitute_type_param(
     tp_count: i64,
     tp_names: [Name; 8],
     args: TypeEntryList,
-) -> TypeEntry with Mut, Panic, Div {
-    if ty.kind == TypeKind::TyNamed {
+) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if !name_is_empty(ty.name) {
         // Check if this name matches any type parameter
         var idx: i64 = 0
         while idx < tp_count {
@@ -651,8 +651,37 @@ fn substitute_type_param(
             idx = idx + 1
         }
     }
-    // Not a type param reference — return as-is
-    ty
+    var result = ty
+    match ty.inner {
+        Some(inner_ty) => {
+            let new_inner = substitute_type_param(*inner_ty, tp_count, tp_names, args)
+            result.inner = Some(Box::new(new_inner))
+        }
+        None => {}
+    }
+    match ty.tuple_elems {
+        Some(elems) => {
+            result.tuple_elems = Some(Box::new(substitute_type_param_list(*elems, tp_count, tp_names, args)))
+        }
+        None => {}
+    }
+    result
+}
+
+fn substitute_type_param_list(
+    list: TypeEntryList,
+    tp_count: i64,
+    tp_names: [Name; 8],
+    args: TypeEntryList,
+) -> TypeEntryList with Mut, Panic, Div, Alloc {
+    let new_head = substitute_type_param(list.head, tp_count, tp_names, args)
+    match list.tail {
+        None => TypeEntryList { head: new_head, tail: None }
+        Some(rest) => {
+            let new_tail = substitute_type_param_list(*rest, tp_count, tp_names, args)
+            TypeEntryList { head: new_head, tail: Some(Box::new(new_tail)) }
+        }
+    }
 }
 
 // Get the nth element of a TypeEntryList (0-indexed).
@@ -663,6 +692,115 @@ fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic
         match list.tail {
             None => list.head  // fallback: return head if out of bounds
             Some(rest) => type_entry_list_nth(*rest, n - 1)
+        }
+    }
+}
+
+fn type_entry_list_count_value(list: TypeEntryList) -> i64 with Mut, Panic, Div {
+    match list.tail {
+        None => 1
+        Some(rest) => 1 + type_entry_list_count_value(*rest)
+    }
+}
+
+fn type_param_buf_has(buf: TypeParamBuf, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.count {
+        if name_eq(buf.names[i], name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn type_param_buf_push_unique(buf: TypeParamBuf, name: Name) -> TypeParamBuf with Mut, Panic, Div {
+    var result = buf
+    if name_is_empty(name) || result.count >= 8 || type_param_buf_has(result, name) {
+        return result
+    }
+    result.names[result.count] = name
+    result.count = result.count + 1
+    result
+}
+
+fn type_is_unresolved_type_param_in_tables(structs: *mut StructTable, enums: *mut EnumTable, ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if name_is_empty(ty.name) {
+        return false
+    }
+    if struct_table_find(structs, ty.name) >= 0 {
+        return false
+    }
+    if enum_table_find(enums, ty.name) >= 0 {
+        return false
+    }
+    true
+}
+
+fn collect_fn_generic_names_from_type_in_tables(structs: *mut StructTable, enums: *mut EnumTable, ty: TypeEntry, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    var result = buf
+    if type_is_unresolved_type_param_in_tables(structs, enums, ty) {
+        result = type_param_buf_push_unique(result, ty.name)
+    }
+    match ty.inner {
+        Some(inner_ty) => {
+            result = collect_fn_generic_names_from_type_in_tables(structs, enums, *inner_ty, result)
+        }
+        None => {}
+    }
+    match ty.tuple_elems {
+        Some(elems) => {
+            result = collect_fn_generic_names_from_type_list_in_tables(structs, enums, *elems, result)
+        }
+        None => {}
+    }
+    result
+}
+
+fn collect_fn_generic_names_from_type_list_in_tables(structs: *mut StructTable, enums: *mut EnumTable, list: TypeEntryList, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    var result = collect_fn_generic_names_from_type_in_tables(structs, enums, list.head, buf)
+    match list.tail {
+        Some(rest) => {
+            result = collect_fn_generic_names_from_type_list_in_tables(structs, enums, *rest, result)
+        }
+        None => {}
+    }
+    result
+}
+
+fn collect_fn_generic_names_from_params_in_tables(structs: *mut StructTable, enums: *mut EnumTable, opt: Option<Box<FnParamList> >, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    match opt {
+        None => buf
+        Some(list) => {
+            let with_head = collect_fn_generic_names_from_type_in_tables(structs, enums, (*list).head.ty, buf)
+            collect_fn_generic_names_from_params_in_tables(structs, enums, (*list).tail, with_head)
+        }
+    }
+}
+
+fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_count: i64, tp_names: [Name; 8], args: TypeEntryList) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let head = (*list).head
+            let new_head = FnParamInfo {
+                name: head.name,
+                ty: substitute_type_param(head.ty, tp_count, tp_names, args),
+            }
+            let new_tail = checker_substitute_fn_params((*list).tail, tp_count, tp_names, args)
+            Some(Box::new(FnParamList { head: new_head, tail: new_tail }))
+        }
+    }
+}
+
+fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, Div, Alloc {
+    match e.type_args {
+        Some(args) => Some(args)
+        None => {
+            match e.left {
+                Some(callee) => (*callee).type_args
+                None => None
+            }
         }
     }
 }
@@ -5887,16 +6025,34 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+        var effective_params = direct_sig.params
+        var effective_return_type = direct_sig.return_type
+        match call_expr_type_args(e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, direct_sig.params, empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(direct_sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                }
+            }
+            None => {}
+        }
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
-            fn_param_list_handle(direct_sig.params),
+            fn_param_list_handle(effective_params),
             direct_sig.param_count,
             e.span,
         )
         checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, direct_sig.params, call_start_borrows)
-        return direct_sig.return_type
+        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -5948,10 +6104,28 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
-        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
+        var effective_params = sig.params
+        var effective_return_type = sig.return_type
+        match call_expr_type_args(e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, sig.params, empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                }
+            }
+            None => {}
+        }
+        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
         checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
-        sig.return_type
+        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        effective_return_type
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -18593,13 +18767,33 @@ impl Checker {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
-            c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+            var effective_params = sig.params
+            var effective_return_type = sig.return_type
+            match call_expr_type_args(e) {
+                Some(type_arg_exprs) => {
+                    let lowered_type_args_pair = c.lower_type_expr_list(*type_arg_exprs)
+                    c = lowered_type_args_pair.0
+                    let lowered_type_args = lowered_type_args_pair.1
+                    var generic_names = collect_fn_generic_names_from_params_in_tables(c.structs, c.enums, sig.params, empty_type_param_buf())
+                    generic_names = collect_fn_generic_names_from_type_in_tables(c.structs, c.enums, sig.return_type, generic_names)
+                    if generic_names.count > 0 {
+                        let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                        if provided_type_arg_count != generic_names.count {
+                            c = c.report_error_at(e.span, 10, 0, 0, 0)
+                        }
+                        effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                        effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                    }
+                }
+                None => {}
+            }
+            c = c.check_call_args(e.args, effective_params, sig.param_count, e.span)
             // Verify callee's effects are subset of caller's effects
             c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
             // Release borrows taken for call arguments — the call has returned,
             // so exclusive/shared borrows on arguments are no longer active.
-            c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
-            (c, sig.return_type)
+            c = c.release_call_arg_borrows(e.args, effective_params, call_start_borrows)
+            (c, effective_return_type)
         } else if is_error_or_unknown(callee_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
