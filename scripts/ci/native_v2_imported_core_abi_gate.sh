@@ -17,10 +17,21 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
     ;;
 esac
 
+if [[ -n "${SOUNIO_GATE_SOUC_BIN:-}" ]]; then
+  export SOUC_BIN="$SOUNIO_GATE_SOUC_BIN"
+elif [[ -n "${SOUC_BIN:-}" && "$SOUC_BIN" != "$ROOT_DIR"/* ]]; then
+  echo "[native-v2-imported-core-abi] ignoring external SOUC_BIN outside this worktree: $SOUC_BIN"
+  unset SOUC_BIN
+fi
+
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+if [[ -n "${SOUNIO_GATE_STDLIB_PATH:-}" ]]; then
+  export SOUNIO_STDLIB_PATH="$SOUNIO_GATE_STDLIB_PATH"
+elif [[ -z "${SOUNIO_STDLIB_PATH:-}" || "$SOUNIO_STDLIB_PATH" != "$ROOT_DIR"/* ]]; then
+  export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
+fi
 
 OUT_DIR="${SOUNIO_NATIVE_V2_IMPORTED_CORE_ABI_DIR:-$(mktemp -d /tmp/sounio-native-v2-imported-core-abi.XXXXXX)}"
 LOG_DIR="$OUT_DIR/logs"
