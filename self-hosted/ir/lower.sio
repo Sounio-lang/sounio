@@ -6128,6 +6128,16 @@ impl Lowerer {
         }
     }
 
+    fn first_arg_capturing_closure_local_fn_id_ref(self, opt: &Option<Box<ExprList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind != ExprKind::ExprIdent { return -1 }
+                self.lookup_local_closure_fn_id((*list).head.name)
+            }
+            _ => -1,
+        }
+    }
+
     fn lower_function_is_transparent_hof(self, fn_id: i64) -> bool with Mut, Panic, Div, Alloc {
         if fn_id < 0 || fn_id >= (*self.module).fn_count { return false }
         let func = (*self.module).functions[fn_id as usize]
@@ -6167,6 +6177,38 @@ impl Lowerer {
             i = i + 1
         }
         call_count == 1 && saw_return
+    }
+
+    fn lower_hof_captured_closure_local_call(self, closure_fn_id: i64, callee_name: Name, opt: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *opt {
+            Some(list) => {
+                var lo = self
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                lo = pair_tail.lowerer
+                var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
+                var total = pair_tail.count
+                let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 {
+                    let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist = ir_reg_list_prepend((*lo.closure_caps).entries[cidx as usize].caps[jc as usize], arglist)
+                        jc = jc - 1
+                    }
+                    total = total + ccount
+                }
+
+                let pair_dst = lo.fresh_reg()
+                let lo_dst = pair_dst.0
+                let dst = pair_dst.1
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                (lo_call, dst)
+            }
+            _ => {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        }
     }
 
     fn lower_hof_captured_closure_literal_call(self, callee_name: Name, opt: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -7499,6 +7541,10 @@ impl Lowerer {
         }
         if lo1.first_arg_is_capturing_closure_literal_ref(&e.args) && lo1.lower_function_is_transparent_hof(fn_id) {
             return lo1.lower_hof_captured_closure_literal_call(callee_name, &e.args)
+        }
+        let hof_closure_local_fn = lo1.first_arg_capturing_closure_local_fn_id_ref(&e.args)
+        if hof_closure_local_fn >= 0 && lo1.lower_function_is_transparent_hof(fn_id) {
+            return lo1.lower_hof_captured_closure_local_call(hof_closure_local_fn, callee_name, &e.args)
         }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
         let lo2 = pair_args.lowerer
