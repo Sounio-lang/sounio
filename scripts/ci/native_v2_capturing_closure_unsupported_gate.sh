@@ -31,11 +31,12 @@ OUT_DIR="${SOUNIO_NATIVE_V2_CAPTURING_CLOSURE_UNSUPPORTED_DIR:-$(mktemp -d /tmp/
 LOG_DIR="$OUT_DIR/logs"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
 ZERO_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_zero_capture_direct_42.sio"
-DIRECT_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_direct_unsupported.sio"
+DIRECT_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_direct_42.sio"
 ESCAPE_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_escape_unsupported.sio"
 LOWER_SOURCE="self-hosted/ir/lower.sio"
 DIAGNOSTIC="native-v2 capturing closure literals are not yet supported"
 ZERO_ELF="$ARTIFACT_DIR/native_v2_closure_zero_capture_direct_42.native"
+DIRECT_ELF="$ARTIFACT_DIR/native_v2_closure_capture_direct_42.native"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -59,6 +60,11 @@ if ! grep -q 'if captures.count > 0' "$LOWER_SOURCE"; then
   exit 1
 fi
 
+if ! grep -q 'allow_direct_capturing_closure_literal' "$LOWER_SOURCE"; then
+  echo "[native-v2-capturing-closure-unsupported] FAIL: missing direct captured-closure context guard in $LOWER_SOURCE" >&2
+  exit 1
+fi
+
 run_log() {
   local name="$1"
   shift
@@ -67,6 +73,7 @@ run_log() {
 }
 
 run_log zero_capture_compile "$SOUC_BIN" compile "$ZERO_CAPTURE" -o "$ZERO_ELF"
+run_log direct_capture_compile "$SOUC_BIN" compile "$DIRECT_CAPTURE" -o "$DIRECT_ELF"
 
 if [[ ! -f "$ZERO_ELF" ]]; then
   echo "[native-v2-capturing-closure-unsupported] FAIL: zero-capture closure did not produce native ELF" >&2
@@ -74,7 +81,13 @@ if [[ ! -f "$ZERO_ELF" ]]; then
   exit 1
 fi
 
-chmod +x "$ZERO_ELF" 2>/dev/null || true
+if [[ ! -f "$DIRECT_ELF" ]]; then
+  echo "[native-v2-capturing-closure-unsupported] FAIL: direct captured closure did not produce native ELF" >&2
+  cat "$LOG_DIR/direct_capture_compile.log" >&2 || true
+  exit 1
+fi
+
+chmod +x "$ZERO_ELF" "$DIRECT_ELF" 2>/dev/null || true
 
 set +e
 "$ZERO_ELF" >"$LOG_DIR/zero_capture.stdout" 2>"$LOG_DIR/zero_capture.stderr"
@@ -88,4 +101,16 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-echo "[native-v2-capturing-closure-unsupported] PASS: source rejects capturing closures; zero-capture native closure still exits 42"
+set +e
+"$DIRECT_ELF" >"$LOG_DIR/direct_capture.stdout" 2>"$LOG_DIR/direct_capture.stderr"
+direct_runtime_rc=$?
+set -e
+
+if [[ "$direct_runtime_rc" -ne 42 ]]; then
+  echo "[native-v2-capturing-closure-unsupported] FAIL: direct captured closure expected exit 42, got $direct_runtime_rc" >&2
+  cat "$LOG_DIR/direct_capture.stdout" >&2 || true
+  cat "$LOG_DIR/direct_capture.stderr" >&2 || true
+  exit 1
+fi
+
+echo "[native-v2-capturing-closure-unsupported] PASS: direct captured closures stay native; captured closure values remain source-rejected"
