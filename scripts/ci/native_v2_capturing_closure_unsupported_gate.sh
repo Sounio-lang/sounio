@@ -32,18 +32,19 @@ LOG_DIR="$OUT_DIR/logs"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
 ZERO_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_zero_capture_direct_42.sio"
 DIRECT_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_direct_42.sio"
-ESCAPE_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_escape_unsupported.sio"
+HOF_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_hof_apply_42.sio"
 LOWER_SOURCE="self-hosted/ir/lower.sio"
 DIAGNOSTIC="native-v2 capturing closure literals are not yet supported"
 ZERO_ELF="$ARTIFACT_DIR/native_v2_closure_zero_capture_direct_42.native"
 DIRECT_ELF="$ARTIFACT_DIR/native_v2_closure_capture_direct_42.native"
+HOF_ELF="$ARTIFACT_DIR/native_v2_closure_capture_hof_apply_42.native"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
 echo "[native-v2-capturing-closure-unsupported] souc=$SOUC_BIN"
 echo "[native-v2-capturing-closure-unsupported] out=$OUT_DIR"
 
-for path in "$ZERO_CAPTURE" "$DIRECT_CAPTURE" "$ESCAPE_CAPTURE" "$LOWER_SOURCE"; do
+for path in "$ZERO_CAPTURE" "$DIRECT_CAPTURE" "$HOF_CAPTURE" "$LOWER_SOURCE"; do
   if [[ ! -f "$path" ]]; then
     echo "[native-v2-capturing-closure-unsupported] FAIL: missing $path" >&2
     exit 1
@@ -74,6 +75,7 @@ run_log() {
 
 run_log zero_capture_compile "$SOUC_BIN" compile "$ZERO_CAPTURE" -o "$ZERO_ELF"
 run_log direct_capture_compile "$SOUC_BIN" compile "$DIRECT_CAPTURE" -o "$DIRECT_ELF"
+run_log hof_capture_compile "$SOUC_BIN" compile "$HOF_CAPTURE" -o "$HOF_ELF"
 
 if [[ ! -f "$ZERO_ELF" ]]; then
   echo "[native-v2-capturing-closure-unsupported] FAIL: zero-capture closure did not produce native ELF" >&2
@@ -87,7 +89,13 @@ if [[ ! -f "$DIRECT_ELF" ]]; then
   exit 1
 fi
 
-chmod +x "$ZERO_ELF" "$DIRECT_ELF" 2>/dev/null || true
+if [[ ! -f "$HOF_ELF" ]]; then
+  echo "[native-v2-capturing-closure-unsupported] FAIL: HOF captured closure did not produce native ELF" >&2
+  cat "$LOG_DIR/hof_capture_compile.log" >&2 || true
+  exit 1
+fi
+
+chmod +x "$ZERO_ELF" "$DIRECT_ELF" "$HOF_ELF" 2>/dev/null || true
 
 set +e
 "$ZERO_ELF" >"$LOG_DIR/zero_capture.stdout" 2>"$LOG_DIR/zero_capture.stderr"
@@ -113,4 +121,16 @@ if [[ "$direct_runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-echo "[native-v2-capturing-closure-unsupported] PASS: direct captured closures stay native; captured closure values remain source-rejected"
+set +e
+"$HOF_ELF" >"$LOG_DIR/hof_capture.stdout" 2>"$LOG_DIR/hof_capture.stderr"
+hof_runtime_rc=$?
+set -e
+
+if [[ "$hof_runtime_rc" -ne 42 ]]; then
+  echo "[native-v2-capturing-closure-unsupported] FAIL: HOF captured closure expected exit 42, got $hof_runtime_rc" >&2
+  cat "$LOG_DIR/hof_capture.stdout" >&2 || true
+  cat "$LOG_DIR/hof_capture.stderr" >&2 || true
+  exit 1
+fi
+
+echo "[native-v2-capturing-closure-unsupported] PASS: direct and inline-HOF captured closures stay native"
