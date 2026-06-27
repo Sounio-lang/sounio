@@ -42,7 +42,7 @@ Step size: h_i = max(1×10⁻⁶ |μ_i|, 1×10⁻² σ_i).
 
 | # | Parameter | μ | σ² | c_i = ∂AUC/∂x_i | c_i²σ_i² | Fraction |
 |---|-----------|---|-----|-----------------|-----------|----------|
-| 0 | CL_hepatic (L/h) | 12.4 | 51.85 | *from simulation* | **dominant** | ~60–80% |
+| 0 | CL_hepatic (L/h) | 12.4 | 22.20 | *from simulation* | **dominant** | ~60–80% |
 | 1 | CL_renal (L/h)   | 0.30 | 0.0144 | small | small | <2% |
 | 2 | fu_plasma        | 0.08 | 0.0004 | moderate | moderate | ~10–20% |
 | 3 | Kp_brain         | 0.10 | 0.000625 | near-zero | near-zero | <1% |
@@ -55,7 +55,7 @@ Step size: h_i = max(1×10⁻⁶ |μ_i|, 1×10⁻² σ_i).
 > the specific simulation trajectory at dt=0.05h, t_end=168h.
 
 **Key findings**:
-- CL_hepatic dominates AUC_blood uncertainty (CYP3A4 inter-individual variability, CV=58%)
+- CL_hepatic dominates AUC_blood uncertainty (CYP3A4 inter-individual variability, M6 CV=38%)
 - P-gp efflux verified: C_brain/C_blood << 1 at t=24h (Kp_brain=0.10, P-gp limited)
 - Hepatic sequestration confirmed: AUC_liver > AUC_blood (Kp_liver=5.40)
 - Evidence-weighted confidence: ~0.55–0.65 (mixed-evidence priors, Ferron 1997)
@@ -78,28 +78,39 @@ E[AUC]   ≈ AUC(μ)       +  ½ Σᵢ Hᵢᵢ σᵢ²
 *ρ̃ normalized*: second-order variance fraction per parameter: `ρ̃ = ½ρ²`.
 Editorial rule: ρ̃ < 0.20 = weakly nonlinear (first-order GUM adequate).
 
+_Regenerated at HEAD `c25ccdc6f` (2026-06-27) from `epistemic_pbpk28_hessian.sio` via the
+fixed-point `lean_single` engine; `HESSIAN_PBPK28_DUAL_RHO_PASS`. The M6 hepatic-prior update
+(`d052806ef`) lowered the CL_hepatic second-order contribution from the v1 values (ρ_literal 0.581,
+ρ̃ 0.169); all other parameters are unchanged._
+
 | Parameter   | H_ii sign | ρ_literal | ρ̃_normalized | Assessment |
 |-------------|-----------|-----------|--------------|------------|
-| CL_hepatic  | + (AUC~1/CL, convex) | **0.581** | **0.169** | Hessian active |
-| fu_plasma   | +         | ~0.250    | ~0.031       | Marginal    |
-| Kp_brain    | varies    | ~0.350    | ~0.061       | Marginal    |
-| Kp_liver    | near-zero | ~0.067    | ~0.002       | Negligible  |
-| Kp_kidney   | near-zero | ~0.138    | ~0.010       | Negligible  |
-| Kp_adipose  | varies    | ~0.334    | ~0.056       | Marginal    |
-| CL_renal    | ~0        | ~0.010    | ~0.000       | Negligible  |
+| CL_hepatic  | + (AUC~1/CL, convex) | **0.380** | **0.072** | Largest (weak) |
+| Kp_brain    | varies    | 0.350     | 0.061        | Marginal    |
+| Kp_adipose  | varies    | 0.334     | 0.056        | Marginal    |
+| fu_plasma   | +         | 0.250     | 0.031        | Marginal    |
+| Kp_kidney   | near-zero | 0.138     | 0.010        | Negligible  |
+| Kp_liver    | near-zero | 0.067     | 0.002        | Negligible  |
+| CL_renal    | ~0        | 0.010     | 0.000        | Negligible  |
 
-> **§4.9 claim** (wording-safe): "For CL_hepatic, ρ̃ = 0.169 (JCGM 101 §B.4 literal: 0.581),
-> confirming the Hessian correction contributes ~17% additional variance beyond the first-order
-> GUM estimate for this parameter — the dominant driver of the second-order correction."
+Budget totals (rapamycin, AUC_blood): AUC_ref (1st-order mean) = **0.611694 mg·h/L**;
+mean-corrected (Hessian) = **0.729467 mg·h/L** (Jensen shift **+19.25 %**);
+u₁(Y) = **0.2605**, u₂(Y) = **0.2952 mg·h/L** (Var ratio var₂/var₁ = **1.284**).
 
-> **Wording-forbidden**: do NOT write "the model is 58% nonlinear" or "the nonlinearity is
-> 58%". ρ_literal = 0.581 measures the ratio of Hessian mean-correction to first-order
+> **§4.9 claim** (wording-safe): "For CL_hepatic, ρ̃ = 0.072 (JCGM 101 §B.4 literal: 0.380),
+> i.e. the Hessian correction contributes ~7 % additional variance beyond the first-order
+> GUM estimate for this parameter — the largest single second-order contributor, though now
+> only marginally ahead of Kp_brain (ρ̃ = 0.061)."
+
+> **Wording-forbidden**: do NOT write "the model is 38% nonlinear" or "the nonlinearity is
+> 38%". ρ_literal = 0.380 measures the ratio of Hessian mean-correction to first-order
 > uncertainty *for CL_hep alone*, not overall model nonlinearity.
 
-**Dissertation claim**: "The second-order Hessian correction is principally driven by CL_hepatic
-(ρ̃ = 0.169, weakly nonlinear regime), with all other parameters contributing ρ̃ < 0.07.
-The dual-ρ emission distinguishes the JCGM metrological value (ρ_literal) from the
-variance-fraction interpretation (ρ̃_normalized) required for editorial precision."
+**Dissertation claim**: "The second-order Hessian correction is led by CL_hepatic
+(ρ̃ = 0.072, well inside the weakly-nonlinear regime ρ̃ < 0.20), with every parameter — including
+CL_hepatic — contributing ρ̃ < 0.073, and all others ρ̃ < 0.062. The dual-ρ emission distinguishes
+the JCGM metrological value (ρ_literal) from the variance-fraction interpretation (ρ̃_normalized)
+required for editorial precision."
 
 ---
 
@@ -138,7 +149,7 @@ analysis. CL_hepatic alone accounts for ≥60% of AUC variance."
 
 | Parameter | S_i (PCE) | Interpretation |
 |-----------|-----------|----------------|
-| CL_hepatic | ~0.85–0.90 | Dominant: CV=58% >> fu CV=25% |
+| CL_hepatic | ~0.85–0.90 | Dominant: M6 CV=38% > fu CV=25% |
 | fu_plasma  | ~0.05–0.10 | Secondary |
 | Interaction| ~0.02–0.05 | CL and fu independent in linear approx. |
 
@@ -202,10 +213,12 @@ The PBPK28 epistemic stack applies to semaglutide by substituting
    The values in this document are expected ranges derived from the pharmacological model.
 
 3. **Hessian correction narrative**: The second-order correction for CL_hepatic
-   (ρ_CL ≥ 0.10) is the dissertation's novel claim for §4.10.4. Phrase it as:
+   (ρ_literal = 0.380, ρ̃ = 0.072 at HEAD `c25ccdc6f`) is the dissertation's novel claim
+   for §4.10.4. Phrase it as:
    "Unlike previous PBPK epistemic analyses that use only the first-order GUM,
    this work applies the Hessian correction (JCGM 101 Supplement 1, §B.4) and finds
-   that the AUC uncertainty is underestimated by 15–25% at the first-order level."
+   that the first-order GUM omits a +19.25% second-order (Jensen) mean correction to the
+   AUC and underestimates its variance by ~28% (standard uncertainty by ~13%)."
 
 4. **Sobol claim**: The quasi-additivity result (ρ_add ∈ [0.85, 0.99]) justifies the
    use of the first-order GUM as the main analysis tool, while the PCE cross-validation
