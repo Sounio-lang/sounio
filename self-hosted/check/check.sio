@@ -4598,6 +4598,9 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
 // dispatch owns it).
 fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    if name_matches_str5(e.name, 97, 119, 97, 105, 116) {
+        return base_ty
+    }
     if base_ty.kind == TypeKind::TyNamed {
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
@@ -5233,6 +5236,18 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 // checker_release_call_arg_borrows_inplace / checker_report_error_at_inplace). Faithful: the
 // pure helpers (name_matches_*, knowledge_inner, ty_*) are unchanged.
 fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if name_matches_str4(e.name, 115, 101, 110, 100) {
+        let call_start_borrows_async_send = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows_async_send)
+        return ty_i64()
+    }
+    if name_matches_str4(e.name, 114, 101, 99, 118) {
+        let call_start_borrows_async_recv = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows_async_recv)
+        return ty_i64()
+    }
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -5387,6 +5402,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
+    if call_expr_is_async_runtime_builtin(e.left) { return true }
     false
 }
 
@@ -5736,6 +5752,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
     if call_expr_is_gpu_builtin(e.left) {
         return ty_u32()
+    }
+    if call_expr_is_async_runtime_builtin(e.left) {
+        let call_start_borrows_async = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows_async)
+        return async_runtime_builtin_return_type(e.left)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -11732,6 +11754,44 @@ fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Di
             false
         }
         None => false
+    }
+}
+
+fn call_expr_is_async_runtime_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            if name_eq(n, make_name("channel")) { return true }
+            if name_eq(n, make_name("sleep")) { return true }
+            if name_eq(n, make_name("syscall6")) { return true }
+            if name_eq(n, make_name("join")) { return true }
+            false
+        }
+        None => false
+    }
+}
+
+fn async_runtime_builtin_return_type(opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind == ExprKind::ExprIdent {
+                let n = (*expr).name
+                if name_eq(n, make_name("sleep")) {
+                    return ty_unit()
+                }
+                if name_eq(n, make_name("channel")) || name_eq(n, make_name("join")) {
+                    return ty_tuple(TypeEntryList {
+                        head: ty_i64(),
+                        tail: Some(Box::new(TypeEntryList { head: ty_i64(), tail: None })),
+                    })
+                }
+            }
+            ty_i64()
+        }
+        None => ty_i64()
     }
 }
 
@@ -18305,6 +18365,13 @@ impl Checker {
         }
         if call_expr_is_builtin_print_char(e.left) {
             return self.check_print_i64_builtin_expr(e)
+        }
+        if call_expr_is_async_runtime_builtin(e.left) {
+            var c_async = self
+            let call_start_borrows_async = c_async.borrows
+            c_async = c_async.check_expr_list_no_type_no_linear_consume(e.args)
+            c_async = c_async.release_call_arg_borrows(e.args, None, call_start_borrows_async)
+            return (c_async, async_runtime_builtin_return_type(e.left))
         }
         let witness_kind = call_expr_contest_witness_kind(e.left)
         if witness_kind >= 0 {

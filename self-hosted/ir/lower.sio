@@ -375,6 +375,17 @@ fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, P
     -1
 }
 
+fn lower_name_is_tuple_temp(n: Name) -> bool {
+    if n.len != 5 {
+        return false
+    }
+    n.buf[0] == 95 as i8 &&
+    n.buf[1] == 95 as i8 &&
+    n.buf[2] == 116 as i8 &&
+    n.buf[3] == 117 as i8 &&
+    n.buf[4] == 112 as i8
+}
+
 pub fn ir_empty_program_summary() -> IrProgramSummary {
     IrProgramSummary {
         module: Box::new(ir_empty_module()),
@@ -3685,6 +3696,10 @@ impl Lowerer {
                 if field_name.len <= 0 {
                     return 0
                 }
+                let first_named_byte = field_name.buf[0] as i64
+                if field_name.len == 1 && first_named_byte >= 48 && first_named_byte <= 57 {
+                    return first_named_byte - 48
+                }
                 return (field_name.buf[0] as i64) % 64
             }
             si = si + 1
@@ -3693,7 +3708,12 @@ impl Lowerer {
         if field_name.len <= 0 {
             0
         } else {
-            (field_name.buf[0] as i64) % 64
+            let first_missing_byte = field_name.buf[0] as i64
+            if field_name.len == 1 && first_missing_byte >= 48 && first_missing_byte <= 57 {
+                first_missing_byte - 48
+            } else {
+                (field_name.buf[0] as i64) % 64
+            }
         }
     }
 
@@ -5443,8 +5463,41 @@ impl Lowerer {
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
-        let reg = pair.1
+        var reg = pair.1
+        if is_mut {
+            let pair_dst = lo.fresh_reg()
+            lo = pair_dst.0
+            let dst = pair_dst.1
+            lo = lo.emit(ir_copy(dst, reg))
+            reg = dst
+        }
         lo = lo.bind_local(s.name, reg, is_mut)
+        if lower_name_is_tuple_temp(s.name) {
+            match s.expr {
+                Some(expr_box_tuple_tmp) => {
+                    if (*expr_box_tuple_tmp).kind == ExprKind::ExprTupleLit {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Tuple"))
+                    } else if (*expr_box_tuple_tmp).kind == ExprKind::ExprCall {
+                        let tuple_callee = match (*expr_box_tuple_tmp).left {
+                            Some(callee_box_tuple_tmp) => lo.expr_to_callee_name_ref(&(*callee_box_tuple_tmp)),
+                            None => ir_empty_name(),
+                        }
+                        if ir_name_eq(tuple_callee, make_name("join")) || ir_name_eq(tuple_callee, make_name("channel")) {
+                            lo = lo.bind_local_struct_type(s.name, make_name("Tuple"))
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        match s.expr {
+            Some(expr_box_async_tag) => {
+                if (*expr_box_async_tag).kind == ExprKind::ExprBlock && ir_name_eq((*expr_box_async_tag).name, make_name("spawn")) {
+                    lo = lo.bind_local_struct_type(s.name, make_name("TaskHandle"))
+                }
+            }
+            _ => {}
+        }
         // Closures step 2: if the RHS was a capturing closure, mark this local so a later
         // `name(args)` call injects the captured regs (direct call to the synthetic fn).
         if lo.pending_closure_fn_id >= 0 {
@@ -6133,6 +6186,246 @@ impl Lowerer {
             }
             _ => self.emit_unit(),
         }
+    }
+
+    fn async_reg_list7(self, r0: i64, r1: i64, r2: i64, r3: i64, r4: i64, r5: i64, r6: i64) -> Option<Box<IrRegList>> with Alloc {
+        Some(Box::new(IrRegList {
+            head: r0,
+            tail: Some(Box::new(IrRegList {
+                head: r1,
+                tail: Some(Box::new(IrRegList {
+                    head: r2,
+                    tail: Some(Box::new(IrRegList {
+                        head: r3,
+                        tail: Some(Box::new(IrRegList {
+                            head: r4,
+                            tail: Some(Box::new(IrRegList {
+                                head: r5,
+                                tail: Some(Box::new(IrRegList { head: r6, tail: None })),
+                            })),
+                        })),
+                    })),
+                })),
+            })),
+        }))
+    }
+
+    fn emit_syscall6_regs(self, num: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        let lo = pair_dst.0
+        let dst = pair_dst.1
+        let args = lo.async_reg_list7(num, a1, a2, a3, a4, a5, a6)
+        (lo.emit(ir_syscall6(dst, args, 7)), dst)
+    }
+
+    fn emit_syscall6_const(self, num: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let p0 = self.emit_i64_const(num)
+        var lo = p0.0
+        let r0 = p0.1
+        let p1 = lo.emit_i64_const(a1)
+        lo = p1.0
+        let r1 = p1.1
+        let p2 = lo.emit_i64_const(a2)
+        lo = p2.0
+        let r2 = p2.1
+        let p3 = lo.emit_i64_const(a3)
+        lo = p3.0
+        let r3 = p3.1
+        let p4 = lo.emit_i64_const(a4)
+        lo = p4.0
+        let r4 = p4.1
+        let p5 = lo.emit_i64_const(a5)
+        lo = p5.0
+        let r5 = p5.1
+        let p6 = lo.emit_i64_const(a6)
+        lo = p6.0
+        let r6 = p6.1
+        lo.emit_syscall6_regs(r0, r1, r2, r3, r4, r5, r6)
+    }
+
+    fn emit_raw_index_get_const(self, base: i64, idx: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let idx_pair = self.emit_i64_const(idx)
+        var lo = idx_pair.0
+        let idx_reg = idx_pair.1
+        let dst_pair = lo.fresh_reg()
+        lo = dst_pair.0
+        let dst = dst_pair.1
+        var instr = ir_index_get(dst, base, idx_reg)
+        instr.label_id = 2
+        (lo.emit(instr), dst)
+    }
+
+    fn emit_raw_index_set_const(self, base: i64, idx: i64, value: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let idx_pair = self.emit_i64_const(idx)
+        var lo = idx_pair.0
+        let idx_reg = idx_pair.1
+        var instr = ir_index_set(base, idx_reg, value)
+        instr.label_id = 2
+        lo.emit(instr)
+    }
+
+    fn emit_raw_index_get_reg(self, base: i64, idx_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let dst_pair = self.fresh_reg()
+        let lo = dst_pair.0
+        let dst = dst_pair.1
+        var instr = ir_index_get(dst, base, idx_reg)
+        instr.label_id = 2
+        (lo.emit(instr), dst)
+    }
+
+    fn emit_raw_index_set_reg(self, base: i64, idx_reg: i64, value: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var instr = ir_index_set(base, idx_reg, value)
+        instr.label_id = 2
+        self.emit(instr)
+    }
+
+    fn lower_async_channel_call(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let mmap_pair = self.emit_syscall6_const(9, 0, 4096, 3, 33, 0 - 1, 0)
+        var lo = mmap_pair.0
+        let shared = mmap_pair.1
+        let pair_tuple = lo.fresh_reg()
+        lo = pair_tuple.0
+        let tuple = pair_tuple.1
+        lo = lo.emit(ir_alloc(tuple, 16))
+        lo = lo.emit(ir_field_set(tuple, 0, shared, ir_empty_name()))
+        lo = lo.emit(ir_field_set(tuple, 1, shared, ir_empty_name()))
+        (lo, tuple)
+    }
+
+    fn lower_async_send_call(self, recv: i64, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                let value_pair = self.lower_expr_ref(&(*list).head)
+                var lo = value_pair.0
+                let value = value_pair.1
+                let idx_pair = lo.emit_raw_index_get_const(recv, 0)
+                lo = idx_pair.0
+                let idx = idx_pair.1
+                let two_pair = lo.emit_i64_const(2)
+                lo = two_pair.0
+                let two = two_pair.1
+                let data_idx_pair = lo.fresh_reg()
+                lo = data_idx_pair.0
+                let data_idx = data_idx_pair.1
+                lo = lo.emit(ir_binop(data_idx, idx, BinaryOp::OpAdd, two))
+                lo = lo.emit_raw_index_set_reg(recv, data_idx, value)
+                let one_pair = lo.emit_i64_const(1)
+                lo = one_pair.0
+                let one = one_pair.1
+                let next_pair = lo.fresh_reg()
+                lo = next_pair.0
+                let next = next_pair.1
+                lo = lo.emit(ir_binop(next, idx, BinaryOp::OpAdd, one))
+                lo = lo.emit_raw_index_set_const(recv, 0, next)
+                (lo, next)
+            }
+            _ => self.emit_unit(),
+        }
+    }
+
+    fn lower_async_recv_call(self, recv: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let top_pair = self.fresh_label()
+        var lo = top_pair.0
+        let l_top = top_pair.1
+        let ready_pair = lo.fresh_label()
+        lo = ready_pair.0
+        let l_ready = ready_pair.1
+        lo = lo.emit(ir_label(l_top))
+        let w_pair = lo.emit_raw_index_get_const(recv, 0)
+        lo = w_pair.0
+        let w = w_pair.1
+        let r_pair = lo.emit_raw_index_get_const(recv, 1)
+        lo = r_pair.0
+        let r = r_pair.1
+        let cmp_pair = lo.fresh_reg()
+        lo = cmp_pair.0
+        let cmp = cmp_pair.1
+        lo = lo.emit(ir_binop(cmp, r, BinaryOp::OpLt, w))
+        lo = lo.emit(ir_branch_true(cmp, l_ready))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_ready))
+        let two_pair = lo.emit_i64_const(2)
+        lo = two_pair.0
+        let two = two_pair.1
+        let data_idx_pair = lo.fresh_reg()
+        lo = data_idx_pair.0
+        let data_idx = data_idx_pair.1
+        lo = lo.emit(ir_binop(data_idx, r, BinaryOp::OpAdd, two))
+        let val_pair = lo.emit_raw_index_get_reg(recv, data_idx)
+        lo = val_pair.0
+        let val = val_pair.1
+        let one_pair = lo.emit_i64_const(1)
+        lo = one_pair.0
+        let one = one_pair.1
+        let next_pair = lo.fresh_reg()
+        lo = next_pair.0
+        let next = next_pair.1
+        lo = lo.emit(ir_binop(next, r, BinaryOp::OpAdd, one))
+        lo = lo.emit_raw_index_set_const(recv, 1, next)
+        (lo, val)
+    }
+
+    fn lower_async_await_handle(self, handle: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pid_pair = self.fresh_reg()
+        var lo = pid_pair.0
+        let pid = pid_pair.1
+        lo = lo.emit(ir_field_get(pid, handle, 0, ir_empty_name()))
+        let zero1 = lo.emit_i64_const(0)
+        lo = zero1.0
+        let z1 = zero1.1
+        let zero2 = lo.emit_i64_const(0)
+        lo = zero2.0
+        let z2 = zero2.1
+        let zero3 = lo.emit_i64_const(0)
+        lo = zero3.0
+        let z3 = zero3.1
+        let zero4 = lo.emit_i64_const(0)
+        lo = zero4.0
+        let z4 = zero4.1
+        let zero5 = lo.emit_i64_const(0)
+        lo = zero5.0
+        let z5 = zero5.1
+        let sysno = lo.emit_i64_const(61)
+        lo = sysno.0
+        let sn = sysno.1
+        let wait_pair = lo.emit_syscall6_regs(sn, pid, z1, z2, z3, z4, z5)
+        lo = wait_pair.0
+        let slot_pair = lo.fresh_reg()
+        lo = slot_pair.0
+        let slot = slot_pair.1
+        lo = lo.emit(ir_field_get(slot, handle, 1, ir_empty_name()))
+        lo.emit_raw_index_get_const(slot, 0)
+    }
+
+    fn lower_async_spawn_block_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let slot_pair = self.emit_syscall6_const(9, 0, 4096, 3, 33, 0 - 1, 0)
+        var lo = slot_pair.0
+        let slot = slot_pair.1
+        let fork_pair = lo.emit_syscall6_const(57, 0, 0, 0, 0, 0, 0)
+        lo = fork_pair.0
+        let pid = fork_pair.1
+        let parent_pair = lo.fresh_label()
+        lo = parent_pair.0
+        let l_parent = parent_pair.1
+        lo = lo.emit(ir_branch_true(pid, l_parent))
+        let body_pair = match e.block {
+            Some(blk) => lo.lower_block_ref(&(*blk)),
+            None => lo.emit_unit(),
+        }
+        lo = body_pair.0
+        let body = body_pair.1
+        lo = lo.emit_raw_index_set_const(slot, 0, body)
+        let exit_pair = lo.emit_syscall6_const(60, 0, 0, 0, 0, 0, 0)
+        lo = exit_pair.0
+        let _exit_reg = exit_pair.1
+        lo = lo.emit(ir_label(l_parent))
+        let handle_pair = lo.fresh_reg()
+        lo = handle_pair.0
+        let handle = handle_pair.1
+        lo = lo.emit(ir_alloc(handle, 16))
+        lo = lo.emit(ir_field_set(handle, 0, pid, ir_empty_name()))
+        lo = lo.emit(ir_field_set(handle, 1, slot, ir_empty_name()))
+        (lo, handle)
     }
 
     // prove_robust(contest, policy) → IrProveRobust (zero-cost copy; policy is proof-time only)
@@ -6824,6 +7117,39 @@ impl Lowerer {
             let lo_call_nl = lo_nl_dst.emit(ir_call(nl_dst, fn_id_print_char, make_name("print_char"), nl_args, 1))
             return (lo_call_nl, dst_pl)
         }
+        if name_eq(callee_name, make_name("channel")) {
+            return self.lower_async_channel_call()
+        }
+        if name_eq(callee_name, make_name("sleep")) {
+            return self.emit_unit()
+        }
+        if name_eq(callee_name, make_name("syscall6")) {
+            let pair_args_sys: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
+            let lo_sys = pair_args_sys.lowerer
+            let args_sys: Option<Box<IrRegList>> = if pair_args_sys.count <= 0 { None } else { Some(Box::new(pair_args_sys.regs)) }
+            let pair_dst_sys = lo_sys.fresh_reg()
+            let lo_dst_sys = pair_dst_sys.0
+            let dst_sys = pair_dst_sys.1
+            return (lo_dst_sys.emit(ir_syscall6(dst_sys, args_sys, pair_args_sys.count)), dst_sys)
+        }
+        if name_eq(callee_name, make_name("join")) {
+            let pair_args_join: LowerExprArgsResult = self.lower_expr_args_ref(&e.args)
+            var lo_join = pair_args_join.lowerer
+            let first_two = ir_reg_list_first_two(if pair_args_join.count <= 0 { None } else { Some(Box::new(pair_args_join.regs)) })
+            let aw1_pair = lo_join.lower_async_await_handle(first_two.0)
+            lo_join = aw1_pair.0
+            let r1 = aw1_pair.1
+            let aw2_pair = lo_join.lower_async_await_handle(first_two.1)
+            lo_join = aw2_pair.0
+            let r2 = aw2_pair.1
+            let pair_tuple_join = lo_join.fresh_reg()
+            lo_join = pair_tuple_join.0
+            let tuple_join = pair_tuple_join.1
+            lo_join = lo_join.emit(ir_alloc(tuple_join, 16))
+            lo_join = lo_join.emit(ir_field_set(tuple_join, 0, r1, ir_empty_name()))
+            lo_join = lo_join.emit(ir_field_set(tuple_join, 1, r2, ir_empty_name()))
+            return (lo_join, tuple_join)
+        }
         if ir_name_is_some(callee_name) {
             return self.lower_expr_args_first(&e.args)
         }
@@ -7051,6 +7377,27 @@ impl Lowerer {
     }
 
     fn lower_field_access_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if ir_name_eq(e.name, make_name("await")) {
+            let should_wait = match e.left {
+                Some(base_await_ref) => {
+                    if (*base_await_ref).kind == ExprKind::ExprIdent {
+                        ir_name_eq(self.lookup_local_struct_type((*base_await_ref).name), make_name("TaskHandle"))
+                    } else if (*base_await_ref).kind == ExprKind::ExprBlock {
+                        ir_name_eq((*base_await_ref).name, make_name("spawn"))
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+            let pair_b_await = self.lower_opt_expr_ref(&e.left)
+            let lo_await = pair_b_await.0
+            let base_await = pair_b_await.1
+            if should_wait {
+                return lo_await.lower_async_await_handle(base_await)
+            }
+            return (lo_await, base_await)
+        }
         let fidx = self.field_idx_for_base_ref(&e.left, e.name)
         let field_is_float = self.field_is_float_for_base_ref(&e.left, e.name) || self.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = self.field_array_elem_is_float_for_base_ref(&e.left, e.name)
@@ -7252,6 +7599,16 @@ impl Lowerer {
     }
 
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if name_eq(e.name, make_name("send")) {
+            let pair_b_send = self.lower_opt_expr_ref(&e.left)
+            let lo_send = pair_b_send.0
+            return lo_send.lower_async_send_call(pair_b_send.1, &e.args)
+        }
+        if name_eq(e.name, make_name("recv")) {
+            let pair_b_recv = self.lower_opt_expr_ref(&e.left)
+            let lo_recv = pair_b_recv.0
+            return lo_recv.lower_async_recv_call(pair_b_recv.1)
+        }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
         // A `recv.method()` call must resolve to that SAME mangled name; using the bare
         // method name finds/creates a body-less fn -> codegen crash.
@@ -7480,6 +7837,9 @@ impl Lowerer {
     }
 
     fn lower_block_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if ir_name_eq(e.name, make_name("spawn")) {
+            return self.lower_async_spawn_block_ref(e)
+        }
         let block_opt: Option<Box<Block>> = e.block
         match block_opt {
             Some(blk) => self.lower_block_ref(&(*blk)),
@@ -8318,7 +8678,7 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
 // right field_idx.
 fn lower_program_to_ir_summary_box_with_externs_ref(
     prog: &Program,
-    programs: &[Program; 256],
+    programs: &! [Program; 256],
     program_count: i64,
     self_index: i64,
     epistemic: &IrEpistemicSection
