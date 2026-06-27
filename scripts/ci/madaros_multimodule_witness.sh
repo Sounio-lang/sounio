@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # madaros_multimodule_witness.sh — minimal multimodule native compile/run witnesses.
 #
-# Exercises the import-aware compile path (raw `SRC -o OUT` / bin/madaros run|build),
+# Exercises the import-aware check/compile path (bin/madaros check|run|build),
 # not --native-v2-compile (single-module bridge only).
 set -euo pipefail
 
@@ -67,6 +67,10 @@ while IFS=$'\t' read -r case_id program_path expected_exit gate_mode || [[ -n "$
   fi
 
   case "$gate_mode" in
+    check)
+      actual_exit="n/a"
+      status="check_ok"
+      ;;
     run)
       run_log="$LOG_DIR/$case_id.run.log"
       set +e
