@@ -6116,6 +6116,102 @@ impl Lowerer {
         self.lower_expr_args_ref(&opt)
     }
 
+    fn first_arg_is_capturing_closure_literal_ref(self, opt: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind != ExprKind::ExprClosure { return false }
+                var caps = empty_capture_list()
+                caps = self.scan_captures_opt(&(*list).head.closure_body, &(*list).head.closure_params, caps)
+                caps.count > 0
+            }
+            _ => false,
+        }
+    }
+
+    fn lower_function_is_transparent_hof(self, fn_id: i64) -> bool with Mut, Panic, Div, Alloc {
+        if fn_id < 0 || fn_id >= (*self.module).fn_count { return false }
+        let func = (*self.module).functions[fn_id as usize]
+        if func.param_count < 2 { return false }
+        var call_count: i64 = 0
+        var call_dst: i64 = IR_INVALID_REG
+        var saw_return = false
+        var i: i64 = 0
+        while i < func.instr_count {
+            let instr = func.instrs[i as usize]
+            if instr.op == IrOpcode::IrCallIndirect {
+                call_count = call_count + 1
+                if instr.src1 != func.param_regs[0] { return false }
+                if instr.arg_count != func.param_count - 1 { return false }
+                var cur = instr.call_args
+                var pidx: i64 = 1
+                while pidx < func.param_count {
+                    match cur {
+                        Some(arg_node) => {
+                            if (*arg_node).head != func.param_regs[pidx as usize] { return false }
+                            cur = (*arg_node).tail
+                        }
+                        _ => return false,
+                    }
+                    pidx = pidx + 1
+                }
+                match cur {
+                    Some(_) => return false,
+                    _ => {}
+                }
+                call_dst = instr.dst
+            } else if instr.op == IrOpcode::IrReturn {
+                if instr.src1 == call_dst {
+                    saw_return = true
+                }
+            }
+            i = i + 1
+        }
+        call_count == 1 && saw_return
+    }
+
+    fn lower_hof_captured_closure_literal_call(self, callee_name: Name, opt: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *opt {
+            Some(list) => {
+                var lo_closure = self
+                lo_closure.allow_direct_capturing_closure_literal = true
+                let pair_closure = lo_closure.lower_expr_ref(&(*list).head)
+                var lo = pair_closure.0
+                let closure_fn_id = lo.pending_closure_fn_id
+                lo.pending_closure_fn_id = -1
+                if closure_fn_id < 0 {
+                    print("error: capturing closure HOF specialization expected a captured closure literal\n")
+                    let loe = lo.report_error()
+                    return (loe, pair_closure.1)
+                }
+
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                lo = pair_tail.lowerer
+                var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
+                var total = pair_tail.count
+                let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 {
+                    let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist = ir_reg_list_prepend((*lo.closure_caps).entries[cidx as usize].caps[jc as usize], arglist)
+                        jc = jc - 1
+                    }
+                    total = total + ccount
+                }
+
+                let pair_dst = lo.fresh_reg()
+                let lo_dst = pair_dst.0
+                let dst = pair_dst.1
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                (lo_call, dst)
+            }
+            _ => {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        }
+    }
+
     fn prepend_arg(self, reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
         Some(Box::new(IrRegList { head: reg, tail: args }))
     }
@@ -7400,6 +7496,9 @@ impl Lowerer {
             if lo1.expr_list_len_ref(&e.args) == 2 {
                 return lo1.lower_kaxi_publish_call(fn_id, callee_name, e.args)
             }
+        }
+        if lo1.first_arg_is_capturing_closure_literal_ref(&e.args) && lo1.lower_function_is_transparent_hof(fn_id) {
+            return lo1.lower_hof_captured_closure_literal_call(callee_name, &e.args)
         }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
         let lo2 = pair_args.lowerer
