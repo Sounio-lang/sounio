@@ -633,6 +633,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.sedenion-zero-divisor-geometry-report | historical | docs/research/SEDENION_ZERO_DIVISOR_GEOMETRY_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-hosted-hypercomplex | historical | docs/research/self_hosted_hypercomplex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.smt-farkas-microkernel-2026-06-23 | historical | docs/research/smt-farkas-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.solver-gpu-native-path-2026-06-27 | historical | docs/research/solver-gpu-native-path-2026-06-27.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-heuristic-literature-matrix-2026-06-25 | historical | docs/research/solver-heuristic-literature-matrix-2026-06-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-lorenz-v175-lane-state-2026-06-24 | historical | docs/research/solver-lorenz-v175-lane-state-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-novelty-readiness-2026-06-25 | historical | docs/research/solver-novelty-readiness-2026-06-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
