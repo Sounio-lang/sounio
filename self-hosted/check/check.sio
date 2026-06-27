@@ -5888,6 +5888,47 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
     }
 }
 
+fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprPath {
+                return false
+            }
+            if (*expr).path.seg_count != 2 {
+                return false
+            }
+            let head_name = checker_copy_string_list_to_name((*expr).path.segments)
+            let tail_name = checker_copy_string_list_tail_to_name((*expr).path.segments)
+            let head_ok = name_matches_str3(head_name, 66, 111, 120)
+            let tail_ok = name_matches_str3(tail_name, 110, 101, 119)
+            head_ok && tail_ok
+        }
+        None => false
+    }
+}
+
+fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let call_start_borrows = (*c).borrows
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(extra) => {
+            let _extra_ty = checker_check_expr_inplace(c, *extra)
+            checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        }
+        None => {}
+    }
+    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    var box_ty = ty_named(make_name("Box"))
+    box_ty.inner = Some(Box::new(arg_ty))
+    box_ty
+}
+
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
     fn_sig_table_find((*c).fn_sigs, name)
 }
@@ -6010,6 +6051,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
     if call_expr_is_gpu_builtin(e.left) {
         return ty_u32()
+    }
+    if call_expr_is_box_new(e.left) {
+        return checker_check_box_new_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -18634,6 +18678,31 @@ impl Checker {
         (c, ty_unit())
     }
 
+    fn check_box_new_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let call_start_borrows = self.borrows
+        let first_pair = self.check_opt_expr(first_arg)
+        var c = first_pair.0
+        let arg_ty = first_pair.1
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(extra) => {
+                let extra_pair = c.check_expr(*extra)
+                c = extra_pair.0
+                c = c.report_error_at(e.span, 10, 0, 0, 0)
+            }
+            None => {}
+        }
+        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+        var box_ty = ty_named(make_name("Box"))
+        box_ty.inner = Some(Box::new(arg_ty))
+        (c, box_ty)
+    }
+
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
@@ -18709,6 +18778,9 @@ impl Checker {
         }
         if call_expr_is_builtin_slice_len(e.left) {
             return self.check_slice_len_call_expr(e)
+        }
+        if call_expr_is_box_new(e.left) {
+            return self.check_box_new_expr(e)
         }
         if call_expr_is_builtin_print_int(e.left) {
             return self.check_print_i64_builtin_expr(e)
