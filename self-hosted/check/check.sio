@@ -2459,6 +2459,28 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     print_error_note(code)
 }
 
+fn checker_report_unobserved_print_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E036]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": cannot print Unobserved<T>\n")
+    print("   |\n   = help: Unobserved<T> requires `with Observe` before IO can inspect it\n")
+}
+
+fn checker_type_is_unobserved_like(ty: TypeEntry) -> bool with Panic, Div {
+    if ty.kind == TypeKind::TyUnobserved {
+        return true
+    }
+    ty.kind == TypeKind::TyNamed && name_matches_str10(ty.name, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100)
+}
+
 fn checker_push_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
     if (*c).const_int_scope_depth < MAX_SCOPE_DEPTH {
         (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize] = (*c).const_int_count
@@ -5634,6 +5656,15 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
         None => {}
     }
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if checker_type_is_unobserved_like(arg_ty) {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
+            checker_report_unobserved_print_inplace(c, e.span)
+        }
+        var effects_unobserved: [i64; 8] = [0; 8]
+        effects_unobserved[0] = 0
+        checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+        return ty_unit()
+    }
     if !is_error_or_unknown(arg_ty) && !checker_types_compatible_inplace(c, arg_ty, ty_i64()) {
         checker_report_mismatch_inplace(c, e.span, 9, ty_i64(), arg_ty)
     }
@@ -5796,6 +5827,19 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_print_char(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_println(e.left) {
+        let first_arg = expr_list_head(e.args)
+        let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+        if checker_type_is_unobserved_like(arg_ty) {
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
+                checker_report_unobserved_print_inplace(c, e.span)
+            }
+            var effects_unobserved: [i64; 8] = [0; 8]
+            effects_unobserved[0] = 0
+            checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+            return ty_unit()
+        }
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
     // gpu_block_dim_*, gpu_barrier, gpu_sync_threads): implicit kernel builtins
@@ -8889,6 +8933,23 @@ impl Checker {
         c
     }
 
+    fn report_unobserved_print(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E036]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": cannot print Unobserved<T>\n")
+        print("   |\n   = help: Unobserved<T> requires `with Observe` before IO can inspect it\n")
+        c
+    }
+
     fn report_warning_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
         var c = self
         c.warning_count = c.warning_count + 1
@@ -11879,6 +11940,18 @@ fn call_expr_is_builtin_print_char(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110)
         }
         None => false
     }
@@ -18334,6 +18407,15 @@ impl Checker {
             Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
             None => {}
         }
+        if checker_type_is_unobserved_like(arg_ty) {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 13) {
+                c = c.report_unobserved_print(e.span)
+            }
+            var effects_unobserved: [i64; 8] = [0; 8]
+            effects_unobserved[0] = 0
+            c = c.check_callee_effects(e.span, effects_unobserved, 1)
+            return (c, ty_unit())
+        }
         if !is_error_or_unknown(arg_ty) && !c.types_compatible_structural(arg_ty, ty_i64()) {
             c = c.report_mismatch(e.span, 9, ty_i64(), arg_ty)
         }
@@ -18424,6 +18506,21 @@ impl Checker {
         }
         if call_expr_is_builtin_print_char(e.left) {
             return self.check_print_i64_builtin_expr(e)
+        }
+        if call_expr_is_builtin_println(e.left) {
+            let first_arg = expr_list_head(e.args)
+            let first_pair = self.check_opt_expr(first_arg)
+            var c_println = first_pair.0
+            let arg_ty = first_pair.1
+            if checker_type_is_unobserved_like(arg_ty) {
+                if !has_effect_id(c_println.current_effects, c_println.current_effect_count, 13) {
+                    c_println = c_println.report_unobserved_print(e.span)
+                }
+                var effects_unobserved: [i64; 8] = [0; 8]
+                effects_unobserved[0] = 0
+                c_println = c_println.check_callee_effects(e.span, effects_unobserved, 1)
+                return (c_println, ty_unit())
+            }
         }
         let witness_kind = call_expr_contest_witness_kind(e.left)
         if witness_kind >= 0 {
