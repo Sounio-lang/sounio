@@ -35,13 +35,13 @@ emit_sio_decl() {
   awk -v kind="$kind" -v name="$name" '
     function is_target_decl(line) {
       if (kind == "fn") {
-        return line ~ ("^fn " name "\\(")
+        return line ~ ("^(pub )?fn " name "\\(")
       }
-      return line ~ ("^" kind " " name "([ {]|$)")
+      return line ~ ("^(pub )?" kind " " name "([ {]|$)")
     }
 
     function is_top_level_decl(line) {
-      return line ~ /^(fn|struct) /
+      return line ~ /^(pub )?(fn|struct) /
     }
 
     is_target_decl($0) {
