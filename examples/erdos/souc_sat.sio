@@ -790,25 +790,19 @@ fn want_restart() -> i32 with Mut, Panic {
 
 fn pick() -> i32 with Mut, Panic, Div {
     if USE_LRB == 2 {
-        // Epistemic Thompson Sampling — O(1) per var via cached sigma
-        // Periodically refresh sigma[v] = sqrt(act_var[v])
-        // Per decision: score = act_mean[v] + noise·sigma_cached[v]
-        // noise = single Rayleigh sample shared across vars
+        // Epistemic Thompson Sampling — shared noise, O(1) per var
         if n_conflicts % 500 == 0 {
             var vv: i32 = 1
             while vv <= nvars { ts_sigma[vv] = ts_sqrt(act_var[vv])  vv = vv + 1 }
         }
         ts_step = ts_step + 1
-        // Single noise sample for this decision
         var u = ts_hash(ts_step * 7919 + 13)
         var z_mag = ts_sqrt(0.0 - 2.0 * ts_ln(u))
         var u2 = ts_hash(ts_step * 3947 + 29)
         var noise: f64 = z_mag
         if u2 < 0.5 { noise = 0.0 - z_mag }
-        // Adaptive beta: high early (explore), low late (exploit)
-        var beta = 0.6
         var density = n_conflicts as f64 / (n_conflicts as f64 + n_decisions as f64 + 1.0)
-        beta = 0.6 * (1.0 - density) * (1.0 - density)
+        var beta = 0.6 * (1.0 - density) * (1.0 - density)
         var n = noise * beta
         var best: i32 = 0
         var bestkey: f64 = 0.0 - 1.0
@@ -816,6 +810,34 @@ fn pick() -> i32 with Mut, Panic, Div {
         while v <= nvars {
             if assign[v] == 0 {
                 var score = act_mean[v] + n * ts_sigma[v]
+                if score > bestkey { bestkey = score  best = v }
+            }
+            v = v + 1
+        }
+        pick_best = best
+        return best
+    }
+    if USE_LRB == 3 {
+        // Per-variable aggressive Thompson — true TS, reactive beta
+        if n_conflicts % 500 == 0 {
+            var vv: i32 = 1
+            while vv <= nvars { ts_sigma[vv] = ts_sqrt(act_var[vv])  vv = vv + 1 }
+        }
+        ts_step = ts_step + 1
+        // Reactive beta: high when stuck (short trail), low when progressing (long trail)
+        var trail_ratio = (trail_len as f64) / (nvars as f64 + 1.0)
+        var beta = 1.0 / (1.0 + trail_ratio * trail_ratio * 2.0)
+        if beta < 0.1 { beta = 0.1 }
+        var best: i32 = 0
+        var bestkey: f64 = 0.0 - 1.0
+        var v: i32 = 1
+        while v <= nvars {
+            if assign[v] == 0 {
+                var nv = ts_hash(v * 65537 + ts_step * 4099 + 7)
+                var nsgn = ts_hash(v * 7919 + ts_step * 2017 + 3)
+                var nvar_noise = (nv * 2.0 - 1.0)
+                if nsgn < 0.5 { nvar_noise = 0.0 - nvar_noise }
+                var score = act_mean[v] + nvar_noise * beta * ts_sigma[v]
                 if score > bestkey { bestkey = score  best = v }
             }
             v = v + 1
