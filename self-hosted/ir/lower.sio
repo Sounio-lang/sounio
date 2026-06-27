@@ -2235,6 +2235,425 @@ fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
     0
 }
 
+struct CapturedClosureValueScan {
+    locals: [Name; 256],
+    local_count: i64,
+    captured_closures: [Name; 256],
+    captured_closure_count: i64,
+    transparent_hofs: [Name; 256],
+    transparent_hof_count: i64,
+}
+
+fn captured_closure_value_scan_empty() -> CapturedClosureValueScan {
+    CapturedClosureValueScan {
+        locals: [ir_empty_name(); 256],
+        local_count: 0,
+        captured_closures: [ir_empty_name(); 256],
+        captured_closure_count: 0,
+        transparent_hofs: [ir_empty_name(); 256],
+        transparent_hof_count: 0,
+    }
+}
+
+fn captured_scan_has_local(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.local_count {
+        if ir_name_eq(scan.locals[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_has_closure(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.captured_closure_count {
+        if ir_name_eq(scan.captured_closures[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_has_transparent_hof(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.transparent_hof_count {
+        if ir_name_eq(scan.transparent_hofs[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_add_local(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_local(out, name) { return out }
+    if out.local_count < 256 {
+        out.locals[out.local_count as usize] = name
+        out.local_count = out.local_count + 1
+    }
+    out
+}
+
+fn captured_scan_add_closure(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_closure(out, name) { return out }
+    if out.captured_closure_count < 256 {
+        out.captured_closures[out.captured_closure_count as usize] = name
+        out.captured_closure_count = out.captured_closure_count + 1
+    }
+    out
+}
+
+fn captured_scan_add_transparent_hof(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_transparent_hof(out, name) { return out }
+    if out.transparent_hof_count < 256 {
+        out.transparent_hofs[out.transparent_hof_count as usize] = name
+        out.transparent_hof_count = out.transparent_hof_count + 1
+    }
+    out
+}
+
+fn captured_closure_param_has_name(params: &Option<Box<ClosureParamList>>, name: Name) -> bool with Mut, Panic, Div {
+    var cur = params
+    while true {
+        match *cur {
+            Some(node) => {
+                if ir_name_eq((*node).head.name, name) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_expr_references_enclosing_local(e: &Expr, params: &Option<Box<ClosureParamList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        if captured_scan_has_local(scan, (*e).name) && !captured_closure_param_has_name(params, (*e).name) {
+            return true
+        }
+    }
+    match (*e).left {
+        Some(l) => { if captured_expr_references_enclosing_local(&(*l), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).right {
+        Some(r) => { if captured_expr_references_enclosing_local(&(*r), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).else_expr {
+        Some(el) => { if captured_expr_references_enclosing_local(&(*el), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).block {
+        Some(b) => { if captured_block_references_enclosing_local(&(*b), params, scan) { return true } }
+        _ => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(node) => {
+                if captured_expr_references_enclosing_local(&(*node).head, params, scan) { return true }
+                args = &(*node).tail
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn captured_block_references_enclosing_local(block: &Block, params: &Option<Box<ClosureParamList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                match (*node).head.expr {
+                    Some(e) => {
+                        if captured_expr_references_enclosing_local(&(*e), params, scan) { return true }
+                    }
+                    _ => {}
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_expr_is_capturing_closure_literal(e: &Expr, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprClosure { return false }
+    match (*e).closure_body {
+        Some(body) => captured_expr_references_enclosing_local(&(*body), &(*e).closure_params, scan),
+        _ => false,
+    }
+}
+
+fn captured_expr_is_captured_closure_value(e: &Expr, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        return captured_scan_has_closure(scan, (*e).name)
+    }
+    captured_expr_is_capturing_closure_literal(e, scan)
+}
+
+fn captured_call_first_arg_is_captured_value(args: &Option<Box<ExprList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    match *args {
+        Some(node) => captured_expr_is_captured_closure_value(&(*node).head, scan),
+        _ => false,
+    }
+}
+
+fn captured_expr_callee_name(e: &Expr) -> Name with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprIdent {
+        return (*e).name
+    }
+    if (*e).kind == ExprKind::ExprPath {
+        return ir_path_first_name((*e).path)
+    }
+    ir_empty_name()
+}
+
+fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_callee: bool) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        return !in_callee && captured_scan_has_closure(scan, (*e).name)
+    }
+    if (*e).kind == ExprKind::ExprClosure {
+        return !in_callee && captured_expr_is_capturing_closure_literal(e, scan)
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(ret) => { return captured_expr_misuses_value(&(*ret), scan, false) }
+            _ => return false,
+        }
+    }
+    if (*e).kind == ExprKind::ExprCall {
+        var callee_name = ir_empty_name()
+        var direct_captured_call = false
+        match (*e).left {
+            Some(callee) => {
+                callee_name = captured_expr_callee_name(&(*callee))
+                if callee_name.len > 0 {
+                    direct_captured_call = captured_scan_has_closure(scan, callee_name)
+                } else if captured_expr_misuses_value(&(*callee), scan, true) {
+                    return true
+                }
+            }
+            _ => {}
+        }
+        let captured_first_arg = captured_call_first_arg_is_captured_value(&(*e).args, scan)
+        let transparent_hof_call = captured_first_arg && captured_scan_has_transparent_hof(scan, callee_name)
+        if captured_first_arg && !transparent_hof_call { return true }
+        var args = &(*e).args
+        var idx: i64 = 0
+        while true {
+            match *args {
+                Some(node) => {
+                    if !((direct_captured_call || transparent_hof_call) && idx == 0) {
+                        if captured_expr_misuses_value(&(*node).head, scan, false) { return true }
+                    }
+                    args = &(*node).tail
+                    idx = idx + 1
+                }
+                _ => break,
+            }
+        }
+        return false
+    }
+    match (*e).left {
+        Some(l) => { if captured_expr_misuses_value(&(*l), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).right {
+        Some(r) => { if captured_expr_misuses_value(&(*r), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).else_expr {
+        Some(el) => { if captured_expr_misuses_value(&(*el), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).block {
+        Some(b) => { if captured_block_misuses_value(&(*b), scan) { return true } }
+        _ => {}
+    }
+    var args2 = &(*e).args
+    while true {
+        match *args2 {
+            Some(node2) => {
+                if captured_expr_misuses_value(&(*node2).head, scan, false) { return true }
+                args2 = &(*node2).tail
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn captured_block_misuses_value(block: &Block, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var state = scan
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                let stmt = &(*node).head
+                if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+                    match (*stmt).expr {
+                        Some(e) => {
+                            if captured_expr_is_capturing_closure_literal(&(*e), state) {
+                                state = captured_scan_add_closure(state, (*stmt).name)
+                            } else {
+                                if captured_expr_misuses_value(&(*e), state, false) { return true }
+                            }
+                        }
+                        _ => {}
+                    }
+                    state = captured_scan_add_local(state, (*stmt).name)
+                } else {
+                    match (*stmt).expr {
+                        Some(e2) => {
+                            if captured_expr_misuses_value(&(*e2), state, false) { return true }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_param_count(params: &Option<Box<ParamList>>) -> i64 with Alloc, Mut, Div {
+    var n: i64 = 0
+    var cur = params
+    while true {
+        match *cur {
+            Some(node) => {
+                n = n + 1
+                cur = &(*node).tail
+            }
+            _ => return n,
+        }
+    }
+    0
+}
+
+fn captured_first_param_name(params: &Option<Box<ParamList>>) -> Name with Alloc, Mut, Div {
+    match *params {
+        Some(node) => (*node).head.name,
+        _ => ir_empty_name(),
+    }
+}
+
+fn captured_expr_is_transparent_hof_body(e: &Expr, first_param: Name) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(ret) => return captured_expr_is_transparent_hof_body(&(*ret), first_param),
+            _ => return false,
+        }
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        return false
+    }
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(callee) => {
+            ir_name_eq(captured_expr_callee_name(&(*callee)), first_param)
+        }
+        _ => false,
+    }
+}
+
+fn captured_stmt_list_has_transparent_hof_body(stmts: &Option<Box<StmtList>>, first_param: Name) -> bool with Mut, Panic, Div {
+    var cur = stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                match (*node).head.expr {
+                    Some(e) => {
+                        if captured_expr_is_transparent_hof_body(&(*e), first_param) {
+                            return true
+                        }
+                    }
+                    _ => {}
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_fn_is_transparent_hof(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    if captured_param_count(&(*fd).params) < 2 { return false }
+    let first_param = captured_first_param_name(&(*fd).params)
+    captured_stmt_list_has_transparent_hof_body(&(*fd).body.stmts, first_param)
+}
+
+fn captured_collect_transparent_hofs(items: &Option<Box<ItemList>>, scan: CapturedClosureValueScan) -> CapturedClosureValueScan with Mut, Panic, Div, Alloc {
+    var state = scan
+    var cur = items
+    while true {
+        match *cur {
+            Some(node) => {
+                let item = &(*node).head
+                if (*item).kind == ItemKind::ItemFn {
+                    match (*item).fn_def {
+                        Some(fd) => {
+                            if captured_fn_is_transparent_hof(&(*fd)) {
+                                state = captured_scan_add_transparent_hof(state, (*item).name)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return state,
+        }
+    }
+    state
+}
+
+fn captured_fn_has_value_misuse(fd: &FnDef, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var state = scan
+    var params = &(*fd).params
+    while true {
+        match *params {
+            Some(node) => {
+                state = captured_scan_add_local(state, (*node).head.name)
+                params = &(*node).tail
+            }
+            _ => break,
+        }
+    }
+    captured_block_misuses_value(&(*fd).body, state)
+}
+
+pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bool with Mut, Panic, Div, Alloc {
+    var scan = captured_closure_value_scan_empty()
+    scan = captured_collect_transparent_hofs(&(*prog).items, scan)
+    var cur = &(*prog).items
+    while true {
+        match *cur {
+            Some(node) => {
+                let item = &(*node).head
+                if (*item).kind == ItemKind::ItemFn {
+                    match (*item).fn_def {
+                        Some(fd) => {
+                            if captured_fn_has_value_misuse(&(*fd), scan) { return true }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {

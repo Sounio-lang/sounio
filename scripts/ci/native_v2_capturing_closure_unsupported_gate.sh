@@ -39,6 +39,9 @@ ALIAS_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_alias_fail.s
 RETURN_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_return_fail.sio"
 IGNORE_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_ignore_fail.sio"
 INLINE_NONTRANSPARENT_HOF_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_inline_nontransparent_hof_fail.sio"
+NONTRANSPARENT_HOF_GENERIC_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_nontransparent_hof_generic_fail.sio"
+ALIAS_GENERIC_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_alias_generic_fail.sio"
+RETURN_GENERIC_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_return_generic_fail.sio"
 LOWER_SOURCE="self-hosted/ir/lower.sio"
 DIAGNOSTIC="native-v2 capturing closure literals are not yet supported"
 ZERO_ELF="$ARTIFACT_DIR/native_v2_closure_zero_capture_direct_42.native"
@@ -61,6 +64,9 @@ for path in \
   "$RETURN_FAIL" \
   "$IGNORE_FAIL" \
   "$INLINE_NONTRANSPARENT_HOF_FAIL" \
+  "$NONTRANSPARENT_HOF_GENERIC_FAIL" \
+  "$ALIAS_GENERIC_FAIL" \
+  "$RETURN_GENERIC_FAIL" \
   "$LOWER_SOURCE"; do
   if [[ ! -f "$path" ]]; then
     echo "[native-v2-capturing-closure-unsupported] FAIL: missing $path" >&2
@@ -199,5 +205,8 @@ expect_compile_fail alias_fail "$ALIAS_FAIL"
 expect_compile_fail return_fail "$RETURN_FAIL"
 expect_compile_fail ignore_fail "$IGNORE_FAIL"
 expect_compile_fail inline_nontransparent_hof_fail "$INLINE_NONTRANSPARENT_HOF_FAIL"
+expect_compile_fail nontransparent_hof_generic_fail "$NONTRANSPARENT_HOF_GENERIC_FAIL"
+expect_compile_fail alias_generic_fail "$ALIAS_GENERIC_FAIL"
+expect_compile_fail return_generic_fail "$RETURN_GENERIC_FAIL"
 
 echo "[native-v2-capturing-closure-unsupported] PASS: transparent direct/HOF captured closures stay native; escaping/nontransparent captured closure value use fails closed"
