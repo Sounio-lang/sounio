@@ -2018,6 +2018,20 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len != 3 { return false }
+            if seg.head_buf[0] as i64 != 105 { return false }   // 'i'
+            if seg.head_buf[1] as i64 != 54 { return false }    // '6'
+            if seg.head_buf[2] as i64 != 52 { return false }    // '4'
+            true
+        }
+        None => false,
+    }
+}
+
 fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
@@ -3596,18 +3610,11 @@ impl Lowerer {
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
-                let hk = (*list).head.kind
-                if hk == ExprKind::ExprIntLit {
+                let sk = self.expr_result_scalar_kind_ref(&(*list).head)
+                if sk == 1 {
                     make_name("print_int")
-                } else if self.expr_result_is_float_ref(&(*list).head) {
+                } else if sk == 2 {
                     make_name("print_f64")
-                } else if hk == ExprKind::ExprIdent {
-                    let sk = self.lookup_local_scalar_kind((*list).head.name)
-                    if sk == 1 {
-                        make_name("print_int")
-                    } else {
-                        make_name("print")
-                    }
                 } else {
                     make_name("print")
                 }
@@ -4239,6 +4246,38 @@ impl Lowerer {
             return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
         }
         false
+    }
+
+    fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit {
+            return 1
+        }
+        if (*e).kind == ExprKind::ExprFloatLit {
+            return 2
+        }
+        if (*e).kind == ExprKind::ExprStringLit {
+            return 3
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            if lower_cast_type_is_f64(&(*e).cast_type) { return 2 }
+            if lower_cast_type_is_i64(&(*e).cast_type) { return 1 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            if lower_binary_op_is_compare((*e).bin_op) {
+                return 1
+            }
+            if self.expr_result_is_float_ref(e) {
+                return 2
+            }
+        }
+        if self.expr_result_is_float_ref(e) {
+            return 2
+        }
+        0
     }
 
     fn ensure_struct_literal_layout_ref(self, type_name: Name, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc {
@@ -7169,7 +7208,10 @@ impl Lowerer {
             // Redirect bare print(<int literal>) to the print_int builtin: print
             // (=print_str) treats its argument as a char* and would deref the integer
             // value as a pointer. Explicit print_int / print_char are left untouched.
-            let print_builtin_name = if name_eq(callee_name, make_name("print")) && lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { callee_name }
+            var print_builtin_name = callee_name
+            if name_eq(callee_name, make_name("print")) {
+                print_builtin_name = self.println_dispatch_name(&e.args)
+            }
             var lo_builtin = self
             let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
             let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
