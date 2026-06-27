@@ -25,7 +25,11 @@ fi
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+if [[ -n "${SOUNIO_GATE_STDLIB_PATH:-}" ]]; then
+  export SOUNIO_STDLIB_PATH="$SOUNIO_GATE_STDLIB_PATH"
+elif [[ -z "${SOUNIO_STDLIB_PATH:-}" || "$SOUNIO_STDLIB_PATH" != "$ROOT_DIR"/* ]]; then
+  export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
+fi
 
 OUT_DIR="${SOUNIO_NATIVE_V2_IMPORTED_BODY_LOWERING_DIR:-$(mktemp -d /tmp/sounio-native-v2-imported-body-lowering.XXXXXX)}"
 LOG_DIR="$OUT_DIR/logs"
