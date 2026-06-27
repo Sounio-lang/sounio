@@ -1592,6 +1592,70 @@ fn checker_lower_tuple_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >
     }
 }
 
+fn option_expr_is_some(opt: Option<Box<Expr> >) -> bool {
+    match opt {
+        Some(_) => true,
+        None => false
+    }
+}
+
+fn checker_lower_raw_ptr_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, mut_flag: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match inner_opt {
+        Some(inner_te) => {
+            let inner_ty = checker_lower_type_expr_mut(c, *inner_te)
+            ty_raw_ptr(inner_ty, option_expr_is_some(mut_flag))
+        }
+        None => ty_error()
+    }
+}
+
+fn checker_refinement_pred_from_info(ri: RefinementInfo) -> RefinementPred with Alloc {
+    let pred = if ri.pred_is_float {
+        pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+    } else {
+        pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+    }
+    if ri.compound_op == 7 || ri.compound_op == 8 {
+        let pred2 = if ri.pred2_is_float {
+            pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+        } else {
+            pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+        }
+        if ri.compound_op == 7 {
+            pred_and(pred, pred2)
+        } else {
+            pred_or(pred, pred2)
+        }
+    } else {
+        pred
+    }
+}
+
+fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info) => {
+            let ri = *info
+            match ri.base_type {
+                Some(bte) => {
+                    let base_ty = checker_lower_type_expr_mut(c, *bte)
+                    if ri.pred_op > 0 {
+                        let pred = checker_refinement_pred_from_info(ri)
+                        let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                        let synth_name = make_refinement_synth_name((*c).refinements.count)
+                        (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
+                        let ref_idx = (*c).refinements.count - 1
+                        ty_with_refinement(base_ty, ref_idx)
+                    } else {
+                        base_ty
+                    }
+                }
+                None => ty_error()
+            }
+        }
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1689,6 +1753,8 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeTuple => checker_lower_tuple_type_mut(c, te.type_args)
         TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
         TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
+        TypeExprKind::TypeRawPtr => checker_lower_raw_ptr_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -3161,9 +3227,41 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         // Bridged to the by-value collect_impl_def (mirrors checker_check_impl_item_bridge);
         // its ~8MB SRET frame stays isolated in the bridge leaf.
         checker_collect_impl_item_bridge(c, item.impl_def)
+    } else if item.kind == ItemKind::ItemTypeAlias {
+        checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
+    }
+}
+
+fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    match ty_opt {
+        Some(te_box) => {
+            let te = *te_box
+            if te.kind == TypeExprKind::TypeRefinement {
+                match te.refinement_info {
+                    Some(ri_box) => {
+                        let ri = *ri_box
+                        match ri.base_type {
+                            Some(bte) => {
+                                let base_ty = checker_lower_type_expr_mut(c, *bte)
+                                let pred = checker_refinement_pred_from_info(ri)
+                                let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                                (*c).refinements = refinement_table_add((*c).refinements, name, rt)
+                            }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+            } else {
+                let alias_ty = checker_lower_type_expr_mut(c, te)
+                (*c).env = (*c).env.bind(name, alias_ty, false)
+                checker_const_int_bind_unknown_inplace(c, name)
+            }
+        }
+        None => {}
     }
 }
 
@@ -3748,6 +3846,17 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_warn_large_params_inplace(c, (*fd).name, (*fd).params)
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
+            match (*fd).body.stmts {
+                None => {
+                    (*c).current_return_type = ty_unit()
+                    (*c).current_effects = saved_effects
+                    (*c).current_effect_count = saved_effect_count
+                    (*c).multitest_count = saved_multitest_count
+                    (*c).multitest_corrected = saved_multitest_corrected
+                    return
+                }
+                Some(_) => {}
+            }
             (*c).env = (*c).env.push_scope()
             (*c).borrows = (*c).borrows.push_scope()
             checker_push_const_scope_inplace(c)
@@ -8289,6 +8398,17 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         }
         TypeKind::TyRefMut => {
             print("&!")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+        }
+        TypeKind::TyRawPtr => {
+            if ty.name.buf[0] == 1 {
+                print("*mut ")
+            } else {
+                print("*const ")
+            }
             match ty.inner {
                 Some(inner) => print_type_name(*inner)
                 None => print("?")
@@ -13638,6 +13758,7 @@ impl Checker {
             TypeExprKind::TypeSelfUpper => (c, c.current_impl_type)
             TypeExprKind::TypeReference => c.lower_ref_type(te.inner)
             TypeExprKind::TypeRefMut => c.lower_ref_mut_type(te.inner)
+            TypeExprKind::TypeRawPtr => c.lower_raw_ptr_type(te.inner, te.array_size)
             TypeExprKind::TypeArray => c.lower_array_type(te.inner, te.array_size)
             TypeExprKind::TypeTuple => c.lower_tuple_type(te.type_args)
             TypeExprKind::TypeFn => c.lower_fn_type_expr(te)
@@ -13891,6 +14012,8 @@ impl Checker {
                         || bound_ty.kind == TypeKind::TyDeferralPolicy
                         || bound_ty.kind == TypeKind::TyValidation {
                         (self, bound_ty)
+                    } else if bound_ty.kind != TypeKind::TyUnknown && bound_ty.kind != TypeKind::TyError && bound_ty.kind != TypeKind::TyNever {
+                        (self, bound_ty)
                     } else {
                         (self, ty_named(name))
                     }
@@ -13909,6 +14032,16 @@ impl Checker {
     fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(inner_te) => self.lower_ref_like_type(*inner_te, true)
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_raw_ptr_type(self, opt: Option<Box<TypeExpr> >, mut_flag: Option<Box<Expr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                (pair.0, ty_raw_ptr(pair.1, option_expr_is_some(mut_flag)))
+            }
             None => (self, ty_error())
         }
     }
@@ -14657,7 +14790,20 @@ impl Checker {
                             } else {
                                 pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
                             }
-                            let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                            var full_pred = pred
+                            if ri.compound_op == 7 || ri.compound_op == 8 {
+                                let pred2 = if ri.pred2_is_float {
+                                    pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+                                } else {
+                                    pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+                                }
+                                if ri.compound_op == 7 {
+                                    full_pred = pred_and(pred, pred2)
+                                } else {
+                                    full_pred = pred_or(pred, pred2)
+                                }
+                            }
+                            let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: full_pred }
                             let synth_name = make_refinement_synth_name(c.refinements.count)
                             c.refinements = refinement_table_add(c.refinements, synth_name, rt)
                             let ref_idx = c.refinements.count - 1
@@ -14856,10 +15002,23 @@ impl Checker {
                             } else {
                                 pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
                             }
+                            var full_pred = pred
+                            if ri.compound_op == 7 || ri.compound_op == 8 {
+                                let pred2 = if ri.pred2_is_float {
+                                    pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+                                } else {
+                                    pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+                                }
+                                if ri.compound_op == 7 {
+                                    full_pred = pred_and(pred, pred2)
+                                } else {
+                                    full_pred = pred_or(pred, pred2)
+                                }
+                            }
                             let rt = RefinementType {
                                 base_type: base_ty,
                                 var_name: ri.var_name,
-                                predicate: pred,
+                                predicate: full_pred,
                             }
                             c.refinements = refinement_table_add(c.refinements, name, rt)
                             c
@@ -17187,6 +17346,17 @@ impl Checker {
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
+                match (*fd).body.stmts {
+                    None => {
+                        c.current_return_type = ty_unit()
+                        c.current_effects = saved_effects
+                        c.current_effect_count = saved_effect_count
+                        c.multitest_count = saved_multitest_count
+                        c.multitest_corrected = saved_multitest_corrected
+                        return c
+                    }
+                    Some(_) => {}
+                }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
                 c = c.push_const_scope()
@@ -17453,7 +17623,13 @@ impl Checker {
         let ann_ty = ann_pair.1
         let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
         c = init_pair.0
-        let init_ty = init_pair.1
+        var init_ty = init_pair.1
+        if ann_ty.kind == TypeKind::TyRawPtr {
+            match s.expr {
+                None => { init_ty = ann_ty }
+                Some(_) => {}
+            }
+        }
         var bind_ty = init_ty
         if ann_ty.kind != TypeKind::TyUnknown {
             // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
