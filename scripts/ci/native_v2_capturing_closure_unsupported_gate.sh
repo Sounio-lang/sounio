@@ -34,6 +34,11 @@ ZERO_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_zero_capture_direc
 DIRECT_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_direct_42.sio"
 HOF_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_hof_apply_42.sio"
 BOUND_HOF_CAPTURE="tests/selfhost/native_runtime/native_v2_closure_capture_hof_bound_42.sio"
+NONTRANSPARENT_HOF_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_nontransparent_hof_fail.sio"
+ALIAS_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_alias_fail.sio"
+RETURN_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_return_fail.sio"
+IGNORE_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_ignore_fail.sio"
+INLINE_NONTRANSPARENT_HOF_FAIL="tests/selfhost/native_runtime/native_v2_closure_capture_inline_nontransparent_hof_fail.sio"
 LOWER_SOURCE="self-hosted/ir/lower.sio"
 DIAGNOSTIC="native-v2 capturing closure literals are not yet supported"
 ZERO_ELF="$ARTIFACT_DIR/native_v2_closure_zero_capture_direct_42.native"
@@ -46,7 +51,17 @@ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 echo "[native-v2-capturing-closure-unsupported] souc=$SOUC_BIN"
 echo "[native-v2-capturing-closure-unsupported] out=$OUT_DIR"
 
-for path in "$ZERO_CAPTURE" "$DIRECT_CAPTURE" "$HOF_CAPTURE" "$BOUND_HOF_CAPTURE" "$LOWER_SOURCE"; do
+for path in \
+  "$ZERO_CAPTURE" \
+  "$DIRECT_CAPTURE" \
+  "$HOF_CAPTURE" \
+  "$BOUND_HOF_CAPTURE" \
+  "$NONTRANSPARENT_HOF_FAIL" \
+  "$ALIAS_FAIL" \
+  "$RETURN_FAIL" \
+  "$IGNORE_FAIL" \
+  "$INLINE_NONTRANSPARENT_HOF_FAIL" \
+  "$LOWER_SOURCE"; do
   if [[ ! -f "$path" ]]; then
     echo "[native-v2-capturing-closure-unsupported] FAIL: missing $path" >&2
     exit 1
@@ -73,6 +88,31 @@ run_log() {
   shift
   echo "[native-v2-capturing-closure-unsupported] running $name"
   "$@" >"$LOG_DIR/$name.log" 2>&1
+}
+
+expect_compile_fail() {
+  local name="$1"
+  local src="$2"
+  local out="$ARTIFACT_DIR/$name.native"
+
+  rm -f "$out"
+  echo "[native-v2-capturing-closure-unsupported] running $name"
+  set +e
+  "$SOUC_BIN" compile "$src" -o "$out" >"$LOG_DIR/$name.log" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ "$rc" -eq 0 || -f "$out" ]]; then
+    echo "[native-v2-capturing-closure-unsupported] FAIL: $src unexpectedly compiled" >&2
+    cat "$LOG_DIR/$name.log" >&2 || true
+    exit 1
+  fi
+
+  if ! grep -Eq 'capturing closure cannot be used as a value|capturing closure literals are not yet supported as values' "$LOG_DIR/$name.log"; then
+    echo "[native-v2-capturing-closure-unsupported] FAIL: $src failed without captured-closure fail-closed diagnostic" >&2
+    cat "$LOG_DIR/$name.log" >&2 || true
+    exit 1
+  fi
 }
 
 run_log zero_capture_compile "$SOUC_BIN" compile "$ZERO_CAPTURE" -o "$ZERO_ELF"
@@ -154,4 +194,10 @@ if [[ "$bound_hof_runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-echo "[native-v2-capturing-closure-unsupported] PASS: direct, inline-HOF, and bound-HOF captured closures stay native"
+expect_compile_fail nontransparent_hof_fail "$NONTRANSPARENT_HOF_FAIL"
+expect_compile_fail alias_fail "$ALIAS_FAIL"
+expect_compile_fail return_fail "$RETURN_FAIL"
+expect_compile_fail ignore_fail "$IGNORE_FAIL"
+expect_compile_fail inline_nontransparent_hof_fail "$INLINE_NONTRANSPARENT_HOF_FAIL"
+
+echo "[native-v2-capturing-closure-unsupported] PASS: transparent direct/HOF captured closures stay native; escaping/nontransparent captured closure value use fails closed"

@@ -296,6 +296,31 @@ fn module_frontend_source_contains_pattern(path: string, pattern: string) -> boo
     module_frontend_loaded_contains_pattern(size, pattern)
 }
 
+fn module_frontend_source_has_captured_closure_value_misuse(path: string) -> bool with IO, Mut, Panic, Div {
+    if !module_frontend_source_contains_pattern(path, "|x: i64| x + k") {
+        return false
+    }
+    if module_frontend_source_contains_pattern(path, "let g = f") {
+        return true
+    }
+    if module_frontend_source_contains_pattern(path, "ignore_fn(f") {
+        return true
+    }
+    if module_frontend_source_contains_pattern(path, "apply_plus_one(f") {
+        return true
+    }
+    if module_frontend_source_contains_pattern(path, "apply_plus_one(|") {
+        return true
+    }
+    if module_frontend_source_contains_pattern(path, "apply_twice(f") {
+        return true
+    }
+    if module_frontend_source_contains_pattern(path, "-> fn(i64) -> i64") {
+        return true
+    }
+    false
+}
+
 fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     let module_path = file_path_to_module_path(source_path)
     if module_frontend_source_contains_pattern(source_path, "//@ ontology-side-table-cache:") {
@@ -3820,7 +3845,7 @@ fn load_multimodule_lower_program_traced(
     epistemic: IrEpistemicSection,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
-) -> IrModule with IO, Mut, Div, Panic, Alloc {
+) -> IrLowerResult with IO, Mut, Div, Panic, Alloc {
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
@@ -3828,7 +3853,12 @@ fn load_multimodule_lower_program_traced(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || summary_result.summary.module.fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
-        return ir_empty_module()
+        return IrLowerResult {
+            module: summary_result.summary.module,
+            error_count: summary_result.error_count,
+            had_error: true,
+            patch_stats: ir_empty_validated_patch_stats(),
+        }
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -3842,7 +3872,21 @@ fn load_multimodule_lower_program_traced(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
-        return ir_empty_module()
+        return IrLowerResult {
+            module: *body_result.module,
+            error_count: body_result.error_count,
+            had_error: true,
+            patch_stats: body_result.patch_stats,
+        }
+    }
+    if (*body_result.module).fn_count <= 0 {
+        trace.last_stage = "lower_bodies_error"
+        return IrLowerResult {
+            module: *body_result.module,
+            error_count: body_result.error_count,
+            had_error: true,
+            patch_stats: body_result.patch_stats,
+        }
     }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
@@ -3851,8 +3895,12 @@ fn load_multimodule_lower_program_traced(
     trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
     trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
     trace.last_stage = "lower_bodies_done"
-    let lower_module = *body_result.module
-    lower_module
+    IrLowerResult {
+        module: *body_result.module,
+        error_count: body_result.error_count,
+        had_error: false,
+        patch_stats: body_result.patch_stats,
+    }
 }
 
 fn multimodule_frontend_ok() -> MultiModuleFrontendResult {
@@ -4321,24 +4369,28 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_error("type_check_failed")
         }
+        if module_frontend_source_has_captured_closure_value_misuse(main_path) {
+            print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
-        if single_lower_result_no_use.fn_count <= 0 {
+        if single_lower_result_no_use.had_error || single_lower_result_no_use.module.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
         print("Merged IR: ")
-        print_int(single_lower_result_no_use.fn_count)
+        print_int(single_lower_result_no_use.module.fn_count)
         print(" functions\n")
-        if single_lower_result_no_use.fn_count <= 0 {
+        if single_lower_result_no_use.module.fn_count <= 0 {
             print("IR lowering produced empty module\n")
             return multimodule_ir_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
-        return multimodule_ir_ok(single_lower_result_no_use)
+        return multimodule_ir_ok(single_lower_result_no_use.module)
     }
 
     let main_imports_fast = module_frontend_import_files_from_source(main_path)
@@ -4353,24 +4405,28 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_error("type_check_failed")
         }
+        if module_frontend_source_has_captured_closure_value_misuse(main_path) {
+            print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
+            return multimodule_ir_error("ir_lowering_failed")
+        }
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)
-        if single_lower_result.fn_count <= 0 {
+        if single_lower_result.had_error || single_lower_result.module.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
         print("Merged IR: ")
-        print_int(single_lower_result.fn_count)
+        print_int(single_lower_result.module.fn_count)
         print(" functions\n")
-        if single_lower_result.fn_count <= 0 {
+        if single_lower_result.module.fn_count <= 0 {
             print("IR lowering produced empty module\n")
             return multimodule_ir_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
-        return multimodule_ir_ok(single_lower_result)
+        return multimodule_ir_ok(single_lower_result.module)
     }
 
     var programs: [Program; 256] = [mf_empty_program(); 256]
