@@ -359,6 +359,17 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   were deleted. No matching remote branches existed at cleanup time. Post-delete
   counts: 88 local branches, 93 remote refs, 56 worktrees.
 
+- `/workspace/sounio-tests-fix` -> `fix/test-suite-epistemic-failures`: the
+  branch had no patch-exclusive commits versus consolidation and was already
+  listed as absorbed by ancestry. The only dirty state was generated
+  `test-results.xml` output (`tests="1079" failures="12" skipped="69"`), so it
+  was not ported into the consolidation branch. The original branch tip was
+  archived as
+  `archive/worktree/fix-test-suite-epistemic-failures/2026-06-28` ->
+  `de63733c9`, `/workspace/sounio-tests-fix` was removed, and local/remote
+  `fix/test-suite-epistemic-failures` refs were deleted. Post-delete counts:
+  87 local branches, 92 remote refs, 55 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
