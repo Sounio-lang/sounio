@@ -112,6 +112,26 @@ Archive tags, batch 2:
 - `archive/worktree/honest-composer-strcat/2026-06-28` -> `7d260ebd5`
 - `archive/worktree/honest-sret-builtins/2026-06-28` -> `27da861f9`
 
+Removed worktrees, batch 3:
+
+- `/workspace/sounio-no-caveats` -> `codex/no-caveats-warning-zero`
+- `/workspace/sounio-erdos-canonical` -> `research/erdos-canonical`
+- `/workspace/sounio-zd-surgery` -> `research/sedenion-zd-chromatic`
+- `/workspace/sounio/.claude/worktrees/wf_80ff6027-621-4` ->
+  `worktree-wf_80ff6027-621-4`
+- `/workspace/sounio-frame-revert` -> `fix/revert-frame-noop`
+
+Archive tags, batch 3:
+
+- `archive/worktree/codex-no-caveats-warning-zero/2026-06-28` ->
+  `aca1f4e19`
+- `archive/worktree/research-erdos-canonical/2026-06-28` -> `e649f5b16`
+- `archive/worktree/research-sedenion-zd-chromatic/2026-06-28` ->
+  `ad1ac127a`
+- `archive/worktree/worktree-wf_80ff6027-621-4/2026-06-28` ->
+  `9f796a78a`
+- `archive/worktree/fix-revert-frame-noop/2026-06-28` -> `683170964`
+
 Verification after deletion:
 
 - Batch-1 worktree paths absent: `/workspace/sounio-forloop`,
@@ -121,10 +141,14 @@ Verification after deletion:
   `/workspace/sounio/.claude/worktrees/wf_932ba1b4-006-3`,
   `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-1`,
   `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-2`.
-- Local branches absent for all seven removed worktrees.
-- Batch-1 remote branches absent after `git fetch --prune origin`; batch-2 had
-  no matching remote branch.
-- Counts after batch 2: 98 local branches, 96 remote refs, 66 worktrees.
+- Batch-3 worktree paths absent: `/workspace/sounio-no-caveats`,
+  `/workspace/sounio-erdos-canonical`, `/workspace/sounio-zd-surgery`,
+  `/workspace/sounio/.claude/worktrees/wf_80ff6027-621-4`,
+  `/workspace/sounio-frame-revert`.
+- Local branches absent for all twelve removed worktrees.
+- Batch-1 and batch-3 remote branches absent after `git fetch --prune origin`;
+  batch-2 had no matching remote branch.
+- Counts after batch 3: 93 local branches, 95 remote refs, 61 worktrees.
 
 ## Remote cleanup executed
 
