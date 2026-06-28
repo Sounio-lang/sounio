@@ -4,9 +4,29 @@
 //! - propositional CNF with fixed-size clause storage
 //! - always-active LIA side constraints checked by bounded Fourier-Motzkin
 //!
-//! Decision heuristic: Epistemic VSIDS (GUM-weighted conflict attribution)
-//!   Each variable carries (act_mean, act_var) — a GUM probability distribution
-//!   over its causal responsibility for conflicts.
+//! ── NOVELTY STATUS (verified 2026-06-28 — see docs/research/solver-novelty-boundary-verified-2026-06-28.md) ──
+//!   The "GUM / epistemic uncertainty" framing below is DESIGN INTENT, not a
+//!   verified novelty claim. Adversarial lit review (2 deep-research passes, 22
+//!   confirmed claims) found every individual ingredient is prior art: bandit
+//!   variable selection (LRB/CHB, SAT/AAAI 2016, ERWA); joint variable+polarity
+//!   Bayesian learning (Online BMM, ICML 2020); Thompson sampling in CDCL
+//!   (arXiv 2404.03753, RESET decision only); regime-gated switching (Cherif CP 2021).
+//!   SAFE claim = the CONJUNCTION only: per-decision (not init/in-processing/
+//!   restart-gated) bandit/TS applied JOINTLY to variable AND polarity, with a
+//!   regime-gated exploration coefficient, in one bounded DPLL(T) core.
+//!   UNSAFE (all refuted): "first bandit/Bayesian/uncertainty/Thompson/epistemic
+//!   heuristic in SAT", "fully epistemic DPLL", any "SOTA", any standalone "first".
+//!   VARIANCE CAVEAT: the mode-0 act_var accumulator GROWS with conflicts, so it is
+//!   functionally a recency-weighted clause-length signal (Jeroslow-Wang/MOM lineage),
+//!   NOT a concentrating posterior variance. A genuine variance-aware bandit branching
+//!   heuristic (UCB-V / empirical-Bernstein, bonus shrinking as 1/sqrt(n)) is an OPEN
+//!   frontier no solver has done. (mode 4 below already uses a 1/sqrt(decided)-shrinking
+//!   form; mode 0 does not.)
+//!
+//! Decision heuristic: epistemic-VSIDS variant (conflict attribution with a
+//!   second-moment dispersion term). Each variable carries (act_mean, act_var) —
+//!   an accumulated mean plus a dispersion term (aspirational GUM framing; see
+//!   NOVELTY STATUS — act_var is dispersion, not a calibrated posterior).
 //!
 //!   Bump rule (clause of length L, conflict diversity d = distinct decision levels):
 //!     act_mean[v] += bump_amount                            // full credit to mean
@@ -19,7 +39,9 @@
 //!   Decay: O(1) growing bump_amount (= 1/0.95 per conflict), avoiding O(n) scan.
 //!   Phase confidence: EWMA tracks how reliably the saved polarity avoids conflicts.
 //!
-//! GUM causal model (formal derivation):
+//! GUM causal model (DESIGN MOTIVATION — not a verified property; see NOVELTY STATUS.
+//! The act_var below is a SUM over conflicts, so it grows rather than concentrating;
+//! treat the "uncertainty" reading as aspirational, not a calibrated posterior):
 //!
 //!   We want to estimate μ_v — the "true conflict-driving weight" of variable v.
 //!   At each conflict involving clause C_k of length L_k, we observe v ∈ C_k.
@@ -58,7 +80,7 @@
 //!         |z| = sqrt(-2·ln(u_mag)) — Rayleigh magnitude; sign = ±1 by u_sgn.
 //!         Expected score = act_mean (correct TS property: E[sample] = posterior mean).
 //!         act_var=0 → score = mean exactly (safe fallback, cannot regress vs mode 1).
-//!         Literature status: prior art review required before novelty wording.
+//!         Literature status: candidate combination, NOT a verified first — see NOVELTY STATUS.
 //!
 //! POLARITY TS (phase_mode=1) [candidate experimental mode]:
 //!   Beta-Bernoulli Thompson Sampling for polarity selection.
@@ -67,8 +89,9 @@
 //!     assign[v]>0 (true was bad) → phase_beta[v] += 1.0
 //!     assign[v]<0 (false was bad) → phase_alpha[v] += 1.0
 //!   Sampling: normal approximation N(μ_p, σ²_p) at each decision.
-//!   Combined with score_mode=3 = fully epistemic DPLL experiment:
-//!     variable selection AND polarity selection both driven by posterior sampling.
+//!   Combined with score_mode=3 = candidate per-decision sampling over BOTH variable
+//!     and polarity selection (the SAFE-claim conjunction; NOT a verified "first" —
+//!     see NOVELTY STATUS).
 //
 //! REGIME DETECTOR (Thread 2 full design, Erdős-critical):
 //!   When this solver is used inside Erdős 90 attacks (168-guided ZD surgeries
@@ -76,8 +99,9 @@
 //!   search), the inner search goes through long "Proof" phases (hard unsat cores
 //!   after a surgery or deep in a high-quality configuration) and occasional
 //!   "Exploratory" pockets (after a twist that creates heterogeneous blame
-//!   precision — exactly the mixed-length regime where GUM-TS won 57.7% in
-//!   the 500-seed characterization).
+//!   precision — a mixed-length regime). NOTE: an earlier "GUM-TS won 57.7%"
+//!   characterization is NOT corroborated — the canonical Beta-TS smoke shows
+//!   mode1/mode0/ties ≈ 44/47/9 (no dominance); see NOVELTY STATUS.
 //!   The detector (explore_trust scalar + discrete label) will modulate β and
 //!   whether TS is allowed, using signals we already compute (stat_total_d/avg d,
 //!   conflict rate, backjumps) plus cheap EWMAs.
@@ -211,7 +235,8 @@ pub struct SmtContext {
     //   Prior: alpha=beta=1 (uniform, no preference). Persists across smt_solve() calls.
     //   Sampling: normal approximation N(μ_p, σ²_p), σ_p=sqrt(μ(1-μ)/n_sum).
     //   phase_mode=0: classic saved-phase+confidence (default).
-    //   phase_mode=1: Beta-TS polarity selection for the fully epistemic DPLL experiment.
+    //   phase_mode=1: Beta-TS polarity selection — the polarity half of the candidate
+//                 per-decision var+polarity combination (see NOVELTY STATUS; not a verified "first").
     phase_alpha: [f64; 1024],
     phase_beta: [f64; 1024],
     phase_mode: i32,
@@ -871,10 +896,12 @@ fn smt_all_assigned(ctx: &!SmtContext) -> bool with Mut {
 //       GUM law of propagation on learning rate ratio LR[v] = participated/decided.
 //       σ²(LR) ≈ LR/decided (Poisson model: σ²_participated ≈ participated).
 //       score[v] = LR[v] + 0.5·sqrt(LR/decided)·regime_explore_trust
-//       Strictly more informative than Wilson CI (mode 2): uses GUM ratio propagation
-//       rather than flat Bernoulli CI — uncertainty shrinks as 1/sqrt(decided), not 1/sqrt(n).
+//       A different uncertainty model than Wilson CI (mode 2): GUM-style ratio
+//       propagation rather than flat Bernoulli CI — uncertainty shrinks as
+//       1/sqrt(decided), not 1/sqrt(n). This 1/sqrt(decided) form IS closer to a
+//       genuine concentrating bonus (unlike mode-0 act_var); not verified to dominate.
 //       Literature status: LRB/CHB use scalar ERWA point estimates and Wilson CI
-//       uses Bernoulli CI; stronger novelty wording requires focused review.
+//       uses Bernoulli CI; candidate combination, see NOVELTY STATUS.
 //   3 = Epistemic Thompson Sampling [candidate experimental mode]:
 //       Signed sample from N(μ_v, σ_v²): score = μ_v + sign·|z_v|·σ_v
 //       u_mag = hash(v, step), u_sgn = hash(v+32, step) for independent sign flip.
