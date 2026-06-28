@@ -356,3 +356,23 @@ No old hunks were cherry-picked. Instead, added
 ELF execution: half-open range, inclusive range, `continue`, `break`,
 `println(42)`, `print(7)`, `println(i64 variable)`, `print(i64 variable)`, and
 `println/print(f64 variable)`.
+
+## Imported stdlib lowering branch triage
+
+Reviewed `codex/madaros-import-stdlib-lowering-current` (`542a91e31`).
+
+Not ported yet: the large `self-hosted/compiler/module_frontend.sio` and
+`self-hosted/ir/lower.sio` imported-lowering machinery. It is a broad subsystem
+change, not a cleanup cherry-pick, and should land only with a dedicated
+multimodule/stdlib gate proving the exact residual it fixes.
+
+Attempted the branch's apparently low-risk test-only pieces, but did not keep
+them because current consolidation does not yet pass them:
+
+- Adapting `tests/stdlib/core/test_result_e2e.sio` from unsupported method calls
+  to free functions moves the test past checker errors but hits a current
+  Madaros SIGSEGV during imported IR merge (`lower_array: seed_begin`, rc 139).
+- Adding `tests/stdlib/csv/test_csv_parse.sio` exposes current stdlib/import
+  parse/type failures before native-v2 ELF emission.
+
+Treat this branch as a residual owner lane, not as absorbed cleanup.
