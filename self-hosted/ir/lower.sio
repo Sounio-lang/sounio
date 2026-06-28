@@ -2218,6 +2218,39 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
     }
 }
 
+// True iff `n` is a primitive integer scalar type name: i8/u8 .. i64/u64 and
+// isize/usize. Used by the println dispatch to recognize provably-integer
+// call results / annotations (via IrFunction.return_struct_name and let-type
+// annotations) so they route to print_int (itoa+write) instead of print
+// (strlen+write, which derefs the integer as char* and SIGSEGVs). Wide ints
+// (i128/i256) are intentionally rejected: they use a separate wide-limb print
+// path, and mis-routing them to print_int would print only the low limb.
+fn lower_name_is_int_scalar(n: Name) -> bool with Panic, Div {
+    if n.len < 2 { return false }
+    let c0 = n.buf[0] as i64
+    if c0 != 105 && c0 != 117 { return false }   // 'i' / 'u' only
+    if n.len == 5 && n.buf[1] as i64 == 115 && n.buf[2] as i64 == 105 && n.buf[3] as i64 == 122 && n.buf[4] as i64 == 101 { return true }  // isize/usize
+    var bits: i64 = 0
+    var i: i64 = 1
+    while i < n.len {
+        let d = n.buf[i as usize] as i64
+        if d < 48 || d > 57 { return false }
+        bits = bits * 10 + (d - 48)
+        i = i + 1
+    }
+    bits >= 1 && bits <= 64
+}
+
+fn lower_opt_type_is_int_scalar(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return false }
+            lower_name_is_int_scalar(ir_path_first_name((*te).path))
+        }
+        None => false,
+    }
+}
+
 fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
     match *opt {
         Some(te) => lower_param_struct_type_name(&(*te)),
@@ -3481,15 +3514,7 @@ impl Lowerer {
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
-                let hk = (*list).head.kind
-                if hk == ExprKind::ExprIntLit {
-                    make_name("print_int")
-                } else if hk == ExprKind::ExprIdent {
-                    let sk = self.lookup_local_scalar_kind((*list).head.name)
-                    if sk == 1 { make_name("print_int") } else { make_name("print") }
-                } else {
-                    make_name("print")
-                }
+                if self.expr_result_is_int_ref(&(*list).head) { make_name("print_int") } else { make_name("print") }
             }
             _ => make_name("print"),
         }
@@ -4107,6 +4132,31 @@ impl Lowerer {
                 return false
             }
             return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
+        }
+        false
+    }
+
+    fn opt_expr_result_is_int_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_result_is_int_ref(&(*expr)),
+            _ => false,
+        }
+    }
+
+    // True iff `e` is provably an integer (decimal-printable via print_int):
+    //   int literal; an ident tracked as scalar_kind==1; a call whose
+    //   return_struct_name is an int scalar (i8..i64/usize); a comparison
+    //   (bool, decimal-printable); or an arithmetic binop over int operands.
+    // f64/string results are excluded so println keeps routing them to print.
+    fn expr_result_is_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit { return true }
+        if (*e).kind == ExprKind::ExprIdent { return self.lookup_local_scalar_kind((*e).name) == 1 }
+        if (*e).kind == ExprKind::ExprCall { return lower_name_is_int_scalar(self.expr_call_return_struct_name_ref(e)) }
+        if (*e).kind == ExprKind::ExprBinary {
+            if lower_binary_op_is_compare((*e).bin_op) { return true }
+            if self.expr_result_is_float_ref(e) { return false }
+            if self.expr_result_is_string_ref(e) { return false }
+            return self.opt_expr_result_is_int_ref(&(*e).left) || self.opt_expr_result_is_int_ref(&(*e).right)
         }
         false
     }
@@ -5744,6 +5794,8 @@ impl Lowerer {
         }
         if lower_opt_type_is_f64(&s.ty) {
             lo = lo.bind_local_scalar_kind(s.name, 2)
+        } else if lower_opt_type_is_int_scalar(&s.ty) {
+            lo = lo.bind_local_scalar_kind(s.name, 1)
         } else {
             match s.expr {
                 Some(expr_box_sk) => {
@@ -5754,6 +5806,9 @@ impl Lowerer {
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
                         // Track string locals (kind 3) so `s + t` / `s ++ t` route to str_concat.
                         lo = lo.bind_local_scalar_kind(s.name, 3)
+                    } else if lo.expr_result_is_int_ref(&(*expr_box_sk)) {
+                        // Track int locals (kind 1) bound from a call/binop so println(r) routes to print_int.
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
                     }
                 }
                 _ => {}
