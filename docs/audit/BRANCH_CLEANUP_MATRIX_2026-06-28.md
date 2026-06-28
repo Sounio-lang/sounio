@@ -726,6 +726,26 @@ Closed since the previous boundary entry:
   local and remote `qual/pbpk28-tissue-composition` refs were deleted.
   Post-delete counts: 49 local branches, 56 remote refs, 52 worktrees.
 
+## Residual local no-worktree sweep complete
+
+After the cleanup entries above, the local branch set has no remaining
+non-`main`, non-consolidation branch without an attached worktree:
+
+```bash
+git for-each-ref --format='%(refname:short)' refs/heads | while read b; do
+  if ! git worktree list --porcelain | rg -q "^branch refs/heads/${b}$"; then
+    if [ "$b" != "integration/compiler-consolidation-20260628" ] && [ "$b" != "main" ]; then
+      echo "$b"
+    fi
+  fi
+done
+```
+
+Result: no output. Current counts are 49 local branches, 56 remote refs, and 52
+worktrees. The remaining local branches are attached owner/worktree lanes or
+`main`/consolidation and should be handled as an ownership/worktree phase rather
+than as orphan-branch cleanup.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
