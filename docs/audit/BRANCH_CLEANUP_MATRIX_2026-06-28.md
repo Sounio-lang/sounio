@@ -228,8 +228,14 @@ classified in this audit as non-merge residuals:
   then local/remote refs were deleted. All three exclusive commits were
   `DEBUG:` IR tracing changes in `self-hosted/native/codegen_x86_linux.sio`,
   already rejected as not being a semantic #478 fix.
+- `codex/madaros-pr-disposition-20260621`: archived as
+  `archive/branch/codex-madaros-pr-disposition-20260621/2026-06-28` ->
+  `3d522f3a2`, then local/remote refs were deleted. Its primary audit doc is
+  byte-identical in consolidation; the remaining branch-only governance
+  registry/report edits are stale relative to the current, much larger
+  registry state and were not ported.
 
-Post-delete counts: 78 local branches, 85 remote refs, 52 worktrees.
+Post-delete counts: 77 local branches, 84 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
