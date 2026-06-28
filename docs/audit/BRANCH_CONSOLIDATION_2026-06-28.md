@@ -426,3 +426,29 @@ Validation on current consolidation:
 - `bin/souc --native-v2-compile tests/run-pass/type_hash_3level_nesting.sio
   -o /tmp/sounio_type_hash_box.elf` emitted an ELF; running it exited 0 and
   printed `type-hash 3-level PASS`.
+
+## Frame noop and Root2 global branch triage
+
+Reviewed `fix/revert-frame-noop` (`b33ef5593`).
+
+Current consolidation already has the reverted/no-op state: the vestigial
+`native_v2_core_begin_function_from_ir_into` body emits fixed `sub rsp, 512`,
+and `rg "native_v2_core_begin_function_from_ir_into\\("` finds only the
+definition. No code change needed.
+
+Reviewed `codex/root2-global-lookup-probe` and
+`codex/root2-global-preload-probe`.
+
+Current consolidation already contains the non-debug global lowering fixes:
+
+- `lowerer_lookup_fn_id_by_name_ref`
+- BSS global metadata on `LowerLocalStack`
+- `preload_bss_globals_as_locals`
+- global-local store-back through `IrStoreGlobal`
+
+Added `tests/native_v2_global_bss_gate/` to lock the absorbed behavior with
+native-v2 ELF execution for scalar global read/write.
+
+Residual found while trying to broaden the gate: global array element
+read/write (`var GLOBAL_VALUES: [i64; 4]`) compiles to an ELF but the ELF exits
+139 when writing/reading elements. That case is not marked absorbed.
