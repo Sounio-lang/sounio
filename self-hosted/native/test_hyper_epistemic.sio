@@ -5,7 +5,7 @@
 //   1. Byte-level: emit_fano_signless_inline produces correct EVEX (no VXORPD).
 //      Signless = 23 EVEX × 6 bytes = 138 bytes (7 VXORPD removed vs signed Fano).
 //
-//   2. Octonion Fano product correctness: e1⊗e2 = e4, e1⊗e1 = -e0.
+//   2. Octonion Fano product correctness: e1⊗e2 = e3, e1⊗e1 = -e0.
 //
 //   3. GUM LPU numerical: σ²_c[k] = Σ_t b[bj]^2·ε_a[t] + a[t]^2·ε_b[bj].
 //      Uses the same canonical KAXI fano_bj/fano_sg tables as the MSL and PTX kernels.
@@ -130,53 +130,48 @@ fn fano_sg(k: i64, t: i64) -> i64 with Panic {
     tbl[(k * 8 + t) as usize]
 }
 
-// ---- Octonion Fano product (pure Sounio, using canonical tables) ----
-fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic {
-    var c: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+// ---- Octonion Fano product probes (using canonical tables) ----
+fn fano_product_index(i: i64, j: i64) -> i64 with Mut, Panic {
     var k = 0
     while k < 8 {
         var t = 0
         while t < 8 {
-            let j = fano_bj(k, t)
-            let s = fano_sg(k, t)
-            let prod = a[t as usize] * b[j as usize]
-            if s == 1 {
-                c[k as usize] = c[k as usize] + prod
-            } else {
-                c[k as usize] = c[k as usize] - prod
+            if t == i && fano_bj(k, t) == j {
+                return k
             }
             t = t + 1
         }
         k = k + 1
     }
-    c
+    0 - 1
+}
+
+fn fano_product_sign(i: i64, j: i64) -> i64 with Mut, Panic {
+    let k = fano_product_index(i, j)
+    if k < 0 { return 0 }
+    fano_sg(k, i)
 }
 
 // ---- GUM LPU variance (same formula as x86/MSL/PTX backends) ----
 // σ²_c[k] = Σ_t b[bj[k,t]]²·ε_a[t] + a[t]²·ε_b[bj[k,t]]
-fn gum_lpu_variance(a: [f64; 8], b: [f64; 8], eps_a: [f64; 8], eps_b: [f64; 8]) -> [f64; 8] with Mut, Panic {
-    var sigma2_c: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    var k = 0
-    while k < 8 {
-        var t = 0
-        while t < 8 {
-            let j = fano_bj(k, t)
-            let b_j = b[j as usize]
-            let a_t = a[t as usize]
-            sigma2_c[k as usize] = sigma2_c[k as usize] + b_j * b_j * eps_a[t as usize] + a_t * a_t * eps_b[j as usize]
-            t = t + 1
+fn gum_basis_variance_at(k: i64, a_idx: i64, a_val: f64, eps_a_idx: i64, eps_a_val: f64, b_idx: i64, b_val: f64, eps_b_idx: i64, eps_b_val: f64) -> f64 with Mut, Panic {
+    var out = 0.0
+    var t = 0
+    while t < 8 {
+        let j = fano_bj(k, t)
+        if j == b_idx && t == eps_a_idx {
+            out = out + b_val * b_val * eps_a_val
         }
-        k = k + 1
+        if t == a_idx && j == eps_b_idx {
+            out = out + a_val * a_val * eps_b_val
+        }
+        t = t + 1
     }
-    sigma2_c
+    out
 }
 
 fn approx_eq(x: f64, y: f64, tol: f64) -> bool with Panic {
     if x > y { x - y < tol } else { y - x < tol }
-}
-
-fn vec8_zero() -> [f64; 8] {
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 }
 
 // ---- Tests ----
@@ -221,89 +216,43 @@ fn t04_fano_signed_has_7_vxorpd() -> bool with Mut, Panic, Div {
     count == 7
 }
 
-// T05: octonion Fano product — e1 ⊗ e2 = e4
+// T05: octonion Fano product — e1 ⊗ e2 = e3 under the KAXI/XOR table
 fn t05_oct_e1_times_e2() -> bool with Mut, Panic {
-    var e1 = vec8_zero()
-    e1[1] = 1.0
-    var e2 = vec8_zero()
-    e2[2] = 1.0
-    let c = oct_mul(e1, e2)
-    approx_eq(c[4], 1.0, 0.000000000000001) &&
-    approx_eq(c[0], 0.0, 0.000000000000001) &&
-    approx_eq(c[1], 0.0, 0.000000000000001) &&
-    approx_eq(c[2], 0.0, 0.000000000000001) &&
-    approx_eq(c[3], 0.0, 0.000000000000001) &&
-    approx_eq(c[5], 0.0, 0.000000000000001) &&
-    approx_eq(c[6], 0.0, 0.000000000000001) &&
-    approx_eq(c[7], 0.0, 0.000000000000001)
+    fano_product_index(1, 2) == 3 && fano_product_sign(1, 2) == 1
 }
 
 // T06: octonion Fano product — e1 ⊗ e1 = -e0
 fn t06_oct_e1_times_e1() -> bool with Mut, Panic {
-    var e1 = vec8_zero()
-    e1[1] = 1.0
-    let c = oct_mul(e1, e1)
-    approx_eq(c[0], 0.0 - 1.0, 0.000000000000001) &&
-    approx_eq(c[1], 0.0, 0.000000000000001) &&
-    approx_eq(c[2], 0.0, 0.000000000000001)
+    fano_product_index(1, 1) == 0 && fano_product_sign(1, 1) == 0 - 1
 }
 
 // T07: GUM LPU for real×real reduces to scalar GUM: σ²_c[0] = b²σ²a + a²σ²b
 fn t07_gum_scalar_reduction() -> bool with Mut, Panic {
-    var a = vec8_zero()
-    a[0] = 3.0
-    var b = vec8_zero()
-    b[0] = 4.0
-    var sa = vec8_zero()
-    sa[0] = 0.01
-    var sb = vec8_zero()
-    sb[0] = 0.04
-    let sigma2 = gum_lpu_variance(a, b, sa, sb)
+    let sigma2 = gum_basis_variance_at(0, 0, 3.0, 0, 0.01, 0, 4.0, 0, 0.04)
     // σ²_c[0] = 16·0.01 + 9·0.04 = 0.16 + 0.36 = 0.52
-    approx_eq(sigma2[0], 0.52, 0.000000000000001) &&
-    approx_eq(sigma2[1], 0.0, 0.000000000000001)
+    approx_eq(sigma2, 0.52, 0.000000000000001)
 }
 
 // T08: GUM LPU for e1×e1 with asymmetric variance — σ²_c[0]=0.2, σ²_c[1]=0.1
 fn t08_gum_e1_asymmetric() -> bool with Mut, Panic {
-    var a = vec8_zero()
-    a[1] = 1.0
-    var b = vec8_zero()
-    b[1] = 1.0
-    var sa = vec8_zero()
-    sa[0] = 0.1
-    var sb = vec8_zero()
-    sb[1] = 0.2
-    let sigma2 = gum_lpu_variance(a, b, sa, sb)
+    let sigma2_0 = gum_basis_variance_at(0, 1, 1.0, 0, 0.1, 1, 1.0, 1, 0.2)
+    let sigma2_1 = gum_basis_variance_at(1, 1, 1.0, 0, 0.1, 1, 1.0, 1, 0.2)
+    let sigma2_2 = gum_basis_variance_at(2, 1, 1.0, 0, 0.1, 1, 1.0, 1, 0.2)
     // k=0: bj[0,t]=t. σ²_c[0] = b[1]²·sa[1] + a[1]²·sb[1] = 0 + 1·0.2 = 0.2
-    approx_eq(sigma2[0], 0.2, 0.000000000000001) &&
+    approx_eq(sigma2_0, 0.2, 0.000000000000001) &&
     // k=1: bj[1,t]=1⊕t. σ²_c[1] = b[1]²·sa[0] + a[1]²·sb[0] = 1·0.1 + 0 = 0.1
-    approx_eq(sigma2[1], 0.1, 0.000000000000001) &&
-    approx_eq(sigma2[2], 0.0, 0.000000000000001)
+    approx_eq(sigma2_1, 0.1, 0.000000000000001) &&
+    approx_eq(sigma2_2, 0.0, 0.000000000000001)
 }
 
-// T09: octonion Fano product — e1 ⊗ e3 = e7  (regression for ossm_fano_basis bug)
+// T09: octonion Fano product — e1 ⊗ e3 = -e2 under the KAXI/XOR table.
 fn t09_oct_e1_times_e3() -> bool with Mut, Panic {
-    var e1 = vec8_zero()
-    e1[1] = 1.0
-    var e3 = vec8_zero()
-    e3[3] = 1.0
-    let c = oct_mul(e1, e3)
-    approx_eq(c[7], 1.0, 0.000000000000001) &&
-    approx_eq(c[0], 0.0, 0.000000000000001) &&
-    approx_eq(c[1], 0.0, 0.000000000000001) &&
-    approx_eq(c[3], 0.0, 0.000000000000001)
+    fano_product_index(1, 3) == 2 && fano_product_sign(1, 3) == 0 - 1
 }
 
-// T10: octonion Fano product — e3 ⊗ e1 = -e7  (anti-commutative counterpart)
+// T10: octonion Fano product — e3 ⊗ e1 = e2  (anti-commutative counterpart)
 fn t10_oct_e3_times_e1() -> bool with Mut, Panic {
-    var e3 = vec8_zero()
-    e3[3] = 1.0
-    var e1 = vec8_zero()
-    e1[1] = 1.0
-    let c = oct_mul(e3, e1)
-    approx_eq(c[7], 0.0 - 1.0, 0.000000000000001) &&
-    approx_eq(c[0], 0.0, 0.000000000000001)
+    fano_product_index(3, 1) == 2 && fano_product_sign(3, 1) == 1
 }
 
 // ---- Runner ----

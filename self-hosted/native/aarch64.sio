@@ -53,6 +53,41 @@ pub let A64_LR:  i64 = 30  // link register (x30)
 pub let A64_SP:  i64 = 31  // stack pointer (context-dependent: SP or XZR)
 pub let A64_XZR: i64 = 31  // zero register (same encoding as SP)
 
+// Floating-point/SIMD scalar double registers. These share the 5-bit
+// architectural register encoding used by scalar FP instructions.
+pub let A64_D0:  i64 = 0
+pub let A64_D1:  i64 = 1
+pub let A64_D2:  i64 = 2
+pub let A64_D3:  i64 = 3
+pub let A64_D4:  i64 = 4
+pub let A64_D5:  i64 = 5
+pub let A64_D6:  i64 = 6
+pub let A64_D7:  i64 = 7
+pub let A64_D8:  i64 = 8
+pub let A64_D9:  i64 = 9
+pub let A64_D10: i64 = 10
+pub let A64_D11: i64 = 11
+pub let A64_D12: i64 = 12
+pub let A64_D13: i64 = 13
+pub let A64_D14: i64 = 14
+pub let A64_D15: i64 = 15
+pub let A64_D16: i64 = 16
+pub let A64_D17: i64 = 17
+pub let A64_D18: i64 = 18
+pub let A64_D19: i64 = 19
+pub let A64_D20: i64 = 20
+pub let A64_D21: i64 = 21
+pub let A64_D22: i64 = 22
+pub let A64_D23: i64 = 23
+pub let A64_D24: i64 = 24
+pub let A64_D25: i64 = 25
+pub let A64_D26: i64 = 26
+pub let A64_D27: i64 = 27
+pub let A64_D28: i64 = 28
+pub let A64_D29: i64 = 29
+pub let A64_D30: i64 = 30
+pub let A64_D31: i64 = 31
+
 // ============================================================================
 // Bit-field helpers
 // ============================================================================
@@ -694,6 +729,52 @@ pub fn a64_emit_udiv(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer w
 }
 
 // ============================================================================
+// Floating-point scalar double arithmetic
+//
+// FMUL Dd, Dn, Dm => 0x1E600800 | Rm<<16 | Rn<<5 | Rd
+// FADD Dd, Dn, Dm => 0x1E602800 | Rm<<16 | Rn<<5 | Rd
+// FSUB Dd, Dn, Dm => 0x1E603800 | Rm<<16 | Rn<<5 | Rd
+// Encodings checked against llvm-mc for AArch64.
+// ============================================================================
+
+pub fn a64_emit_fmul_d(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x1E600800
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+pub fn a64_emit_fadd_d(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x1E602800
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+pub fn a64_emit_fsub_d(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x1E603800
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// One-lane scalar preview for IrHyperEpistemicMul on AArch64:
+//   value = a * b
+//   variance = (b*b)*eps_a + (a*a)*eps_b
+pub fn a64_emit_hyper_epistemic_mul_lane_preview(buf: CodeBuffer, value_d: i64, variance_d: i64, a_d: i64, eps_a_d: i64, b_d: i64, eps_b_d: i64, tmp0_d: i64, tmp1_d: i64) -> CodeBuffer with Mut, Panic, Div {
+    var out = buf
+    out = a64_emit_fmul_d(out, value_d, a_d, b_d)
+    out = a64_emit_fmul_d(out, tmp0_d, b_d, b_d)
+    out = a64_emit_fmul_d(out, tmp0_d, tmp0_d, eps_a_d)
+    out = a64_emit_fmul_d(out, tmp1_d, a_d, a_d)
+    out = a64_emit_fmul_d(out, tmp1_d, tmp1_d, eps_b_d)
+    a64_emit_fadd_d(out, variance_d, tmp0_d, tmp1_d)
+}
+
+// ============================================================================
 // NEG Xd, Xm — SUB Xd, XZR, Xm
 // ============================================================================
 
@@ -1020,13 +1101,48 @@ pub fn a64_test_and_reg() -> bool with Mut, Panic, Div {
     true
 }
 
+// T19: FMUL D0, D1, D2 => 0x1E620820
+pub fn a64_test_fmul_d() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_fmul_d(buf, A64_D0, A64_D1, A64_D2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x1E620820) { return false }
+    true
+}
+
+// T20: FADD D3, D4, D5 and FSUB D6, D7, D8 match llvm-mc encodings.
+pub fn a64_test_fadd_fsub_d() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_fadd_d(buf, A64_D3, A64_D4, A64_D5)
+    buf = a64_emit_fsub_d(buf, A64_D6, A64_D7, A64_D8)
+    if !(buf.len == 8) { return false }
+    if !(a64_read_word(buf, 0) == 0x1E652883) { return false }
+    if !(a64_read_word(buf, 4) == 0x1E6838E6) { return false }
+    true
+}
+
+// T21: Hyper-epistemic one-lane preview emits value plus variance chain.
+pub fn a64_test_hyper_epistemic_lane_preview() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_hyper_epistemic_mul_lane_preview(buf, A64_D0, A64_D1, A64_D2, A64_D3, A64_D4, A64_D5, A64_D6, A64_D7)
+    if !(buf.len == 24) { return false }
+    if !(a64_read_word(buf, 0) == 0x1E640840) { return false }   // fmul d0, d2, d4
+    if !(a64_read_word(buf, 4) == 0x1E640886) { return false }   // fmul d6, d4, d4
+    if !(a64_read_word(buf, 8) == 0x1E6308C6) { return false }   // fmul d6, d6, d3
+    if !(a64_read_word(buf, 12) == 0x1E620847) { return false }  // fmul d7, d2, d2
+    if !(a64_read_word(buf, 16) == 0x1E6508E7) { return false }  // fmul d7, d7, d5
+    if !(a64_read_word(buf, 20) == 0x1E6728C1) { return false }  // fadd d1, d6, d7
+    true
+}
+
 // ============================================================================
 // Test runner
 // ============================================================================
 
 pub fn a64_test_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 18
+    let total: i64 = 21
 
     print("=== AArch64 Encoder Tests ===\n")
 
@@ -1048,6 +1164,9 @@ pub fn a64_test_main() -> i32 with IO, Mut, Panic, Div {
     if a64_test_cbz()       { passed = passed + 1; print("  T16 OK (CBZ)\n")      } else { print("  FAIL: T16 CBZ\n") }
     if a64_test_prologue_epilogue() { passed = passed + 1; print("  T17 OK (prologue/epilogue)\n") } else { print("  FAIL: T17 prologue/epilogue\n") }
     if a64_test_and_reg()   { passed = passed + 1; print("  T18 OK (AND reg)\n")  } else { print("  FAIL: T18 AND reg\n") }
+    if a64_test_fmul_d()    { passed = passed + 1; print("  T19 OK (FMUL D)\n")   } else { print("  FAIL: T19 FMUL D\n") }
+    if a64_test_fadd_fsub_d() { passed = passed + 1; print("  T20 OK (FADD/FSUB D)\n") } else { print("  FAIL: T20 FADD/FSUB D\n") }
+    if a64_test_hyper_epistemic_lane_preview() { passed = passed + 1; print("  T21 OK (hyper epistemic lane preview)\n") } else { print("  FAIL: T21 hyper epistemic lane preview\n") }
 
     print("\nAArch64 tests: ")
     print_int(passed)
