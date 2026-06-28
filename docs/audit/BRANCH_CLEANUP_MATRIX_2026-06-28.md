@@ -257,8 +257,30 @@ classified in this audit as non-merge residuals:
   `scripts/research/` plus a benchmark manifest. It was not ported into the
   compiler consolidation lane because it is research/benchmark infrastructure,
   not compiler-core behavior.
+- `codex/solver-pilot-blockers-20260626`: archived as
+  `archive/branch/codex-solver-pilot-blockers-20260626/2026-06-28` ->
+  `c6c6598ab`, then local/remote refs were deleted. This was the older sibling
+  of the solver external-corpus pilot lane; its tuple-destructuring commit was
+  patch-equivalent in consolidation and the remaining solver harness work is
+  research infrastructure already preserved by archive tags.
+- `fix/website-quality-check`: archived as
+  `archive/branch/fix-website-quality-check/2026-06-28` -> `1e5e96d6c`,
+  then local/remote refs were deleted. This was a website/docs CI repair branch;
+  its `bool`/`i64` compiler hunk had already been extracted from
+  `fix/main-ci-red-2026-06-18`, and the remaining website/governance edits are
+  stale relative to the current website state.
+- `codex/madaros-boxnew-clean`: archived as
+  `archive/branch/codex-madaros-boxnew-clean/2026-06-28` -> `49434fc7b`,
+  then local/remote refs were deleted. Current consolidation already contains
+  the non-debug Box::new/flat-lowering fixes in newer form; remaining branch
+  material is debug markers, stale bridge rewrites, or binary refresh history.
+- `codex/madaros-boxnew-append-fix`: archived as
+  `archive/branch/codex-madaros-boxnew-append-fix/2026-06-28` ->
+  `de2a6e213`, then local/remote refs were deleted. It was covered by the same
+  BoxNew triage: no direct merge because the branch would reintroduce stale
+  broad compiler/script rewrites already superseded by the consolidation lane.
 
-Post-delete counts: 74 local branches, 81 remote refs, 52 worktrees.
+Post-delete counts: 70 local branches, 77 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
@@ -279,9 +301,9 @@ its compiler claim is represented by the consolidation branch and audit.
 - `codex/release-conformance-spine-fix`: compiler-core validated-call
   hardening was extracted; remaining commits are release/tooling conformance.
 - BoxNew branches: `codex/madaros-boxnew-clean` and
-  `codex/madaros-boxnew-append-fix` are covered by current BoxNew/source gates;
-  remaining branch-only material is debug markers, bridge rewrites, or binary
-  refresh.
+  `codex/madaros-boxnew-append-fix` are covered by current BoxNew/source gates
+  and were archived/deleted above; remaining branch-only material is debug
+  markers, bridge rewrites, or binary refresh.
 
 ## Keep as owner lane, not merge parent
 
