@@ -999,6 +999,26 @@ the remaining residue was root-owned Lean `.lake` cache and was removed with
 
 Post-cleanup counts: 19 local branches, 22 remote refs, 19 worktrees.
 
+### Duplicate venlafaxine worktree cleanup
+
+After removing `/workspace/sounio-venlafaxine`, a second attached worktree for
+the same local branch remained at
+`/workspace/sounio/.claude/worktrees/venlafaxine`. It pointed at the same
+ancestor tip (`63644b6b0`) and had the same PBPK/venlafaxine local WIP shape:
+
+- modified `stdlib/darwin_pbpk/core/pbpk28_params.sio`
+- untracked venlafaxine drug, PGx, release matrix, scenario, and smoke-test
+files
+
+The existing archive tag
+`archive/worktree/dissertation-venlafaxine-xr-parity/2026-06-28` was verified
+to point at the same tip, and this duplicate worktree's dirty state was saved
+under `docs/audit/archived_wip/duplicate-venlafaxine-local-2026-06-28/`. The
+duplicate worktree and local branch were then removed. No clinical/PBPK content
+was promoted into consolidation in this pass.
+
+Post-cleanup counts: 18 local branches, 22 remote refs, 18 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
