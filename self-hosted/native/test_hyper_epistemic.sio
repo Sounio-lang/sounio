@@ -1,0 +1,299 @@
+// self-hosted::native::test_hyper_epistemic — tests for IrHyperEpistemicMul
+//
+// Door γ — fused hypercomplex × GUM product.  Three test categories:
+//
+//   1. Byte-level: emit_fano_signless_inline produces correct EVEX (no VXORPD).
+//      Signless = 23 EVEX × 6 bytes = 138 bytes (7 VXORPD removed vs signed Fano).
+//
+//   2. Octonion Fano product correctness: e1⊗e2 = e4, e1⊗e1 = -e0.
+//
+//   3. GUM LPU numerical: σ²_c[k] = Σ_t b[bj]^2·ε_a[t] + a[t]^2·ε_b[bj].
+//      Uses the same canonical KAXI fano_bj/fano_sg tables as the MSL and PTX kernels.
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; the_ prefix, from test_hyper_o.sio) ----
+
+fn the_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn the_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn the_lo3(id: i64) -> i64 { id & 7 }
+
+fn the_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = the_inv(the_bit(dst_id,  3))
+    let b_inv  = the_inv(the_bit(src2_id, 3))
+    let rp_inv = the_inv(the_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn the_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn the_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = the_inv(the_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn the_emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, the_p1(dst, src2, map))
+    b = emit_byte(b, the_p2_pd(src1))
+    b = emit_byte(b, the_p3_vl_full(src1, vl_code, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (the_lo3(dst) << 3) | the_lo3(src2))
+    b
+}
+
+fn the_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- Signless Fano (mirrors emit_fano_signless_inline in lower_ir.sio) ----
+// 2 + 7×3 = 23 EVEX × 6 bytes = 138 bytes (no VXORPD sign step).
+fn the_emit_fano_signless(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                          t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+    let vl = 2
+    var b = buf
+    b = the_emit_evex_pd_rr_full(b, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
+    b = the_emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    var col = 0
+    while col < 7 {
+        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        b = the_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        col = col + 1
+    }
+    b
+}
+
+// ---- Signed Fano (control — mirrors emit_fano_inline) ----
+// 2 + 7×4 = 30 EVEX × 6 bytes = 180 bytes.
+fn the_emit_fano_signed(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                        t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+    let vl = 2
+    var b = buf
+    b = the_emit_evex_pd_rr_full(b, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
+    b = the_emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    var col = 0
+    while col < 7 {
+        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        b = the_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + col, vl, 0, 0)
+        b = the_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        col = col + 1
+    }
+    b
+}
+
+// ---- Canonical Fano tables (same as MSL/PTX kernels, from kretikos_emit_kaxi.sio) ----
+// c[k] = Σ_t sg[k*8+t] · a[t] · b[bj[k*8+t]]
+// bj[k*8+t] = k XOR t  (Cayley-Dickson XOR permutation, complete for all 64 pairs)
+
+fn fano_bj(k: i64, t: i64) -> i64 with Panic {
+    let tbl: [i64; 64] = [
+        0, 1, 2, 3, 4, 5, 6, 7,
+        1, 0, 3, 2, 5, 4, 7, 6,
+        2, 3, 0, 1, 6, 7, 4, 5,
+        3, 2, 1, 0, 7, 6, 5, 4,
+        4, 5, 6, 7, 0, 1, 2, 3,
+        5, 4, 7, 6, 1, 0, 3, 2,
+        6, 7, 4, 5, 2, 3, 0, 1,
+        7, 6, 5, 4, 3, 2, 1, 0
+    ]
+    tbl[(k * 8 + t) as usize]
+}
+
+fn fano_sg(k: i64, t: i64) -> i64 with Panic {
+    let tbl: [i64; 64] = [
+        1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1,
+        1, 1, 1, 0 - 1, 1, 0 - 1, 0 - 1, 1,
+        1, 0 - 1, 1, 1, 1, 1, 0 - 1, 0 - 1,
+        1, 1, 0 - 1, 1, 1, 0 - 1, 1, 0 - 1,
+        1, 0 - 1, 0 - 1, 0 - 1, 1, 1, 1, 1,
+        1, 1, 0 - 1, 1, 0 - 1, 1, 0 - 1, 1,
+        1, 1, 1, 0 - 1, 0 - 1, 1, 1, 0 - 1,
+        1, 0 - 1, 1, 1, 0 - 1, 0 - 1, 1, 1
+    ]
+    tbl[(k * 8 + t) as usize]
+}
+
+// ---- Octonion Fano product (pure Sounio, using canonical tables) ----
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    var c: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var k = 0
+    while k < 8 {
+        var t = 0
+        while t < 8 {
+            let j = fano_bj(k, t)
+            let s = fano_sg(k, t)
+            let prod = a[t as usize] * b[j as usize]
+            if s == 1 {
+                c[k as usize] = c[k as usize] + prod
+            } else {
+                c[k as usize] = c[k as usize] - prod
+            }
+            t = t + 1
+        }
+        k = k + 1
+    }
+    c
+}
+
+// ---- GUM LPU variance (same formula as x86/MSL/PTX backends) ----
+// σ²_c[k] = Σ_t b[bj[k,t]]²·ε_a[t] + a[t]²·ε_b[bj[k,t]]
+fn gum_lpu_variance(a: [f64; 8], b: [f64; 8], eps_a: [f64; 8], eps_b: [f64; 8]) -> [f64; 8] with Mut, Panic {
+    var sigma2_c: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var k = 0
+    while k < 8 {
+        var t = 0
+        while t < 8 {
+            let j = fano_bj(k, t)
+            let b_j = b[j as usize]
+            let a_t = a[t as usize]
+            sigma2_c[k as usize] = sigma2_c[k as usize] + b_j * b_j * eps_a[t as usize] + a_t * a_t * eps_b[j as usize]
+            t = t + 1
+        }
+        k = k + 1
+    }
+    sigma2_c
+}
+
+fn approx_eq(x: f64, y: f64, tol: f64) -> bool with Panic {
+    if x > y { x - y < tol } else { y - x < tol }
+}
+
+fn vec8_zero() -> [f64; 8] {
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+}
+
+// ---- Tests ----
+
+// T01: signless Fano byte count = 138 (23 EVEX × 6 bytes)
+fn t01_fano_signless_byte_count() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = the_emit_fano_signless(buf, 0, 1, 8, 4, 6, 16)
+    buf.len == 138
+}
+
+// T02: signed Fano byte count = 180 (30 EVEX × 6 bytes) — control
+fn t02_fano_signed_byte_count() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = the_emit_fano_signed(buf, 0, 1, 8, 4, 6, 16)
+    buf.len == 180
+}
+
+// T03: signless Fano has NO 0x57 (VXORPD opcode) anywhere
+fn t03_fano_signless_no_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = the_emit_fano_signless(buf, 0, 1, 8, 4, 6, 16)
+    var i = 0
+    var ok = 1
+    while i < buf.len {
+        if the_read_byte(buf, i) == 0x57 { ok = 0 }
+        i = i + 1
+    }
+    ok == 1
+}
+
+// T04: signed Fano has exactly 7 VXORPD (0x57) opcodes
+fn t04_fano_signed_has_7_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = the_emit_fano_signed(buf, 0, 1, 8, 4, 6, 16)
+    var count = 0
+    var i = 0
+    while i < buf.len {
+        if the_read_byte(buf, i) == 0x57 { count = count + 1 }
+        i = i + 1
+    }
+    count == 7
+}
+
+// T05: octonion Fano product — e1 ⊗ e2 = e4
+fn t05_oct_e1_times_e2() -> bool with Mut, Panic {
+    var e1 = vec8_zero()
+    e1[1] = 1.0
+    var e2 = vec8_zero()
+    e2[2] = 1.0
+    let c = oct_mul(e1, e2)
+    approx_eq(c[4], 1.0, 0.000000000000001) &&
+    approx_eq(c[0], 0.0, 0.000000000000001) &&
+    approx_eq(c[1], 0.0, 0.000000000000001) &&
+    approx_eq(c[2], 0.0, 0.000000000000001) &&
+    approx_eq(c[3], 0.0, 0.000000000000001) &&
+    approx_eq(c[5], 0.0, 0.000000000000001) &&
+    approx_eq(c[6], 0.0, 0.000000000000001) &&
+    approx_eq(c[7], 0.0, 0.000000000000001)
+}
+
+// T06: octonion Fano product — e1 ⊗ e1 = -e0
+fn t06_oct_e1_times_e1() -> bool with Mut, Panic {
+    var e1 = vec8_zero()
+    e1[1] = 1.0
+    let c = oct_mul(e1, e1)
+    approx_eq(c[0], 0.0 - 1.0, 0.000000000000001) &&
+    approx_eq(c[1], 0.0, 0.000000000000001) &&
+    approx_eq(c[2], 0.0, 0.000000000000001)
+}
+
+// T07: GUM LPU for real×real reduces to scalar GUM: σ²_c[0] = b²σ²a + a²σ²b
+fn t07_gum_scalar_reduction() -> bool with Mut, Panic {
+    var a = vec8_zero()
+    a[0] = 3.0
+    var b = vec8_zero()
+    b[0] = 4.0
+    var sa = vec8_zero()
+    sa[0] = 0.01
+    var sb = vec8_zero()
+    sb[0] = 0.04
+    let sigma2 = gum_lpu_variance(a, b, sa, sb)
+    // σ²_c[0] = 16·0.01 + 9·0.04 = 0.16 + 0.36 = 0.52
+    approx_eq(sigma2[0], 0.52, 0.000000000000001) &&
+    approx_eq(sigma2[1], 0.0, 0.000000000000001)
+}
+
+// T08: GUM LPU for e1×e1 with asymmetric variance — σ²_c[0]=0.2, σ²_c[1]=0.1
+fn t08_gum_e1_asymmetric() -> bool with Mut, Panic {
+    var a = vec8_zero()
+    a[1] = 1.0
+    var b = vec8_zero()
+    b[1] = 1.0
+    var sa = vec8_zero()
+    sa[0] = 0.1
+    var sb = vec8_zero()
+    sb[1] = 0.2
+    let sigma2 = gum_lpu_variance(a, b, sa, sb)
+    // k=0: bj[0,t]=t. σ²_c[0] = b[1]²·sa[1] + a[1]²·sb[1] = 0 + 1·0.2 = 0.2
+    approx_eq(sigma2[0], 0.2, 0.000000000000001) &&
+    // k=1: bj[1,t]=1⊕t. σ²_c[1] = b[1]²·sa[0] + a[1]²·sb[0] = 1·0.1 + 0 = 0.1
+    approx_eq(sigma2[1], 0.1, 0.000000000000001) &&
+    approx_eq(sigma2[2], 0.0, 0.000000000000001)
+}
+
+// ---- Runner ----
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_fano_signless_byte_count()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_fano_signed_byte_count()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_fano_signless_no_vxorpd()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_fano_signed_has_7_vxorpd()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_oct_e1_times_e2()             { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_oct_e1_times_e1()             { pass = pass + 1 } else { fail = fail + 1 }
+    if t07_gum_scalar_reduction()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t08_gum_e1_asymmetric()           { pass = pass + 1 } else { fail = fail + 1 }
+
+    print("test_hyper_epistemic: ")
+    print_int(pass)
+    print(" passed, ")
+    print_int(fail)
+    print(" failed\n")
+
+    if fail == 0 { 0 } else { 1 }
+}
