@@ -18,18 +18,14 @@ struct CodeBuffer {
 }
 
 fn code_buffer_new() -> CodeBuffer {
-    var out: CodeBuffer
-    out.len = 0
-    out
+    CodeBuffer { bytes: [0; 512], len: 0 }
 }
 
-fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut {
-    var out = buf
-    if out.len < 512 {
-        out.bytes[out.len as usize] = (b & 0xff) as i8
-        out.len = out.len + 1
+fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut {
+    if (*buf).len < 512 {
+        (*buf).bytes[(*buf).len as usize] = (b & 0xff) as i8
+        (*buf).len = (*buf).len + 1
     }
-    out
 }
 
 // ---- Minimal EVEX helpers (inlined; the_ prefix, from test_hyper_o.sio) ----
@@ -55,15 +51,13 @@ fn the_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
     ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
 }
 
-fn the_emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
-    var b = buf
-    b = emit_byte(b, 0x62)
-    b = emit_byte(b, the_p1(dst, src2, map))
-    b = emit_byte(b, the_p2_pd(src1))
-    b = emit_byte(b, the_p3_vl_full(src1, vl_code, mask_k, z_bit))
-    b = emit_byte(b, opcode)
-    b = emit_byte(b, 0xC0 | (the_lo3(dst) << 3) | the_lo3(src2))
-    b
+fn the_emit_evex_pd_rr_full(buf: &! CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) with Mut, Panic, Div {
+    emit_byte_mut(buf, 0x62)
+    emit_byte_mut(buf, the_p1(dst, src2, map))
+    emit_byte_mut(buf, the_p2_pd(src1))
+    emit_byte_mut(buf, the_p3_vl_full(src1, vl_code, mask_k, z_bit))
+    emit_byte_mut(buf, opcode)
+    emit_byte_mut(buf, 0xC0 | (the_lo3(dst) << 3) | the_lo3(src2))
 }
 
 fn the_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
@@ -73,39 +67,35 @@ fn the_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
 
 // ---- Signless Fano (mirrors emit_fano_signless_inline in lower_ir.sio) ----
 // 2 + 7×3 = 23 EVEX × 6 bytes = 138 bytes (no VXORPD sign step).
-fn the_emit_fano_signless(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
-                          t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+fn the_emit_fano_signless(buf: &! CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                          t_bj: i64, t_aj: i64, ctrl_base: i64) with Mut, Panic, Div {
     let vl = 2
-    var b = buf
-    b = the_emit_evex_pd_rr_full(b, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
-    b = the_emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    the_emit_evex_pd_rr_full(buf, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
+    the_emit_evex_pd_rr_full(buf, 1, 0x59, accum, za, t_bj, vl, 0, 0)
     var col = 0
     while col < 7 {
-        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
-        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
-        b = the_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
         col = col + 1
     }
-    b
 }
 
 // ---- Signed Fano (control — mirrors emit_fano_inline) ----
 // 2 + 7×4 = 30 EVEX × 6 bytes = 180 bytes.
-fn the_emit_fano_signed(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
-                        t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+fn the_emit_fano_signed(buf: &! CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                        t_bj: i64, t_aj: i64, ctrl_base: i64) with Mut, Panic, Div {
     let vl = 2
-    var b = buf
-    b = the_emit_evex_pd_rr_full(b, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
-    b = the_emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    the_emit_evex_pd_rr_full(buf, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
+    the_emit_evex_pd_rr_full(buf, 1, 0x59, accum, za, t_bj, vl, 0, 0)
     var col = 0
     while col < 7 {
-        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
-        b = the_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
-        b = the_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + col, vl, 0, 0)
-        b = the_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + col, vl, 0, 0)
+        the_emit_evex_pd_rr_full(buf, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
         col = col + 1
     }
-    b
 }
 
 // ---- Canonical Fano tables (same as MSL/PTX kernels, from kretikos_emit_kaxi.sio) ----
@@ -194,21 +184,21 @@ fn vec8_zero() -> [f64; 8] {
 // T01: signless Fano byte count = 138 (23 EVEX × 6 bytes)
 fn t01_fano_signless_byte_count() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
-    buf = the_emit_fano_signless(buf, 0, 1, 8, 4, 6, 16)
+    the_emit_fano_signless(&! buf, 0, 1, 8, 4, 6, 16)
     buf.len == 138
 }
 
 // T02: signed Fano byte count = 180 (30 EVEX × 6 bytes) — control
 fn t02_fano_signed_byte_count() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
-    buf = the_emit_fano_signed(buf, 0, 1, 8, 4, 6, 16)
+    the_emit_fano_signed(&! buf, 0, 1, 8, 4, 6, 16)
     buf.len == 180
 }
 
 // T03: signless Fano has NO 0x57 (VXORPD opcode) anywhere
 fn t03_fano_signless_no_vxorpd() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
-    buf = the_emit_fano_signless(buf, 0, 1, 8, 4, 6, 16)
+    the_emit_fano_signless(&! buf, 0, 1, 8, 4, 6, 16)
     var i = 0
     var ok = 1
     while i < buf.len {
@@ -221,7 +211,7 @@ fn t03_fano_signless_no_vxorpd() -> bool with Mut, Panic, Div {
 // T04: signed Fano has exactly 7 VXORPD (0x57) opcodes
 fn t04_fano_signed_has_7_vxorpd() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
-    buf = the_emit_fano_signed(buf, 0, 1, 8, 4, 6, 16)
+    the_emit_fano_signed(&! buf, 0, 1, 8, 4, 6, 16)
     var count = 0
     var i = 0
     while i < buf.len {
