@@ -113,19 +113,26 @@ Attempted focused cherry-picks:
 - `07ecfa0ff` contextual int array literals: conflict only in tests already marked `//@ requires: madaros`; after resolving to keep the marker, the patch was empty/equivalent.
 - `ac60fc11f` native implicit unit returns and assert builtin: conflict only in `tests/madaros/source_to_elf/manifest.tsv`, whose entries were already present; after resolving, the patch was empty/equivalent.
 - `eaf803935` native bool literals: skipped as empty/equivalent in the consolidation branch.
+- `71387df9a` raw async runtime gates: ported as compiler-only code from `codex/madaros-retire-lean-single-20260627`. Conflicts were resolved by preserving the current Box::new, println/unobserved, and configurable multimodule visibility behavior while adding async runtime call typing, TaskHandle/spawn/await lowering, raw-array native lowering, and `IrSyscall6` native emission. The branch merge commit `933da3c4a` was not merged because it also carries solver/governance/history and a bootstrap binary update.
 
 Dirty WIP extraction attempts:
 
 - `/workspace/sounio-source-elf-proof`: reviewed dirty `check`, `defs`, `mod`, and `parser/exprs` changes. The valuable checker capacity/import/runtime-builtin and parser control-expression newline handling are already present in the consolidation branch. Copying this worktree would downgrade newer parser guards for newline `[`/`(`/prefix operators and newer checker architecture, so no code was ported.
 - `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`: reviewed dirty native-codegen changes. `self-hosted/native/lower_ir.sio` is byte-identical to the consolidation branch, and all inspected call sites already use `&! NativeCompiler`. The only remaining difference changes a rodata constant in `self-hosted/native/codegen.sio` from `1e6` to another value without a clear acceptance gate, so it was not ported.
 
+Validation after porting `71387df9a`:
+
+- `bin/souc info`: PASS, selected Madares v0.80.0.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS, 2 passed / 0 failed.
+- `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check, trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
+
 ## Next clean consolidation path
 
 1. Keep `origin/main` as the compiler baseline, not any old WIP train.
 2. Merge only one lane at a time into `integration/compiler-consolidation-20260628`.
 3. First real candidates:
-   - `codex/madaros-retire-lean-single-20260627`
    - `fix/binop-literal-float-478b` only after debug trace is converted to gated instrumentation or dropped.
+   - remaining compiler-core commits from `codex/madaros-retire-lean-single-20260627` only if a missing gate is named; the raw async compiler patch has been extracted.
 4. For each candidate, require:
    - no active worktree owner collision,
    - named conflict files,
