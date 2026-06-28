@@ -29,6 +29,49 @@ Rationale: branches attached to worktrees are treated as owned lanes, even when
 their branch tip looks old, because dirty worktree state may contain the real
 handoff.
 
+## Local cleanup executed
+
+Archived and deleted 24 local-only branches that had no attached worktree and
+no matching `origin/*` branch. These branches still had patch-exclusive history,
+so each branch tip was first preserved as a pushed archive tag under
+`archive/local/*/2026-06-28`.
+
+Local branch count after deletion: 105.
+
+Archived local branch tips:
+
+- `archive/local/claude-gpu-e137-fix/2026-06-28` -> `150f72aaf`
+- `archive/local/claude-solver-gpu-native-path/2026-06-28` -> `a8fe4756e`
+- `archive/local/codex-card-a-parser/2026-06-28` -> `617204fdc`
+- `archive/local/codex-card-b-ir-bodies/2026-06-28` -> `617204fdc`
+- `archive/local/codex-gpu-modular-bridge/2026-06-28` -> `b3dc49ef2`
+- `archive/local/codex-gpu-semantic-profile/2026-06-28` -> `2202eded4`
+- `archive/local/codex-madaros-check-segv-sret/2026-06-28` -> `b021c6720`
+- `archive/local/codex-madaros-rebuild-probe/2026-06-28` -> `e4284b656`
+- `archive/local/codex-madaros-retire-lean-single-20260627/2026-06-28` ->
+  `933da3c4a`
+- `archive/local/codex-release-conformance-spine-fix/2026-06-28` ->
+  `0e0845447`
+- `archive/local/codex-release-install-visibility-20260626/2026-06-28` ->
+  `2091589c2`
+- `archive/local/codex-tuple-signature-types-20260626/2026-06-28` ->
+  `c40517e2b`
+- `archive/local/codex-website-docs-support-gate-20260626/2026-06-28` ->
+  `f2d28ca06`
+- `archive/local/debug-root2-probe/2026-06-28` -> `7bd6ac02e`
+- `archive/local/f64-cast-field-type-isolate/2026-06-28` -> `717349576`
+- `archive/local/feat-affine-octonion-clean/2026-06-28` -> `29159d660`
+- `archive/local/feat-assoc-variance-wiring/2026-06-28` -> `01148b616`
+- `archive/local/feat-lean-tier2/2026-06-28` -> `b5dac8017`
+- `archive/local/feat-m2-effect-firewall/2026-06-28` -> `c3a2f7c8b`
+- `archive/local/fix-docs-registry-sync/2026-06-28` -> `cac90b8db`
+- `archive/local/fix-native-codegen-sret-regression-rebase/2026-06-28` ->
+  `6312f1194`
+- `archive/local/fix-silent-typecheck-diag/2026-06-28` -> `8875efa9e`
+- `archive/local/research-affect-curvature-depression/2026-06-28` ->
+  `aa10da5c5`
+- `archive/local/research-erdos-compiler-wip/2026-06-28` -> `b8828063d`
+
 ## Remote cleanup executed
 
 After `git fetch --prune origin`, checked `refs/remotes/origin/*` for remote
