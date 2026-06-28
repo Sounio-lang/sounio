@@ -123,6 +123,70 @@ fn expr_is_gpu_axis_field(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
     }
 }
 
+fn expr_is_gpu_effect_root(e: Expr) -> bool with Mut, Panic, Div {
+    e.kind == ExprKind::ExprIdent && name_eq(e.name, make_name("GPU"))
+}
+
+fn expr_is_gpu_effect_field(e: Expr, field: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprPath && e.path.seg_count == 2 {
+        let head = copy_string_list_to_name(e.path.segments)
+        let tail = copy_string_list_tail_to_name(e.path.segments)
+        return name_eq(head, make_name("GPU")) && name_eq(tail, field)
+    }
+    if e.kind != ExprKind::ExprFieldAccess {
+        return false
+    }
+    if !name_eq(e.name, field) { return false }
+    match e.left {
+        Some(base) => expr_is_gpu_effect_root(*base),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_launch_descriptor_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("launch")) { return false }
+        match e.left {
+            Some(base) => return expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_effect_field(*callee, make_name("launch")),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_launch_invocation_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_launch_descriptor_call(*callee),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_sync_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("sync")) { return false }
+        match e.left {
+            Some(base) => return expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_effect_field(*callee, make_name("sync")),
+        None => false,
+    }
+}
+
 // ============================================================
 // Core operations — define, lookup, scoping, errors
 // ============================================================
@@ -1020,10 +1084,26 @@ impl Resolver {
                 r.resolve_opt_expr(e.right)
             }
             ExprKind::ExprMethodCall => {
+                if expr_is_gpu_launch_descriptor_call(e) || expr_is_gpu_sync_call(e) {
+                    return self.resolve_expr_list(e.args)
+                }
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_expr_list(e.args)
             }
             ExprKind::ExprCall => {
+                if expr_is_gpu_launch_invocation_call(e) {
+                    var r_launch = self
+                    match e.left {
+                        Some(desc) => {
+                            r_launch = r_launch.resolve_expr_list((*desc).args)
+                        }
+                        None => {}
+                    }
+                    return r_launch.resolve_expr_list(e.args)
+                }
+                if expr_is_gpu_launch_descriptor_call(e) || expr_is_gpu_sync_call(e) {
+                    return self.resolve_expr_list(e.args)
+                }
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_expr_list(e.args)
             }
