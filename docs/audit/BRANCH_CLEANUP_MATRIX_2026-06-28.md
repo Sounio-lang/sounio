@@ -29,18 +29,25 @@ Rationale: branches attached to worktrees are treated as owned lanes, even when
 their branch tip looks old, because dirty worktree state may contain the real
 handoff.
 
-## Remote delete-ready candidates
+## Remote cleanup executed
 
 After `git fetch --prune origin`, checked `refs/remotes/origin/*` for remote
 branches with no attached local worktree and no patch-id-exclusive commits
 against `integration/compiler-consolidation-20260628`.
 
-Delete-ready after archive tag:
+Archive tags created and pushed:
 
-- `origin/codex/gum-variance-sota-20260626`: `git cherry -v HEAD` reports the
+- `archive/codex-gum-variance-sota-20260626/2026-06-28` ->
+  `36a3b1d2b`
+- `archive/codex-parser-strict-20260627/2026-06-28` -> `95b16f24b`
+- `archive/fix-stdlib-e2e-sret-workarounds/2026-06-28` -> `57255a289`
+
+Remote branches deleted after archive tags were pushed:
+
+- `origin/codex/gum-variance-sota-20260626`: `git cherry -v HEAD` reported the
   branch's exclusive fix as patch-equivalent (`- 36a3b1d2b...`). The variance
   tests are already recorded as passing in the consolidation audit.
-- `origin/codex/parser-strict-20260627`: `git cherry -v HEAD` reports the
+- `origin/codex/parser-strict-20260627`: `git cherry -v HEAD` reported the
   branch's Box::new path-call checker fix as patch-equivalent
   (`- 95b16f24b...`).
 - `origin/fix/stdlib-e2e-sret-workarounds`: both branch commits are
@@ -48,7 +55,15 @@ Delete-ready after archive tag:
   does not claim the broader native-runtime/SRET residual is solved; it only
   removes a branch with no remaining patch-exclusive source.
 
-Archive/delete commands when remote cleanup is approved:
+Verification after deletion:
+
+- `git fetch --prune origin`
+- `refs/remotes/origin/codex/gum-variance-sota-20260626`: absent
+- `refs/remotes/origin/codex/parser-strict-20260627`: absent
+- `refs/remotes/origin/fix/stdlib-e2e-sret-workarounds`: absent
+- Remote ref count after prune: 99
+
+Commands executed:
 
 ```bash
 git tag archive/codex-gum-variance-sota-20260626/2026-06-28 origin/codex/gum-variance-sota-20260626
