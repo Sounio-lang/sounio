@@ -389,8 +389,12 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   `slurm-jobs/erdos90/run_on_cluster.sh`, and a Slurm runner WIP that defaulted
   the partition to `all`, selected a `souc` with a `compile` subcommand, exported
   `SOUNIO_STDLIB_PATH`, and added `--gres=gpu:0` to `srun`. This patch was
-  archived in the audit rather than ported into compiler consolidation.
-  Archive/delete evidence will be recorded below after tag and branch removal.
+  archived in the audit rather than ported into compiler consolidation. The
+  original branch tip was archived as
+  `archive/worktree/minimax-f64-compare/2026-06-28` -> `8fcf23d18`,
+  `/workspace/sounio-f64cmp` was removed, and local `minimax/f64-compare` was
+  deleted. No matching remote branch existed at cleanup time. Post-delete
+  counts: 85 local branches, 91 remote refs, 53 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
