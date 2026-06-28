@@ -1,11 +1,13 @@
 # Editor integrations
 
-The Sounio LSP (built from `self-hosted/lsp/server.sio`) speaks
-JSON-RPC over stdio and is invoked as `souc lsp --stdio`.
+The Sounio preview LSP speaks JSON-RPC over stdio and is invoked as
+`souc lsp --stdio`. In the checked preview contract this routes through
+`tools/lsp/sounio-lsp.sh`; rebuilding the pure-Sounio server from
+`self-hosted/lsp/server.sio` is tracked separately.
 
 | Editor | Path | Status |
 |---|---|---|
-| VS Code | `editors/vscode/` | Full extension with syntax highlighting, snippets, and LSP client |
+| VS Code | `editors/vscode/` | Preview extension with syntax highlighting, snippets, command wiring, and LSP client |
 | Helix | `editors/helix/languages.toml` | LSP-only (no tree-sitter grammar yet) |
 | Neovim | `editors/neovim/lspconfig.lua` | LSP via `nvim-lspconfig` |
 
@@ -25,7 +27,7 @@ npm run compile
 
 If `souc` isn't on PATH, the extension falls back to
 `<workspace>/bin/souc`, so dragging a Sounio source repo into VS Code
-just works.
+uses the in-tree preview tooling.
 
 ### Helix
 

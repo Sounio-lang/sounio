@@ -1,0 +1,103 @@
+//@ run-pass
+//
+// M3 smoke — F2 conjugation-under-speaker-reversal test on a synthetic
+// 8-turn alternating-speaker trajectory.
+//
+// Pins these contracts of `tools/ocssm/f2_conjugation.sio`:
+//   1. The F2 algorithm runs end-to-end: paired vs random aggregate
+//      distances, ratio computation, no degenerate division.
+//   2. On synthetic hashes (no real conjugation structure), the
+//      paired/random ratio is finite and close to 1 — neither hypothesis
+//      is favoured.
+//
+// What this does NOT claim: ratio ≥ 5. That PASS criterion from the
+// plan §6.2 requires real SWDA σ-pairs, deferred to M3a.
+
+use dialogue::trajectory::*
+use dialogue::embed::*
+
+fn rp_conj(v: &[f64; 8], out: &![f64; 8]) with Mut {
+    out[0] = v[0]
+    var i: i64 = 1
+    while i < 8 {
+        out[i as usize] = 0.0 - v[i as usize]
+        i = i + 1
+    }
+}
+
+fn rp_dist_sq(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        let d: f64 = a[i as usize] - b[i as usize]
+        s = s + d * d
+        i = i + 1
+    }
+    return s
+}
+
+fn rp_pair_residual_sq(hash_a: i64, hash_b: i64) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    var ea: [f64; 8] = [0.0; 8]
+    var eb: [f64; 8] = [0.0; 8]
+    embed_into(hash_a, &!ea)
+    embed_into(hash_b, &!eb)
+    var ca: [f64; 8] = [0.0; 8]
+    rp_conj(&ea, &!ca)
+    return rp_dist_sq(&eb, &ca)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, NaturalityG2 {
+    var t: Trajectory = traj_empty()
+    let _0: i64 = traj_push(&t, 0, 1001, 1, 0, 8)
+    let _1: i64 = traj_push(&t, 1, 2002, 1, 0, 8)
+    let _2: i64 = traj_push(&t, 0, 1003, 1, 0, 8)
+    let _3: i64 = traj_push(&t, 1, 2004, 1, 0, 8)
+    let _4: i64 = traj_push(&t, 0, 1005, 1, 0, 8)
+    let _5: i64 = traj_push(&t, 1, 2006, 1, 0, 8)
+    let _6: i64 = traj_push(&t, 0, 1007, 1, 0, 8)
+    let _7: i64 = traj_push(&t, 1, 2008, 1, 0, 8)
+
+    let n: i64 = traj_len(&t)
+
+    // Paired: consecutive turns of opposite speaker.
+    var sum_p: f64 = 0.0
+    var c_p: i64 = 0
+    var i: i64 = 0
+    while i < n - 1 {
+        if traj_speaker(&t, i) != traj_speaker(&t, i + 1) {
+            sum_p = sum_p + rp_pair_residual_sq(traj_hash(&t, i), traj_hash(&t, i + 1))
+            c_p = c_p + 1
+        }
+        i = i + 1
+    }
+    var d_paired: f64 = 0.0
+    if c_p > 0 { d_paired = sum_p / (c_p as f64) }
+
+    // Random shuffle: pair (i, (i+3) mod n).
+    var sum_r: f64 = 0.0
+    var c_r: i64 = 0
+    var k: i64 = 0
+    while k < n {
+        let j: i64 = (k + 3) - ((k + 3) / n) * n
+        if j != k {
+            sum_r = sum_r + rp_pair_residual_sq(traj_hash(&t, k), traj_hash(&t, j))
+            c_r = c_r + 1
+        }
+        k = k + 1
+    }
+    var d_random: f64 = 0.0
+    if c_r > 0 { d_random = sum_r / (c_r as f64) }
+
+    var ratio: f64 = 0.0
+    if d_paired > 0.0000000001 { ratio = d_random / d_paired }
+
+    var ok: i64 = 1
+    if c_p == 0 { ok = 0 }                  // must find σ-pairs
+    if d_paired <= 0.0 { ok = 0 }           // must produce non-trivial residual
+    if ratio < 0.1 { ok = 0 }               // ratio finite, lower bound
+    if ratio > 10.0 { ok = 0 }              // ratio finite, upper bound
+                                            // (synthetic, no real structure)
+
+    if ok == 1 { print("PASS\n") } else { print("FAIL\n") }
+    return 0
+}

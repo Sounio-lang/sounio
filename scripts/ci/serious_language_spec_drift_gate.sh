@@ -78,7 +78,7 @@ required_header = [
     "claim_id",
     "notes",
 ]
-evidence_required = {"executable", "partially_executable"}
+evidence_required = {"executable", "partially_executable", "validated_research"}
 valid_statuses = evidence_required | {"prototype", "specified_only", "stale_conflicting"}
 
 
@@ -153,7 +153,7 @@ for row in rows:
         failures.append({"spec_id": spec_id, "reason": "executable status without evidence"})
         continue
 
-    if claim_id and claim_id != "-" and status in evidence_required and claim_id not in claim_ids:
+    if claim_id and claim_id != "-" and status in evidence_required and kind in {"conformance_case", "conformance_claim"} and claim_id not in claim_ids:
         failures.append({"spec_id": spec_id, "reason": f"claim_id not in conformance manifest: {claim_id}"})
 
     if not ref or ref == "-":
@@ -226,7 +226,7 @@ if failures:
 lines.extend([
     "## Rule",
     "",
-    "Rows marked `executable` or `partially_executable` must cite live repo evidence.",
+    "Rows marked `executable`, `partially_executable`, or `validated_research` must cite live repo evidence.",
     "Conformance evidence must exist in the manifest and pass in the conformance summary.",
     "Rows marked `prototype`, `specified_only`, or `stale_conflicting` may remain documented without executable conformance coverage, but public claims must keep that lower status.",
     "",

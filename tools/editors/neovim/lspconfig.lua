@@ -8,9 +8,9 @@
 -- and require it from init.lua:
 --   require('sounio')
 --
--- `souc` must be on PATH (or pass an absolute path via `cmd`). The LSP
--- binary is built automatically on first invocation of `souc lsp`
--- (see bin/souc and self-hosted/lsp/server.sio in the Sounio repo).
+-- `souc` must be on PATH (or pass an absolute path via `cmd`).
+-- `souc lsp --stdio` starts the checked preview LSP route in bin/souc; the
+-- pure-Sounio server rebuild is tracked separately.
 
 local lspconfig = require('lspconfig')
 local configs = require('lspconfig.configs')
@@ -37,7 +37,7 @@ if not configs.sounio_lsp then
       settings = {},
     },
     docs = {
-      description = 'Sounio Language Server (pure-Sounio LSP).',
+      description = 'Sounio Language Server preview.',
       default_config = {
         root_dir = [[root_pattern("souc.toml", ".git")]],
       },

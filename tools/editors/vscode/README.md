@@ -3,9 +3,9 @@
 VS Code extension for the [Sounio](https://github.com/sounio-lang/sounio)
 programming language — epistemic computing at the horizon of certainty.
 
-## Features (v1.1.0)
+## Features (preview)
 
-Powered by the pure-Sounio Language Server (`souc lsp`):
+Powered by the checked preview Language Server route (`souc lsp --stdio`):
 
 - **Diagnostics** — type errors highlighted as you save.
 - **Hover** — info on Sounio keywords, primitive types, effects, and
@@ -16,6 +16,8 @@ Powered by the pure-Sounio Language Server (`souc lsp`):
 - **Find References** (Shift+F12) — list every use of an identifier.
 - **Rename Symbol** (F2) — rename across the current file with a
   workspace-edit preview.
+- **Formatting** — routes through the checked `souc format` surface.
+- **REPL terminal** — opens the file-backed `souc repl` preview.
 - **Syntax Highlighting** — TextMate grammar covering effects, units of
   measure, refinement types, and Sounio's epistemic keywords.
 
@@ -30,9 +32,10 @@ The extension spawns the Sounio compiler as a language server:
    `"/path/to/sounio/bin/souc"`). When opening a Sounio repo, the
    extension also falls back to `<workspace>/bin/souc` automatically.
 
-The LSP binary builds itself the first time the extension launches it
-(`souc lsp` auto-compiles `bin/sounio-lsp` from
-`self-hosted/lsp/server.sio` when missing).
+The checked preview route uses the in-tree `bin/souc` wrapper. Rebuilding the
+pure-Sounio server from `self-hosted/lsp/server.sio` is a separate compiler
+blocker and should not be presented as green until `tools/lsp/test_protocol.sh`
+or an equivalent gate passes.
 
 ## Commands
 

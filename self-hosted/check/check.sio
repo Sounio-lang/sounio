@@ -267,6 +267,13 @@ pub struct Checker {
     refine_violations: i64,       // predicates definitely violated (compile error)
     // Condition-narrowing guard stack: up to 8 nested if-conditions.
     refine_cond_env: RefineStaticEnv,
+    // Program items pointer, stored once during the in-place collect spine, so the
+    // deep expression-checking compat path can walk ontology class declarations
+    // for E009 subclass→parent subsumption. A single Option<Box<…>> field (one
+    // shallow write that persists, unlike deep ontology_kernel mutation) avoids
+    // both the un-writable kernel and threading the list through the call chain.
+    // Placed at struct end to keep all existing field offsets unchanged.
+    ontology_items: Option<Box<ItemList> >,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -639,8 +646,8 @@ fn substitute_type_param(
     tp_count: i64,
     tp_names: [Name; 8],
     args: TypeEntryList,
-) -> TypeEntry with Mut, Panic, Div {
-    if ty.kind == TypeKind::TyNamed {
+) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if !name_is_empty(ty.name) {
         // Check if this name matches any type parameter
         var idx: i64 = 0
         while idx < tp_count {
@@ -651,8 +658,37 @@ fn substitute_type_param(
             idx = idx + 1
         }
     }
-    // Not a type param reference — return as-is
-    ty
+    var result = ty
+    match ty.inner {
+        Some(inner_ty) => {
+            let new_inner = substitute_type_param(*inner_ty, tp_count, tp_names, args)
+            result.inner = Some(Box::new(new_inner))
+        }
+        None => {}
+    }
+    match ty.tuple_elems {
+        Some(elems) => {
+            result.tuple_elems = Some(Box::new(substitute_type_param_list(*elems, tp_count, tp_names, args)))
+        }
+        None => {}
+    }
+    result
+}
+
+fn substitute_type_param_list(
+    list: TypeEntryList,
+    tp_count: i64,
+    tp_names: [Name; 8],
+    args: TypeEntryList,
+) -> TypeEntryList with Mut, Panic, Div, Alloc {
+    let new_head = substitute_type_param(list.head, tp_count, tp_names, args)
+    match list.tail {
+        None => TypeEntryList { head: new_head, tail: None }
+        Some(rest) => {
+            let new_tail = substitute_type_param_list(*rest, tp_count, tp_names, args)
+            TypeEntryList { head: new_head, tail: Some(Box::new(new_tail)) }
+        }
+    }
 }
 
 // Get the nth element of a TypeEntryList (0-indexed).
@@ -663,6 +699,115 @@ fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic
         match list.tail {
             None => list.head  // fallback: return head if out of bounds
             Some(rest) => type_entry_list_nth(*rest, n - 1)
+        }
+    }
+}
+
+fn type_entry_list_count_value(list: TypeEntryList) -> i64 with Mut, Panic, Div {
+    match list.tail {
+        None => 1
+        Some(rest) => 1 + type_entry_list_count_value(*rest)
+    }
+}
+
+fn type_param_buf_has(buf: TypeParamBuf, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.count {
+        if name_eq(buf.names[i], name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn type_param_buf_push_unique(buf: TypeParamBuf, name: Name) -> TypeParamBuf with Mut, Panic, Div {
+    var result = buf
+    if name_is_empty(name) || result.count >= 8 || type_param_buf_has(result, name) {
+        return result
+    }
+    result.names[result.count] = name
+    result.count = result.count + 1
+    result
+}
+
+fn type_is_unresolved_type_param_in_tables(structs: *mut StructTable, enums: *mut EnumTable, ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if name_is_empty(ty.name) {
+        return false
+    }
+    if struct_table_find(structs, ty.name) >= 0 {
+        return false
+    }
+    if enum_table_find(enums, ty.name) >= 0 {
+        return false
+    }
+    true
+}
+
+fn collect_fn_generic_names_from_type_in_tables(structs: *mut StructTable, enums: *mut EnumTable, ty: TypeEntry, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    var result = buf
+    if type_is_unresolved_type_param_in_tables(structs, enums, ty) {
+        result = type_param_buf_push_unique(result, ty.name)
+    }
+    match ty.inner {
+        Some(inner_ty) => {
+            result = collect_fn_generic_names_from_type_in_tables(structs, enums, *inner_ty, result)
+        }
+        None => {}
+    }
+    match ty.tuple_elems {
+        Some(elems) => {
+            result = collect_fn_generic_names_from_type_list_in_tables(structs, enums, *elems, result)
+        }
+        None => {}
+    }
+    result
+}
+
+fn collect_fn_generic_names_from_type_list_in_tables(structs: *mut StructTable, enums: *mut EnumTable, list: TypeEntryList, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    var result = collect_fn_generic_names_from_type_in_tables(structs, enums, list.head, buf)
+    match list.tail {
+        Some(rest) => {
+            result = collect_fn_generic_names_from_type_list_in_tables(structs, enums, *rest, result)
+        }
+        None => {}
+    }
+    result
+}
+
+fn collect_fn_generic_names_from_params_in_tables(structs: *mut StructTable, enums: *mut EnumTable, opt: Option<Box<FnParamList> >, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
+    match opt {
+        None => buf
+        Some(list) => {
+            let with_head = collect_fn_generic_names_from_type_in_tables(structs, enums, (*list).head.ty, buf)
+            collect_fn_generic_names_from_params_in_tables(structs, enums, (*list).tail, with_head)
+        }
+    }
+}
+
+fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_count: i64, tp_names: [Name; 8], args: TypeEntryList) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let head = (*list).head
+            let new_head = FnParamInfo {
+                name: head.name,
+                ty: substitute_type_param(head.ty, tp_count, tp_names, args),
+            }
+            let new_tail = checker_substitute_fn_params((*list).tail, tp_count, tp_names, args)
+            Some(Box::new(FnParamList { head: new_head, tail: new_tail }))
+        }
+    }
+}
+
+fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, Div, Alloc {
+    match e.type_args {
+        Some(args) => Some(args)
+        None => {
+            match e.left {
+                Some(callee) => (*callee).type_args
+                None => None
+            }
         }
     }
 }
@@ -761,6 +906,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         refine_runtime_checked: 0,
         refine_violations: 0,
         refine_cond_env: refine_static_env_new(),
+        ontology_items: None,
     }
 }
 
@@ -861,6 +1007,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).refine_runtime_checked = 0
     (*raw).refine_violations = 0
     (*raw).refine_cond_env = refine_static_env_new()
+    (*raw).ontology_items = None
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -956,6 +1103,7 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).refine_runtime_checked = src.refine_runtime_checked
     (*dst).refine_violations = src.refine_violations
     (*dst).refine_cond_env = src.refine_cond_env
+    (*dst).ontology_items = src.ontology_items
 }
 
 fn checker_note_type_error_mut(c: *mut Checker) with Mut {
@@ -1436,6 +1584,88 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
     ty_fn(sig_id)
 }
 
+fn checker_lower_type_expr_list_mut(c: *mut Checker, tel: TypeExprList) -> TypeEntryList with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, tel.head)
+    match tel.tail {
+        None => TypeEntryList { head: head_ty, tail: None }
+        Some(rest) => {
+            let rest_list = checker_lower_type_expr_list_mut(c, *rest)
+            TypeEntryList { head: head_ty, tail: Some(Box::new(rest_list)) }
+        }
+    }
+}
+
+fn checker_lower_tuple_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(tel) => ty_tuple(checker_lower_type_expr_list_mut(c, *tel))
+        None => ty_unit()
+    }
+}
+
+fn option_expr_is_some(opt: Option<Box<Expr> >) -> bool {
+    match opt {
+        Some(_) => true,
+        None => false
+    }
+}
+
+fn checker_lower_raw_ptr_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, mut_flag: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match inner_opt {
+        Some(inner_te) => {
+            let inner_ty = checker_lower_type_expr_mut(c, *inner_te)
+            ty_raw_ptr(inner_ty, option_expr_is_some(mut_flag))
+        }
+        None => ty_error()
+    }
+}
+
+fn checker_refinement_pred_from_info(ri: RefinementInfo) -> RefinementPred with Alloc {
+    let pred = if ri.pred_is_float {
+        pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+    } else {
+        pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+    }
+    if ri.compound_op == 7 || ri.compound_op == 8 {
+        let pred2 = if ri.pred2_is_float {
+            pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+        } else {
+            pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+        }
+        if ri.compound_op == 7 {
+            pred_and(pred, pred2)
+        } else {
+            pred_or(pred, pred2)
+        }
+    } else {
+        pred
+    }
+}
+
+fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info) => {
+            let ri = *info
+            match ri.base_type {
+                Some(bte) => {
+                    let base_ty = checker_lower_type_expr_mut(c, *bte)
+                    if ri.pred_op > 0 {
+                        let pred = checker_refinement_pred_from_info(ri)
+                        let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                        let synth_name = make_refinement_synth_name((*c).refinements.count)
+                        (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
+                        let ref_idx = (*c).refinements.count - 1
+                        ty_with_refinement(base_ty, ref_idx)
+                    } else {
+                        base_ty
+                    }
+                }
+                None => ty_error()
+            }
+        }
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1530,8 +1760,11 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         }
         TypeExprKind::TypeFn => checker_lower_fn_type_expr_mut(c, te)
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeTuple => checker_lower_tuple_type_mut(c, te.type_args)
         TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
         TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
+        TypeExprKind::TypeRawPtr => checker_lower_raw_ptr_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -2440,6 +2673,28 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     print_error_note(code)
 }
 
+fn checker_report_unobserved_print_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E036]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": cannot print Unobserved<T>\n")
+    print("   |\n   = help: Unobserved<T> requires `with Observe` before IO can inspect it\n")
+}
+
+fn checker_type_is_unobserved_like(ty: TypeEntry) -> bool with Panic, Div {
+    if ty.kind == TypeKind::TyUnobserved {
+        return true
+    }
+    ty.kind == TypeKind::TyNamed && name_matches_str10(ty.name, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100)
+}
+
 fn checker_push_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
     if (*c).const_int_scope_depth < MAX_SCOPE_DEPTH {
         (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize] = (*c).const_int_count
@@ -2807,6 +3062,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("str_eq"))
     checker_bind_import_unknown_inplace(c, make_name("file_size"))
     checker_bind_import_unknown_inplace(c, make_name("read_file"))
+    checker_bind_import_unknown_inplace(c, make_name("read_i64"))
     checker_bind_import_unknown_inplace(c, make_name("write_file"))
     checker_bind_import_unknown_inplace(c, make_name("print"))
     checker_bind_import_unknown_inplace(c, make_name("print_int"))
@@ -2982,13 +3238,49 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         // Bridged to the by-value collect_impl_def (mirrors checker_check_impl_item_bridge);
         // its ~8MB SRET frame stays isolated in the bridge leaf.
         checker_collect_impl_item_bridge(c, item.impl_def)
+    } else if item.kind == ItemKind::ItemTypeAlias {
+        checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
     }
 }
 
+fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    match ty_opt {
+        Some(te_box) => {
+            let te = *te_box
+            if te.kind == TypeExprKind::TypeRefinement {
+                match te.refinement_info {
+                    Some(ri_box) => {
+                        let ri = *ri_box
+                        match ri.base_type {
+                            Some(bte) => {
+                                let base_ty = checker_lower_type_expr_mut(c, *bte)
+                                let pred = checker_refinement_pred_from_info(ri)
+                                let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                                (*c).refinements = refinement_table_add((*c).refinements, name, rt)
+                            }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+            } else {
+                let alias_ty = checker_lower_type_expr_mut(c, te)
+                (*c).env = (*c).env.bind(name, alias_ty, false)
+                checker_const_int_bind_unknown_inplace(c, name)
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    // Stash the program items so the deep call-arg compat path can resolve
+    // ontology subclass relations by name (E009 subsumption). Single shallow
+    // pointer write — persists where deep ontology_kernel mutation does not.
+    (*c).ontology_items = items
     checker_collect_runtime_builtins_inplace(c)
     var cursor = items
     while true {
@@ -3092,6 +3384,20 @@ fn onto_prop_pred(p: OntologyPropertyDecl) -> RefinementPred with Mut, Panic, Di
     }
 }
 
+// Field-wise RefinementPred constructor — the weakening check builds a predicate
+// from scalar fields read directly off the inline property array (no struct copy).
+fn onto_prop_pred_fields(op: i64, rhs_int: i64, rhs_float: f64, is_float: bool) -> RefinementPred with Mut, Panic, Div {
+    RefinementPred {
+        op: op,
+        var_name: empty_name(),
+        rhs_int: rhs_int,
+        rhs_float: rhs_float,
+        is_float: is_float,
+        left: None,
+        right: None,
+    }
+}
+
 fn checker_onto_check_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >, classes: Option<Box<OntologyClassDeclList> >) with Mut, Panic, Div, Alloc, IO {
     var cur = roles
     var k: i64 = 0
@@ -3126,12 +3432,12 @@ fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<Ont
     while true {
         match ci {
             Some(clist) => {
-                // Do NOT copy (*clist).head into a local: OntologyClassDecl contains
-                // `properties: [OntologyPropertyDecl; 8]` (an array of structs), and
-                // copying that struct misaligns the array under Madaros codegen
-                // (struct-array offset bug) — reads of properties[a].pred_op then
-                // come back 0. Access fields directly through the list pointer and
-                // copy out only a single (array-free) OntologyPropertyDecl at a time.
+                // Read property predicate fields DIRECTLY off the inline array
+                // elements — do NOT copy the whole OntologyPropertyDecl (two embedded
+                // [i8;128] Names). The large-boxed-struct codegen was fixed by the
+                // bump-arena Box::new rework (#430); a direct
+                // `(*clist).head.properties[a].pred_op` through the boxed list is now
+                // correct, while copying the ~290 B struct out is unreliable.
                 var si: i64 = 0
                 while si < (*clist).head.superclass_count && si < 8 {
                     let sname = (*clist).head.superclass_names[si as usize]
@@ -3142,16 +3448,29 @@ fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<Ont
                                 if name_eq((*plist).head.name, sname) {
                                     var a: i64 = 0
                                     while a < (*clist).head.property_count && a < 8 {
-                                        let cp = (*clist).head.properties[a as usize]
-                                        var b: i64 = 0
-                                        while b < (*plist).head.property_count && b < 8 {
-                                            let pp = (*plist).head.properties[b as usize]
-                                            if name_eq(cp.name, pp.name) && cp.pred_op > 0 && pp.pred_op > 0 {
-                                                if !pred_implies(onto_prop_pred(cp), onto_prop_pred(pp)) {
-                                                    checker_report_error_at_inplace(c, cp.span, 41, 0, 0, 0)
+                                        let c_op = (*clist).head.properties[a as usize].pred_op
+                                        if c_op > 0 {
+                                            let c_name = (*clist).head.properties[a as usize].name
+                                            var b: i64 = 0
+                                            while b < (*plist).head.property_count && b < 8 {
+                                                let p_op = (*plist).head.properties[b as usize].pred_op
+                                                if p_op > 0 && name_eq(c_name, (*plist).head.properties[b as usize].name) {
+                                                    let child_pred = onto_prop_pred_fields(
+                                                        c_op,
+                                                        (*clist).head.properties[a as usize].pred_rhs_int,
+                                                        (*clist).head.properties[a as usize].pred_rhs_float,
+                                                        (*clist).head.properties[a as usize].is_float)
+                                                    let parent_pred = onto_prop_pred_fields(
+                                                        p_op,
+                                                        (*plist).head.properties[b as usize].pred_rhs_int,
+                                                        (*plist).head.properties[b as usize].pred_rhs_float,
+                                                        (*plist).head.properties[b as usize].is_float)
+                                                    if !pred_implies(child_pred, parent_pred) {
+                                                        checker_report_error_at_inplace(c, (*clist).head.properties[a as usize].span, 41, 0, 0, 0)
+                                                    }
                                                 }
+                                                b = b + 1
                                             }
-                                            b = b + 1
                                         }
                                         a = a + 1
                                     }
@@ -3542,6 +3861,17 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_warn_large_params_inplace(c, (*fd).name, (*fd).params)
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
+            match (*fd).body.stmts {
+                None => {
+                    (*c).current_return_type = ty_unit()
+                    (*c).current_effects = saved_effects
+                    (*c).current_effect_count = saved_effect_count
+                    (*c).multitest_count = saved_multitest_count
+                    (*c).multitest_corrected = saved_multitest_corrected
+                    return
+                }
+                Some(_) => {}
+            }
             (*c).env = (*c).env.push_scope()
             (*c).borrows = (*c).borrows.push_scope()
             checker_push_const_scope_inplace(c)
@@ -5000,6 +5330,29 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             ty_named(struct_name)
         }
     } else {
+        if name_eq(struct_name, make_name("Knowledge")) {
+            var cur_k = e.fields
+            var seen_value = false
+            var value_ty = ty_error()
+            while true {
+                match cur_k {
+                    Some(list) => {
+                        let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                        if name_eq((*list).head.name, make_name("value")) {
+                            value_ty = init_ty
+                            seen_value = true
+                        }
+                        cur_k = (*list).tail
+                    }
+                    None => break
+                }
+            }
+            if !seen_value {
+                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                return ty_error()
+            }
+            return ty_knowledge(value_ty, 0.0 - 1.0)
+        }
         // ---- Enum struct-variant constructor (`Enum::Variant { field: val }`). The head
         // segment ("Event") is the enum name; the last segment ("C") names a struct variant.
         // checker_copy_string_list_to_name returns the HEAD; _tail_to_name returns the LAST
@@ -5401,6 +5754,8 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_variance_of(e.left) { return true }
+    if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
     if call_expr_is_async_runtime_builtin(e.left) { return true }
     false
@@ -5555,6 +5910,21 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     ty_knowledge(v_ty, 0.0 - 1.0)
 }
 
+fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
 fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -5587,6 +5957,15 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
         None => {}
     }
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if checker_type_is_unobserved_like(arg_ty) {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
+            checker_report_unobserved_print_inplace(c, e.span)
+        }
+        var effects_unobserved: [i64; 8] = [0; 8]
+        effects_unobserved[0] = 0
+        checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+        return ty_unit()
+    }
     if !is_error_or_unknown(arg_ty) && !checker_types_compatible_inplace(c, arg_ty, ty_i64()) {
         checker_report_mismatch_inplace(c, e.span, 9, ty_i64(), arg_ty)
     }
@@ -5647,6 +6026,47 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
         }
         None => -1
     }
+}
+
+fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprPath {
+                return false
+            }
+            if (*expr).path.seg_count != 2 {
+                return false
+            }
+            let head_name = checker_copy_string_list_to_name((*expr).path.segments)
+            let tail_name = checker_copy_string_list_tail_to_name((*expr).path.segments)
+            let head_ok = name_matches_str3(head_name, 66, 111, 120)
+            let tail_ok = name_matches_str3(tail_name, 110, 101, 119)
+            head_ok && tail_ok
+        }
+        None => false
+    }
+}
+
+fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let call_start_borrows = (*c).borrows
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(extra) => {
+            let _extra_ty = checker_check_expr_inplace(c, *extra)
+            checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        }
+        None => {}
+    }
+    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    var box_ty = ty_named(make_name("Box"))
+    box_ty.inner = Some(Box::new(arg_ty))
+    box_ty
 }
 
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -5732,6 +6152,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
     }
+    if call_expr_is_builtin_variance_of(e.left) {
+        return checker_check_variance_metric_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_uncertainty_of(e.left) {
+        return checker_check_variance_metric_expr_inplace(c, e)
+    }
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
     }
@@ -5743,6 +6169,19 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_print_char(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_println(e.left) {
+        let first_arg = expr_list_head(e.args)
+        let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+        if checker_type_is_unobserved_like(arg_ty) {
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
+                checker_report_unobserved_print_inplace(c, e.span)
+            }
+            var effects_unobserved: [i64; 8] = [0; 8]
+            effects_unobserved[0] = 0
+            checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+            return ty_unit()
+        }
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
     // gpu_block_dim_*, gpu_barrier, gpu_sync_threads): implicit kernel builtins
@@ -5758,6 +6197,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows_async)
         return async_runtime_builtin_return_type(e.left)
+    }
+    if call_expr_is_box_new(e.left) {
+        return checker_check_box_new_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -5796,16 +6238,34 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+        var effective_params = direct_sig.params
+        var effective_return_type = direct_sig.return_type
+        match call_expr_type_args(e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, direct_sig.params, empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(direct_sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                }
+            }
+            None => {}
+        }
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
-            fn_param_list_handle(direct_sig.params),
+            fn_param_list_handle(effective_params),
             direct_sig.param_count,
             e.span,
         )
         checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, direct_sig.params, call_start_borrows)
-        return direct_sig.return_type
+        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -5857,10 +6317,28 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
-        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
+        var effective_params = sig.params
+        var effective_return_type = sig.return_type
+        match call_expr_type_args(e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, sig.params, empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                }
+            }
+            None => {}
+        }
+        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
         checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
-        sig.return_type
+        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        effective_return_type
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -6556,7 +7034,13 @@ fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr
                 checker_check_expr_inplace(c, *e)
             }
         }
-        None => ty_unit()
+        None => {
+            if ann_ty.kind != TypeKind::TyUnknown {
+                ann_ty
+            } else {
+                ty_unit()
+            }
+        }
     }
 }
 
@@ -6579,7 +7063,16 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        var init_context_ok = false
+        match s.expr {
+            Some(init_expr) => {
+                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+            }
+            None => {
+                init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
+            }
+        }
+        if !init_context_ok && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -6631,7 +7124,16 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow {
+        var init_context_ok = false
+        match s.expr {
+            Some(init_expr) => {
+                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+            }
+            None => {
+                init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
+            }
+        }
+        if !init_context_ok && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -7938,6 +8440,17 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 None => print("?")
             }
         }
+        TypeKind::TyRawPtr => {
+            if ty.name.buf[0] == 1 {
+                print("*mut ")
+            } else {
+                print("*const ")
+            }
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+        }
         TypeKind::TySlice => {
             print("&[")
             match ty.inner {
@@ -8821,6 +9334,23 @@ impl Checker {
         // Print help and note if available
         print_error_help(code)
         print_error_note(code)
+        c
+    }
+
+    fn report_unobserved_print(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E036]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": cannot print Unobserved<T>\n")
+        print("   |\n   = help: Unobserved<T> requires `with Observe` before IO can inspect it\n")
         c
     }
 
@@ -10745,8 +11275,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 38 { print("cannot borrow exclusively while other borrows are active") }
     else if code == 39 { print("linear value has already been used") }
     else if code == 40 { print("linear value must be used") }
-    // Units/refinement (41-43)
-    else if code == 41 { print("units are incompatible in this operation") }
+    // Ontology property weakening (41); refinement (42-43)
+    // E041 is ontology subsumption (child property weakens parent) — the only
+    // reporter of error code 41. (No reporter uses 41 for unit incompatibility.)
+    else if code == 41 { print("ontology subsumption could not be verified") }
     else if code == 42 { print("value does not satisfy the refinement predicate") }
     else if code == 43 { print("incompatible unit dimensions in conversion") }
     // Phase A additions (44-51)
@@ -11725,6 +12257,30 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
     }
 }
 
+fn call_expr_is_builtin_variance_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str11((*expr).name, 118, 97, 114, 105, 97, 110, 99, 101, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_uncertainty_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str14((*expr).name, 117, 110, 99, 101, 114, 116, 97, 105, 110, 116, 121, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
 // Read-only GPU thread/block coordinate intrinsics. These are implicit
 // kernel-scope builtins with no user-declared signature, so the call checker
 // must recognise them by name and assign their result type (u32) directly —
@@ -11826,6 +12382,18 @@ fn call_expr_is_builtin_print_char(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110)
         }
         None => false
     }
@@ -12178,7 +12746,34 @@ fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Panic, Div
     true
 }
 
-fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic, Div, Alloc {
+fn checker_types_compatible_table_deep(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(a, b) {
+        return true
+    }
+    if depth > 16 {
+        return false
+    }
+    if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
+        return false
+    }
+    if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
+        return false
+    }
+    if a.fn_sig_id >= (*tbl).count || b.fn_sig_id >= (*tbl).count {
+        return false
+    }
+    let asig = fn_sig_table_get(tbl, a.fn_sig_id)
+    let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
+    if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, depth + 1) {
+        return false
+    }
+    if !checker_fn_sig_params_compatible_table_deep(tbl, asig, bsig, depth + 1) {
+        return false
+    }
+    checker_fn_sig_effects_compatible(asig, bsig)
+}
+
+fn checker_fn_sig_params_compatible_table_deep(tbl: *mut FnSigTable, a: FnSig, b: FnSig, depth: i64) -> bool with Mut, Panic, Div, Alloc {
     if a.param_count != b.param_count {
         return false
     }
@@ -12188,7 +12783,7 @@ fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic,
     while i < a.param_count {
         let ap = fn_param_list_handle_get(ah, i)
         let bp = fn_param_list_handle_get(bh, i)
-        if !types_compatible(ap.ty, bp.ty) {
+        if !checker_types_compatible_table_deep(tbl, ap.ty, bp.ty, depth + 1) {
             return false
         }
         i = i + 1
@@ -12211,10 +12806,10 @@ fn checker_fn_types_structurally_compatible_table(tbl: *mut FnSigTable, a: TypeE
     }
     let asig = fn_sig_table_get(tbl, a.fn_sig_id)
     let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
-    if !types_compatible(asig.return_type, bsig.return_type) {
+    if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, 0) {
         return false
     }
-    if !checker_fn_sig_params_compatible(asig, bsig) {
+    if !checker_fn_sig_params_compatible_table_deep(tbl, asig, bsig, 0) {
         return false
     }
     checker_fn_sig_effects_compatible(asig, bsig)
@@ -12263,17 +12858,7 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     if a.fn_sig_id >= (*(*c).fn_sigs).count || b.fn_sig_id >= (*(*c).fn_sigs).count {
         return false
     }
-    let ai = a.fn_sig_id
-    let bi = b.fn_sig_id
-    let asig = fn_sig_table_get((*c).fn_sigs, ai)
-    let bsig = fn_sig_table_get((*c).fn_sigs, bi)
-    if !types_compatible(asig.return_type, bsig.return_type) {
-        return false
-    }
-    if !checker_fn_sig_params_compatible(asig, bsig) {
-        return false
-    }
-    checker_fn_sig_effects_compatible(asig, bsig)
+    checker_types_compatible_table_deep((*c).fn_sigs, a, b, 0)
 }
 
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -12281,6 +12866,56 @@ fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry)
         return true
     }
     checker_fn_types_structurally_compatible_inplace(c, a, b)
+}
+
+// E009 ontology subsumption by name: walk the stored program items for child_name's
+// class declaration and recurse up its superclasses; true if parent_name is reached
+// (reflexive + transitive). Pure read-walk — works in the *mut spine where deep
+// ontology_kernel mutation does not. Depth-bounded against pathological cycles.
+fn checker_onto_name_subclass_walk(items: Option<Box<ItemList> >, child_name: Name, parent_name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if name_eq(child_name, parent_name) {
+        return true
+    }
+    if depth > 64 {
+        return false
+    }
+    var cur = items
+    while true {
+        match cur {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemOntology {
+                    match item.ontology_def {
+                        Some(odef) => {
+                            var ci = (*odef).classes
+                            while true {
+                                match ci {
+                                    Some(clist) => {
+                                        if name_eq((*clist).head.name, child_name) {
+                                            var s: i64 = 0
+                                            while s < (*clist).head.superclass_count && s < 8 {
+                                                let sname = (*clist).head.superclass_names[s as usize]
+                                                if checker_onto_name_subclass_walk(items, sname, parent_name, depth + 1) {
+                                                    return true
+                                                }
+                                                s = s + 1
+                                            }
+                                        }
+                                        ci = (*clist).tail
+                                    }
+                                    None => break
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    false
 }
 
 fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -12302,6 +12937,14 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
     if arg_expr.kind == ExprKind::ExprIdent &&
        (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
         return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
+    }
+    // Ontology subsumption: a subclass argument satisfies a parent-class parameter.
+    let exp_ty = call_ref_inner_or_self(param_ty)
+    let got_ty = call_ref_inner_or_self(arg_ty)
+    if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
+        if checker_onto_name_subclass_walk((*c).ontology_items, got_ty.name, exp_ty.name, 0) {
+            return true
+        }
     }
     false
 }
@@ -13265,6 +13908,7 @@ impl Checker {
             TypeExprKind::TypeSelfUpper => (c, c.current_impl_type)
             TypeExprKind::TypeReference => c.lower_ref_type(te.inner)
             TypeExprKind::TypeRefMut => c.lower_ref_mut_type(te.inner)
+            TypeExprKind::TypeRawPtr => c.lower_raw_ptr_type(te.inner, te.array_size)
             TypeExprKind::TypeArray => c.lower_array_type(te.inner, te.array_size)
             TypeExprKind::TypeTuple => c.lower_tuple_type(te.type_args)
             TypeExprKind::TypeFn => c.lower_fn_type_expr(te)
@@ -13518,6 +14162,8 @@ impl Checker {
                         || bound_ty.kind == TypeKind::TyDeferralPolicy
                         || bound_ty.kind == TypeKind::TyValidation {
                         (self, bound_ty)
+                    } else if bound_ty.kind != TypeKind::TyUnknown && bound_ty.kind != TypeKind::TyError && bound_ty.kind != TypeKind::TyNever {
+                        (self, bound_ty)
                     } else {
                         (self, ty_named(name))
                     }
@@ -13536,6 +14182,16 @@ impl Checker {
     fn lower_ref_mut_type(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(inner_te) => self.lower_ref_like_type(*inner_te, true)
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_raw_ptr_type(self, opt: Option<Box<TypeExpr> >, mut_flag: Option<Box<Expr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                (pair.0, ty_raw_ptr(pair.1, option_expr_is_some(mut_flag)))
+            }
             None => (self, ty_error())
         }
     }
@@ -14284,7 +14940,20 @@ impl Checker {
                             } else {
                                 pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
                             }
-                            let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                            var full_pred = pred
+                            if ri.compound_op == 7 || ri.compound_op == 8 {
+                                let pred2 = if ri.pred2_is_float {
+                                    pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+                                } else {
+                                    pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+                                }
+                                if ri.compound_op == 7 {
+                                    full_pred = pred_and(pred, pred2)
+                                } else {
+                                    full_pred = pred_or(pred, pred2)
+                                }
+                            }
+                            let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: full_pred }
                             let synth_name = make_refinement_synth_name(c.refinements.count)
                             c.refinements = refinement_table_add(c.refinements, synth_name, rt)
                             let ref_idx = c.refinements.count - 1
@@ -14483,10 +15152,23 @@ impl Checker {
                             } else {
                                 pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
                             }
+                            var full_pred = pred
+                            if ri.compound_op == 7 || ri.compound_op == 8 {
+                                let pred2 = if ri.pred2_is_float {
+                                    pred_make_float(ri.pred2_op, ri.var_name, ri.pred2_float_val)
+                                } else {
+                                    pred_make_int(ri.pred2_op, ri.var_name, ri.pred2_int_val)
+                                }
+                                if ri.compound_op == 7 {
+                                    full_pred = pred_and(pred, pred2)
+                                } else {
+                                    full_pred = pred_or(pred, pred2)
+                                }
+                            }
                             let rt = RefinementType {
                                 base_type: base_ty,
                                 var_name: ri.var_name,
-                                predicate: pred,
+                                predicate: full_pred,
                             }
                             c.refinements = refinement_table_add(c.refinements, name, rt)
                             c
@@ -16814,6 +17496,17 @@ impl Checker {
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
+                match (*fd).body.stmts {
+                    None => {
+                        c.current_return_type = ty_unit()
+                        c.current_effects = saved_effects
+                        c.current_effect_count = saved_effect_count
+                        c.multitest_count = saved_multitest_count
+                        c.multitest_corrected = saved_multitest_corrected
+                        return c
+                    }
+                    Some(_) => {}
+                }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
                 c = c.push_const_scope()
@@ -17080,7 +17773,13 @@ impl Checker {
         let ann_ty = ann_pair.1
         let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
         c = init_pair.0
-        let init_ty = init_pair.1
+        var init_ty = init_pair.1
+        if ann_ty.kind == TypeKind::TyRawPtr {
+            match s.expr {
+                None => { init_ty = ann_ty }
+                Some(_) => {}
+            }
+        }
         var bind_ty = init_ty
         if ann_ty.kind != TypeKind::TyUnknown {
             // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
@@ -17281,7 +17980,13 @@ impl Checker {
                     self.check_expr(*e)
                 }
             }
-            None => (self, ty_unit())
+            None => {
+                if ann_ty.kind != TypeKind::TyUnknown {
+                    (self, ann_ty)
+                } else {
+                    (self, ty_unit())
+                }
+            }
         }
     }
 }
@@ -18281,6 +18986,15 @@ impl Checker {
             Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
             None => {}
         }
+        if checker_type_is_unobserved_like(arg_ty) {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 13) {
+                c = c.report_unobserved_print(e.span)
+            }
+            var effects_unobserved: [i64; 8] = [0; 8]
+            effects_unobserved[0] = 0
+            c = c.check_callee_effects(e.span, effects_unobserved, 1)
+            return (c, ty_unit())
+        }
         if !is_error_or_unknown(arg_ty) && !c.types_compatible_structural(arg_ty, ty_i64()) {
             c = c.report_mismatch(e.span, 9, ty_i64(), arg_ty)
         }
@@ -18288,6 +19002,31 @@ impl Checker {
         effects[0] = 0
         c = c.check_callee_effects(e.span, effects, 1)
         (c, ty_unit())
+    }
+
+    fn check_box_new_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let call_start_borrows = self.borrows
+        let first_pair = self.check_opt_expr(first_arg)
+        var c = first_pair.0
+        let arg_ty = first_pair.1
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(extra) => {
+                let extra_pair = c.check_expr(*extra)
+                c = extra_pair.0
+                c = c.report_error_at(e.span, 10, 0, 0, 0)
+            }
+            None => {}
+        }
+        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+        var box_ty = ty_named(make_name("Box"))
+        box_ty.inner = Some(Box::new(arg_ty))
+        (c, box_ty)
     }
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -18357,8 +19096,17 @@ impl Checker {
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
         }
+        if call_expr_is_builtin_variance_of(e.left) {
+            return self.check_variance_metric_expr(e)
+        }
+        if call_expr_is_builtin_uncertainty_of(e.left) {
+            return self.check_variance_metric_expr(e)
+        }
         if call_expr_is_builtin_slice_len(e.left) {
             return self.check_slice_len_call_expr(e)
+        }
+        if call_expr_is_box_new(e.left) {
+            return self.check_box_new_expr(e)
         }
         if call_expr_is_builtin_print_int(e.left) {
             return self.check_print_i64_builtin_expr(e)
@@ -18372,6 +19120,21 @@ impl Checker {
             c_async = c_async.check_expr_list_no_type_no_linear_consume(e.args)
             c_async = c_async.release_call_arg_borrows(e.args, None, call_start_borrows_async)
             return (c_async, async_runtime_builtin_return_type(e.left))
+        }
+        if call_expr_is_builtin_println(e.left) {
+            let first_arg = expr_list_head(e.args)
+            let first_pair = self.check_opt_expr(first_arg)
+            var c_println = first_pair.0
+            let arg_ty = first_pair.1
+            if checker_type_is_unobserved_like(arg_ty) {
+                if !has_effect_id(c_println.current_effects, c_println.current_effect_count, 13) {
+                    c_println = c_println.report_unobserved_print(e.span)
+                }
+                var effects_unobserved: [i64; 8] = [0; 8]
+                effects_unobserved[0] = 0
+                c_println = c_println.check_callee_effects(e.span, effects_unobserved, 1)
+                return (c_println, ty_unit())
+            }
         }
         let witness_kind = call_expr_contest_witness_kind(e.left)
         if witness_kind >= 0 {
@@ -18444,13 +19207,33 @@ impl Checker {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
-            c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+            var effective_params = sig.params
+            var effective_return_type = sig.return_type
+            match call_expr_type_args(e) {
+                Some(type_arg_exprs) => {
+                    let lowered_type_args_pair = c.lower_type_expr_list(*type_arg_exprs)
+                    c = lowered_type_args_pair.0
+                    let lowered_type_args = lowered_type_args_pair.1
+                    var generic_names = collect_fn_generic_names_from_params_in_tables(c.structs, c.enums, sig.params, empty_type_param_buf())
+                    generic_names = collect_fn_generic_names_from_type_in_tables(c.structs, c.enums, sig.return_type, generic_names)
+                    if generic_names.count > 0 {
+                        let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                        if provided_type_arg_count != generic_names.count {
+                            c = c.report_error_at(e.span, 10, 0, 0, 0)
+                        }
+                        effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
+                        effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                    }
+                }
+                None => {}
+            }
+            c = c.check_call_args(e.args, effective_params, sig.param_count, e.span)
             // Verify callee's effects are subset of caller's effects
             c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
             // Release borrows taken for call arguments — the call has returned,
             // so exclusive/shared borrows on arguments are no longer active.
-            c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
-            (c, sig.return_type)
+            c = c.release_call_arg_borrows(e.args, effective_params, call_start_borrows)
+            (c, effective_return_type)
         } else if is_error_or_unknown(callee_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
@@ -20354,6 +21137,22 @@ impl Checker {
         (c, ty_knowledge(v_ty, 0.0 - 1.0))
     }
 
+    fn check_variance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        var c = self
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            None => {}
+        }
+        c = c.check_expr_list_no_type_no_linear_consume(e.args)
+        (c, ty_f64())
+    }
+
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {
         let idx = self.borrows.find(name)
         if idx >= 0 {
@@ -21110,10 +21909,39 @@ impl Checker {
                 (c, ty_named(struct_name))
             }
         } else {
+            if name_eq(struct_name, make_name("Knowledge")) {
+                return self.check_knowledge_struct_lit(e)
+            }
             var c = self.report_error_at(e.span, 15, 0, 0, 0)
             c = c.check_struct_field_inits_no_type(e.fields)
             (c, ty_error())
         }
+    }
+
+    fn check_knowledge_struct_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var cur = e.fields
+        var seen_value = false
+        var value_ty = ty_error()
+        while true {
+            match cur {
+                Some(list) => {
+                    let pair = c.check_expr((*list).head.value)
+                    c = pair.0
+                    if name_eq((*list).head.name, make_name("value")) {
+                        value_ty = pair.1
+                        seen_value = true
+                    }
+                    cur = (*list).tail
+                }
+                None => break
+            }
+        }
+        if !seen_value {
+            c = c.report_error_at(e.span, 12, 0, 0, 0)
+            return (c, ty_error())
+        }
+        (c, ty_knowledge(value_ty, 0.0 - 1.0))
     }
 
     fn check_generic_struct_lit(self, e: Expr, tmpl: StructInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {

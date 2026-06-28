@@ -30,7 +30,7 @@ bash scripts/dev/measure_repo_scale.sh --json artifacts/audit/repo_scale.v1.json
 | CI `*gate*.sh` scripts | **129** | Assuming all gates run on `make check` |
 | Works gates wired to CI | **~10%** (see A.4) | "127 gates = green CI" |
 
-**Canonical public-claim downgrades:** `docs/serious-language/public-claim-registry.v1.tsv` (`stdlib.surface = prototype`, LSP/editor = prototype, etc.).
+**Canonical public-claim downgrades and closures:** `docs/serious-language/public-claim-registry.v1.tsv` (`stdlib.surface = validated_research` for the bounded support contract only, LSP/editor = validated_research for checked preview tooling, remaining prototype rows such as generics and Windows stay downgraded).
 
 ## Audit phases (machine-readable)
 

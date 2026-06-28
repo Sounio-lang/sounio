@@ -20,6 +20,8 @@ struct LowerLocalStack {
     is_global: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
+    // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
+    variance_regs: [i64; 4096],
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
     // must be injected when this local is called (closures step 2).
     closure_fn_id: [i64; 4096],
@@ -39,6 +41,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
         scalar_kind: [0; 4096],
+        variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
         count: 0,
     }
@@ -134,6 +137,9 @@ struct Lowerer {
     struct_layouts: Box<StructLayoutTable>,
     array_elem_float_regs: [i64; 512],
     array_elem_float_reg_count: i64,
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    variance_base_reg_count: i64,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
@@ -143,6 +149,8 @@ struct Lowerer {
     // bound local knows it is a capturing closure.
     closure_caps: Box<ClosureCapTable>,
     pending_closure_fn_id: i64,
+    allow_direct_capturing_closure_literal: bool,
+    pending_variance_reg: i64,
 }
 
 struct IrPreparedCallArgs {
@@ -246,10 +254,15 @@ fn lowerer_new() -> Lowerer with Alloc {
         struct_layouts: Box::new(empty_struct_layout_table()),
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
         pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
     }
 }
 
@@ -782,6 +795,55 @@ fn lowerer_preseed_external_struct_items_mut(
     }
 }
 
+fn lowerer_register_struct_fields_direct_mut(
+    lo: &! Lowerer,
+    type_name: Name,
+    fields: &Option<Box<FieldDefList>>
+) with Mut, Panic, Div, Alloc {
+    var sl_box = (*lo).struct_layouts
+    var layout_idx: i64 = -1
+    var si: i64 = 0
+    while si < (*sl_box).count {
+        if ir_name_eq((*sl_box).entries[si as usize].type_name, type_name) {
+            layout_idx = si
+        }
+        si = si + 1
+    }
+    if layout_idx < 0 {
+        let pre_count = (*sl_box).count
+        if pre_count >= 256 {
+            lo.error_count = lo.error_count + 1
+            lo.had_error = true
+            return
+        }
+        layout_idx = pre_count
+        (*sl_box).count = pre_count + 1
+    }
+
+    var entry = empty_struct_layout_entry()
+    entry.type_name = type_name
+    var fc: i64 = 0
+    var fcur = fields
+    var keep_going = true
+    while keep_going && fc < 64 {
+        match *fcur {
+            Some(flist) => {
+                entry.fields[fc as usize] = StructFieldEntry {
+                    name: (*flist).head.name,
+                    index: fc,
+                    is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else { 0 },
+                }
+                fc = fc + 1
+                fcur = &(*flist).tail
+            }
+            _ => { keep_going = false }
+        }
+    }
+    entry.field_count = fc
+    (*sl_box).entries[layout_idx as usize] = entry
+    (*lo).struct_layouts = sl_box
+}
+
 fn lowerer_register_struct_fields_mut(
     lo: &! Lowerer,
     type_name: Name,
@@ -976,7 +1038,7 @@ fn lowerer_preseed_program_items_mut(
                     let struct_def_opt_ref: &Option<Box<StructDef>> = &head.struct_def
                     match *struct_def_opt_ref {
                         Some(sd) => {
-                            lowerer_register_struct_fields_mut(lo, name, &(*sd).fields, 0)
+                            lowerer_register_struct_fields_direct_mut(lo, name, &(*sd).fields)
                         }
                         _ => {}
                     }
@@ -1620,6 +1682,8 @@ fn lowerer_bind_local_mut(
         (*locals_box).global_bss_offsets[idx as usize] = 0
         (*locals_box).global_bss_sizes[idx as usize] = 0
         (*locals_box).is_global[idx as usize] = 0
+        (*locals_box).scalar_kind[idx as usize] = 0
+        (*locals_box).variance_regs[idx as usize] = -1
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
@@ -1876,7 +1940,13 @@ fn lowerer_lower_fn_item_mut(
     }
 
     if !(*lo).fn_ends_with_return() {
-        (*lo) = (*lo).emit(ir_return(result_reg))
+        if lower_opt_type_is_unit_or_implicit(&fd.return_type) {
+            let unit_pair = (*lo).emit_unit()
+            (*lo) = unit_pair.0
+            (*lo) = (*lo).emit(ir_return(unit_pair.1))
+        } else {
+            (*lo) = (*lo).emit(ir_return(result_reg))
+        }
     }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_return_check name=")
@@ -2010,6 +2080,20 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len != 3 { return false }
+            if seg.head_buf[0] as i64 != 105 { return false }   // 'i'
+            if seg.head_buf[1] as i64 != 54 { return false }    // '6'
+            if seg.head_buf[2] as i64 != 52 { return false }    // '4'
+            true
+        }
+        None => false,
+    }
+}
+
 fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
@@ -2032,6 +2116,13 @@ fn lower_opt_type_is_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     match *opt {
         Some(te) => lower_type_expr_is_f64(&(*te)),
         None => false,
+    }
+}
+
+fn lower_opt_type_is_unit_or_implicit(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => (*te).kind == TypeExprKind::TypeUnit,
+        None => true,
     }
 }
 
@@ -2202,6 +2293,425 @@ fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
     if lower_expr_is_f64_array_literal_ref(e) { return 2 }
     if lower_expr_has_float_source_ref(e) { return 1 }
     0
+}
+
+struct CapturedClosureValueScan {
+    locals: [Name; 256],
+    local_count: i64,
+    captured_closures: [Name; 256],
+    captured_closure_count: i64,
+    transparent_hofs: [Name; 256],
+    transparent_hof_count: i64,
+}
+
+fn captured_closure_value_scan_empty() -> CapturedClosureValueScan {
+    CapturedClosureValueScan {
+        locals: [ir_empty_name(); 256],
+        local_count: 0,
+        captured_closures: [ir_empty_name(); 256],
+        captured_closure_count: 0,
+        transparent_hofs: [ir_empty_name(); 256],
+        transparent_hof_count: 0,
+    }
+}
+
+fn captured_scan_has_local(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.local_count {
+        if ir_name_eq(scan.locals[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_has_closure(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.captured_closure_count {
+        if ir_name_eq(scan.captured_closures[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_has_transparent_hof(scan: CapturedClosureValueScan, name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < scan.transparent_hof_count {
+        if ir_name_eq(scan.transparent_hofs[i as usize], name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn captured_scan_add_local(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_local(out, name) { return out }
+    if out.local_count < 256 {
+        out.locals[out.local_count as usize] = name
+        out.local_count = out.local_count + 1
+    }
+    out
+}
+
+fn captured_scan_add_closure(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_closure(out, name) { return out }
+    if out.captured_closure_count < 256 {
+        out.captured_closures[out.captured_closure_count as usize] = name
+        out.captured_closure_count = out.captured_closure_count + 1
+    }
+    out
+}
+
+fn captured_scan_add_transparent_hof(scan: CapturedClosureValueScan, name: Name) -> CapturedClosureValueScan with Mut, Panic, Div {
+    var out = scan
+    if captured_scan_has_transparent_hof(out, name) { return out }
+    if out.transparent_hof_count < 256 {
+        out.transparent_hofs[out.transparent_hof_count as usize] = name
+        out.transparent_hof_count = out.transparent_hof_count + 1
+    }
+    out
+}
+
+fn captured_closure_param_has_name(params: &Option<Box<ClosureParamList>>, name: Name) -> bool with Mut, Panic, Div {
+    var cur = params
+    while true {
+        match *cur {
+            Some(node) => {
+                if ir_name_eq((*node).head.name, name) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_expr_references_enclosing_local(e: &Expr, params: &Option<Box<ClosureParamList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        if captured_scan_has_local(scan, (*e).name) && !captured_closure_param_has_name(params, (*e).name) {
+            return true
+        }
+    }
+    match (*e).left {
+        Some(l) => { if captured_expr_references_enclosing_local(&(*l), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).right {
+        Some(r) => { if captured_expr_references_enclosing_local(&(*r), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).else_expr {
+        Some(el) => { if captured_expr_references_enclosing_local(&(*el), params, scan) { return true } }
+        _ => {}
+    }
+    match (*e).block {
+        Some(b) => { if captured_block_references_enclosing_local(&(*b), params, scan) { return true } }
+        _ => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(node) => {
+                if captured_expr_references_enclosing_local(&(*node).head, params, scan) { return true }
+                args = &(*node).tail
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn captured_block_references_enclosing_local(block: &Block, params: &Option<Box<ClosureParamList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                match (*node).head.expr {
+                    Some(e) => {
+                        if captured_expr_references_enclosing_local(&(*e), params, scan) { return true }
+                    }
+                    _ => {}
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_expr_is_capturing_closure_literal(e: &Expr, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprClosure { return false }
+    match (*e).closure_body {
+        Some(body) => captured_expr_references_enclosing_local(&(*body), &(*e).closure_params, scan),
+        _ => false,
+    }
+}
+
+fn captured_expr_is_captured_closure_value(e: &Expr, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        return captured_scan_has_closure(scan, (*e).name)
+    }
+    captured_expr_is_capturing_closure_literal(e, scan)
+}
+
+fn captured_call_first_arg_is_captured_value(args: &Option<Box<ExprList>>, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    match *args {
+        Some(node) => captured_expr_is_captured_closure_value(&(*node).head, scan),
+        _ => false,
+    }
+}
+
+fn captured_expr_callee_name(e: &Expr) -> Name with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprIdent {
+        return (*e).name
+    }
+    if (*e).kind == ExprKind::ExprPath {
+        return ir_path_first_name((*e).path)
+    }
+    ir_empty_name()
+}
+
+fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_callee: bool) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent {
+        return !in_callee && captured_scan_has_closure(scan, (*e).name)
+    }
+    if (*e).kind == ExprKind::ExprClosure {
+        return !in_callee && captured_expr_is_capturing_closure_literal(e, scan)
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(ret) => { return captured_expr_misuses_value(&(*ret), scan, false) }
+            _ => return false,
+        }
+    }
+    if (*e).kind == ExprKind::ExprCall {
+        var callee_name = ir_empty_name()
+        var direct_captured_call = false
+        match (*e).left {
+            Some(callee) => {
+                callee_name = captured_expr_callee_name(&(*callee))
+                if callee_name.len > 0 {
+                    direct_captured_call = captured_scan_has_closure(scan, callee_name)
+                } else if captured_expr_misuses_value(&(*callee), scan, true) {
+                    return true
+                }
+            }
+            _ => {}
+        }
+        let captured_first_arg = captured_call_first_arg_is_captured_value(&(*e).args, scan)
+        let transparent_hof_call = captured_first_arg && captured_scan_has_transparent_hof(scan, callee_name)
+        if captured_first_arg && !transparent_hof_call { return true }
+        var args = &(*e).args
+        var idx: i64 = 0
+        while true {
+            match *args {
+                Some(node) => {
+                    if !((direct_captured_call || transparent_hof_call) && idx == 0) {
+                        if captured_expr_misuses_value(&(*node).head, scan, false) { return true }
+                    }
+                    args = &(*node).tail
+                    idx = idx + 1
+                }
+                _ => break,
+            }
+        }
+        return false
+    }
+    match (*e).left {
+        Some(l) => { if captured_expr_misuses_value(&(*l), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).right {
+        Some(r) => { if captured_expr_misuses_value(&(*r), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).else_expr {
+        Some(el) => { if captured_expr_misuses_value(&(*el), scan, false) { return true } }
+        _ => {}
+    }
+    match (*e).block {
+        Some(b) => { if captured_block_misuses_value(&(*b), scan) { return true } }
+        _ => {}
+    }
+    var args2 = &(*e).args
+    while true {
+        match *args2 {
+            Some(node2) => {
+                if captured_expr_misuses_value(&(*node2).head, scan, false) { return true }
+                args2 = &(*node2).tail
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn captured_block_misuses_value(block: &Block, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var state = scan
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                let stmt = &(*node).head
+                if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+                    match (*stmt).expr {
+                        Some(e) => {
+                            if captured_expr_is_capturing_closure_literal(&(*e), state) {
+                                state = captured_scan_add_closure(state, (*stmt).name)
+                            } else {
+                                if captured_expr_misuses_value(&(*e), state, false) { return true }
+                            }
+                        }
+                        _ => {}
+                    }
+                    state = captured_scan_add_local(state, (*stmt).name)
+                } else {
+                    match (*stmt).expr {
+                        Some(e2) => {
+                            if captured_expr_misuses_value(&(*e2), state, false) { return true }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_param_count(params: &Option<Box<ParamList>>) -> i64 with Alloc, Mut, Div {
+    var n: i64 = 0
+    var cur = params
+    while true {
+        match *cur {
+            Some(node) => {
+                n = n + 1
+                cur = &(*node).tail
+            }
+            _ => return n,
+        }
+    }
+    0
+}
+
+fn captured_first_param_name(params: &Option<Box<ParamList>>) -> Name with Alloc, Mut, Div {
+    match *params {
+        Some(node) => (*node).head.name,
+        _ => ir_empty_name(),
+    }
+}
+
+fn captured_expr_is_transparent_hof_body(e: &Expr, first_param: Name) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(ret) => return captured_expr_is_transparent_hof_body(&(*ret), first_param),
+            _ => return false,
+        }
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        return false
+    }
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(callee) => {
+            ir_name_eq(captured_expr_callee_name(&(*callee)), first_param)
+        }
+        _ => false,
+    }
+}
+
+fn captured_stmt_list_has_transparent_hof_body(stmts: &Option<Box<StmtList>>, first_param: Name) -> bool with Mut, Panic, Div {
+    var cur = stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                match (*node).head.expr {
+                    Some(e) => {
+                        if captured_expr_is_transparent_hof_body(&(*e), first_param) {
+                            return true
+                        }
+                    }
+                    _ => {}
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn captured_fn_is_transparent_hof(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    if captured_param_count(&(*fd).params) < 2 { return false }
+    let first_param = captured_first_param_name(&(*fd).params)
+    captured_stmt_list_has_transparent_hof_body(&(*fd).body.stmts, first_param)
+}
+
+fn captured_collect_transparent_hofs(items: &Option<Box<ItemList>>, scan: CapturedClosureValueScan) -> CapturedClosureValueScan with Mut, Panic, Div, Alloc {
+    var state = scan
+    var cur = items
+    while true {
+        match *cur {
+            Some(node) => {
+                let item = &(*node).head
+                if (*item).kind == ItemKind::ItemFn {
+                    match (*item).fn_def {
+                        Some(fd) => {
+                            if captured_fn_is_transparent_hof(&(*fd)) {
+                                state = captured_scan_add_transparent_hof(state, (*item).name)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return state,
+        }
+    }
+    state
+}
+
+fn captured_fn_has_value_misuse(fd: &FnDef, scan: CapturedClosureValueScan) -> bool with Mut, Panic, Div, Alloc {
+    var state = scan
+    var params = &(*fd).params
+    while true {
+        match *params {
+            Some(node) => {
+                state = captured_scan_add_local(state, (*node).head.name)
+                params = &(*node).tail
+            }
+            _ => break,
+        }
+    }
+    captured_block_misuses_value(&(*fd).body, state)
+}
+
+pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bool with Mut, Panic, Div, Alloc {
+    var scan = captured_closure_value_scan_empty()
+    scan = captured_collect_transparent_hofs(&(*prog).items, scan)
+    var cur = &(*prog).items
+    while true {
+        match *cur {
+            Some(node) => {
+                let item = &(*node).head
+                if (*item).kind == ItemKind::ItemFn {
+                    match (*item).fn_def {
+                        Some(fd) => {
+                            if captured_fn_has_value_misuse(&(*fd), scan) { return true }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 
@@ -3090,6 +3600,14 @@ impl Lowerer {
         lo
     }
 
+    fn report_fatal_lowering_error(self) -> Lowerer with Mut {
+        var lo = self.report_error()
+        lo.module = Box::new(ir_empty_module())
+        lo.current_fn = IR_INVALID_FN
+        lo.current_func_loaded = false
+        lo
+    }
+
     fn enter_scope(self) -> Lowerer with Mut {
         var lo = self
         lo.scope_depth = lo.scope_depth + 1
@@ -3117,6 +3635,7 @@ impl Lowerer {
                 stk.array_elem_float[idx as usize] = 0
                 stk.wide_bits[idx as usize] = 0
                 stk.wide_signed[idx as usize] = 0
+                stk.variance_regs[idx as usize] = -1
                 stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -3291,22 +3810,300 @@ impl Lowerer {
         0
     }
 
+    fn bind_local_variance_reg(self, name: Name, variance_reg: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.variance_regs[i as usize] = variance_reg
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_variance_reg(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).variance_regs[i as usize]
+            }
+            i = i - 1
+        }
+        -1
+    }
+
+    fn bind_variance_for_base_reg(self, base_reg: i64, variance_reg: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base_reg < 0 || variance_reg < 0 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < lo.variance_base_reg_count {
+            if lo.variance_base_regs[i as usize] == base_reg {
+                lo.variance_value_regs[i as usize] = variance_reg
+                return lo
+            }
+            i = i + 1
+        }
+        if lo.variance_base_reg_count < 1024 {
+            let idx = lo.variance_base_reg_count
+            lo.variance_base_regs[idx as usize] = base_reg
+            lo.variance_value_regs[idx as usize] = variance_reg
+            lo.variance_base_reg_count = idx + 1
+        }
+        lo
+    }
+
+    fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.variance_base_reg_count {
+            if self.variance_base_regs[i as usize] == base_reg {
+                return self.variance_value_regs[i as usize]
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn emit_zero_variance(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        self.emit_f64_const(0.0)
+    }
+
+    fn name_is_variance_of(self, n: Name) -> bool with Div {
+        n.len == 11
+        && n.buf[0] == 118 as i8 && n.buf[1] == 97 as i8
+        && n.buf[2] == 114 as i8 && n.buf[3] == 105 as i8
+        && n.buf[4] == 97 as i8 && n.buf[5] == 110 as i8
+        && n.buf[6] == 99 as i8 && n.buf[7] == 101 as i8
+        && n.buf[8] == 95 as i8 && n.buf[9] == 111 as i8
+        && n.buf[10] == 102 as i8
+    }
+
+    fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
+        n.len == 14
+        && n.buf[0] == 117 as i8 && n.buf[1] == 110 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 101 as i8
+        && n.buf[4] == 114 as i8 && n.buf[5] == 116 as i8
+        && n.buf[6] == 97 as i8 && n.buf[7] == 105 as i8
+        && n.buf[8] == 110 as i8 && n.buf[9] == 116 as i8
+        && n.buf[10] == 121 as i8 && n.buf[11] == 95 as i8
+        && n.buf[12] == 111 as i8 && n.buf[13] == 102 as i8
+    }
+
+    fn lower_measure_value_arg_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => self.lower_expr_ref(&(*list).head),
+            None => self.emit_unit(),
+        }
+    }
+
+    fn lower_measure_uncertainty_arg_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                match (*list).tail {
+                    Some(rest) => self.lower_expr_ref(&(*rest).head),
+                    None => self.emit_unit(),
+                }
+            }
+            None => self.emit_unit(),
+        }
+    }
+
+    fn emit_variance_add(self, lhs_v: i64, rhs_v: i64) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        lo = lo.emit(ir_binop(dst, lhs_v, BinaryOp::OpAdd, rhs_v))
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    fn emit_variance_scale(self, variance_reg: i64, scale_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair_sq = self.fresh_reg()
+        var lo = pair_sq.0
+        let scale_sq = pair_sq.1
+        lo = lo.emit(ir_binop(scale_sq, scale_reg, BinaryOp::OpMul, scale_reg))
+        lo = lo.emit(ir_mark_float_reg(scale_sq))
+        let pair_dst = lo.fresh_reg()
+        lo = pair_dst.0
+        let dst = pair_dst.1
+        lo = lo.emit(ir_binop(dst, scale_sq, BinaryOp::OpMul, variance_reg))
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    fn expr_is_same_ident_ref(self, lhs: &Option<Box<Expr>>, rhs: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+        match *lhs {
+            Some(l) => {
+                if (*l).kind == ExprKind::ExprIdent {
+                    match *rhs {
+                        Some(r) => {
+                            if (*r).kind == ExprKind::ExprIdent {
+                                return ir_name_eq((*l).name, (*r).name)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn lower_knowledge_variance_for_ident(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc {
+        let shadow = self.lookup_local_variance_reg(name)
+        if shadow >= 0 {
+            return (self, shadow)
+        }
+        let base = self.lookup_local(name)
+        if base < 0 {
+            return (self, -1)
+        }
+        let base_shadow = self.lookup_variance_for_base_reg(base)
+        if base_shadow >= 0 {
+            return (self, base_shadow)
+        }
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        var instr = ir_field_get(dst, base, 1, make_name("variance"))
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    fn lower_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    if ir_name_is_measure(callee_name) {
+                        let unc_pair = self.lower_measure_uncertainty_arg_ref(&(*e).args)
+                        var lo = unc_pair.0
+                        let unc_reg = unc_pair.1
+                        lo = lo.emit(ir_mark_float_reg(unc_reg))
+                        let pair_v = lo.fresh_reg()
+                        lo = pair_v.0
+                        let variance_reg = pair_v.1
+                        lo = lo.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+                        lo = lo.emit(ir_mark_float_reg(variance_reg))
+                        return (lo, variance_reg)
+                    }
+                }
+                _ => {}
+            }
+            return (self, -1)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            let local_v = self.lookup_local_variance_reg((*e).name)
+            if local_v >= 0 {
+                return (self, local_v)
+            }
+            if ir_name_eq(self.lookup_local_struct_type((*e).name), make_name("Knowledge")) {
+                return self.lower_knowledge_variance_for_ident((*e).name)
+            }
+            return (self, -1)
+        }
+        if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
+            return self.emit_zero_variance()
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if ir_name_eq((*e).name, make_name("value")) {
+                match (*e).left {
+                    Some(base_expr) => {
+                        if (*base_expr).kind == ExprKind::ExprIdent {
+                            return self.lower_knowledge_variance_for_ident((*base_expr).name)
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return (self, -1)
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            let same_ident = self.expr_is_same_ident_ref(&(*e).left, &(*e).right)
+            if same_ident && (*e).bin_op == BinaryOp::OpSub {
+                return self.emit_zero_variance()
+            }
+            let pair_lv = match (*e).left {
+                Some(l_expr) => self.lower_expr_variance_ref(&(*l_expr)),
+                _ => (self, -1),
+            }
+            var lo = pair_lv.0
+            let lv0 = pair_lv.1
+            let lv_pair = if lv0 >= 0 { (lo, lv0) } else { lo.emit_zero_variance() }
+            lo = lv_pair.0
+            let lv = lv_pair.1
+
+            let pair_rv = match (*e).right {
+                Some(r_expr) => lo.lower_expr_variance_ref(&(*r_expr)),
+                _ => (lo, -1),
+            }
+            lo = pair_rv.0
+            let rv0 = pair_rv.1
+            let rv_pair = if rv0 >= 0 { (lo, rv0) } else { lo.emit_zero_variance() }
+            lo = rv_pair.0
+            let rv = rv_pair.1
+
+            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                if same_ident && (*e).bin_op == BinaryOp::OpAdd {
+                    let two_pair = lo.emit_f64_const(2.0)
+                    lo = two_pair.0
+                    return lo.emit_variance_scale(lv, two_pair.1)
+                }
+                return lo.emit_variance_add(lv, rv)
+            }
+            if (*e).bin_op == BinaryOp::OpMul {
+                if same_ident {
+                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+                    lo = lhs_val_pair.0
+                    let two_pair = lo.emit_f64_const(2.0)
+                    lo = two_pair.0
+                    let scale_pair = lo.fresh_reg()
+                    lo = scale_pair.0
+                    let scale = scale_pair.1
+                    lo = lo.emit(ir_binop(scale, two_pair.1, BinaryOp::OpMul, lhs_val_pair.1))
+                    lo = lo.emit(ir_mark_float_reg(scale))
+                    return lo.emit_variance_scale(lv, scale)
+                }
+                let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+                lo = lhs_val_pair.0
+                let lhs_val = lhs_val_pair.1
+                let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+                lo = rhs_val_pair.0
+                let rhs_val = rhs_val_pair.1
+                let term_l_pair = lo.emit_variance_scale(lv, rhs_val)
+                lo = term_l_pair.0
+                let term_r_pair = lo.emit_variance_scale(rv, lhs_val)
+                lo = term_r_pair.0
+                return lo.emit_variance_add(term_l_pair.1, term_r_pair.1)
+            }
+            return (lo, -1)
+        }
+        (self, -1)
+    }
+
     // Returns the print builtin name for println's first argument.
-    //   int literal / i64 var (scalar_kind=1) → print_int  (itoa+write)
-    //   everything else                        → print      (strlen+write, safe fallback)
-    // Note: f64 vars (scalar_kind=2) intentionally fall through to print here because
-    // emit_builtin_print_f64 reads its argument from RDI (integer ABI) but our inline
-    // println call path passes floats via XMM0 (float ABI), causing a mismatch.
-    // Wiring up f64 dispatch requires threading the float-arg ABI into println lowering.
+    //   int literal / i64 var (scalar_kind=1) → print_int
+    //   f64-valued expression                 → print_f64
+    //   everything else                       → print
+    // Routing f64 through print treats the IEEE bits as a char* and segfaults.
+    // The native backend's print_f64 builtin consumes the lowered f64 payload
+    // through the same integer slot convention used by emitted call arguments.
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
-                let hk = (*list).head.kind
-                if hk == ExprKind::ExprIntLit {
+                let sk = self.expr_result_scalar_kind_ref(&(*list).head)
+                if sk == 1 {
                     make_name("print_int")
-                } else if hk == ExprKind::ExprIdent {
-                    let sk = self.lookup_local_scalar_kind((*list).head.name)
-                    if sk == 1 { make_name("print_int") } else { make_name("print") }
+                } else if sk == 2 {
+                    make_name("print_f64")
                 } else {
                     make_name("print")
                 }
@@ -3744,6 +4541,27 @@ impl Lowerer {
         }
     }
 
+    fn field_idx_from_struct_literal_name(self, struct_name: Name, field_name: Name, default_idx: i64) -> i64 with Mut, Panic, Div {
+        if struct_name.len <= 0 {
+            return self.field_idx_from_name_simple(field_name)
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    }
+                    fi = fi + 1
+                }
+                return default_idx
+            }
+            si = si + 1
+        }
+        default_idx
+    }
+
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
@@ -3912,8 +4730,27 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprFloatLit {
             return true
         }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 2
+        }
         if (*e).kind == ExprKind::ExprCast {
             return lower_cast_type_is_f64(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    if self.name_is_variance_of(callee_name) || self.name_is_uncertainty_of(callee_name) {
+                        return true
+                    }
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        return self.module.functions[fn_id as usize].returns_float == 1
+                    }
+                }
+                None => {}
+            }
+            return false
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
             return self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name)
@@ -3928,6 +4765,38 @@ impl Lowerer {
             return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
         }
         false
+    }
+
+    fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit {
+            return 1
+        }
+        if (*e).kind == ExprKind::ExprFloatLit {
+            return 2
+        }
+        if (*e).kind == ExprKind::ExprStringLit {
+            return 3
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            if lower_cast_type_is_f64(&(*e).cast_type) { return 2 }
+            if lower_cast_type_is_i64(&(*e).cast_type) { return 1 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            if lower_binary_op_is_compare((*e).bin_op) {
+                return 1
+            }
+            if self.expr_result_is_float_ref(e) {
+                return 2
+            }
+        }
+        if self.expr_result_is_float_ref(e) {
+            return 2
+        }
+        0
     }
 
     fn ensure_struct_literal_layout_ref(self, type_name: Name, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc {
@@ -5461,8 +6330,18 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_opt_expr_ref(&s.expr)
+        var lhs_lo = self
+        match s.expr {
+            Some(expr_box_closure) => {
+                if (*expr_box_closure).kind == ExprKind::ExprClosure {
+                    lhs_lo.allow_direct_capturing_closure_literal = true
+                }
+            }
+            _ => {}
+        }
+        let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
+        lo.allow_direct_capturing_closure_literal = false
         var reg = pair.1
         if is_mut {
             let pair_dst = lo.fresh_reg()
@@ -5504,6 +6383,10 @@ impl Lowerer {
             lo = lo.bind_local_closure_fn_id(s.name, lo.pending_closure_fn_id)
             lo.pending_closure_fn_id = -1
         }
+        if lo.pending_variance_reg >= 0 {
+            lo = lo.bind_local_variance_reg(s.name, lo.pending_variance_reg)
+            lo.pending_variance_reg = -1
+        }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
         } else {
@@ -5521,7 +6404,7 @@ impl Lowerer {
         } else {
             match s.expr {
                 Some(expr_box_sk) => {
-                    if (*expr_box_sk).kind == ExprKind::ExprFloatLit {
+                    if lo.expr_result_is_float_ref(&(*expr_box_sk)) {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
                     } else if (*expr_box_sk).kind == ExprKind::ExprIntLit {
                         lo = lo.bind_local_scalar_kind(s.name, 1)
@@ -5532,6 +6415,23 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        match s.expr {
+            Some(expr_box_var) => {
+                if lo.lookup_local_variance_reg(s.name) >= 0 {
+                    if lo.expr_result_is_float_ref(&(*expr_box_var)) {
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
+                    }
+                } else {
+                    let var_pair = lo.lower_expr_variance_ref(&(*expr_box_var))
+                    lo = var_pair.0
+                    if var_pair.1 >= 0 {
+                        lo = lo.bind_local_variance_reg(s.name, var_pair.1)
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
+                    }
+                }
+            }
+            _ => {}
         }
         let annotated_wide_bits = lower_opt_type_wide_bits(&s.ty)
         if annotated_wide_bits > 64 {
@@ -5598,6 +6498,15 @@ impl Lowerer {
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
+        var rhs_variance: i64 = -1
+        match s.expr {
+            Some(rhs_expr_var) => {
+                let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
+                lo = rhs_var_pair.0
+                rhs_variance = rhs_var_pair.1
+            }
+            _ => {}
+        }
         let target_opt: Option<Box<Expr>> = s.target
 
         if s.assign_op != AssignOp::AssignEq {
@@ -5636,6 +6545,10 @@ impl Lowerer {
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
+                            if rhs_variance >= 0 {
+                                lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
+                                lo = lo.bind_local_scalar_kind((*target_expr).name, 2)
+                            }
                             (lo, dst)
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
@@ -5751,6 +6664,144 @@ impl Lowerer {
 
     fn lower_expr_args(self, opt: Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
         self.lower_expr_args_ref(&opt)
+    }
+
+    fn first_arg_is_capturing_closure_literal_ref(self, opt: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind != ExprKind::ExprClosure { return false }
+                var caps = empty_capture_list()
+                caps = self.scan_captures_opt(&(*list).head.closure_body, &(*list).head.closure_params, caps)
+                caps.count > 0
+            }
+            _ => false,
+        }
+    }
+
+    fn first_arg_capturing_closure_local_fn_id_ref(self, opt: &Option<Box<ExprList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind != ExprKind::ExprIdent { return -1 }
+                self.lookup_local_closure_fn_id((*list).head.name)
+            }
+            _ => -1,
+        }
+    }
+
+    fn lower_function_is_transparent_hof(self, fn_id: i64) -> bool with Mut, Panic, Div, Alloc {
+        if fn_id < 0 || fn_id >= (*self.module).fn_count { return false }
+        let func = (*self.module).functions[fn_id as usize]
+        if func.param_count < 2 { return false }
+        var call_count: i64 = 0
+        var call_dst: i64 = IR_INVALID_REG
+        var saw_return = false
+        var i: i64 = 0
+        while i < func.instr_count {
+            let instr = func.instrs[i as usize]
+            if instr.op == IrOpcode::IrCallIndirect {
+                call_count = call_count + 1
+                if instr.src1 != func.param_regs[0] { return false }
+                if instr.arg_count != func.param_count - 1 { return false }
+                var cur = instr.call_args
+                var pidx: i64 = 1
+                while pidx < func.param_count {
+                    match cur {
+                        Some(arg_node) => {
+                            if (*arg_node).head != func.param_regs[pidx as usize] { return false }
+                            cur = (*arg_node).tail
+                        }
+                        _ => return false,
+                    }
+                    pidx = pidx + 1
+                }
+                match cur {
+                    Some(_) => return false,
+                    _ => {}
+                }
+                call_dst = instr.dst
+            } else if instr.op == IrOpcode::IrReturn {
+                if instr.src1 == call_dst {
+                    saw_return = true
+                }
+            }
+            i = i + 1
+        }
+        call_count == 1 && saw_return
+    }
+
+    fn lower_hof_captured_closure_local_call(self, closure_fn_id: i64, callee_name: Name, opt: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *opt {
+            Some(list) => {
+                var lo = self
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                lo = pair_tail.lowerer
+                var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
+                var total = pair_tail.count
+                let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 {
+                    let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist = ir_reg_list_prepend((*lo.closure_caps).entries[cidx as usize].caps[jc as usize], arglist)
+                        jc = jc - 1
+                    }
+                    total = total + ccount
+                }
+
+                let pair_dst = lo.fresh_reg()
+                let lo_dst = pair_dst.0
+                let dst = pair_dst.1
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                (lo_call, dst)
+            }
+            _ => {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        }
+    }
+
+    fn lower_hof_captured_closure_literal_call(self, callee_name: Name, opt: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *opt {
+            Some(list) => {
+                var lo_closure = self
+                lo_closure.allow_direct_capturing_closure_literal = true
+                let pair_closure = lo_closure.lower_expr_ref(&(*list).head)
+                var lo = pair_closure.0
+                let closure_fn_id = lo.pending_closure_fn_id
+                lo.pending_closure_fn_id = -1
+                if closure_fn_id < 0 {
+                    print("error: capturing closure HOF specialization expected a captured closure literal\n")
+                    let loe = lo.report_error()
+                    return (loe, pair_closure.1)
+                }
+
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                lo = pair_tail.lowerer
+                var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
+                var total = pair_tail.count
+                let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 {
+                    let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
+                    var jc = ccount - 1
+                    while jc >= 0 {
+                        arglist = ir_reg_list_prepend((*lo.closure_caps).entries[cidx as usize].caps[jc as usize], arglist)
+                        jc = jc - 1
+                    }
+                    total = total + ccount
+                }
+
+                let pair_dst = lo.fresh_reg()
+                let lo_dst = pair_dst.0
+                let dst = pair_dst.1
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                (lo_call, dst)
+            }
+            _ => {
+                let loe = self.report_error()
+                loe.emit_unit()
+            }
+        }
     }
 
     fn prepend_arg(self, reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
@@ -5919,7 +6970,7 @@ impl Lowerer {
                     }
                     let named_field_idx = if (*list).head.name.len > 0 {
                         if struct_name.len > 0 {
-                            lo.field_idx_from_name(struct_name, (*list).head.name)
+                            lo.field_idx_from_struct_literal_name(struct_name, (*list).head.name, field_idx)
                         } else {
                             lo.field_idx_from_name_simple((*list).head.name)
                         }
@@ -6751,27 +7802,17 @@ impl Lowerer {
     }
 
     // Sprint 116: measure(v, uncertainty) → Knowledge<f64> struct construction
-    fn lower_measure_call(self, _span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // Extract first argument: value
-        let value_expr = match args {
-            Some(list) => Some(Box::new((*list).head))
-            None => None
-        }
-        let value_pair = self.lower_opt_expr(value_expr)
+        let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
 
         // Extract second argument: uncertainty
-        let unc_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => Some(Box::new((*rest).head))
-                None => None
-            }
-            None => None
-        }
-        let unc_pair = lo1.lower_opt_expr(unc_expr)
-        let lo2 = unc_pair.0
+        let unc_pair = lo1.lower_measure_uncertainty_arg_ref(args)
+        var lo2 = unc_pair.0
         let unc_reg = unc_pair.1
+        lo2 = lo2.emit(ir_mark_float_reg(unc_reg))
 
         // IrAlloc for Knowledge struct
         let dst_pair = lo2.fresh_reg()
@@ -6786,7 +7827,8 @@ impl Lowerer {
         let var_pair = lo5.fresh_reg()
         let lo6 = var_pair.0
         let variance_reg = var_pair.1
-        let lo7 = lo6.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+        var lo7 = lo6.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+        lo7 = lo7.emit(ir_mark_float_reg(variance_reg))
         let lo8 = lo7.emit(ir_field_set(dst_reg, 1, variance_reg, make_name("variance")))
 
         // field 2: confidence = 1.0
@@ -6794,9 +7836,42 @@ impl Lowerer {
         let lo9 = conf_pair.0
         let conf_reg = conf_pair.1
         let lo10 = lo9.emit(ir_load_float(conf_reg, 1.0))
-        let lo11 = lo10.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
+        var lo11 = lo10.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
+        lo11 = lo11.bind_variance_for_base_reg(dst_reg, variance_reg)
+        lo11.pending_variance_reg = variance_reg
 
         (lo11, dst_reg)
+    }
+
+    fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                if pair_v.1 >= 0 {
+                    lo = lo.emit(ir_mark_float_reg(pair_v.1))
+                    return (lo, pair_v.1)
+                }
+                lo.emit_zero_variance()
+            }
+            _ => self.emit_zero_variance(),
+        }
+    }
+
+    fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_v = self.lower_variance_of_call_ref(args)
+        var lo = pair_v.0
+        let variance_reg = pair_v.1
+        let sqrt_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+        let sqrt_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(variance_reg)))
+        let pair_dst = lo.fresh_reg()
+        lo = pair_dst.0
+        let dst = pair_dst.1
+        var instr = ir_call(dst, sqrt_id, make_name("sqrt"), sqrt_args, 1)
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
     }
 
     // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
@@ -7073,7 +8148,10 @@ impl Lowerer {
             // Redirect bare print(<int literal>) to the print_int builtin: print
             // (=print_str) treats its argument as a char* and would deref the integer
             // value as a pointer. Explicit print_int / print_char are left untouched.
-            let print_builtin_name = if name_eq(callee_name, make_name("print")) && lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { callee_name }
+            var print_builtin_name = callee_name
+            if name_eq(callee_name, make_name("print")) {
+                print_builtin_name = self.println_dispatch_name(&e.args)
+            }
             var lo_builtin = self
             let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
             let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
@@ -7208,7 +8286,13 @@ impl Lowerer {
             return self.lower_lift_knowledge_call(e.span, e.args)
         }
         if ir_name_is_measure(callee_name) {
-            return self.lower_measure_call(e.span, e.args)
+            return self.lower_measure_call_ref(e.span, &e.args)
+        }
+        if self.name_is_variance_of(callee_name) {
+            return self.lower_variance_of_call_ref(&e.args)
+        }
+        if self.name_is_uncertainty_of(callee_name) {
+            return self.lower_uncertainty_of_call_ref(&e.args)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
@@ -7277,6 +8361,13 @@ impl Lowerer {
             if lo1.expr_list_len_ref(&e.args) == 2 {
                 return lo1.lower_kaxi_publish_call(fn_id, callee_name, e.args)
             }
+        }
+        if lo1.first_arg_is_capturing_closure_literal_ref(&e.args) && lo1.lower_function_is_transparent_hof(fn_id) {
+            return lo1.lower_hof_captured_closure_literal_call(callee_name, &e.args)
+        }
+        let hof_closure_local_fn = lo1.first_arg_capturing_closure_local_fn_id_ref(&e.args)
+        if hof_closure_local_fn >= 0 && lo1.lower_function_is_transparent_hof(fn_id) {
+            return lo1.lower_hof_captured_closure_local_call(hof_closure_local_fn, callee_name, &e.args)
         }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
         let lo2 = pair_args.lowerer
@@ -7398,9 +8489,12 @@ impl Lowerer {
             }
             return (lo_await, base_await)
         }
-        let fidx = self.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = self.field_is_float_for_base_ref(&e.left, e.name) || self.field_is_float_by_name_simple(e.name)
-        let field_array_elem_is_float = self.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let pair_b = self.lower_opt_expr_ref(&e.left)
+        let lo1 = pair_b.0
+        let base = pair_b.1
+        let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
+        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+        let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
         if lower_aggregate_diag_enabled() {
             print("lower_agg: field name=")
             print(str_from_bytes(e.name.buf, e.name.len))
@@ -7418,31 +8512,28 @@ impl Lowerer {
             print(" idx=")
             print_int(fidx)
             print(" layouts.count=")
-            print_int((*self.struct_layouts).count)
+            print_int((*lo1.struct_layouts).count)
             print("\n")
             var di: i64 = 0
-            while di < (*self.struct_layouts).count {
+            while di < (*lo1.struct_layouts).count {
                 print("  [")
                 print_int(di)
                 print("] ")
-                print(str_from_bytes((*self.struct_layouts).entries[di as usize].type_name.buf, (*self.struct_layouts).entries[di as usize].type_name.len))
+                print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].type_name.buf, (*lo1.struct_layouts).entries[di as usize].type_name.len))
                 print(" fc=")
-                print_int((*self.struct_layouts).entries[di as usize].field_count)
+                print_int((*lo1.struct_layouts).entries[di as usize].field_count)
                 var dj: i64 = 0
-                while dj < (*self.struct_layouts).entries[di as usize].field_count {
+                while dj < (*lo1.struct_layouts).entries[di as usize].field_count {
                     print(" ")
-                    print(str_from_bytes((*self.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*self.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
                     print(":")
-                    print_int((*self.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    print_int((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].index)
                     dj = dj + 1
                 }
                 print("\n")
                 di = di + 1
             }
         }
-        let pair_b = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_b.0
-        let base = pair_b.1
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
@@ -8015,8 +9106,8 @@ impl Lowerer {
                 // before reaching here, so this only fires for non-callee uses.)
                 if self.lookup_local_closure_fn_id(e.name) >= 0 {
                     print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
-                    let loe = self.report_error()
-                    return (loe, src)
+                    let loe = self.report_fatal_lowering_error()
+                    return (loe, 0)
                 }
                 (self, src)
             } else {
@@ -8301,12 +9392,20 @@ impl Lowerer {
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
         let saved_loaded = lo.current_func_loaded
+        let saved_allow_direct_capture = lo.allow_direct_capturing_closure_literal
 
         // 2b. Scan the closure body for captured free variables (idents bound in the
         // enclosing scope, not lambda params) BEFORE wiping locals. Captures become LEADING
         // params on the synthetic fn and are injected at the (direct) call site.
         var captures = empty_capture_list()
         captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+        if captures.count > 0 {
+            if !lo.allow_direct_capturing_closure_literal {
+                print("error: native-v2 capturing closure literals are not yet supported as values; bind and call directly, use a named function, or use a noncapturing closure\n")
+                let loe = lo.report_fatal_lowering_error()
+                return loe.emit_unit()
+            }
+        }
 
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
         // the functional lowering (current_fn_validated_reg / param resolution) reads from
@@ -8319,6 +9418,7 @@ impl Lowerer {
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
+        lo.allow_direct_capturing_closure_literal = false
 
         // 3b. Bind captured variables as LEADING params of the synthetic fn, so the body's
         // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
@@ -8388,6 +9488,7 @@ impl Lowerer {
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+        lo.allow_direct_capturing_closure_literal = saved_allow_direct_capture
 
         // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
         // flag the pending closure so the let-binding marks its local. (Zero-capture closures
@@ -8456,14 +9557,25 @@ fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrR
 
 fn ir_call_needs_validated_patch(
     fn_count: i64,
-    callee_strategies: [i64; 2048],
-    callee_param_counts: [i64; 2048],
+    callee_strategies: &[i64; 2048],
+    callee_param_counts: &[i64; 2048],
     instr: IrInstr
 ) -> bool with Mut, Panic, Div {
     if instr.op != IrOpcode::IrCall { return false }
     if instr.fn_id < 0 || instr.fn_id >= fn_count { return false }
     callee_strategies[instr.fn_id as usize] == IR_STRATEGY_INSTRUMENTED &&
     instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
+}
+
+fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Panic, Div {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if module.functions[i as usize].compile_strategy == IR_STRATEGY_INSTRUMENTED {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
@@ -8513,8 +9625,8 @@ fn ir_patch_validated_call_instr(instr: &! IrInstr, validated_reg: i64) with Mut
 
 fn ir_patch_validated_calls_in_function(
     fn_count: i64,
-    callee_strategies: [i64; 2048],
-    callee_param_counts: [i64; 2048],
+    callee_strategies: &[i64; 2048],
+    callee_param_counts: &[i64; 2048],
     func: &! IrFunction,
     stats: &! IrValidatedPatchStats
 ) with Mut, Panic, Div, Alloc {
@@ -8570,9 +9682,13 @@ fn ir_patch_validated_calls_in_function(
 }
 
 fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with Mut, Panic, Div, Alloc {
+    var stats = ir_empty_validated_patch_stats()
+    if !ir_module_has_instrumented_strategy(module) {
+        return stats
+    }
+
     var callee_strategies: [i64; 2048] = [IR_STRATEGY_STANDARD; 2048]
     var callee_param_counts: [i64; 2048] = [0; 2048]
-    var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
     while i < module.fn_count {
         callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
@@ -8582,7 +9698,7 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
 
     i = 0
     while i < module.fn_count {
-        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
+        ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! module.functions[i as usize], &! stats)
         i = i + 1
     }
     stats
@@ -8940,7 +10056,9 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
+        var module_box = lo2.module
+        patch_stats = ir_patch_validated_calls(&! (*module_box))
+        lo2.module = module_box
     }
     IrLowerBoxResult {
         module: lo2.module,

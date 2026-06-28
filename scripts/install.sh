@@ -94,6 +94,13 @@ case "$TARGET" in
   *) echo "error: unrecognised --target $TARGET" >&2; exit 2;;
 esac
 MADAROS_ART_BIN="$ROOT_DIR/artifacts/self-hosted/madaros"
+MADAROS_PREBUILT_BIN="$ROOT_DIR/bin/madaros-linux-x86_64"
+MADAROS_SHIP_BIN=""
+if [[ -x "$MADAROS_ART_BIN" ]]; then
+  MADAROS_SHIP_BIN="$MADAROS_ART_BIN"
+elif [[ "$TARGET" == "x86_64" && -x "$MADAROS_PREBUILT_BIN" ]]; then
+  MADAROS_SHIP_BIN="$MADAROS_PREBUILT_BIN"
+fi
 
 if [[ ! -x "$ART_BIN" ]]; then
   echo "error: missing artifact: $ART_BIN" >&2
@@ -119,8 +126,8 @@ echo "Sounio install plan:"
 echo "  prefix:  $PREFIX"
 echo "  target:  $TARGET"
 echo "  binary:  $ART_BIN -> $BIN_DIR/souc-self-hosted-$TARGET"
-if [[ -x "$MADAROS_ART_BIN" ]]; then
-  echo "  madaros: $MADAROS_ART_BIN -> $BIN_DIR/madaros-linux-x86_64"
+if [[ -n "$MADAROS_SHIP_BIN" ]]; then
+  echo "  madaros: $MADAROS_SHIP_BIN -> $BIN_DIR/madaros-linux-x86_64"
 else
   echo "  madaros: <not built; run make build-madaros to include Stage1>"
 fi
@@ -157,9 +164,9 @@ install -m 0644 "$ROOT_DIR/scripts/lib/macos_codesign.sh"    "$LIB_SCRIPTS/"
 # lib/ locations so the launcher's relative lookups resolve cleanly.
 install -m 0755 "$ROOT_DIR/bin/souc" "$BIN_DIR/souc"
 
-if [[ -x "$MADAROS_ART_BIN" ]]; then
+if [[ -n "$MADAROS_SHIP_BIN" ]]; then
   install -m 0755 "$ROOT_DIR/bin/madaros" "$BIN_DIR/madaros"
-  install -m 0755 "$MADAROS_ART_BIN" "$BIN_DIR/madaros-linux-x86_64"
+  install -m 0755 "$MADAROS_SHIP_BIN" "$BIN_DIR/madaros-linux-x86_64"
 fi
 
 # Mirror scripts/lib at $PREFIX/scripts/lib so launcher's

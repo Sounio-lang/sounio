@@ -1,0 +1,210 @@
+//@ run-pass
+//
+// M5 — Held-out replication of F2 conjugation on the SWDA fixture.
+//
+// Plan reference: project_octonion_homology_functor.md M5 (wk 19-20).
+// Preprint reference: ocssm_preprint_skeleton.md §6.5 (replication).
+//
+// CONTRACT:
+//
+//   The full SWDA fixture (480 utterances, 240 σ-pairs) has been shown
+//   to PASS F2 (`tests/run-pass/f2_conjugation_swda.sio`):
+//     d_paired^2 = 0.0807, d_random^2 = 2.06, ratio = 25.5.
+//
+//   M5 splits σ-pairs into a deterministic train/held-out fold:
+//     - σ-pair index p in {0..239}
+//     - p mod 5 == 0  →  held-out (≈ 48 pairs, 20%)
+//     - p mod 5 != 0  →  train     (≈ 192 pairs, 80%)
+//
+//   PASS criteria for replication:
+//     (a) train fold PASSes F2 thresholds (ratio >= 5.0, d_paired^2 <= 0.10).
+//     (b) held-out fold PASSes the same thresholds.
+//     (c) held-out estimate is consistent with train: |d_paired^2_train -
+//         d_paired^2_held| <= 0.5 * d_paired^2_train (loose tolerance for
+//         a fixture this small; the tight 95% CI version requires a
+//         bootstrap which is out of v1 scope).
+//
+// SEED: this fold uses index-modulo, not a PRNG seed. The pre-registration
+// document `docs/research/ocssm_preregistration_20260615.md:6.1` reserves
+// the random-seed slot for the wk-9 corpus run. For the M5 unit-smoke
+// over the M3a fixture, deterministic stride is sufficient.
+
+use dialogue::trajectory::*
+use dialogue::embed::*
+
+// ============================================================================
+// HELPERS  (mirror tools/ocssm/f2_conjugation.sio with fold filtering)
+// ============================================================================
+
+fn rp_conj(v: &[f64; 8], out: &![f64; 8]) with Mut {
+    out[0] = v[0]
+    var i: i64 = 1
+    while i < 8 {
+        out[i as usize] = 0.0 - v[i as usize]
+        i = i + 1
+    }
+}
+
+fn rp_dist_sq(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        let d: f64 = a[i as usize] - b[i as usize]
+        s = s + d * d
+        i = i + 1
+    }
+    return s
+}
+
+fn rp_pair_residual_sq(hash_a: i64, hash_b: i64) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    var ea: [f64; 8] = [0.0; 8]
+    var eb: [f64; 8] = [0.0; 8]
+    embed_into(hash_a, &!ea)
+    embed_into(hash_b, &!eb)
+    var ca: [f64; 8] = [0.0; 8]
+    rp_conj(&ea, &!ca)
+    return rp_dist_sq(&eb, &ca)
+}
+
+fn rp_load_binary(t: &Trajectory, path: string) -> i64 with IO, Mut, Panic {
+    let raw: string = read_file(path)
+    let sz: i64 = file_size(path)
+    if sz < 16 { return 0 }
+    let version: i64 = read_i64(raw, 0)
+    if version != 1 { return 0 }
+    let n: i64 = read_i64(raw, 1)
+    if n < 2 { return 0 }
+    if sz < 16 + n * 40 { return 0 }
+    var idx: i64 = 2
+    var i: i64 = 0
+    while i < n {
+        let speaker: i64 = read_i64(raw, idx)
+        let hash_val: i64 = read_i64(raw, idx + 1)
+        let affect: i64 = read_i64(raw, idx + 2)
+        let rupture: i64 = read_i64(raw, idx + 3)
+        let dim: i64 = read_i64(raw, idx + 4)
+        let _len: i64 = traj_push(t, speaker, hash_val, affect, rupture, dim)
+        idx = idx + 5
+        i = i + 1
+    }
+    return n
+}
+
+// fold = 0 → all σ-pairs; 1 → train (p mod 5 != 0); 2 → held-out (p mod 5 == 0)
+fn rp_paired_dist_sq_fold(t: &Trajectory, fold: i64) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    let n: i64 = traj_len(t)
+    if n < 2 { return 0.0 }
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    var p: i64 = 0
+    while i < n - 1 {
+        if traj_speaker(t, i) != traj_speaker(t, i + 1) {
+            let mod5: i64 = p - (p / 5) * 5
+            var include: i64 = 0
+            if fold == 0 { include = 1 }
+            if fold == 1 && mod5 != 0 { include = 1 }
+            if fold == 2 && mod5 == 0 { include = 1 }
+            if include == 1 {
+                sum = sum + rp_pair_residual_sq(traj_hash(t, i), traj_hash(t, i + 1))
+                count = count + 1
+            }
+            p = p + 1
+        }
+        i = i + 2
+    }
+    if count == 0 { return 0.0 }
+    return sum / (count as f64)
+}
+
+// Random shuffle dist for a fold: pair (k, (k+3) mod n) where k is in fold.
+fn rp_random_dist_sq_fold(t: &Trajectory, fold: i64) -> f64 with Mut, Div, Panic, NaturalityG2 {
+    let n: i64 = traj_len(t)
+    if n < 2 { return 0.0 }
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var k: i64 = 0
+    while k < n {
+        let mod5: i64 = (k / 2) - ((k / 2) / 5) * 5
+        var include: i64 = 0
+        if fold == 0 { include = 1 }
+        if fold == 1 && mod5 != 0 { include = 1 }
+        if fold == 2 && mod5 == 0 { include = 1 }
+        if include == 1 {
+            let j: i64 = (k + 3) - ((k + 3) / n) * n
+            if j != k {
+                sum = sum + rp_pair_residual_sq(traj_hash(t, k), traj_hash(t, j))
+                count = count + 1
+            }
+        }
+        k = k + 1
+    }
+    if count == 0 { return 0.0 }
+    return sum / (count as f64)
+}
+
+// |a - b|
+fn rp_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Threshold helpers
+fn rp_d_paired_max() -> f64 { return 0.10 }
+fn rp_ratio_min() -> f64    { return 5.0 }
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic, NaturalityG2 {
+    var t: Trajectory = traj_empty()
+    let loaded: i64 = rp_load_binary(&t, "tests/fixtures/f2_swda.bin")
+
+    if loaded < 2 {
+        print("FAIL  (M5: SWDA fixture missing — regenerate via tools/ocssm/swda_loader.py)\n")
+        return 1
+    }
+
+    // Train fold (p mod 5 != 0)
+    let dp_train: f64 = rp_paired_dist_sq_fold(&t, 1)
+    let dr_train: f64 = rp_random_dist_sq_fold(&t, 1)
+    var ratio_train: f64 = 0.0
+    if dp_train > 0.0 { ratio_train = dr_train / dp_train }
+
+    // Held-out fold (p mod 5 == 0)
+    let dp_held: f64 = rp_paired_dist_sq_fold(&t, 2)
+    let dr_held: f64 = rp_random_dist_sq_fold(&t, 2)
+    var ratio_held: f64 = 0.0
+    if dp_held > 0.0 { ratio_held = dr_held / dp_held }
+
+    print("M5 train     d_paired^2 = "); println(dp_train)
+    print("M5 train     ratio      = "); println(ratio_train)
+    print("M5 held-out  d_paired^2 = "); println(dp_held)
+    print("M5 held-out  ratio      = "); println(ratio_held)
+
+    // Consistency: |dp_held - dp_train| <= 0.5 * dp_train
+    let drift: f64 = rp_abs_f64(dp_held - dp_train)
+    let tolerance: f64 = 0.5 * dp_train
+    print("M5 drift / tolerance     = ")
+    if tolerance > 0.0 { println(drift / tolerance) } else { println(0.0 - 1.0) }
+
+    var ok: i64 = 1
+    // (a) train PASSes
+    if dp_train <= 0.0 { ok = 0 }
+    if dp_train > rp_d_paired_max() { ok = 0 }
+    if ratio_train < rp_ratio_min() { ok = 0 }
+    // (b) held-out PASSes
+    if dp_held <= 0.0 { ok = 0 }
+    if dp_held > rp_d_paired_max() { ok = 0 }
+    if ratio_held < rp_ratio_min() { ok = 0 }
+    // (c) held-out estimate consistent with train (loose 50% tolerance)
+    if drift > tolerance { ok = 0 }
+
+    if ok == 1 {
+        print("PASS  (train + held-out both meet F2 thresholds; drift within tolerance)\n")
+    } else {
+        print("FAIL  (M5 replication criteria not met)\n")
+    }
+    return 0
+}

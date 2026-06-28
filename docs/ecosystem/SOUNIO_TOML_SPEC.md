@@ -12,6 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.soun
 **Versão:** 0.1.0 (Draft)
 **Data:** 2026-04-20
 **Autor:** Análise de Ecossistema Sounio
+Status: Draft/local package manifest contract; public registry publishing is not launched.
 
 ## 1. Objetivo
 
@@ -77,18 +78,20 @@ path = "tests/test_pbpk_epistemic.sio"
 
 ## 5. CLI Integration
 
+Os comandos abaixo descrevem a direção de design. A superfície suportada hoje é
+o wrapper local `tools/sounio-pkg/sounio-pkg` para `new`, `build`, `check` e
+`test`, junto com os imports locais gateados em `packages/*`.
+
 ```bash
-souc pkg init                    # cria sounio.toml interativo
-souc pkg build                   # valida + empacota
-souc pkg publish                 # envia para registry.sounio.org
-souc install epistemic-pbpk@0.4
-souc search "pbpk"
-souc pkg audit                   # verifica qualidade epistêmica
+tools/sounio-pkg/sounio-pkg new my-package
+tools/sounio-pkg/sounio-pkg build
+tools/sounio-pkg/sounio-pkg check
+tools/sounio-pkg/sounio-pkg test
 ```
 
 ## 6. Registry Metadata
 
-O registry público armazenará:
+Um registry público futuro armazenaria:
 - Hash do pacote
 - Epistemic score (calculado + revisado por humanos)
 - Lista de dependências resolvidas
@@ -106,4 +109,4 @@ O registry público armazenará:
 **Esta especificação é o fundamento do ecossistema Sounio.**
 Ela combina simplicidade (como Cargo.toml) com metadados epistêmicos únicos.
 
-**Status:** Draft — aberto a refinamento pela comunidade.
+**Status:** Draft — aberto a refinamento pela comunidade; sem registry pública lançada.
