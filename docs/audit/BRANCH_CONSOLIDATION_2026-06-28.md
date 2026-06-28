@@ -810,3 +810,72 @@ Residual:
 Validation:
 
 - `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
+
+## Madaros closeout / variance / async branch triage
+
+Reviewed:
+
+- `origin/codex/gum-variance-sota-20260626` (`36a3b1d2b`)
+- `origin/codex/parser-strict-20260627` (`95b16f24b`)
+- `origin/codex/madaros-raw-async-gates-20260627` (`c25ccdc6f`)
+- `codex/madaros-close-20260627` (`c64fbd8ad` tip, including
+  `ae4b63943` ultrareview substrate patch)
+
+Absorbed/equivalent:
+
+- `origin/codex/gum-variance-sota-20260626`: `git cherry` reports the single
+  patch as patch-equivalent on consolidation. The focused tests exist and pass:
+  `variance_of_literal` and `variance_of_measure_sum`.
+- `origin/codex/parser-strict-20260627`: `git cherry` reports the single
+  `Box::new` path-call checker patch as patch-equivalent on consolidation.
+  Current `self-hosted/check/check.sio` has `call_expr_is_box_new` and both
+  in-place/by-value `Box::new` call handlers.
+
+Ported from `codex/madaros-close-20260627`:
+
+- `ae4b63943` partial ultrareview substrate fix, limited to the two
+  compiler-core changes that were still missing and did not require the broad
+  solver/bootstrap train:
+  - `self-hosted/ir/opt_strategy.sio`: `ir_opt_append` now writes through the
+    full `[IrInstr; 1024]` output buffer instead of silently dropping writes
+    after index 127 while continuing to advance the returned count.
+  - `self-hosted/native/codegen_x86_linux.sio`: ET_REL and ET_DYN finalizers now
+    read `.text` through `NATIVE_V2_TEXT_BUF` when available, avoiding narrow
+    `CodeBuffer.bytes[131072]` reads when the native-v2 text mirror grows past
+    128 KiB.
+
+Not merged as branches:
+
+- `origin/codex/madaros-raw-async-gates-20260627`: the compiler patch was
+  previously extracted, but current consolidation does not prove async closed.
+  `async_basic` fails typecheck with `E012` on async/await shapes, and
+  `async_spawn_syscall_pid` fails with `E137` plus `E012`. Treat as residual
+  language/checker surface, not absorbed-green.
+- `codex/madaros-close-20260627`: direct branch diff is still broad and
+  destructive relative to consolidation (`self-hosted/compiler/main.sio`,
+  `module_frontend.sio`, `ir/lower.sio`, native codegen, multimodule witness
+  scripts, solver/theorem docs, and bootstrap binary refresh). Keep it as
+  provenance and extract only named, reviewable compiler patches.
+
+Validation:
+
+- `bash scripts/run_sio_test_suite.sh variance_of_literal --verbose`: PASS 1/1.
+- `bash scripts/run_sio_test_suite.sh variance_of_measure_sum --verbose`: PASS
+  1/1.
+- `bash scripts/run_sio_test_suite.sh async_basic --verbose`: FAIL 1/1
+  (`E012`, type has no field; async/await checker surface still red).
+- `bash scripts/run_sio_test_suite.sh async_spawn_syscall_pid --verbose`: FAIL
+  1/1 (`E137` undeclared variable plus `E012`).
+- After the ultrareview micro-port:
+  - `git diff --check`: PASS.
+  - `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
+  - `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS.
+  - `bash scripts/run_sio_test_suite.sh variance_of_measure_sum --verbose`:
+    PASS 1/1.
+  - `bin/souc --check self-hosted/ir/opt_strategy.sio`: FAIL on existing
+    multimodule visibility noise (`E175`) and large-frame warnings; not used as
+    acceptance evidence for this micro-port.
+  - `bin/souc --check self-hosted/native/codegen_x86_linux.sio`: FAIL on
+    existing broad native-codegen check noise (`E137`, `E035`, `E012`, `E002`,
+    `E175`, large-frame warnings); not used as acceptance evidence for this
+    micro-port.
