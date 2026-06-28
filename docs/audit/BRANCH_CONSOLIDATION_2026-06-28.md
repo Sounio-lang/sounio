@@ -93,6 +93,46 @@ These are too broad or old to merge automatically:
 
 Keep them as archaeological branches until a specific missing feature is named.
 
+### Effects / kw-demote / legacy self-host trains
+
+Reviewed:
+
+- `origin/claude/effects-enforcement`
+- `origin/claude/kw-demote-module`
+- `origin/integration/effects-kwdemote`
+- `origin/integrate/kw-demote-landing`
+- `origin/campaign/mc-frontend-fixes`
+- `origin/claude/ir-heap-indirect`
+- `origin/claude/codegen-largestruct-fix`
+
+Do not merge these branches as branches. They are all non-ancestors of current
+consolidation and their raw diffs are old-base rollback shapes:
+
+- effects/kw-demote lanes: about 2,976-2,986 files, about 294k-296k insertions
+  and about 670k-671k deletions.
+- kw-demote landing / mc frontend campaign: 2,678 files, about 280k insertions
+  and about 660k deletions.
+- `ir-heap-indirect`: 2,397 files, 11,391 insertions and 254,795 deletions.
+- `codegen-largestruct-fix`: 2,887 files, 30,745 insertions and 338,597
+  deletions.
+
+Current consolidation already carries several central ideas from these trains
+in newer form: `IR_MAX_FUNCS=2048`, `local_cap() = 2048`, checker `slice_len`
+support, `load_multimodule_ir_into`, raw-ELF wrapper routing, effect violation
+checks/effect-polymorphic call propagation, and `a64_preview_record_call_patch`
+marked `with Mut` in the active native codegen path.
+
+Classification:
+
+- Treat effects/kw-demote and mc-frontend branches as historical provenance,
+  not merge parents.
+- Keep uncommitted worktrees `/workspace/sounio-effects` and
+  `/workspace/sounio-ir` as owner lanes until their dirty diffs are explicitly
+  archived or transferred.
+- If one of these branches contains a still-missing fix, it must be extracted
+  as a named single-purpose patch with a focused acceptance gate on
+  `integration/compiler-consolidation-20260628`.
+
 ## Merge attempts made
 
 Attempted `git merge --no-ff fix/madaros-tuple-let-desugar` in the consolidation
