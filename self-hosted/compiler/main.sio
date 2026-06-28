@@ -27467,6 +27467,56 @@ fn gpu_emit_host_glue(
 }
 
 
+fn compiler_hlir_name_matches_ast_name(hn: HlirName, an: Name) -> bool with Mut, Panic, Div {
+    if hn.len != an.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < hn.len {
+        if hn.buf[i as usize] != an.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn compiler_mark_hlir_kernel_name(module: HlirModule, name: Name) -> HlirModule with Mut, Panic, Div {
+    var out = module
+    var i: i64 = 0
+    while i < out.fn_count {
+        if compiler_hlir_name_matches_ast_name(out.functions[i as usize].name, name) {
+            var f = out.functions[i as usize]
+            f.is_kernel = true
+            out.functions[i as usize] = f
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn compiler_mark_hlir_kernels_from_items(module: HlirModule, items: Option<Box<ItemList>>) -> HlirModule with Mut, Panic, Div {
+    match items {
+        Some(list) => {
+            var out = module
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                match item.fn_def {
+                    Some(fd) => {
+                        if (*fd).is_kernel {
+                            out = compiler_mark_hlir_kernel_name(out, (*fd).name)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            compiler_mark_hlir_kernels_from_items(out, (*list).tail)
+        }
+        None => module,
+    }
+}
+
+
 // ============================================================================
 // GPU COMPILE PIPELINE
 // ============================================================================
@@ -27513,8 +27563,13 @@ fn run_gpu_compile_pipeline(
         return 1
     }
 
-    // Lower AST to HLIR SSA
-    let hlir_module = hlir_lower_module(main_prog)
+    // module_frontend_check_items_with_source_context consumes the item list on
+    // the self-hosted value path. Reload before HLIR lowering so kernel fn
+    // declarations remain visible to the GPU extraction pass.
+    let lower_prog = load_module_file(input_path)
+    var hlir_module = hlir_lower_module(lower_prog)
+    let kernel_mark_prog = load_module_file(input_path)
+    hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
 
     // Count GPU-annotated kernels
     let kcount = hlir_extract_kernel_count(hlir_module)
