@@ -531,6 +531,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.erdos-sat-smt-unsat-scope-2026-06-23 | historical | docs/research/erdos-sat-smt-unsat-scope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.gpu-epistemic-scorer-blackwell-2026-06-27 | historical | docs/research/gpu-epistemic-scorer-blackwell-2026-06-27.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gradual-epistemic-positioning | historical | docs/research/gradual_epistemic_positioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyper-uncertainty-parenthesization-report | historical | docs/research/HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyperbolic-semantic-networks-run | historical | docs/research/hyperbolic_semantic_networks_run.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

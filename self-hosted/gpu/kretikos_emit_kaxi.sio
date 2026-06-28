@@ -3312,6 +3312,99 @@ pub fn kaxi_emit_mb_vec_double_f32_asm() -> KaxiAsmBuf with Mut, Panic, Div, All
     gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 9)
 }
 
+// UCB epistemic scorer: score[i] = act_mean[i] + beta * sqrt(act_var[i])
+//
+// Single-pointer memory layout (packed f32, one param_mem base):
+//   [0..N)   = act_mean   (input)
+//   [N..2N)  = act_var    (input)
+//   [2N..3N) = score      (output)
+//   [3N]     = beta       (scalar)
+//
+// Thread i = tid.x computes score[i] and writes to mem[2N+i].
+// N = blockDim.x (ntid.x); a single-block launch of N threads covers all slots.
+//
+// Mode: must be lowered through mode 2 (f32) to emit f32 arithmetic and sqrt.
+pub fn kaxi_emit_epistemic_scorer_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    // r0 = tid.x  (thread index i)
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    // r1 = ntid.x  (N = blockDim.x)
+    opcodes[1] = GPU_IR_GET_NTID
+    dsts[1] = 1
+
+    // r2 = act_mean[i] = mem[i]
+    opcodes[2] = GPU_IR_LOAD_GLOBAL
+    dsts[2] = 2
+    src_a[2] = 0
+
+    // r3 = N + i  (address of act_var[i])
+    opcodes[3] = GPU_IR_ADD
+    dsts[3] = 3
+    src_a[3] = 1
+    src_b[3] = 0
+
+    // r4 = act_var[i] = mem[N+i]
+    opcodes[4] = GPU_IR_LOAD_GLOBAL
+    dsts[4] = 4
+    src_a[4] = 3
+
+    // r5 = 2*N
+    opcodes[5] = GPU_IR_ADD
+    dsts[5] = 5
+    src_a[5] = 1
+    src_b[5] = 1
+
+    // r6 = 3*N  (address of scalar beta)
+    opcodes[6] = GPU_IR_ADD
+    dsts[6] = 6
+    src_a[6] = 5
+    src_b[6] = 1
+
+    // r7 = beta = mem[3N]
+    opcodes[7] = GPU_IR_LOAD_GLOBAL
+    dsts[7] = 7
+    src_a[7] = 6
+
+    // r8 = sqrt(act_var[i])
+    opcodes[8] = GPU_IR_SQRT
+    dsts[8] = 8
+    src_a[8] = 4
+
+    // r9 = beta * sqrt(act_var[i])
+    opcodes[9] = GPU_IR_MUL
+    dsts[9] = 9
+    src_a[9] = 7
+    src_b[9] = 8
+
+    // r10 = act_mean[i] + beta * sqrt(act_var[i])
+    opcodes[10] = GPU_IR_ADD
+    dsts[10] = 10
+    src_a[10] = 2
+    src_b[10] = 9
+
+    // r11 = 2*N + i  (address of score[i])
+    opcodes[11] = GPU_IR_ADD
+    dsts[11] = 11
+    src_a[11] = 5
+    src_b[11] = 0
+
+    // mem[2N+i] = score[i]
+    opcodes[12] = GPU_IR_STORE_GLOBAL
+    src_a[12] = 10
+    src_b[12] = 11
+
+    opcodes[13] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 14)
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc < 1 {
@@ -3337,6 +3430,7 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  source_epistemic_dual_output_f32 - checked-source value+uncertainty lanes")
         println("  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch")
         println("  epistemic_dual_output_f32 - separate value/uncertainty output sketch")
+        println("  epistemic_scorer          - UCB scorer: score[i] = mean[i] + beta*sqrt(var[i])")
         println("  self-check                - run K-AXI self-check suite")
         return 1
     }
@@ -3458,6 +3552,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_sedenion_associator_asm()
     } else if str_eq(pattern, "pbpk_2comp_gum_4step") {
         buf = kaxi_emit_pbpk_2comp_gum_4step_asm()
+    } else if str_eq(pattern, "epistemic_scorer") {
+        buf = kaxi_emit_epistemic_scorer_asm()
     } else if str_eq(pattern, "self-check") {
         let ok = kaxi_self_check()
         if ok {
