@@ -72,6 +72,36 @@ Archived local branch tips:
   `aa10da5c5`
 - `archive/local/research-erdos-compiler-wip/2026-06-28` -> `b8828063d`
 
+## Clean worktree cleanup executed
+
+Archived and removed three clean worktrees whose branch tips were already
+covered by the consolidation audit. For each branch, the local and remote tips
+matched, the worktree had zero `git status --short` lines, and an archive tag
+was pushed before deleting the worktree, local branch, and remote branch.
+
+Removed worktrees:
+
+- `/workspace/sounio-forloop` -> `fix/madaros-for-loop-lowering`
+- `/workspace/sounio-printint` -> `fix/madaros-print-int-dispatch`
+- `/workspace/sounio-arena` -> `feat/madaros-bump-arena`
+
+Archive tags:
+
+- `archive/worktree/fix-madaros-for-loop-lowering/2026-06-28` ->
+  `6dde85913`
+- `archive/worktree/fix-madaros-print-int-dispatch/2026-06-28` ->
+  `c152ac3b4`
+- `archive/worktree/feat-madaros-bump-arena/2026-06-28` -> `59dd2bc8f`
+
+Verification after deletion:
+
+- Worktree paths absent: `/workspace/sounio-forloop`,
+  `/workspace/sounio-printint`, `/workspace/sounio-arena`.
+- Local branches absent: `fix/madaros-for-loop-lowering`,
+  `fix/madaros-print-int-dispatch`, `feat/madaros-bump-arena`.
+- Remote branches absent after `git fetch --prune origin`.
+- Counts after this cleanup: 102 local branches, 96 remote refs, 70 worktrees.
+
 ## Remote cleanup executed
 
 After `git fetch --prune origin`, checked `refs/remotes/origin/*` for remote
