@@ -865,6 +865,53 @@ Validation:
 
 - `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
 
+## E008 checker train triage
+
+Reviewed the older E008/checker stack:
+
+- `origin/check/e014-int-index-e008`
+- `origin/check/int-cross-width-e008`
+- `origin/check/ref-param-lower-e008`
+- `origin/check/fn-type-lower-e008`
+- `origin/check/f32-field-narrowing-e008`
+- `origin/check/field-deref-ref-e008`
+- `origin/check/closure-hof-triple-e008`
+- `origin/check/linear-double-consume-e039`
+- `origin/check/refinement-types-e008`
+- `origin/parser/fn-type-effects-list-e008`
+- `origin/integration/e008-nested-store-complete`
+- `origin/integration/consolidate-modular`
+
+Do not merge these branches as branches. None is an ancestor of the current
+consolidation branch, and each raw branch diff is an old-worktree rollback
+shape: roughly 2,808-2,815 files, about 283k insertions and about 716k-717k
+deletions. The diffs include broad docs, website, binary, and audit churn, so
+they are not safe compiler cleanup sources.
+
+Current consolidation already carries the main surfaces these lanes were
+tracking:
+
+- lexer/parser support for `algebra`, `study`, `kernel`, `const`, extern
+  function items, scientific notation, refinement types, and `fn(...) -> ...`
+  types
+- `lean_single.sio` refinement checks, fn-type signature scanning, effect
+  propagation for higher-order calls, reference compatibility in call arguments,
+  and linear-consume path checks
+
+Classification:
+
+- Treat the E008/checker stack as provenance and residual ownership history.
+- If a specific claim regresses, create or revive a fresh focused witness on the
+  consolidation branch and port only the minimal source hunk needed for that
+  witness.
+- Do not use any of the E008 branch histories as direct merge parents for
+  `integration/compiler-consolidation-20260628`.
+
+Validation:
+
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2 after this
+  triage.
+
 ## Madaros closeout / variance / async branch triage
 
 Reviewed:
