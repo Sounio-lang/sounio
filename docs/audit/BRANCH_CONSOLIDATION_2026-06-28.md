@@ -452,3 +452,24 @@ native-v2 ELF execution for scalar global read/write.
 Residual found while trying to broaden the gate: global array element
 read/write (`var GLOBAL_VALUES: [i64; 4]`) compiles to an ELF but the ELF exits
 139 when writing/reading elements. That case is not marked absorbed.
+
+## Tuple-signature branch triage
+
+Reviewed `codex/tuple-signature-types-20260626`.
+
+Current consolidation already contains the compiler fixes for the branch's core
+cases:
+
+- contextual int array literal bindings in the checker
+- implicit unit returns in IR lowering
+- native-v2 assert builtin and bool literal emission
+- compound assignment RHS parsing for blocks, if-expressions, and nested parens
+
+Added `tests/native_v2_tuple_signature_absorbed_gate/` to lock those absorbed
+behaviors. The gate uses native-v2 ELF execution for assert/bool/unit cases and
+`--check` for checker/parser cases, including the negative i8 array-repeat
+diagnostic.
+
+Not ported in this pass: the branch-local Metal opcode smoke script adjustment
+and known-failures list edits. Those are GPU/test-harness ownership, not core
+compiler consolidation.
