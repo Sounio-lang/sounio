@@ -74,7 +74,11 @@ but are not safe for automatic merge:
 - `codex/tuple-signature-types-20260626`: reviewed. The parser, checker, native implicit-unit/assert, and native bool-literal fixes are already equivalent in the consolidation branch; remaining exclusive commits are GPU/script/test-bookkeeping and should not drive the compiler-core merge.
 - `codex/madaros-import-stdlib-lowering-current`: older imported-stdlib lowering branch; conflicts with the newer imported-lowering path already on `origin/main`.
 - `codex/imported-full-lowerer-20260627`: reviewed. Its only patch-exclusive commit adds `scripts/ci/madaros_multimodule_witness.sh` to the Madaros prebuilt refresh gate, but that witness is currently red on consolidation (`thin_single` exits 139 at `lower_array: seed_begin`). Do not wire it into prebuilt refresh until the imported multimodule lowerer residual is actually fixed.
-- `codex/madaros-boxnew-clean` and `codex/madaros-boxnew-append-fix`: older Box::new trains; need comparison against current `origin/main` before any merge.
+- `codex/madaros-boxnew-clean` and `codex/madaros-boxnew-append-fix`: reviewed
+  again after the substrate ultrareview micro-port. Current consolidation already
+  has the non-debug Box::new/flat-lowering/validated-patching fixes in newer
+  form; remaining branch-exclusive commits are debug markers, stale bridge
+  rewrites, and bootstrap binary refreshes.
 
 ### Archive/quarantine
 
@@ -430,6 +434,20 @@ Validation on current consolidation:
 - `bin/souc --native-v2-compile tests/run-pass/type_hash_3level_nesting.sio
   -o /tmp/sounio_type_hash_box.elf` emitted an ELF; running it exited 0 and
   printed `type-hash 3-level PASS`.
+- Re-run after `e04d3ec44`: `door1_box_new_array_65536.sio` emitted
+  `/tmp/sounio_box_array_current.elf`; after `chmod +x`, running it printed
+  `PASS: box array` and exited 0.
+- Re-run after `e04d3ec44`: `type_hash_3level_nesting.sio` emitted
+  `/tmp/sounio_type_hash_current.elf`; after `chmod +x`, running it printed
+  `type-hash 3-level PASS` and exited 0.
+- `bash scripts/run_sio_test_suite.sh door1_box_new_array_65536 --verbose`:
+  PASS 1/1.
+- `bin/madaros --self-test | rg 'T10|T11|validated|FAIL'` is not a BoxNew
+  acceptance gate. It currently stops earlier with `FAIL: T08 ir_opt dispatch
+  and merge layout`, `FAIL: T09 ir_opt remaps cloned branch targets`, and a
+  raw-Madaros segmentation fault before the validated-chain lines are reached.
+  Keep that as a separate `ir_opt` self-test residual, not evidence against the
+  BoxNew branches.
 
 ## Frame noop and Root2 global branch triage
 
@@ -820,6 +838,7 @@ Reviewed:
 - `origin/codex/madaros-raw-async-gates-20260627` (`c25ccdc6f`)
 - `codex/madaros-close-20260627` (`c64fbd8ad` tip, including
   `ae4b63943` ultrareview substrate patch)
+- `origin/claude/madaros-substrate-review` (`e0d265ef2`)
 
 Absorbed/equivalent:
 
@@ -856,6 +875,16 @@ Not merged as branches:
   `module_frontend.sio`, `ir/lower.sio`, native codegen, multimodule witness
   scripts, solver/theorem docs, and bootstrap binary refresh). Keep it as
   provenance and extract only named, reviewable compiler patches.
+- `origin/claude/madaros-substrate-review`: its only patch-exclusive commit is
+  another copy of the broad imported-SMT substrate train. `git diff
+  HEAD..origin/claude/madaros-substrate-review` spans 196 files and would delete
+  the consolidation audit plus the focused gates added in this sweep
+  (`native_v2_float_arith_gate`, `native_v2_global_bss_gate`,
+  `native_v2_loop_print_gate`, `native_v2_semcall_absorbed_gate`,
+  `native_v2_struct_field_float_gate`, and
+  `native_v2_tuple_signature_absorbed_gate`). Do not merge it as a branch; the
+  only small substrate review fix identified so far was the `ae4b63943`
+  ultrareview bounds/mirror-read patch ported above.
 
 Validation:
 
