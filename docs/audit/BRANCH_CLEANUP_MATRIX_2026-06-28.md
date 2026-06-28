@@ -623,6 +623,27 @@ Closed since the previous boundary entry:
   local and remote `fix/madaros-tuple-let-desugar` refs were deleted.
   Post-delete counts: 57 local branches, 64 remote refs, 52 worktrees.
 
+- `fix/native-codegen-sret-regression`: no attached worktree. The core SRET fix
+  commit (`8f537aac1`, struct-shorthand + nested-array return after SRET
+  refactor) was patch-equivalent to consolidation (`git cherry -v HEAD` marked
+  it `-`). The only patch-exclusive commit was governance/docs registry churn
+  (`6312f1194`), while the full branch diff still had stale rollback shape:
+  1591 files, 4859 insertions, 231696 deletions, including deletion of the
+  active consolidation audit docs and many already-consolidated gates. Direct
+  merge was rejected; no hunk was extracted. Archive before deleting as
+  `archive/branch/fix-native-codegen-sret-regression/2026-06-28` -> `6312f1194`.
+
+- `fix/native-codegen-sret-regression-v2`: no attached worktree. Despite the
+  SRET name, patch-exclusive commits were unrelated/mixed: `6aa3ef236`
+  (ROCm/HIP backend work) and `90f13011a` (module_frontend compile-to-file API
+  refactor). The full branch diff had stale rollback shape: 1581 files, 5909
+  insertions, 231373 deletions, including deletion of active consolidation audit
+  docs and native-v2/effects gates. Direct merge was rejected; no hunk was
+  extracted. Archive before deleting as
+  `archive/branch/fix-native-codegen-sret-regression-v2/2026-06-28` -> `90f13011a`.
+  Local and remote refs for both SRET branches were deleted. Post-delete counts:
+  55 local branches, 62 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
