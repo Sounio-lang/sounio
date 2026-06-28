@@ -668,6 +668,20 @@ Closed since the previous boundary entry:
   local and remote `integration/effects-kwdemote` refs were deleted.
   Post-delete counts: 53 local branches, 60 remote refs, 52 worktrees.
 
+- `fix/ocp-locals-cap`: no attached worktree. The first two OCP-local-cap
+  commits were already patch-equivalent to consolidation (`git cherry -v HEAD`
+  marked `a8005666b` and `abcd3077f` as `-`). The remaining exclusive commit
+  (`ba02961ed`) mixed a rebuilt `bin/souc`, bool/i64 `ty_eq`, wide-int/SRET
+  ports, and class-2 wall cleanup. The full branch diff still had rollback
+  shape: 2742 files, 280135 insertions, 671534 deletions, including deletion of
+  active consolidation audit docs and many historical docs/gates. Direct merge
+  was rejected; no hunk was extracted. The bool/i64 scalar rule was already
+  handled separately in consolidation, and wide-int/SRET material needs a named
+  owner lane rather than wholesale branch import. Archive before deleting as
+  `archive/branch/fix-ocp-locals-cap/2026-06-28` -> `ba02961ed`; local and
+  remote `fix/ocp-locals-cap` refs were deleted. Post-delete counts: 52 local
+  branches, 59 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
