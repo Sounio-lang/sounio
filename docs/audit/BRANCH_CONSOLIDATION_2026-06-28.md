@@ -116,6 +116,7 @@ Attempted focused cherry-picks:
 - `71387df9a` raw async runtime gates: ported as compiler-only code from `codex/madaros-retire-lean-single-20260627`. Conflicts were resolved by preserving the current Box::new, println/unobserved, and configurable multimodule visibility behavior while adding async runtime call typing, TaskHandle/spawn/await lowering, raw-array native lowering, and `IrSyscall6` native emission. The branch merge commit `933da3c4a` was not merged because it also carries solver/governance/history and a bootstrap binary update.
 - `85aaadccd`, `442031ed9`, `3fd937bd1` from `fix/binop-literal-float-478b`: not ported. All three are debug instrumentation for native-v2 IR tracing, including direct deep-field reads for investigation of #478, but no compiler semantic change or focused acceptance gate.
 - `2286fb6d5` native-v2 memory-operand float arithmetic: ported in adapted form from `integration/native-v2-honest`/related branches. The old commit's `LowerLocalStack.is_float` model was not copied because the consolidation branch already has newer `scalar_kind` and `array_elem_float` tracking. The port adds `ir_binop_float`, tags real float binary expressions via existing `expr_result_is_float_ref`, and routes `IrBinOp` with imm_flags bit 1 to the SSE path. The old `scripts/ci/release_gate.sh` edit was intentionally not restored. The f32 testcase from the old gate was not ported because current Madaros rejects implicit f64-to-f32 literal arguments and explicit f32 casts still exit 0; f32 remains a separate residual, while the f64 memory-operand bug is covered.
+- `c2a783f27` struct-field float arithmetic: compiler code was already absorbed by newer consolidation architecture (`StructFieldEntry.is_float`, struct-type local tracking, field float lookup, and `ir_binop_float` tagging). Only the focused gate was ported/adapted. The old f32 struct-field case was not ported because current Madaros rejects implicit f64 literals in f32 struct fields; f32 remains a separate residual. The old `scripts/ci/release_gate.sh` edit was intentionally not restored.
 
 Dirty WIP extraction attempts:
 
@@ -135,13 +136,20 @@ Validation after porting adapted `2286fb6d5`:
 - `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS, 2 passed / 0 failed.
 - `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check, trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
 
+Validation after absorbing/adapting `c2a783f27`:
+
+- `bash tests/native_v2_struct_field_float_gate/run.sh bin/souc`: PASS, 7 passed / 0 failed. Covered f64 struct-field +/*, let annotated/inferred struct locals, mixed int/float struct controls, and integer field controls.
+- `bin/souc info`: PASS, selected Madares v0.80.0.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS, 2 passed / 0 failed.
+- `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check, trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
+
 ## Next clean consolidation path
 
 1. Keep `origin/main` as the compiler baseline, not any old WIP train.
 2. Merge only one lane at a time into `integration/compiler-consolidation-20260628`.
 3. First real candidates:
    - remaining compiler-core commits from `codex/madaros-retire-lean-single-20260627` only if a missing gate is named; the raw async compiler patch has been extracted.
-   - `c2a783f27` struct-field float arithmetic, if it can be adapted without downgrading the newer struct-layout/field metadata path.
+   - remaining compiler-core branches with patch-exclusive code not yet classified; prioritize branches with focused gates over broad solver/GPU trains.
 4. For each candidate, require:
    - no active worktree owner collision,
    - named conflict files,
