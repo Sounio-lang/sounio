@@ -5,6 +5,9 @@ Worktree: `/workspace/sounio-compiler-consolidation`
 Branch: `integration/compiler-consolidation-20260628`
 Base: `origin/main` at `63644b6b0`
 
+Operational action matrix:
+`docs/audit/BRANCH_CLEANUP_MATRIX_2026-06-28.md`.
+
 ## What changed in this sweep
 
 - Created the compiler consolidation branch from `origin/main`.
