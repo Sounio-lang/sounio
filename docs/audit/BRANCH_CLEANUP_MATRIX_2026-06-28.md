@@ -565,6 +565,34 @@ Closed since the previous boundary entry:
   existed at cleanup time. Post-delete counts: 84 local branches, 91 remote
   refs, 52 worktrees.
 
+- `feat/assoc-variance-clean`: direct merge rejected. Its first two commits
+  (`3c7fa879a`, `d75ce1c7`) were patch-equivalent to consolidation, while the
+  remaining diff had a stale rollback shape across docs/audit and offload-log
+  surfaces. The useful compiler/stdlib hunk from `2e93f7d0` was extracted
+  manually instead: `pg_leaf`/`pg_mul` now return `-1` before overflowing the
+  64-node perturbation arena, and `pg_mul` plus `UncertainOct.mul3` clamp total
+  variance at zero for negative-kappa / floating-point drift cases. Focused
+  assertions were added to the existing run-pass witnesses. The later
+  `e3174a35` module split to `epistemic::propagate_nonassoc` was not ported:
+  it changes the public module path and is not required for the defensive hunk.
+  Validation: `git diff --check` passed; `bash scripts/ci/build_modular_madaros.sh
+  /tmp/madaros-assoc-variance-guard` produced `Madaros ready`; the rebuilt
+  Madaros passed `check` for `stdlib/epistemic/perturbation_graph.sio`,
+  `stdlib/epistemic/uncertain_octonion.sio`, and
+  `tests/run-pass/perturbation_graph_order_safe.sio`. The focused run gates for
+  `perturbation_graph_order_safe`, `uncertain_octonion_auto`, and
+  `propagate_nonassoc_variance` remain known-failure territory:
+  `tests/known_failures/hardened_diagnostics_full_suite.txt` already lists all
+  three; baseline `HEAD` reproduces the same `perturbation_graph` run-139 and
+  the same `uncertain` / `propagate` E137 typecheck failures. LLM-offload policy:
+  `bin/llm-offload -t math-review -p xai -i
+  stdlib/epistemic/uncertain_octonion.sio` returned OK / no mathematical errors;
+  the file/diff reviews for the perturbation graph returned
+  `NO MATHEMATICAL CONTENT TO REVIEW`, so they are recorded as non-approval
+  context rather than semantic proof. After this extraction commit, archive and
+  delete the branch under
+  `archive/branch/feat-assoc-variance-clean/2026-06-28`.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
