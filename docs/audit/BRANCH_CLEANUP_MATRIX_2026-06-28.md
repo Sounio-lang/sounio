@@ -594,6 +594,20 @@ Closed since the previous boundary entry:
   local and remote `feat/assoc-variance-clean` refs were deleted. Post-delete
   counts: 59 local branches, 66 remote refs, 52 worktrees.
 
+- `fix/flatparse-and-scan-operator`: no attached worktree, but not a narrow
+  parser branch in current consolidation terms. `git cherry -v HEAD
+  fix/flatparse-and-scan-operator` showed a long native-v2 / source-bridge /
+  release train, and `git diff --stat HEAD..fix/flatparse-and-scan-operator`
+  spanned 3022 files with 296362 insertions and 672707 deletions, including
+  mass deletions across docs/audit, tests, website, and release surfaces. Direct
+  merge was rejected as a stale rollback / provenance bundle. No hunk was
+  extracted in this pass; native-v2/source-bridge work remains represented by
+  active owner lanes and separate residual branches. The original branch tip was
+  archived as
+  `archive/branch/fix-flatparse-and-scan-operator/2026-06-28` -> `aa39c356d`;
+  local and remote `fix/flatparse-and-scan-operator` refs were deleted.
+  Post-delete counts: 58 local branches, 65 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
