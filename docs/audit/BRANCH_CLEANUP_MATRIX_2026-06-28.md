@@ -949,6 +949,29 @@ and local branch were then removed.
 
 Post-cleanup counts: 29 local branches, 22 remote refs, 29 worktrees.
 
+### Ancestor local WIP archive cleanup
+
+Three remaining local-only attached worktrees had branch tips already reachable
+from the consolidation branch (`merge-base --is-ancestor <branch> HEAD` was
+true), but still had uncommitted local WIP. For each lane, the branch tip was
+archived as `archive/worktree/<branch-slug>/2026-06-28`, the tag was pushed,
+and the dirty state was saved under
+`docs/audit/archived_wip/ancestor-local-wip-2026-06-28/` before removing the
+worktree and local branch:
+
+- `dissertation/venlafaxine-xr-parity`: archived tracked PBPK parameter diff
+  plus untracked venlafaxine/PBPK scenario, PGx, release matrix, and smoke-test
+  files. No clinical/PBPK content was promoted into consolidation in this pass.
+- `metrics/fregni-profile`: archived untracked PPCR metrics docs and validation
+  tests. No external-facing or methodology content was promoted in this pass.
+- `worktree-agent-adc1cd8b9d52ba53b`: archived a dirty compiler/native patch
+  touching `self-hosted/compiler/main.sio`, `self-hosted/native/codegen.sio`,
+  `self-hosted/native/codegen_x86_linux.sio`,
+  `self-hosted/native/lower_ir.sio`, and `self-hosted/native/suite.sio`. No
+  compiler WIP from this patch was promoted in this pass.
+
+Post-cleanup counts: 26 local branches, 22 remote refs, 26 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
