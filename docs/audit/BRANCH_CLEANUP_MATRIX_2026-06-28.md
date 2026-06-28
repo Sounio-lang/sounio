@@ -309,8 +309,22 @@ classified in this audit as non-merge residuals:
   then local/remote refs were deleted. It is a Lean/website/math-provenance
   branch rather than a compiler-core merge source; the archive tag preserves
   the offload log and theorem edits for any future math lane.
+- `docs/pbpk-session-notes-2026-06-28`: archived as
+  `archive/branch/docs-pbpk-session-notes-2026-06-28/2026-06-28` ->
+  `37b7741b9`, then local/remote refs were deleted. It is PBPK dissertation
+  notes plus broad Madaros/solver history, not a compiler-core merge branch;
+  the clinical/external-facing notes remain recoverable by archive tag.
+- `gpu/epistemic-tensor-core-gum-sm75`: archived as
+  `archive/branch/gpu-epistemic-tensor-core-gum-sm75/2026-06-28` ->
+  `a88b0c6b8`, then local/remote refs were deleted. It is GPU tensor-core GUM
+  design/provenance material and a CUDA reference file, not part of this
+  compiler-core consolidation pass.
+- `nl-castle/native-orc-audit`: archived as
+  `archive/branch/nl-castle-native-orc-audit/2026-06-28` -> `da34c57d6`,
+  then local/remote refs were deleted. It is ORC definition/audit provenance,
+  not an active compiler consolidation source.
 
-Post-delete counts: 64 local branches, 71 remote refs, 52 worktrees.
+Post-delete counts: 61 local branches, 68 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
