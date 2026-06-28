@@ -2867,7 +2867,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                     }
                     ri = ri + 1
                 }
-                if ret_ty.kind != TypeKind::TyUnit {
+                // E072: a missing return annotation lowers to TyUnknown and is
+                // implicitly unit for a void kernel — accept it; only an EXPLICIT
+                // non-unit return type is an error. (Mirrors the collect_fn_def site.)
+                if ret_ty.kind != TypeKind::TyUnit && ret_ty.kind != TypeKind::TyUnknown {
                     checker_report_error_at_inplace(c, (*fd).span, 72, 0, 0, 0)
                 }
             }
@@ -4087,6 +4090,13 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
     while true {
         match cursor {
             Some(list) => {
+                // Reset the int-literal flag before each stmt so that after the
+                // loop (*c).last_literal_kind reflects ONLY the block's tail
+                // statement — a bare `0` leaves it set, a non-literal tail (call,
+                // ident, binary) leaves it clear, never stale from an earlier
+                // statement's literal. The E008 return-narrow (checker_collect_fn_
+                // def_inplace) depends on this being the tail's literalness.
+                (*c).last_literal_kind = 0
                 last_ty = checker_check_stmt_inplace(c, (*list).head)
                 // Capture the escape provenance of the block's TAIL expression
                 // (the value the block/function yields) while the AST is still live;
@@ -4152,6 +4162,7 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
 }
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).last_literal_kind = 0  // so the flag reflects ONLY this return value expr
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
     match e.left {
         Some(val_expr) => {
@@ -6174,7 +6185,20 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // The GPU backend lowers these by name to PTX sregs (%tid.x / %ctaid.x /
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
     if call_expr_is_gpu_builtin(e.left) {
-        return ty_u32()
+        // Barriers (gpu_barrier, gpu_barrier_sync, gpu_sync_threads) are void
+        // side-effects; the thread-index/dim intrinsics return a u32 coordinate.
+        if call_expr_is_gpu_barrier(e.left) {
+            return ty_unit()
+        }
+        // E004: thread/block coordinate intrinsics return the language's native
+        // index type i64 (not u32), so cast-free witness kernels typecheck as
+        // written — `let i = bid*bdim + tid; if i < n` where `n: i64` no longer
+        // reports a u32/i64 mismatch. The GPU backend lowers GpuGetTid/Bid/Ntid
+        // by NAME to 32-bit PTX sregs (%tid.x etc.) independent of this checker
+        // type (hlir_to_gpu.sio hardcodes GpuU32 for the read; all integer binops
+        // lower as i32), so widening the checker type to i64 keeps strict integer
+        // typing intact without changing the emitted register width.
+        return ty_i64()
     }
     if call_expr_is_box_new(e.left) {
         return checker_check_box_new_expr_inplace(c, e)
@@ -12261,11 +12285,29 @@ fn call_expr_is_builtin_uncertainty_of(opt: Option<Box<Expr> >) -> bool with Mut
 
 // Read-only GPU thread/block coordinate intrinsics. These are implicit
 // kernel-scope builtins with no user-declared signature, so the call checker
-// must recognise them by name and assign their result type (u32) directly —
+// must recognise them by name and assign their result type directly —
 // otherwise the callee ident falls through to the unbound-identifier check
 // (E137) just as the name resolver would reject it without its allowlist.
 // MUST stay in sync with name_is_gpu_builtin() in self-hosted/resolve/resolve.sio
 // and token_is_gpu_builtin_name() in self-hosted/compiler/lean_single.sio.
+// The subset of call_expr_is_gpu_builtin names that are void barriers (return
+// unit), as opposed to the thread-index/dim coordinate reads (return i64).
+fn call_expr_is_gpu_barrier(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            if name_eq(n, make_name("gpu_barrier")) { return true }
+            if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+            if name_eq(n, make_name("gpu_sync_threads")) { return true }
+            false
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -16299,8 +16341,11 @@ impl Checker {
                         ri = ri + 1
                     }
 
-                    // E072: Kernel must return unit type
-                    if ret_ty.kind != TypeKind::TyUnit {
+                    // E072: Kernel must return unit type. A missing return
+                    // annotation lowers to TyUnknown (lower_opt_return_type's
+                    // None case), which is implicitly unit for a void kernel —
+                    // accept it; only an EXPLICIT non-unit return type is an error.
+                    if ret_ty.kind != TypeKind::TyUnit && ret_ty.kind != TypeKind::TyUnknown {
                         c = c.report_error_at((*fd).span, 72, 0, 0, 0)
                     }
                 }
