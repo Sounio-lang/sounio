@@ -223,8 +223,13 @@ classified in this audit as non-merge residuals:
   `f68d688c9`, then local/remote refs were deleted. The compiler-code portion
   is already present in consolidation; its branch-only generic struct witness
   still parses red on current consolidation and remains residual.
+- `fix/binop-literal-float-478b`: archived as
+  `archive/branch/fix-binop-literal-float-478b/2026-06-28` -> `3fd937bd1`,
+  then local/remote refs were deleted. All three exclusive commits were
+  `DEBUG:` IR tracing changes in `self-hosted/native/codegen_x86_linux.sio`,
+  already rejected as not being a semantic #478 fix.
 
-Post-delete counts: 79 local branches, 86 remote refs, 52 worktrees.
+Post-delete counts: 78 local branches, 85 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
