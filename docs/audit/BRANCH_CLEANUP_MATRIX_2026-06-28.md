@@ -332,6 +332,26 @@ focused gate.
   `fix/root2-enum-inplace` refs were deleted. Post-delete counts: 91 local
   branches, 93 remote refs, 59 worktrees.
 
+- Slurm-only Madaros proof lanes:
+  `/workspace/sounio-madaros-check-segv` (`codex/madaros-full-functioning`),
+  `/workspace/sounio-madaros-source-elf-consolidated`
+  (`codex/madaros-source-elf-consolidated`), and
+  `/workspace/sounio-madaros-main-proof`
+  (`codex/madaros-main-proof-17d115`) had no remaining patch-exclusive compiler
+  commits versus consolidation (`git cherry -v HEAD` empty for the first two;
+  only `- 0b3624dcc...` for the third). The only dirty state in each worktree
+  was the same local Slurm runner tweak, not a compiler change:
+
+```diff
+diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cluster.sh
+@@
+-base64 -w0 "$ELF" | srun --partition="$PART" --time=00:10:00 --chdir=/orangefs/training bash -c '
++base64 -w0 "$ELF" | srun --partition="$PART" --gres=gpu:0 --time=00:10:00 --chdir=/orangefs/training bash -c '
+```
+
+  This WIP patch was archived here rather than ported into compiler
+  consolidation.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
