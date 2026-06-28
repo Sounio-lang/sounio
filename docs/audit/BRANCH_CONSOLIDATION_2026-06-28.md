@@ -660,3 +660,54 @@ Status:
 - The validated-call hardening is absorbed.
 - The imported multimodule witness remains a residual blocker and still must not
   be wired into the prebuilt-refresh workflow.
+
+## Direct-call param-slot branch triage
+
+Reviewed `origin/codex/direct-call-param-slot` (`9174e3fc5`).
+
+The branch is a small native-v2 patch:
+
+- initialize `MachineFunction.temp_count` from `IrFunction.reg_count` in
+  `native_v2_lower_function_to_machine`
+- start legalizer temps above `max(base_slot_count, temp_count)`
+- add `tests/native-v2/param_slot_legalize_boundary_witness.sio`
+
+Do not port yet. The patch applies cleanly and the witness passes `--check`, but
+the real execution surface is red on current consolidation:
+
+```text
+bin/souc --native-v2-compile tests/native-v2/param_slot_legalize_boundary_witness.sio -o /tmp/sounio_param_slot_witness.elf
+/tmp/sounio_param_slot_witness.elf
+=> exit 139
+
+bin/madaros run tests/native-v2/param_slot_legalize_boundary_witness.sio
+=> lower_array: seed_begin; Segmentation fault
+```
+
+Related probe: existing
+`tests/native-v2/large_value_legalize_boundary_witness.sio` also compiles to an
+ELF and then exits 139. Treat this as a native-v2 witness/runtime residual, not
+as an absorbed compiler-core change.
+
+## Generic struct instantiation branch triage
+
+Reviewed `feat/generics-struct-instantiation` (`f68d688c9`).
+
+The compiler-code portion is already present in current consolidation:
+
+- `mono_register_struct` exists in `self-hosted/compiler/lean_single.sio`.
+- the generic-function rewrite loop already collapses `GenStruct<TYPE>` into a
+  registered monomorphic struct token.
+
+The branch's new witness was not kept because it is still red on current
+consolidation:
+
+```text
+struct Box<T> { val: T }
+fn wrap<T>(x: T) -> Box<T> { Box<T>{ val: x } }
+
+bin/souc --native-v2-compile tests/generics/box_generic_struct.sio -o /tmp/box_generic_struct.elf
+=> native_v2_compile: front-half failed: parse_failed
+```
+
+Classification: code absorbed already; runnable witness remains residual.
