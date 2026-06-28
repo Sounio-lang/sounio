@@ -68,7 +68,7 @@ but are not safe for automatic merge:
 - `codex/madaros-retire-lean-single-20260627` and `codex/madaros-close-20260627`: overlapping Madaros closeout trains; likely supersede some older branches, but need gate-by-gate merge.
 - `claude/solver-gpu-native-path` and `claude/gpu-e137-fix`: solver/GPU path branches; keep out of compiler core until ownership is assigned.
 - `fix/binop-literal-float-478b`: debug-only codegen tracing branch; do not merge into the clean compiler line without stripping or gating the trace.
-- `codex/tuple-signature-types-20260626`: likely important compiler work, but broad enough to deserve a focused merge.
+- `codex/tuple-signature-types-20260626`: reviewed. The parser, checker, native implicit-unit/assert, and native bool-literal fixes are already equivalent in the consolidation branch; remaining exclusive commits are GPU/script/test-bookkeeping and should not drive the compiler-core merge.
 - `codex/madaros-import-stdlib-lowering-current`: older imported-stdlib lowering branch; conflicts with the newer imported-lowering path already on `origin/main`.
 - `codex/madaros-boxnew-clean` and `codex/madaros-boxnew-append-fix`: older Box::new trains; need comparison against current `origin/main` before any merge.
 
@@ -109,13 +109,21 @@ Attempted focused cherry-picks:
 - `36a3b1d2b`, `3158a46b3`, `4eb67966c`, `95b16f24b`: skipped as already represented by current `origin/main`.
 - `220f5b8f1` imported runtime lowering: skipped after resolving showed the remaining conflict would downgrade current `with_externs`/call-target remap behavior.
 - `542a91e31` imported stdlib lowering: aborted; too old and broad against current imported-lowering architecture.
+- `9726be6f4` parser compound-assignment RHS: skipped as empty/equivalent in the consolidation branch.
+- `07ecfa0ff` contextual int array literals: conflict only in tests already marked `//@ requires: madaros`; after resolving to keep the marker, the patch was empty/equivalent.
+- `ac60fc11f` native implicit unit returns and assert builtin: conflict only in `tests/madaros/source_to_elf/manifest.tsv`, whose entries were already present; after resolving, the patch was empty/equivalent.
+- `eaf803935` native bool literals: skipped as empty/equivalent in the consolidation branch.
+
+Dirty WIP extraction attempts:
+
+- `/workspace/sounio-source-elf-proof`: reviewed dirty `check`, `defs`, `mod`, and `parser/exprs` changes. The valuable checker capacity/import/runtime-builtin and parser control-expression newline handling are already present in the consolidation branch. Copying this worktree would downgrade newer parser guards for newline `[`/`(`/prefix operators and newer checker architecture, so no code was ported.
+- `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`: reviewed dirty native-codegen changes. `self-hosted/native/lower_ir.sio` is byte-identical to the consolidation branch, and all inspected call sites already use `&! NativeCompiler`. The only remaining difference changes a rodata constant in `self-hosted/native/codegen.sio` from `1e6` to another value without a clear acceptance gate, so it was not ported.
 
 ## Next clean consolidation path
 
 1. Keep `origin/main` as the compiler baseline, not any old WIP train.
 2. Merge only one lane at a time into `integration/compiler-consolidation-20260628`.
 3. First real candidates:
-   - `codex/tuple-signature-types-20260626`
    - `codex/madaros-retire-lean-single-20260627`
    - `fix/binop-literal-float-478b` only after debug trace is converted to gated instrumentation or dropped.
 4. For each candidate, require:
