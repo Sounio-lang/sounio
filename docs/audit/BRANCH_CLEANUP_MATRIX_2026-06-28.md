@@ -293,8 +293,24 @@ classified in this audit as non-merge residuals:
   `archive/branch/chore-repo-hygiene/2026-06-28` -> `4302652f3`, then
   local/remote refs were deleted. It is release/docs/repository-hygiene
   material, not a compiler-core merge source for this consolidation lane.
+- `integration/madaros-fixes-trace`: archived as
+  `archive/branch/integration-madaros-fixes-trace/2026-06-28` ->
+  `cb77ab17b`, then local/remote refs were deleted. Its for-loop and
+  print-int-literal fixes are already represented in consolidation by the
+  native-v2 loop/print gate and newer lowering code; the direct branch diff
+  would revert newer lowerer fields and docs metadata.
+- `feat/future-work-first-slices`: archived as
+  `archive/branch/feat-future-work-first-slices/2026-06-28` -> `cf1123f6b`,
+  then local/remote refs were deleted. The branch is future-work/research/docs
+  material covering Lean/GPU/PBPK slices, not compiler-core consolidation
+  material; its tip remains recoverable by archive tag.
+- `d3-a/missing-imports-sweep`: archived as
+  `archive/branch/d3-a-missing-imports-sweep/2026-06-28` -> `728e4ca39`,
+  then local/remote refs were deleted. It is a Lean/website/math-provenance
+  branch rather than a compiler-core merge source; the archive tag preserves
+  the offload log and theorem edits for any future math lane.
 
-Post-delete counts: 67 local branches, 74 remote refs, 52 worktrees.
+Post-delete counts: 64 local branches, 71 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
