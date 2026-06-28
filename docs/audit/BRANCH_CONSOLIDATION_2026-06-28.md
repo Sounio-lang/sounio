@@ -133,6 +133,46 @@ Classification:
   as a named single-purpose patch with a focused acceptance gate on
   `integration/compiler-consolidation-20260628`.
 
+### Epistemic / affine / proof / future-work lanes
+
+Reviewed:
+
+- `origin/feat/affine-nonassoc-uncertainty`
+- `origin/feat/affine-octonion-correlation`
+- `feat/affine-octonion-clean`
+- `feat/assoc-variance-clean`
+- `feat/assoc-variance-wiring`
+- `origin/feat/assoc-variance-clean`
+- `origin/fix/assoc-variance-273-consolidated`
+- `origin/m2/effect-firewall`
+- `origin/recover/m2-effect-firewall`
+- `feat/lean-tier2`
+- `feat/future-work-first-slices`
+- `origin/feat/future-work-first-slices`
+
+Do not merge these branches as compiler-core branches. They are semantic,
+epistemic, proof, effect-policy, GPU, or future-work lanes rather than cleanup
+sources for the single compiler consolidation branch. Their raw diffs are also
+old-base rollback shapes: affine/assoc branches range from ~1,373 to ~2,894
+files; M2/effect-firewall branches are ~1,368-1,379 files; Lean/future-work
+branches are ~2,390-2,411 files. Several would roll back hundreds of thousands
+of lines relative to the current consolidation state.
+
+Status notes:
+
+- `origin/fix/assoc-variance-273-consolidated` is already an ancestor of the
+  current consolidation branch; no branch-tip integration remains.
+- `feat/assoc-variance-wiring` is build-lock/pod policy history, not a compiler
+  source merge.
+- `m2/effect-firewall` has a live worktree and should stay an owner lane until
+  explicitly transferred.
+- `lean-tier2` and `future-work-first-slices` include proof/GPU/future-work
+  material. They require their own proof/offload policy lane if revived; this
+  consolidation audit is not a validation of their mathematical claims.
+
+Classification: keep these as research/semantics/proof provenance, not as
+merge parents for `integration/compiler-consolidation-20260628`.
+
 ### Codegen / G1 / GPU / CI residue triage
 
 Reviewed:
