@@ -5751,6 +5751,10 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
 }
 
 fn checker_check_method_call_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return ty_unit()
+    }
     (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
     if (*c).suppress_linear_consume_depth > 0 {
@@ -6189,6 +6193,20 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
 }
 
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_expr_is_gpu_launch_invocation_call(e) {
+        match e.left {
+            Some(desc) => {
+                checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*desc).args)
+            }
+            None => {}
+        }
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return ty_unit()
+    }
+    if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return ty_unit()
+    }
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
@@ -12377,6 +12395,70 @@ fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Di
             false
         }
         None => false
+    }
+}
+
+fn checker_expr_is_gpu_effect_root(e: Expr) -> bool with Mut, Panic, Div {
+    e.kind == ExprKind::ExprIdent && name_eq(e.name, make_name("GPU"))
+}
+
+fn checker_expr_is_gpu_effect_field(e: Expr, field: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprPath && e.path.seg_count == 2 {
+        let head = checker_copy_string_list_to_name(e.path.segments)
+        let tail = checker_copy_string_list_tail_to_name(e.path.segments)
+        return name_eq(head, make_name("GPU")) && name_eq(tail, field)
+    }
+    if e.kind != ExprKind::ExprFieldAccess {
+        return false
+    }
+    if !name_eq(e.name, field) { return false }
+    match e.left {
+        Some(base) => checker_expr_is_gpu_effect_root(*base),
+        None => false,
+    }
+}
+
+fn checker_expr_is_gpu_launch_descriptor_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("launch")) { return false }
+        match e.left {
+            Some(base) => return checker_expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => checker_expr_is_gpu_effect_field(*callee, make_name("launch")),
+        None => false,
+    }
+}
+
+fn checker_expr_is_gpu_launch_invocation_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => checker_expr_is_gpu_launch_descriptor_call(*callee),
+        None => false,
+    }
+}
+
+fn checker_expr_is_gpu_sync_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("sync")) { return false }
+        match e.left {
+            Some(base) => return checker_expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => checker_expr_is_gpu_effect_field(*callee, make_name("sync")),
+        None => false,
     }
 }
 
@@ -18738,6 +18820,10 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_method_call(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
+            let c_gpu = self.check_expr_list_no_type_no_linear_consume(e.args)
+            return (c_gpu, ty_unit())
+        }
         // Method receiver evaluation should not eagerly consume linear values,
         // because receiver passing mode is method-signature dependent.
         var checker_for_base = self
@@ -19070,6 +19156,21 @@ impl Checker {
         match e.right {
             Some(_) => return self.check_index_expr(e)
             None => {}
+        }
+        if checker_expr_is_gpu_launch_invocation_call(e) {
+            var c_launch = self
+            match e.left {
+                Some(desc) => {
+                    c_launch = c_launch.check_expr_list_no_type_no_linear_consume((*desc).args)
+                }
+                None => {}
+            }
+            c_launch = c_launch.check_expr_list_no_type_no_linear_consume(e.args)
+            return (c_launch, ty_unit())
+        }
+        if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
+            let c_gpu = self.check_expr_list_no_type_no_linear_consume(e.args)
+            return (c_gpu, ty_unit())
         }
         if call_expr_is_builtin_prove_robust(e.left) {
             return self.check_prove_robust_expr(e)
