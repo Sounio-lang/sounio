@@ -261,6 +261,26 @@ Apple Silicon. The default Madaros imported/native path remains classified by
 the existing `madaros_imported_native_lower_array_seed_segfault` blocker until
 the official seed witness passes.
 
+## Hyper-Epistemic Boundary Gate
+
+The combined hyper-epistemic boundary gate is:
+
+```sh
+bash scripts/ci/native_v2_hyper_epistemic_boundary_gate.sh
+```
+
+That gate joins the current promoted evidence for `IrHyperEpistemicMul`: the
+Madaros typecheck witness for
+`Knowledge<Hyper<Octonion, f64>> * Knowledge<Hyper<Octonion, f64>>`, the
+self-hosted native hyper-epistemic runtime self-tests, the native-v2 MIR
+fail-closed boundary witness with `unsupported_detail=hyper_epistemic_mul`, and
+the AArch64 Mach-O preview gate above. It writes a summary JSON in its temp
+artifact directory.
+
+This is a boundary/proof-surface gate. It does not promote full legal MIR
+lowering for `IrHyperEpistemicMul`, Apple Silicon runtime parity, or the
+default Madaros imported/native runtime for imported `machine_ir` witnesses.
+
 ## ISO GUM Primitives (SOTA)
 
 The ISO JCGM 100:2008 (GUM) uncertainty propagation gate is:
