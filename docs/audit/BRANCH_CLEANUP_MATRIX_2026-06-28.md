@@ -972,6 +972,33 @@ worktree and local branch:
 
 Post-cleanup counts: 26 local branches, 22 remote refs, 26 worktrees.
 
+### Parked local-only owner lanes
+
+Eight remaining local-only lanes had no live remote branch. Their branch tips
+and dirty working state were parked instead of promoted: each tip was archived
+as `archive/worktree/<branch-slug>/2026-06-28`, status/diff/untracked files
+were saved under `docs/audit/archived_wip/parked-local-only-2026-06-28/`, and
+the local worktree plus branch were removed:
+
+- `dissertation/epistemic-tensor`
+- `dissertation/vancomycin-witness`
+- `fix/dissertation-gates-green-20260625`
+- `integration/modular-checker-e008`
+- `integration/native-v2-onto-exact-orc`
+- `research/solver-sota-class`
+- `website/fixes-from-main`
+- `xai/conversa`
+
+This batch included math/Lean, clinical/dissertation, solver, website, and
+compiler/checker artifacts. They were archived only; no claim-bearing,
+clinical, website, or compiler WIP was promoted into consolidation in this
+pass. The `dissertation/vancomycin-witness` worktree left a physical directory
+orphan at `/workspace/sounio-dissertation` after git unregistered the worktree;
+the remaining residue was root-owned Lean `.lake` cache and was removed with
+`sudo rm -rf` after the WIP archive had been written.
+
+Post-cleanup counts: 19 local branches, 22 remote refs, 19 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive

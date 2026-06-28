@@ -1,0 +1,64 @@
+diff --git a/.claude/AGENT_HANDOFF.md b/.claude/AGENT_HANDOFF.md
+index 40a3ce194..b2f407e87 100644
+--- a/.claude/AGENT_HANDOFF.md
++++ b/.claude/AGENT_HANDOFF.md
+@@ -267,6 +267,22 @@ avoid file + build-lock collisions.
+   If i128 is mid-edit on check.sio, expect a merge touch-point in the closure/call-arg
+   regions (different from i128's int-width sites). PR #235's subsumption helpers are now
+   dead — fold/revise when landing.
++- **LEVER 3 DEFERRED (this lane):** unit type-lowering in the *mut spine (`checker_lower_named_type_mut`
++  + `ItemUnit` collect arm) was prototyped + REVERTED — NOT the clean +7 estimated. Reality: only
++  **+2** (unit_cast_compatible/cast_time) need just lowering; the other **5 need UNIT ARITHMETIC**
++  (E041 "unit mismatch in arithmetic" — dimensional analysis in binary-op typing, a separate
++  feature). AND the lowering REGRESSES `generic_struct_instantiate`: `struct Map<K,V>` — the generic
++  param **K collides with builtin unit Kelvin** (both in the registry; `find` returns the builtin,
++  no index gate works since `mg` is also builtin). Clean fix needs **inplace generic-param scoping**
++  (so `env.lookup(K)` finds the param before units) — a real feature. Units lever = 2 sub-features
++  (generic-param scoping + unit arithmetic), not single-mechanism. Reverted to keep lever-2 clean.
++- **LEVER 3b+3c DONE + PUSHED (PR #242, branch `check/linear-double-consume-e039`):** linear E039
++  false positives, SOUND **+7** (283→290). (b) removed redundant double-consume in call-args (Site B;
++  Site A in ident handler already consumes). (c) branch-borrow isolation in if-expr via 128-byte
++  consumed-flag snapshot/merge (NOT whole-BorrowEnv copy — ~19KB by-value is miscompiled). Soundness
++  preserved. ⚠️ gh pr edit is blocked by a repo Projects-classic GraphQL deprecation → PR #242 title
++  still says only "double-consume"; the 2nd commit (`544b4d9cd`) covers the branch merge. Confined to
++  `check.sio` (if-expr + call-args) + `borrow.sio` flag helpers — orthogonal to i128/SRET.
+ - **i128 / arbitrary-width-int lane** (`feat/i128-modular`): owns `check/types.sio`,
+   `check/compat.sio`, `check/check.sio` (int-width additions) + native codegen
+   (`native/codegen_x86_linux.sio`, `native/encode.sio`, `ir/ir.sio`). I avoid these.
+diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cluster.sh
+index f77767033..832ceb0af 100755
+--- a/slurm-jobs/erdos90/run_on_cluster.sh
++++ b/slurm-jobs/erdos90/run_on_cluster.sh
+@@ -20,8 +20,21 @@
+ 
+ set -euo pipefail
+ KERNEL="${1:-stdlib/research/erdos90_search.sio}"
+-PART="${2:-cpu-ops}"
+-SOUC="/workspace/sounio/bin/souc"; [ -x "$SOUC" ] || SOUC="./bin/souc"
++PART="${2:-all}"
++export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-/workspace/sounio/stdlib}"
++# Resolve a souc that ACCEPTS effect decls. The self-hosted compiler is under active
++# testing; override with SOUC_BIN=/path/to/souc. The rc1+ wrapper exposes a `compile`
++# subcommand; the legacy mini_native does not (and rejects effect decls -> "no main").
++pick_souc() {
++  local c
++  for c in "${SOUC_BIN:-}" "${SOUC:-}" /workspace/sounio-compiler/bin/souc ./bin/souc /workspace/sounio/bin/souc; do
++    [ -n "$c" ] && [ -x "$c" ] || continue
++    if "$c" --help 2>&1 | grep -q "compile"; then echo "$c"; return 0; fi
++  done
++  return 1
++}
++SOUC="$(pick_souc)" || { echo "ERROR: no souc with a compile subcommand found; set SOUC_BIN=/path/to/souc" >&2; exit 1; }
++echo "[souc] using $SOUC ($("$SOUC" --version 2>&1 | head -1))" >&2
+ ELF="$(mktemp /tmp/e90_XXXX)"
+ 
+ echo "[1/3] compiling $KERNEL -> static ELF with $SOUC"
+@@ -29,7 +42,7 @@ echo "[1/3] compiling $KERNEL -> static ELF with $SOUC"
+ file "$ELF" | grep -q "statically linked" || { echo "ERROR: ELF not static"; exit 1; }
+ 
+ echo "[2/3] shipping $(stat -c%s "$ELF") bytes to a '$PART' node via srun + running"
+-base64 -w0 "$ELF" | srun --partition="$PART" --time=00:10:00 --chdir=/orangefs/training bash -c '
++base64 -w0 "$ELF" | srun --partition="$PART" --gres=gpu:0 --time=00:10:00 --chdir=/orangefs/training bash -c '
+   base64 -d > /orangefs/training/e90_run && chmod +x /orangefs/training/e90_run
+   echo "=== node $(hostname) ($(nproc) cores) running Sounio Erdős-[90] search ==="
+   t0=$(date +%s); /orangefs/training/e90_run; echo "wall=$(( $(date +%s) - t0 ))s"
