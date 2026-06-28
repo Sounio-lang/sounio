@@ -710,6 +710,22 @@ Closed since the previous boundary entry:
   local and remote `codex/madaros-close-20260627` refs were deleted.
   Post-delete counts: 50 local branches, 57 remote refs, 52 worktrees.
 
+- `qual/pbpk28-tissue-composition`: no attached worktree. The visible tip adds
+  PBPK28 tissue-composition / peptide-partitioning / QE approximation modules
+  and dissertation claim-truth-table updates, but the full diff versus
+  consolidation had stale rollback shape: 2407 files, 10585 insertions, 253602
+  deletions, including deletion of the active consolidation audit docs, PPCR
+  docs, solver research docs, and many historical audit surfaces. Direct merge
+  was rejected. No clinical/PBPK or external-facing hunk was extracted here
+  because it would require a dedicated owner lane plus mandatory offload review.
+  Current PBPK ownership remains with the attached
+  `/workspace/sounio-pbpk-integration`
+  (`integration/pbpk-sprints-28-70-onto-main`) lane, not this stale residual
+  branch. Archive before deleting as
+  `archive/branch/qual-pbpk28-tissue-composition/2026-06-28` -> `8269a9a80`;
+  local and remote `qual/pbpk28-tissue-composition` refs were deleted.
+  Post-delete counts: 49 local branches, 56 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
