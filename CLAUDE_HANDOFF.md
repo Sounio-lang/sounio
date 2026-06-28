@@ -83,6 +83,53 @@ proper fix are in `docs/audit/MADAROS_VALIDATED_CALL_IMPORTED_BYPASS_2026-06-26.
 - Level 3 frontier: external benchmark slices, independent proof/certificate checker
   path, paper-grade literature review.
 
+### GPU lane (Sounio on Blackwell) — updated 2026-06-28
+
+**Headline (MEASURED on real hardware):** Sounio's solver epistemic heuristic runs
+per-variable-parallel on a real **NVIDIA Blackwell GB10 (sm_121)**, computed exactly.
+The full chain is proven: self-hosted compiler → K-AXI/Kretikos GPU emitter → f32 PTX
+(`sqrt.approx.f32`) → ptxas sm_121 SASS/CUBIN → GB10 execution, with GUM uncertainty
+propagated through the tensor cores.
+
+**Two GPU surfaces (don't conflate):** the narrow checked `kernel fn` surface
+(`souc-linux-x86_64-gpu --backend gpu`) is loop+scalar f32 only (no thread index / array
+I/O). The real engine is the **K-AXI/Kretikos** stack (`self-hosted/gpu/`, driver
+`bin/kretikos`): thread/block intrinsics (`get_tid`/`get_bid`/`get_ntid` + `getvar`),
+audited K-AXI→PTX emitter (53 patterns × 6 modes), and real CUBIN emission (below PTX,
+bypassing nvcc).
+
+**Hardware:** 2× DGX Spark (GB10 Grace-Blackwell). One reachable by direct SSH at
+`192.168.3.43` (user `demetrios`; password user-provided per session, NOT stored).
+aarch64 Grace host + GB10 GPU (cc 12.1 = sm_121), CUDA 13.0 (`ptxas`/`nvcc` at
+`/usr/local/cuda-13.0/bin`, not on default SSH PATH). The k8s cluster has no Blackwell
+node — use direct SSH. Emit PTX/CUBIN on the x86 workspace, run on the Spark.
+Details + the load-bearing caveats live in agent memory `dgx-spark-blackwell-gpu-access`.
+
+**Landed (merged into the operational branch):**
+- PR #483 (`82b1db42c`) — GPU emitter emits **ptxas-valid PTX**: removed E137 dangling
+  `erdos90_hc_smoke` import + ASCII-ified non-ASCII PTX strings. Verified: fixed emitter
+  output → ptxas sm_121 cubin.
+- PR #487 (`e24c64e28`) — **Blackwell runtime receipt**: the epistemic tensor-core MMA
+  kernel runs on GB10 (A=0 ⇒ D=C=[1,2,3,4]; `ε_C`=√7=2.64575 exact; provenance), JIT and
+  native sm_121. Launchers in `benchmarks/solver/gpu/`.
+- PR #492 (`f636d0e53`) — **GPU solver scorer**: new `epistemic_scorer` K-AXI pattern;
+  `score[i] = act_mean[i] + β·sqrt(act_var[i])` (smt.sio Mode-0 GUM-UCB, β=0.6 fresh)
+  runs per-variable-parallel on GB10, verified = [0.22,0.38,0.54,0.70] (δ~1e-8).
+  Receipt: `docs/research/gpu-epistemic-scorer-blackwell-2026-06-27.md`.
+
+**Emitter bugs (real-ptxas-found):** #476 non-ASCII PTX (fixed by #483); #477 `retval`
+illegal state space (clarified — a stale-artifact non-issue from the removed old gpu
+binary, not the live emitter).
+
+**Open follow-ups:**
+- Golden-gate coverage: `epistemic_scorer` not yet in `scripts/ci/kaxi_ptx_golden_gate.sh`
+  PATTERNS (needs captured goldens × 6 modes).
+- #468 — public `kernel fn` thread-index surface (`gpu.thread_id`/`gpu.block_id` + array
+  params); being done in parallel on `feat/gpu-thread-intrinsics`.
+- #477 closeable; a correct per-lane A·B matmul kernel (vs the reference broadcast kernel);
+  native sm_121 CUBIN emission (vs JIT) end-to-end; GPU-side f64 (path currently narrows to
+  approx-f32).
+
 ## What Happened
 
 ### 1. The old VM was abandoned
