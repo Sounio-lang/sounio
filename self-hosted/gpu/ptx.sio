@@ -1274,3 +1274,248 @@ fn ptx_emit_store_u32_const() -> PtxBuf with Mut, Panic, Div {
     b = ptx_push_str(b, "}\n")
     b
 }
+
+// hyper_epistemic_mul_octonion — fused octonion × GUM product (Door γ, PTX kernel)
+//
+// First PTX kernel to emit octonion Fano multiplication AND GUM LPU uncertainty
+// propagation in a single kernel body.  No stubs, no placeholder.
+//
+// GUM LPU (corrected after xai math-review v2):
+//   σ²_c[k] = Σ_t b[bj[k,t]]²·σ²_a[t] + a[t]²·σ²_b[bj[k,t]]
+// Since sg² = 1, all Fano signs cancel in the variance → signless Fano accumulation.
+//
+// Value lane:  c[k] = Σ_t sg[k,t]·a[t]·b[bj[k,t]]   (signed Fano, 64 muls/fmas)
+// ε lane:      σ²_c[k] = Σ_t b[bj[k,t]]²·ε_a[t] + a[t]²·ε_b[bj[k,t]]  (signless, 128 fmas)
+//
+// Register layout (65 f64 regs):
+//   %fd0..7   = a[0..7]          %fd32..39 = val[0..7]   (value output)
+//   %fd8..15  = b[0..7]          %fd40..47 = eps[0..7]   (variance output)
+//   %fd16..23 = eps_a[0..7]      %fd48..55 = a_sq[0..7]  (precomputed)
+//   %fd24..31 = eps_b[0..7]      %fd56..63 = b_sq[0..7]  (precomputed)
+//   %fd64     = scratch (sign handling)
+//
+fn ptx_emit_hyper_epistemic_mul_octonion() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+
+    // ── Kernel signature ──────────────────────────────────────────────
+    b = ptx_push_str(b, ".visible .entry hyper_epistemic_mul_octonion(\n")
+    b = ptx_push_str(b, "    .param .u64 param_a_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_a_eps,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b_eps,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_eps\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<2>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<15>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<65>;\n\n")
+
+    // ── Thread index → byte offset (8 f64 = 64 bytes per octonion) ────
+    b = ptx_push_str(b, "    mov.u32 %r1, %tid.x;\n")
+    b = ptx_push_str(b, "    cvt.u64.u32 %rd1, %r1;\n")
+    b = ptx_push_str(b, "    mul.lo.u64 %rd2, %rd1, 64;\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd3, [param_a_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd4, [param_b_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd5, [param_a_eps];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd6, [param_b_eps];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd7, [param_out_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd8, [param_out_eps];\n")
+    b = ptx_push_str(b, "    add.u64 %rd9, %rd3, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd10, %rd4, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd11, %rd5, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd12, %rd6, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd13, %rd7, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd14, %rd8, %rd2;\n")
+
+    // ── Load octonion operands (4 × 8 f64 via v2.f64 vector loads) ────
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd0, %fd1}, [%rd9];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd2, %fd3}, [%rd9+16];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd4, %fd5}, [%rd9+32];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd6, %fd7}, [%rd9+48];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd8, %fd9}, [%rd10];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd10, %fd11}, [%rd10+16];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd12, %fd13}, [%rd10+32];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd14, %fd15}, [%rd10+48];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd16, %fd17}, [%rd11];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd18, %fd19}, [%rd11+16];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd20, %fd21}, [%rd11+32];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd22, %fd23}, [%rd11+48];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd24, %fd25}, [%rd12];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd26, %fd27}, [%rd12+16];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd28, %fd29}, [%rd12+32];\n")
+    b = ptx_push_str(b, "    ld.global.v2.f64 {%fd30, %fd31}, [%rd12+48];\n")
+
+    // ── Fano octonion multiplication table (canonical) ────────────────
+    let fano_bj: [i64; 64] = [
+        0, 1, 2, 3, 4, 5, 6, 7,
+        1, 0, 3, 2, 5, 4, 7, 6,
+        2, 3, 0, 1, 6, 7, 4, 5,
+        3, 2, 1, 0, 7, 6, 5, 4,
+        4, 5, 6, 7, 0, 1, 2, 3,
+        5, 4, 7, 6, 1, 0, 3, 2,
+        6, 7, 4, 5, 2, 3, 0, 1,
+        7, 6, 5, 4, 3, 2, 1, 0
+    ]
+    let fano_sg: [i64; 64] = [
+        1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1,
+        1, 1, 1, 0 - 1, 1, 0 - 1, 0 - 1, 1,
+        1, 0 - 1, 1, 1, 1, 1, 0 - 1, 0 - 1,
+        1, 1, 0 - 1, 1, 1, 0 - 1, 1, 0 - 1,
+        1, 0 - 1, 0 - 1, 0 - 1, 1, 1, 1, 1,
+        1, 1, 0 - 1, 1, 0 - 1, 1, 0 - 1, 1,
+        1, 1, 1, 0 - 1, 0 - 1, 1, 1, 0 - 1,
+        1, 0 - 1, 1, 1, 0 - 1, 0 - 1, 1, 1
+    ]
+
+    // ── Register name arrays (avoids str_concat dependency) ───────────
+    let fd_a:  [string; 8] = ["%fd0", "%fd1", "%fd2", "%fd3", "%fd4", "%fd5", "%fd6", "%fd7"]
+    let fd_b:  [string; 8] = ["%fd8", "%fd9", "%fd10", "%fd11", "%fd12", "%fd13", "%fd14", "%fd15"]
+    let fd_ea: [string; 8] = ["%fd16", "%fd17", "%fd18", "%fd19", "%fd20", "%fd21", "%fd22", "%fd23"]
+    let fd_eb: [string; 8] = ["%fd24", "%fd25", "%fd26", "%fd27", "%fd28", "%fd29", "%fd30", "%fd31"]
+    let fd_v:  [string; 8] = ["%fd32", "%fd33", "%fd34", "%fd35", "%fd36", "%fd37", "%fd38", "%fd39"]
+    let fd_e:  [string; 8] = ["%fd40", "%fd41", "%fd42", "%fd43", "%fd44", "%fd45", "%fd46", "%fd47"]
+    let fd_asq: [string; 8] = ["%fd48", "%fd49", "%fd50", "%fd51", "%fd52", "%fd53", "%fd54", "%fd55"]
+    let fd_bsq: [string; 8] = ["%fd56", "%fd57", "%fd58", "%fd59", "%fd60", "%fd61", "%fd62", "%fd63"]
+
+    // ── VALUE LANE: signed Fano product  c[k] = Σ_t sg·a[t]·b[bj] ────
+    var k: i64 = 0
+    while k < 8 {
+        var t: i64 = 0
+        while t < 8 {
+            let row = k * 8 + t
+            let j = fano_bj[row as usize]
+            let sg = fano_sg[row as usize]
+            if t == 0 {
+                // First product: mul (overwrites, no accumulation needed)
+                b = ptx_push_str(b, "    mul.rn.f64 ")
+                b = ptx_push_str(b, fd_v[k as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_a[t as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_b[j as usize])
+                b = ptx_push_str(b, ";\n")
+                if sg != 1 {
+                    b = ptx_push_str(b, "    neg.f64 ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ";\n")
+                }
+            } else {
+                if sg == 1 {
+                    b = ptx_push_str(b, "    fma.rn.f64 ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_a[t as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_b[j as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ";\n")
+                } else {
+                    b = ptx_push_str(b, "    mul.rn.f64 %fd64, ")
+                    b = ptx_push_str(b, fd_a[t as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_b[j as usize])
+                    b = ptx_push_str(b, ";\n")
+                    b = ptx_push_str(b, "    sub.f64 ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ", ")
+                    b = ptx_push_str(b, fd_v[k as usize])
+                    b = ptx_push_str(b, ", %fd64;\n")
+                }
+            }
+            t = t + 1
+        }
+        k = k + 1
+    }
+
+    // ── Precompute squares for variance lane ──────────────────────────
+    // a_sq[i] = a[i] * a[i]
+    var sq_i: i64 = 0
+    while sq_i < 8 {
+        b = ptx_push_str(b, "    mul.rn.f64 ")
+        b = ptx_push_str(b, fd_asq[sq_i as usize])
+        b = ptx_push_str(b, ", ")
+        b = ptx_push_str(b, fd_a[sq_i as usize])
+        b = ptx_push_str(b, ", ")
+        b = ptx_push_str(b, fd_a[sq_i as usize])
+        b = ptx_push_str(b, ";\n")
+        sq_i = sq_i + 1
+    }
+    // b_sq[j] = b[j] * b[j]
+    sq_i = 0
+    while sq_i < 8 {
+        b = ptx_push_str(b, "    mul.rn.f64 ")
+        b = ptx_push_str(b, fd_bsq[sq_i as usize])
+        b = ptx_push_str(b, ", ")
+        b = ptx_push_str(b, fd_b[sq_i as usize])
+        b = ptx_push_str(b, ", ")
+        b = ptx_push_str(b, fd_b[sq_i as usize])
+        b = ptx_push_str(b, ";\n")
+        sq_i = sq_i + 1
+    }
+
+    // ── VARIANCE LANE: signless GUM LPU ───────────────────────────────
+    // σ²_c[k] = Σ_t b[bj[k,t]]²·ε_a[t] + a[t]²·ε_b[bj[k,t]]
+    // Signs cancel (sg²=1).  First term per k uses mul (sets), rest use fma (adds).
+    k = 0
+    while k < 8 {
+        var t: i64 = 0
+        while t < 8 {
+            let row = k * 8 + t
+            let j = fano_bj[row as usize]
+
+            if t == 0 {
+                // Term 1: eps[k] = b_sq[j] * eps_a[t]
+                b = ptx_push_str(b, "    mul.rn.f64 ")
+                b = ptx_push_str(b, fd_e[k as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_bsq[j as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_ea[t as usize])
+                b = ptx_push_str(b, ";\n")
+            } else {
+                // Term 1: eps[k] += b_sq[j] * eps_a[t]
+                b = ptx_push_str(b, "    fma.rn.f64 ")
+                b = ptx_push_str(b, fd_e[k as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_bsq[j as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_ea[t as usize])
+                b = ptx_push_str(b, ", ")
+                b = ptx_push_str(b, fd_e[k as usize])
+                b = ptx_push_str(b, ";\n")
+            }
+            // Term 2: eps[k] += a_sq[t] * eps_b[j]  (always fma)
+            b = ptx_push_str(b, "    fma.rn.f64 ")
+            b = ptx_push_str(b, fd_e[k as usize])
+            b = ptx_push_str(b, ", ")
+            b = ptx_push_str(b, fd_asq[t as usize])
+            b = ptx_push_str(b, ", ")
+            b = ptx_push_str(b, fd_eb[j as usize])
+            b = ptx_push_str(b, ", ")
+            b = ptx_push_str(b, fd_e[k as usize])
+            b = ptx_push_str(b, ";\n")
+
+            t = t + 1
+        }
+        k = k + 1
+    }
+
+    // ── Store results (8 f64 value + 8 f64 variance) ──────────────────
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd13], {%fd32, %fd33};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd13+16], {%fd34, %fd35};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd13+32], {%fd36, %fd37};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd13+48], {%fd38, %fd39};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd14], {%fd40, %fd41};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd14+16], {%fd42, %fd43};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd14+32], {%fd44, %fd45};\n")
+    b = ptx_push_str(b, "    st.global.v2.f64 [%rd14+48], {%fd46, %fd47};\n")
+
+    b = ptx_push_str(b, "    ret;\n")
+    b = ptx_push_str(b, "}\n")
+    b
+}
