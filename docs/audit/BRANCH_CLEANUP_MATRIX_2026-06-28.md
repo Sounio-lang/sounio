@@ -1019,6 +1019,64 @@ was promoted into consolidation in this pass.
 
 Post-cleanup counts: 18 local branches, 22 remote refs, 18 worktrees.
 
+## Remaining live ownership lanes
+
+After the local-only parking pass, the remaining local worktrees are no longer
+anonymous branch clutter. They are either remote-backed owner lanes, the
+consolidation branch, or a single Cursor-owned detached worktree.
+
+Current counts:
+
+- 18 local branches
+- 22 remote refs (`origin/*` plus `pr/232`, `pr/296`, and `pr/313`)
+- 18 worktrees
+
+Remote refs intentionally preserved without matching local active branch:
+
+- `origin/main`
+- `origin/integration/sounio-dev-ready-base` (historical recovery base)
+- `pr/232`, `pr/296`, `pr/313` (PR refs, not normal branch heads)
+
+Remaining live worktree/owner buckets:
+
+- Primary active lane:
+  - `integration/compiler-consolidation-20260628` at
+    `/workspace/sounio-compiler-consolidation`, clean.
+- GLM / hyper-epistemic lane:
+  - `feat/hyper-epistemic-mul` at `/workspace/sounio`, remote-backed and dirty
+    with IR/native/PBPK/variance ABI WIP. Do not clean or merge blindly; this
+    is the current GLM lane.
+- Compiler/native/checker lanes:
+  - `claude/codegen-largestruct-fix` at `/workspace/sounio-codegen`
+  - `claude/effects-enforcement` at `/workspace/sounio-effects`
+  - `claude/ir-heap-indirect` at `/workspace/sounio-ir`
+  - `codex/project-spine-madaros` at `/workspace/sounio-project-spine`
+  - `codex/real-language-runner` at `/workspace/sounio-real-runner`
+  - `codex/semcall-hof-main` at `/workspace/sounio-semcall-main`
+  - `g1/qualify-bare-patterns` at `/workspace/sounio-cluster-c`
+  - `integrate/kw-demote-landing` at `/workspace/tmp/integrate-kw-demote-landing`
+  - `integration/native-v2-honest` at `/workspace/sounio-merge`
+- Scientific / math / GPU / PBPK lanes:
+  - `feat/affine-nonassoc-uncertainty` at `/workspace/sounio-affine`
+  - `feat/affine-octonion-correlation` at `/workspace/sounio-affine-pg`
+  - `feat/gpu-thread-intrinsics` at `/workspace/sounio-gpu-kernel`
+  - `integration/pbpk-sprints-28-70-onto-main` at
+    `/workspace/sounio-pbpk-integration`
+- Tooling / viz / campaign lanes:
+  - `campaign/mc-frontend-fixes` at `/workspace/tmp/mc-campaign-fixes`
+  - `codex/viz-molecule-authoring` at
+    `/workspace/sounio-viz-molecule-authoring`
+- Detached / external owner:
+  - `/workspace/.home/openvscode-server/.cursor/worktrees/DMH2026-e3d71e55/sounio-c48641ba187e`
+    at `4aab38cd8`, detached and clean. It remains untouched because it is
+    under Cursor's worktree area.
+
+Most remaining remote-backed worktrees still have local dirty state, commonly
+the Slurm wrapper pair or generated artifacts. These are now ownership signals,
+not branch-cleanup targets. Future redeploy should assign agents by the buckets
+above and only extract/promote claim-bearing math, clinical, website, or
+external-facing work after the mandatory offload policy is satisfied.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
