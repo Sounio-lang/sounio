@@ -746,6 +746,39 @@ worktrees. The remaining local branches are attached owner/worktree lanes or
 `main`/consolidation and should be handled as an ownership/worktree phase rather
 than as orphan-branch cleanup.
 
+## Attached worktree ownership phase
+
+Initial attached-worktree census after the no-worktree sweep:
+
+- `git worktree list --porcelain`: 52 worktrees.
+- All attached worktrees reported `git status --short` count `0` in this pass.
+- Remaining branches are attached lanes, so deletion is no longer a branch-only
+  hygiene operation. Each needs owner/role disposition first.
+
+Ownership buckets by branch/path naming:
+
+- Active primary / special lanes: `/workspace/sounio`
+  (`feat/hyper-epistemic-mul`), `/workspace/sounio-compiler-consolidation`
+  (`integration/compiler-consolidation-20260628`), `main` detached verifier
+  worktrees.
+- Compiler integration lanes: `integration/native-v2-honest`,
+  `integration/native-v2-onto-exact-orc`, `integration/modular-checker-e008`,
+  `claude/checker-singlemodule-crashes`, `claude/codegen-largestruct-fix`,
+  `claude/ir-heap-indirect`, `claude/mm-hardening`, parser lanes, source/enum
+  wall lanes, and `integrate/kw-demote-landing`.
+- Release/docs/tooling lanes: release worktrees, docs honesty, gate recovery,
+  stdlib path, LSP revival, project spine, real language runner, package/docs
+  registry, and website/fixes-from-main.
+- Scientific/clinical/research lanes: PBPK integration, dissertation /
+  vancomycin, epistemic tensor, affine/octonion work, solver SOTA, Fregni
+  metrics, GPU-thread intrinsics, and viz/molecule authoring. Clinical and
+  external-facing lanes require the repo offload policy before any content
+  extraction or claim promotion.
+- Scratch/detached lanes: detached verification/repro/scopeprobe worktrees and
+  `.claude/worktrees/*` agent lanes. These should be removed only after explicit
+  owner disposition or after proving they are disposable temp worktrees with no
+  branch-only state.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
