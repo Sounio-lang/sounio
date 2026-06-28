@@ -74,18 +74,19 @@ Archived local branch tips:
 
 ## Clean worktree cleanup executed
 
-Archived and removed three clean worktrees whose branch tips were already
-covered by the consolidation audit. For each branch, the local and remote tips
-matched, the worktree had zero `git status --short` lines, and an archive tag
-was pushed before deleting the worktree, local branch, and remote branch.
+Archived and removed clean worktrees whose branch tips were already covered by
+the consolidation audit. For each branch, the worktree had zero
+`git status --short` lines and an archive tag was pushed before deleting the
+worktree and local branch. Remote branches were deleted when a matching remote
+branch existed.
 
-Removed worktrees:
+Removed worktrees, batch 1:
 
 - `/workspace/sounio-forloop` -> `fix/madaros-for-loop-lowering`
 - `/workspace/sounio-printint` -> `fix/madaros-print-int-dispatch`
 - `/workspace/sounio-arena` -> `feat/madaros-bump-arena`
 
-Archive tags:
+Archive tags, batch 1:
 
 - `archive/worktree/fix-madaros-for-loop-lowering/2026-06-28` ->
   `6dde85913`
@@ -93,14 +94,37 @@ Archive tags:
   `c152ac3b4`
 - `archive/worktree/feat-madaros-bump-arena/2026-06-28` -> `59dd2bc8f`
 
+Removed worktrees, batch 2:
+
+- `/workspace/sounio/.claude/worktrees/wf_932ba1b4-006-1` ->
+  `backlog/f64-compare`
+- `/workspace/sounio/.claude/worktrees/wf_932ba1b4-006-3` ->
+  `backlog/sret-return`
+- `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-1` ->
+  `honest/composer-strcat`
+- `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-2` ->
+  `honest/sret-builtins`
+
+Archive tags, batch 2:
+
+- `archive/worktree/backlog-f64-compare/2026-06-28` -> `54ecab937`
+- `archive/worktree/backlog-sret-return/2026-06-28` -> `dce0ea1ca`
+- `archive/worktree/honest-composer-strcat/2026-06-28` -> `7d260ebd5`
+- `archive/worktree/honest-sret-builtins/2026-06-28` -> `27da861f9`
+
 Verification after deletion:
 
-- Worktree paths absent: `/workspace/sounio-forloop`,
+- Batch-1 worktree paths absent: `/workspace/sounio-forloop`,
   `/workspace/sounio-printint`, `/workspace/sounio-arena`.
-- Local branches absent: `fix/madaros-for-loop-lowering`,
-  `fix/madaros-print-int-dispatch`, `feat/madaros-bump-arena`.
-- Remote branches absent after `git fetch --prune origin`.
-- Counts after this cleanup: 102 local branches, 96 remote refs, 70 worktrees.
+- Batch-2 worktree paths absent:
+  `/workspace/sounio/.claude/worktrees/wf_932ba1b4-006-1`,
+  `/workspace/sounio/.claude/worktrees/wf_932ba1b4-006-3`,
+  `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-1`,
+  `/workspace/sounio/.claude/worktrees/wf_5d5668eb-0cd-2`.
+- Local branches absent for all seven removed worktrees.
+- Batch-1 remote branches absent after `git fetch --prune origin`; batch-2 had
+  no matching remote branch.
+- Counts after batch 2: 98 local branches, 96 remote refs, 66 worktrees.
 
 ## Remote cleanup executed
 
