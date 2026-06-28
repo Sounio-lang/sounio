@@ -326,8 +326,11 @@ focused gate.
   (`git cherry -v HEAD fix/root2-enum-inplace` emitted no `+` lines), and the
   only dirty state was one untracked audit note:
   `docs/audit/MADAROS_328_LOCAL_REGRESSION_2026-06-20.md`. That note was
-  recovered into this consolidation branch before cleanup. Archive/delete
-  evidence will be recorded below after the tag and branch removal complete.
+  recovered into this consolidation branch before cleanup. The original branch
+  tip was archived as `archive/worktree/fix-root2-enum-inplace/2026-06-28` ->
+  `55c440b23`, `/workspace/sounio-integ` was removed, and local/remote
+  `fix/root2-enum-inplace` refs were deleted. Post-delete counts: 91 local
+  branches, 93 remote refs, 59 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
