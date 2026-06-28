@@ -133,6 +133,50 @@ Classification:
   as a named single-purpose patch with a focused acceptance gate on
   `integration/compiler-consolidation-20260628`.
 
+### Codegen / G1 / GPU / CI residue triage
+
+Reviewed:
+
+- `origin/codegen/byval-arg-crasher`
+- `origin/codegen/deref-nested-store`
+- `origin/codegen/nested-mut-write-fix`
+- `origin/d3-a/missing-imports-sweep`
+- `origin/g1/qualify-bare-patterns`
+- `origin/gpu/epistemic-tensor-core-gum-sm75`
+- `origin/feat/gpu-thread-intrinsics`
+- `origin/feat/exact-orc-machinery`
+- `origin/feat/erdos-straus-gpu-sieve`
+- `origin/fix/flatparse-and-scan-operator`
+- `origin/fix/main-ci-red-2026-06-18`
+- `origin/fix/website-quality-check`
+
+Do not merge these branches as branches. Their raw diffs range from old G1
+rollback shapes (~2,812 files / ~716k-718k deletions), to GPU/archive trains
+(`feat/erdos-straus-gpu-sieve`: 7,330 files and 3.2M deletions), to CI/website
+repair branches that would roll back large parts of the current repo. They mix
+compiler code, docs, GPU research, generated artifacts, website content, and
+historical audits.
+
+Status notes:
+
+- `origin/feat/madaros-bump-arena` and `origin/fix/root2-enum-inplace` are
+  already ancestors of the current consolidation branch; no integration action
+  remains for their branch tips.
+- `origin/codegen/*` and `origin/g1/qualify-bare-patterns` are G1/codegen
+  provenance. Current consolidation already documents the relevant SRET,
+  nested-store, and boundary-check surfaces elsewhere in this audit; revive only
+  with a fresh failing witness.
+- `origin/feat/gpu-thread-intrinsics`, `origin/gpu/epistemic-tensor-core-gum-sm75`,
+  `origin/feat/erdos-straus-gpu-sieve`, and
+  `origin/feat/exact-orc-machinery` are GPU/research/backend lanes, not
+  compiler-core cleanup branches.
+- `origin/fix/main-ci-red-2026-06-18` and `origin/fix/website-quality-check`
+  are CI/website repair history, not compiler consolidation sources.
+
+Validation after this triage:
+
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
+
 ## Merge attempts made
 
 Attempted `git merge --no-ff fix/madaros-tuple-let-desugar` in the consolidation
