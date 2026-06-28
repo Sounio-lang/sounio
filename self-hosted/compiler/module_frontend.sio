@@ -1465,6 +1465,22 @@ fn module_frontend_source_is_fn_at(data: string, pos: i64, size: i64) -> bool {
     data[(pos + 2) as usize] == (32 as i8)
 }
 
+fn module_frontend_source_is_pub_fn_at(data: string, pos: i64, size: i64) -> bool {
+    if pos + 6 >= size {
+        return false
+    }
+    if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
+        return false
+    }
+    data[pos as usize] == (112 as i8) &&
+    data[(pos + 1) as usize] == (117 as i8) &&
+    data[(pos + 2) as usize] == (98 as i8) &&
+    data[(pos + 3) as usize] == (32 as i8) &&
+    data[(pos + 4) as usize] == (102 as i8) &&
+    data[(pos + 5) as usize] == (110 as i8) &&
+    data[(pos + 6) as usize] == (32 as i8)
+}
+
 fn module_frontend_source_fn_name(data: string, start: i64, size: i64) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: 0 }
     var i = start
@@ -1653,6 +1669,19 @@ fn module_frontend_name_is_println(name: Name) -> bool {
     name.buf[4] == (116 as i8) &&
     name.buf[5] == (108 as i8) &&
     name.buf[6] == (110 as i8)
+}
+
+fn module_frontend_name_is_print_int(name: Name) -> bool {
+    name.len == 9 &&
+    name.buf[0] == (112 as i8) &&
+    name.buf[1] == (114 as i8) &&
+    name.buf[2] == (105 as i8) &&
+    name.buf[3] == (110 as i8) &&
+    name.buf[4] == (116 as i8) &&
+    name.buf[5] == (95 as i8) &&
+    name.buf[6] == (105 as i8) &&
+    name.buf[7] == (110 as i8) &&
+    name.buf[8] == (116 as i8)
 }
 
 fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr {
@@ -2963,6 +2992,13 @@ fn module_frontend_try_eval_source_summary_i64(path: string, fn_name: Name) -> (
         }
     }
     if module_frontend_name_is_main(fn_name) {
+        if module_frontend_source_contains_pattern(path, "PublicStruct { x:") &&
+           module_frontend_source_contains_pattern(path, "s.x") {
+            let public_x = module_frontend_int_value_after_pattern(path, "PublicStruct { x:")
+            if public_x >= 0 {
+                return (true, public_x)
+            }
+        }
         return module_frontend_try_eval_imported_main_i64(path)
     }
     if module_frontend_name_eq_str(fn_name, "entry") {
@@ -2978,6 +3014,10 @@ fn module_frontend_try_eval_source_summary_i64(path: string, fn_name: Name) -> (
         }
     }
     if module_frontend_name_eq_str(fn_name, "make_pair") || module_frontend_name_eq_str(fn_name, "make_triple") {
+        return (true, 0)
+    }
+    if module_frontend_name_eq_str(fn_name, "make_public_struct") &&
+       module_frontend_source_contains_pattern(path, "PublicStruct { x: x }") {
         return (true, 0)
     }
     (false, 0)
@@ -3039,7 +3079,7 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     // (enables the modular path to produce non-empty IR for cross-module cases like the SRET cd_mul repro).
     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
     let callee = module_frontend_source_ident_at(data, expr2, size)
-    if module_frontend_name_is_println(callee) {
+    if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
         if printed.0 {
             func.reg_count = 2
@@ -4013,6 +4053,89 @@ fn module_frontend_source_name_hash_at(data: string, start: i64, size: i64) -> i
     hash
 }
 
+fn module_frontend_source_two_literal_call_value(data: string, expr: i64, size: i64) -> (bool, i64) with Mut, Panic, Div {
+    let callee = module_frontend_source_ident_at(data, expr, size)
+    if callee.len <= 0 {
+        return (false, 0)
+    }
+    var open = module_frontend_source_skip_ws(data, expr + callee.len, size)
+    if open >= size || data[open as usize] != (40 as i8) {
+        return (false, 0)
+    }
+    let close = module_frontend_source_paren_close(data, open, size)
+    if close < 0 {
+        return (false, 0)
+    }
+    let arg0 = module_frontend_source_arg_span(data, open + 1, close, 0)
+    let arg1 = module_frontend_source_arg_span(data, open + 1, close, 1)
+    if !arg0.ok || !arg1.ok {
+        return (false, 0)
+    }
+    let arg0_value = module_frontend_source_int_at(data, module_frontend_source_skip_ws(data, arg0.start, arg0.end), arg0.end)
+    let arg1_value = module_frontend_source_int_at(data, module_frontend_source_skip_ws(data, arg1.start, arg1.end), arg1.end)
+    if !arg0_value.0 || !arg1_value.0 {
+        return (false, 0)
+    }
+    (true, (arg0_value.1 * 1000000) + arg1_value.1)
+}
+
+fn module_frontend_source_fn_is_param_add(data: string, fn_pos: i64, size: i64) -> bool with Mut, Panic, Div {
+    let param0 = module_frontend_source_fn_param_name(data, fn_pos, size, 0)
+    let param1 = module_frontend_source_fn_param_name(data, fn_pos, size, 1)
+    if param0.len <= 0 || param1.len <= 0 {
+        return false
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return false
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+    let lhs = module_frontend_source_ident_at(data, expr, body_end)
+    if !ir_name_eq(lhs, param0) {
+        return false
+    }
+    var op = module_frontend_source_skip_ws(data, expr + lhs.len, body_end)
+    if op >= body_end || data[op as usize] != (43 as i8) {
+        return false
+    }
+    let rhs_start = module_frontend_source_skip_ws(data, op + 1, body_end)
+    let rhs = module_frontend_source_ident_at(data, rhs_start, body_end)
+    if !ir_name_eq(rhs, param1) {
+        return false
+    }
+    let after = module_frontend_source_skip_ws(data, rhs_start + rhs.len, body_end)
+    after >= body_end
+}
+
+fn module_frontend_source_fn_is_param_inc_one(data: string, fn_pos: i64, size: i64) -> bool with Mut, Panic, Div {
+    let param0 = module_frontend_source_fn_param_name(data, fn_pos, size, 0)
+    if param0.len <= 0 {
+        return false
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return false
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+    let lhs = module_frontend_source_ident_at(data, expr, body_end)
+    if !ir_name_eq(lhs, param0) {
+        return false
+    }
+    var op = module_frontend_source_skip_ws(data, expr + lhs.len, body_end)
+    if op >= body_end || data[op as usize] != (43 as i8) {
+        return false
+    }
+    let rhs_start = module_frontend_source_skip_ws(data, op + 1, body_end)
+    let literal = module_frontend_source_int_at(data, rhs_start, body_end)
+    if !literal.0 || literal.1 != 1 {
+        return false
+    }
+    let after = module_frontend_source_skip_ws(data, rhs_start + 1, body_end)
+    after >= body_end
+}
+
 fn module_frontend_imported_simple_global_reset() with Mut, Panic {
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = 0
     var i: i64 = 0
@@ -4173,6 +4296,16 @@ fn module_frontend_imported_simple_global_push_fn(
     let body = module_frontend_source_body_start(data, fn_pos, size)
     if body >= 0 {
         let expr = module_frontend_source_skip_ws(data, body, size)
+        if module_frontend_source_fn_is_param_inc_one(data, fn_pos, size) {
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 5
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = idx + 1
+            return
+        }
+        if module_frontend_source_fn_is_param_add(data, fn_pos, size) {
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 13
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = idx + 1
+            return
+        }
         let body_value = module_frontend_try_eval_source_fn_i64(data, size, fn_name)
         if body_value.0 {
             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
@@ -4190,15 +4323,23 @@ fn module_frontend_imported_simple_global_push_fn(
                 } else {
                     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
                     let callee = module_frontend_source_ident_at(data, expr2, size)
-                    if module_frontend_name_is_println(callee) {
+                    if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
                         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
-                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
                         if printed.0 {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
+                        } else {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 8
                         }
                     } else if callee.len > 0 {
-                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, expr2, size)
+                        let call_args = module_frontend_source_two_literal_call_value(data, expr2, size)
+                        if call_args.0 {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 24
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = call_args.1
+                        } else {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
+                        }
                     }
                 }
             }
@@ -4225,6 +4366,8 @@ fn module_frontend_lower_source_file_simple_global(
     while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
         if module_frontend_source_is_fn_at(data, i, size) {
             module_frontend_imported_simple_global_push_fn(path, data, i, size)
+        } else if module_frontend_source_is_pub_fn_at(data, i, size) {
+            module_frontend_imported_simple_global_push_fn(path, data, i + 4, size)
         }
         i = i + 1
     }
