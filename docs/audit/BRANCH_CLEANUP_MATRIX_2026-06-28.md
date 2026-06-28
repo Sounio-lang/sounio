@@ -323,8 +323,14 @@ classified in this audit as non-merge residuals:
   `archive/branch/nl-castle-native-orc-audit/2026-06-28` -> `da34c57d6`,
   then local/remote refs were deleted. It is ORC definition/audit provenance,
   not an active compiler consolidation source.
+- `parser/algebra-keyword-e008`: archived as
+  `archive/branch/parser-algebra-keyword-e008/2026-06-28` -> `ff0bc1166`,
+  then local/remote refs were deleted. Current consolidation already carries
+  lexer/parser support for `algebra`, `study`, and scientific notation; the
+  branch-level diff is an old E008 rollback/provenance shape and is not a safe
+  merge source.
 
-Post-delete counts: 61 local branches, 68 remote refs, 52 worktrees.
+Post-delete counts: 60 local branches, 67 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
