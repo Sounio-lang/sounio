@@ -398,20 +398,26 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
 
 ## Current zero-exclusive boundary
 
-After the cleanup above, only three attached worktrees still have no
+After the cleanup above, only two attached worktrees still have no
 patch-exclusive commits versus consolidation. They are **not** automatic
 deletion candidates:
 
 - `/workspace/sounio-metrics` (`metrics/fregni-profile`): untracked PPCR /
   survival-validation docs and tests. Clinical/external-facing policy applies;
   keep as owner lane until reviewed.
+- `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
+  (`worktree-agent-adc1cd8b9d52ba53b`): dirty native/compiler WIP in
+  `self-hosted/compiler/main.sio`, native codegen, lowerer, and suite. Needs
+  extraction/gates before cleanup.
+
+Closed since the previous boundary entry:
+
 - `/workspace/sounio-source-elf-proof`
-  (`codex/source-elf-on-madaros-proof`): dirty compiler WIP in checker/parser
-  plus Slurm runner. Re-reviewed against the current consolidation HEAD after
-  the zero-exclusive cleanup. Its committed history is patch-equivalent, and
-  its dirty diff would downgrade current checker/parser architecture: it
-  reverts heap-indirect struct/enum/fn tables, removes newer ontology verdict
-  and visibility plumbing, and removes parser newline guards for `[`/`(`/prefix
+  (`codex/source-elf-on-madaros-proof`): re-reviewed against current
+  consolidation HEAD. Its committed history was patch-equivalent, and its dirty
+  diff would downgrade current checker/parser architecture: it reverts
+  heap-indirect struct/enum/fn tables, removes newer ontology verdict and
+  visibility plumbing, and removes parser newline guards for `[`/`(`/prefix
   operators. The raw dirty diff was archived at
   `docs/audit/archived_wip/source-elf-proof-dirty-2026-06-28.patch`; do not
   port it wholesale. The original branch tip was archived as
@@ -420,10 +426,6 @@ deletion candidates:
   `codex/source-elf-on-madaros-proof` was deleted. No matching remote branch
   existed at cleanup time. Post-delete counts: 84 local branches, 91 remote
   refs, 52 worktrees.
-- `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
-  (`worktree-agent-adc1cd8b9d52ba53b`): dirty native/compiler WIP in
-  `self-hosted/compiler/main.sio`, native codegen, lowerer, and suite. Needs
-  extraction/gates before cleanup.
 
 ## Next cleanup commands, when owner approval exists
 
