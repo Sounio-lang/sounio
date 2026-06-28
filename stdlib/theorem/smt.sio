@@ -81,6 +81,15 @@
 //!         Expected score = act_mean (correct TS property: E[sample] = posterior mean).
 //!         act_var=0 → score = mean exactly (safe fallback, cannot regress vs mode 1).
 //!         Literature status: candidate combination, NOT a verified first — see NOVELTY STATUS.
+//!     5 = Discounted Empirical-Bernstein UCB-V [candidate experimental mode]:
+//!         The genuine concentrating, nonstationarity-robust variance-aware bonus the
+//!         mode-0 act_var is NOT (see VARIANCE CAVEAT). Replaces the growing act_var sum
+//!         with 3 discounted accumulators (disc_s0/s1/s2, γ=0.99, O(1) storage/update) over
+//!         a bounded 1/L reward; bonus concentrates as 1/sqrt(S0) to a nonzero floor.
+//!         score = mean + (β·disc_beta_scale)·[sqrt(2·var·ζ·ln(max(S0,2))/S0)+3·ζ·ln(max(S0,2))/S0].
+//!         CANDIDATE: prototype validates the math only, NOT improved solving — run the
+//!         β=0-vs-β>0 ablation (smt_set_disc_beta_scale). See:
+//!         docs/research/act-var-redefinition-prototype-2026-06-28.md.
 //!
 //! POLARITY TS (phase_mode=1) [candidate experimental mode]:
 //!   Beta-Bernoulli Thompson Sampling for polarity selection.
@@ -201,6 +210,24 @@ pub struct SmtContext {
     act_mean: [f64; 1024],
     act_var: [f64; 1024],
     bump_amount: f64,
+    // Discounted Empirical-Bernstein UCB-V accumulators (score_mode=5 ONLY).
+    // 3 discounted accumulators per variable (γ≈0.99, n_eff steady-state ≈ 100):
+    //   disc_s0 = γ·s0 + 1     (discounted count)
+    //   disc_s1 = γ·s1 + r     (discounted reward sum,   r∈[0,1])
+    //   disc_s2 = γ·s2 + r·r   (discounted sum of squares)
+    // Written by smt_bump_var_epistemic on EVERY bump event; READ ONLY in the
+    // score_mode==5 branch of smt_pick_branch_var. Modes 0-4 never read them, so
+    // they remain byte-identical (the no-regression invariant). Bounded by
+    // 1/(1-γ)≈100, so they never trip the smt_decay_activity rescale path and are
+    // intentionally excluded from it. See docs/research/act-var-redefinition-prototype-2026-06-28.md.
+    disc_s0: [f64; 1024],
+    disc_s1: [f64; 1024],
+    disc_s2: [f64; 1024],
+    // Exploration scale for score_mode=5, read ONLY in that branch:
+    //   score = mean + (global_beta * disc_beta_scale) * bonus
+    // Default 1.0. Set to 0.0 for the β=0 ablation (mode-5 → mean-only ranking),
+    // since regime_explore_trust is reset every smt_solve() and cannot be pinned externally.
+    disc_beta_scale: f64,
     phase: [i32; 1024],
     phase_conf: [f64; 1024],
     n_decisions: i32,
@@ -266,6 +293,10 @@ pub fn smt_new() -> SmtContext {
         act_mean: [0.0; 1024],
         act_var: [0.0; 1024],
         bump_amount: 1.0,
+        disc_s0: [0.0; 1024],
+        disc_s1: [0.0; 1024],
+        disc_s2: [0.0; 1024],
+        disc_beta_scale: 1.0,
         phase: [0; 1024],
         phase_conf: [0.5; 1024],
         n_decisions: 0,
@@ -337,6 +368,19 @@ fn smt_bump_var_epistemic(ctx: &!SmtContext, var_idx: i32, clause_len: i32, div_
     let var_frac = (len_f - 1.0) / len_f
     ctx.act_var[var_idx] = ctx.act_var[var_idx] +
         ctx.bump_amount * ctx.bump_amount * var_frac * div_mult
+    // Discounted Empirical-Bernstein UCB-V update (consumed only by score_mode=5).
+    // Reward r = 1/L: a 1/L-scaled conflict-relevance indicator in (0,1] — short
+    // clauses (concentrated, reliable blame) give high reward, long clauses low.
+    // HONEST NOTE: this fires on EVERY bump event (same events as act_mean), so
+    // decision and pure-literal bumps (L=1) inject r=1.0. It is therefore a blended
+    // relevance/conflict signal, not a pure conflict-participation reward — kept this
+    // way to satisfy "same events as the activity bump" and disclaimed accordingly.
+    // Does not affect modes 0-4 (write-only here) and cannot break DPLL completeness.
+    let disc_gamma: f64 = 0.99
+    let r = 1.0 / len_f
+    ctx.disc_s0[var_idx] = disc_gamma * ctx.disc_s0[var_idx] + 1.0
+    ctx.disc_s1[var_idx] = disc_gamma * ctx.disc_s1[var_idx] + r
+    ctx.disc_s2[var_idx] = disc_gamma * ctx.disc_s2[var_idx] + r * r
 }
 
 // Count distinct decision levels among assigned literals in a clause.
@@ -672,6 +716,9 @@ pub fn smt_reset_activities(ctx: &!SmtContext) with Mut {
     while i < 1024 {
         ctx.act_mean[i] = 0.0
         ctx.act_var[i] = 0.0
+        ctx.disc_s0[i] = 0.0
+        ctx.disc_s1[i] = 0.0
+        ctx.disc_s2[i] = 0.0
         ctx.phase_conf[i] = 0.5
         ctx.lrb_participated[i] = 0
         ctx.lrb_interval[i] = 0
@@ -684,6 +731,28 @@ pub fn smt_reset_activities(ctx: &!SmtContext) with Mut {
 
 pub fn smt_set_score_mode(ctx: &!SmtContext, mode: i32) with Mut {
     ctx.score_mode = mode
+}
+
+// Exploration scale for score_mode=5 (Discounted Empirical-Bernstein UCB-V).
+// scale=1.0 (default): full β·bonus. scale=0.0: β=0 ablation → mode-5 ranks by the
+// discounted mean S1/S0 only (mean-only). Read ONLY in the score_mode==5 branch;
+// has no effect on modes 0-4.
+pub fn smt_set_disc_beta_scale(ctx: &!SmtContext, scale: f64) with Mut {
+    ctx.disc_beta_scale = scale
+}
+
+// Discounted UCB-V accumulator getters (diagnostics / ablation reporting).
+pub fn smt_get_disc_s0(ctx: &SmtContext, var_idx: i32) -> f64 {
+    if var_idx < 0 { return 0.0 }
+    if var_idx >= 1024 { return 0.0 }
+    return ctx.disc_s0[var_idx]
+}
+
+pub fn smt_get_disc_mean(ctx: &SmtContext, var_idx: i32) -> f64 with Div {
+    if var_idx < 0 { return 0.0 }
+    if var_idx >= 1024 { return 0.0 }
+    if ctx.disc_s0[var_idx] < 0.000001 { return 0.0 }
+    return ctx.disc_s1[var_idx] / ctx.disc_s0[var_idx]
 }
 
 // Disable pure-literal elimination for ablation (isolates branching heuristic).
@@ -885,7 +954,7 @@ fn smt_all_assigned(ctx: &!SmtContext) -> bool with Mut {
     return true
 }
 
-// Five score modes:
+// Six score modes:
 //   0 = GUM-UCB adaptive: mean + β_density * sigma(v)
 //       β_density = 0.6*(1-density)² where density = conflicts/(conflicts+decisions+1)
 //       act_var=0 at start → score = mean, identical to mode 1 until first conflict.
@@ -893,6 +962,16 @@ fn smt_all_assigned(ctx: &!SmtContext) -> bool with Mut {
 //   2 = Wilson-LRB: Bayesian UCB on conflict-participation rate (CI-UCB)
 //   3 = Epistemic Thompson Sampling [candidate experimental mode]
 //   4 = Epistemic LRB [candidate experimental mode]
+//   5 = Discounted Empirical-Bernstein UCB-V [candidate experimental mode]
+//       3 discounted accumulators (disc_s0/s1/s2, γ=0.99) over a 1/L reward; bonus
+//       CONCENTRATES as 1/sqrt(S0) toward a nonzero floor and rises after a regime
+//       shift (validated on a synthetic nonstationary stream by the prototype below).
+//       mean = S1/S0; var = max(S2/S0 - mean², 0);
+//       bonus = sqrt(2·var·ζ·ln(max(S0,2))/S0) + 3·ζ·ln(max(S0,2))/S0  (ζ=1.2);
+//       score = mean + (global_beta·disc_beta_scale)·bonus, global_beta as in mode 0.
+//       Source: docs/research/act-var-redefinition-prototype-2026-06-28.md.
+//       CANDIDATE: validates the math (concentration/adaptation/boundedness) only —
+//       NOT verified to improve solving. Mode 0 stays the ablation baseline.
 //       GUM law of propagation on learning rate ratio LR[v] = participated/decided.
 //       σ²(LR) ≈ LR/decided (Poisson model: σ²_participated ≈ participated).
 //       score[v] = LR[v] + 0.5·sqrt(LR/decided)·regime_explore_trust
@@ -917,7 +996,7 @@ fn smt_pick_branch_var(ctx: &!SmtContext) -> i32 with Mut, Div {
     var best_var: i32 = (0 - 1) as i32
     var best_score: f64 = 0.0 - 1.0
     var global_beta: f64 = 0.0
-    if ctx.score_mode == 0 {
+    if ctx.score_mode == 0 || ctx.score_mode == 5 {
         global_beta = smt_adaptive_beta_v2(ctx) * ctx.regime_explore_trust
     }
     var i: i32 = 0
@@ -944,6 +1023,28 @@ fn smt_pick_branch_var(ctx: &!SmtContext) -> i32 with Mut, Div {
                 var sign: f64 = 1.0
                 if u_sgn < 0.5 { sign = 0.0 - 1.0 }
                 score = ctx.act_mean[i] + sign * z_abs * sigma
+            } else if ctx.score_mode == 5 {
+                // Discounted Empirical-Bernstein UCB-V (candidate, NOT verified to
+                // improve solving — see docs/research/act-var-redefinition-prototype-2026-06-28.md).
+                // mean = S1/S0 ; var = max(S2/S0 - mean², 0)
+                // bonus = sqrt(2·var·ζ·ln(max(S0,2))/S0) + 3·ζ·ln(max(S0,2))/S0   (ζ=1.2)
+                // score = mean + (global_beta·disc_beta_scale)·bonus
+                let s0 = ctx.disc_s0[i]
+                if s0 < 0.000001 {
+                    // No reward observed yet → mean 0, no bonus (matches mode-1 floor).
+                    score = 0.0
+                } else {
+                    let mean = ctx.disc_s1[i] / s0
+                    var variance = ctx.disc_s2[i] / s0 - mean * mean
+                    if variance < 0.0 { variance = 0.0 }
+                    let zeta: f64 = 1.2
+                    var s0_log = s0
+                    if s0_log < 2.0 { s0_log = 2.0 }
+                    let ln_s0 = smt_ln_f64(s0_log)
+                    let bonus = smt_sqrt_f64(2.0 * variance * zeta * ln_s0 / s0) +
+                        3.0 * zeta * ln_s0 / s0
+                    score = mean + global_beta * ctx.disc_beta_scale * bonus
+                }
             } else {
                 score = ctx.act_mean[i]
                 if ctx.score_mode == 0 {

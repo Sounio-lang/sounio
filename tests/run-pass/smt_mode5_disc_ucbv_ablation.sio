@@ -1,0 +1,105 @@
+//@ run-pass
+//@ expect-stdout: ABLATION DONE
+//
+// Ablation driver for score_mode=5 (Discounted Empirical-Bernstein UCB-V).
+// Compares the β=0 path (smt_set_disc_beta_scale=0.0 → mode-5 ranks by discounted
+// mean only) against β>0 (scale=1.0 → full UCB-V exploration bonus) on a set of
+// fixed-seed instances, reporting smt_get_decisions / smt_get_conflicts for each.
+//
+// This is the harness the prototype's "next step" calls for (the discriminability-
+// stratified ablation that would tell whether the variance bonus actually helps
+// solving — the math is validated, the heuristic value is NOT). It runs both arms
+// on identical formulas; the verdict (SAT/UNSAT) must match between arms (the bonus
+// only reorders branching, never changes satisfiability), while decisions/conflicts
+// may differ. Extend by adding stratified instances to build_instance.
+//
+// Reproduce: ./bin/souc run tests/run-pass/smt_mode5_disc_ucbv_ablation.sio
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+// Build a fixed-seed random 3-SAT instance with n_clauses over n_vars variables.
+fn build_instance(ctx: &!SmtContext, seed0: i64, n_clauses: i32, n_vars: i64) with Mut, Div {
+    var seed: i64 = seed0
+    var clause_idx: i32 = 0
+    while clause_idx < n_clauses {
+        var clause: [i32; 8] = [0 as i32; 8]
+        var lit_idx: i32 = 0
+        while lit_idx < 3 {
+            let raw_var = lcg_next(&! seed) % n_vars
+            let raw_pol = lcg_next(&! seed) % 2
+            clause[lit_idx] = (raw_var as i32) * 2 + (raw_pol as i32)
+            lit_idx = lit_idx + 1
+        }
+        smt_add_clause(ctx, &clause, 3)
+        clause_idx = clause_idx + 1
+    }
+}
+
+// Run one arm (a given disc_beta_scale) on a fresh instance, print stats, return verdict.
+fn run_arm(seed0: i64, n_clauses: i32, n_vars: i64, beta_scale: f64, label: i32) -> i32 with IO, Mut, Div {
+    var ctx = smt_new()
+    smt_set_score_mode(&! ctx, 5)
+    smt_set_disc_beta_scale(&! ctx, beta_scale)
+    // Disable pure-literal elimination so the branching heuristic (and thus the
+    // variance bonus) is actually exercised — classical DPLL, the right setting
+    // for a branching-heuristic ablation.
+    smt_set_no_ple(&! ctx, 1)
+    build_instance(&! ctx, seed0, n_clauses, n_vars)
+    let verdict = smt_solve(&! ctx)
+    let dec = smt_get_decisions(&ctx)
+    let conf = smt_get_conflicts(&ctx)
+    print("  arm=")
+    print_int(label as i64)
+    print(" verdict=")
+    print_int(verdict as i64)
+    print(" decisions=")
+    print_int(dec as i64)
+    print(" conflicts=")
+    print_int(conf as i64)
+    println("")
+    return verdict
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var mismatches: i32 = 0
+
+    // Three fixed-seed instances. label 0 = β=0 (scale 0.0), label 1 = β>0 (scale 1.0).
+    var inst: i32 = 0
+    while inst < 3 {
+        // Higher clause/var ratio (near/over the 3-SAT phase transition) so the
+        // search actually hits conflicts and the variance bonus is exercised.
+        let seed0 = 1000003 * ((inst as i64) + 1) + 7
+        let n_clauses: i32 = 100 + inst * 10
+        let n_vars: i64 = 5
+        print("instance ")
+        print_int(inst as i64)
+        println(":")
+        let v_beta0 = run_arm(seed0, n_clauses, n_vars, 0.0, 0)
+        let v_beta1 = run_arm(seed0, n_clauses, n_vars, 1.0, 1)
+        // Soundness cross-check: the exploration bonus only reorders branching,
+        // so both arms MUST agree on satisfiability.
+        if v_beta0 != v_beta1 {
+            println("  MISMATCH: beta=0 and beta>0 disagree on verdict")
+            mismatches = mismatches + 1
+        }
+        inst = inst + 1
+    }
+
+    println("---")
+    if mismatches == 0 {
+        println("ABLATION DONE: beta=0 vs beta>0 verdicts consistent across instances")
+        return 0
+    }
+    println("ABLATION DONE: verdict MISMATCH detected (soundness bug)")
+    return 1
+}
