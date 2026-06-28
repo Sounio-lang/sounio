@@ -30,7 +30,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="${SOUC:-./bin/souc}"
+# Pin lean_single: Madaros (bin/souc default) fails check/compile on Hessian
+# tests (E137 undeclared vars during imported IR merge). Same shim as suite gate.
+: "${SOUC:=$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh}"
 SRC_HESS="stdlib/darwin_pbpk/epistemic_pbpk14_hessian.sio"
 SRC_UNIT="tests/stdlib/darwin_pbpk/hessian_correction_test.sio"
 SRC_E2E="tests/run-pass/dissertation_pbpk14_hessian.sio"

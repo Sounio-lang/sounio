@@ -66,11 +66,19 @@ RMSE_THRESHOLD_PCT="${SOUNIO_DISSERTATION_PBPK28_PARITY_RMSE_PCT:-1.0}"
 echo "[pbpk28-parity] out=$OUT_DIR"
 echo "[pbpk28-parity] threshold=${RMSE_THRESHOLD_PCT}% RMSE per compartment (cavg)"
 
+# Pin the lean_single engine via run/check shim. `bin/souc` defaults to Madaros
+# (user-facing since 2026-06-14), which hangs on PBPK28 parity refs (~288s,
+# non-zero exit). Same shim as dissertation_pbpk_suite_gate.sh. CI may override
+# via SOUC_BIN.
+: "${SOUC_BIN:=$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh}"
+export SOUC_BIN
+
 # ─── Step 1: Sounio reference ────────────────────────────────────────────────
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
-echo "[pbpk28-parity] Sounio reference: bin/souc run tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio"
+echo "[pbpk28-parity] souc=$SOUC_BIN"
+echo "[pbpk28-parity] Sounio reference: $SOUC_BIN run tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio"
 "$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio > "$SIO_LOG" 2>&1 || {
   echo "[pbpk28-parity] FAIL: Sounio reference returned non-zero" >&2
   tail -n 40 "$SIO_LOG" >&2

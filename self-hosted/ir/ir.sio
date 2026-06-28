@@ -403,7 +403,7 @@ pub enum IrOpcode {
     // Epistemic source — measure(v: T, uncertainty: f64) → Knowledge<T> (H5.5)
     //   dst  = destination register (holds the observed datum)
     //   src1 = value register (the T being measured)
-    //   Codegen: MOV dst, src1 (zero-cost; uncertainty is type-level metadata)
+    //   Runtime ABI: MOV value lane; lowering binds uncertainty² as variance lane.
     IrMeasure,             // measure(value, uncertainty): Knowledge<T> intro from raw observation
 
     // Effect handler block boundaries — row-polymorphic effect handling (H6.2)
@@ -741,6 +741,7 @@ pub struct IrFunction {
     pub label_count: i64,
     pub param_count: i64,
     pub param_regs: [i64; 64],
+    pub param_knowledge_value_slots: [i64; 64],
     pub compile_strategy: i64,
     pub returns_float: i64,        // 1 = declared return type is f64; used by native core value tracking
     pub return_struct_name: Name,  // Named return type, used by native field layout recovery
@@ -2970,7 +2971,8 @@ fn ir_name_is_lift_knowledge(n: Name) -> bool {
 }
 
 // IrMeasure: measure(v: T, uncertainty: f64) → Knowledge<T> source (H5.5)
-// At machine level this is equivalent to IrCopy (MOV); uncertainty is type-level only.
+// Runtime Knowledge lowering carries value plus variance. This legacy instruction
+// remains a value-lane copy for paths that materialize variance separately.
 fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrMeasure)
     IrInstr {
@@ -3290,6 +3292,12 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
     }
 }
 
+pub fn ir_call_with_variance_dst(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64, variance_dst: i64) -> IrInstr with Mut, Panic {
+    var instr = ir_call(dst, fn_id, fn_name, args, arg_count)
+    instr.field_idx = variance_dst
+    instr
+}
+
 // Caller-side sret call. dest_reg = pre-allocated destination handle vreg (goes in rdi,
 // NOT counted in arg_count). first_arg = vreg of the first EXPLICIT arg (goes in rsi);
 // explicit args are dest contiguous vregs first_arg..first_arg+arg_count.
@@ -3369,6 +3377,12 @@ pub fn ir_return(src: i64) -> IrInstr {
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
+}
+
+pub fn ir_return_with_variance(src: i64, variance_src: i64) -> IrInstr with Mut, Panic {
+    var instr = ir_return(src)
+    instr.src2 = variance_src
+    instr
 }
 
 // N-limb carry-chain add. dst/src1/src2 = base vregs of L consecutive limb slots;
@@ -3529,6 +3543,7 @@ pub fn ir_empty_function() -> IrFunction {
         label_count: 0,
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
+        param_knowledge_value_slots: [0; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
         returns_float: 0,
         return_struct_name: ir_empty_name(),

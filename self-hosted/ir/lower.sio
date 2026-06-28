@@ -140,6 +140,14 @@ struct Lowerer {
     variance_base_regs: [i64; 1024],
     variance_value_regs: [i64; 1024],
     variance_base_reg_count: i64,
+    field_variance_base_regs: [i64; 1024],
+    field_variance_names: [Name; 1024],
+    field_variance_value_regs: [i64; 1024],
+    field_variance_count: i64,
+    index_variance_base_regs: [i64; 1024],
+    index_variance_indices: [i64; 1024],
+    index_variance_value_regs: [i64; 1024],
+    index_variance_count: i64,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
@@ -257,6 +265,14 @@ fn lowerer_new() -> Lowerer with Alloc {
         variance_base_regs: [IR_INVALID_REG; 1024],
         variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
+        field_variance_base_regs: [IR_INVALID_REG; 1024],
+        field_variance_names: [ir_empty_name(); 1024],
+        field_variance_value_regs: [IR_INVALID_REG; 1024],
+        field_variance_count: 0,
+        index_variance_base_regs: [IR_INVALID_REG; 1024],
+        index_variance_indices: [-1; 1024],
+        index_variance_value_regs: [IR_INVALID_REG; 1024],
+        index_variance_count: 0,
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -447,6 +463,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         var func = ir_empty_function()
         func.name = (*summary.module).functions[i as usize].name
         func.param_count = (*summary.module).functions[i as usize].param_count
+        func.param_knowledge_value_slots = (*summary.module).functions[i as usize].param_knowledge_value_slots
         func.compile_strategy = sm_strat
         func.returns_float = (*summary.module).functions[i as usize].returns_float
         func.return_struct_name = (*summary.module).functions[i as usize].return_struct_name
@@ -520,6 +537,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         var func = ir_empty_function()
         func.name = summary.module.functions[i as usize].name
         func.param_count = summary.module.functions[i as usize].param_count
+        func.param_knowledge_value_slots = summary.module.functions[i as usize].param_knowledge_value_slots
         func.compile_strategy = summary.module.functions[i as usize].compile_strategy
         func.returns_float = summary.module.functions[i as usize].returns_float
         func.return_struct_name = summary.module.functions[i as usize].return_struct_name
@@ -548,6 +566,66 @@ fn ir_param_list_count_ref(params: &Option<Box<ParamList>>) -> i64 with Alloc, M
         }
     }
     count
+}
+
+fn lower_type_expr_is_knowledge(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    (*te).kind == TypeExprKind::TypeKnowledge
+}
+
+fn lower_type_expr_is_knowledge_value_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeKnowledge { return false }
+    match (*te).knowledge_info {
+        Some(info) => lower_type_expr_is_f64(&(*info).inner_type),
+        None => false,
+    }
+}
+
+fn lower_opt_type_is_knowledge(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_knowledge(&(*te)),
+        None => false,
+    }
+}
+
+// Runtime ABI: Knowledge<T> is passed as value, variance.  The checker still owns
+// epsilon bounds; the lowered function ABI carries executable variance data.
+fn ir_param_list_runtime_count_ref(params: &Option<Box<ParamList>>) -> i64 with Alloc, Mut, Panic, Div {
+    var count: i64 = 0
+    var current = params
+    while true {
+        match *current {
+            Some(list) => {
+                count = count + 1
+                if lower_type_expr_is_knowledge(&(*list).head.ty) {
+                    count = count + 1
+                }
+                current = &(*list).tail
+            }
+            None => break
+        }
+    }
+    count
+}
+
+fn ir_param_list_runtime_knowledge_value_slots_ref(params: &Option<Box<ParamList>>, hidden_offset: i64) -> [i64; 64] with Alloc, Mut, Panic, Div {
+    var slots: [i64; 64] = [0; 64]
+    var slot: i64 = hidden_offset
+    var current = params
+    while true {
+        match *current {
+            Some(list) => {
+                if slot >= 0 && slot < 64 && lower_type_expr_is_knowledge(&(*list).head.ty) {
+                    slots[slot as usize] = 1
+                    slot = slot + 2
+                } else {
+                    slot = slot + 1
+                }
+                current = &(*list).tail
+            }
+            None => break
+        }
+    }
+    slots
 }
 
 fn ir_param_list_count(params: Option<Box<ParamList>>) -> i64 with Alloc, Mut, Div {
@@ -673,7 +751,8 @@ fn lowerer_preseed_fn_signature_mut(
     (*(*lo).module).functions[fn_id as usize].compile_strategy = strategy
     (*(*lo).module).functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
     (*(*lo).module).functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
-    (*(*lo).module).functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    (*(*lo).module).functions[fn_id as usize].param_count = ir_param_list_runtime_count_ref(params)
+    (*(*lo).module).functions[fn_id as usize].param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
     if strategy == IR_STRATEGY_INSTRUMENTED {
         (*(*lo).module).functions[fn_id as usize].param_count = (*(*lo).module).functions[fn_id as usize].param_count + 1
         if (*(*lo).module).functions[fn_id as usize].prof_counter_id < 0 {
@@ -974,7 +1053,8 @@ fn lowerer_preseed_program_items_mut(
                                     fn_slot_sig.compile_strategy = strategy_sig
                                     fn_slot_sig.returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
                                     fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
-                                    fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                                    fn_slot_sig.param_count = ir_param_list_runtime_count_ref(&(*fd).params)
+                                    fn_slot_sig.param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(&(*fd).params, if strategy_sig == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                                         fn_slot_sig.param_count = fn_slot_sig.param_count + 1
                                         if fn_slot_sig.prof_counter_id < 0 {
@@ -1103,7 +1183,8 @@ fn ir_fast_summary_preseed_fn_signature(
     module_value.functions[fn_id as usize].compile_strategy = strategy
     module_value.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
-    module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    module_value.functions[fn_id as usize].param_count = ir_param_list_runtime_count_ref(params)
+    module_value.functions[fn_id as usize].param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
     if strategy == IR_STRATEGY_INSTRUMENTED {
         module_value.functions[fn_id as usize].param_count = module_value.functions[fn_id as usize].param_count + 1
         if module_value.functions[fn_id as usize].prof_counter_id < 0 {
@@ -1227,7 +1308,8 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     module_value.functions[fn_id as usize].compile_strategy = strategy
     module_value.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
-    module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    module_value.functions[fn_id as usize].param_count = ir_param_list_runtime_count_ref(params)
+    module_value.functions[fn_id as usize].param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
     if strategy == IR_STRATEGY_INSTRUMENTED {
         module_value.functions[fn_id as usize].param_count = module_value.functions[fn_id as usize].param_count + 1
         if module_value.functions[fn_id as usize].prof_counter_id < 0 {
@@ -1532,7 +1614,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 module.functions[fn_id as usize].compile_strategy = strategy
                                 module.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
                                 module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
-                                module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                module.functions[fn_id as usize].param_count = ir_param_list_runtime_count_ref(&(*fd).params)
+                                module.functions[fn_id as usize].param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(&(*fd).params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
                                     module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                     if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -1617,7 +1700,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         module.functions[fn_id as usize].compile_strategy = strategy
                                                         module.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
                                                         module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
-                                                        module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                                        module.functions[fn_id as usize].param_count = ir_param_list_runtime_count_ref(&(*fd).params)
+                                                        module.functions[fn_id as usize].param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(&(*fd).params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
                                                             module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                                             if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -1771,6 +1855,9 @@ fn lowerer_lower_fn_params_mut(
                     if (*current_func_box).param_count < IR_MAX_PARAMS {
                         let param_count = (*current_func_box).param_count
                         (*current_func_box).param_regs[param_count as usize] = preg
+                        if lower_type_expr_is_knowledge(&(*list).head.ty) {
+                            (*current_func_box).param_knowledge_value_slots[param_count as usize] = 1
+                        }
                         (*current_func_box).param_count = param_count + 1
                         (*lo).current_func = current_func_box
                         if lower_live_diag_enabled() {
@@ -1783,7 +1870,7 @@ fn lowerer_lower_fn_params_mut(
                     }
                 }
 
-                if lower_type_expr_is_f64(&(*list).head.ty) {
+                if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_knowledge_value_f64(&(*list).head.ty) {
                     var current_func_box2 = (*lo).current_func
                     let instr_count = (*current_func_box2).instr_count
                     if instr_count < IR_MAX_INSTRS {
@@ -1797,6 +1884,29 @@ fn lowerer_lower_fn_params_mut(
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
+                if lower_type_expr_is_knowledge(&(*list).head.ty) {
+                    let variance_preg = lowerer_fresh_reg_mut(lo)
+                    let fn_id_v = (*lo).current_fn
+                    if fn_id_v < 0 || fn_id_v >= (*(*lo).module).fn_count {
+                        lowerer_mark_error(lo)
+                    } else {
+                        var current_func_box_v = (*lo).current_func
+                        if (*current_func_box_v).param_count < IR_MAX_PARAMS {
+                            let param_count_v = (*current_func_box_v).param_count
+                            (*current_func_box_v).param_regs[param_count_v as usize] = variance_preg
+                            (*current_func_box_v).param_count = param_count_v + 1
+                            let instr_count_v = (*current_func_box_v).instr_count
+                            if instr_count_v < IR_MAX_INSTRS {
+                                (*current_func_box_v).instrs[instr_count_v as usize] = ir_mark_float_reg(variance_preg)
+                                (*current_func_box_v).instr_count = instr_count_v + 1
+                            }
+                            (*lo).current_func = current_func_box_v
+                        } else {
+                            lowerer_mark_error(lo)
+                        }
+                    }
+                    (*lo) = (*lo).bind_local_variance_reg((*list).head.name, variance_preg)
+                }
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
                 }
@@ -1943,9 +2053,9 @@ fn lowerer_lower_fn_item_mut(
         if lower_opt_type_is_unit_or_implicit(&fd.return_type) {
             let unit_pair = (*lo).emit_unit()
             (*lo) = unit_pair.0
-            (*lo) = (*lo).emit(ir_return(unit_pair.1))
+            (*lo) = (*lo).emit_return_for_reg(unit_pair.1)
         } else {
-            (*lo) = (*lo).emit(ir_return(result_reg))
+            (*lo) = (*lo).emit_return_for_reg(result_reg)
         }
     }
     if lower_live_diag_enabled() {
@@ -2154,6 +2264,9 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
             if (*te).kind == TypeExprKind::TypeNamed {
                 return ir_path_first_name((*te).path)
             }
+            if (*te).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
             ir_empty_name()
         }
         None => ir_empty_name(),
@@ -2164,6 +2277,9 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
 // `self.method()` (and `param.method()`) can resolve the receiver's type — params were
 // previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeKnowledge {
+        return make_name("Knowledge")
+    }
     if (*ty).kind == TypeExprKind::TypeNamed {
         return ir_path_first_name((*ty).path)
     }
@@ -2293,6 +2409,21 @@ fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
     if lower_expr_is_f64_array_literal_ref(e) { return 2 }
     if lower_expr_has_float_source_ref(e) { return 1 }
     0
+}
+
+fn lower_static_index_expr_ref(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(expr) => {
+            if (*expr).kind == ExprKind::ExprIntLit {
+                return (*expr).int_val
+            }
+            if (*expr).kind == ExprKind::ExprCast {
+                return lower_static_index_expr_ref(&(*expr).left)
+            }
+            -1
+        }
+        None => -1,
+    }
 }
 
 struct CapturedClosureValueScan {
@@ -3869,6 +4000,153 @@ impl Lowerer {
         -1
     }
 
+    fn bind_variance_for_field(self, base_reg: i64, field_name: Name, variance_reg: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base_reg < 0 || variance_reg < 0 || field_name.len <= 0 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < lo.field_variance_count {
+            if lo.field_variance_base_regs[i as usize] == base_reg && ir_name_eq(lo.field_variance_names[i as usize], field_name) {
+                lo.field_variance_value_regs[i as usize] = variance_reg
+                return lo
+            }
+            i = i + 1
+        }
+        if lo.field_variance_count < 1024 {
+            let idx = lo.field_variance_count
+            lo.field_variance_base_regs[idx as usize] = base_reg
+            lo.field_variance_names[idx as usize] = field_name
+            lo.field_variance_value_regs[idx as usize] = variance_reg
+            lo.field_variance_count = idx + 1
+        }
+        lo
+    }
+
+    fn lookup_variance_for_field(self, base_reg: i64, field_name: Name) -> i64 with Mut, Panic, Div {
+        if base_reg < 0 || field_name.len <= 0 {
+            return -1
+        }
+        var i: i64 = 0
+        while i < self.field_variance_count {
+            if self.field_variance_base_regs[i as usize] == base_reg && ir_name_eq(self.field_variance_names[i as usize], field_name) {
+                return self.field_variance_value_regs[i as usize]
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn bind_variance_for_index(self, base_reg: i64, index: i64, variance_reg: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base_reg < 0 || index < 0 || variance_reg < 0 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < lo.index_variance_count {
+            if lo.index_variance_base_regs[i as usize] == base_reg && lo.index_variance_indices[i as usize] == index {
+                lo.index_variance_value_regs[i as usize] = variance_reg
+                return lo
+            }
+            i = i + 1
+        }
+        if lo.index_variance_count < 1024 {
+            let idx = lo.index_variance_count
+            lo.index_variance_base_regs[idx as usize] = base_reg
+            lo.index_variance_indices[idx as usize] = index
+            lo.index_variance_value_regs[idx as usize] = variance_reg
+            lo.index_variance_count = idx + 1
+        }
+        lo
+    }
+
+    fn lookup_variance_for_index(self, base_reg: i64, index: i64) -> i64 with Mut, Panic, Div {
+        if base_reg < 0 || index < 0 {
+            return -1
+        }
+        var i: i64 = 0
+        while i < self.index_variance_count {
+            if self.index_variance_base_regs[i as usize] == base_reg && self.index_variance_indices[i as usize] == index {
+                return self.index_variance_value_regs[i as usize]
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn clear_variance_metadata_for_base_reg(self, base_reg: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base_reg < 0 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < lo.variance_base_reg_count {
+            if lo.variance_base_regs[i as usize] == base_reg {
+                lo.variance_value_regs[i as usize] = IR_INVALID_REG
+            }
+            i = i + 1
+        }
+        i = 0
+        while i < lo.field_variance_count {
+            if lo.field_variance_base_regs[i as usize] == base_reg {
+                lo.field_variance_value_regs[i as usize] = IR_INVALID_REG
+            }
+            i = i + 1
+        }
+        i = 0
+        while i < lo.index_variance_count {
+            if lo.index_variance_base_regs[i as usize] == base_reg {
+                lo.index_variance_value_regs[i as usize] = IR_INVALID_REG
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    fn copy_variance_metadata_for_base_reg(self, src_base: i64, dst_base: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self.clear_variance_metadata_for_base_reg(dst_base)
+        if src_base < 0 || dst_base < 0 {
+            return lo
+        }
+        let src_base_variance = lo.lookup_variance_for_base_reg(src_base)
+        if src_base_variance >= 0 {
+            lo = lo.bind_variance_for_base_reg(dst_base, src_base_variance)
+        }
+        let field_count0 = lo.field_variance_count
+        var i: i64 = 0
+        while i < field_count0 {
+            if lo.field_variance_base_regs[i as usize] == src_base {
+                let field_v = lo.field_variance_value_regs[i as usize]
+                if field_v >= 0 {
+                    lo = lo.bind_variance_for_field(dst_base, lo.field_variance_names[i as usize], field_v)
+                }
+            }
+            i = i + 1
+        }
+        let index_count0 = lo.index_variance_count
+        i = 0
+        while i < index_count0 {
+            if lo.index_variance_base_regs[i as usize] == src_base {
+                let index_v = lo.index_variance_value_regs[i as usize]
+                if index_v >= 0 {
+                    lo = lo.bind_variance_for_index(dst_base, lo.index_variance_indices[i as usize], index_v)
+                }
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    fn emit_return_for_reg(self, value_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
+        let variance_reg0 = self.lookup_variance_for_base_reg(value_reg)
+        if variance_reg0 >= 0 {
+            return self.emit(ir_return_with_variance(value_reg, variance_reg0))
+        }
+        let zero_pair = self.emit_zero_variance()
+        let lo = zero_pair.0
+        lo.emit(ir_return_with_variance(value_reg, zero_pair.1))
+    }
+
     fn emit_zero_variance(self) -> (Lowerer, i64) with Mut, Panic, Div {
         self.emit_f64_const(0.0)
     }
@@ -3931,6 +4209,7 @@ impl Lowerer {
         let pair_dst = lo.fresh_reg()
         lo = pair_dst.0
         let dst = pair_dst.1
+        lo = lo.emit(ir_mark_float_reg(dst))
         lo = lo.emit(ir_binop(dst, scale_sq, BinaryOp::OpMul, variance_reg))
         lo = lo.emit(ir_mark_float_reg(dst))
         (lo, dst)
@@ -3991,6 +4270,7 @@ impl Lowerer {
                         let pair_v = lo.fresh_reg()
                         lo = pair_v.0
                         let variance_reg = pair_v.1
+                        lo = lo.emit(ir_mark_float_reg(variance_reg))
                         lo = lo.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
                         lo = lo.emit(ir_mark_float_reg(variance_reg))
                         return (lo, variance_reg)
@@ -4025,6 +4305,18 @@ impl Lowerer {
                 }
             }
             return (self, -1)
+        }
+        if (*e).kind == ExprKind::ExprIndex {
+            let pair_b = self.lower_opt_expr_ref(&(*e).left)
+            let lo = pair_b.0
+            let static_idx = lower_static_index_expr_ref(&(*e).right)
+            if static_idx >= 0 {
+                let indexed_variance = lo.lookup_variance_for_index(pair_b.1, static_idx)
+                if indexed_variance >= 0 {
+                    return (lo, indexed_variance)
+                }
+            }
+            return (lo, -1)
         }
         if (*e).kind == ExprKind::ExprBinary {
             let same_ident = self.expr_is_same_ident_ref(&(*e).left, &(*e).right)
@@ -5255,7 +5547,8 @@ impl Lowerer {
         func.compile_strategy = strategy
         func.returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
         func.return_struct_name = lower_opt_type_named_name(return_type)
-        func.param_count = ir_param_list_count_ref(params)
+        func.param_count = ir_param_list_runtime_count_ref(params)
+        func.param_knowledge_value_slots = ir_param_list_runtime_knowledge_value_slots_ref(params, if strategy == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 })
         func.param_regs = [IR_INVALID_REG; 64]
         func.instr_count = 0
         func.reg_count = 0
@@ -5599,9 +5892,11 @@ impl Lowerer {
         var j: i64 = (*lo.current_func).param_count
         while j > 0 {
             (*lo.current_func).param_regs[j as usize] = (*lo.current_func).param_regs[(j - 1) as usize]
+            (*lo.current_func).param_knowledge_value_slots[j as usize] = (*lo.current_func).param_knowledge_value_slots[(j - 1) as usize]
             j = j - 1
         }
         (*lo.current_func).param_regs[0] = validated_vreg
+        (*lo.current_func).param_knowledge_value_slots[0] = 0
         (*lo.current_func).param_count = (*lo.current_func).param_count + 1
         lo
     }
@@ -5630,6 +5925,9 @@ impl Lowerer {
                     if current_func.param_count < IR_MAX_PARAMS {
                         let param_count = current_func.param_count
                         current_func.param_regs[param_count as usize] = preg
+                        if lower_type_expr_is_knowledge(&(*list).head.ty) {
+                            current_func.param_knowledge_value_slots[param_count as usize] = 1
+                        }
                         current_func.param_count = param_count + 1
                         if lower_live_diag_enabled() {
                             print("lower_live: ref_param_count_now=")
@@ -5640,11 +5938,31 @@ impl Lowerer {
                         lo = lo.report_error()
                     }
 
-                    if lower_type_expr_is_f64(&(*list).head.ty) {
+                    if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_knowledge_value_f64(&(*list).head.ty) {
                         let instr_count = current_func.instr_count
                         if instr_count < IR_MAX_INSTRS {
                             current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
                             current_func.instr_count = instr_count + 1
+                        } else {
+                            lo = lo.report_error()
+                        }
+                    }
+
+                    var knowledge_variance_preg: i64 = -1
+                    if lower_type_expr_is_knowledge(&(*list).head.ty) {
+                        knowledge_variance_preg = current_func.reg_count
+                        current_func.reg_count = knowledge_variance_preg + 1
+                        if current_func.param_count < IR_MAX_PARAMS {
+                            let param_count_v = current_func.param_count
+                            current_func.param_regs[param_count_v as usize] = knowledge_variance_preg
+                            current_func.param_count = param_count_v + 1
+                            let instr_count_v = current_func.instr_count
+                            if instr_count_v < IR_MAX_INSTRS {
+                                current_func.instrs[instr_count_v as usize] = ir_mark_float_reg(knowledge_variance_preg)
+                                current_func.instr_count = instr_count_v + 1
+                            } else {
+                                lo = lo.report_error()
+                            }
                         } else {
                             lo = lo.report_error()
                         }
@@ -5660,6 +5978,12 @@ impl Lowerer {
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
+                        locals.global_bss_offsets[idx as usize] = 0
+                        locals.global_bss_sizes[idx as usize] = 0
+                        locals.is_global[idx as usize] = 0
+                        locals.scalar_kind[idx as usize] = 0
+                        locals.variance_regs[idx as usize] = knowledge_variance_preg
+                        locals.closure_fn_id[idx as usize] = -1
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -5968,7 +6292,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_return_for_reg(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -6123,7 +6447,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_return_for_reg(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -6348,9 +6672,13 @@ impl Lowerer {
             lo = pair_dst.0
             let dst = pair_dst.1
             lo = lo.emit(ir_copy(dst, reg))
+            lo = lo.copy_variance_metadata_for_base_reg(reg, dst)
             reg = dst
         }
         lo = lo.bind_local(s.name, reg, is_mut)
+        if lower_opt_type_is_knowledge(&s.ty) {
+            lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+        }
         if lower_name_is_tuple_temp(s.name) {
             match s.expr {
                 Some(expr_box_tuple_tmp) => {
@@ -6504,6 +6832,9 @@ impl Lowerer {
                 let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
                 lo = rhs_var_pair.0
                 rhs_variance = rhs_var_pair.1
+                if rhs_variance < 0 {
+                    rhs_variance = lo.lookup_variance_for_base_reg(rhs)
+                }
             }
             _ => {}
         }
@@ -6545,6 +6876,7 @@ impl Lowerer {
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
+                            lo = lo.copy_variance_metadata_for_base_reg(rhs, dst)
                             if rhs_variance >= 0 {
                                 lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
                                 lo = lo.bind_local_scalar_kind((*target_expr).name, 2)
@@ -6563,6 +6895,9 @@ impl Lowerer {
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
                                 lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                if rhs_variance >= 0 {
+                                    lo = lo.bind_variance_for_field(base_reg, (*target_expr).name, rhs_variance)
+                                }
                                 (lo, rhs)
                             }
                             _ => (lo.report_error(), rhs),
@@ -6575,6 +6910,10 @@ impl Lowerer {
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
                         lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
+                        let static_idx = lower_static_index_expr_ref(&(*target_expr).right)
+                        if rhs_variance >= 0 && static_idx >= 0 {
+                            lo = lo.bind_variance_for_index(base_reg, static_idx, rhs_variance)
+                        }
                         (lo, rhs)
                 } else if (*target_expr).kind == ExprKind::ExprUnary {
                         if (*target_expr).un_op == UnaryOp::OpDeref {
@@ -6642,6 +6981,131 @@ impl Lowerer {
                         reg_count = reg_count + 1
                     } else {
                         break
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if reg_count <= 0 {
+            let empty = IrRegList { head: 0, tail: None }
+            LowerExprArgsResult { lowerer: lo, regs: empty, count: 0 }
+        } else {
+            var idx = reg_count - 1
+            var args = IrRegList { head: regs[idx as usize], tail: None }
+            while idx > 0 {
+                idx = idx - 1
+                args = IrRegList { head: regs[idx as usize], tail: Some(Box::new(args)) }
+            }
+            LowerExprArgsResult { lowerer: lo, regs: args, count: reg_count }
+        }
+    }
+
+    fn lower_expr_args_runtime_ref(self, opt: &Option<Box<ExprList>>, expected_count: i64, knowledge_value_slots: [i64; 64], slot_offset: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        if expected_count <= 0 {
+            return self.lower_expr_args_ref(opt)
+        }
+        var lo = self
+        var current = opt
+        var regs: [i64; 64] = [0; 64]
+        var reg_count: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let pair_head = lo.lower_expr_ref(&(*list).head)
+                    lo = pair_head.0
+                    let value_slot = reg_count
+                    if reg_count < 64 {
+                        regs[reg_count as usize] = pair_head.1
+                        reg_count = reg_count + 1
+                    } else {
+                        break
+                    }
+                    let callee_slot = value_slot + slot_offset
+                    if callee_slot >= 0 && callee_slot < 64 && knowledge_value_slots[callee_slot as usize] == 1 && reg_count < expected_count {
+                        let var_pair = lo.lower_expr_variance_ref(&(*list).head)
+                        lo = var_pair.0
+                        let lowered_shadow = if var_pair.1 >= 0 { var_pair.1 } else { lo.lookup_variance_for_base_reg(pair_head.1) }
+                        let variance_pair = if lowered_shadow >= 0 { (lo, lowered_shadow) } else { lo.emit_zero_variance() }
+                        lo = variance_pair.0
+                        if reg_count < 64 {
+                            regs[reg_count as usize] = variance_pair.1
+                            reg_count = reg_count + 1
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if reg_count <= 0 {
+            let empty = IrRegList { head: 0, tail: None }
+            LowerExprArgsResult { lowerer: lo, regs: empty, count: 0 }
+        } else {
+            var idx = reg_count - 1
+            var args = IrRegList { head: regs[idx as usize], tail: None }
+            while idx > 0 {
+                idx = idx - 1
+                args = IrRegList { head: regs[idx as usize], tail: Some(Box::new(args)) }
+            }
+            LowerExprArgsResult { lowerer: lo, regs: args, count: reg_count }
+        }
+    }
+
+    fn lower_expr_args_runtime_for_fn_ref(self, fn_id: i64, opt: &Option<Box<ExprList>>, slot_offset: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        if fn_id < 0 || fn_id >= (*self.module).fn_count {
+            return self.lower_expr_args_ref(opt)
+        }
+        let expected_count = (*self.module).functions[fn_id as usize].param_count
+        let knowledge_slots = (*self.module).functions[fn_id as usize].param_knowledge_value_slots
+        self.lower_expr_args_runtime_ref(opt, expected_count, knowledge_slots, slot_offset)
+    }
+
+    fn lower_method_expr_args_runtime_ref(self, receiver_expr: &Option<Box<Expr>>, receiver_reg: i64, opt: &Option<Box<ExprList>>, expected_count: i64, knowledge_value_slots: [i64; 64], slot_offset: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var regs: [i64; 64] = [0; 64]
+        var reg_count: i64 = 0
+        if receiver_reg >= 0 {
+            regs[0] = receiver_reg
+            reg_count = 1
+            let receiver_slot = slot_offset
+            if expected_count > 0 && receiver_slot >= 0 && receiver_slot < 64 && knowledge_value_slots[receiver_slot as usize] == 1 && reg_count < expected_count {
+                let recv_var_pair = match *receiver_expr {
+                    Some(recv_expr) => lo.lower_expr_variance_ref(&(*recv_expr)),
+                    None => (lo, -1),
+                }
+                lo = recv_var_pair.0
+                let recv_shadow = if recv_var_pair.1 >= 0 { recv_var_pair.1 } else { lo.lookup_variance_for_base_reg(receiver_reg) }
+                let recv_variance_pair = if recv_shadow >= 0 { (lo, recv_shadow) } else { lo.emit_zero_variance() }
+                lo = recv_variance_pair.0
+                regs[reg_count as usize] = recv_variance_pair.1
+                reg_count = reg_count + 1
+            }
+        }
+        var current = opt
+        while true {
+            match *current {
+                Some(list) => {
+                    let pair_head = lo.lower_expr_ref(&(*list).head)
+                    lo = pair_head.0
+                    let value_slot = reg_count
+                    if reg_count < 64 {
+                        regs[reg_count as usize] = pair_head.1
+                        reg_count = reg_count + 1
+                    } else {
+                        break
+                    }
+                    let callee_slot = value_slot + slot_offset
+                    if expected_count > 0 && callee_slot >= 0 && callee_slot < 64 && knowledge_value_slots[callee_slot as usize] == 1 && reg_count < expected_count {
+                        let var_pair = lo.lower_expr_variance_ref(&(*list).head)
+                        lo = var_pair.0
+                        let lowered_shadow = if var_pair.1 >= 0 { var_pair.1 } else { lo.lookup_variance_for_base_reg(pair_head.1) }
+                        let variance_pair = if lowered_shadow >= 0 { (lo, lowered_shadow) } else { lo.emit_zero_variance() }
+                        lo = variance_pair.0
+                        if reg_count < 64 {
+                            regs[reg_count as usize] = variance_pair.1
+                            reg_count = reg_count + 1
+                        }
                     }
                     current = &(*list).tail
                 }
@@ -6733,7 +7197,12 @@ impl Lowerer {
         match *opt {
             Some(list) => {
                 var lo = self
-                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                var ccount_for_slots: i64 = 0
+                let cidx_for_slots = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx_for_slots >= 0 {
+                    ccount_for_slots = (*lo.closure_caps).entries[cidx_for_slots as usize].cap_count
+                }
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_runtime_for_fn_ref(closure_fn_id, &(*list).tail, ccount_for_slots)
                 lo = pair_tail.lowerer
                 var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
                 var total = pair_tail.count
@@ -6776,7 +7245,12 @@ impl Lowerer {
                     return (loe, pair_closure.1)
                 }
 
-                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_ref(&(*list).tail)
+                var ccount_for_slots: i64 = 0
+                let cidx_for_slots = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx_for_slots >= 0 {
+                    ccount_for_slots = (*lo.closure_caps).entries[cidx_for_slots as usize].cap_count
+                }
+                let pair_tail: LowerExprArgsResult = lo.lower_expr_args_runtime_for_fn_ref(closure_fn_id, &(*list).tail, ccount_for_slots)
                 lo = pair_tail.lowerer
                 var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
                 var total = pair_tail.count
@@ -6980,7 +7454,13 @@ impl Lowerer {
                     let pair = lo.lower_expr_ref(&(*list).head.value)
                     lo = pair.0
                     let vreg = pair.1
+                    let var_pair = lo.lower_expr_variance_ref(&(*list).head.value)
+                    lo = var_pair.0
+                    let field_variance = var_pair.1
                     lo = lo.emit(ir_field_set(base_reg, named_field_idx, vreg, (*list).head.name))
+                    if field_variance >= 0 {
+                        lo = lo.bind_variance_for_field(base_reg, (*list).head.name, field_variance)
+                    }
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
@@ -7004,11 +7484,17 @@ impl Lowerer {
                     let pair_v = lo.lower_expr_ref(&(*list).head)
                     lo = pair_v.0
                     let vreg = pair_v.1
+                    let var_pair = lo.lower_expr_variance_ref(&(*list).head)
+                    lo = var_pair.0
+                    let elem_variance = var_pair.1
                     let pair_i = lo.fresh_reg()
                     lo = pair_i.0
                     let ireg = pair_i.1
                     lo = lo.emit(ir_load_imm(ireg, elem_idx))
                     lo = lo.emit(ir_index_set(base_reg, ireg, vreg))
+                    if elem_variance >= 0 {
+                        lo = lo.bind_variance_for_index(base_reg, elem_idx, elem_variance)
+                    }
                     current = &(*list).tail
                     elem_idx = elem_idx + 1
                 }
@@ -7801,7 +8287,8 @@ impl Lowerer {
         (lo5, dst_reg)
     }
 
-    // Sprint 116: measure(v, uncertainty) → Knowledge<f64> struct construction
+    // Runtime Knowledge ABI: measure(v, uncertainty) returns the value lane and
+    // binds uncertainty² as the executable variance lane.
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // Extract first argument: value
         let value_pair = self.lower_measure_value_arg_ref(args)
@@ -7814,33 +8301,17 @@ impl Lowerer {
         let unc_reg = unc_pair.1
         lo2 = lo2.emit(ir_mark_float_reg(unc_reg))
 
-        // IrAlloc for Knowledge struct
-        let dst_pair = lo2.fresh_reg()
-        let lo3 = dst_pair.0
-        let dst_reg = dst_pair.1
-        let lo4 = lo3.emit(ir_alloc(dst_reg, 0))
-
-        // field 0: value
-        let lo5 = lo4.emit(ir_field_set(dst_reg, 0, value_reg, make_name("value")))
-
-        // field 1: variance = uncertainty * uncertainty
-        let var_pair = lo5.fresh_reg()
+        // variance = uncertainty * uncertainty
+        let var_pair = lo2.fresh_reg()
         let lo6 = var_pair.0
         let variance_reg = var_pair.1
-        var lo7 = lo6.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+        var lo7 = lo6.emit(ir_mark_float_reg(variance_reg))
+        lo7 = lo7.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
         lo7 = lo7.emit(ir_mark_float_reg(variance_reg))
-        let lo8 = lo7.emit(ir_field_set(dst_reg, 1, variance_reg, make_name("variance")))
+        lo7 = lo7.bind_variance_for_base_reg(value_reg, variance_reg)
+        lo7.pending_variance_reg = variance_reg
 
-        // field 2: confidence = 1.0
-        let conf_pair = lo8.fresh_reg()
-        let lo9 = conf_pair.0
-        let conf_reg = conf_pair.1
-        let lo10 = lo9.emit(ir_load_float(conf_reg, 1.0))
-        var lo11 = lo10.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
-        lo11 = lo11.bind_variance_for_base_reg(dst_reg, variance_reg)
-        lo11.pending_variance_reg = variance_reg
-
-        (lo11, dst_reg)
+        (lo7, value_reg)
     }
 
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -7887,7 +8358,18 @@ impl Lowerer {
         let lo2 = dst_pair.0
         let dst_reg = dst_pair.1
         let contest_id = lo2.find_contest_id_for_span(span)
-        let lo3 = lo2.emit(ir_lift_knowledge(dst_reg, knowledge_reg, contest_id))
+        let var_pair = match args {
+            Some(list_v) => lo2.lower_expr_variance_ref(&(*list_v).head),
+            None => (lo2, -1),
+        }
+        var lo3 = var_pair.0
+        let v0 = var_pair.1
+        let v_pair2 = if v0 >= 0 { (lo3, v0) } else { lo3.emit_zero_variance() }
+        lo3 = v_pair2.0
+        let variance_reg = v_pair2.1
+        lo3 = lo3.emit(ir_lift_knowledge(dst_reg, knowledge_reg, contest_id))
+        lo3 = lo3.bind_variance_for_base_reg(dst_reg, variance_reg)
+        lo3.pending_variance_reg = variance_reg
         (lo3, dst_reg)
     }
 
@@ -8369,14 +8851,34 @@ impl Lowerer {
         if hof_closure_local_fn >= 0 && lo1.lower_function_is_transparent_hof(fn_id) {
             return lo1.lower_hof_captured_closure_local_call(hof_closure_local_fn, callee_name, &e.args)
         }
-        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
+        let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo1.module).fn_count { (*lo1.module).functions[fn_id as usize].compile_strategy } else { 0 }
+        let callee_expected_args: i64 = if fn_id >= 0 && fn_id < (*lo1.module).fn_count {
+            let pc = (*lo1.module).functions[fn_id as usize].param_count
+            if callee_strat_ext == IR_STRATEGY_INSTRUMENTED && pc > 0 { pc - 1 } else { pc }
+        } else {
+            0
+        }
+        var callee_knowledge_value_slots: [i64; 64] = [0; 64]
+        if fn_id >= 0 && fn_id < (*lo1.module).fn_count {
+            callee_knowledge_value_slots = (*lo1.module).functions[fn_id as usize].param_knowledge_value_slots
+        }
+        let callee_slot_offset = if callee_strat_ext == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 }
+        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_runtime_ref(&e.args, callee_expected_args, callee_knowledge_value_slots, callee_slot_offset)
         let lo2 = pair_args.lowerer
         let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let argc = pair_args.count
         let pair_d = lo2.fresh_reg()
-        let lo3 = pair_d.0
+        var lo3 = pair_d.0
         let dst = pair_d.1
-        let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { (*lo3.module).functions[fn_id as usize].compile_strategy } else { 0 }
+        var return_variance_dst: i64 = -1
+        if fn_id >= 0 && fn_id < (*lo3.module).fn_count {
+            let ret_name = (*lo3.module).functions[fn_id as usize].return_struct_name
+            if (*lo3.module).functions[fn_id as usize].returns_float == 1 || ir_name_eq(ret_name, make_name("Knowledge")) {
+                let ret_var_pair = lo3.fresh_reg()
+                lo3 = ret_var_pair.0
+                return_variance_dst = ret_var_pair.1
+            }
+        }
         if callee_strat_ext == 6 {
             let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
             return (lo_ext, dst)
@@ -8385,7 +8887,11 @@ impl Lowerer {
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
-        var call_instr = ir_call(dst, fn_id, callee_name, final_args, final_argc)
+        var call_instr = if return_variance_dst >= 0 {
+            ir_call_with_variance_dst(dst, fn_id, callee_name, final_args, final_argc, return_variance_dst)
+        } else {
+            ir_call(dst, fn_id, callee_name, final_args, final_argc)
+        }
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             if (*lo4.module).functions[fn_id as usize].returns_float == 1 {
                 call_instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
@@ -8394,6 +8900,11 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if return_variance_dst >= 0 {
+            lo5 = lo5.emit(ir_mark_float_reg(return_variance_dst))
+            lo5 = lo5.bind_variance_for_base_reg(dst, return_variance_dst)
+            lo5.pending_variance_reg = return_variance_dst
         }
         (lo5, dst)
     }
@@ -8444,7 +8955,54 @@ impl Lowerer {
                 let info = (*lo3.module).epistemic.hyper_exprs[hyper_expr_id as usize]
                 if info.op_kind == 1 && info.algebra_tag == 3 {
                     let lo4_h = if info.knowledge_wrapped {
-                        lo3.emit(ir_hyper_epistemic_mul(dst, lhs, rhs))
+                        let lv_pair = match e.left {
+                            Some(left_expr) => lo3.lower_expr_variance_ref(&(*left_expr)),
+                            None => (lo3, -1),
+                        }
+                        var lo_k = lv_pair.0
+                        let lv0 = lv_pair.1
+                        let lv_pair2 = if lv0 >= 0 { (lo_k, lv0) } else { lo_k.emit_zero_variance() }
+                        lo_k = lv_pair2.0
+                        let lhs_var = lv_pair2.1
+
+                        let rv_pair = match e.right {
+                            Some(right_expr) => lo_k.lower_expr_variance_ref(&(*right_expr)),
+                            None => (lo_k, -1),
+                        }
+                        lo_k = rv_pair.0
+                        let rv0 = rv_pair.1
+                        let rv_pair2 = if rv0 >= 0 { (lo_k, rv0) } else { lo_k.emit_zero_variance() }
+                        lo_k = rv_pair2.0
+                        let rhs_var = rv_pair2.1
+
+                        let lhs_pair_v = lo_k.fresh_reg()
+                        lo_k = lhs_pair_v.0
+                        let lhs_value_lane = lhs_pair_v.1
+                        let lhs_pair_var = lo_k.fresh_reg()
+                        lo_k = lhs_pair_var.0
+                        let lhs_variance_lane = lhs_pair_var.1
+                        lo_k = lo_k.emit(ir_copy(lhs_value_lane, lhs))
+                        lo_k = lo_k.emit(ir_copy(lhs_variance_lane, lhs_var))
+
+                        let rhs_pair_v = lo_k.fresh_reg()
+                        lo_k = rhs_pair_v.0
+                        let rhs_value_lane = rhs_pair_v.1
+                        let rhs_pair_var = lo_k.fresh_reg()
+                        lo_k = rhs_pair_var.0
+                        let rhs_variance_lane = rhs_pair_var.1
+                        lo_k = lo_k.emit(ir_copy(rhs_value_lane, rhs))
+                        lo_k = lo_k.emit(ir_copy(rhs_variance_lane, rhs_var))
+
+                        let out_pair_v = lo_k.fresh_reg()
+                        lo_k = out_pair_v.0
+                        let out_value_lane = out_pair_v.1
+                        let out_pair_var = lo_k.fresh_reg()
+                        lo_k = out_pair_var.0
+                        let out_variance_lane = out_pair_var.1
+                        lo_k = lo_k.emit(ir_hyper_epistemic_mul(out_value_lane, lhs_value_lane, rhs_value_lane))
+                        lo_k = lo_k.bind_variance_for_base_reg(out_value_lane, out_variance_lane)
+                        lo_k.pending_variance_reg = out_variance_lane
+                        return (lo_k, out_value_lane)
                     } else {
                         lo3.emit(ir_hyper_mul_o(dst, lhs, rhs))
                     }
@@ -8496,6 +9054,37 @@ impl Lowerer {
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base = pair_b.1
+        let runtime_variance = match e.left {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    lo1.lookup_local_variance_reg((*base_expr).name)
+                } else {
+                    lo1.lookup_variance_for_base_reg(base)
+                }
+            }
+            None => lo1.lookup_variance_for_base_reg(base),
+        }
+        if runtime_variance >= 0 {
+            if ir_name_eq(e.name, make_name("value")) {
+                return (lo1, base)
+            }
+            if ir_name_eq(e.name, make_name("variance")) {
+                return (lo1, runtime_variance)
+            }
+            if ir_name_eq(e.name, make_name("epsilon")) {
+                var lo_eps = lo1
+                let sqrt_id = lowerer_find_or_add_fn_id_mut(&! lo_eps, make_name("sqrt"))
+                let eps_pair = lo_eps.fresh_reg()
+                lo_eps = eps_pair.0
+                let eps_reg = eps_pair.1
+                let sqrt_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(runtime_variance)))
+                var instr_eps = ir_call(eps_reg, sqrt_id, make_name("sqrt"), sqrt_args, 1)
+                instr_eps.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                lo_eps = lo_eps.emit(instr_eps)
+                lo_eps = lo_eps.emit(ir_mark_float_reg(eps_reg))
+                return (lo_eps, eps_reg)
+            }
+        }
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
         let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
@@ -8552,6 +9141,11 @@ impl Lowerer {
         if field_array_elem_is_float {
             lo3 = lo3.bind_reg_array_elem_float(dst)
         }
+        let field_variance = lo3.lookup_variance_for_field(base, e.name)
+        if field_variance >= 0 {
+            lo3 = lo3.bind_variance_for_base_reg(dst, field_variance)
+            lo3.pending_variance_reg = field_variance
+        }
         (lo3, dst)
     }
 
@@ -8585,6 +9179,14 @@ impl Lowerer {
         var lo4 = lo3.emit(instr)
         if index_elem_is_float {
             lo4 = lo4.emit(ir_mark_float_reg(dst))
+        }
+        let static_idx = lower_static_index_expr_ref(&e.right)
+        if static_idx >= 0 {
+            let indexed_variance = lo4.lookup_variance_for_index(base, static_idx)
+            if indexed_variance >= 0 {
+                lo4 = lo4.bind_variance_for_base_reg(dst, indexed_variance)
+                lo4.pending_variance_reg = indexed_variance
+            }
         }
         (lo4, dst)
     }
@@ -8710,24 +9312,48 @@ impl Lowerer {
         let recv_type = self.lower_method_recv_type(&e.left)
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_b.0
+        var lo1 = pair_b.0
         let base_reg = pair_b.1
-        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
+        let pair_fn = lo1.find_or_add_fn_id(call_name)
+        lo1 = pair_fn.0
+        let fn_id = pair_fn.1
+        let callee_strat_m: i64 = if fn_id >= 0 && fn_id < (*lo1.module).fn_count { (*lo1.module).functions[fn_id as usize].compile_strategy } else { 0 }
+        let callee_expected_args_m: i64 = if fn_id >= 0 && fn_id < (*lo1.module).fn_count {
+            let pc_m = (*lo1.module).functions[fn_id as usize].param_count
+            if callee_strat_m == IR_STRATEGY_INSTRUMENTED && pc_m > 0 { pc_m - 1 } else { pc_m }
+        } else {
+            0
+        }
+        var callee_knowledge_value_slots_m: [i64; 64] = [0; 64]
+        if fn_id >= 0 && fn_id < (*lo1.module).fn_count {
+            callee_knowledge_value_slots_m = (*lo1.module).functions[fn_id as usize].param_knowledge_value_slots
+        }
+        let callee_slot_offset_m = if callee_strat_m == IR_STRATEGY_INSTRUMENTED { 1 } else { 0 }
+        let pair_args: LowerExprArgsResult = lo1.lower_method_expr_args_runtime_ref(&e.left, base_reg, &e.args, callee_expected_args_m, callee_knowledge_value_slots_m, callee_slot_offset_m)
         let lo2 = pair_args.lowerer
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
-        let args2 = lo2.prepend_arg(base_reg, arg_list)
-        let pair_fn = lo2.find_or_add_fn_id(call_name)
-        let lo3 = pair_fn.0
-        let fn_id = pair_fn.1
-        let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
+        let pair_call = lo2.ir_lower_prepend_validated_arg(fn_id, arg_list, arg_count)
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
         let pair_d = lo4.fresh_reg()
-        let lo5 = pair_d.0
+        var lo5 = pair_d.0
         let dst = pair_d.1
-        var call_instr_m = ir_call(dst, fn_id, call_name, final_args, final_argc)
+        var return_variance_dst_m: i64 = -1
+        if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
+            let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
+            if (*lo5.module).functions[fn_id as usize].returns_float == 1 || ir_name_eq(ret_name_m, make_name("Knowledge")) {
+                let ret_var_pair_m = lo5.fresh_reg()
+                lo5 = ret_var_pair_m.0
+                return_variance_dst_m = ret_var_pair_m.1
+            }
+        }
+        var call_instr_m = if return_variance_dst_m >= 0 {
+            ir_call_with_variance_dst(dst, fn_id, call_name, final_args, final_argc, return_variance_dst_m)
+        } else {
+            ir_call(dst, fn_id, call_name, final_args, final_argc)
+        }
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             if (*lo5.module).functions[fn_id as usize].returns_float == 1 {
                 call_instr_m.imm_flags = IR_FLOAT_REG_MARKER_FLAG
@@ -8736,6 +9362,11 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if return_variance_dst_m >= 0 {
+            lo6 = lo6.emit(ir_mark_float_reg(return_variance_dst_m))
+            lo6 = lo6.bind_variance_for_base_reg(dst, return_variance_dst_m)
+            lo6.pending_variance_reg = return_variance_dst_m
         }
         (lo6, dst)
     }
@@ -8944,9 +9575,20 @@ impl Lowerer {
 
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_opt_expr_ref(&e.left)
-        let lo = pair.0
+        var lo = pair.0
         let reg = pair.1
-        let lo2 = lo.emit(ir_return(reg))
+        match e.left {
+            Some(expr_box_v) => {
+                let var_pair = lo.lower_expr_variance_ref(&(*expr_box_v))
+                lo = var_pair.0
+                let lowered_shadow = if var_pair.1 >= 0 { var_pair.1 } else { lo.lookup_variance_for_base_reg(reg) }
+                if lowered_shadow >= 0 {
+                    lo = lo.bind_variance_for_base_reg(reg, lowered_shadow)
+                }
+            }
+            _ => {}
+        }
+        let lo2 = lo.emit_return_for_reg(reg)
         (lo2, reg)
     }
 
@@ -9461,10 +10103,45 @@ impl Lowerer {
                     if (*cf_box).param_count < IR_MAX_PARAMS {
                         let pc = (*cf_box).param_count
                         (*cf_box).param_regs[pc as usize] = preg
+                        if lower_type_expr_is_knowledge(&(*plist).head.ty) {
+                            (*cf_box).param_knowledge_value_slots[pc as usize] = 1
+                        }
                         (*cf_box).param_count = pc + 1
+                        if lower_type_expr_is_f64(&(*plist).head.ty) || lower_type_expr_is_knowledge_value_f64(&(*plist).head.ty) {
+                            let instr_count = (*cf_box).instr_count
+                            if instr_count < IR_MAX_INSTRS {
+                                (*cf_box).instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                                (*cf_box).instr_count = instr_count + 1
+                            } else {
+                                lo = lo.report_error()
+                            }
+                        }
                     }
                     lo.current_func = cf_box
                     lo = lo.bind_local((*plist).head.name, preg, false)
+                    lo = lo.bind_local_struct_type((*plist).head.name, lower_param_struct_type_name(&(*plist).head.ty))
+                    if lower_type_expr_is_knowledge(&(*plist).head.ty) {
+                        let variance_preg_pair = lo.fresh_reg()
+                        lo = variance_preg_pair.0
+                        let variance_preg = variance_preg_pair.1
+                        var cf_box_v = lo.current_func
+                        if (*cf_box_v).param_count < IR_MAX_PARAMS {
+                            let pc_v = (*cf_box_v).param_count
+                            (*cf_box_v).param_regs[pc_v as usize] = variance_preg
+                            (*cf_box_v).param_count = pc_v + 1
+                            let instr_count_v = (*cf_box_v).instr_count
+                            if instr_count_v < IR_MAX_INSTRS {
+                                (*cf_box_v).instrs[instr_count_v as usize] = ir_mark_float_reg(variance_preg)
+                                (*cf_box_v).instr_count = instr_count_v + 1
+                            } else {
+                                lo = lo.report_error()
+                            }
+                        } else {
+                            lo = lo.report_error()
+                        }
+                        lo.current_func = cf_box_v
+                        lo = lo.bind_local_variance_reg((*plist).head.name, variance_preg)
+                    }
                     params = &(*plist).tail
                 }
                 _ => break
@@ -9474,7 +10151,7 @@ impl Lowerer {
         // 5. Lower the closure body using the standard optional-expression path.
         let body_pair = lo.lower_opt_expr_ref(&e.closure_body)
         lo = body_pair.0
-        lo = lo.emit(ir_return(body_pair.1))
+        lo = lo.emit_return_for_reg(body_pair.1)
 
         // 7. Flush the completed closure function back to the module. Extract the module
         // Box to a local first (as lowerer_flush_current_func_mut does) — the direct
