@@ -382,6 +382,16 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   removed, and local/remote `fix/assoc-variance-273-consolidated` refs were
   deleted. Post-delete counts: 86 local branches, 91 remote refs, 54 worktrees.
 
+- `/workspace/sounio-f64cmp` -> `minimax/f64-compare`: the branch had no
+  patch-exclusive commits versus consolidation and no matching remote branch.
+  Dirty state was not compiler-core: an executable-bit-only change to
+  `artifacts/sprint72/check_single.elf`, an untracked backup of
+  `slurm-jobs/erdos90/run_on_cluster.sh`, and a Slurm runner WIP that defaulted
+  the partition to `all`, selected a `souc` with a `compile` subcommand, exported
+  `SOUNIO_STDLIB_PATH`, and added `--gres=gpu:0` to `srun`. This patch was
+  archived in the audit rather than ported into compiler consolidation.
+  Archive/delete evidence will be recorded below after tag and branch removal.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
