@@ -22,8 +22,10 @@ Branch counts observed in this session:
 
 ## Current ownership split
 
-Do not use `/workspace/sounio` as the integration surface. It is detached at
-`d7befc9d1` and should remain coordination/read-only until explicitly moved.
+Do not use `/workspace/sounio` as the integration surface. As of the 2026-06-28
+refresh it is on `feat/hyper-epistemic-mul` at `2973e2130` and should remain a
+coordination/review surface for that experimental branch, not the compiler
+consolidation landing lane.
 
 The consolidation surface is:
 
@@ -68,6 +70,7 @@ but are not safe for automatic merge:
 - `codex/madaros-retire-lean-single-20260627` and `codex/madaros-close-20260627`: overlapping Madaros closeout trains; likely supersede some older branches, but need gate-by-gate merge.
 - `claude/solver-gpu-native-path` and `claude/gpu-e137-fix`: solver/GPU path branches; keep out of compiler core until ownership is assigned.
 - `fix/binop-literal-float-478b`: reviewed and rejected as a compiler merge candidate. It contains only `DEBUG:` commits in `self-hosted/native/codegen_x86_linux.sio` that reshape `SOUNIO_NV2_IR_TRACE` printing; it does not contain a semantic fix for binop literal floats. Keep only as forensic trace history unless a real #478 fix is identified.
+- `feat/hyper-epistemic-mul`: reviewed and rejected for immediate consolidation. It adds `IrHyperEpistemicMul` backend/Metal pieces, but the opcode is not produced by the normal compiler path, no `ir_hyper_epistemic_*` constructor or focused gate was found, and the committed audit/help text still describes the rejected associator-correction variant. Keep as an experimental/review lane until the audit doc is corrected, the user-visible help text matches the v2 formula, and either a real producer plus gate lands or the branch is explicitly scoped as backend-only prototype.
 - `codex/tuple-signature-types-20260626`: reviewed. The parser, checker, native implicit-unit/assert, and native bool-literal fixes are already equivalent in the consolidation branch; remaining exclusive commits are GPU/script/test-bookkeeping and should not drive the compiler-core merge.
 - `codex/madaros-import-stdlib-lowering-current`: older imported-stdlib lowering branch; conflicts with the newer imported-lowering path already on `origin/main`.
 - `codex/madaros-boxnew-clean` and `codex/madaros-boxnew-append-fix`: older Box::new trains; need comparison against current `origin/main` before any merge.
@@ -497,3 +500,44 @@ native-v2 ELF execution for:
 Not ported in this pass: the old `scripts/ci/madaros_source_to_elf_gate.sh`
 replacement and broad `opt_cleanup.sio` re-splits; the current consolidation
 already has the canonical source-to-ELF gate passing.
+
+## Hyper-epistemic multiplication branch triage
+
+Reviewed `feat/hyper-epistemic-mul` (`2973e2130`).
+
+Do not absorb into `integration/compiler-consolidation-20260628` yet.
+
+Findings:
+
+- The branch adds `IrHyperEpistemicMul` to the IR enum, native dispatch/lowering,
+  and a Metal emission path, but no normal compiler producer was found. Searches
+  for `IrHyperEpistemicMul`, `ir_hyper_epistemic`, `lower_hyper_epistemic`, and
+  `hyper_epistemic_mul` found enum/backend/docs/tool-pattern references only;
+  unlike older hyper opcodes, there is no constructor analogous to
+  `ir_hyper_mul_o` and no source-to-IR lowering path.
+- The audit document committed on the branch still describes the earlier
+  associator-correction design even though the commit message and code comments
+  say that formula was rejected and removed. That makes the branch unsafe as an
+  external-facing math/audit artifact.
+- `self-hosted/gpu/kretikos_emit_metal.sio` still has user-visible help text
+  claiming associator correction, which conflicts with the v2 GUM variance
+  implementation.
+- No focused gate was found for either the native-v2 opcode path or the Metal
+  pattern emission path.
+
+Validation attempted on the branch:
+
+- `bin/souc --check self-hosted/gpu/kretikos_emit_metal.sio`: FAIL on the
+  current branch surface. The failure was not attributed to this commit because
+  it was not parent-compared and appears mixed with existing broad check noise.
+- `bin/souc --check self-hosted/native/lower_ir.sio`: FAIL on the current branch
+  surface. Likewise, not attributed to this commit without parent comparison.
+
+Required before reconsidering for consolidation:
+
+- Rewrite the audit doc so it contains only the accepted v2 formula and honest
+  backend scope.
+- Fix the Metal/kretikos help text to remove associator-correction claims.
+- Add either a real source/IR producer plus a focused native-v2 gate, or mark the
+  branch explicitly as a backend-only prototype with a manual IR/codegen gate.
+- Add a Metal emission smoke/golden test if the Metal path remains in scope.
