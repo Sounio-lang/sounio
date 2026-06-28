@@ -528,6 +528,12 @@ Findings:
 
 Validation attempted on the branch:
 
+- `bin/souc info`: PASS, identifies `/workspace/sounio/bin/madaros` as the
+  selected wrapper and `Madares v0.80.0` as the compiler identity.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2 on the branch.
+- `bin/souc --check self-hosted/gpu/metal.sio`: FAIL on the current branch
+  surface with local type/undeclared-variable diagnostics. This makes the new
+  Metal emitter path unfit for absorption without a focused repair/golden gate.
 - `bin/souc --check self-hosted/gpu/kretikos_emit_metal.sio`: FAIL on the
   current branch surface. The failure was not attributed to this commit because
   it was not parent-compared and appears mixed with existing broad check noise.
@@ -764,3 +770,43 @@ Classification:
 - If one of their claims regresses, add a fresh focused gate on
   `integration/compiler-consolidation-20260628` instead of reviving the old
   branch history.
+
+## Parser/lexer small-branch triage
+
+Reviewed the small parser/lexer branches:
+
+- `parser/extern-blocks` (`74368b22b`)
+- `parser/kernel-fn` (`f9c189397`)
+- `parser/const-decls` (`0b3918faa`)
+- `parser/sci-notation-float` (`f77ae77b0`)
+- `parser/algebra-keyword-e008` (`ff0bc1166`)
+- `parser/sci-notation-modular-e008` (`c39750e5d`)
+
+Do not merge these branches as branches. The current consolidation source
+already contains most of the parser/lexer surface, and the remaining red surface
+needs fresh focused repair rather than old branch history.
+
+Absorbed/equivalent evidence on current consolidation:
+
+- `parser/kernel-fn`: `kernel fn k() -> () { }` plus a simple `main` checks OK.
+  The same probe without explicit `-> ()` still reports `E072`, so keep the
+  accepted surface to the explicit-unit form.
+- `parser/const-decls`: a top-level `const ANSWER: i64 = 42;` plus a simple
+  `main` checks OK.
+- `parser/sci-notation-float` and `parser/sci-notation-modular-e008`:
+  `let x: f64 = 1.25e-3;` checks OK.
+- `parser/algebra-keyword-e008`: current source already carries parser/AST
+  support for `algebra`/`study`; the inspected branch is docs/provenance only
+  for this consolidation pass.
+
+Residual:
+
+- `parser/extern-blocks`: current source has `parse_extern_fn_item` and brace
+  form handling, but `extern "C" { fn puts(s: *const i8); }` still reports
+  `E072` ("kernel function must return unit type") on `bin/souc --check`.
+  Treat this as parser-present/checker-surface residual, not a green absorbed
+  feature.
+
+Validation:
+
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
