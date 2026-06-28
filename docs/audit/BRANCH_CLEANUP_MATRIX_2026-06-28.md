@@ -29,6 +29,35 @@ Rationale: branches attached to worktrees are treated as owned lanes, even when
 their branch tip looks old, because dirty worktree state may contain the real
 handoff.
 
+## Remote delete-ready candidates
+
+After `git fetch --prune origin`, checked `refs/remotes/origin/*` for remote
+branches with no attached local worktree and no patch-id-exclusive commits
+against `integration/compiler-consolidation-20260628`.
+
+Delete-ready after archive tag:
+
+- `origin/codex/gum-variance-sota-20260626`: `git cherry -v HEAD` reports the
+  branch's exclusive fix as patch-equivalent (`- 36a3b1d2b...`). The variance
+  tests are already recorded as passing in the consolidation audit.
+- `origin/codex/parser-strict-20260627`: `git cherry -v HEAD` reports the
+  branch's Box::new path-call checker fix as patch-equivalent
+  (`- 95b16f24b...`).
+- `origin/fix/stdlib-e2e-sret-workarounds`: both branch commits are
+  patch-equivalent (`- a4c5db9de...`, `- 57255a289...`). Deleting the branch
+  does not claim the broader native-runtime/SRET residual is solved; it only
+  removes a branch with no remaining patch-exclusive source.
+
+Archive/delete commands when remote cleanup is approved:
+
+```bash
+git tag archive/codex-gum-variance-sota-20260626/2026-06-28 origin/codex/gum-variance-sota-20260626
+git tag archive/codex-parser-strict-20260627/2026-06-28 origin/codex/parser-strict-20260627
+git tag archive/fix-stdlib-e2e-sret-workarounds/2026-06-28 origin/fix/stdlib-e2e-sret-workarounds
+git push origin archive/codex-gum-variance-sota-20260626/2026-06-28 archive/codex-parser-strict-20260627/2026-06-28 archive/fix-stdlib-e2e-sret-workarounds/2026-06-28
+git push origin :codex/gum-variance-sota-20260626 :codex/parser-strict-20260627 :fix/stdlib-e2e-sret-workarounds
+```
+
 ## Already absorbed or covered by current consolidation
 
 These should not be merged again. If a remote/local branch is later removed,
