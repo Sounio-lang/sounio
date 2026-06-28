@@ -376,3 +376,20 @@ them because current consolidation does not yet pass them:
   parse/type failures before native-v2 ELF emission.
 
 Treat this branch as a residual owner lane, not as absorbed cleanup.
+
+## SRET/codegen branch triage
+
+Reviewed `fix/native-codegen-sret-regression` (`8f537aac1`).
+
+Current consolidation already contains the relevant `lean_single.sio` fixes:
+
+- struct-literal shorthand rewind via `shorthand_ep`
+- `compile_value_field_field_array_store_x86`
+- `compile_stmt` dispatch for `stmt_is_field_field_array_store_shape(EP)` with
+  pointer and value-struct roots
+
+No cherry-pick needed. The sibling `fix/native-codegen-sret-regression-v2`
+diff is not a small SRET follow-up; it includes a broad AMD HIP/ROCm GPU train
+(`bin/kretikos`, `scripts/amd/*`, `self-hosted/gpu/*`, `tests/amd/*`) plus
+compiler driver edits. Keep that as a GPU/backend owner lane, not part of this
+compiler-core consolidation pass.
