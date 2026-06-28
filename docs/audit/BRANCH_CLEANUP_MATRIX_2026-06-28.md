@@ -608,6 +608,21 @@ Closed since the previous boundary entry:
   local and remote `fix/flatparse-and-scan-operator` refs were deleted.
   Post-delete counts: 58 local branches, 65 remote refs, 52 worktrees.
 
+- `fix/madaros-tuple-let-desugar`: no attached worktree, and not a tuple-let
+  branch in current consolidation terms. `git cherry -v HEAD
+  fix/madaros-tuple-let-desugar` showed a mixed solver / GPU / PBPK /
+  bootstrap substrate train, while `git diff --stat
+  HEAD..fix/madaros-tuple-let-desugar` spanned 266 files with 9868 insertions
+  and 10228 deletions. The branch would delete the active consolidation audit
+  docs and several native-v2/effects gates already consolidated elsewhere, while
+  adding unrelated solver/GPU research material and a PBPK dissertation note.
+  Direct merge was rejected as a stale provenance bundle. No hunk was extracted
+  in this pass; PBPK/external-facing material was not ported because it would
+  require its own owner/offload review. The original branch tip was archived as
+  `archive/branch/fix-madaros-tuple-let-desugar/2026-06-28` -> `d1f43914f`;
+  local and remote `fix/madaros-tuple-let-desugar` refs were deleted.
+  Post-delete counts: 57 local branches, 64 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
