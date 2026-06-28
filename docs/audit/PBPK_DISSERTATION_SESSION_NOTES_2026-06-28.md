@@ -31,13 +31,13 @@ gate result (operating principle R5: intrinsic property vs defect):
 - **lean_single fixed-point engine** (`SOUNIO_SOUC_ENGINE=lean_single`, ELF
   `bin/souc-lean-single-x86_64`) compiles and runs the same sources **clean**:
 
-  | Gate | Result | Markers |
-  |---|---|---|
-  | `dissertation_pbpk28_parity_gate` | PASS | `PBPK28_PARITY_PASS 14/14`, `MASS_CONSERVATION_PASS 12/12`, `TMDD_PARITY_PASS 3/3`, `PD_PARITY_PASS 1/1`, `SEMAGLUTIDE_PARITY_PASS 14/14`, `SEMA_TMDD/SEMA_PD` |
-  | `dissertation_frontend_parity_gate` | PASS | `PARITY_PASS 14/14` |
-  | `dissertation_confidence_gate_gate` | PASS | C4: honest-ceiling compiles, over-claim + non-literal ε rejected |
-  | `dissertation_pbpk_suite_gate` | PASS | 51/53 active; 2 PENDING (clinical, awaiting observed data) |
-  | `dissertation_pbpk_hessian_gate` | science PASS | `HESSIAN_PBPK28_DUAL_RHO_PASS`; CSV byte-identical to golden |
+| Gate | Result | Markers |
+|---|---|---|
+| `dissertation_pbpk28_parity_gate` | PASS | `PBPK28_PARITY_PASS 14/14`, `MASS_CONSERVATION_PASS 12/12`, `TMDD_PARITY_PASS 3/3`, `PD_PARITY_PASS 1/1`, `SEMAGLUTIDE_PARITY_PASS 14/14`, `SEMA_TMDD/SEMA_PD` |
+| `dissertation_frontend_parity_gate` | PASS | `PARITY_PASS 14/14` |
+| `dissertation_confidence_gate_gate` | PASS | C4: honest-ceiling compiles, over-claim + non-literal ε rejected |
+| `dissertation_pbpk_suite_gate` | PASS | 51/53 active; 2 PENDING (clinical, awaiting observed data) |
+| `dissertation_pbpk_hessian_gate` | science PASS | `HESSIAN_PBPK28_DUAL_RHO_PASS`; CSV byte-identical to golden |
 
 **Gotchas**
 - lean_single does **not** `chmod +x` its emitted ELF, so gates guarding with
