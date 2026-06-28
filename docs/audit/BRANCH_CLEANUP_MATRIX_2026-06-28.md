@@ -589,9 +589,10 @@ Closed since the previous boundary entry:
   stdlib/epistemic/uncertain_octonion.sio` returned OK / no mathematical errors;
   the file/diff reviews for the perturbation graph returned
   `NO MATHEMATICAL CONTENT TO REVIEW`, so they are recorded as non-approval
-  context rather than semantic proof. After this extraction commit, archive and
-  delete the branch under
-  `archive/branch/feat-assoc-variance-clean/2026-06-28`.
+  context rather than semantic proof. The original branch tip was archived as
+  `archive/branch/feat-assoc-variance-clean/2026-06-28` -> `e3174a35e`;
+  local and remote `feat/assoc-variance-clean` refs were deleted. Post-delete
+  counts: 59 local branches, 66 remote refs, 52 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
