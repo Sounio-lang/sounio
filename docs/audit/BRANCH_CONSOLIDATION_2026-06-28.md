@@ -272,3 +272,38 @@ Then either:
 
 - cherry-pick the branch commits into `integration/compiler-consolidation-20260628`, or
 - manually port only the still-missing hunks from the dirty diff.
+
+### Project-spine extraction result
+
+Reviewed `/workspace/sounio-project-spine` dirty core diff against
+`integration/compiler-consolidation-20260628`.
+
+Ported:
+
+- `self-hosted/parser/stmts.sio`: removed the assignment-parser one-token
+  lookahead fallback. The branch-local note is correct: only an assignment
+  operator at the current parser position should bind the parsed expression;
+  looking one token ahead can consume the next assignment as if the previous
+  expression were the assignment target.
+
+Not ported:
+
+- `self-hosted/check/check.sio`: the useful ideas from the dirty diff are
+  already present in the consolidation branch in newer form: `TypeFn` lowering,
+  builtin `print_int`/`print_char` handling, and function-signature support.
+- `self-hosted/check/defs.sio`: `fn_sig_table_get` already bounds-checks and
+  returns `empty_fn_sig()` in the current chunked table implementation.
+- `artifacts/omega/*.selftest.bin`: binary artifacts, not compiler source.
+- `slurm-jobs/erdos90/run_on_cluster.sh` and `.bak-cpuopsfix`: repeated
+  mechanical Slurm noise; keep out of compiler consolidation until that policy
+  is decided globally.
+
+Validation after port:
+
+- `bin/souc info`: OK, `Madares v0.80.0`.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2 / FAIL 0.
+- `bash scripts/run_sio_test_suite.sh assignment --verbose`: PASS 4 / FAIL 2.
+  The same two failures reproduce on a clean `origin/main` worktree
+  (`gtt_reassignment_wrong_channel.sio` expected compile-fail but passed;
+  `gtt_reassignment_topology.sio` exited 139), so this is baseline noise rather
+  than a regression from the parser hunk.
