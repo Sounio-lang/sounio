@@ -3753,13 +3753,23 @@ impl Lowerer {
             lo.current_func = current_func_box
             lo
         } else {
-            if lo.probe_mode {
-                print("lower_probe: emit_overflow instr_count=")
-                print_int(instr_count)
-                print(" fn=")
-                print(str_from_bytes(lo.current_func.name.buf, lo.current_func.name.len))
-                print("\n")
+            // IR_MAX_INSTRS overflow: refuse to emit truncated code. Mark this
+            // function's had_overflow flag via the current_func round-trip -- the
+            // same channel that persists emitted instrs into module.functions --
+            // so the lowering funnel can detect truncation even though Lowerer
+            // value-copy threading drops scalar field updates. Gate the loud
+            // diagnostic on the flag (which persists across emits) so it prints
+            // exactly once per over-cap function, not once per dropped instr.
+            var ovf_func_box = lo.current_func
+            if !(*ovf_func_box).had_overflow {
+                print("error: function '")
+                print(str_from_bytes((*ovf_func_box).name.buf, (*ovf_func_box).name.len))
+                print("' exceeds IR_MAX_INSTRS=")
+                print_int(IR_MAX_INSTRS)
+                print(" instructions; refusing to emit truncated code\n")
             }
+            (*ovf_func_box).had_overflow = true
+            lo.current_func = ovf_func_box
             lo.report_error()
         }
     }
@@ -8940,14 +8950,28 @@ fn lower_program_to_ir_staged_with_lowerer_box_trace_ref(
     if !lo2.had_error {
         lo2 = lo2.lower_program_bodies_ref(&prog.items)
     }
+    // IR_MAX_INSTRS overflow backstop: scan the finalized module functions for
+    // the had_overflow flag, flushed from current_func into module.functions via
+    // the proven write channel. This recomputes the reject signal at the funnel
+    // from plain field reads, sidestepping the Lowerer value-threading that drops
+    // lo2.had_error, and ORs it into had_error so the module_loader gate rejects
+    // before codegen.
+    var lower_overflow = false
+    var ovf_i: i64 = 0
+    while ovf_i < (*lo2.module).fn_count {
+        if (*lo2.module).functions[ovf_i as usize].had_overflow {
+            lower_overflow = true
+        }
+        ovf_i = ovf_i + 1
+    }
     (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if !lo2.had_error && !lower_overflow {
         (*patch_stats) = ir_patch_validated_calls(&! lo2.module)
     }
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lo2.had_error || lower_overflow,
         patch_stats: (*patch_stats),
     }
 }

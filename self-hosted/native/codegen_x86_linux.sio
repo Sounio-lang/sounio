@@ -9371,7 +9371,25 @@ fn a64_preview_emit_entry_trampoline_linux(c: A64PreviewCompiler, main_fn_index:
 
 
 
+// IR_MAX_INSTRS overflow gate: true if ANY function was truncated at the cap
+// (had_overflow set by the lowerer's emit overflow branch). Universal reject so
+// no native path emits a truncated binary, regardless of which lowering funnel
+// produced the module. See docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md.
+fn ir_module_has_overflow(module: &IrModule) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if module.functions[i as usize].had_overflow {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    if ir_module_has_overflow(module) {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_max_instrs_overflow: refusing to emit truncated code")
+    }
     var nc = compiler_new()
     let err = compile_module_v2_mut(&! nc, module)
     if str_len(err) > 0 {
@@ -9630,6 +9648,9 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     }
     if !(target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX()) {
         return 11
+    }
+    if ir_module_has_overflow(module) {
+        return 19
     }
 
     native_v2_trace_module_ir_ref(module)
