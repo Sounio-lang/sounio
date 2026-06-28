@@ -150,3 +150,125 @@ Legacy-Kept: yes
 LLM-Offload: not-required
 Next-Action: choose one candidate branch and assign exclusive ownership for conflict resolution
 ```
+
+## Second-pass dirty worktree triage
+
+Follow-up command:
+
+```bash
+for d in /workspace/sounio-* /workspace/.cnp-phaseB /workspace/tmp/* /workspace/sounio/.claude/worktrees/*; do
+  git -C "$d" status --short
+done
+```
+
+Live-process check found active processes in `/workspace/sounio` and
+`/workspace/sounio-solver-sota`; the solver lane also had Slurm job `4487`
+running as `q13k11` on `cpu-ops`.
+
+### Do not touch while live
+
+- `/workspace/sounio-solver-sota`
+  - Branch: `research/solver-sota-class`
+  - Dirty: `slurm-jobs/queen-sat-assault/`
+  - Reason: live Slurm solver job observed.
+
+### Dirty mechanical noise repeated across many worktrees
+
+Many worktrees are dirty only because of:
+
+- `M slurm-jobs/erdos90/run_on_cluster.sh`
+- `?? slurm-jobs/erdos90/run_on_cluster.sh.bak-cpuopsfix`
+
+These should be handled by one coordinated policy, not lane-by-lane guessing:
+
+1. Decide whether the CPU ops fix belongs on `main`.
+2. If yes, land it once in the consolidation branch.
+3. If no, restore/remove the repeated local noise only after the lane owner agrees.
+
+Affected examples include:
+
+- `/workspace/sounio-affine`
+- `/workspace/sounio-affine-pg`
+- `/workspace/sounio-baseline-contracts`
+- `/workspace/sounio-checker`
+- `/workspace/sounio-docs`
+- `/workspace/sounio-fnptr-integ`
+- `/workspace/sounio-gates`
+- `/workspace/sounio-lsp-work`
+- `/workspace/sounio-mmh`
+- `/workspace/sounio-parser`
+- `/workspace/sounio-parser-integ`
+- `/workspace/sounio-pbpk-integration`
+- `/workspace/sounio-real-runner`
+- `/workspace/sounio-rel-eval`
+- `/workspace/sounio-relmc`
+- `/workspace/sounio-showcase`
+- `/workspace/sounio-stdlibpath`
+- `/workspace/sounio-strcat`
+- `/workspace/sounio-viz-molecule-authoring`
+
+### High-value compiler WIP, preserve until reviewed
+
+These worktrees have actual compiler-core modifications or artifacts that may
+matter:
+
+- `/workspace/sounio-project-spine`
+  - Branch: `codex/project-spine-madaros`
+  - Dirty core files: `self-hosted/check/check.sio`, `self-hosted/check/defs.sio`, `self-hosted/parser/stmts.sio`
+  - Notes: likely the highest-value local WIP, but needs owner review before extraction.
+
+- `/workspace/sounio-source-elf-proof`
+  - Branch: `codex/source-elf-on-madaros-proof`
+  - Dirty core files: `self-hosted/check/check.sio`, `self-hosted/check/defs.sio`, `self-hosted/check/mod.sio`, `self-hosted/parser/exprs.sio`
+  - Notes: `patch_plus=0` against `origin/main`, so committed history is redundant, but dirty files may contain uncommitted work.
+
+- `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
+  - Branch: `worktree-agent-adc1cd8b9d52ba53b`
+  - Dirty core files: `self-hosted/compiler/main.sio`, `self-hosted/native/codegen.sio`, `self-hosted/native/codegen_x86_linux.sio`, `self-hosted/native/lower_ir.sio`, `self-hosted/native/suite.sio`
+  - Notes: `patch_plus=0`, but dirty native-codegen edits need diff review.
+
+- `/workspace/sounio-gpu-kernel`
+  - Branch: `feat/gpu-thread-intrinsics`
+  - Dirty artifacts: `artifacts/omega/vadd.ptx`, `artifacts/self-hosted/madaros-*`
+  - Notes: artifacts only in dirty state; committed branch has GPU intrinsic work.
+
+- `/workspace/sounio-ir`
+  - Branch: `claude/ir-heap-indirect`
+  - Dirty docs/artifacts: heap-indirect plans and `test_fill_repro.sio`
+  - Notes: likely design/repro material more than immediate compiler merge.
+
+- `/workspace/sounio-effects`
+  - Branch: `claude/effects-enforcement`
+  - Dirty artifacts/scripts: effects reports, ELFs, `scripts/dev/effects_annotate.sh`
+  - Notes: preserve as evidence lane.
+
+### Likely cleanup/close candidates after owner ack
+
+These have `patch_plus=0` and dirty content that appears artifact/report-only or
+mechanical:
+
+- `/workspace/sounio-f64cmp`
+- `/workspace/sounio-integ`
+- `/workspace/sounio-madaros-check-segv`
+- `/workspace/sounio-madaros-main-proof`
+- `/workspace/sounio-madaros-source-elf-consolidated`
+- `/workspace/sounio-tests-fix`
+- `/workspace/sounio/.claude/worktrees/madaros-default`
+
+Do not delete them yet. Next step is to archive their dirty diff or get explicit
+owner approval to drop it.
+
+### Recommended next manual action
+
+Start with `/workspace/sounio-project-spine` because it has real compiler-core
+dirty files and patch-exclusive branch history. The first extraction should be
+read-only:
+
+```bash
+git -C /workspace/sounio-project-spine diff -- self-hosted/check/check.sio self-hosted/check/defs.sio self-hosted/parser/stmts.sio
+```
+
+Then either:
+
+- cherry-pick the branch commits into `integration/compiler-consolidation-20260628`, or
+- manually port only the still-missing hunks from the dirty diff.
