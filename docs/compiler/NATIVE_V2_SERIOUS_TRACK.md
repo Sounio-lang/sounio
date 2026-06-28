@@ -241,6 +241,26 @@ classification: the fixtures are checked and the PTX contract is green, but
 native CUDA runtime parity is not promoted until a host with `libcuda.so.1`
 runs the rows without fallback.
 
+## AArch64 Mach-O Preview
+
+The Apple Silicon preview gate is:
+
+```sh
+bash scripts/ci/native_v2_aarch64_preview_gate.sh
+```
+
+That gate checks `tests/native-v2/aarch64_macho_preview_emit.sio`, runs the
+preview emitter through the stable `lean_single` engine, verifies that the
+generated artifact is 32768 bytes, and checks the Mach-O magic bytes
+`cffaedfe`. The gate copies the emitted binary into its temp artifact
+directory and restores the tracked smoke artifact on exit so the worktree stays
+clean after validation.
+
+This promotes a narrow AArch64/Mach-O emission preview, not native-v2 parity on
+Apple Silicon. The default Madaros imported/native path remains classified by
+the existing `madaros_imported_native_lower_array_seed_segfault` blocker until
+the official seed witness passes.
+
 ## ISO GUM Primitives (SOTA)
 
 The ISO JCGM 100:2008 (GUM) uncertainty propagation gate is:

@@ -72,6 +72,7 @@ run_sub_gate imported_hof_abi env SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA=0 \
   bash scripts/ci/native_v2_imported_hof_abi_gate.sh
 
 run_sub_gate metal_algebra bash scripts/ci/native_v2_metal_algebra_gate.sh
+run_sub_gate aarch64_preview bash scripts/ci/native_v2_aarch64_preview_gate.sh
 
 if [[ "${SOUNIO_NATIVE_V2_NVIDIA_BARE_METAL_GATE_RUN:-0}" == "1" ]]; then
   run_sub_gate nvidia_bare_metal bash scripts/ci/native_v2_nvidia_bare_metal_gate.sh
