@@ -312,9 +312,12 @@ focused gate.
   Validation: `bash scripts/ci/build_modular_madaros.sh
   /tmp/madaros-effects-port` produced a fresh Madaros ELF; `bash
   tests/native_v2_effects_gate/run.sh /tmp/madaros-effects-port` passed 10/10;
-  `bash scripts/run_sio_test_suite.sh hello --verbose` passed 2/2. Once the
-  consolidation commit is pushed, `/workspace/sounio-m2-firewall` and the
-  branch are archive/delete candidates.
+  `bash scripts/run_sio_test_suite.sh hello --verbose` passed 2/2. The
+  consolidation commit `90b147169` was pushed, the original branch tip was
+  archived as `archive/worktree/m2-effect-firewall/2026-06-28` ->
+  `8c34a11a8`, `/workspace/sounio-m2-firewall` was removed, and local/remote
+  `m2/effect-firewall` refs were deleted. Post-delete counts: 92 local
+  branches, 94 remote refs, 60 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
