@@ -243,8 +243,15 @@ classified in this audit as non-merge residuals:
   promoted back to ordinary compile-fail tests. The old website locale and docs
   registry edits were not ported because they would overwrite newer website and
   governance state.
+- `codex/pl-command-center`: archived as
+  `archive/branch/codex-pl-command-center/2026-06-28` -> `efc852596`,
+  then local/remote refs were deleted. Its exclusive work is a
+  `docs/serious-language/command-center.md` public-claim operating board plus
+  stale governance registry/report edits. It was not ported into the compiler
+  consolidation lane because it is not compiler-core and should only land via a
+  documentation/public-surface lane with the required external-artifact review.
 
-Post-delete counts: 76 local branches, 83 remote refs, 52 worktrees.
+Post-delete counts: 75 local branches, 82 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
