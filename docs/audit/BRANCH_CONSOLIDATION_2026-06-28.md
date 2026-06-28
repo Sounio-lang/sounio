@@ -845,6 +845,41 @@ Status:
 - The imported multimodule witness remains a residual blocker and still must not
   be wired into the prebuilt-refresh workflow.
 
+## Release / docs / repo tooling branch triage
+
+Reviewed:
+
+- `origin/chore/repo-hygiene` and local `chore/repo-hygiene`
+- `origin/codex/main-release-ci-repair-20260623` and local
+  `codex/main-release-ci-repair-20260623`
+- local `codex/release-install-visibility-20260626`
+- local `codex/release-conformance-spine-fix`
+- local `codex/website-docs-support-gate-20260626`
+- local `codex/baseline-docs-registry`
+- `claude/release-apparatus`
+- `claude/release-e2e-eval`
+- `claude/release-real-mc`
+- local `fix/docs-registry-sync`
+
+Do not merge these branches as compiler-core branches. They are release,
+install, website/docs, governance, package/editor, Slurm/rebootstrap, or repo
+hygiene trains. Raw diffs against the consolidation branch still include old
+worktree rollback shapes, from smaller install-support branches (~176-177
+files) up to release/docs trains with ~2,862-2,932 files and ~671k deletions.
+
+Compiler-core status:
+
+- `codex/release-conformance-spine-fix`: the only compiler-core commit needed
+  for this sweep, `0e0845447` validated-call patch hardening, was already
+  ported in the previous section.
+- `claude/release-apparatus`, `claude/release-e2e-eval`, and
+  `claude/release-real-mc` contain release packaging and some checker/native
+  history, but their branch-level diffs are too broad for consolidation. Any
+  remaining compiler claim must be extracted with a named gate.
+- `main-release-ci-repair`, `release-install-visibility`,
+  `website-docs-support-gate`, `baseline-docs-registry`, `docs-registry-sync`,
+  and `repo-hygiene` are not merge sources for the compiler lane.
+
 ## Direct-call param-slot branch triage
 
 Reviewed `origin/codex/direct-call-param-slot` (`9174e3fc5`).
