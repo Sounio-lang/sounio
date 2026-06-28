@@ -279,8 +279,22 @@ classified in this audit as non-merge residuals:
   `de2a6e213`, then local/remote refs were deleted. It was covered by the same
   BoxNew triage: no direct merge because the branch would reintroduce stale
   broad compiler/script rewrites already superseded by the consolidation lane.
+- `codex/root2-global-lookup-probe`: archived as
+  `archive/branch/codex-root2-global-lookup-probe/2026-06-28` ->
+  `d2ffa34ad`, then local/remote refs were deleted. Current consolidation
+  already contains the non-debug global function lookup fix plus the
+  `native_v2_global_bss_gate`; the branch-only residue is probe tracing.
+- `codex/root2-global-preload-probe`: archived as
+  `archive/branch/codex-root2-global-preload-probe/2026-06-28` ->
+  `70c29abbd`, then local/remote refs were deleted. Current consolidation
+  already contains the stable BSS global preload/store-back path; the branch
+  only preserved old probe tracing history.
+- `chore/repo-hygiene`: archived as
+  `archive/branch/chore-repo-hygiene/2026-06-28` -> `4302652f3`, then
+  local/remote refs were deleted. It is release/docs/repository-hygiene
+  material, not a compiler-core merge source for this consolidation lane.
 
-Post-delete counts: 70 local branches, 77 remote refs, 52 worktrees.
+Post-delete counts: 67 local branches, 74 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
