@@ -779,6 +779,24 @@ Ownership buckets by branch/path naming:
   owner disposition or after proving they are disposable temp worktrees with no
   branch-only state.
 
+### Detached temp cleanup
+
+Three clean detached temporary worktrees were archived by commit tag and removed:
+
+- `/tmp/sounio-origin-main-verify` at `63644b6b0`, archived as
+  `archive/worktree-detached/sounio-origin-main-verify/2026-06-28`.
+- `/workspace/sounio-mm-repro` at `590af4641`, archived as
+  `archive/worktree-detached/sounio-mm-repro/2026-06-28`.
+- `/workspace/sounio-scopeprobe` at `090767311`, archived as
+  `archive/worktree-detached/sounio-scopeprobe/2026-06-28`.
+
+The remaining detached worktree is
+`/workspace/.home/openvscode-server/.cursor/worktrees/DMH2026-e3d71e55/sounio-c48641ba187e`
+at `4aab38cd8`. It was left intact because it is under the Cursor-owned
+worktree area rather than an obvious temporary repo path.
+
+Post-cleanup counts: 49 local branches, 56 remote refs, 49 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
