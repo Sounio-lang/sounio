@@ -319,6 +319,16 @@ focused gate.
   `m2/effect-firewall` refs were deleted. Post-delete counts: 92 local
   branches, 94 remote refs, 60 worktrees.
 
+## Dirty-but-absorbed worktree cleanup executed
+
+- `/workspace/sounio-integ` -> `fix/root2-enum-inplace`: the branch had no
+  patch-exclusive commits versus `integration/compiler-consolidation-20260628`
+  (`git cherry -v HEAD fix/root2-enum-inplace` emitted no `+` lines), and the
+  only dirty state was one untracked audit note:
+  `docs/audit/MADAROS_328_LOCAL_REGRESSION_2026-06-20.md`. That note was
+  recovered into this consolidation branch before cleanup. Archive/delete
+  evidence will be recorded below after the tag and branch removal complete.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
