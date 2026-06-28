@@ -194,6 +194,29 @@ git push origin archive/codex-gum-variance-sota-20260626/2026-06-28 archive/code
 git push origin :codex/gum-variance-sota-20260626 :codex/parser-strict-20260627 :fix/stdlib-e2e-sret-workarounds
 ```
 
+## Residual branch archive/delete executed
+
+Archived and deleted branches that had no attached worktree and were already
+classified in this audit as non-merge residuals:
+
+- `codex/imported-full-lowerer-20260627`: archived as
+  `archive/branch/codex-imported-full-lowerer-20260627/2026-06-28` ->
+  `40cbd8af8`, then local/remote refs were deleted. Its only patch-exclusive
+  commit wires the currently-red multimodule witness into the Madaros prebuilt
+  refresh workflow; the witness still fails at `lower_array: seed_begin`.
+- `codex/madaros-import-stdlib-lowering-current`: archived as
+  `archive/branch/codex-madaros-import-stdlib-lowering-current/2026-06-28` ->
+  `542a91e31`, then local/remote refs were deleted. The branch remains an
+  older imported-stdlib lowering residual that conflicts with the newer
+  imported-lowering path.
+- `recover/m2-effect-firewall`: archived as
+  `archive/branch/recover-m2-effect-firewall/2026-06-28` -> `e2cdefc51`,
+  then local/remote refs were deleted. The accepted M2 effect firewall work was
+  already extracted from `m2/effect-firewall` into consolidation with the
+  10/10 `native_v2_effects_gate`; this recovery branch is redundant provenance.
+
+Post-delete counts: 81 local branches, 88 remote refs, 52 worktrees.
+
 ## Already absorbed or covered by current consolidation
 
 These should not be merged again. If a remote/local branch is later removed,
