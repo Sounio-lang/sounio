@@ -473,3 +473,27 @@ diagnostic.
 Not ported in this pass: the branch-local Metal opcode smoke script adjustment
 and known-failures list edits. Those are GPU/test-harness ownership, not core
 compiler consolidation.
+
+## Semcall/HOF branch triage
+
+Reviewed `codex/semcall-hof-main`.
+
+Patch-id showed four commits already equivalent to consolidation:
+
+- `960e68aa` source return semantics
+- `4f8fc8e` higher-order source execution
+- `dce38a6f` / `e613b648` `opt_cleanup` bootstrap split churn
+
+The remaining semcall surface also passes on current consolidation without
+porting old broad hunks. Added `tests/native_v2_semcall_absorbed_gate/` with
+native-v2 ELF execution for:
+
+- literal return `42`
+- direct call `double(21)`
+- returned function reference call through `let f = choose(0); f(21)`
+- if-without-else followed by assignment, guarding the newline/assignment parse
+  shape used in the old selfhost native runtime manifest
+
+Not ported in this pass: the old `scripts/ci/madaros_source_to_elf_gate.sh`
+replacement and broad `opt_cleanup.sio` re-splits; the current consolidation
+already has the canonical source-to-ELF gate passing.
