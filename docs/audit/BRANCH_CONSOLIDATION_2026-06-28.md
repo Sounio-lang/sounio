@@ -339,3 +339,20 @@ Validation after port:
   (`gtt_reassignment_wrong_channel.sio` expected compile-fail but passed;
   `gtt_reassignment_topology.sio` exited 139), so this is baseline noise rather
   than a regression from the parser hunk.
+
+## Absorbed compiler fixes with focused gates
+
+Reviewed two small non-ancestor compiler branches:
+
+- `fix/madaros-for-loop-lowering` (`6dde85913`): current consolidation already
+  contains `lower_for_in_expr_ref` and dispatches `ExprForIn` through
+  `lower_expr_ref`.
+- `fix/madaros-print-int-dispatch` (`c152ac3b4`): current consolidation already
+  contains the older int-literal redirect and a stronger `scalar_kind`-based
+  `println_dispatch_name` covering int variables and f64 values.
+
+No old hunks were cherry-picked. Instead, added
+`tests/native_v2_loop_print_gate/` to lock the absorbed behavior with native-v2
+ELF execution: half-open range, inclusive range, `continue`, `break`,
+`println(42)`, `print(7)`, `println(i64 variable)`, `print(i64 variable)`, and
+`println/print(f64 variable)`.
