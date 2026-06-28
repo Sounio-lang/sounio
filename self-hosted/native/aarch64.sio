@@ -734,6 +734,7 @@ pub fn a64_emit_udiv(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer w
 // FMUL Dd, Dn, Dm => 0x1E600800 | Rm<<16 | Rn<<5 | Rd
 // FADD Dd, Dn, Dm => 0x1E602800 | Rm<<16 | Rn<<5 | Rd
 // FSUB Dd, Dn, Dm => 0x1E603800 | Rm<<16 | Rn<<5 | Rd
+// FNEG Dd, Dn     => 0x1E614000 | Rn<<5 | Rd
 // Encodings checked against llvm-mc for AArch64.
 // ============================================================================
 
@@ -761,12 +762,84 @@ pub fn a64_emit_fsub_d(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer
     a64_emit_instr(buf, word)
 }
 
+pub fn a64_emit_fneg_d(buf: CodeBuffer, rd: i64, rn: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x1E614000
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
 // One-lane scalar preview for IrHyperEpistemicMul on AArch64:
 //   value = a * b
 //   variance = (b*b)*eps_a + (a*a)*eps_b
 pub fn a64_emit_hyper_epistemic_mul_lane_preview(buf: CodeBuffer, value_d: i64, variance_d: i64, a_d: i64, eps_a_d: i64, b_d: i64, eps_b_d: i64, tmp0_d: i64, tmp1_d: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
     out = a64_emit_fmul_d(out, value_d, a_d, b_d)
+    out = a64_emit_fmul_d(out, tmp0_d, b_d, b_d)
+    out = a64_emit_fmul_d(out, tmp0_d, tmp0_d, eps_a_d)
+    out = a64_emit_fmul_d(out, tmp1_d, a_d, a_d)
+    out = a64_emit_fmul_d(out, tmp1_d, tmp1_d, eps_b_d)
+    a64_emit_fadd_d(out, variance_d, tmp0_d, tmp1_d)
+}
+
+pub fn a64_fano_bj(k: i64, t: i64) -> i64 with Panic {
+    let tbl: [i64; 64] = [
+        0, 1, 2, 3, 4, 5, 6, 7,
+        1, 0, 3, 2, 5, 4, 7, 6,
+        2, 3, 0, 1, 6, 7, 4, 5,
+        3, 2, 1, 0, 7, 6, 5, 4,
+        4, 5, 6, 7, 0, 1, 2, 3,
+        5, 4, 7, 6, 1, 0, 3, 2,
+        6, 7, 4, 5, 2, 3, 0, 1,
+        7, 6, 5, 4, 3, 2, 1, 0
+    ]
+    tbl[(k * 8 + t) as usize]
+}
+
+pub fn a64_fano_sg(k: i64, t: i64) -> i64 with Panic {
+    let tbl: [i64; 64] = [
+        1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1,
+        1, 1, 1, 0 - 1, 1, 0 - 1, 0 - 1, 1,
+        1, 0 - 1, 1, 1, 1, 1, 0 - 1, 0 - 1,
+        1, 1, 0 - 1, 1, 1, 0 - 1, 1, 0 - 1,
+        1, 0 - 1, 0 - 1, 0 - 1, 1, 1, 1, 1,
+        1, 1, 0 - 1, 1, 0 - 1, 1, 0 - 1, 1,
+        1, 1, 1, 0 - 1, 0 - 1, 1, 1, 0 - 1,
+        1, 0 - 1, 1, 1, 0 - 1, 0 - 1, 1, 1
+    ]
+    tbl[(k * 8 + t) as usize]
+}
+
+pub fn a64_fano_product_index(i: i64, j: i64) -> i64 with Mut, Panic {
+    var k = 0
+    while k < 8 {
+        var t = 0
+        while t < 8 {
+            if t == i && a64_fano_bj(k, t) == j {
+                return k
+            }
+            t = t + 1
+        }
+        k = k + 1
+    }
+    0 - 1
+}
+
+pub fn a64_fano_product_sign(i: i64, j: i64) -> i64 with Mut, Panic {
+    let k = a64_fano_product_index(i, j)
+    if k < 0 { return 0 }
+    a64_fano_sg(k, i)
+}
+
+// Basis-pair preview for IrHyperEpistemicMul on AArch64.
+// The value lane keeps the signed Fano product e_i*e_j, while the variance lane
+// remains signless because GUM squares the partial derivatives.
+pub fn a64_emit_hyper_epistemic_mul_basis_preview(buf: CodeBuffer, i: i64, j: i64, value_d: i64, variance_d: i64, a_d: i64, eps_a_d: i64, b_d: i64, eps_b_d: i64, tmp0_d: i64, tmp1_d: i64) -> CodeBuffer with Mut, Panic, Div {
+    var out = buf
+    out = a64_emit_fmul_d(out, value_d, a_d, b_d)
+    if a64_fano_product_sign(i, j) < 0 {
+        out = a64_emit_fneg_d(out, value_d, value_d)
+    }
     out = a64_emit_fmul_d(out, tmp0_d, b_d, b_d)
     out = a64_emit_fmul_d(out, tmp0_d, tmp0_d, eps_a_d)
     out = a64_emit_fmul_d(out, tmp1_d, a_d, a_d)
@@ -1136,13 +1209,46 @@ pub fn a64_test_hyper_epistemic_lane_preview() -> bool with Mut, Panic, Div {
     true
 }
 
+// T22: FNEG D0, D1 => 0x1E614020.
+pub fn a64_test_fneg_d() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_fneg_d(buf, A64_D0, A64_D1)
+    if !(buf.len == 4) { return false }
+    if !(a64_read_word(buf, 0) == 0x1E614020) { return false }
+    true
+}
+
+// T23: basis preview applies signed Fano value while keeping signless GUM variance.
+pub fn a64_test_hyper_epistemic_basis_preview() -> bool with Mut, Panic, Div {
+    if !(a64_fano_product_index(1, 3) == 2) { return false }
+    if !(a64_fano_product_sign(1, 3) == 0 - 1) { return false }
+    if !(a64_fano_product_index(3, 1) == 2) { return false }
+    if !(a64_fano_product_sign(3, 1) == 1) { return false }
+
+    var neg_buf = code_buffer_new()
+    neg_buf = a64_emit_hyper_epistemic_mul_basis_preview(neg_buf, 1, 3, A64_D0, A64_D1, A64_D2, A64_D3, A64_D4, A64_D5, A64_D6, A64_D7)
+    if !(neg_buf.len == 28) { return false }
+    if !(a64_read_word(neg_buf, 0) == 0x1E640840) { return false }   // fmul d0, d2, d4
+    if !(a64_read_word(neg_buf, 4) == 0x1E614000) { return false }   // fneg d0, d0
+    if !(a64_read_word(neg_buf, 8) == 0x1E640886) { return false }   // fmul d6, d4, d4
+    if !(a64_read_word(neg_buf, 24) == 0x1E6728C1) { return false }  // fadd d1, d6, d7
+
+    var pos_buf = code_buffer_new()
+    pos_buf = a64_emit_hyper_epistemic_mul_basis_preview(pos_buf, 3, 1, A64_D0, A64_D1, A64_D2, A64_D3, A64_D4, A64_D5, A64_D6, A64_D7)
+    if !(pos_buf.len == 24) { return false }
+    if !(a64_read_word(pos_buf, 0) == 0x1E640840) { return false }   // fmul d0, d2, d4
+    if !(a64_read_word(pos_buf, 4) == 0x1E640886) { return false }   // no fneg; variance starts
+    if !(a64_read_word(pos_buf, 20) == 0x1E6728C1) { return false }  // fadd d1, d6, d7
+    true
+}
+
 // ============================================================================
 // Test runner
 // ============================================================================
 
 pub fn a64_test_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 21
+    let total: i64 = 23
 
     print("=== AArch64 Encoder Tests ===\n")
 
@@ -1167,6 +1273,8 @@ pub fn a64_test_main() -> i32 with IO, Mut, Panic, Div {
     if a64_test_fmul_d()    { passed = passed + 1; print("  T19 OK (FMUL D)\n")   } else { print("  FAIL: T19 FMUL D\n") }
     if a64_test_fadd_fsub_d() { passed = passed + 1; print("  T20 OK (FADD/FSUB D)\n") } else { print("  FAIL: T20 FADD/FSUB D\n") }
     if a64_test_hyper_epistemic_lane_preview() { passed = passed + 1; print("  T21 OK (hyper epistemic lane preview)\n") } else { print("  FAIL: T21 hyper epistemic lane preview\n") }
+    if a64_test_fneg_d()    { passed = passed + 1; print("  T22 OK (FNEG D)\n")   } else { print("  FAIL: T22 FNEG D\n") }
+    if a64_test_hyper_epistemic_basis_preview() { passed = passed + 1; print("  T23 OK (hyper epistemic basis preview)\n") } else { print("  FAIL: T23 hyper epistemic basis preview\n") }
 
     print("\nAArch64 tests: ")
     print_int(passed)
