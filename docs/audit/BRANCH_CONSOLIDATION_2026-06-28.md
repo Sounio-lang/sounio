@@ -365,6 +365,31 @@ ELF execution: half-open range, inclusive range, `continue`, `break`,
 `println(42)`, `print(7)`, `println(i64 variable)`, `print(i64 variable)`, and
 `println/print(f64 variable)`.
 
+Follow-up triage on the same small-fix cluster:
+
+- `fix/madaros-for-loop-lowering`: `git cherry -v HEAD` marks
+  `6dde85913` as patch-equivalent (`-`), so there is no remaining branch-owned
+  delta to port.
+- `fix/madaros-print-int-dispatch`: `c152ac3b4` is not patch-id equivalent, but
+  the current `scalar_kind`-based dispatch is strictly broader than its
+  int-literal redirect. Validation: `bash tests/native_v2_loop_print_gate/run.sh
+  bin/souc` passed 7/7 (`p01_for_range_sum`, `p02_for_inclusive_range_sum`,
+  `p03_for_continue`, `p04_for_break`, `p05_print_int_literal`,
+  `p06_print_int_variable`, `p07_print_float_variable`).
+- `origin/fix/test-suite-epistemic-failures`: already contained by ancestry.
+  `git merge-base --is-ancestor origin/fix/test-suite-epistemic-failures HEAD`
+  returned rc 0, and `git cherry -v HEAD
+  origin/fix/test-suite-epistemic-failures` was empty.
+- `fix/ocp-locals-cap`: the first two OCP split commits are
+  patch-equivalent/already absorbed (`ocp_const_fold_pass_a1`,
+  `ocp_const_fold_pass_a2`, `ocp_const_fold_pass_b`). The remaining top commit
+  (`ba02961ed`) is not cleanup-safe: `git diff --stat HEAD..fix/ocp-locals-cap`
+  spans 2,796 files with 297,647 insertions and 686,982 deletions, including
+  current audit/gate deletion and broad binary/docs churn. Do not merge this
+  branch into consolidation. Residual ownership, if revived, should be a named
+  wide-int/SRET/class-2-wall lane with a focused gate; the bool/i64 `ty_eq`
+  compatibility idea is already represented in the earlier consolidation port.
+
 ## Imported stdlib lowering branch triage
 
 Reviewed `codex/madaros-import-stdlib-lowering-current` (`542a91e31`).
