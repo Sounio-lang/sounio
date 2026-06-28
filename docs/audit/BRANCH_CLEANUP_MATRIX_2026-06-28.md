@@ -376,8 +376,11 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   state was documentation-only: two audit docs had `docs:meta` headers already
   present in consolidation, and one untracked forensic audit,
   `docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md`, was recovered into
-  this branch before cleanup. Archive/delete evidence will be recorded below
-  after the tag and branch removal complete.
+  this branch before cleanup. The original branch tip was archived as
+  `archive/worktree/fix-assoc-variance-273-consolidated/2026-06-28` ->
+  `b595ac4a2`, `/workspace/sounio/.claude/worktrees/madaros-default` was
+  removed, and local/remote `fix/assoc-variance-273-consolidated` refs were
+  deleted. Post-delete counts: 86 local branches, 91 remote refs, 54 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
