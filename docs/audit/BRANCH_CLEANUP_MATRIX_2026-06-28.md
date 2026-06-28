@@ -846,6 +846,56 @@ non-settings WIP:
 
 Post-cleanup counts: 44 local branches, 56 remote refs, 44 worktrees.
 
+### Remote-only stale ref cleanup
+
+After local no-worktree and scratch cleanup, 34 `origin/*` branches had no
+matching local branch or active local worktree and showed stale rollback-shaped
+diffs against consolidation. Each remote tip was archived as
+`archive/remote/<branch-slug>/2026-06-28`, the archive tag was pushed, and then
+the remote branch was deleted:
+
+- `check/closure-hof-triple-e008`
+- `check/e014-int-index-e008`
+- `check/f32-field-narrowing-e008`
+- `check/field-deref-ref-e008`
+- `check/fn-type-lower-e008`
+- `check/int-cross-width-e008`
+- `check/linear-double-consume-e039`
+- `check/ref-param-lower-e008`
+- `check/refinement-types-e008`
+- `claude/madaros-substrate-review`
+- `claude/refine-local-plan-XoG73`
+- `codegen/byval-arg-crasher`
+- `codegen/deref-nested-store`
+- `codegen/nested-mut-write-fix`
+- `codex/direct-call-param-slot`
+- `codex/madaros-language-reality-gate`
+- `codex/madaros-raw-async-gates-20260627`
+- `feat/erdos-straus-gpu-sieve`
+- `feat/exact-orc-machinery`
+- `feat/mc-v2-opcodes`
+- `feat/native-v2-bridge-sret`
+- `fix/frame-slot-recycling`
+- `fix/native-selfhost-prebuilt`
+- `integration/canonical-souc-gate-shepherd`
+- `integration/consolidate-modular`
+- `integration/e008-nested-store-complete`
+- `modular/native-v2-e2e-gate`
+- `modular/native-v2-source-to-elf`
+- `parser/const-decls`
+- `parser/extern-blocks`
+- `parser/fn-type-effects-list-e008`
+- `parser/kernel-fn`
+- `parser/sci-notation-float`
+- `parser/sci-notation-modular-e008`
+
+`integration/sounio-dev-ready-base` was explicitly excluded from deletion
+because `AGENTS.md` records it as the historical safe base branch for the
+recovered workspace. `pr/232`, `pr/296`, and `pr/313` were also excluded
+because they are PR refs, not normal `origin/*` branch heads.
+
+Post-prune counts: 44 local branches, 22 remote refs, 44 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
