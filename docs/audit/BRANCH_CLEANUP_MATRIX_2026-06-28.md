@@ -396,6 +396,23 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   deleted. No matching remote branch existed at cleanup time. Post-delete
   counts: 85 local branches, 91 remote refs, 53 worktrees.
 
+## Current zero-exclusive boundary
+
+After the cleanup above, only three attached worktrees still have no
+patch-exclusive commits versus consolidation. They are **not** automatic
+deletion candidates:
+
+- `/workspace/sounio-metrics` (`metrics/fregni-profile`): untracked PPCR /
+  survival-validation docs and tests. Clinical/external-facing policy applies;
+  keep as owner lane until reviewed.
+- `/workspace/sounio-source-elf-proof`
+  (`codex/source-elf-on-madaros-proof`): dirty compiler WIP in checker/parser
+  plus Slurm runner. Needs extraction/gates before cleanup.
+- `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
+  (`worktree-agent-adc1cd8b9d52ba53b`): dirty native/compiler WIP in
+  `self-hosted/compiler/main.sio`, native codegen, lowerer, and suite. Needs
+  extraction/gates before cleanup.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
