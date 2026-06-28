@@ -393,3 +393,36 @@ diff is not a small SRET follow-up; it includes a broad AMD HIP/ROCm GPU train
 (`bin/kretikos`, `scripts/amd/*`, `self-hosted/gpu/*`, `tests/amd/*`) plus
 compiler driver edits. Keep that as a GPU/backend owner lane, not part of this
 compiler-core consolidation pass.
+
+## BoxNew branch triage
+
+Reviewed `codex/madaros-boxnew-clean` and
+`codex/madaros-boxnew-append-fix`.
+
+Current consolidation already contains the important non-debug BoxNew fixes in
+newer form:
+
+- `Box::new(...)` allocates the destination register before lowering its value
+  argument.
+- `let b = Box::new(...)` does not misclassify `Box` as the inner call return
+  struct; the local is tagged as `Box` so dereference lowering can use field 0.
+- flat summary/body lowering no longer applies validated-call patching in the
+  flat body path.
+- validated-call patching mutates functions through boxed module references
+  rather than detached local copies.
+
+Not ported:
+
+- branch-local debug marker writes under `/tmp/lower_*`
+- `bin/madaros-linux-x86_64` prebuilt refresh
+- broad native bridge rewrites from the append branch; current consolidation
+  already routes native-v2 through `compile_native_v2_preview_to_file`.
+
+Validation on current consolidation:
+
+- `bin/souc --native-v2-compile tests/run-pass/door1_box_new_array_65536.sio
+  -o /tmp/sounio_box_array.elf` emitted an ELF; running it exited 0 and printed
+  `PASS: box array`.
+- `bin/souc --native-v2-compile tests/run-pass/type_hash_3level_nesting.sio
+  -o /tmp/sounio_type_hash_box.elf` emitted an ELF; running it exited 0 and
+  printed `type-hash 3-level PASS`.
