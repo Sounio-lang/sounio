@@ -73,6 +73,7 @@ but are not safe for automatic merge:
 - `feat/hyper-epistemic-mul`: reviewed and rejected for immediate consolidation. It adds `IrHyperEpistemicMul` backend/Metal pieces, but the opcode is not produced by the normal compiler path, no `ir_hyper_epistemic_*` constructor or focused gate was found, and the committed audit/help text still describes the rejected associator-correction variant. Keep as an experimental/review lane until the audit doc is corrected, the user-visible help text matches the v2 formula, and either a real producer plus gate lands or the branch is explicitly scoped as backend-only prototype.
 - `codex/tuple-signature-types-20260626`: reviewed. The parser, checker, native implicit-unit/assert, and native bool-literal fixes are already equivalent in the consolidation branch; remaining exclusive commits are GPU/script/test-bookkeeping and should not drive the compiler-core merge.
 - `codex/madaros-import-stdlib-lowering-current`: older imported-stdlib lowering branch; conflicts with the newer imported-lowering path already on `origin/main`.
+- `codex/imported-full-lowerer-20260627`: reviewed. Its only patch-exclusive commit adds `scripts/ci/madaros_multimodule_witness.sh` to the Madaros prebuilt refresh gate, but that witness is currently red on consolidation (`thin_single` exits 139 at `lower_array: seed_begin`). Do not wire it into prebuilt refresh until the imported multimodule lowerer residual is actually fixed.
 - `codex/madaros-boxnew-clean` and `codex/madaros-boxnew-append-fix`: older Box::new trains; need comparison against current `origin/main` before any merge.
 
 ### Archive/quarantine
@@ -541,3 +542,26 @@ Required before reconsidering for consolidation:
 - Add either a real source/IR producer plus a focused native-v2 gate, or mark the
   branch explicitly as a backend-only prototype with a manual IR/codegen gate.
 - Add a Metal emission smoke/golden test if the Metal path remains in scope.
+
+## Imported full lowerer CI-gate triage
+
+Reviewed `codex/imported-full-lowerer-20260627` (`40cbd8af8`).
+
+The branch's only patch-exclusive commit modifies
+`.github/workflows/madaros-prebuilt-refresh.yml` to require
+`bash scripts/ci/madaros_multimodule_witness.sh` before refreshing the checked-in
+Madaros prebuilt.
+
+Do not port this workflow change yet. On current consolidation,
+`bash scripts/ci/madaros_multimodule_witness.sh` fails:
+
+```text
+[madaros-mm-witness] FAIL: thin_single expected_exit=7 actual_exit=139
+lower_array: seed_begin
+Segmentation fault
+```
+
+That makes the workflow patch a useful desired gate, but not an absorptive
+cleanup change. It belongs with the imported stdlib/multimodule lowerer residual
+until `thin_single` and the rest of the witness manifest pass on the branch that
+would enable the prebuilt refresh.
