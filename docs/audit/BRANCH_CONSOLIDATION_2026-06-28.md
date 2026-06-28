@@ -565,3 +565,64 @@ That makes the workflow patch a useful desired gate, but not an absorptive
 cleanup change. It belongs with the imported stdlib/multimodule lowerer residual
 until `thin_single` and the rest of the witness manifest pass on the branch that
 would enable the prebuilt refresh.
+
+## Tuple-let/PBPK broad-train refresh
+
+Re-reviewed `fix/madaros-tuple-let-desugar` and
+`docs/pbpk-session-notes-2026-06-28` after the consolidation branch reached
+`939725590`.
+
+Do not merge either branch as a unit.
+
+Evidence:
+
+- `fix/madaros-tuple-let-desugar` still has a broad right-side history including
+  solver/GPU Blackwell receipt work, KAXI scorer kernels, dissertation notes,
+  bootstrap binary refresh, imported SMT lowering, and raw async closeout.
+- Direct branch diff against consolidation touches 241 files, including
+  `.claude/llm_offload_log.md`, `.github/workflows/ci.yml`, `bin/souc`,
+  `bin/madaros-linux-x86_64`, solver benchmarks/scripts, GPU emitters,
+  theorem/stdlib files, parser/checker/IR/native compiler surfaces, docs, and
+  many test deletions.
+- The raw diff would delete the consolidation audit doc and the focused gates
+  added by this sweep (`native_v2_float_arith_gate`,
+  `native_v2_struct_field_float_gate`, `native_v2_loop_print_gate`,
+  `native_v2_global_bss_gate`, `native_v2_tuple_signature_absorbed_gate`, and
+  `native_v2_semcall_absorbed_gate`).
+- `docs/pbpk-session-notes-2026-06-28` has the same broad-train shape plus
+  additional handoff/docs content. It is documentation/audit material, not a
+  compiler-core merge branch.
+
+Classification:
+
+- Keep both as broad provenance branches.
+- Extract only named compiler fixes with a small diff and a focused gate.
+- Do not use either branch as the base for the unified compiler branch.
+
+## Madaros rebuild probe extraction
+
+Reviewed `codex/madaros-rebuild-probe` (`e4284b656`).
+
+Ported the complete patch because it is a small source-only compiler fix:
+
+- `self-hosted/compiler/lean_single.sio`: extends the legacy `ty_eq` escape hatch
+  for integer scalar values flowing into enum/bool struct fields by adding the
+  bool case (`k1 == 4 && k2 == 1`).
+- `self-hosted/ir/opt_cleanup.sio`: restores two malformed unary-op tracking
+  guards by turning dangling `&& ...` fragments into explicit `if
+  result.instrs[i].op == IrUnaryOp && ...` conditions and by reading through a
+  local instruction value before populating `is_bnot`/`bnot_src`.
+
+Validation after port:
+
+- `bin/souc info`: PASS, selected Madares v0.80.0.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2 / FAIL 0.
+- `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check,
+  trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
+- `bash tests/native_v2_semcall_absorbed_gate/run.sh bin/souc`: PASS 4 / FAIL 0.
+
+Additional probe:
+
+- `bin/souc --check self-hosted/ir/opt_cleanup.sio`: FAILS on broad existing
+  parse/check noise in this module surface, so it is not used as proof for this
+  extraction.
