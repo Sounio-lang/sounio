@@ -250,8 +250,15 @@ classified in this audit as non-merge residuals:
   stale governance registry/report edits. It was not ported into the compiler
   consolidation lane because it is not compiler-core and should only land via a
   documentation/public-surface lane with the required external-artifact review.
+- `codex/solver-pilot-blockers-clean-20260626`: archived as
+  `archive/branch/codex-solver-pilot-blockers-clean-20260626/2026-06-28` ->
+  `4af962057`, then local/remote refs were deleted. Its exclusive work is a
+  solver external-corpus pilot harness and Slurm submitter under
+  `scripts/research/` plus a benchmark manifest. It was not ported into the
+  compiler consolidation lane because it is research/benchmark infrastructure,
+  not compiler-core behavior.
 
-Post-delete counts: 75 local branches, 82 remote refs, 52 worktrees.
+Post-delete counts: 74 local branches, 81 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
