@@ -711,3 +711,56 @@ bin/souc --native-v2-compile tests/generics/box_generic_struct.sio -o /tmp/box_g
 ```
 
 Classification: code absorbed already; runnable witness remains residual.
+
+## Legacy native-v2 backlog branch triage
+
+Reviewed the top commits of the older native-v2 backlog/worktree branches:
+
+- `wall/source-to-elf` (`0f0cc9df9`)
+- `wall/check-enumctor` (`a595ad29f`)
+- `backlog/f64-compare` (`54ecab937`)
+- `backlog/sret-return` (`dce0ea1ca`)
+- `backlog/strconcat-emit-fix` (`d5bf9dd9e`)
+- `honest/codex-calls` (`eae0d5134`)
+- `claude/fn-pointers-integ` (`999b6633b`)
+
+Do not merge these branches as branches. Their branch bases are very old and a
+raw diff against consolidation spans thousands of files, including massive
+deletions unrelated to the top commit being inspected.
+
+Absorbed/equivalent evidence on current consolidation:
+
+- `wall/source-to-elf`: current `self-hosted/compiler/main.sio` documents and
+  implements the second positional output path for `--native-v2-compile`; the
+  canonical `bash scripts/ci/madaros_source_to_elf_gate.sh` remains PASS.
+- `honest/codex-calls`: `bin/madaros --native-v2-emit-call5` emits an ELF that
+  exits 31; `--native-v2-emit-call6` emits an ELF that exits 63.
+- `backlog/sret-return`: `bin/madaros --native-v2-emit-sret` emits an ELF that
+  exits 14.
+- `backlog/strconcat-emit-fix`: `--native-v2-emit-strconcatlen` emits an ELF
+  that exits 5; `--native-v2-emit-strconcatcharat` emits an ELF that exits 100.
+- `claude/fn-pointers-integ`: `--native-v2-emit-fnptr` emits an ELF that exits
+  110.
+- `backlog/f64-compare`: `--native-v2-emit-f64cmp` is present and emits/runs
+  the full case matrix. Observed results on consolidation:
+  `lt-true=1`, `lt-false=0`, `lt-nan=1`, `le-true=1`, `le-false=0`,
+  `le-nan=1`, `gt-true=1`, `gt-false=0`, `gt-nan=0`, `ge-true=1`,
+  `ge-false=0`, `ge-nan=0`, `eq-true=1`, `eq-false=0`, `eq-nan=1`,
+  `ne-true=1`, `ne-false=0`, `ne-nan=0`.
+- `wall/check-enumctor`: kept as source-absorbed/needs-no-branch-merge for now;
+  current consolidation already carries enum constructor checker work in newer
+  branches, and this top commit is not safe to replay through the old branch
+  history.
+
+Additional validation:
+
+- `bash scripts/ci/madaros_full_gate.sh`: PASS on current consolidation,
+  including public/raw check CLI, source build/run, native-v2 ABI/backend
+  witnesses, multimodule visibility diagnostics, and package manager self-test.
+
+Classification:
+
+- Treat these legacy backlog branches as provenance, not merge sources.
+- If one of their claims regresses, add a fresh focused gate on
+  `integration/compiler-consolidation-20260628` instead of reviving the old
+  branch history.
