@@ -626,3 +626,37 @@ Additional probe:
 - `bin/souc --check self-hosted/ir/opt_cleanup.sio`: FAILS on broad existing
   parse/check noise in this module surface, so it is not used as proof for this
   extraction.
+
+## Release conformance spine compiler-core extraction
+
+Reviewed `codex/release-conformance-spine-fix`.
+
+Ported only the compiler-core commit `0e0845447`
+(`Harden validated-call patching for multimodule lower`). The other exclusive
+commits in the branch are local editor/package/install/docs conformance-gate
+work and were not pulled into the compiler consolidation lane.
+
+Ported/adapted:
+
+- `self-hosted/ir/lower.sio`: added `lowerer_lower_program_items_ref_mut` so
+  summary-based imported body lowering mutates a single `Lowerer` rather than
+  lowering through a by-value return path.
+- Added bounds guards for validated-call patching over `fn_id`, module
+  functions, and function instruction counts (`2048` and `IR_MAX_INSTRS`).
+- Resolved the branch conflict by preserving the newer consolidation signature
+  that passes `callee_strategies` and `callee_param_counts` by reference.
+
+Validation after port:
+
+- `bin/souc info`: PASS, selected Madares v0.80.0.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2 / FAIL 0.
+- `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check,
+  trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
+- `bash scripts/ci/madaros_multimodule_witness.sh`: still FAILS with
+  `thin_single expected_exit=7 actual_exit=139` at `lower_array: seed_begin`.
+
+Status:
+
+- The validated-call hardening is absorbed.
+- The imported multimodule witness remains a residual blocker and still must not
+  be wired into the prebuilt-refresh workflow.
