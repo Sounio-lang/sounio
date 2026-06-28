@@ -640,3 +640,198 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
   }
   return { ...base, vascFrac: vasc, ps };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// VENLAFAXINE XR — controlled-release witness (SISTEMA 2: Korsmeyer-Peppas matrix)
+//
+// Third canonical drug. Two coupled PBPK28 compartments: parent (venlafaxine)
+// and active metabolite ODV (O-desmethylvenlafaxine), bridged by hepatic CYP2D6
+// formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
+//
+// Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
+// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
+// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
+//
+// Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
+// Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
+// (ODV/parent Css PM 0.25 / NM 3.45 / UM 10.3 → CYP2D6 formation scaling).
+// ════════════════════════════════════════════════════════════════════════════
+
+export const VFX_MATRIX_GOHEL2008 = Object.freeze({ totalDose: 75.0, k: 0.199, n: 0.65 });
+export const VFX_F_ORAL_XR = 0.45;
+export const VFX_KA_ABS    = 0.63;
+export const VFX_CL_FORM_ODV_NM = 43.0;   // L/h, CYP2D6 formation at NM (parity reference)
+export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Klamerus 1999
+export const VFX_CL_ODV_CENTRAL    = 28.0; // L/h, Wyeth label
+
+export const VFX_KP_PARENT = Object.freeze([1.00, 4.20, 3.50, 1.20, 2.00, 2.80, 1.80, 1.20, 2.40, 1.50, 0.80, 2.00, 1.60, 0.90]);
+export const VFX_PS_PARENT = Object.freeze([0.0, 900.0, 600.0, 120.0, 200.0, 8000.0, 250.0, 80.0, 500.0, 100.0, 40.0, 120.0, 80.0, 60.0]);
+export const VFX_KP_ODV    = Object.freeze([1.00, 3.50, 3.00, 1.00, 1.60, 2.20, 1.40, 0.90, 2.00, 1.20, 0.70, 1.60, 1.30, 0.70]);
+export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000.0, 200.0, 60.0, 400.0, 80.0, 30.0, 100.0, 70.0, 50.0]);
+
+// CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
+export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
+
+// ─── Matrix transcendentals — verbatim ports of release/matrix_er.sio ────────
+function merLnUnit(x) {                       // ln(x) for x in (0,2], artanh series
+  if (x <= 0.0) return -1.0e6;
+  const y = (x - 1.0) / (x + 1.0);
+  const y2 = y * y;
+  let term = y, sum = term;
+  for (let k = 1; k < 20; k++) { term = term * y2; sum = sum + term / (2.0 * k + 1.0); }
+  return 2.0 * sum;
+}
+function merExp(x) {                          // exp via (1+x/1024)^1024
+  let r = 1.0 + x / 1024.0;
+  for (let i = 0; i < 10; i++) r = r * r;
+  return r;
+}
+function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
+  if (t <= 0.0) return 0.0;
+  if (Math.abs(n - 1.0) < 1.0e-12) return t;
+  if (Math.abs(n - 0.5) < 1.0e-12) return Math.sqrt(t);
+  let lnT = 0.0;
+  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
+  return merExp(n * lnT);
+}
+function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+  if (x >= 0.0) return 1.0;
+  let y = 1.0, term = 1.0;
+  for (let k = 1; k < 20; k++) { term = term * x / k; y = y + term; }
+  return y;
+}
+
+export function vfxMatrixFraction(rel, t) {
+  if (t <= 0.0) return 0.0;
+  const f = rel.k * merPow(t, rel.n);
+  return f > 1.0 ? 1.0 : f;
+}
+export function vfxMatrixCumulative(rel, t) { return rel.totalDose * vfxMatrixFraction(rel, t); }
+export function vfxMatrixStepAmount(rel, t, dt) {
+  return vfxMatrixCumulative(rel, t + dt) - vfxMatrixCumulative(rel, t);
+}
+
+// ─── Fully-coupled CN transport step — port of pbpk28_full_cn_step ───────────
+function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
+  const h = 0.5 * dt;
+  const vb = V_REF[0];
+  let sumQ = 0.0;
+  for (let i = 1; i < N; i++) sumQ += Q[i];
+  const bigS = h * (sumQ + clCentral) / vb;
+  const cbOld = Cv[0];
+  let rhs0 = (1.0 - bigS) * cbOld + dt * relMid / vb;
+  const aV = new Float64Array(N), bV = new Float64Array(N);
+  const aT = new Float64Array(N), bT = new Float64Array(N);
+  let sumBetaA = 0.0, sumBetaB = 0.0;
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    const vv = Math.max(vi * vf, 1e-30), vt = Math.max(vi * (1 - vf), 1e-30);
+    const kpi = kp[i], psi = ps[i], qi = Q[i];
+    const beta = h * qi / vb, gamma = h * qi / vv;
+    const p = 1.0 + h * (qi + psi) / vv;
+    const qq = h * psi / (vv * kpi);
+    const r = h * psi / vt;
+    const sb = 1.0 + h * psi / (vt * kpi);
+    const det = p * sb - qq * r;
+    rhs0 += beta * Cv[i];
+    const rhsV = gamma * cbOld + (1.0 - h * (qi + psi) / vv) * Cv[i] + qq * Ct[i];
+    const rhsT = r * Cv[i] + (1.0 - h * psi / (vt * kpi)) * Ct[i];
+    aV[i] = (sb * rhsV + qq * rhsT) / det;
+    bV[i] = (sb * gamma) / det;
+    aT[i] = (r * rhsV + p * rhsT) / det;
+    bT[i] = (r * gamma) / det;
+    sumBetaA += beta * aV[i];
+    sumBetaB += beta * bV[i];
+  }
+  const cbNew = (rhs0 + sumBetaA) / ((1.0 + bigS) - sumBetaB);
+  const outCv = new Float64Array(N), outCt = new Float64Array(N);
+  outCv[0] = cbNew < 0 ? 0 : cbNew;
+  for (let i = 1; i < N; i++) {
+    const cv = aV[i] + bV[i] * cbNew;
+    const ct = aT[i] + bT[i] * cbNew;
+    outCv[i] = cv < 0 ? 0 : cv;
+    outCt[i] = ct < 0 ? 0 : ct;
+  }
+  return { cv: outCv, ct: outCt };
+}
+
+function vfxOrganAverage(cv, ct, i) {
+  if (i === 0) return cv[0];
+  const vf = VASC_FRAC[i];
+  return vf * cv[i] + (1 - vf) * ct[i];
+}
+function vfxTotalMass(cv, ct) {
+  let total = V_REF[0] * cv[0];
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    total += vi * vf * cv[i] + vi * (1 - vf) * ct[i];
+  }
+  return total;
+}
+
+// One Lie-Trotter step: matrix → gut → ka absorption → parent CN → CYP2D6
+// liver formation (drain parent organ 1, feed ODV) → ODV CN. Mirrors
+// vfx_strang_step in scenarios/venlafaxine_xr.sio.
+function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
+  const relAmt = vfxMatrixStepAmount(rel, tStart, dt);
+  let gut = st.gut + relAmt;
+  const fracAbs = 1.0 - merExpNeg(-VFX_KA_ABS * dt);
+  const absorbAmt = VFX_F_ORAL_XR * gut * fracAbs;
+  gut = gut - absorbAmt;
+  if (gut < 0) gut = 0;
+  const parentInput = absorbAmt / dt;
+
+  const outP = vfxCnStep(st.pCv, st.pCt, VFX_KP_PARENT, VFX_PS_PARENT, VFX_CL_PARENT_CENTRAL, parentInput, dt);
+
+  const cLiver = vfxOrganAverage(outP.cv, outP.ct, 1);
+  const clForm = VFX_CL_FORM_ODV_NM * clFormScale;
+  const formMg = clForm * cLiver * dt;
+  outP.cv[1] = outP.cv[1] - formMg / V_REF[1];
+  if (outP.cv[1] < 0) outP.cv[1] = 0;
+  if (outP.cv[0] < 0) outP.cv[0] = 0;
+  const odvInput = formMg / dt;
+
+  const outO = vfxCnStep(st.oCv, st.oCt, VFX_KP_ODV, VFX_PS_ODV, VFX_CL_ODV_CENTRAL, odvInput, dt);
+  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut };
+}
+
+/**
+ * Integrate the venlafaxine XR scenario at NM (or a chosen CYP2D6 phenotype) and
+ * sample parent + ODV organ-average trajectories at the given times. Returns a
+ * record per sample with parent/ODV {cv,ct,avg}[14], cumulative matrix release,
+ * and the total-body ODV/parent mass ratio. Default dt=0.5 h matches the stdlib
+ * scenario; pheno default 2 = NM (the parity reference, R7).
+ */
+export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
+  const rel = VFX_MATRIX_GOHEL2008;
+  const clFormScale = VFX_CL_FORM_SCALE[pheno];
+  let st = {
+    pCv: new Float64Array(N), pCt: new Float64Array(N),
+    oCv: new Float64Array(N), oCt: new Float64Array(N), gut: 0.0,
+  };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) {
+      st = vfxStrangStep(st, rel, t, dt, clFormScale);
+      t += dt;
+    }
+    const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      pAvg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
+      oAvg[i] = vfxOrganAverage(st.oCv, st.oCt, i);
+    }
+    const mp = vfxTotalMass(st.pCv, st.pCt);
+    const mo = vfxTotalMass(st.oCv, st.oCt);
+    out.push({
+      t: target,
+      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), pAvg,
+      oCv: Float64Array.from(st.oCv), oCt: Float64Array.from(st.oCt), oAvg,
+      released: vfxMatrixCumulative(rel, target),
+      ratio: mp < 1.0e-12 ? 0.0 : mo / mp,
+      pMass: mp, oMass: mo,
+    });
+  }
+  return out;
+}
