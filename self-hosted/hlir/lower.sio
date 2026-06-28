@@ -1910,6 +1910,50 @@ pub fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, 
     hlir_lower_unit(state)
 }
 
+fn hlir_gpu_axis_root(e: Expr) -> bool {
+    e.kind == ExprKind::ExprIdent && hlir_ast_name_to_string(e.name) == "gpu"
+}
+
+fn hlir_gpu_axis_flat_name(e: Expr) -> string with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprFieldAccess {
+        return ""
+    }
+    if hlir_ast_name_to_string(e.name) != "x" {
+        return ""
+    }
+    match e.left {
+        Some(base) => {
+            if (*base).kind == ExprKind::ExprFieldAccess {
+                match (*base).left {
+                    Some(root) => {
+                        if hlir_gpu_axis_root(*root) {
+                            let axis_name = hlir_ast_name_to_string((*base).name)
+                            if axis_name == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_name == "block_id" { return "gpu_block_id_x" }
+                            if axis_name == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            } else if (*base).kind == ExprKind::ExprMethodCall {
+                match (*base).left {
+                    Some(root2) => {
+                        if hlir_gpu_axis_root(*root2) {
+                            let axis_method = hlir_ast_name_to_string((*base).name)
+                            if axis_method == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_method == "block_id" { return "gpu_block_id_x" }
+                            if axis_method == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    ""
+}
+
 pub fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<MatchArmList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     // Minimal bridge implementation: lower first arm body if present.
     // Full pattern dispatch is handled by match_begin/match_merge APIs.
@@ -2043,6 +2087,11 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     }
 
     if expr.kind == ExprKind::ExprFieldAccess {
+        let gpu_axis_name = hlir_gpu_axis_flat_name(expr)
+        if gpu_axis_name != "" {
+            var no_args: [i64; 64] = [0; 64]
+            return hlir_lower_call(s, gpu_axis_name, no_args, 0, hlir_type_i64())
+        }
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
         let field_idx = hlir_ast_name_hash(expr.name) % 16

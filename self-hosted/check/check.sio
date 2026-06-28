@@ -4925,6 +4925,50 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
     }
 }
 
+fn checker_expr_is_gpu_axis_root(e: Expr) -> bool with Mut, Panic, Div {
+    e.kind == ExprKind::ExprIdent && name_eq(e.name, make_name("gpu"))
+}
+
+fn checker_expr_gpu_axis_base_kind(e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprFieldAccess {
+        match e.left {
+            Some(base) => {
+                if checker_expr_is_gpu_axis_root(*base) {
+                    if name_eq(e.name, make_name("thread_id")) { return 1 }
+                    if name_eq(e.name, make_name("block_id")) { return 2 }
+                    if name_eq(e.name, make_name("block_dim")) { return 3 }
+                }
+            }
+            None => {}
+        }
+    } else if e.kind == ExprKind::ExprMethodCall {
+        match e.left {
+            Some(base) => {
+                if checker_expr_is_gpu_axis_root(*base) {
+                    if name_eq(e.name, make_name("thread_id")) { return 1 }
+                    if name_eq(e.name, make_name("block_id")) { return 2 }
+                    if name_eq(e.name, make_name("block_dim")) { return 3 }
+                }
+            }
+            None => {}
+        }
+    }
+    0
+}
+
+fn checker_expr_is_gpu_axis_field(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprFieldAccess {
+        return false
+    }
+    if !name_eq(e.name, make_name("x")) {
+        return false
+    }
+    match e.left {
+        Some(base) => checker_expr_gpu_axis_base_kind(*base) > 0,
+        None => false,
+    }
+}
+
 // *mut ExprFieldAccess handler — FULL transcription of check_field_access (13528), not a
 // bridge. The ONLY sub-expression is the object (e.left); it is routed through the *mut
 // spine via checker_check_opt_expr_inplace so a nested enum path-expr / binary / etc. in
@@ -4938,6 +4982,9 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
 // byte-for-byte faithful to the by-value original. No (*c).expr_depth management here (the
 // dispatch owns it).
 fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_expr_is_gpu_axis_field(e) {
+        return ty_i64()
+    }
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
     if base_ty.kind == TypeKind::TyNamed {
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
@@ -18513,6 +18560,9 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_field_access(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if checker_expr_is_gpu_axis_field(e) {
+            return (self, ty_i64())
+        }
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let base_ty = pair.1
