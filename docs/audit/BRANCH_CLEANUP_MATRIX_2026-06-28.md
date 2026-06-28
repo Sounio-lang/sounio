@@ -214,8 +214,17 @@ classified in this audit as non-merge residuals:
   then local/remote refs were deleted. The accepted M2 effect firewall work was
   already extracted from `m2/effect-firewall` into consolidation with the
   10/10 `native_v2_effects_gate`; this recovery branch is redundant provenance.
+- `codex/main-release-ci-repair-20260623`: archived as
+  `archive/branch/codex-main-release-ci-repair-20260623/2026-06-28` ->
+  `19cde59a7`, then local/remote refs were deleted. This was already classified
+  as release/docs/tooling rather than compiler-core merge material.
+- `feat/generics-struct-instantiation`: archived as
+  `archive/branch/feat-generics-struct-instantiation/2026-06-28` ->
+  `f68d688c9`, then local/remote refs were deleted. The compiler-code portion
+  is already present in consolidation; its branch-only generic struct witness
+  still parses red on current consolidation and remains residual.
 
-Post-delete counts: 81 local branches, 88 remote refs, 52 worktrees.
+Post-delete counts: 79 local branches, 86 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
