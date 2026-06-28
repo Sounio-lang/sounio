@@ -6385,7 +6385,17 @@ impl Lowerer {
                     lo = var_pair.0
                     if var_pair.1 >= 0 {
                         lo = lo.bind_local_variance_reg(s.name, var_pair.1)
-                        lo = lo.bind_local_scalar_kind(s.name, 2)
+                        // Do NOT force scalar_kind=2 (float) here. A variance reg is
+                        // produced for every tracked value, including INT locals
+                        // (variance 0); the value's scalar_kind was already set
+                        // authoritatively above (int/bool->1, float->2, string->3).
+                        // Clobbering it to float made `int_local + literal` (and the
+                        // for_sum loop accumulator `var s=3; s=s+5`) lower as a float
+                        // add, yielding 0 instead of 8 (#478). Re-assert float only
+                        // when the value is genuinely float, mirroring the if-branch.
+                        if lo.expr_result_is_float_ref(&(*expr_box_var)) {
+                            lo = lo.bind_local_scalar_kind(s.name, 2)
+                        }
                     }
                 }
             }
@@ -6457,11 +6467,13 @@ impl Lowerer {
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
         var rhs_variance: i64 = -1
+        var rhs_is_float: bool = false
         match s.expr {
             Some(rhs_expr_var) => {
                 let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
                 lo = rhs_var_pair.0
                 rhs_variance = rhs_var_pair.1
+                rhs_is_float = lo.expr_result_is_float_ref(&(*rhs_expr_var))
             }
             _ => {}
         }
@@ -6505,7 +6517,12 @@ impl Lowerer {
                             lo = lo.emit(ir_copy(dst, rhs))
                             if rhs_variance >= 0 {
                                 lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
-                                lo = lo.bind_local_scalar_kind((*target_expr).name, 2)
+                                // Re-assert float scalar_kind only when the RHS is
+                                // genuinely float; an int RHS that merely carries a
+                                // variance reg must not flip the local to float (#478).
+                                if rhs_is_float {
+                                    lo = lo.bind_local_scalar_kind((*target_expr).name, 2)
+                                }
                             }
                             (lo, dst)
                         }
