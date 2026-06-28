@@ -106,7 +106,9 @@ if [ "$TARGET" = "x86_64-linux" ]; then
   bash scripts/omega/omega_native_v2_shadow_gate.sh > artifacts/omega/apple_os26_native_v2_gate.log 2>&1
   SMOKE_BIN="artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin"
 else
-  ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio > artifacts/omega/apple_os26_native_v2_emit.log 2>&1
+  # The preview emitter is multimodule source; use the stable lean_single path
+  # until Madaros imported/native lowering passes the seed witness.
+  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/native-v2/aarch64_macho_preview_emit.sio > artifacts/omega/apple_os26_native_v2_emit.log 2>&1
   cat > "artifacts/omega/native_backend_v2_contract.$TARGET.json" <<CONTRACT_EOF
 {
   "schema": "sounio.native_backend_v2_contract.v1",
