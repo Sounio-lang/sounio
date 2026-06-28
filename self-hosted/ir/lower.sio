@@ -18,6 +18,9 @@ struct LowerLocalStack {
     global_bss_offsets: [i64; 4096],
     global_bss_sizes: [i64; 4096],
     is_global: [i64; 4096],
+    // 1 = local/param holds a reference (&P / &[T;N] / &![T;N]) to a heap aggregate,
+    // i.e. its slot stores a raw address of the caller slot, not the handle directly.
+    is_ref: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
@@ -40,6 +43,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_offsets: [0; 4096],
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
+        is_ref: [0; 4096],
         scalar_kind: [0; 4096],
         variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
@@ -1671,12 +1675,31 @@ fn lowerer_bind_local_mut(
         (*locals_box).global_bss_offsets[idx as usize] = 0
         (*locals_box).global_bss_sizes[idx as usize] = 0
         (*locals_box).is_global[idx as usize] = 0
+        (*locals_box).is_ref[idx as usize] = 0
         (*locals_box).scalar_kind[idx as usize] = 0
         (*locals_box).variance_regs[idx as usize] = -1
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
         lowerer_mark_error(lo)
+    }
+}
+
+// *mut analogue: mark a just-bound param/local as a reference-typed binding so
+// field/index lowering can emit the extra dereference for &P / &[T;N] params.
+fn lowerer_mark_local_ref_mut(
+    lo: &! Lowerer,
+    name: Name
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).is_ref[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
     }
 }
 
@@ -1786,6 +1809,9 @@ fn lowerer_lower_fn_params_mut(
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
+                if lower_type_expr_is_ref_like(&(*list).head.ty) {
+                    lowerer_mark_local_ref_mut(lo, (*list).head.name)
+                }
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
                 }
@@ -2160,6 +2186,10 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
         return lower_opt_type_named_name(&(*ty).inner)
     }
     ir_empty_name()
+}
+
+fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
+    (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -3624,6 +3654,7 @@ impl Lowerer {
                 stk.array_elem_float[idx as usize] = 0
                 stk.wide_bits[idx as usize] = 0
                 stk.wide_signed[idx as usize] = 0
+                stk.is_ref[idx as usize] = 0
                 stk.variance_regs[idx as usize] = -1
                 stk.count = idx + 1
             lo.locals = Box::new(stk)
@@ -3723,6 +3754,17 @@ impl Lowerer {
         while i >= 0 {
             if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
                 return (*self.locals).is_global[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn lookup_local_is_ref(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).is_ref[i as usize] == 1
             }
             i = i - 1
         }
@@ -5649,6 +5691,7 @@ impl Lowerer {
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
+                        locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -6533,23 +6576,46 @@ impl Lowerer {
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
                         match base_opt {
                             Some(base_expr) => {
+                                let base_is_ref = if (*base_expr).kind == ExprKind::ExprIdent {
+                                    lo.lookup_local_is_ref((*base_expr).name)
+                                } else {
+                                    false
+                                }
                                 let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
                                 let pair_base = lo.lower_expr_ref(&(*base_expr))
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
-                                lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                var set_instr = ir_field_set(base_reg, fidx, rhs, (*target_expr).name)
+                                if base_is_ref {
+                                    set_instr.label_id = 1
+                                }
+                                lo = lo.emit(set_instr)
                                 (lo, rhs)
                             }
                             _ => (lo.report_error(), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let target_base_is_ref = match (*target_expr).left {
+                            Some(target_base_expr) => {
+                                if (*target_base_expr).kind == ExprKind::ExprIdent {
+                                    lo.lookup_local_is_ref((*target_base_expr).name)
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        }
                         let pair_base = lo.lower_opt_expr_ref(&(*target_expr).left)
                         lo = pair_base.0
                         let base_reg = pair_base.1
                         let pair_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
-                        lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
+                        var index_set_instr = ir_index_set(base_reg, idx_reg, rhs)
+                        if target_base_is_ref {
+                            index_set_instr.label_id = 1
+                        }
+                        lo = lo.emit(index_set_instr)
                         (lo, rhs)
                 } else if (*target_expr).kind == ExprKind::ExprUnary {
                         if (*target_expr).un_op == UnaryOp::OpDeref {
@@ -8176,6 +8242,16 @@ impl Lowerer {
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
         let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let base_is_ref = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    lo1.lookup_local_is_ref((*base_expr_ref).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
         if lower_aggregate_diag_enabled() {
             print("lower_agg: field name=")
             print(str_from_bytes(e.name.buf, e.name.len))
@@ -8219,6 +8295,9 @@ impl Lowerer {
         let lo2 = pair_d.0
         let dst = pair_d.1
         var instr = ir_field_get(dst, base, fidx, e.name)
+        if base_is_ref {
+            instr.label_id = 1
+        }
         if field_is_float || field_array_elem_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
         }
@@ -8234,6 +8313,16 @@ impl Lowerer {
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
+        let base_is_ref = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    self.lookup_local_is_ref((*base_expr_ref).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base = pair_b.1
@@ -8256,6 +8345,9 @@ impl Lowerer {
         let lo3 = pair_d.0
         let dst = pair_d.1
         var instr = ir_index_get(dst, base, idx)
+        if base_is_ref {
+            instr.label_id = 1
+        }
         if index_elem_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
         }
