@@ -644,6 +644,30 @@ Closed since the previous boundary entry:
   Local and remote refs for both SRET branches were deleted. Post-delete counts:
   55 local branches, 62 remote refs, 52 worktrees.
 
+- `claude/kw-demote-module`: no attached worktree. The branch is not a narrow
+  keyword-demotion branch in current consolidation terms; it is a historical
+  native-v2/self-hosting train with many already-superseded changes. The full
+  diff versus consolidation spanned 2974 files, 293894 insertions, and 672649
+  deletions, including removal of the active branch-consolidation audit docs,
+  workflows, demo/docs surfaces, and consolidated gates. Direct merge was
+  rejected. The relevant M2/effect-firewall work has already been ported and
+  validated in this consolidation branch; no additional hunk was extracted.
+  The original branch tip was archived as
+  `archive/branch/claude-kw-demote-module/2026-06-28` -> `d731cc3ce`;
+  local and remote `claude/kw-demote-module` refs were deleted.
+
+- `integration/effects-kwdemote`: no attached worktree. The branch shares the
+  same historical effects/kwdemote/native-v2 ancestry, with a full diff of 2984
+  files, 296305 insertions, and 672599 deletions versus consolidation. It would
+  delete active consolidation audits and many already-consolidated gates while
+  reintroducing old effects measurement artifacts. Direct merge was rejected.
+  The useful effect-enforcement path was already extracted through the M2
+  effect-firewall port and validated separately; no hunk was extracted here.
+  The original branch tip was archived as
+  `archive/branch/integration-effects-kwdemote/2026-06-28` -> `89a467baf`;
+  local and remote `integration/effects-kwdemote` refs were deleted.
+  Post-delete counts: 53 local branches, 60 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
