@@ -50,14 +50,20 @@ CHECKER_WARNING_MUT_PROBE_BIN="$WORK_DIR/checker_warning_mut_probe.elf"
 CHECKER_WARNING_MUT_PROBE_LOG="$WORK_DIR/checker_warning_mut_probe.log"
 CHECKER_WARNING_MUT_PROBE_RUN_LOG="$WORK_DIR/checker_warning_mut_probe.run.log"
 BOOTSTRAP_LOG="$WORK_DIR/bootstrap.log"
-# Default the fallback compile oracle to the lean_single fixed-point ELF rather
-# than bin/souc. As of 2026-06-14 bin/souc defaults to the Madaros engine, whose
-# in-place checker spine does not yet collect ItemOntology (check.sio:2832), so it
-# silently accepts ontology role/property/inverse axiom violations. lean_single
-# (check.sio by-value path) owns ontology validation, so it is the correct oracle
-# for this gate. Override via SOUNIO_VALIDATION_FALLBACK_SOUC. See memory:
-# project_madaros_ontology_gap. Tracking the Madaros gap closure as follow-up.
-DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc-lean-single-x86_64"
+# Fallback compile oracle: the default engine (bin/souc → Madaros). This gate
+# previously pinned the oracle to the lean_single fixed-point ELF for two reasons,
+# both now CLOSED:
+#   1. Madaros silently accepted ontology axiom violations — fixed: it enforces
+#      E041 property weakening (PR #439) and E009 subclass subsumption (PR #475).
+#   2. Madaros native codegen segfaulted on field/index access through reference
+#      params to heap aggregates (&P, &[T;N]), crashing ontology_subsumption at
+#      runtime — fixed in PR #505 (ref-param deref before handle resolution),
+#      live in the committed prebuilt as of refresh d90b42d61 (2026-06-28).
+# With both closed the full ontology validation suite passes under Madaros
+# (57/57), so the lean_single pin is removed and Madaros owns ontology validation
+# here too. Override via SOUNIO_VALIDATION_FALLBACK_SOUC. See memory:
+# project_madaros_ontology_gap.
+DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc"
 [[ -x "$DEFAULT_FALLBACK_SOUC" ]] || DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
 FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$DEFAULT_FALLBACK_SOUC}"
 BOOT4_BIN="${SOUNIO_VALIDATION_BOOT4_BIN:-$ROOT_DIR/artifacts/bootstrap/boot4.elf}"
