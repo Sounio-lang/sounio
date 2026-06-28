@@ -912,6 +912,47 @@ Validation:
 - `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2 after this
   triage.
 
+## Native-v2 source bridge / prebuilt branch triage
+
+Reviewed the old native-v2/source-bridge and prebuilt-refresh branches:
+
+- `origin/feat/native-v2-source-bridge`
+- `origin/feat/native-v2-bridge-sret`
+- `origin/feat/mc-v2-opcodes`
+- `origin/fix/frame-slot-recycling`
+- `origin/fix/native-selfhost-prebuilt`
+- `origin/fix/stdlib-e2e-sret-workarounds`
+- `origin/modular/native-v2-e2e-gate`
+- `origin/modular/native-v2-source-to-elf`
+- `origin/integration/canonical-souc-gate-shepherd`
+
+Do not merge these branches as branches. None is an ancestor of the current
+consolidation branch. Raw diffs range from 2,722 to 2,898 files and include
+roughly 282k-284k insertions with 702k-729k deletions, which is old-base
+rollback shape rather than focused compiler work.
+
+Current consolidation already proves the main current native-v2/source-to-ELF
+surfaces through canonical gates:
+
+- `bin/souc info`: selected `Madares v0.80.0`.
+- `bash scripts/ci/madaros_source_to_elf_gate.sh`: PASS, including check,
+  trace, normal/native-v2 compile, ELF execution, and exit-code semantics.
+- `bash scripts/ci/madaros_full_gate.sh`: PASS, including public/raw check CLI,
+  source build/run, native-v2 ABI/backend witnesses, multimodule visibility
+  diagnostics, and package manager self-test.
+
+Classification:
+
+- Treat `native-v2-source-bridge`, `native-v2-source-to-elf`, `mc-v2-opcodes`,
+  and `native-v2-e2e-gate` as provenance covered by the current source-to-ELF
+  and full Madaros gates, not direct merge sources.
+- Treat `native-selfhost-prebuilt` and `canonical-souc-gate-shepherd` as
+  binary/canonical-wrapper provenance. Do not refresh prebuilts from old branch
+  state during compiler consolidation.
+- Treat `native-v2-bridge-sret`, `frame-slot-recycling`, and
+  `stdlib-e2e-sret-workarounds` as residual native-runtime/SRET ownership lanes
+  unless a fresh focused gate identifies a missing source hunk.
+
 ## Madaros closeout / variance / async branch triage
 
 Reviewed:
