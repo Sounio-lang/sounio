@@ -16,8 +16,24 @@ SMOKE_SRC="tests/native-v2/aarch64_macho_preview_emit.sio"
 SMOKE_BIN="artifacts/omega/native_backend_v2_scalar_smoke.aarch64-macos.bin"
 COPIED_BIN="$ARTIFACT_DIR/native_backend_v2_scalar_smoke.aarch64-macos.bin"
 SUMMARY_JSON="$ARTIFACT_DIR/summary.json"
+SMOKE_BACKUP="$OUT_DIR/original-smoke-bin"
+HAD_SMOKE_BIN=0
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts/omega
+
+if [[ -f "$SMOKE_BIN" ]]; then
+  cp "$SMOKE_BIN" "$SMOKE_BACKUP"
+  HAD_SMOKE_BIN=1
+fi
+
+restore_smoke_bin() {
+  if [[ "$HAD_SMOKE_BIN" == "1" ]]; then
+    cp "$SMOKE_BACKUP" "$SMOKE_BIN"
+  else
+    rm -f "$SMOKE_BIN"
+  fi
+}
+trap restore_smoke_bin EXIT
 
 portable_size() {
   stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
