@@ -407,7 +407,14 @@ deletion candidates:
   keep as owner lane until reviewed.
 - `/workspace/sounio-source-elf-proof`
   (`codex/source-elf-on-madaros-proof`): dirty compiler WIP in checker/parser
-  plus Slurm runner. Needs extraction/gates before cleanup.
+  plus Slurm runner. Re-reviewed against the current consolidation HEAD after
+  the zero-exclusive cleanup. Its committed history is patch-equivalent, and
+  its dirty diff would downgrade current checker/parser architecture: it
+  reverts heap-indirect struct/enum/fn tables, removes newer ontology verdict
+  and visibility plumbing, and removes parser newline guards for `[`/`(`/prefix
+  operators. The raw dirty diff was archived at
+  `docs/audit/archived_wip/source-elf-proof-dirty-2026-06-28.patch`; do not
+  port it wholesale.
 - `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
   (`worktree-agent-adc1cd8b9d52ba53b`): dirty native/compiler WIP in
   `self-hosted/compiler/main.sio`, native codegen, lowerer, and suite. Needs
