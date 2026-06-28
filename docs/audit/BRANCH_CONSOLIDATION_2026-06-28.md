@@ -1191,6 +1191,37 @@ Validation:
     multimodule visibility noise (`E175`) and large-frame warnings; not used as
     acceptance evidence for this micro-port.
   - `bin/souc --check self-hosted/native/codegen_x86_linux.sio`: FAIL on
-    existing broad native-codegen check noise (`E137`, `E035`, `E012`, `E002`,
-    `E175`, large-frame warnings); not used as acceptance evidence for this
-    micro-port.
+  existing broad native-codegen check noise (`E137`, `E035`, `E012`, `E002`,
+  `E175`, large-frame warnings); not used as acceptance evidence for this
+  micro-port.
+
+## M2 effect firewall extraction
+
+Reviewed clean worktree branch `m2/effect-firewall` at `8c34a11a8`. Its only
+patch-exclusive compiler commit was `52689f11d`:
+`feat(check): M2 effect enforcement + LLM effect + build-mode codegen firewall`.
+
+Ported into consolidation:
+
+- `self-hosted/check/check.sio`: effect-use enforcement and build-mode codegen
+  firewall, preserving existing consolidation checker warnings. Conflict
+  resolution kept the current chaotic/equiv and large-frame diagnostics, removed
+  a duplicate `call_expr_is_box_new` recognizer, and made the inplace
+  `Box::new` path require `Alloc`.
+- `self-hosted/check/effects.sio` and `self-hosted/effects/types.sio`: added
+  `LLM` effect support.
+- `tests/native_v2_effects_gate/`: focused IO/Div/Alloc/LLM firewall gate.
+
+Validation:
+
+- `bash scripts/ci/build_modular_madaros.sh /tmp/madaros-effects-port`: PASS,
+  produced `/tmp/madaros-effects-port` (104090961 bytes). The build still emits
+  existing native-codegen/check warning noise, including known mid-build
+  diagnostics, but exits 0 and emits the ELF.
+- `bash tests/native_v2_effects_gate/run.sh /tmp/madaros-effects-port`: PASS
+  10/10.
+- `bash scripts/run_sio_test_suite.sh hello --verbose`: PASS 2/2.
+- `git diff --check`: PASS.
+
+Branch-level outcome: `m2/effect-firewall` is absorbed by extraction and can be
+archived/deleted after the consolidation commit is pushed.

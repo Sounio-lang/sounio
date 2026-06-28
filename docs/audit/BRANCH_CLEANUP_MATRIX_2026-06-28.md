@@ -299,6 +299,23 @@ focused gate.
 - `feat/hyper-epistemic-mul`: backend/Metal prototype; no normal producer/gate
   and audit/help wording still conflicts with the accepted v2 scope.
 
+## Newly absorbed clean-worktree compiler lanes
+
+- `m2/effect-firewall`: extracted commit `52689f11d` into
+  `integration/compiler-consolidation-20260628` instead of merging the branch
+  wholesale. The port keeps M2 effect enforcement, adds the `LLM` effect kind,
+  adds the build-mode codegen firewall, and installs
+  `tests/native_v2_effects_gate/`. During conflict resolution the consolidation
+  lane kept the existing chaotic/equiv and large-frame checker warnings, removed
+  a duplicate `call_expr_is_box_new` recognizer, and made the inplace
+  `Box::new` handler require `Alloc` like the by-value handler.
+  Validation: `bash scripts/ci/build_modular_madaros.sh
+  /tmp/madaros-effects-port` produced a fresh Madaros ELF; `bash
+  tests/native_v2_effects_gate/run.sh /tmp/madaros-effects-port` passed 10/10;
+  `bash scripts/run_sio_test_suite.sh hello --verbose` passed 2/2. Once the
+  consolidation commit is pushed, `/workspace/sounio-m2-firewall` and the
+  branch are archive/delete candidates.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
