@@ -350,7 +350,14 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
 ```
 
   This WIP patch was archived here rather than ported into compiler
-  consolidation.
+  consolidation. Original branch tips were archived as:
+  `archive/worktree/codex-madaros-full-functioning/2026-06-28` ->
+  `17d1157be`, `archive/worktree/codex-madaros-source-elf-consolidated/2026-06-28`
+  -> `14f984e26`, and
+  `archive/worktree/codex-madaros-main-proof-17d115/2026-06-28` ->
+  `0b3624dcc`. The three worktrees were removed and the three local branches
+  were deleted. No matching remote branches existed at cleanup time. Post-delete
+  counts: 88 local branches, 93 remote refs, 56 worktrees.
 
 ## Next cleanup commands, when owner approval exists
 
