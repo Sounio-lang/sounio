@@ -797,6 +797,55 @@ worktree area rather than an obvious temporary repo path.
 
 Post-cleanup counts: 49 local branches, 56 remote refs, 49 worktrees.
 
+### Scratch settings-only worktree cleanup
+
+The first `.claude/worktrees/*` dirty pass found six attached scratch lanes
+whose only local dirt was `.claude/settings.local.json`. Because that file is a
+local Claude settings surface rather than compiler/language WIP, each branch
+tip was archived by tag, the dirty local settings diff was saved under
+`docs/audit/archived_wip/`, and then the worktree plus local branch were
+removed:
+
+- `backlog/enum-ctor-check` at `810c7abf8`, archived as
+  `archive/worktree/backlog-enum-ctor-check/2026-06-28`.
+- `backlog/strconcat-emit-fix` at `d5bf9dd9e`, archived as
+  `archive/worktree/backlog-strconcat-emit-fix/2026-06-28`.
+- `honest/codex-calls` at `eae0d5134`, archived as
+  `archive/worktree/honest-codex-calls/2026-06-28`.
+- `wall/source-to-elf` at `0f0cc9df9`, archived as
+  `archive/worktree/wall-source-to-elf/2026-06-28`.
+- `wall/check-enumctor` at `a595ad29f`, archived as
+  `archive/worktree/wall-check-enumctor/2026-06-28`.
+- `worktree-agent-a203887be9ace9526` at `171a9f708`, archived as
+  `archive/worktree/worktree-agent-a203887be9ace9526/2026-06-28`.
+
+The preserved local WIP archives for this pass are:
+
+- `docs/audit/archived_wip/backlog-enum-ctor-check-*2026-06-28.*`
+- `docs/audit/archived_wip/backlog-strconcat-emit-fix-*2026-06-28.*`
+- `docs/audit/archived_wip/honest-codex-calls-*2026-06-28.*`
+- `docs/audit/archived_wip/wall-source-to-elf-*2026-06-28.*`
+- `docs/audit/archived_wip/wall-check-enumctor-*2026-06-28.*`
+- `docs/audit/archived_wip/worktree-agent-a203887be9ace9526-*2026-06-28.*`
+
+Two dirty scratch lanes were intentionally preserved because they contain
+non-settings WIP:
+
+- `worktree-agent-adc1cd8b9d52ba53b` in
+  `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` modifies
+  `self-hosted/compiler/main.sio` and four `self-hosted/native/*` files.
+  Status and binary diff were archived in
+  `docs/audit/archived_wip/worktree-agent-adc1cd8b9d52ba53b-*2026-06-28.*`,
+  but the worktree and branch remain live pending compiler-owner disposition.
+- `xai/conversa` in `/workspace/sounio/.claude/worktrees/xai-conversa`
+  modifies `README.md` and has three untracked audit/hyper-epistemic notes.
+  Status, tracked diff, and copied untracked docs were archived under
+  `docs/audit/archived_wip/xai-conversa-*2026-06-28.*` and
+  `docs/audit/archived_wip/xai-conversa-untracked-2026-06-28/`, but the
+  worktree and branch remain live pending owner disposition.
+
+Post-cleanup counts: 44 local branches, 56 remote refs, 44 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
