@@ -414,7 +414,12 @@ deletion candidates:
   and visibility plumbing, and removes parser newline guards for `[`/`(`/prefix
   operators. The raw dirty diff was archived at
   `docs/audit/archived_wip/source-elf-proof-dirty-2026-06-28.patch`; do not
-  port it wholesale.
+  port it wholesale. The original branch tip was archived as
+  `archive/worktree/codex-source-elf-on-madaros-proof/2026-06-28` ->
+  `8951073c1`, `/workspace/sounio-source-elf-proof` was removed, and local
+  `codex/source-elf-on-madaros-proof` was deleted. No matching remote branch
+  existed at cleanup time. Post-delete counts: 84 local branches, 91 remote
+  refs, 52 worktrees.
 - `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
   (`worktree-agent-adc1cd8b9d52ba53b`): dirty native/compiler WIP in
   `self-hosted/compiler/main.sio`, native codegen, lowerer, and suite. Needs
