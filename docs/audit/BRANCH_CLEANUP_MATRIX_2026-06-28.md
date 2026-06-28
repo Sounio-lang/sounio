@@ -370,6 +370,15 @@ diff --git a/slurm-jobs/erdos90/run_on_cluster.sh b/slurm-jobs/erdos90/run_on_cl
   `fix/test-suite-epistemic-failures` refs were deleted. Post-delete counts:
   87 local branches, 92 remote refs, 55 worktrees.
 
+- `/workspace/sounio/.claude/worktrees/madaros-default` ->
+  `fix/assoc-variance-273-consolidated`: the branch had no patch-exclusive
+  commits versus consolidation and was already ancestor-contained. The dirty
+  state was documentation-only: two audit docs had `docs:meta` headers already
+  present in consolidation, and one untracked forensic audit,
+  `docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md`, was recovered into
+  this branch before cleanup. Archive/delete evidence will be recorded below
+  after the tag and branch removal complete.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive

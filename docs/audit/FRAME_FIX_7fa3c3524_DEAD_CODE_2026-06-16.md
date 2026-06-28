@@ -9,6 +9,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.frame-fi
 
 # Forensic audit: frame-size fix `7fa3c3524` patches dead code (no-op)
 
+Recovered during the 2026-06-28 branch consolidation sweep from the untracked
+WIP state in `/workspace/sounio/.claude/worktrees/madaros-default`
+(`fix/assoc-variance-273-consolidated`) before that already-absorbed worktree
+was archived and removed.
+
 **Date:** 2026-06-16
 **Auditor:** Claude (Opus 4.8), worktree `madaros-default`
 **Subject:** commit `7fa3c3524` — *"fix(codegen): dynamic frame size in native_v2_core_begin_function_from_ir_into"* (on `main`)
