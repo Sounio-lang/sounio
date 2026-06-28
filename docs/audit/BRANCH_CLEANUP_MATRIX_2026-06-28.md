@@ -682,6 +682,34 @@ Closed since the previous boundary entry:
   remote `fix/ocp-locals-cap` refs were deleted. Post-delete counts: 52 local
   branches, 59 remote refs, 52 worktrees.
 
+- `feat/native-v2-source-bridge`: no attached worktree. This is an important
+  native-v2/wide-int/source-bridge provenance train, but not a direct merge
+  source for consolidation. `git cherry -v HEAD` showed the whole source-bridge
+  and wide-int sequence as patch-exclusive, while `git diff --shortstat
+  HEAD..feat/native-v2-source-bridge` showed 2860 files, 284826 insertions, and
+  718501 deletions, including removal of active consolidation audit docs,
+  historical artifacts, datasets, demos, and gates. Direct merge was rejected.
+  No hunk was extracted in this pass; future source-bridge/wide-int work should
+  be reintroduced from named commits with focused gates, not via wholesale
+  branch import. Note: local tip `55c8c94f9` was ahead of remote
+  `origin/feat/native-v2-source-bridge` (`9c2097c33`), so archive the local tip
+  before deleting as
+  `archive/branch/feat-native-v2-source-bridge/2026-06-28` -> `55c8c94f9`;
+  local and remote `feat/native-v2-source-bridge` refs were deleted.
+
+- `codex/madaros-close-20260627`: no attached worktree. The branch contains a
+  mixed Madaros solver/runtime closeout train: imported-SMT lowering substrate,
+  theorem/solver readiness docs and scripts, gate deflaking, and seed/binary
+  resync. The full branch diff still had rollback shape relative to
+  consolidation: 256 files, 9018 insertions, 10304 deletions, including deletion
+  of active branch-consolidation audit docs and several already-consolidated
+  gates. Direct merge was rejected. No hunk was extracted; any remaining Madaros
+  closeout work should be pulled by named patch and gate, not by branch merge.
+  Archive before deleting as
+  `archive/branch/codex-madaros-close-20260627/2026-06-28` -> `c64fbd8ad`;
+  local and remote `codex/madaros-close-20260627` refs were deleted.
+  Post-delete counts: 50 local branches, 57 remote refs, 52 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
