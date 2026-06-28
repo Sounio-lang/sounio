@@ -931,6 +931,24 @@ archived.
 
 Post-cleanup counts: 30 local branches, 22 remote refs, 30 worktrees.
 
+### Local release apparatus artifact cleanup
+
+`claude/release-apparatus` was a local-only attached worktree with a docs-only
+tip (`7ada884b2`) plus local Slurm wrapper dirt and one small untracked ELF
+artifact:
+
+- modified `slurm-jobs/erdos90/run_on_cluster.sh`
+- untracked `slurm-jobs/erdos90/run_on_cluster.sh.bak-cpuopsfix`
+- untracked `artifacts/omega/emit13.elf`
+
+The branch tip was archived as
+`archive/worktree/claude-release-apparatus/2026-06-28`; status, binary diff,
+the Slurm backup, and `emit13.elf` were saved under
+`docs/audit/archived_wip/release-apparatus-local-2026-06-28/`. The worktree
+and local branch were then removed.
+
+Post-cleanup counts: 29 local branches, 22 remote refs, 29 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
