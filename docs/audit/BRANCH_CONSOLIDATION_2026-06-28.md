@@ -389,6 +389,17 @@ Follow-up triage on the same small-fix cluster:
   branch into consolidation. Residual ownership, if revived, should be a named
   wide-int/SRET/class-2-wall lane with a focused gate; the bool/i64 `ty_eq`
   compatibility idea is already represented in the earlier consolidation port.
+- `fix/silent-typecheck-diag`: not an ancestor and not patch-equivalent. The
+  branch is really a merged A64 residual train (`fix/a64-emit`,
+  `fix(lean_single)`, rebuilt self-hosted binaries, debug docs, and three new
+  run-pass witnesses), not a silent-diag leaf. `git diff --stat
+  HEAD..fix/silent-typecheck-diag` spans 2,581 files with 282,256 insertions
+  and 650,018 deletions, including deletion of current consolidation audit/docs
+  and broad website/test/artifact churn. Do not merge into the compiler
+  consolidation branch. Residual ownership should stay with an A64/native
+  runtime lane and a host-specific acceptance gate; the three branch-only
+  witnesses are `f64_gt_method_a64.sio`, `knowledge_arith_a64.sio`, and
+  `struct_shorthand_and_nested_array_store.sio`.
 
 ## Imported stdlib lowering branch triage
 
