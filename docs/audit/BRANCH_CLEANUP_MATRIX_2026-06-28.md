@@ -234,8 +234,17 @@ classified in this audit as non-merge residuals:
   byte-identical in consolidation; the remaining branch-only governance
   registry/report edits are stale relative to the current, much larger
   registry state and were not ported.
+- `fix/main-ci-red-2026-06-18`: archived as
+  `archive/branch/fix-main-ci-red-2026-06-18/2026-06-28` -> `db9239fb2`,
+  then local/remote refs were deleted. This branch was a stale mixed CI repair
+  lane. The only compiler-core hunk still missing from consolidation was
+  extracted separately: `lean_single` no longer treats `bool` as compatible
+  with `i64`, and the two formerly-known-failure compile-fail fixtures were
+  promoted back to ordinary compile-fail tests. The old website locale and docs
+  registry edits were not ported because they would overwrite newer website and
+  governance state.
 
-Post-delete counts: 77 local branches, 84 remote refs, 52 worktrees.
+Post-delete counts: 76 local branches, 83 remote refs, 52 worktrees.
 
 ## Already absorbed or covered by current consolidation
 
