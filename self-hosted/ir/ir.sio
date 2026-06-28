@@ -199,6 +199,33 @@ pub enum IrOpcode {
     //
     // Scratch: dst+2..dst+13 (same 12-ZMM layout as IrAssociator)
     IrAssociatorVariance, // Door β: Var([a,b,c]) correction, 1 instr (Fano) / ~128 (non-Fano)
+    // Fused hypercomplex × epistemic product (Door γ).  First IR node to combine
+    // octonion multiplication with GUM uncertainty propagation in a single
+    // contiguous EVEX sequence.  No lower_copy.
+    //
+    // GUM LPU (corrected after xai math-review v2): the ε lane applies first-order
+    // linear propagation of uncertainty to the octonion Fano product.  Since the
+    // Fano signs cancel (sg²=1), the variance is a SIGNLESS Fano accumulation:
+    //   σ²_c[k] = Σ_t b[bj[k,t]]²·σ²_a[t] + a[t]²·σ²_b[bj[k,t]]
+    //
+    // Binary contract (c/σ²/associator removed — no GUM derivation supports them):
+    //   dst       = value result ZMM  (a ⊗ b, Fano product)
+    //   dst+1     = ε result ZMM      (per-component GUM variance σ²_c[k])
+    //   src1      = a value ZMM
+    //   src1+1    = a-ε   ZMM         (Knowledge<T>.eps of a)
+    //   src2      = b value ZMM
+    //   src2+1    = b-ε   ZMM         (Knowledge<T>.eps of b)
+    //   imm_i64   = reserved (was c index in v1; unused — associator removed)
+    //   imm_f64   = reserved (was σ²;   unused — associator removed)
+    //   imm_flags bit 2 = z_bit       (zeroing mask on ε/output; merge if 0)
+    //   label_id  = (mask_k & 7) | (ctrl_base << 4)   — same encoding as IrHyperMulO
+    //
+    // Value lane:  emit_fano_inline(a,b) → dst                  (31 EVEX)
+    // ε lane:      2× emit_fano_signless_inline + 2 VMULPD + VADDPD → dst+1
+    //              ~24 EVEX (exact GUM LPU, no approximation)
+    //
+    // Total: ~57 EVEX.  Scratch: dst+2..dst+13.
+    IrHyperEpistemicMul, // fused Hyper⊗ × GUM binary product; ~57 EVEX, exact LPU
     // Sedenion zero-divisor check — first type system to detect ZD pairs at compile time.
     //   For literal sedenion basis elements: eliminated at type-check (zero runtime cost).
     //   For non-literal operands: runtime bitmask test → epistemic ZD warning flag.

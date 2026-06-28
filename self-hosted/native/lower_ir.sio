@@ -237,6 +237,8 @@ pub fn lower_instr(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div, 
         lower_associator(nc, instr)
     } else if instr.op == IrOpcode::IrAssociatorVariance {
         lower_assoc_variance(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperEpistemicMul {
+        lower_hyper_epistemic_mul(nc, instr)
     } else if instr.op == IrOpcode::IrSedZDCheck {
         lower_sed_zd_check(nc, instr)
     } else if instr.op == IrOpcode::IrG2ProjectImO {
@@ -1742,6 +1744,33 @@ pub fn emit_fano_inline(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
     b
 }
 
+// Signless Fano accumulation — identical to emit_fano_inline but WITHOUT the
+// VXORPD sign-correction step.  Used by IrHyperEpistemicMul for the GUM LPU
+// variance lane: since sg² = 1, all Fano signs cancel in the variance, yielding
+// a signless Fano accumulation:
+//   accum[k] = Σ_t za[perm_a(t)] · zb_in[perm_b(t)]
+//
+// This is the core of the σ²_c[k] = Σ_t a[t]²·ε_b[bj[k,t]] + b[bj[k,t]]²·ε_a[t]
+// GUM variance: two signless Fano accumulations (with squared value inputs)
+// summed via VADDPD give the exact first-order uncertainty propagation.
+//
+pub fn emit_fano_signless_inline(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                                 t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+    let vl = 2   // ZMM
+    // Column 0: identity — VBROADCASTSD + VMULPD
+    var b = emit_vbroadcastsd(buf, t_bj, zb_in, vl, 0, 0)
+    b = emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    // Columns 1-7: VPERMPD(broadcast) + VPERMPD(permute) + VFMADD231PD  (NO sign XOR)
+    var col = 0
+    while col < 7 {
+        b = emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        b = emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        b = emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        col = col + 1
+    }
+    b
+}
+
 //
 // IrHyperMulS → Cayley-Dickson sedenion multiply via 4 Fano-plane octonionic products
 //
@@ -1924,6 +1953,70 @@ pub fn lower_assoc_variance(nc: &! NativeCompiler, instr: IrInstr) with Mut, Pan
         // Step 8: dst = ||[a,b,c]||² × σ²  (VMULPD, 1 EVEX)
         c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, dst, t_ab, vl, mask_k, zb)
     }
+    (*nc) = c
+}
+
+// IrHyperEpistemicMul → fused hypercomplex × GUM product (Door γ, corrected).
+//
+// Value lane:  dst   = a ⊗ b           (emit_fano_inline, 31 EVEX)
+// ε lane:      dst+1 = σ²_c[k]         (full GUM LPU, signless Fano, ~24 EVEX)
+//
+// GUM LPU derivation (validated by xai math-review v2):
+//   c[k] = Σ_t sg[k,t]·a[t]·b[bj[k,t]]   (Fano product)
+//   σ²_c[k] = Σ_t (∂c[k]/∂a[t])²·σ²_a[t] + (∂c[k]/∂b[t])²·σ²_b[t]
+//           = Σ_t b[bj[k,t]]²·σ²_a[t] + a[t]²·σ²_b[bj[k,t]]   (sg²=1)
+//
+// This is a SIGNLESS Fano accumulation: sg[k,t]² = 1 for all k,t, so signs
+// vanish in the variance.  Implemented via emit_fano_signless_inline (below).
+//
+// The associator ||[a,b,c]||²·σ² term from v1 was REMOVED — it has no GUM
+// derivation: [a,b,c] is a deterministic algebraic quantity, not a random
+// variable.  Once LPU is applied to the octonion product, σ²_c is exact.
+//
+pub fn lower_hyper_epistemic_mul(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
+    let vl        = 2                       // ZMM (512-bit)
+    let mask_k    = instr.label_id & 7
+    let z_bit     = (instr.imm_flags >> 2) & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+
+    let dst   = instr.dst                   // value result ZMM
+    let dst_e = instr.dst + 1               // ε result ZMM
+    let a     = instr.src1                  // a value ZMM
+    let a_eps = instr.src1 + 1              // a-ε  ZMM
+    let b     = instr.src2                  // b value ZMM
+    let b_eps = instr.src2 + 1              // b-ε  ZMM
+
+    // Scratch ZMMs (offset temps, same convention as IrAssociator)
+    let t_bj  = dst + 2                     // Fano broadcast scratch (reused)
+    let t_aj  = dst + 4                     // Fano permute scratch  (reused)
+    let t_asq = dst + 6                     // a²
+    let t_bsq = dst + 8                     // b²
+    let t_v1  = dst + 10                    // ε variance term 1
+    let t_v2  = dst + 12                    // ε variance term 2
+
+    // ── VALUE LANE: octonion Hamilton product a ⊗ b (31 EVEX, Fano) ──────────
+    c.code = emit_fano_inline(c.code, a, b, dst, t_bj, t_aj, ctrl_base)
+
+    // ── ε LANE: full GUM LPU variance σ²_c[k] ───────────────────────────────
+    // σ²_c[k] = Σ_t b[bj[k,t]]²·σ²_a[t]  +  Σ_t a[t]²·σ²_b[bj[k,t]]
+    //
+    // Term 1: emit_fano_signless_inline(a², ε_b) → Σ a[i_k]²·ε_b[j_k]
+    // Term 2: emit_fano_signless_inline(ε_a, b²) → Σ ε_a[i_k]·b[j_k]²
+    // (note arg swap in term 2: ε_a goes in the a-position, b² in the b-position,
+    //  so the Fano permutations yield the correct cross-terms.)
+
+    // t_asq = a ⊙ a                                         — VMULPD, 1 EVEX
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t_asq, a, a, vl, 0, 0)
+    // t_bsq = b ⊙ b                                         — VMULPD, 1 EVEX
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t_bsq, b, b, vl, 0, 0)
+    // Term 1: signless Fano accumulation of a² ⊗ ε_b → t_v1
+    c.code = emit_fano_signless_inline(c.code, t_asq, b_eps, t_v1, t_bj, t_aj, ctrl_base)
+    // Term 2: signless Fano accumulation of ε_a ⊗ b² → t_v2
+    c.code = emit_fano_signless_inline(c.code, a_eps, t_bsq, t_v2, t_bj, t_aj, ctrl_base)
+    // dst_e = t_v1 + t_v2                                   — VADDPD, 1 EVEX
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_e, t_v1, t_v2, vl, mask_k, z_bit)
+
     (*nc) = c
 }
 
