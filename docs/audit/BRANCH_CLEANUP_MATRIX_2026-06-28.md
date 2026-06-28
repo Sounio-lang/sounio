@@ -896,6 +896,41 @@ because they are PR refs, not normal `origin/*` branch heads.
 
 Post-prune counts: 44 local branches, 22 remote refs, 44 worktrees.
 
+### Local Slurm-only worktree cleanup
+
+Fourteen local-only attached worktrees had no remote branch and the only dirty
+state was the repeated Slurm wrapper pair:
+
+- modified `slurm-jobs/erdos90/run_on_cluster.sh`
+- untracked `slurm-jobs/erdos90/run_on_cluster.sh.bak-cpuopsfix`
+
+For each lane, the branch tip was archived as
+`archive/worktree/<branch-slug>/2026-06-28`, the tag was pushed, and status,
+binary diff, and the untracked `.bak-cpuopsfix` file were saved under
+`docs/audit/archived_wip/slurm-only-local-2026-06-28/`. The worktree and local
+branch were then removed:
+
+- `claude/checker-singlemodule-crashes`
+- `claude/docs-honesty`
+- `claude/fn-pointers-integ`
+- `claude/gate-recovery`
+- `claude/lsp-revival`
+- `claude/mm-hardening`
+- `claude/parser-integ`
+- `claude/parser-traits-iflet-enumdata`
+- `claude/release-e2e-eval`
+- `claude/release-real-mc`
+- `claude/showcase`
+- `claude/stdlib-path`
+- `codex/baseline-docs-registry`
+- `composer/string-concat`
+
+No compiler, stdlib, website, clinical, math, or external-facing content was
+extracted from this batch; only the branch tips and local Slurm dirt were
+archived.
+
+Post-cleanup counts: 30 local branches, 22 remote refs, 30 worktrees.
+
 ## Next cleanup commands, when owner approval exists
 
 Do not run these as a batch without confirming owner transfer and archive
