@@ -960,3 +960,139 @@ export function runHaloperidolScenario(sampleTimes, { dt = 0.002, doseMg = 5.0 }
   }
   return out;
 }
+
+// ============================================================================
+// MIDAZOLAM — fifth canonical drug: oral CYP3A drug–drug interaction (DDI).
+//
+// Novel surface (none of the four prior drugs model enzyme inhibition):
+// mechanistic well-stirred oral first-pass (F = Fa·FG·FH) + competitive CYP3A
+// inhibition. A SINGLE hepatic intrinsic clearance CLint_h drives BOTH the
+// first-pass survival FH = Qh/(Qh+fu·CLint_h) AND the systemic well-stirred
+// clearance CL_h = Qh·fu·CLint_h/(Qh+fu·CLint_h). A separate gut CLint_g drives
+// FG = Qg/(Qg+fu_g·CLint_g). Competitive inhibition divides the INTRINSIC
+// clearances by (1 + I/Ki). Because FH and CL_h come from one CLint_h,
+// inhibition raises FH and lowers CL_h *consistently* — no double-count — so the
+// iconic oral midazolam+ketoconazole AUC rise (~15×) emerges honestly
+// (AUC = F·Dose/CL_h; validated in stdlib/darwin_pbpk/validation/midazolam_ddi.sio).
+//
+// Inhibitor is held STATIC at its steady-state unbound concentration (matches how
+// clinical DDI studies pre-dose the perpetrator). Systemic distribution Kp are
+// nominal midazolam-plausible values (Vss ~1.4 L/kg); the *validated* DDI
+// quantities are F, CL_h and AUCR, which are distribution-independent.
+// Units: mg, L, L/h, h, mg/L throughout.
+//
+// Sources: Heizmann 1984 (oral F~0.4), Thummel 1996 (gut+hepatic first-pass),
+// Gorski 1998 / Olkkola 1994,1996 (ketoconazole DDI ~15×), Yang 2007 (Qgut model).
+// ============================================================================
+
+// Generic 70 kg human physiology (volumes L, flows L/h) — reused; Kp are midazolam.
+export const MDZ_V  = Object.freeze([5.2, 1.69, 0.31, 1.37, 0.31, 1.17, 29.0, 18.2, 1.65, 7.8, 10.5, 0.19, 0.14, 4.5]);
+export const MDZ_Q  = Object.freeze([0.0, 90.0, 72.0, 44.0, 14.4, 0.0, 73.8, 18.0, 57.6, 18.0, 21.6, 10.8, 4.5, 18.0]);
+export const MDZ_KP = Object.freeze([1.0, 2.0, 1.5, 1.5, 1.2, 1.5, 1.0, 2.0, 1.5, 1.2, 0.6, 1.2, 1.2, 1.0]);
+export const MDZ_FU_PLASMA = 0.03, MDZ_RB = 1.0;
+export const MDZ_CL_RENAL = 0.0;  // midazolam: <1% renal — elimination is CYP3A-hepatic.
+// First-pass + CYP3A metabolism: one CLint_h -> {FH, CL_h}; CLint_g -> FG.
+export const MDZ_FP = Object.freeze({ qh: 90.0, qg: 18.0, fu: 0.03, fuGut: 1.0, fa: 0.95, clintH: 1090.0, clintG: 14.7 });
+// Absorption: rapid oral (Tmax ~0.9 h), negligible lag.
+export const MDZ_ABS = Object.freeze({ ka: 3.0, tlag: 0.0 });
+// Ketoconazole perpetrator, static steady-state UNBOUND conc (mg/L): I/Ki = 8 -> R = 9.
+export const MDZ_KETO = Object.freeze({ ki: 0.008, iSteadyState: 0.064 });
+
+// exp(-x) — verbatim port of absorption.sio abs_exp_neg (shared low-accuracy arithmetic).
+function mdzAbsExpNeg(x) {
+  if (x <= 0.0) return 1.0;
+  if (x > 0.5) { const half = mdzAbsExpNeg(x * 0.5); return half * half; }
+  let term = 1.0, sum = 1.0;
+  for (let k = 1; k < 16; k++) { term = term * (-x) / k; sum = sum + term; }
+  return sum;
+}
+
+// Competitive inhibition on CYP3A intrinsic clearance: factor in [0,1].
+function mdzInhFactor(I) { return 1.0 / (1.0 + I / MDZ_KETO.ki); }
+// Gut-wall survival FG, hepatic first-pass survival FH, systemic CL_h — each from
+// a single (inhibited) intrinsic clearance. Same enzyme/inhibitor -> same factor.
+function mdzFG(I)  { const b = MDZ_FP.fuGut * MDZ_FP.clintG * mdzInhFactor(I); return MDZ_FP.qg / (MDZ_FP.qg + b); }
+function mdzFH(I)  { const a = MDZ_FP.fu   * MDZ_FP.clintH * mdzInhFactor(I); return MDZ_FP.qh / (MDZ_FP.qh + a); }
+function mdzCLh(I) { const a = MDZ_FP.fu   * MDZ_FP.clintH * mdzInhFactor(I); return MDZ_FP.qh * a / (MDZ_FP.qh + a); }
+function mdzF(I)   { return MDZ_FP.fa * mdzFG(I) * mdzFH(I); }
+
+// PBPK14 well-stirred RHS; clH is the (inhibitor-dependent) systemic hepatic
+// clearance acting on plasma — it already embeds fu via the well-stirred form,
+// so it is NOT multiplied by fu again here.
+function mdzSysOde(c, clH) {
+  const cPlasma = c[0] / MDZ_RB;
+  const d = new Float64Array(14);
+  let dBlood = 0.0;
+  for (let i = 1; i < 14; i++) {
+    const flux = (MDZ_Q[i] / MDZ_V[i]) * (cPlasma - c[i] / MDZ_KP[i]);
+    d[i] = flux;
+    dBlood = dBlood - (MDZ_Q[i] / MDZ_V[0]) * MDZ_RB * (cPlasma - c[i] / MDZ_KP[i]);
+  }
+  dBlood = dBlood - (clH / MDZ_V[0]) * cPlasma * MDZ_RB;
+  dBlood = dBlood - (MDZ_CL_RENAL / MDZ_V[0]) * cPlasma * MDZ_RB;
+  d[0] = dBlood;
+  return d;
+}
+function mdzSysRk4(c, dt, clH) {
+  const axpy = (y, k, a) => { const r = new Float64Array(14); for (let i = 0; i < 14; i++) r[i] = y[i] + a * k[i]; return r; };
+  const k1 = mdzSysOde(c, clH);
+  const k2 = mdzSysOde(axpy(c, k1, 0.5 * dt), clH);
+  const k3 = mdzSysOde(axpy(c, k2, 0.5 * dt), clH);
+  const k4 = mdzSysOde(axpy(c, k3, dt), clH);
+  const r = new Float64Array(14);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  for (let i = 0; i < 14; i++) r[i] = c[i] + sixth * k1[i] + third * k2[i] + third * k3[i] + sixth * k4[i];
+  return r;
+}
+
+// One fixed step: operator-split oral absorption (delivers Fa·FG·FH of the released
+// mass to blood) -> systemic RK4. clH, Foral are constant (static inhibitor).
+function mdzStep(st, t, dt, clH, Foral) {
+  let aGut = st.aGut;
+  let c = st.sys;
+  if (t + dt > MDZ_ABS.tlag) {
+    const tActiveStart = t < MDZ_ABS.tlag ? MDZ_ABS.tlag : t;
+    const dtActive = (t + dt) - tActiveStart;
+    if (dtActive > 0.0) {
+      const decay = mdzAbsExpNeg(MDZ_ABS.ka * dtActive);
+      const aAfter = aGut * decay;
+      const toBlood = Foral * (aGut - aAfter);
+      aGut = aAfter;
+      c = Float64Array.from(c);
+      c[0] = c[0] + toBlood / MDZ_V[0];
+    }
+  }
+  return { sys: mdzSysRk4(c, dt, clH), aGut };
+}
+
+/**
+ * Integrate the oral midazolam scenario (single dose, fixed-step RK4) under a
+ * static unbound inhibitor concentration `I` (mg/L; 0 = solo). Samples plasma
+ * (mg/L) at the given times. dt default 0.002 h, dose 5 mg — matches the ref.
+ */
+export function runMidazolamScenario(sampleTimes, { dt = 0.002, doseMg = 5.0, I = 0.0 } = {}) {
+  const clH = mdzCLh(I);
+  const Foral = mdzF(I);
+  let st = { sys: new Float64Array(14), aGut: doseMg };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) { st = mdzStep(st, t, dt, clH, Foral); t += dt; }
+    out.push({ t: target, plasma: st.sys[0] / MDZ_RB });
+  }
+  return out;
+}
+
+/**
+ * Analytic DDI dose-response across a grid of I/Ki ratios: per point returns oral
+ * F, systemic CL_h, and AUC ratio vs solo (AUCR = (F/F0)·(CL_h0/CL_h)). This is
+ * the inhibition-curve parity series (case 19) — closed form, no integration.
+ */
+export function runMidazolamDDIResponse(iOverKiGrid) {
+  const F0 = mdzF(0.0), clH0 = mdzCLh(0.0);
+  return iOverKiGrid.map((r) => {
+    const I = r * MDZ_KETO.ki;
+    const F = mdzF(I), clH = mdzCLh(I);
+    return { iOverKi: r, F, clH, aucr: (F / F0) * (clH0 / clH) };
+  });
+}
