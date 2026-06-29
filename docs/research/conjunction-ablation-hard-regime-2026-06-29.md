@@ -1,4 +1,4 @@
-# Results — conjunction ablation in the HARD regime (the dissection + first positive signal)
+# Results — conjunction ablation in the HARD regime (dissection: joint claim disconfirmed; polarity = unconfirmed trend)
 
 Date: 2026-06-29
 Branch: `research/novelty-ablation` (base `d7bf33814`, madaros `cb2f7685…`)
@@ -45,20 +45,50 @@ All three CIs exclude 0. This **dissects** the conjunction:
 The hard regime did not change the signs — it made the already-present trends significant.
 This is strong internal consistency: the easy regime simply lacked the headroom to resolve them.
 
+## OUT-OF-SAMPLE CONFIRMATION (α=4.4, fresh seeds 4000–4079) — POL does NOT robustly replicate
+
+The α=4.3 result was found after α=6.0 (null) and community structure (failed), so α=4.3 is a
+post-hoc regime pick. Two hardening checks were run:
+
+- **Split-half of the α=4.3 batch:** first 40 seeds Δ_POL=+22.8 (15/2, sig); second 40
+  Δ_POL=+16.8 (10/10, CI includes 0). The pooled significance was partly carried by the first half.
+- **Fresh batch at α=4.4** (m=220, seeds 4000–4079, 46 UNSAT kept, 0 censored, all z3-agreed):
+
+| config | Δ vs BASE @ α=4.4 | 95% CI | better/worse | vs α=4.3 |
+|---|---|---|---|---|
+| BANDIT | −22.5 | [−34.7, −10.3] | 15/29 | replicates (harmful) |
+| CONJ   | −38.8 | [−55.5, −22.2] | 11/33 | replicates (harmful) |
+| **POL** | **+4.4** | **[−5.1, +13.9]** | 27/17 | was +19.6 → **n.s.** |
+
+**Verdict:** the *harm* of the variable-side bandit (BANDIT) and the joint conjunction (CONJ)
+is **robust and replicated** across α=4.3 and α=4.4. The *help* of polarity (POL) is **fragile**:
+significant at α=4.3, not significant at α=4.4, second-half-null in its own split. POL is a
+**consistently-positive-direction trend** (Δ = +2.7 @α6, +19.6 @α4.3, +4.4 @α4.4; majority
+better in every batch) but does **NOT clear the bar for a confirmed positive result.** The
+α=4.3 significance was partly favorable noise. Reported as a suggestive, unconfirmed trend —
+not a result. (Also clears check #1: zero censoring at either ratio, so the kept set is not a
+hardness-biased easy tail; and POL wins on decisions too, not just conflicts.)
+
 ## Honest reframe of the narrow novelty claim
 
 The verified boundary's "per-decision bandit applied JOINTLY to variable AND polarity" is
-**not supported** — jointness is exactly what sinks it, because the variable half is harmful.
-But a *narrower* claim now has its **first positive evidence**:
+**disconfirmed** — jointness is exactly what sinks it, because the variable half is harmful,
+robustly and replicably (BANDIT and CONJ significantly worse at BOTH α=4.3 and α=4.4).
 
-> **Per-decision Beta-Bernoulli polarity (phase) Thompson sampling significantly reduces
-> conflicts-to-UNSAT vs saved-phase, on hard near-transition random-3-SAT UNSAT (≈10%,
-> 25/12, CI [+5.3,+35.1]).**
+The polarity half is a **suggestive but UNCONFIRMED** positive: consistently positive in
+direction across all three batches (Δ = +2.7 @α6 n.s., +19.6 @α4.3 sig, +4.4 @α4.4 n.s.;
+majority-better every time) but it fails out-of-sample significance. Not a result.
 
-Standing of the three conjuncts after all experiments:
-- variance additive bonus (score_mode=5): **disconfirmed** (toxic, mechanism).
-- variable-side Thompson/act_var (score_mode=3): **disconfirmed** (toxic in hard regime).
-- **polarity-side Beta-Bernoulli sampling (phase_mode=1): SUPPORTED (positive) in this regime.**
+> **Suggestive, unconfirmed:** per-decision Beta-Bernoulli polarity Thompson sampling *may*
+> reduce conflicts-to-UNSAT vs saved-phase on hard random-3-SAT UNSAT — positive direction in
+> 3/3 batches, but significant in only 1/2 hard-ratio batches. Needs more data / a stronger
+> solver to confirm or kill.
+
+Standing of the conjuncts after all experiments:
+- variance additive bonus (score_mode=5): **disconfirmed** (toxic, mechanism; replicated via sweep).
+- variable-side Thompson/act_var (score_mode=3): **disconfirmed** (toxic in hard regime; replicated α4.3+α4.4).
+- joint var+polarity conjunction (CONJ): **disconfirmed** (net harmful, replicated).
+- polarity-side Beta-Bernoulli sampling (phase_mode=1): **suggestive positive, UNCONFIRMED** (fails out-of-sample sig).
 - regime-gating: not isolatable here.
 
 ## Boundaries / next
