@@ -45,7 +45,9 @@ use check::types::*
 //   - arg_count: i64
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 4
+let SOIR_VERSION: i8 = 5  // v5: serialize func.returns_float + return_struct_name (were
+                          // dropped on deserialize -> imported i32/f64 call results lost their
+                          // type -> println(imported_call) mis-routed to print_str -> SIGSEGV)
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -581,6 +583,17 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
         p = hyper_alg_pair.1
     }
 
+    // v5: returns_float + return_struct_name (else imported call-results lose their type and
+    // println(imported_i32_call) mis-routes to print_str -> deref-as-char* -> SIGSEGV).
+    if SOIR_VERSION >= 5 {
+        let rf_pair = write_i64(b, p, func.returns_float)
+        b = rf_pair.0
+        p = rf_pair.1
+        let rsn_pair = write_name(b, p, func.return_struct_name)
+        b = rsn_pair.0
+        p = rsn_pair.1
+    }
+
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
@@ -642,6 +655,18 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         p = hyper_alg_pair.1
     }
 
+    // v5: returns_float + return_struct_name (default to 0/empty for older streams).
+    var returns_float_v: i64 = 0
+    var return_struct_name_v: Name = ir_empty_name()
+    if version >= 5 {
+        let rf_pair = read_i64(buf, p)
+        returns_float_v = rf_pair.0
+        p = rf_pair.1
+        let rsn_pair = read_name(buf, p)
+        return_struct_name_v = rsn_pair.0
+        p = rsn_pair.1
+    }
+
     // Read instructions
     var instrs: [IrInstr; 2048] = [ir_nop(); 2048]
     var j: i64 = 0
@@ -661,8 +686,8 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         param_count: param_count,
         param_regs: param_regs,
         compile_strategy: compile_strategy,
-        returns_float: 0,
-        return_struct_name: ir_empty_name(),
+        returns_float: returns_float_v,
+        return_struct_name: return_struct_name_v,
         prof_counter_id: prof_counter_id,
         hyper_algebra_kind: hyper_algebra_kind,
         is_sret: 0,

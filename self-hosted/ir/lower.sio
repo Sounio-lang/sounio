@@ -2225,6 +2225,101 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 // (strlen+write, which derefs the integer as char* and SIGSEGVs). Wide ints
 // (i128/i256) are intentionally rejected: they use a separate wide-limb print
 // path, and mis-routing them to print_int would print only the low limb.
+// EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its return-type code
+// (1=int scalar, 2=f64). Populated per-module from the OTHER programs' AST in the externs preseed
+// (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a fallback by
+// expr_result_is_int_ref / the let-binding when module.functions has no return type for an
+// imported callee. i64-only (no Name aggregate in globals); hash collisions degrade safely
+// (a number is printed instead of crashing). Mirrors the NV2_RELOC_* global-table pattern.
+var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
+
+fn lower_name_hash(n: Name) -> i64 with Panic, Div {
+    var h: i64 = n.len & 1023
+    var i: i64 = 0
+    while i < n.len && i < 64 {
+        h = (h * 131 + (n.buf[i as usize] as i64)) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn lower_extern_fn_ret_reset() with Mut, Panic {
+    LOWER_EXTERN_FN_RET_COUNT = 0
+}
+
+fn lower_extern_fn_ret_record(name: Name, code: i64) with Mut, Panic, Div {
+    let idx = LOWER_EXTERN_FN_RET_COUNT
+    if idx >= 0 && idx < 8192 {
+        LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
+        LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
+        LOWER_EXTERN_FN_RET_COUNT = idx + 1
+    }
+}
+
+fn lower_extern_fn_ret_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_CODES[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Return-type code (1=int, 2=f64, 0=other) for an ExprCall whose callee is an imported function,
+// via the EXTERN_FN_RET side table. Mirrors expr_call_return_struct_name_ref's callee extraction.
+fn lower_extern_fn_ret_code_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+// Walk a sibling module's items and record each function's return-type code into the side table.
+fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head_owned = (*list).head
+                if head_owned.kind == ItemKind::ItemFn {
+                    match head_owned.fn_def {
+                        Some(fd) => {
+                            var code: i64 = 0
+                            if lower_opt_type_is_f64(&(*fd).return_type) {
+                                code = 2
+                            } else if lower_opt_type_is_int_scalar(&(*fd).return_type) {
+                                code = 1
+                            }
+                            if code != 0 {
+                                lower_extern_fn_ret_record(head_owned.name, code)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => { return }
+        }
+    }
+}
+
 fn lower_name_is_int_scalar(n: Name) -> bool with Panic, Div {
     if n.len < 2 { return false }
     let c0 = n.buf[0] as i64
@@ -4161,7 +4256,14 @@ impl Lowerer {
     fn expr_result_is_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit { return true }
         if (*e).kind == ExprKind::ExprIdent { return self.lookup_local_scalar_kind((*e).name) == 1 }
-        if (*e).kind == ExprKind::ExprCall { return lower_name_is_int_scalar(self.expr_call_return_struct_name_ref(e)) }
+        if (*e).kind == ExprKind::ExprCall {
+            if lower_name_is_int_scalar(self.expr_call_return_struct_name_ref(e)) { return true }
+            // Fallback for imported calls: their return type is not in module.functions at body
+            // lowering (cross-module fn signatures aren't preseeded — only structs). Consult the
+            // EXTERN_FN_RET side table populated from sibling modules' AST. Without this,
+            // println(<imported i32 call>) mis-routes to print_str -> deref-as-char* -> SIGSEGV.
+            return lower_extern_fn_ret_code_for_call(e) == 1
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if lower_binary_op_is_compare((*e).bin_op) { return true }
             if self.expr_result_is_float_ref(e) { return false }
@@ -5819,6 +5921,11 @@ impl Lowerer {
                     } else if lo.expr_result_is_int_ref(&(*expr_box_sk)) {
                         // Track int locals (kind 1) bound from a call/binop so println(r) routes to print_int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprCall
+                              && lower_extern_fn_ret_code_for_call(&(*expr_box_sk)) == 2 {
+                        // Imported f64-returning call (return type not in module.functions at body
+                        // lowering — see the EXTERN_FN_RET side table): route println(r) to print_f64.
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
                     }
                 }
                 _ => {}
@@ -9065,11 +9172,15 @@ fn lower_program_items_to_ir_summary_box_with_externs_ref(
     epistemic: &IrEpistemicSection
 ) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_with_epistemic(epistemic)
+    lower_extern_fn_ret_reset()
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
             let ext_items = (*programs)[i as usize].items
             lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
+            // Also record sibling-module function return types so println(<imported int/f64
+            // call>) routes to print_int/print_f64 instead of string-print (deref crash).
+            lower_preseed_external_fn_rets(&ext_items)
         }
         i = i + 1
     }
