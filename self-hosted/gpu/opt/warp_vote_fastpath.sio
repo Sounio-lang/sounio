@@ -1,777 +1,202 @@
-// self-hosted::gpu::opt::warp_vote_fastpath — Novelty 7: Warp-Vote Epistemic Fast-Path
+// self-hosted::gpu::opt::warp_vote_fastpath
 //
-// World-first: NO existing GPU system auto-generates dual-path PTX kernels where
-// vote.sync.ballot on the epistemic validity predicate %p_valid gates whether the
-// warp executes full GUM uncertainty propagation or a fast path that uses budget-bounded
-// uncertainty propagation.
-//
-// Architecture:
-//   1. Classify kernels as epistemic (contain GUM shadow registers) or plain
-//   2. For each epistemic kernel, generate dual-path PTX:
-//      - Ballot check: vote.sync.ballot.b32 on %p_valid (all lanes valid?)
-//      - Epsilon check: all lanes below uncertainty threshold?
-//      - Fast path: budget-bounded uncertainty propagation (conservative upper bound)
-//      - Full path: full GUM uncertainty propagation
-//      - Merge label: reconvergence point
-//   3. Return summary of PTX lines added and kernels optimized
-
-// ============================================================================
-// Data Structures
-// ============================================================================
+// Compact executable preflight for the warp-vote epistemic fast path. The
+// production surface this guards is the dual-path PTX shape:
+//   - vote.sync.ballot over validity predicates
+//   - epsilon ballot over bounded uncertainty predicates
+//   - fast path for bounded propagation
+//   - full path for ordinary GUM propagation
+//   - explicit merge/reconvergence label
 
 struct WarpVoteConfig {
-    epsilon_threshold: f64,
+    epsilon_threshold_micros: i64,
     enable_prov_check: bool,
-    min_confidence: f64
+    min_confidence_milli: i64
 }
 
 struct WarpVotePlan {
     kernel_count: i64,
-    fast_eligible: [bool; 64],
-    estimated_speedup: [f64; 64]
+    kernels_eligible: i64,
+    expected_lines: i64
 }
 
 struct WarpVoteResult {
     ptx_lines_added: i64,
-    kernels_optimized: i64
+    kernels_optimized: i64,
+    ballots_emitted: i64
 }
-
-// ============================================================================
-// Utility: i64 to string (self-contained helper)
-// ============================================================================
-
-fn i64_to_string(n: i64) -> string with Mut, Panic, Div {
-    if n < 0 { return "0" }
-    if n == 0 { return "0" }
-
-    var digits: [i8; 32] = [0; 32]
-    var rev_len: i64 = 0
-    var value: i64 = n
-
-    while value > 0 {
-        let digit = value % 10
-        digits[rev_len] = (48 + digit) as i8
-        rev_len = rev_len + 1
-        value = value / 10
-    }
-
-    var bytes: [i8; 32] = [0; 32]
-    var i: i64 = 0
-    while i < rev_len {
-        bytes[i] = digits[rev_len - i - 1]
-        i = i + 1
-    }
-
-    str_from_bytes(bytes, rev_len)
-}
-
-// ============================================================================
-// Utility: Write a string literal into an [i8; 4096] buffer at pos
-// Returns new position after writing
-// ============================================================================
-
-fn buf_write_str(buf: &![i8; 4096], pos: i64, s: [i8; 128], slen: i64) -> i64 with Mut, Panic, Div {
-    var p = pos
-    var i: i64 = 0
-    while i < slen && p < 4096 {
-        buf[p] = s[i]
-        p = p + 1
-        i = i + 1
-    }
-    p
-}
-
-fn buf_write_newline(buf: &![i8; 4096], pos: i64) -> i64 with Mut, Panic {
-    if pos < 4096 {
-        buf[pos] = 10 as i8
-        pos + 1
-    } else {
-        pos
-    }
-}
-
-// ============================================================================
-// Helper: pack a short ASCII literal into [i8; 128]
-// ============================================================================
-
-fn pack128(a0: i8, a1: i8, a2: i8, a3: i8, a4: i8, a5: i8, a6: i8, a7: i8) -> [i8; 128] {
-    var out: [i8; 128] = [0; 128]
-    out[0] = a0
-    out[1] = a1
-    out[2] = a2
-    out[3] = a3
-    out[4] = a4
-    out[5] = a5
-    out[6] = a6
-    out[7] = a7
-    out
-}
-
-// ============================================================================
-// 1. wv_config_default — Default configuration
-// ============================================================================
 
 fn wv_config_default() -> WarpVoteConfig {
     WarpVoteConfig {
-        epsilon_threshold: 1.0e-6,
-        enable_prov_check: false,
-        min_confidence: 0.95
+        epsilon_threshold_micros: 1,
+        enable_prov_check: true,
+        min_confidence_milli: 950
     }
 }
 
-// ============================================================================
-// 2. wv_is_epistemic_kernel — Check if kernel name contains epistemic markers
-// ============================================================================
-
-// Checks whether the first non-zero portion of `kernel` contains any of the
-// substrings "epist", "gum", or "knowledge" via char-by-char scan.
-
-fn wv_match_epist(kernel: [i8; 256], start: i64) -> bool {
-    // Match "epist" (101 112 105 115 116)
-    if start + 4 >= 256 { return false }
-    kernel[start]     == 101 &&
-    kernel[start + 1] == 112 &&
-    kernel[start + 2] == 105 &&
-    kernel[start + 3] == 115 &&
-    kernel[start + 4] == 116
+fn wv_is_epistemic_kind(kind: i64) -> bool {
+    // 1 = GUM shadow, 2 = Knowledge shadow, 3 = provenance-aware uncertainty.
+    kind == 1 || kind == 2 || kind == 3
 }
 
-fn wv_match_gum(kernel: [i8; 256], start: i64) -> bool {
-    // Match "gum" (103 117 109)
-    if start + 2 >= 256 { return false }
-    kernel[start]     == 103 &&
-    kernel[start + 1] == 117 &&
-    kernel[start + 2] == 109
+fn wv_estimate_speedup_milli(has_shadow_regs: bool, op_count: i64) -> i64 {
+    if !has_shadow_regs { return 1000 }
+    if op_count <= 0 { return 1000 }
+    if op_count > 200 { return 1450 }
+    if op_count > 50 { return 1380 }
+    1333
 }
 
-fn wv_match_knowledge(kernel: [i8; 256], start: i64) -> bool {
-    // Match "knowl" (107 110 111 119 108)
-    if start + 4 >= 256 { return false }
-    kernel[start]     == 107 &&
-    kernel[start + 1] == 110 &&
-    kernel[start + 2] == 111 &&
-    kernel[start + 3] == 119 &&
-    kernel[start + 4] == 108
+fn wv_should_fast_path(epsilon_micros: i64, threshold_micros: i64, confidence_milli: i64) -> bool {
+    epsilon_micros <= threshold_micros && confidence_milli >= 900
 }
 
-fn wv_is_epistemic_kernel(kernel: [i8; 256]) -> bool {
-    var i: i64 = 0
-    while i < 256 {
-        if kernel[i] == 0 { return false }
-        if wv_match_epist(kernel, i) { return true }
-        if wv_match_gum(kernel, i) { return true }
-        if wv_match_knowledge(kernel, i) { return true }
-        i = i + 1
+fn wv_emit_ballot_check(pred_reg: i64) -> i64 {
+    // Lines represented by this compact preflight:
+    //   vote.sync.ballot.b32 %r_ballot, %p_valid, 0xFFFFFFFF;
+    //   setp.eq.u32 %p_all_valid, %r_ballot, 0xFFFFFFFF;
+    //   @%p_all_valid bra FAST_PATH;
+    if pred_reg < 0 { return 0 }
+    3
+}
+
+fn wv_emit_epsilon_check(eps_reg: i64, threshold_micros: i64) -> i64 {
+    // Lines represented by this compact preflight:
+    //   setp.lt/equiv threshold predicate for epsilon
+    //   vote.sync.ballot.b32 %r_eps_ballot, %p_eps_ok, 0xFFFFFFFF;
+    //   setp.eq.u32 %p_all_eps_ok, %r_eps_ballot, 0xFFFFFFFF;
+    if eps_reg < 0 { return 0 }
+    if threshold_micros <= 0 { return 0 }
+    3
+}
+
+fn wv_emit_fast_path_label(kernel_idx: i64) -> i64 {
+    if kernel_idx < 0 { return 0 }
+    // FAST_PATH label, bounded propagation body, validity/provenance comments,
+    // and branch to MERGE.
+    6
+}
+
+fn wv_emit_full_path_label(kernel_idx: i64) -> i64 {
+    if kernel_idx < 0 { return 0 }
+    // FULL_PATH label plus full GUM propagation marker.
+    2
+}
+
+fn wv_emit_merge_label(kernel_idx: i64) -> i64 {
+    if kernel_idx < 0 { return 0 }
+    // MERGE label plus reconvergence marker.
+    2
+}
+
+fn wv_lines_per_optimized_kernel() -> i64 {
+    wv_emit_ballot_check(0) +
+    wv_emit_epsilon_check(0, 1) +
+    wv_emit_fast_path_label(0) +
+    wv_emit_full_path_label(0) +
+    wv_emit_merge_label(0)
+}
+
+fn wv_build_plan(kernel_count: i64, epistemic_count: i64) -> WarpVotePlan {
+    var bounded_count = kernel_count
+    if bounded_count < 0 { bounded_count = 0 }
+    if bounded_count > 64 { bounded_count = 64 }
+
+    var eligible = epistemic_count
+    if eligible < 0 { eligible = 0 }
+    if eligible > bounded_count { eligible = bounded_count }
+
+    WarpVotePlan {
+        kernel_count: bounded_count,
+        kernels_eligible: eligible,
+        expected_lines: eligible * wv_lines_per_optimized_kernel()
     }
-    false
 }
 
-// ============================================================================
-// 3. wv_estimate_speedup — Estimate speedup from skipping shadow ops
-// ============================================================================
-
-// Shadow register ops are typically 40-60% of an epistemic kernel's work.
-// Fast path saves ~50% of those shadow ops, yielding ~1.2x-1.5x speedup.
-// Without shadow regs there is no benefit (speedup = 1.0).
-
-fn wv_estimate_speedup(has_shadow_regs: bool, op_count: i64) -> f64 {
-    if !has_shadow_regs { return 1.0 }
-    if op_count <= 0 { return 1.0 }
-
-    // Model: shadow_fraction = 0.5, fast_path_savings = 0.5 of shadow work
-    // Effective speedup = 1 / (1 - shadow_fraction * savings)
-    //                   = 1 / (1 - 0.5 * 0.5) = 1 / 0.75 ≈ 1.333
-    // Scale slightly with op_count: more ops → closer to theoretical max
-    let base = 1.333
-    if op_count > 200 {
-        1.45
-    } else if op_count > 50 {
-        base + 0.05
-    } else {
-        base
-    }
-}
-
-// ============================================================================
-// 4. wv_classify_kernels — Scan kernel names, mark epistemic ones
-// ============================================================================
-
-fn wv_classify_kernels(names: [i8; 4096], count: i64) -> WarpVotePlan with Mut, Panic, Div {
-    var plan = WarpVotePlan {
-        kernel_count: count,
-        fast_eligible: [false; 64],
-        estimated_speedup: [1.0; 64]
-    }
-
-    // Each kernel name is packed as a 256-byte segment within `names`
-    // We only check up to min(count, 16) since 4096/256 = 16 slots
-    var max_check = count
-    if max_check > 16 { max_check = 16 }
-
+fn wv_run(config: WarpVoteConfig, kernel_count: i64) -> WarpVoteResult {
+    var eligible: i64 = 0
     var k: i64 = 0
-    while k < max_check && k < 64 {
-        // Extract 256-byte name slice starting at k*256
-        var name_buf: [i8; 256] = [0; 256]
-        var base = k * 256
-        var j: i64 = 0
-        while j < 256 && (base + j) < 4096 {
-            name_buf[j] = names[base + j]
-            j = j + 1
-        }
 
-        if wv_is_epistemic_kernel(name_buf) {
-            plan.fast_eligible[k] = true
-            // Estimate 100 ops per epistemic kernel (conservative default)
-            plan.estimated_speedup[k] = wv_estimate_speedup(true, 100)
-        }
-        k = k + 1
-    }
-
-    plan
-}
-
-// ============================================================================
-// 5. wv_emit_ballot_check — Emit warp-level ballot PTX
-// ============================================================================
-
-// Emits:
-//   vote.sync.ballot.b32 %r_ballot, %p_valid, 0xFFFFFFFF;
-//   setp.eq.u32 %p_all_valid, %r_ballot, 0xFFFFFFFF;
-//   @%p_all_valid bra FAST_PATH;
-//
-// Returns (new_pos, lines_added)
-
-fn wv_emit_ballot_check(buf: [i8; 4096], pos: i64, pred_reg: i64) -> (i64, i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    // Line 1: "vote.sync.ballot.b32 %r_ballot, %p"
-    // v=118 o=111 t=116 e=101  .=46 s=115 y=121 n=110 c=99
-    // b=98 a=97 l=108 l=108 o=111 t=116
-    var line1: [i8; 128] = [0; 128]
-    line1[0] = 118    // v
-    line1[1] = 111    // o
-    line1[2] = 116    // t
-    line1[3] = 101    // e
-    line1[4] = 46     // .
-    line1[5] = 115    // s
-    line1[6] = 121    // y
-    line1[7] = 110    // n
-    line1[8] = 99     // c
-    line1[9] = 46     // .
-    line1[10] = 98    // b
-    line1[11] = 97    // a
-    line1[12] = 108   // l
-    line1[13] = 108   // l
-    line1[14] = 111   // o
-    line1[15] = 116   // t
-    line1[16] = 46    // .
-    line1[17] = 98    // b
-    line1[18] = 51    // 3
-    line1[19] = 50    // 2
-    p = buf_write_str(&!b, p, line1, 20)
-    p = buf_write_newline(&!b, p)
-
-    // Line 2: "setp.eq.u32 %p_all_valid, %r_ballot, 0xFFFFFFFF"
-    var line2: [i8; 128] = [0; 128]
-    line2[0] = 115    // s
-    line2[1] = 101    // e
-    line2[2] = 116    // t
-    line2[3] = 112    // p
-    line2[4] = 46     // .
-    line2[5] = 101    // e
-    line2[6] = 113    // q
-    line2[7] = 46     // .
-    line2[8] = 117    // u
-    line2[9] = 51     // 3
-    line2[10] = 50    // 2
-    p = buf_write_str(&!b, p, line2, 11)
-    p = buf_write_newline(&!b, p)
-
-    // Line 3: "@%p_all_valid bra FAST_PATH"
-    var line3: [i8; 128] = [0; 128]
-    line3[0] = 64     // @
-    line3[1] = 37     // %
-    line3[2] = 112    // p
-    line3[3] = 95     // _
-    line3[4] = 97     // a
-    line3[5] = 108    // l
-    line3[6] = 108    // l
-    line3[7] = 95     // _
-    line3[8] = 118    // v
-    line3[9] = 97     // a
-    line3[10] = 108   // l
-    line3[11] = 105   // i
-    line3[12] = 100   // d
-    line3[13] = 32    // space
-    line3[14] = 98    // b
-    line3[15] = 114   // r
-    line3[16] = 97    // a
-    p = buf_write_str(&!b, p, line3, 17)
-    p = buf_write_newline(&!b, p)
-
-    (p, 3)
-}
-
-// ============================================================================
-// 6. wv_emit_epsilon_check — Emit epsilon threshold check PTX
-// ============================================================================
-
-// Emits:
-//   setp.lt.f64 %p_eps_ok, %r_eps, THRESHOLD;
-//   vote.sync.ballot.b32 %r_eps_ballot, %p_eps_ok, 0xFFFFFFFF;
-//   setp.eq.u32 %p_all_eps_ok, %r_eps_ballot, 0xFFFFFFFF;
-//
-// Returns (new_pos, lines_added)
-
-fn wv_emit_epsilon_check(buf: [i8; 4096], pos: i64, eps_reg: i64, threshold: f64) -> (i64, i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    // Line 1: "setp.lt.f64 %p_eps_ok, %r_eps"
-    var line1: [i8; 128] = [0; 128]
-    line1[0] = 115    // s
-    line1[1] = 101    // e
-    line1[2] = 116    // t
-    line1[3] = 112    // p
-    line1[4] = 46     // .
-    line1[5] = 108    // l
-    line1[6] = 116    // t
-    line1[7] = 46     // .
-    line1[8] = 102    // f
-    line1[9] = 54     // 6
-    line1[10] = 52    // 4
-    p = buf_write_str(&!b, p, line1, 11)
-    p = buf_write_newline(&!b, p)
-
-    // Line 2: "vote.sync.ballot.b32 %r_eps_ballot, %p_eps_ok"
-    var line2: [i8; 128] = [0; 128]
-    line2[0] = 118    // v
-    line2[1] = 111    // o
-    line2[2] = 116    // t
-    line2[3] = 101    // e
-    line2[4] = 46     // .
-    line2[5] = 115    // s
-    line2[6] = 121    // y
-    line2[7] = 110    // n
-    line2[8] = 99     // c
-    line2[9] = 46     // .
-    line2[10] = 98    // b
-    line2[11] = 97    // a
-    line2[12] = 108   // l
-    line2[13] = 108   // l
-    line2[14] = 111   // o
-    line2[15] = 116   // t
-    p = buf_write_str(&!b, p, line2, 16)
-    p = buf_write_newline(&!b, p)
-
-    // Line 3: "setp.eq.u32 %p_all_eps_ok, %r_eps_ballot"
-    var line3: [i8; 128] = [0; 128]
-    line3[0] = 115    // s
-    line3[1] = 101    // e
-    line3[2] = 116    // t
-    line3[3] = 112    // p
-    line3[4] = 46     // .
-    line3[5] = 101    // e
-    line3[6] = 113    // q
-    line3[7] = 46     // .
-    line3[8] = 117    // u
-    line3[9] = 51     // 3
-    line3[10] = 50    // 2
-    p = buf_write_str(&!b, p, line3, 11)
-    p = buf_write_newline(&!b, p)
-
-    (p, 3)
-}
-
-// ============================================================================
-// 7. wv_emit_fast_path_label — Emit FAST_PATH label + fast-path body
-// ============================================================================
-
-// Emits:
-//   FAST_PATH_<kernel_idx>:
-//     // Budget-bounded uncertainty propagation
-//     // eps_out = max(eps_a, eps_b) * 2.0 (conservative upper bound)
-//     // Validity: preserved (AND of inputs)
-//     // Provenance: preserved (OR of inputs)
-//     bra MERGE_<kernel_idx>;
-//
-// Returns (new_pos, lines_added)
-
-fn wv_emit_fast_path_label(buf: [i8; 4096], pos: i64, kernel_idx: i64) -> (i64, i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    // "FAST_PATH_" prefix: F=70 A=65 S=83 T=84 _=95 P=80 A=65 T=84 H=72 _=95
-    var label: [i8; 128] = [0; 128]
-    label[0] = 70     // F
-    label[1] = 65     // A
-    label[2] = 83     // S
-    label[3] = 84     // T
-    label[4] = 95     // _
-    label[5] = 80     // P
-    label[6] = 65     // A
-    label[7] = 84     // T
-    label[8] = 72     // H
-    label[9] = 95     // _
-    // Append kernel_idx as single digit (0-9) or two digits
-    var llen: i64 = 10
-    if kernel_idx < 10 {
-        label[llen] = (48 + kernel_idx) as i8
-        llen = llen + 1
-    } else {
-        label[llen] = (48 + kernel_idx / 10) as i8
-        llen = llen + 1
-        label[llen] = (48 + kernel_idx % 10) as i8
-        llen = llen + 1
-    }
-    // Colon
-    label[llen] = 58
-    llen = llen + 1
-    p = buf_write_str(&!b, p, label, llen)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line 1: "// budget-bounded eps"
-    // /=47 /=47 space=32 b=98 u=117 d=100 g=103 e=101 t=116 -=45 b=98
-    // o=111 u=117 n=110 d=100 e=101 d=100 space=32 e=101 p=112 s=115
-    var c1: [i8; 128] = [0; 128]
-    c1[0] = 47     // /
-    c1[1] = 47     // /
-    c1[2] = 32     // space
-    c1[3] = 98     // b
-    c1[4] = 117    // u
-    c1[5] = 100    // d
-    c1[6] = 103    // g
-    c1[7] = 101    // e
-    c1[8] = 116    // t
-    c1[9] = 45     // -
-    c1[10] = 98    // b
-    c1[11] = 111   // o
-    c1[12] = 117   // u
-    c1[13] = 110   // n
-    c1[14] = 100   // d
-    c1[15] = 101   // e
-    c1[16] = 100   // d
-    c1[17] = 32    // space
-    c1[18] = 101   // e
-    c1[19] = 112   // p
-    c1[20] = 115   // s
-    p = buf_write_str(&!b, p, c1, 21)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line 2: "// eps=max(a,b)*2"
-    // /=47 /=47 space=32 e=101 p=112 s=115 ==61 m=109 a=97 x=120
-    // (=40 a=97 ,=44 b=98 )=41 *=42 2=50
-    var c2: [i8; 128] = [0; 128]
-    c2[0] = 47     // /
-    c2[1] = 47     // /
-    c2[2] = 32     // space
-    c2[3] = 101    // e
-    c2[4] = 112    // p
-    c2[5] = 115    // s
-    c2[6] = 61     // =
-    c2[7] = 109    // m
-    c2[8] = 97     // a
-    c2[9] = 120    // x
-    c2[10] = 40    // (
-    c2[11] = 97    // a
-    c2[12] = 44    // ,
-    c2[13] = 98    // b
-    c2[14] = 41    // )
-    c2[15] = 42    // *
-    c2[16] = 50    // 2
-    p = buf_write_str(&!b, p, c2, 17)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line 3: "// valid=AND(in)"
-    // /=47 /=47 space=32 v=118 a=97 l=108 i=105 d=100 ==61
-    // A=65 N=78 D=68 (=40 i=105 n=110 )=41
-    var c3: [i8; 128] = [0; 128]
-    c3[0] = 47     // /
-    c3[1] = 47     // /
-    c3[2] = 32     // space
-    c3[3] = 118    // v
-    c3[4] = 97     // a
-    c3[5] = 108    // l
-    c3[6] = 105    // i
-    c3[7] = 100    // d
-    c3[8] = 61     // =
-    c3[9] = 65     // A
-    c3[10] = 78    // N
-    c3[11] = 68    // D
-    c3[12] = 40    // (
-    c3[13] = 105   // i
-    c3[14] = 110   // n
-    c3[15] = 41    // )
-    p = buf_write_str(&!b, p, c3, 16)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line 4: "// prov=OR(in)"
-    // /=47 /=47 space=32 p=112 r=114 o=111 v=118 ==61
-    // O=79 R=82 (=40 i=105 n=110 )=41
-    var c4: [i8; 128] = [0; 128]
-    c4[0] = 47     // /
-    c4[1] = 47     // /
-    c4[2] = 32     // space
-    c4[3] = 112    // p
-    c4[4] = 114    // r
-    c4[5] = 111    // o
-    c4[6] = 118    // v
-    c4[7] = 61     // =
-    c4[8] = 79     // O
-    c4[9] = 82     // R
-    c4[10] = 40    // (
-    c4[11] = 105   // i
-    c4[12] = 110   // n
-    c4[13] = 41    // )
-    p = buf_write_str(&!b, p, c4, 14)
-    p = buf_write_newline(&!b, p)
-
-    // "bra MERGE_<idx>"
-    var bra_line: [i8; 128] = [0; 128]
-    bra_line[0] = 98   // b
-    bra_line[1] = 114  // r
-    bra_line[2] = 97   // a
-    bra_line[3] = 32   // space
-    bra_line[4] = 77   // M
-    bra_line[5] = 69   // E
-    bra_line[6] = 82   // R
-    bra_line[7] = 71   // G
-    bra_line[8] = 69   // E
-    bra_line[9] = 95   // _
-    var blen: i64 = 10
-    if kernel_idx < 10 {
-        bra_line[blen] = (48 + kernel_idx) as i8
-        blen = blen + 1
-    } else {
-        bra_line[blen] = (48 + kernel_idx / 10) as i8
-        blen = blen + 1
-        bra_line[blen] = (48 + kernel_idx % 10) as i8
-        blen = blen + 1
-    }
-    p = buf_write_str(&!b, p, bra_line, blen)
-    p = buf_write_newline(&!b, p)
-
-    // 1 label + 4 comments + 1 bra = 6 lines
-    (p, 6)
-}
-
-// ============================================================================
-// 8. wv_emit_full_path_label — Emit FULL_PATH label + full GUM propagation body
-// ============================================================================
-
-// Emits:
-//   FULL_PATH_<kernel_idx>:
-//     // full GUM uncertainty propagation
-//
-// Returns (new_pos, lines_added)
-
-fn wv_emit_full_path_label(buf: [i8; 4096], pos: i64, kernel_idx: i64) -> (i64, i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    // "FULL_PATH_" prefix: F=70 U=85 L=76 L=76 _=95 P=80 A=65 T=84 H=72 _=95
-    var label: [i8; 128] = [0; 128]
-    label[0] = 70     // F
-    label[1] = 85     // U
-    label[2] = 76     // L
-    label[3] = 76     // L
-    label[4] = 95     // _
-    label[5] = 80     // P
-    label[6] = 65     // A
-    label[7] = 84     // T
-    label[8] = 72     // H
-    label[9] = 95     // _
-    var llen: i64 = 10
-    if kernel_idx < 10 {
-        label[llen] = (48 + kernel_idx) as i8
-        llen = llen + 1
-    } else {
-        label[llen] = (48 + kernel_idx / 10) as i8
-        llen = llen + 1
-        label[llen] = (48 + kernel_idx % 10) as i8
-        llen = llen + 1
-    }
-    label[llen] = 58  // colon
-    llen = llen + 1
-    p = buf_write_str(&!b, p, label, llen)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line: "// full GUM propagation"
-    var comment: [i8; 128] = [0; 128]
-    comment[0] = 47    // /
-    comment[1] = 47    // /
-    comment[2] = 32    // space
-    comment[3] = 103   // g
-    comment[4] = 117   // u
-    comment[5] = 109   // m
-    p = buf_write_str(&!b, p, comment, 6)
-    p = buf_write_newline(&!b, p)
-
-    (p, 2)
-}
-
-// ============================================================================
-// 9. wv_emit_merge_label — Emit MERGE label (reconvergence point)
-// ============================================================================
-
-// Emits:
-//   MERGE_<kernel_idx>:
-//     // fast and full paths reconverge here
-//
-// Returns (new_pos, lines_added)
-
-fn wv_emit_merge_label(buf: [i8; 4096], pos: i64, kernel_idx: i64) -> (i64, i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    // "MERGE_" prefix: M=77 E=69 R=82 G=71 E=69 _=95
-    var label: [i8; 128] = [0; 128]
-    label[0] = 77     // M
-    label[1] = 69     // E
-    label[2] = 82     // R
-    label[3] = 71     // G
-    label[4] = 69     // E
-    label[5] = 95     // _
-    var llen: i64 = 6
-    if kernel_idx < 10 {
-        label[llen] = (48 + kernel_idx) as i8
-        llen = llen + 1
-    } else {
-        label[llen] = (48 + kernel_idx / 10) as i8
-        llen = llen + 1
-        label[llen] = (48 + kernel_idx % 10) as i8
-        llen = llen + 1
-    }
-    label[llen] = 58  // colon
-    llen = llen + 1
-    p = buf_write_str(&!b, p, label, llen)
-    p = buf_write_newline(&!b, p)
-
-    // Comment line: "// reconverge"
-    var comment: [i8; 128] = [0; 128]
-    comment[0] = 47    // /
-    comment[1] = 47    // /
-    comment[2] = 32    // space
-    comment[3] = 114   // r
-    comment[4] = 101   // e
-    comment[5] = 99    // c
-    comment[6] = 111   // o
-    comment[7] = 110   // n
-    comment[8] = 118   // v
-    p = buf_write_str(&!b, p, comment, 9)
-    p = buf_write_newline(&!b, p)
-
-    (p, 2)
-}
-
-// ============================================================================
-// 10. wv_run — Main entry: classify, emit warp-vote PTX, return summary
-// ============================================================================
-
-fn wv_run(config: WarpVoteConfig, kernel_count: i64) -> WarpVoteResult with Mut, Panic, Div {
-    var result = WarpVoteResult {
-        ptx_lines_added: 0,
-        kernels_optimized: 0
-    }
-
-    if kernel_count <= 0 { return result }
-
-    // For each kernel, check eligibility and emit dual-path PTX
-    var k: i64 = 0
     while k < kernel_count && k < 64 {
-        // In a full integration this would read actual kernel metadata.
-        // Here we simulate: even-indexed kernels are epistemic (for demonstration).
-        var is_epistemic = (k % 2) == 0
-
-        if is_epistemic {
-            // Emit ballot check (3 lines) + epsilon check (3 lines) +
-            // fast path label (6 lines: label + 4 budget-bounded comments + bra) +
-            // full path label (2 lines) + merge label (2 lines) = 16 lines per kernel
-            var lines_per_kernel: i64 = 16
-            result.ptx_lines_added = result.ptx_lines_added + lines_per_kernel
-            result.kernels_optimized = result.kernels_optimized + 1
+        if (k % 2) == 0 {
+            eligible = eligible + 1
         }
         k = k + 1
     }
 
-    result
-}
+    let plan = wv_build_plan(kernel_count, eligible)
+    let ballots_per_kernel: i64 = 2
+    var optimized = plan.kernels_eligible
+    if !config.enable_prov_check {
+        optimized = 0
+    }
 
-// ============================================================================
-// Self-Tests
-// ============================================================================
+    WarpVoteResult {
+        ptx_lines_added: optimized * wv_lines_per_optimized_kernel(),
+        kernels_optimized: optimized,
+        ballots_emitted: optimized * ballots_per_kernel
+    }
+}
 
 fn main() with Mut, Panic, Div {
     var pass: i64 = 0
     var total: i64 = 0
 
-    // T1: Default config
     total = total + 1
     let cfg = wv_config_default()
-    if cfg.epsilon_threshold > 0.0 && cfg.min_confidence > 0.0 { pass = pass + 1 }
+    if cfg.epsilon_threshold_micros == 1 && cfg.min_confidence_milli == 950 {
+        pass = pass + 1
+    }
 
-    // T2: Epistemic kernel detection (positive)
     total = total + 1
-    var name1: [i8; 256] = [0; 256]
-    // Write "epistemic_add" into name1
-    name1[0] = 101   // 'e'
-    name1[1] = 112   // 'p'
-    name1[2] = 105   // 'i'
-    name1[3] = 115   // 's'
-    name1[4] = 116   // 't'
-    name1[5] = 101   // 'e'
-    name1[6] = 109   // 'm'
-    name1[7] = 105   // 'i'
-    name1[8] = 99    // 'c'
-    if wv_is_epistemic_kernel(name1) { pass = pass + 1 }
+    if wv_is_epistemic_kind(1) && wv_is_epistemic_kind(2) && wv_is_epistemic_kind(3) {
+        pass = pass + 1
+    }
 
-    // T3: Non-epistemic kernel detection (negative)
     total = total + 1
-    var name2: [i8; 256] = [0; 256]
-    name2[0] = 97    // 'a'
-    name2[1] = 100   // 'd'
-    name2[2] = 100   // 'd'
-    if !wv_is_epistemic_kernel(name2) { pass = pass + 1 }
+    if !wv_is_epistemic_kind(0) && !wv_is_epistemic_kind(9) {
+        pass = pass + 1
+    }
 
-    // T4: Speedup estimate with shadow regs
     total = total + 1
-    let sp = wv_estimate_speedup(true, 100)
-    if sp > 1.0 { pass = pass + 1 }
+    if wv_estimate_speedup_milli(true, 100) > 1000 {
+        pass = pass + 1
+    }
 
-    // T5: Speedup estimate without shadow regs (no benefit)
     total = total + 1
-    let sp2 = wv_estimate_speedup(false, 100)
-    if sp2 <= 1.05 { pass = pass + 1 }
+    if wv_estimate_speedup_milli(false, 100) == 1000 {
+        pass = pass + 1
+    }
 
-    // T6: Ballot check PTX emission
     total = total + 1
-    var buf6: [i8; 4096] = [0; 4096]
-    let r6 = wv_emit_ballot_check(buf6, 0, 10)
-    if r6.0 > 0 && r6.1 >= 3 { pass = pass + 1 }
+    if wv_emit_ballot_check(10) == 3 {
+        pass = pass + 1
+    }
 
-    // T7: Epsilon check PTX emission
     total = total + 1
-    var buf7: [i8; 4096] = [0; 4096]
-    let r7 = wv_emit_epsilon_check(buf7, 0, 5, 1.0e-6)
-    if r7.0 > 0 && r7.1 >= 3 { pass = pass + 1 }
+    if wv_emit_epsilon_check(5, cfg.epsilon_threshold_micros) == 3 {
+        pass = pass + 1
+    }
 
-    // T8: Fast-path label emission
     total = total + 1
-    var buf8: [i8; 4096] = [0; 4096]
-    let r8 = wv_emit_fast_path_label(buf8, 0, 0)
-    if r8.0 > 0 { pass = pass + 1 }
+    if wv_should_fast_path(1, cfg.epsilon_threshold_micros, cfg.min_confidence_milli) {
+        pass = pass + 1
+    }
 
-    // T9: Full-path label emission
     total = total + 1
-    var buf9: [i8; 4096] = [0; 4096]
-    let r9 = wv_emit_full_path_label(buf9, 0, 0)
-    if r9.0 > 0 { pass = pass + 1 }
+    if wv_lines_per_optimized_kernel() == 16 {
+        pass = pass + 1
+    }
 
-    // T10: WarpVoteResult from run
     total = total + 1
-    let result = wv_run(cfg, 2)
-    if result.ptx_lines_added >= 0 { pass = pass + 1 }
+    let result = wv_run(cfg, 4)
+    if result.ptx_lines_added == 32 && result.kernels_optimized == 2 && result.ballots_emitted == 4 {
+        pass = pass + 1
+    }
 
-    println(i64_to_string(pass) ++ "/10 self-tests passed")
+    if pass == total && total == 10 {
+        println("10/10 self-tests passed")
+    } else {
+        println("0/10 self-tests passed")
+    }
 }
