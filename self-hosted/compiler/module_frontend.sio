@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList}
+use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -17,6 +17,10 @@ use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_pa
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
+}
+
+fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1")
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
@@ -1133,9 +1137,17 @@ fn ir_merge_is_direct_fn_ref_opcode(op: IrOpcode) -> bool {
     }
 }
 
-fn ir_merge_prepare_function_with_remap(
+fn ir_merge_function_name_at(module: &IrModule, fn_id: i64) -> Name with Mut, Div, Panic {
+    if fn_id >= 0 && fn_id < (*module).fn_count {
+        return (*module).functions[fn_id as usize].name
+    }
+    ir_empty_name()
+}
+
+fn ir_merge_prepare_function_with_remap_from_func(
+    func_in: IrFunction,
     src: &IrModule,
-    src_fi: i64,
+    dst: &IrModule,
     dep_fn_count: i64,
     fn_remap: &[i64; 2048],
     contest_offset: i64,
@@ -1150,8 +1162,7 @@ fn ir_merge_prepare_function_with_remap(
     observed_transition_offset: i64,
     rollback_certificate_offset: i64
 ) -> IrFunction with Mut, Panic, Div {
-    var func = (*src).functions[src_fi as usize]
-    func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    var func = func_in
     var ii: i64 = 0
     while ii < func.instr_count {
         if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
@@ -1159,7 +1170,13 @@ fn ir_merge_prepare_function_with_remap(
             if old_id >= 0 && old_id < dep_fn_count {
                 let mapped_id = fn_remap[old_id as usize]
                 if mapped_id >= 0 {
-                    func.instrs[ii as usize].fn_id = mapped_id
+                    let dep_name = (*src).functions[old_id as usize].name
+                    let current_name = ir_merge_function_name_at(dst, old_id)
+                    // Cross-module calls are name-resolved into dst index space first;
+                    // skip fn_remap when old_id no longer denotes the same symbol.
+                    if ir_name_eq(dep_name, current_name) {
+                        func.instrs[ii as usize].fn_id = mapped_id
+                    }
                 }
             }
         }
@@ -1180,6 +1197,83 @@ fn ir_merge_prepare_function_with_remap(
         ii = ii + 1
     }
     func
+}
+
+fn ir_merge_prepare_function_with_remap(
+    src: &IrModule,
+    src_fi: i64,
+    dep_fn_count: i64,
+    fn_remap: &[i64; 2048],
+    contest_offset: i64,
+    robust_offset: i64,
+    decision_offset: i64,
+    deferred_offset: i64,
+    validated_offset: i64,
+    acquisition_plan_offset: i64,
+    recourse_plan_offset: i64,
+    alternative_set_offset: i64,
+    transition_plan_offset: i64,
+    observed_transition_offset: i64,
+    rollback_certificate_offset: i64
+) -> IrFunction with Mut, Panic, Div {
+    ir_merge_prepare_function_with_remap_from_func(
+        (*src).functions[src_fi as usize],
+        src,
+        src,
+        dep_fn_count,
+        fn_remap,
+        contest_offset,
+        robust_offset,
+        decision_offset,
+        deferred_offset,
+        validated_offset,
+        acquisition_plan_offset,
+        recourse_plan_offset,
+        alternative_set_offset,
+        transition_plan_offset,
+        observed_transition_offset,
+        rollback_certificate_offset
+    )
+}
+
+// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
+// over import stubs so dependency functions keep calling real implementations.
+fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    var fi: i64 = 0
+    var found: i64 = 0 - 1
+    var found_stub: i64 = 0 - 1
+    while fi < (*module).fn_count {
+        if ir_name_eq((*module).functions[fi as usize].name, name) {
+            if (*module).functions[fi as usize].instr_count > 0 {
+                found = fi
+            } else if found_stub < 0 {
+                found_stub = fi
+            }
+        }
+        fi = fi + 1
+    }
+    if found >= 0 { found } else { found_stub }
+}
+
+// After stub replacement, remap in-function IrCall/IrCallSret targets from the
+// dependency module's local fn_id space to the accumulated module by name.
+fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &IrModule) -> IrFunction with Mut, Panic, Div {
+    var out = func
+    var ii: i64 = 0
+    while ii < out.instr_count {
+        if out.instrs[ii as usize].op == IrOpcode::IrCall || out.instrs[ii as usize].op == IrOpcode::IrCallSret {
+            let old_id = out.instrs[ii as usize].fn_id
+            if old_id >= 0 && old_id < (*src).fn_count {
+                let target_name = (*src).functions[old_id as usize].name
+                let new_id = ir_merge_find_function_name_index(dst, target_name)
+                if new_id >= 0 {
+                    out.instrs[ii as usize].fn_id = new_id
+                }
+            }
+        }
+        ii = ii + 1
+    }
+    out
 }
 
 // Takes &! IrModule (not &! Box<IrModule>): the latter triggers a lean_single
@@ -1229,6 +1323,164 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     let dst_idx = (*dst).fn_count
     (*dst).functions[dst_idx as usize] = func
     (*dst).fn_count = (*dst).fn_count + 1
+}
+
+// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id.
+// Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
+// callee symbol at the current fn_id when instr.name is empty.
+fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
+    let old_id = instr.fn_id
+    if instr.name.len > 0 {
+        let new_id = ir_merge_find_function_name_index(module, instr.name)
+        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
+            return new_id
+        }
+    }
+    if old_id >= 0 && old_id < (*module).fn_count {
+        let fallback_name = (*module).functions[old_id as usize].name
+        let new_id = ir_merge_find_function_name_index(module, fallback_name)
+        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
+            return new_id
+        }
+    }
+    old_id
+}
+
+// After multimodule merge, rebind every direct IrCall/IrCallSret to the merged
+// module's canonical fn_id for instr.name. Prefer lowered bodies over import stubs.
+fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        var ii: i64 = 0
+        while ii < (*module).functions[fi as usize].instr_count {
+            let op = (*module).functions[fi as usize].instrs[ii as usize].op
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(
+                    module,
+                    (*module).functions[fi as usize].instrs[ii as usize]
+                )
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+}
+
+fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
+    print("MERGE_DUMP: fn_count=")
+    print_int((*module).fn_count)
+    print("\n")
+    let watch_pb = make_name("pb_vacuous")
+    let watch_pred = make_name("predict_cmin_knightian")
+    let watch_main = make_name("main")
+    let find_pb = ir_merge_find_function_name_index(module, watch_pb)
+    print("MERGE_DUMP: find(pb_vacuous)=")
+    print_int(find_pb)
+    if find_pb >= 0 && find_pb < (*module).fn_count {
+        print(" ic=")
+        print_int((*module).functions[find_pb as usize].instr_count)
+        print("\n")
+    } else {
+        print("\n")
+    }
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let fname = (*module).functions[fi as usize].name
+        if ir_name_eq(fname, watch_pb) || ir_name_eq(fname, watch_pred) || ir_name_eq(fname, watch_main) {
+            print("MERGE_DUMP: sym[")
+            print_int(fi)
+            print("] ")
+            print(str_from_bytes(fname.buf, fname.len))
+            print(" ic=")
+            print_int((*module).functions[fi as usize].instr_count)
+            print("\n")
+        }
+        fi = fi + 1
+    }
+    var pfi: i64 = 0
+    while pfi < (*module).fn_count {
+        if ir_name_eq((*module).functions[pfi as usize].name, watch_pred) {
+            print("MERGE_DUMP: predict calls/returns\n")
+            var ii: i64 = 0
+            while ii < (*module).functions[pfi as usize].instr_count {
+                let ins = (*module).functions[pfi as usize].instrs[ii as usize]
+                if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
+                    print("  call ii=")
+                    print_int(ii)
+                    print(" fn_id=")
+                    print_int(ins.fn_id)
+                    print(" name=")
+                    print(str_from_bytes(ins.name.buf, ins.name.len))
+                    if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+                        print(" ->")
+                        print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                        print(" ic=")
+                        print_int((*module).functions[ins.fn_id as usize].instr_count)
+                    }
+                    print("\n")
+                } else if ins.op == IrOpcode::IrReturn {
+                    print("  return ii=")
+                    print_int(ii)
+                    print(" reg=")
+                    print_int(ins.src1)
+                    print("\n")
+                }
+                ii = ii + 1
+            }
+        }
+        pfi = pfi + 1
+    }
+    var mfi: i64 = 0
+    while mfi < (*module).fn_count {
+        if ir_name_eq((*module).functions[mfi as usize].name, watch_main) {
+            print("MERGE_DUMP: main calls\n")
+            var ii: i64 = 0
+            while ii < (*module).functions[mfi as usize].instr_count {
+                let ins = (*module).functions[mfi as usize].instrs[ii as usize]
+                if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
+                    print("  call ii=")
+                    print_int(ii)
+                    print(" fn_id=")
+                    print_int(ins.fn_id)
+                    print(" name=")
+                    print(str_from_bytes(ins.name.buf, ins.name.len))
+                    if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+                        print(" ->")
+                        print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                        print(" ic=")
+                        print_int((*module).functions[ins.fn_id as usize].instr_count)
+                    }
+                    print("\n")
+                }
+                ii = ii + 1
+            }
+        }
+        mfi = mfi + 1
+    }
+}
+
+// Materialize merged IR, resolve call targets on an owned IrModule (not through
+// &! Box<IrModule> — lean_single drops those writes), and return the finalized module.
+fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var out = module
+    ir_module_resolve_named_calls(&! out)
+    // Write whole IrInstr slots back: in-place fn_id patches through &! out can be
+    // dropped by lean_single on nested array elements (same family as Box deref bug).
+    var fi: i64 = 0
+    while fi < out.fn_count {
+        var ii: i64 = 0
+        while ii < out.functions[fi as usize].instr_count {
+            let op = out.functions[fi as usize].instrs[ii as usize].op
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                var ins = out.functions[fi as usize].instrs[ii as usize]
+                ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
+                out.functions[fi as usize].instrs[ii as usize] = ins
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    out
 }
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
@@ -3684,7 +3936,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 print_int(i)
                 print("\n")
                 let dep_items = (*programs)[i as usize].items
-                let dep_lower = module_frontend_lower_program_items_box_traced(&dep_items, i, trace)
+                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
                 print("\n")
@@ -3740,9 +3992,14 @@ fn module_frontend_lower_programs_array_direct_box(
                         while mfi < dep_fn_count {
                             let dst_fi = fn_remap[mfi as usize]
                             if dst_fi >= 0 {
-                                let func = ir_merge_prepare_function_with_remap(
+                                // Remap cross-module call targets by symbol name while fn_id
+                                // values are still in the dependency module index space.
+                                var dep_func = (*dep_box).functions[mfi as usize]
+                                dep_func = ir_merge_remap_existing_call_targets(dep_func, &(*dep_box), &(*acc_box))
+                                var func = ir_merge_prepare_function_with_remap_from_func(
+                                    dep_func,
                                     &(*dep_box),
-                                    mfi,
+                                    &(*acc_box),
                                     dep_fn_count,
                                     &fn_remap,
                                     contest_offset,
@@ -3945,8 +4202,7 @@ fn module_frontend_merge_imported_into(
         print("IR lowering produced empty module\n")
         return false
     }
-    ir_module_resolve_named_calls(&! (*module_box))
-    (*out_module) = *module_box
+    (*out_module) = ir_module_finalize_merged_calls(*module_box)
     true
 }
 
@@ -4027,7 +4283,8 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     }
 
     let module_box = lowered.module
-    let fn_count = (*module_box).fn_count
+    var merged_module = ir_module_finalize_merged_calls(*module_box)
+    let fn_count = merged_module.fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
@@ -4038,10 +4295,12 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         print("IR lowering produced empty module\n")
         return 1
     }
-    ir_module_resolve_named_calls(&! (*module_box))
+    if module_frontend_dump_merged_calls_enabled() {
+        ir_module_dump_merge_calls(&merged_module)
+    }
     parser_reset_last_errors()
     let target_spec = native_resolve_target("native", "auto", false)
-    let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
+    let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
