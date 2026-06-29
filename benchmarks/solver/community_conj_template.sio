@@ -1,0 +1,102 @@
+//@ run-pass
+//@ description: community-structured 3-SAT, isolated 2x2 conjunction ablation for seed __SEED__
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+// uniform int in [0, hi) via multiply-shift (high bits)
+fn rand_below(state: &!i64, hi: i32) -> i32 with Mut, Div {
+    let m: i64 = 2147483648
+    let raw = lcg_next(state)
+    return ((raw * (hi as i64)) / m) as i32
+}
+
+// Community-structured: with prob P_INTRA% a clause draws 3 distinct vars from ONE
+// random community of size n/N_COMM; otherwise from the whole pool. Random polarity.
+fn gen_comm(ctx: &!SmtContext, n_vars: i32, n_clauses: i32, n_comm: i32, p_intra: i32, seed: i64, emit: i32) with IO, Mut, Div {
+    var st: i64 = seed
+    let sz: i32 = n_vars / n_comm
+    var c: i32 = 0
+    while c < n_clauses {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var picked: [i32; 3] = [0 as i32; 3]
+        let roll = rand_below(&! st, 100)
+        var lo: i32 = 0
+        var span: i32 = n_vars
+        if roll < p_intra {
+            let comm = rand_below(&! st, n_comm)
+            lo = comm * sz
+            span = sz
+        }
+        var k: i32 = 0
+        while k < 3 {
+            var v: i32 = 0
+            var ok: i32 = 0
+            while ok == 0 {
+                v = lo + rand_below(&! st, span)
+                ok = 1
+                var j: i32 = 0
+                while j < k {
+                    if picked[j] == v { ok = 0 }
+                    j = j + 1
+                }
+            }
+            picked[k] = v
+            let pol = rand_below(&! st, 2)
+            lits[k] = v * 2 + pol
+            if emit == 1 {
+                if pol == 1 { print("-") }
+                print_int((v + 1) as i64)
+                print(" ")
+            }
+            k = k + 1
+        }
+        if emit == 1 { println("0") }
+        smt_add_clause(ctx, &lits, 3)
+        c = c + 1
+    }
+}
+
+fn solve_cell(seed: i64, n_vars: i32, n_clauses: i32, n_comm: i32, p_intra: i32, score_mode: i32, phase_mode: i32) with IO, Mut, Div {
+    var ctx = smt_new()
+    gen_comm(&! ctx, n_vars, n_clauses, n_comm, p_intra, seed, 0)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, score_mode)
+    smt_set_phase_mode(&! ctx, phase_mode)
+    let result = smt_solve(&! ctx)
+    print("RESULT seed="); print_int(seed)
+    print(" sm="); print_int(score_mode as i64)
+    print(" pm="); print_int(phase_mode as i64)
+    print(" result="); print_int(result as i64)
+    print(" decisions="); print_int(smt_get_decisions(&ctx) as i64)
+    print(" conflicts="); print_int(smt_get_conflicts(&ctx) as i64)
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    let seed: i64 = __SEED__
+    let n_vars: i32 = 60
+    let n_clauses: i32 = 360
+    let n_comm: i32 = 3
+    let p_intra: i32 = 88
+    print("INSTANCE seed="); print_int(seed)
+    print(" n="); print_int(n_vars as i64)
+    print(" m="); print_int(n_clauses as i64); println("")
+    print("p cnf "); print_int(n_vars as i64); print(" "); print_int(n_clauses as i64); println("")
+    var ctx_emit = smt_new()
+    gen_comm(&! ctx_emit, n_vars, n_clauses, n_comm, p_intra, seed, 1)
+    solve_cell(seed, n_vars, n_clauses, n_comm, p_intra, 1, 0)   // BASE
+    solve_cell(seed, n_vars, n_clauses, n_comm, p_intra, 3, 0)   // BANDIT
+    solve_cell(seed, n_vars, n_clauses, n_comm, p_intra, 1, 1)   // POL
+    solve_cell(seed, n_vars, n_clauses, n_comm, p_intra, 3, 1)   // CONJ
+    return 0
+}
