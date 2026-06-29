@@ -5973,7 +5973,7 @@ fn nc_core_emit_alloc_retry_or_exit_into(nc: &! NativeCompiler, slow_jnz: i64, r
     nc_patch_u32_le(nc, retry_jmp + 1, retry_target - (retry_jmp + 5))
 }
 
-fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64) -> bool with Mut, Panic, Div {
+fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
     let payload_size = native_v2_alloc_size_from_tag(type_tag)
     let total_size = payload_size + native_v2_object_header_size()
     let descriptor_id = native_v2_alloc_descriptor_from_tag(type_tag)
@@ -6023,7 +6023,11 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64) -> bo
     nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_descriptor_id())
     nc_emit_mov_rax_imm(nc, payload_size)
     nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
-    nc_emit_xor_rax_rax(nc)
+    // Object-header `flags` slot carries the LOGICAL element count for array
+    // allocations (0 for struct/tuple/scalar). The payload_size above is a
+    // size-BUCKET capacity in bytes, not the logical N, so IrArrayLen reads this
+    // slot instead. Non-array allocs pass elem_count = 0 → flags stays 0.
+    nc_emit_mov_rax_imm(nc, elem_count)
     nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_flags())
     nc_emit_pop_rax(nc)
     nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_handle_id())
@@ -6549,6 +6553,18 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     (*func).instrs[i as usize].imm_i64,
                 )
             }
+        } else if instr_op == IrOpcode::IrArrayLen {
+            // dst = LOGICAL element COUNT of the aggregate handle in src1.
+            // Resolve handle -> object base, then load the object-header `flags`
+            // slot, which the alloc emitter stamped with the logical N recorded at
+            // the array-literal site. This is exact for any element width and any
+            // size bucket (payload_size is the over-allocated bucket capacity in
+            // BYTES, not N — using payload_size>>3 over-iterated for small arrays).
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            native_v2_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_load_rax_mem_rax_disp32(nc, native_v2_object_header_field_flags())
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrBinOp {
             if !nc_emit_core_binop(nc, func, i) {
                 return false
@@ -6606,7 +6622,12 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_emit_store_rbx_to_mem_rax(nc)
         } else if instr_op == IrOpcode::IrAlloc {
-            if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
+            // field_idx carries the LOGICAL element count for array-literal allocs
+            // (set by ir_alloc_array); every other alloc (ir_alloc) leaves it at the
+            // -1 default, which we clamp to 0 so non-array objects keep flags = 0.
+            let alloc_elem_count_raw = (*func).instrs[i as usize].field_idx
+            let alloc_elem_count = if alloc_elem_count_raw < 0 { 0 } else { alloc_elem_count_raw }
+            if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64, alloc_elem_count) {
                 return false
             }
         } else if instr_op == IrOpcode::IrCall {
@@ -7225,7 +7246,7 @@ fn native_v2_emit_sret_witness_main_into(nc: &! NativeCompiler, plain_call: bool
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 512)
 
-    if !nc_core_emit_alloc_into(nc, 0, 64) { return false }
+    if !nc_core_emit_alloc_into(nc, 0, 64, 0) { return false }
     native_v2_core_emit_load_imm_into(nc, 1, 7)
 
     if plain_call {

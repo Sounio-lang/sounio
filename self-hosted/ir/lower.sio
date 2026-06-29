@@ -3182,7 +3182,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(repeat_count)))
+        lo = lo.emit(ir_alloc_array(dst, lo.aggregate_storage_bytes(repeat_count), repeat_count))
 
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
@@ -3213,7 +3213,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         let lo1 = pair_dst.0
         let dst = pair_dst.1
-        let lo2 = lo1.emit(ir_alloc(dst, lo1.aggregate_storage_bytes(count)))
+        let lo2 = lo1.emit(ir_alloc_array(dst, lo1.aggregate_storage_bytes(count), count))
         let lo3 = lo2.emit_name_array_values(dst, names, count, 0)
         (lo3, dst)
     }
@@ -3222,7 +3222,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         let lo1 = pair_dst.0
         let dst = pair_dst.1
-        let lo2 = lo1.emit(ir_alloc(dst, lo1.aggregate_storage_bytes(count)))
+        let lo2 = lo1.emit(ir_alloc_array(dst, lo1.aggregate_storage_bytes(count), count))
         var lo3 = lo2.emit_f64_array_values(dst, values, count, 0)
         lo3 = lo3.emit(ir_mark_float_reg(dst))
         lo3 = lo3.bind_reg_array_elem_float(dst)
@@ -8366,7 +8366,8 @@ impl Lowerer {
                 let pair_dst = self.fresh_reg()
                 var lo = pair_dst.0
                 let dst = pair_dst.1
-                lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(count_expr_list_ref(&e.args))))
+                let arr_lit_count = count_expr_list_ref(&e.args)
+                lo = lo.emit(ir_alloc_array(dst, lo.aggregate_storage_bytes(arr_lit_count), arr_lit_count))
                 lo = lo.lower_array_elems_ref(dst, &e.args, 0)
                 if elem_is_float {
                     lo = lo.emit(ir_mark_float_reg(dst))
@@ -8621,7 +8622,11 @@ impl Lowerer {
         match iter_opt {
             Some(iter_box) => {
                 if (*iter_box).kind != ExprKind::ExprRange {
-                    return (self.report_error(), IR_INVALID_REG)
+                    // Non-range iterable: only a bare LOCAL array identifier is
+                    // supported (e.g. `for v in arr`). Anything else (ref/deref,
+                    // non-ident, field access) falls back to a clean report_error
+                    // rather than miscompiling or crashing.
+                    return self.lower_for_in_array_ref(e, &(*iter_box))
                 }
                 // Half-open ranges (`for i in 0..`) have no end bound; the loop
                 // condition would compare against an invalid register. Reject rather
@@ -8688,6 +8693,95 @@ impl Lowerer {
             }
             None => (self.report_error(), IR_INVALID_REG),
         }
+    }
+
+    fn lower_for_in_array_ref(self, e: &Expr, iter: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Desugar `for v in arr { body }` over a bare LOCAL array into the working
+        // while-loop IR, using a runtime element count read from the object header
+        // (IrArrayLen) — NO LowerLocalStack growth, NO per-local length column:
+        //   iv = 0
+        //   len = array_len(arr)
+        //   l_top:  if !(iv < len) goto l_end
+        //           v = arr[iv]                       // IndexGet
+        //           body
+        //   l_cont: iv = iv + 1                       // continue target
+        //           goto l_top
+        //   l_end:
+        // Only a bare local-array identifier is accepted; refs/derefs/non-idents
+        // report_error (clean fallback) so we never crash or silently miscompile.
+        if (*iter).kind != ExprKind::ExprIdent {
+            return (self.report_error(), IR_INVALID_REG)
+        }
+        if self.lookup_local_is_ref((*iter).name) {
+            return (self.report_error(), IR_INVALID_REG)
+        }
+        var lo = self
+        let base_reg = lo.lookup_local((*iter).name)
+        if base_reg == IR_INVALID_REG {
+            return (lo.report_error(), IR_INVALID_REG)
+        }
+
+        // iv = 0
+        let pair_iv = lo.fresh_reg()
+        lo = pair_iv.0
+        let iv = pair_iv.1
+        lo = lo.emit(ir_load_imm(iv, 0))
+
+        // len = element count of the array (payload_size_bytes >> 3)
+        let pair_len = lo.fresh_reg()
+        lo = pair_len.0
+        let len_reg = pair_len.1
+        lo = lo.emit(ir_array_len(len_reg, base_reg))
+
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let l_top = pair_top.1
+        let pair_cont = lo.fresh_label()
+        lo = pair_cont.0
+        let l_cont = pair_cont.1
+        let pair_end_lbl = lo.fresh_label()
+        lo = pair_end_lbl.0
+        let l_end = pair_end_lbl.1
+
+        lo = lo.emit(ir_label(l_top))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        let cond = pair_cond.1
+        lo = lo.emit(ir_binop(cond, iv, BinaryOp::OpLt, len_reg))
+        lo = lo.emit(ir_branch_false(cond, l_end))
+
+        // v = arr[iv]
+        let pair_v = lo.fresh_reg()
+        lo = pair_v.0
+        let v_reg = pair_v.1
+        lo = lo.emit(ir_index_get(v_reg, base_reg, iv))
+        lo = lo.bind_local(e.name, v_reg, true)
+
+        lo = lo.push_loop_labels(l_cont, l_end)
+        let for_block_opt: Option<Box<Block>> = e.block
+        match for_block_opt {
+            Some(blk) => {
+                let pair_body = lo.lower_block_ref(&(*blk))
+                lo = pair_body.0
+            }
+            None => {}
+        }
+        lo = lo.pop_loop_labels()
+
+        // iv = iv + 1
+        lo = lo.emit(ir_label(l_cont))
+        let pair_one = lo.fresh_reg()
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        lo = lo.emit(ir_load_imm(one_reg, 1))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        let next_reg = pair_next.1
+        lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(iv, next_reg))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo.emit_unit()
     }
 
     fn lower_block_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {

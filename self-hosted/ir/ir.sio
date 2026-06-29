@@ -77,6 +77,7 @@ pub enum IrOpcode {
     IrFieldSet,
     IrIndexGet,
     IrIndexSet,
+    IrArrayLen,   // dst = LOGICAL element COUNT of aggregate handle in src1 (object-header flags slot)
     IrAlloc,
     IrLabel,
     IrNop,
@@ -3437,6 +3438,33 @@ fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
     }
 }
 
+// IrArrayLen: dst = LOGICAL element COUNT of the aggregate whose handle is in
+// base_reg. Codegen resolves the handle to the object base and loads the object
+// header `flags` slot, which the alloc emitter populates with the logical N
+// recorded at the array-literal allocation site. This is exact for any element
+// width and any size bucket — unlike payload_size, which is the (over-allocated)
+// bucket capacity in BYTES, not N. Mirrors ir_index_get's base-handle field.
+fn ir_array_len(dst: i64, base_reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrArrayLen)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
 fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrAlloc)
     IrInstr {
@@ -3449,6 +3477,35 @@ fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+// ir_alloc_array: like ir_alloc, but additionally records the LOGICAL element
+// count of an array literal so codegen can stamp it into the object header
+// `flags` slot (which IrArrayLen reads back). The count is parked in `field_idx`
+// — a field IrAlloc never otherwise uses and that no register-renaming pass
+// touches (field_idx is an immediate, not a virtual register). ir_alloc's 2-arg
+// form (used by every struct/tuple/box/scalar alloc and by ~35 callers across
+// other modules) is left untouched, so those allocs keep field_idx = -1 and
+// codegen clamps that to flags = 0. type_id still carries the payload BYTES.
+fn ir_alloc_array(dst: i64, type_id: i64, elem_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrAlloc)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: type_id,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: elem_count,
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
