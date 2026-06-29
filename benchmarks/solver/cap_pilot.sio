@@ -1,0 +1,93 @@
+//@ run-pass
+//@ description: Capability pilot — largest n random 3-SAT UNSAT that completes definitively at beta=0
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+// Random 3-SAT: m clauses, each 3 DISTINCT vars, uniform random polarity.
+// lit encoding: var*2 + polarity (0=positive, 1=negative) — matches stdlib convention.
+fn add_rand_3sat(ctx: &!SmtContext, n_vars: i32, n_clauses: i32, seed: i64) with Mut, Div {
+    var st: i64 = seed
+    var c: i32 = 0
+    while c < n_clauses {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var picked: [i32; 3] = [0 as i32; 3]
+        var k: i32 = 0
+        while k < 3 {
+            var v: i32 = 0
+            var ok: i32 = 0
+            while ok == 0 {
+                let raw = lcg_next(&! st)
+                v = (raw % (n_vars as i64)) as i32
+                ok = 1
+                var j: i32 = 0
+                while j < k {
+                    if picked[j] == v { ok = 0 }
+                    j = j + 1
+                }
+            }
+            picked[k] = v
+            let praw = lcg_next(&! st)
+            let pol = (praw % 2) as i32
+            lits[k] = v * 2 + pol
+            k = k + 1
+        }
+        smt_add_clause(ctx, &lits, 3)
+        c = c + 1
+    }
+}
+
+// alpha given as numerator/100 (e.g. 426 = 4.26) to keep integer arithmetic.
+fn solve_one(n_vars: i32, alpha_x100: i32, seed: i64) with IO, Mut, Div {
+    let n_clauses: i32 = (n_vars * alpha_x100) / 100
+    var ctx = smt_new()
+    add_rand_3sat(&! ctx, n_vars, n_clauses, seed)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, 5)
+    smt_set_disc_beta_scale(&! ctx, 0.0)
+    let result = smt_solve(&! ctx)
+    print("n="); print_int(n_vars as i64)
+    print(" alpha="); print_int(alpha_x100 as i64)
+    print(" seed="); print_int(seed)
+    print(" clauses="); print_int(n_clauses as i64)
+    print(" result="); print_int(result as i64)
+    print(" decisions="); print_int(smt_get_decisions(&ctx) as i64)
+    print(" conflicts="); print_int(smt_get_conflicts(&ctx) as i64)
+    print("  [result: 0=UNSAT 1=SAT 2=CENSORED(cap) -1=err]\n")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    println("# cap pilot: result must be 0 (UNSAT) or 1 (SAT) definitively; 2 = censored = unusable")
+    // transition alpha=4.26, sweep n; 4 seeds each
+    println("## S_high (alpha=4.26, transition)")
+    var ni: i32 = 0
+    var ns: [i32; 4] = [20 as i32, 30 as i32, 40 as i32, 50 as i32]
+    while ni < 4 {
+        var s: i32 = 0
+        while s < 4 {
+            solve_one(ns[ni], 426, 1000 + (s as i64))
+            s = s + 1
+        }
+        ni = ni + 1
+    }
+    println("## S_low (alpha=6.0, overconstrained)")
+    ni = 0
+    while ni < 4 {
+        var s2: i32 = 0
+        while s2 < 4 {
+            solve_one(ns[ni], 600, 2000 + (s2 as i64))
+            s2 = s2 + 1
+        }
+        ni = ni + 1
+    }
+    return 0
+}
