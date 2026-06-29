@@ -44,6 +44,17 @@ var NATIVE_ELF_OFF: i64 = 0
 // narrow compatibility buffer; this mirror carries canonical .text past 128 KiB.
 var NATIVE_V2_TEXT_BUF: [i8; 4194304] = [0; 4194304]
 var NATIVE_V2_TEXT_LEN: i64 = 0
+// Relocation table — module GLOBALS (was [i64;4096] by-value fields in NativeCompiler).
+// The 4096 cap silently dropped relocs for call-dense modules (>~110 DIMACS clauses /
+// >~256KB .text): dropped call relocs left rel32=0 -> jump-to-garbage -> SIGSEGV. Moved to
+// globals (like NATIVE_ELF_BUF/NATIVE_V2_TEXT_BUF) to (a) lift the cap to NV2_RELOC_CAP,
+// (b) drop 128KB of by-value aggregate from NativeCompiler, (c) eliminate the O(n^2)
+// copy-out-modify-copy-back dance the old in-struct array forced. Count stays in the struct
+// (reset per-compile by compiler_new); the arrays are index-bounded by count so need no reset.
+var NV2_RELOC_OFFSETS: [i64; 131072] = [0; 131072]
+var NV2_RELOC_KIND_CODES: [i64; 131072] = [0; 131072]
+var NV2_RELOC_IS_FUNCTIONS: [i64; 131072] = [0; 131072]
+var NV2_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
 // Native-v2 direct-to-file ELF staging buffer (4 MiB). Module-scope BSS global
 // (Debt#4 ELF-cap fix: 256 KiB -> 4 MiB). Indexed directly by the file put_*
 // helpers (Option 2), exactly like NATIVE_ELF_BUF feeds nc_elf_put_*.
@@ -1666,19 +1677,11 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
-    if idx >= 0 && idx < 4096 {
-        var offsets = (*nc).flat_reloc_offsets
-        var kinds = (*nc).flat_reloc_kind_codes
-        var flags = (*nc).flat_reloc_is_functions
-        var targets = (*nc).flat_reloc_target_indices
-        offsets[idx as usize] = patch_offset
-        kinds[idx as usize] = kind_code
-        flags[idx as usize] = is_function
-        targets[idx as usize] = target_index
-        (*nc).flat_reloc_offsets = offsets
-        (*nc).flat_reloc_kind_codes = kinds
-        (*nc).flat_reloc_is_functions = flags
-        (*nc).flat_reloc_target_indices = targets
+    if idx >= 0 && idx < 131072 {
+        NV2_RELOC_OFFSETS[idx as usize] = patch_offset
+        NV2_RELOC_KIND_CODES[idx as usize] = kind_code
+        NV2_RELOC_IS_FUNCTIONS[idx as usize] = is_function
+        NV2_RELOC_TARGET_INDICES[idx as usize] = target_index
         (*nc).flat_reloc_count = idx + 1
     }
 }
@@ -4652,11 +4655,11 @@ fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> 
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).flat_reloc_count && i < 4096 {
-        let patch_offset = (*nc).flat_reloc_offsets[i as usize]
-        let kind_code = (*nc).flat_reloc_kind_codes[i as usize]
-        let is_function = (*nc).flat_reloc_is_functions[i as usize]
-        let target_index = (*nc).flat_reloc_target_indices[i as usize]
+    while i < (*nc).flat_reloc_count && i < 131072 {
+        let patch_offset = NV2_RELOC_OFFSETS[i as usize]
+        let kind_code = NV2_RELOC_KIND_CODES[i as usize]
+        let is_function = NV2_RELOC_IS_FUNCTIONS[i as usize]
+        let target_index = NV2_RELOC_TARGET_INDICES[i as usize]
 
         if kind_code == 1 && native_v2_reloc_is_call_patch(nc, patch_offset) {
             if is_function == 1 {
