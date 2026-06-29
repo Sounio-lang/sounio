@@ -45,10 +45,36 @@ conjunct the verified claim boundary already flagged as the riskiest, prior-art-
 "open-frontier bet." (No post-hoc "large-gap rescue": α controls hardness, not cross-variable
 symmetry.)
 
+## Mechanism vs calibration — settled by an isolated scale sweep
+
+A 0-vs-1.0 test alone cannot separate "variance-awareness is the wrong mechanism" from
+"this particular bonus is miscalibrated / too strong" (the formula's `3ζ·ln(S0)/S0` term is
+large at small S0). The discriminator: sweep `disc_beta_scale` — flat damage ⇒ mechanism,
+monotone dose-response ⇒ calibration. Run process-isolated (`iso_sweep_template.sio`):
+
+| scale | mean conflicts | Δ vs β=0 | worse/40 |
+|---|---|---|---|
+| 0.00 | 166.9 | — | — |
+| 0.05 | 297.0 | −130 | 35 |
+| 0.10 | 300.2 | −133 | 35 |
+| 0.25 | 307.2 | −140 | 35 |
+| 0.50 | 309.5 | −143 | 36 |
+| 1.00 | 312.9 | −146 | 35 |
+
+The curve is **essentially flat**: at scale 0.05 (1/20th strength) the damage is already
+89% of full, and a **20× change in scale moves the effect ~12%**. This is the **mechanism**
+signature, not calibration — were the bonus merely too strong, shrinking it 20× would
+largely recover β=0. It does not. The exploration *bias* (the variance term systematically
+favours under-explored / small-S0 variables) is **directionally wrong** for this regime, so
+even a tiny nudge flips enough argmax decisions to do near-maximal harm.
+
 ## What this licenses
 
 - **Drop the second-moment variable score** (`act_var` / discounted-Bernstein, `score_mode=5`'s
-  bonus) from the narrow novelty claim. First empirical evidence, now valid, says it harms.
+  bonus) from the narrow novelty claim, *for this regime*. The scale sweep shows the harm is the
+  mechanism (flat across a 20× range), not a tunable magnitude, so this is a directional verdict
+  on the variance-exploration idea — not merely "this constant is too big." The claim is bounded
+  to the tested regime (overconstrained random-3-SAT UNSAT), not proven universal.
 - **Keep the conjuncts not under test and not damaged:** per-decision bandit cadence + JOINT
   variable/polarity sampling + regime-gated exploration. The defensible conjunction does not
   depend on the variance term; this result leaves it intact (and untested here).
@@ -60,8 +86,9 @@ benchmark, NOT CDCL parity, NO verified UNSAT certificate (solver emits no DRAT;
 deferred). No SOTA, no public-novelty claim. Safe wording: "a pre-registered, process-isolated,
 z3-gated ablation finds the candidate variance-aware (UCB-V) variable bonus significantly
 increases conflicts-to-UNSAT (worse 35/40, +87%) in an a-priori-symmetric random-3-SAT UNSAT
-regime — evidence against the variance conjunct; the cadence + joint-axis + regime-gating
-conjunction is untested and undamaged."
+regime, and a scale sweep (0.05–1.0, flat damage) attributes the harm to the mechanism rather
+than miscalibration — evidence against the variance conjunct in this regime; the cadence +
+joint-axis + regime-gating conjunction is untested and undamaged."
 
 ## Substrate debt surfaced (for the compiler lane)
 
