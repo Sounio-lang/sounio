@@ -12,7 +12,7 @@
 #   madaros --version
 #   madaros info
 #   madaros check input.sio
-#   madaros build input.sio -o out.elf
+#   madaros build input.sio [-o OUT] [--backend native|gpu]
 #   madaros run input.sio
 #   madaros pkg ...
 #
@@ -65,7 +65,8 @@ Usage:
   madaros --version                     print compiler identity
   madaros info                          print resolution path
   madaros check <source.sio>            parse, resolve and typecheck
-  madaros build <source.sio> [-o OUT]   compile source to a native ELF
+  madaros build <source.sio> [-o OUT] [--backend native|gpu]
+                                      compile source to native ELF or GPU artifact
   madaros compile <source.sio> [-o OUT] alias for build
   madaros run <source.sio>              compile to a temp ELF and run it
   madaros pkg <subcommand>...           package-manager commands
@@ -78,6 +79,12 @@ Common modular-compiler modes:
   madaros --native-v2-emit-scalar N     emit a scalar witness
   madaros --version-json                emit version metadata
   madaros pkg ...                       package manager commands
+
+GPU build options:
+  --backend gpu                         emit PTX via the public GPU build path
+  --gpu-target <target>                 raw GPU target (default: cuda-sm80)
+  --gpu-binary-format <fmt>             raw GPU format/mode selector
+  --gpu-precision <f32|f64>             compatibility alias for GPU mode
 
 Environment:
   SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
@@ -126,10 +133,11 @@ _run_raw_check() {
   ( ulimit -v 8388608 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --check "$src" "$@" )
 }
 
-_parse_output_path() {
-  local fallback="$1"
-  shift
-  local out="$fallback"
+_parse_build_options() {
+  BUILD_OUT="a.out"
+  BUILD_BACKEND="native"
+  BUILD_GPU_TARGET="cuda-sm80"
+  BUILD_GPU_BINARY_FORMAT=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -o|--output)
@@ -137,7 +145,46 @@ _parse_output_path() {
           echo "error: madaros build: $1 requires a path" >&2
           return 2
         fi
-        out="$2"
+        BUILD_OUT="$2"
+        shift 2
+        ;;
+      --backend)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --backend requires native or gpu" >&2
+          return 2
+        fi
+        BUILD_BACKEND="$2"
+        shift 2
+        ;;
+      --gpu-target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-target requires a target" >&2
+          return 2
+        fi
+        BUILD_GPU_TARGET="$2"
+        shift 2
+        ;;
+      --gpu-binary-format)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-binary-format requires a format" >&2
+          return 2
+        fi
+        BUILD_GPU_BINARY_FORMAT="$2"
+        shift 2
+        ;;
+      --gpu-precision)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-precision requires f32 or f64" >&2
+          return 2
+        fi
+        case "$2" in
+          f32) BUILD_GPU_BINARY_FORMAT="f32" ;;
+          f64) BUILD_GPU_BINARY_FORMAT="" ;;
+          *)
+            echo "error: madaros build: unsupported --gpu-precision: $2" >&2
+            return 2
+            ;;
+        esac
         shift 2
         ;;
       *)
@@ -146,7 +193,14 @@ _parse_output_path() {
         ;;
     esac
   done
-  echo "$out"
+  case "$BUILD_BACKEND" in
+    native|"") BUILD_BACKEND="native" ;;
+    gpu) ;;
+    *)
+      echo "error: madaros build: unsupported backend: $BUILD_BACKEND" >&2
+      return 2
+      ;;
+  esac
 }
 
 _build_source() {
@@ -157,10 +211,23 @@ _build_source() {
     echo "error: madaros build: source is empty: $src" >&2
     return 1
   fi
-  local out
-  out="$(_parse_output_path a.out "$@")"
+  _parse_build_options "$@"
+  local out="$BUILD_OUT"
   mkdir -p "$(dirname "$out")"
   rm -f "$out"
+  if [[ "$BUILD_BACKEND" == "gpu" ]]; then
+    local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
+    if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
+      gpu_args+=(--gpu-binary-format "$BUILD_GPU_BINARY_FORMAT")
+    fi
+    # Guard: 16 GB vmem + 300 s timeout
+    ( ulimit -v 16777216 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "${gpu_args[@]}" )
+    if [[ ! -s "$out" ]]; then
+      echo "error: madaros build: compiler produced no GPU artifact at $out" >&2
+      return 1
+    fi
+    return 0
+  fi
   # Guard: 16 GB vmem + 300 s timeout
   ( ulimit -v 16777216 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
   if [[ ! -s "$out" ]]; then
@@ -207,6 +274,10 @@ case "$1" in
     if [[ $# -lt 2 ]]; then
       echo "error: madaros build: missing source file" >&2
       exit 2
+    fi
+    if [[ "${2:-}" == "-h" || "${2:-}" == "--help" || "${2:-}" == "help" ]]; then
+      usage
+      exit 0
     fi
     _build_source "$2" "${@:3}"
     ;;
