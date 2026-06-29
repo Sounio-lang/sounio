@@ -61,6 +61,20 @@ reject_egrep() {
     fi
 }
 
+require_egrep_count() {
+    local label="$1"
+    local pattern="$2"
+    local expected="$3"
+    local file="$4"
+    local count
+    count="$(grep -Ec "$pattern" "$file" || true)"
+    if [ "$count" -eq "$expected" ]; then
+        pass "$label"
+    else
+        fail "$label" "expected $expected matches for $pattern in $file, got $count"
+    fi
+}
+
 build_gpu() {
     local label="$1"
     local src="$2"
@@ -127,9 +141,22 @@ require_egrep "gpu_vec_add_e2e_scales_index" "mul\\.lo\\.u64 %rd[0-9]+, %rd[0-9]
 require_egrep "gpu_vec_add_e2e_addresses_a" "add\\.u64 %rd[0-9]+, %rd1, %rd[0-9]+;" "$E2E_PTX"
 require_egrep "gpu_vec_add_e2e_addresses_b" "add\\.u64 %rd[0-9]+, %rd2, %rd[0-9]+;" "$E2E_PTX"
 require_egrep "gpu_vec_add_e2e_addresses_c" "add\\.u64 %rd[0-9]+, %rd3, %rd[0-9]+;" "$E2E_PTX"
-require_egrep "gpu_vec_add_e2e_loads_inputs" "ld\\.global\\.s64 %rd[0-9]+, \\[%rd[0-9]+\\];" "$E2E_PTX"
-require_egrep "gpu_vec_add_e2e_adds_inputs" "add\\.s64 %rd[0-9]+, %rd[0-9]+, %rd[0-9]+;" "$E2E_PTX"
-require_egrep "gpu_vec_add_e2e_stores_output" "st\\.global\\.s64 \\[%rd[0-9]+\\], %rd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_declares_f64_regs" "\\.reg \\.f64 %fd<[0-9]+>;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_f64_inputs" "ld\\.global\\.f64 %fd[0-9]+, \\[%rd[0-9]+\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_adds_f64_inputs" "add\\.f64 %fd[0-9]+, %fd[0-9]+, %fd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_stores_f64_output" "st\\.global\\.f64 \\[%rd[0-9]+\\], %fd[0-9]+;" "$E2E_PTX"
+reject_egrep "gpu_vec_add_e2e_rejects_s64_value_loads" "ld\\.global\\.s64 %rd[0-9]+, \\[%rd[0-9]+\\];" "$E2E_PTX"
+reject_egrep "gpu_vec_add_e2e_rejects_s64_value_stores" "st\\.global\\.s64 \\[%rd[0-9]+\\], %rd[0-9]+;" "$E2E_PTX"
+
+SLICES_PTX="$TMP_DIR/gpu_launch_vec_slices.ptx"
+build_gpu "gpu_launch_vec_slices_builds" "tests/run-pass/gpu_launch_vec_slices.sio" "$SLICES_PTX"
+require_egrep_count "gpu_launch_vec_slices_single_ptx_version" "^\\.version " 1 "$SLICES_PTX"
+require_egrep_count "gpu_launch_vec_slices_single_ptx_target" "^\\.target " 1 "$SLICES_PTX"
+require_egrep_count "gpu_launch_vec_slices_single_ptx_address_size" "^\\.address_size " 1 "$SLICES_PTX"
+require_egrep "gpu_launch_vec_slices_loads_f64_scalar_params" "ld\\.param\\.f64 %fd[0-9]+, \\[(factor|bias)\\];" "$SLICES_PTX"
+reject_egrep "gpu_launch_vec_slices_rejects_u64_load_to_f64_param" "ld\\.param\\.u64 %fd[0-9]+, \\[(factor|bias)\\];" "$SLICES_PTX"
+require_egrep "gpu_launch_vec_slices_multiplies_f64" "mul\\.rn\\.f64 %fd[0-9]+, %fd[0-9]+, %fd[0-9]+;" "$SLICES_PTX"
+require_egrep "gpu_launch_vec_slices_divides_f64" "div\\.rn\\.f64 %fd[0-9]+, %fd[0-9]+, %fd[0-9]+;" "$SLICES_PTX"
 
 echo ""
 echo "Summary: pass=$PASS fail=$FAIL"
