@@ -804,3 +804,59 @@ awk -F= '
 
 echo
 echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.
+#   14  plasma PK                                   Node ↔ Sounio, <1% RMSE
+#   15  BBB: ISF_free + Kpuu (brain accumulation)   Node ↔ Sounio, <1% RMSE
+#   16  D2 receptor occupancy                       Node ↔ Sounio, <1% RMSE
+# Haloperidol's validated science is PBPK14 well-stirred + detailed BBB + D2 (no
+# citable PBPK28 perm-limited model — empirical-first), so the canonical parity
+# surface is its real CASO II endpoints. Both sides use a FIXED-STEP RK4 systemic
+# integrator (the production scenario uses adaptive Tsit5 — an intractable
+# bit-for-bit parity target); the fixed-step-vs-Tsit5 fidelity gap is disclosed
+# in the gist, and the JS engine uses the same fixed-step scheme so parity
+# validates what the 3D viewer runs.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Cases 14-16: Sounio ↔ Node haloperidol (plasma + BBB Kpuu + D2 occupancy)"
+
+HALO_NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_haloperidol_node.mjs"
+HALO_SIO_LOG="$OUT_DIR/halo_sounio.txt"
+HALO_NODE_LOG="$OUT_DIR/halo_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_haloperidol.sio > "$HALO_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case14] FAIL: Sounio haloperidol ref returned non-zero" >&2
+  tail -n 20 "$HALO_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_HALOPERIDOL_PARITY_DONE$' "$HALO_SIO_LOG"; then
+  echo "[pbpk28-parity:case14] FAIL: Sounio haloperidol ref did not emit DONE" >&2; exit 1; fi
+node "$HALO_NODE_RUNNER" > "$HALO_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case14] FAIL: Node haloperidol runner returned non-zero" >&2
+  tail -n 20 "$HALO_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_HALOPERIDOL_PARITY_DONE$' "$HALO_NODE_LOG"; then
+  echo "[pbpk28-parity:case14] FAIL: Node haloperidol runner did not emit DONE" >&2; exit 1; fi
+
+# RMSE over one HALO|<series> (12 samples, both logs emit them in the same order).
+halo_series_rmse() {  # $1=series $2=label $3=pass-marker $4=fail-marker
+  paste <(grep "^HALO|$1=" "$HALO_SIO_LOG"  | sed "s/^HALO|$1=//") \
+        <(grep "^HALO|$1=" "$HALO_NODE_LOG" | sed "s/^HALO|$1=//") \
+  | awk -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$3" -v FAILM="$4" -v LAB="$2" '
+      {d=($1+0)-($2+0); ss+=d*d; n++; a=($1<0?-($1+0):($1+0)); if(a>pk)pk=a}
+      END{ if(n!=12){printf "%s row count %d != 12\n",FAILM,n; exit 1}
+        rmse=sqrt(ss/n); pct=(pk>0)?100*rmse/pk:0;
+        if(pct<THR+0) printf "%s 12/12 within %s%% RMSE (%s, peak=%.4g)\n",PASS,THR,LAB,pk;
+        else { printf "%s %.4f%% RMSE (%s)\n",FAILM,pct,LAB; exit 1 } }'
+}
+
+echo "[pbpk28-parity:case14] haloperidol plasma PK"
+halo_series_rmse plasma "plasma mg/L" "HALOPERIDOL_PLASMA_PARITY_PASS" "HALOPERIDOL_PLASMA_PARITY_FAIL"
+
+echo "[pbpk28-parity:case15] haloperidol BBB ISF_free + Kpuu (brain accumulation, Loryan 2014 Kpuu->3)"
+halo_series_rmse isf_free "ISF_free mg/L" "HALOPERIDOL_BBB_ISF_PARITY_PASS" "HALOPERIDOL_BBB_ISF_PARITY_FAIL"
+halo_series_rmse kpuu "Kpuu" "HALOPERIDOL_BBB_KPUU_PARITY_PASS" "HALOPERIDOL_BBB_KPUU_PARITY_FAIL"
+
+echo "[pbpk28-parity:case16] haloperidol D2 receptor occupancy (Kd 1.5 nM)"
+halo_series_rmse d2occ "D2 occupancy" "HALOPERIDOL_D2_OCCUPANCY_PARITY_PASS" "HALOPERIDOL_D2_OCCUPANCY_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity] haloperidol CASO II canonical: plasma + BBB Kpuu + D2 occupancy all within ${RMSE_THRESHOLD_PCT}% RMSE (4th canonical drug)"

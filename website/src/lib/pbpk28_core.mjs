@@ -835,3 +835,128 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
   }
   return out;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// HALOPERIDOL (CASO II) — PBPK14 well-stirred + detailed BBB + D2 occupancy.
+//
+// Fourth canonical drug. Its validated science is PBPK14 + BBB(ISF/ICF) + D2
+// (no citable PBPK28 perm-limited model — empirical-first), so the canonical
+// parity surface is plasma PK · BBB Kpuu · D2 occupancy. The production scenario
+// integrates the systemic PBPK14 with adaptive Tsit5; to make Sounio↔Node parity
+// tractable, BOTH this engine and the parity ref use a FIXED-STEP RK4 systemic
+// integrator at the same dt — parity validates exactly what the viewer runs.
+// Mirrors tests/run-pass/dissertation_pbpk28_parity_ref_haloperidol.sio to f64.
+// Constants verbatim from drugs/haloperidol.sio + bbb/bbb_core.sio + pd/d2_occupancy.sio.
+// ════════════════════════════════════════════════════════════════════════════
+
+// index 0=blood,1=liver,2=kidney,3=brain,4=heart,5=lung,6=muscle,7=adipose,
+// 8=gut,9=skin,10=bone,11=spleen,12=pancreas,13=other.
+export const HALO_V  = Object.freeze([5.2, 1.69, 0.31, 1.37, 0.31, 1.17, 29.0, 18.2, 1.65, 7.8, 10.5, 0.19, 0.14, 4.5]);
+export const HALO_Q  = Object.freeze([0.0, 87.0, 72.0, 44.0, 14.4, 0.0, 73.8, 18.0, 57.6, 18.0, 21.6, 10.8, 4.5, 18.0]);
+export const HALO_KP = Object.freeze([1.0, 18.0, 8.0, 15.0, 6.0, 12.0, 35.0, 12.0, 6.0, 8.0, 6.0, 8.0, 5.0, 5.0]);
+export const HALO_CL_HEPATIC = 40.0, HALO_CL_RENAL = 0.5, HALO_FU_PLASMA = 0.08, HALO_RB = 1.0;
+export const HALO_BBB = Object.freeze({ vIsf: 0.270, vIcf: 1.080, psBbb: 2.0, psMem: 8.0, fuIsf: 0.035, fuIcf: 0.010, kpuuBrain: 3.0, kpuuCell: 0.5 });
+export const HALO_D2_KD = 0.000564;
+export const HALO_ABS = Object.freeze({ ka: 0.9, f: 0.65, tlag: 0.25 });
+
+// exp(-x) — verbatim port of absorption.sio abs_exp_neg.
+function haloAbsExpNeg(x) {
+  if (x <= 0.0) return 1.0;
+  if (x > 0.5) { const half = haloAbsExpNeg(x * 0.5); return half * half; }
+  let term = 1.0, sum = 1.0;
+  for (let k = 1; k < 16; k++) { term = term * (-x) / k; sum = sum + term; }
+  return sum;
+}
+
+// PBPK14 well-stirred RHS (pbpk_ode), array form.
+function haloSysOde(c) {
+  const cPlasma = c[0] / HALO_RB;
+  const cUnbound = cPlasma * HALO_FU_PLASMA;
+  const d = new Float64Array(14);
+  let dBlood = 0.0;
+  for (let i = 1; i < 14; i++) {
+    const flux = (HALO_Q[i] / HALO_V[i]) * (cPlasma - c[i] / HALO_KP[i]);
+    d[i] = flux;
+    dBlood = dBlood - (HALO_Q[i] / HALO_V[0]) * HALO_RB * (cPlasma - c[i] / HALO_KP[i]);
+  }
+  dBlood = dBlood - (HALO_CL_HEPATIC / HALO_V[0]) * cUnbound * HALO_RB;
+  dBlood = dBlood - (HALO_CL_RENAL / HALO_V[0]) * cUnbound * HALO_RB;
+  d[0] = dBlood;
+  return d;
+}
+function haloSysRk4(c, dt) {
+  const axpy = (y, k, a) => { const r = new Float64Array(14); for (let i = 0; i < 14; i++) r[i] = y[i] + a * k[i]; return r; };
+  const k1 = haloSysOde(c);
+  const k2 = haloSysOde(axpy(c, k1, 0.5 * dt));
+  const k3 = haloSysOde(axpy(c, k2, 0.5 * dt));
+  const k4 = haloSysOde(axpy(c, k3, dt));
+  const r = new Float64Array(14);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  for (let i = 0; i < 14; i++) r[i] = c[i] + sixth * k1[i] + third * k2[i] + third * k3[i] + sixth * k4[i];
+  return r;
+}
+
+// BBB RHS + RK4 (bbb_ode / bbb_rk4_step), c_plasma constant across the step.
+function haloBbbOde(isf, icf, cPlasma) {
+  const cpu = HALO_FU_PLASMA * cPlasma;
+  const ciu = HALO_BBB.fuIsf * isf;
+  const ccu = HALO_BBB.fuIcf * icf;
+  const bbbFlux = HALO_BBB.psBbb * (cpu - ciu / HALO_BBB.kpuuBrain);
+  const memFlux = HALO_BBB.psMem * (ciu - ccu / HALO_BBB.kpuuCell);
+  return { isf: (bbbFlux - memFlux) / HALO_BBB.vIsf, icf: memFlux / HALO_BBB.vIcf };
+}
+function haloBbbRk4(isf, icf, cPlasma, dt) {
+  const k1 = haloBbbOde(isf, icf, cPlasma);
+  const k2 = haloBbbOde(isf + 0.5 * dt * k1.isf, icf + 0.5 * dt * k1.icf, cPlasma);
+  const k3 = haloBbbOde(isf + 0.5 * dt * k2.isf, icf + 0.5 * dt * k2.icf, cPlasma);
+  const k4 = haloBbbOde(isf + dt * k3.isf, icf + dt * k3.icf, cPlasma);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  return {
+    isf: isf + sixth * k1.isf + third * k2.isf + third * k3.isf + sixth * k4.isf,
+    icf: icf + sixth * k1.icf + third * k2.icf + third * k3.icf + sixth * k4.icf,
+  };
+}
+function haloD2Occ(cIsfFree) { return cIsfFree <= 0.0 ? 0.0 : cIsfFree / (cIsfFree + HALO_D2_KD); }
+
+function haloStep(st, t, dt) {
+  let aGut = st.aGut;
+  let c = st.sys;
+  if (t + dt > HALO_ABS.tlag) {
+    const tActiveStart = t < HALO_ABS.tlag ? HALO_ABS.tlag : t;
+    const dtActive = (t + dt) - tActiveStart;
+    if (dtActive > 0.0) {
+      const decay = haloAbsExpNeg(HALO_ABS.ka * dtActive);
+      const aAfter = aGut * decay;
+      const toBlood = HALO_ABS.f * (aGut - aAfter);
+      aGut = aAfter;
+      c = Float64Array.from(c);
+      c[0] = c[0] + toBlood / HALO_V[0];
+    }
+  }
+  const b0 = c[0];
+  const s1 = haloSysRk4(c, dt);
+  const cMid = 0.5 * (b0 + s1[0]);
+  const b1 = haloBbbRk4(st.bbb.isf, st.bbb.icf, cMid, dt);
+  return { sys: s1, bbb: b1, aGut };
+}
+
+/**
+ * Integrate the haloperidol oral scenario (single dose, fixed-step RK4) and
+ * sample plasma / ISF_free / ICF_free / Kpuu / D2-occupancy at the given times.
+ * dt default 0.01 h, dose 5 mg — matches the parity ref.
+ */
+export function runHaloperidolScenario(sampleTimes, { dt = 0.002, doseMg = 5.0 } = {}) {
+  let st = { sys: new Float64Array(14), bbb: { isf: 0.0, icf: 0.0 }, aGut: doseMg };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) { st = haloStep(st, t, dt); t += dt; }
+    const plasma = st.sys[0] / HALO_RB;
+    const isfFree = HALO_BBB.fuIsf * st.bbb.isf;
+    const icfFree = HALO_BBB.fuIcf * st.bbb.icf;
+    const plasmaFree = HALO_FU_PLASMA * plasma;
+    const kpuu = plasmaFree > 1.0e-12 ? isfFree / plasmaFree : 0.0;
+    out.push({ t: target, plasma, brain: st.sys[3], isfFree, icfFree, kpuu, d2occ: haloD2Occ(isfFree) });
+  }
+  return out;
+}
