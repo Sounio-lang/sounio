@@ -1,0 +1,243 @@
+// darwin_pbpk/population/pop_epistemic.sio — Nested epistemic × population layer.
+//
+// Separates the TWO orthogonal sources of spread that the flat virtual-population
+// simulator (pop_sim.sio) previously conflated under "epistemic priors":
+//
+//   (1) INTER-INDIVIDUAL VARIABILITY (IIV, ω²) — REAL between-subject scatter.
+//       Two patients genuinely have different CL. Random effect η ~ N(0, ω²),
+//       individual θ_i = θ_pop · exp(η_i). This widens the population P5–P95.
+//
+//   (2) EPISTEMIC UNCERTAINTY (u_c, GUM) — our IGNORANCE about the *value* of the
+//       population hyperparameters (θ_pop, ω²) estimated from finite data. This
+//       does NOT widen the between-subject scatter; it puts a confidence band
+//       *on* the population summary (e.g. on the median).
+//
+// They do NOT add naively. The correct structure is NESTED:
+//   outer  m = 1..M : draw θ_pop,m = θ_pop · exp(z_m · u_c)         (epistemic, GUM)
+//   inner  i = 1..N : η_i ~ N(0, ω²),  θ_i = θ_pop,m · exp(η_i)     (IIV)
+// Exposure model (linear PBPK): AUC = F·Dose / CL  (AUC of a linear system is
+// F·Dose/CL exactly, independent of distribution — the methodological layer here
+// is the uncertainty STRUCTURE, not the ODE; the full Tsit5 path lives in
+// pop_sim.sio). Composes over the same θ·exp(η) IIV model used by
+// medlang/population/{simulation,variability}.sio (η, Ω); implemented
+// self-contained per the lean_single cross-module private-field constraint that
+// all population/parity refs in this tree follow.
+//
+// Reported orthogonal axes:
+//   IIV axis        — population P95/P5 RATIO (relative spread). Depends on ω only;
+//                     the θ_pop scale cancels in the ratio.
+//   Epistemic axis  — CV / P5–P95 band of the population MEDIAN across outer draws.
+//                     The median of AUC is analytic = F·Dose/θ_pop,m, so it depends
+//                     on u_c only (and is EXACTLY constant when u_c = 0 → collapse).
+//
+// Because sample_normal consumes the RNG independently of (mean, sd), a shared
+// seed gives an identical standard-normal stream across configs ⇒ the separation
+// is EXACT and deterministic, not merely statistical (see the smoke).
+//
+// References: JCGM 100:2008 (u_c, epistemic); FDA 2018 PBPK Guidance (virtual
+// population IIV); Sheiner & Beal NONMEM (η/ω vs estimation uncertainty).
+// Author: Demetrios Chiuratto Agourakis
+
+// ── RNG (LCG, Numerical Recipes) — consumption independent of (mean, sd) ───────
+struct PeRng { state: i64 }
+fn pe_rng_new(seed: i64) -> PeRng { PeRng { state: seed } }
+fn pe_rng_next(rng: PeRng) -> PeRng {
+    let a = 1664525
+    let c = 1013904223
+    let m = 4294967296
+    let next = (a * rng.state + c) % m
+    let pos = if next < 0 { next + m } else { next }
+    PeRng { state: pos }
+}
+fn pe_rng_value(rng: PeRng) -> f64 { (rng.state as f64) / 4294967296.0 }
+
+// ── Math helpers ───────────────────────────────────────────────────────────────
+fn pe_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 18 { y = (y + x / y) * 0.5; i = i + 1 }
+    return y
+}
+fn pe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn pe_ln(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale = 0
+    while sx > 2.0 { sx = sx / 2.718281828459045; scale = scale + 1 }
+    while sx < 0.5 { sx = sx * 2.718281828459045; scale = scale - 1 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let r = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0 + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    if scale > 0 { var si = 0; while si < scale { sf = sf + 1.0; si = si + 1 } }
+    if scale < 0 { var si2 = 0; while si2 < (0 - scale) { sf = sf - 1.0; si2 = si2 + 1 } }
+    return r + sf
+}
+// exp(x) for arbitrary real x, range-reduced.
+fn pe_exp(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 { return 1.0 / pe_exp(0.0 - x) }
+    if x > 0.5 { let h = pe_exp(x * 0.5); return h * h }
+    var term = 1.0
+    var sum = 1.0
+    var k = 1
+    while k < 16 { term = term * x / (k as f64); sum = sum + term; k = k + 1 }
+    return sum
+}
+
+// Standard normal z ~ N(0,1) via Marsaglia polar. RNG consumption is independent
+// of any later (mean, sd) scaling — this is what makes the separation exact.
+struct PeStdNormal { z: f64, rng: PeRng }
+fn pe_std_normal(rng: PeRng) -> PeStdNormal with Mut, Div, Panic {
+    var r = rng
+    var u1 = 0.0
+    var s = 2.0
+    var attempts = 0
+    while s >= 1.0 || s <= 0.0 {
+        r = pe_rng_next(r); u1 = pe_rng_value(r) * 2.0 - 1.0
+        r = pe_rng_next(r); let u2 = pe_rng_value(r) * 2.0 - 1.0
+        s = u1 * u1 + u2 * u2
+        attempts = attempts + 1
+        if attempts > 100 { return PeStdNormal { z: u1, rng: r } }
+    }
+    let z = u1 * pe_sqrt(0.0 - 2.0 * pe_ln(s) / s)
+    PeStdNormal { z: z, rng: r }
+}
+
+// ── Sorts + percentile (inner population N≤64; outer draws M≤256) ───────────────
+fn pe_sort64(arr: [f64; 64], n: i32) -> [f64; 64] with Mut {
+    var s = arr
+    var i = 0
+    while i < n {
+        var mi = i; var j = i + 1
+        while j < n { if s[j] < s[mi] { mi = j }; j = j + 1 }
+        if mi != i { let t = s[i]; s[i] = s[mi]; s[mi] = t }
+        i = i + 1
+    }
+    return s
+}
+fn pe_sort256(arr: [f64; 256], n: i32) -> [f64; 256] with Mut {
+    var s = arr
+    var i = 0
+    while i < n {
+        var mi = i; var j = i + 1
+        while j < n { if s[j] < s[mi] { mi = j }; j = j + 1 }
+        if mi != i { let t = s[i]; s[i] = s[mi]; s[mi] = t }
+        i = i + 1
+    }
+    return s
+}
+fn pe_pct64(sorted: [f64; 64], n: i32, pct: f64) -> f64 with Mut, Div {
+    if n <= 0 { return 0.0 }
+    let rank = pct / 100.0 * ((n as f64) - 1.0)
+    var lo = 0; var rf = rank
+    while rf >= 1.0 && lo < n - 1 { rf = rf - 1.0; lo = lo + 1 }
+    let hi = if lo + 1 < n { lo + 1 } else { lo }
+    let f = rank - (lo as f64)
+    return sorted[lo] * (1.0 - f) + sorted[hi] * f
+}
+fn pe_pct256(sorted: [f64; 256], n: i32, pct: f64) -> f64 with Mut, Div {
+    if n <= 0 { return 0.0 }
+    let rank = pct / 100.0 * ((n as f64) - 1.0)
+    var lo = 0; var rf = rank
+    while rf >= 1.0 && lo < n - 1 { rf = rf - 1.0; lo = lo + 1 }
+    let hi = if lo + 1 < n { lo + 1 } else { lo }
+    let f = rank - (lo as f64)
+    return sorted[lo] * (1.0 - f) + sorted[hi] * f
+}
+
+// ── Result of the nested epistemic × population simulation ─────────────────────
+pub struct PopEpiResult {
+    pub median_pop:  f64,   // population median exposure (mean over outer draws)
+    pub iiv_ratio:   f64,   // population P95/P5 ratio  — IIV axis (depends on ω only)
+    pub iiv_p5_rel:  f64,   // P5  / median (relative IIV band)
+    pub iiv_p95_rel: f64,   // P95 / median
+    pub epi_cv:      f64,   // CV% of population median across outer draws — epistemic axis (u_c only)
+    pub epi_lo:      f64,   // P5  of the population median (epistemic band)
+    pub epi_hi:      f64,   // P95 of the population median (epistemic band)
+}
+
+// Nested simulation: outer = epistemic GUM draws of θ_pop (log-sd = u_c_rel),
+// inner = N IIV individuals η ~ N(0, ω). Exposure AUC = f_oral·dose / CL.
+pub fn pop_epistemic_run(
+    cl_pop:    f64,   // population CL (L/h)
+    u_c_rel:   f64,   // epistemic relative uncertainty on θ_pop (GUM log-sd); 0 = none
+    omega:     f64,   // IIV (between-subject) log-sd on CL
+    m_outer:   i32,   // epistemic draws (≤ 256)
+    n_inner:   i32,   // individuals per population (≤ 64)
+    dose_mg:   f64,
+    f_oral:    f64,
+    seed:      i64
+) -> PopEpiResult with Mut, Div, Panic {
+    var rng = pe_rng_new(seed)
+    var medians: [f64; 256] = [0.0; 256]
+    var ratios:  [f64; 256] = [0.0; 256]
+    var p5rels:  [f64; 256] = [0.0; 256]
+    var p95rels: [f64; 256] = [0.0; 256]
+
+    var m = 0
+    while m < m_outer {
+        // (1) EPISTEMIC outer draw of the population CL hyperparameter (GUM u_c).
+        let se = pe_std_normal(rng); rng = se.rng
+        let cl_pop_m = cl_pop * pe_exp(se.z * u_c_rel)
+
+        // Population median exposure is analytic (median of exp(η)=1): F·Dose/θ_pop,m.
+        let median_m = f_oral * dose_mg / cl_pop_m
+
+        // (2) INNER IIV population of N individuals η ~ N(0, ω).
+        var auc_inner: [f64; 64] = [0.0; 64]
+        var i = 0
+        while i < n_inner {
+            let si = pe_std_normal(rng); rng = si.rng
+            let cl_i = cl_pop_m * pe_exp(si.z * omega)
+            auc_inner[i] = f_oral * dose_mg / cl_i
+            i = i + 1
+        }
+        let sorted = pe_sort64(auc_inner, n_inner)
+        let p5  = pe_pct64(sorted, n_inner, 5.0)
+        let p95 = pe_pct64(sorted, n_inner, 95.0)
+
+        medians[m] = median_m
+        ratios[m]  = if p5 > 1.0e-12 { p95 / p5 } else { 0.0 }
+        p5rels[m]  = if median_m > 1.0e-12 { p5 / median_m } else { 0.0 }
+        p95rels[m] = if median_m > 1.0e-12 { p95 / median_m } else { 0.0 }
+        m = m + 1
+    }
+
+    // Aggregate. IIV axis: mean P95/P5 ratio (ω only). Epistemic axis: spread of
+    // the population median across outer draws (u_c only).
+    var med_sum = 0.0
+    var ratio_sum = 0.0
+    var p5rel_sum = 0.0
+    var p95rel_sum = 0.0
+    var k = 0
+    while k < m_outer {
+        med_sum = med_sum + medians[k]
+        ratio_sum = ratio_sum + ratios[k]
+        p5rel_sum = p5rel_sum + p5rels[k]
+        p95rel_sum = p95rel_sum + p95rels[k]
+        k = k + 1
+    }
+    let mf = m_outer as f64
+    let median_pop = med_sum / mf
+
+    var var_sum = 0.0
+    var v = 0
+    while v < m_outer { let d = medians[v] - median_pop; var_sum = var_sum + d * d; v = v + 1 }
+    let med_sd = pe_sqrt(var_sum / mf)
+    let epi_cv = if median_pop > 1.0e-12 { med_sd / median_pop * 100.0 } else { 0.0 }
+
+    let med_sorted = pe_sort256(medians, m_outer)
+    let epi_lo = pe_pct256(med_sorted, m_outer, 5.0)
+    let epi_hi = pe_pct256(med_sorted, m_outer, 95.0)
+
+    PopEpiResult {
+        median_pop:  median_pop,
+        iiv_ratio:   ratio_sum / mf,
+        iiv_p5_rel:  p5rel_sum / mf,
+        iiv_p95_rel: p95rel_sum / mf,
+        epi_cv:      epi_cv,
+        epi_lo:      epi_lo,
+        epi_hi:      epi_hi,
+    }
+}
