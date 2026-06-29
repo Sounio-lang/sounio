@@ -42,8 +42,12 @@ var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 var NATIVE_ELF_OFF: i64 = 0
 // Native-v2 direct-to-file text mirror. NativeCompiler.code.bytes is still a
 // narrow compatibility buffer; this mirror carries canonical .text past 128 KiB.
-var NATIVE_V2_TEXT_BUF: [i8; 262144] = [0; 262144]
+var NATIVE_V2_TEXT_BUF: [i8; 4194304] = [0; 4194304]
 var NATIVE_V2_TEXT_LEN: i64 = 0
+// Native-v2 direct-to-file ELF staging buffer (4 MiB). Module-scope BSS global
+// (Debt#4 ELF-cap fix: 256 KiB -> 4 MiB). Indexed directly by the file put_*
+// helpers (Option 2), exactly like NATIVE_ELF_BUF feeds nc_elf_put_*.
+var NATIVE_V2_ELF_FILE_BUF: [i8; 4194304] = [0; 4194304]
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -1335,14 +1339,14 @@ fn native_v2_text_reset() with Mut, Panic {
 }
 
 fn native_v2_text_byte_at(offset: i64) -> i8 with Panic, Div {
-    if offset >= 0 && offset < NATIVE_V2_TEXT_LEN && offset < 262144 {
+    if offset >= 0 && offset < NATIVE_V2_TEXT_LEN && offset < 4194304 {
         return NATIVE_V2_TEXT_BUF[offset as usize]
     }
     0 as i8
 }
 
 fn native_v2_text_patch_u8(offset: i64, val: i64) with Mut, Panic, Div {
-    if offset >= 0 && offset < NATIVE_V2_TEXT_LEN && offset < 262144 {
+    if offset >= 0 && offset < NATIVE_V2_TEXT_LEN && offset < 4194304 {
         NATIVE_V2_TEXT_BUF[offset as usize] = low8(val) as i8
     }
 }
@@ -1350,11 +1354,11 @@ fn native_v2_text_patch_u8(offset: i64, val: i64) with Mut, Panic, Div {
 fn native_v2_text_sync_from_narrow(nc: &NativeCompiler, start_offset: i64) with Mut, Panic, Div {
     var i = start_offset
     if i < 0 { i = 0 }
-    while i < (*nc).code.len && i < 131072 && i < 262144 {
+    while i < (*nc).code.len && i < 131072 && i < 4194304 {
         NATIVE_V2_TEXT_BUF[i as usize] = (*nc).code.bytes[i as usize]
         i = i + 1
     }
-    if (*nc).code.len > NATIVE_V2_TEXT_LEN && (*nc).code.len < 262144 {
+    if (*nc).code.len > NATIVE_V2_TEXT_LEN && (*nc).code.len < 4194304 {
         NATIVE_V2_TEXT_LEN = (*nc).code.len
     }
 }
@@ -1393,7 +1397,7 @@ fn native_v2_patch_label_forwards_text_mirror(nc: &! NativeCompiler) with Mut, P
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < 4194304 {
         NATIVE_V2_TEXT_BUF[len as usize] = low8(b) as i8
         NATIVE_V2_TEXT_LEN = len + 1
     }
@@ -1402,7 +1406,7 @@ fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     } else {
         (*nc).code_overflow = true
     }
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < 4194304 {
         (*nc).code.len = len + 1
     }
 }
@@ -6658,9 +6662,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
             } else if uop == UnaryOp::OpNot {
                 nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-                let not_offset = (*nc).code.len
-                (*nc).code = emit_not_bool_rax((*nc).code)
-                native_v2_text_sync_from_narrow(nc, not_offset)
+                // Mirror-direct (was: (*nc).code = emit_not_bool_rax + sync_from_narrow,
+                // which capped at the 131072 by-value CodeBuffer and silently dropped the
+                // `not` for any function emitted past 128KB -> SIGSEGV in large modules).
+                // emit_not_bool_rax = test rax,rax; sete al; movzx rax,al.
+                nc_emit_test_rax_rax(nc)
+                nc_emit_sete_al(nc)
+                nc_emit_movzx_rax_al(nc)
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                 nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
             } else if uop == UnaryOp::OpDeref {
@@ -9407,42 +9415,49 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
     native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
-fn native_v2_file_put_u8(buf: &![i8; 262144], pos: i64, val: i64) with Mut, Panic {
-    if pos >= 0 && pos < 262144 {
-        (*buf)[pos as usize] = (val & 255) as i8
+fn native_v2_file_zero_sink(n: i64) with Mut, Panic {
+    var z: i64 = 0
+    while z < n && z < 4194304 {
+        NATIVE_V2_ELF_FILE_BUF[z as usize] = 0 as i8
+        z = z + 1
     }
 }
 
-fn native_v2_file_put_u16(buf: &![i8; 262144], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(buf, pos, val)
-    native_v2_file_put_u8(buf, pos + 1, val >> 8)
+fn native_v2_file_put_u8(pos: i64, val: i64) with Mut, Panic {
+    if pos >= 0 && pos < 4194304 {
+        NATIVE_V2_ELF_FILE_BUF[pos as usize] = (val & 255) as i8
+    }
 }
 
-fn native_v2_file_put_u32(buf: &![i8; 262144], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(buf, pos, val)
-    native_v2_file_put_u8(buf, pos + 1, val >> 8)
-    native_v2_file_put_u8(buf, pos + 2, val >> 16)
-    native_v2_file_put_u8(buf, pos + 3, val >> 24)
+fn native_v2_file_put_u16(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(pos, val)
+    native_v2_file_put_u8(pos + 1, val >> 8)
 }
 
-fn native_v2_file_put_u64(buf: &![i8; 262144], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u32(buf, pos, val)
-    native_v2_file_put_u32(buf, pos + 4, val >> 32)
+fn native_v2_file_put_u32(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(pos, val)
+    native_v2_file_put_u8(pos + 1, val >> 8)
+    native_v2_file_put_u8(pos + 2, val >> 16)
+    native_v2_file_put_u8(pos + 3, val >> 24)
 }
 
-fn native_v2_file_emit_phdr(buf: &![i8; 262144], pos: i64, p_type: i64, flags: i64, offset: i64, vaddr: i64, filesz: i64, memsz: i64, align: i64) with Mut, Panic, Div {
-    native_v2_file_put_u32(buf, pos, p_type)
-    native_v2_file_put_u32(buf, pos + 4, flags)
-    native_v2_file_put_u64(buf, pos + 8, offset)
-    native_v2_file_put_u64(buf, pos + 16, vaddr)
-    native_v2_file_put_u64(buf, pos + 24, vaddr)
-    native_v2_file_put_u64(buf, pos + 32, filesz)
-    native_v2_file_put_u64(buf, pos + 40, memsz)
-    native_v2_file_put_u64(buf, pos + 48, align)
+fn native_v2_file_put_u64(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u32(pos, val)
+    native_v2_file_put_u32(pos + 4, val >> 32)
+}
+
+fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vaddr: i64, filesz: i64, memsz: i64, align: i64) with Mut, Panic, Div {
+    native_v2_file_put_u32(pos, p_type)
+    native_v2_file_put_u32(pos + 4, flags)
+    native_v2_file_put_u64(pos + 8, offset)
+    native_v2_file_put_u64(pos + 16, vaddr)
+    native_v2_file_put_u64(pos + 24, vaddr)
+    native_v2_file_put_u64(pos + 32, filesz)
+    native_v2_file_put_u64(pos + 40, memsz)
+    native_v2_file_put_u64(pos + 48, align)
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
-    var bytes: [i8; 262144] = [0; 262144]
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -9467,7 +9482,8 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if data_len > 0 {
         file_len = data_offset + data_len
     }
-    if file_len <= 64 || file_len > 262144 { return 13 }
+    if file_len <= 64 || file_len > 4194304 { return 13 }
+    native_v2_file_zero_sink(file_len)
 
     // Build the ELF header + program headers + segment payloads into `bytes`
     // via a dedicated small helper. Splitting this out of the (large) caller
@@ -9475,91 +9491,91 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     // inside a short function so their branch offsets stay small — working
     // around a c634b38f branch-target miscompile that otherwise skipped this
     // whole block and fell through to `return 0` (file never written).
-    native_v2_build_elf_image_into(&! bytes, nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
+    native_v2_build_elf_image_into(nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
 
-    if bytes[0 as usize] != (0x7f as i8) { return 14 }
-    if bytes[1 as usize] != (0x45 as i8) { return 15 }
-    if bytes[2 as usize] != (0x4c as i8) { return 16 }
-    if bytes[3 as usize] != (0x46 as i8) { return 17 }
-    if write_file(output_path, bytes, file_len) < 0 { return 18 }
+    if NATIVE_V2_ELF_FILE_BUF[0 as usize] != (0x7f as i8) { return 14 }
+    if NATIVE_V2_ELF_FILE_BUF[1 as usize] != (0x45 as i8) { return 15 }
+    if NATIVE_V2_ELF_FILE_BUF[2 as usize] != (0x4c as i8) { return 16 }
+    if NATIVE_V2_ELF_FILE_BUF[3 as usize] != (0x46 as i8) { return 17 }
+    if write_file(output_path, NATIVE_V2_ELF_FILE_BUF, file_len) < 0 { return 18 }
     0
 }
 
 // Helper extracted from native_v2_write_min_elf64_to_file (c634b38f branch-offset
 // workaround — see caller). Writes the full ELF image into `bytes`.
-fn native_v2_build_elf_image_into(bytes: &! [i8; 262144], nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(bytes, 0, 127)
-    native_v2_file_put_u8(bytes, 1, 69)
-    native_v2_file_put_u8(bytes, 2, 76)
-    native_v2_file_put_u8(bytes, 3, 70)
-    native_v2_file_put_u8(bytes, 4, 2)
-    native_v2_file_put_u8(bytes, 5, 1)
-    native_v2_file_put_u8(bytes, 6, 1)
-    native_v2_file_put_u16(bytes, 16, 2)
-    native_v2_file_put_u16(bytes, 18, 62)
-    native_v2_file_put_u32(bytes, 20, 1)
-    native_v2_file_put_u64(bytes, 24, base_addr + text_offset + entry_offset)
-    native_v2_file_put_u64(bytes, 32, 64)
-    native_v2_file_put_u64(bytes, 40, 0)
-    native_v2_file_put_u32(bytes, 48, 0)
-    native_v2_file_put_u16(bytes, 52, 64)
-    native_v2_file_put_u16(bytes, 54, 56)
-    native_v2_file_put_u16(bytes, 56, phnum)
-    native_v2_file_put_u16(bytes, 58, 64)
-    native_v2_file_put_u16(bytes, 60, 0)
-    native_v2_file_put_u16(bytes, 62, 0)
+fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(0, 127)
+    native_v2_file_put_u8(1, 69)
+    native_v2_file_put_u8(2, 76)
+    native_v2_file_put_u8(3, 70)
+    native_v2_file_put_u8(4, 2)
+    native_v2_file_put_u8(5, 1)
+    native_v2_file_put_u8(6, 1)
+    native_v2_file_put_u16(16, 2)
+    native_v2_file_put_u16(18, 62)
+    native_v2_file_put_u32(20, 1)
+    native_v2_file_put_u64(24, base_addr + text_offset + entry_offset)
+    native_v2_file_put_u64(32, 64)
+    native_v2_file_put_u64(40, 0)
+    native_v2_file_put_u32(48, 0)
+    native_v2_file_put_u16(52, 64)
+    native_v2_file_put_u16(54, 56)
+    native_v2_file_put_u16(56, phnum)
+    native_v2_file_put_u16(58, 64)
+    native_v2_file_put_u16(60, 0)
+    native_v2_file_put_u16(62, 0)
 
     var phoff: i64 = 64
-    native_v2_file_emit_phdr(bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
+    native_v2_file_emit_phdr(phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
     phoff = phoff + 56
     if rodata_len > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
         phoff = phoff + 56
     }
     if data_len > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
         phoff = phoff + 56
     }
     if (*nc).bss_total_size > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
         phoff = phoff + 56
     }
-    native_v2_file_emit_phdr(bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
+    native_v2_file_emit_phdr(phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
 
     var i: i64 = 0
-    while i < code_len && (text_offset + i) < 262144 {
+    while i < code_len && (text_offset + i) < 4194304 {
         var tb: i8 = 0 as i8
         if i < NATIVE_V2_TEXT_LEN {
             tb = NATIVE_V2_TEXT_BUF[i as usize]
         } else if i < 131072 {
             tb = (*nc).code.bytes[i as usize]
         }
-        (*bytes)[(text_offset + i) as usize] = tb
+        NATIVE_V2_ELF_FILE_BUF[(text_offset + i) as usize] = tb
         i = i + 1
     }
 
     if (*nc).flat_rodata_len > 0 {
         i = 0
-        while i < rodata_len && (rodata_offset + i) < 262144 {
-            (*bytes)[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+        while i < rodata_len && (rodata_offset + i) < 4194304 {
+            NATIVE_V2_ELF_FILE_BUF[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
             i = i + 1
         }
     } else {
         i = 0
-        while i < rodata_len && (rodata_offset + i) < 262144 {
-            (*bytes)[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
+        while i < rodata_len && (rodata_offset + i) < 4194304 {
+            NATIVE_V2_ELF_FILE_BUF[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
             i = i + 1
         }
     }
 
     if data_len > 0 {
         i = 0
-        while i < data_len && (data_offset + i) < 262144 {
+        while i < data_len && (data_offset + i) < 4194304 {
             var db: i8 = 0 as i8
             if i < (*nc).data.len {
                 db = (*nc).data.bytes[i as usize]
             }
-            (*bytes)[(data_offset + i) as usize] = db
+            NATIVE_V2_ELF_FILE_BUF[(data_offset + i) as usize] = db
             i = i + 1
         }
     }
