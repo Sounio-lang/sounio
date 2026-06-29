@@ -1,0 +1,93 @@
+//@ run-pass
+//@ description: disc_beta_scale sweep (0.0/0.25/0.5/1.0) on the same overconstrained UNSAT set — damage curve
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+fn gen(ctx: &!SmtContext, n_vars: i32, n_clauses: i32, seed: i64, emit: i32) with IO, Mut, Div {
+    var st: i64 = seed
+    var c: i32 = 0
+    while c < n_clauses {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var picked: [i32; 3] = [0 as i32; 3]
+        let m: i64 = 2147483648
+        var k: i32 = 0
+        while k < 3 {
+            var v: i32 = 0
+            var ok: i32 = 0
+            while ok == 0 {
+                let raw = lcg_next(&! st)
+                v = ((raw * (n_vars as i64)) / m) as i32
+                ok = 1
+                var j: i32 = 0
+                while j < k {
+                    if picked[j] == v { ok = 0 }
+                    j = j + 1
+                }
+            }
+            picked[k] = v
+            let praw = lcg_next(&! st)
+            let pol = ((praw * 2) / m) as i32
+            lits[k] = v * 2 + pol
+            if emit == 1 {
+                if pol == 1 { print("-") }
+                print_int((v + 1) as i64)
+                print(" ")
+            }
+            k = k + 1
+        }
+        if emit == 1 { println("0") }
+        smt_add_clause(ctx, &lits, 3)
+        c = c + 1
+    }
+}
+
+// beta_x100: 0,25,50,100 -> scale 0.0,0.25,0.5,1.0
+fn solve_cell(n_vars: i32, n_clauses: i32, seed: i64, beta_x100: i32) with IO, Mut, Div {
+    var ctx = smt_new()
+    gen(&! ctx, n_vars, n_clauses, seed, 0)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, 5)
+    let scale: f64 = (beta_x100 as f64) / 100.0
+    smt_set_disc_beta_scale(&! ctx, scale)
+    let result = smt_solve(&! ctx)
+    print("RESULT seed="); print_int(seed)
+    print(" beta="); print_int(beta_x100 as i64)
+    print(" result="); print_int(result as i64)
+    print(" decisions="); print_int(smt_get_decisions(&ctx) as i64)
+    print(" conflicts="); print_int(smt_get_conflicts(&ctx) as i64)
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    let n_vars: i32 = 50
+    let n_clauses: i32 = 300
+    println("# schema=sounio.solver.beta_sweep.v1")
+    println("# regime=overconstrained_unsat alpha=6.0 score_mode=5 phase_mode=0 restart_budget=0")
+    println("# sweep disc_beta_scale via beta_x100 in {0,25,50,100}")
+    var s: i32 = 0
+    while s < 40 {
+        let seed: i64 = 3000 + (s as i64)
+        print("INSTANCE seed="); print_int(seed)
+        print(" n="); print_int(n_vars as i64)
+        print(" m="); print_int(n_clauses as i64); println("")
+        print("p cnf "); print_int(n_vars as i64); print(" "); print_int(n_clauses as i64); println("")
+        var ctx_emit = smt_new()
+        gen(&! ctx_emit, n_vars, n_clauses, seed, 1)
+        solve_cell(n_vars, n_clauses, seed, 0)
+        solve_cell(n_vars, n_clauses, seed, 25)
+        solve_cell(n_vars, n_clauses, seed, 50)
+        solve_cell(n_vars, n_clauses, seed, 100)
+        s = s + 1
+    }
+    return 0
+}

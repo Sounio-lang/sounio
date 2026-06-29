@@ -5,7 +5,33 @@ Branch: `research/novelty-ablation` (base `d7bf33814`, madaros `cb2f7685…`)
 Pre-registration: `docs/research/act-var-ablation-prereg-2026-06-29.md` (incl. pilot-revision addendum)
 Apparatus: `benchmarks/solver/beta_ablation_v1.sio` + `scripts/research/analyze_beta_ablation.py`
 
-## Headline (honest, negative)
+> ## ⛔ RETRACTED (2026-06-29, same day) — DO NOT CITE THE NUMBERS BELOW
+>
+> A post-hoc control invalidated this result. The comparison is **confounded by a
+> cross-`smt_new()` state-leak bug**, not the variance bonus.
+>
+> **Evidence** (`benchmarks/solver/order_ctrl.sio`): solving the *same* instance at the
+> *same* β twice in a row gives **different** conflict counts for 3/40 instances
+> (3013: 99→425, 3028: 191→301, 3004: 119→127) — and in all 3 the **second** solve is
+> worse. A "fresh" `smt_new()` ctx is NOT isolated from prior-solve allocation history
+> (confirmed independently: v1 and the β-sweep disagree on β=0 for exactly the
+> history-sensitive seeds; `freshness_probe.sio` shows 6 *identical*-history repeats agree,
+> so it is deterministic-but-history-dependent, not random).
+>
+> Because β>0 always runs in a **later cell position** than β=0 within each instance, the
+> "β>0 worse on 33/40" headline is contaminated by a "later-position-is-worse" artifact.
+> A real β effect may still exist (the artifact touches only ~3–8/40 instances, too few to
+> fully explain 33/40), but this design **cannot separate them**. The number `210→313` is
+> not a valid measurement of the β effect.
+>
+> **Valid re-run requires per-(instance,β) PROCESS isolation** (each cell the first/only
+> solve in its process), or a fix to the `smt_new()` zeroing leak. Until then, no claim —
+> positive or negative — about the variance bonus's solving effect is supported.
+>
+> What still stands: the apparatus (gen→solve→z3-gate→stats), z3 correctness agreement
+> (40/40), determinism *within fixed history*, and the discovery of the leak itself.
+
+## Headline (RETRACTED — see banner above)
 
 In the only conflict-bearing regime this bounded DPLL(T) reaches via random 3-SAT —
 **overconstrained UNSAT, α=6.0, n=50** — turning the discounted empirical-Bernstein
