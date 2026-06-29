@@ -3,7 +3,29 @@
 Date: 2026-06-29
 Branch: `research/solver-ts3-parallel`, tip `83513addb`
 Supersedes: `MADAROS_128KB_CODE_PATCH_WALL_2026-06-29.md` (its root-cause is **wrong**)
-Status: two real fixes landed + verified; two distinct open issues precisely characterized.
+Status: **wall (a) RESOLVED** (commit `f5d4466cf`); issue (b) println(smt_solve) still open.
+
+## RESOLUTION of (a) — the wall is the 4096 `flat_reloc` table cap (commit `f5d4466cf`)
+
+A diagnostic build (instrumented `nc_add_flat_reloc`, since reverted) settled it: the unpatched
+rel32 are **all `e8` calls** = relocations, and `NativeCompiler` held the reloc table as four
+by-value `[i64;4096]` fields — `nc_add_flat_reloc` **silently dropped every reloc past index
+4096**. Dropped CALL relocs keep `rel32=0` → jump-to-garbage → SIGSEGV. Reloc counts:
+bi_100=**4000** (<4096 → 0 dropped → runs correct), bi_200=**6603**, bi_600=17015 (thousands
+dropped). It is a COUNT cap, not an offset cap (~26 relocs/clause; `.text`≈256KB is merely where
+the 4096th reloc happened to land). The "256KB" was a coincidence of reloc density.
+
+**Fix:** moved `flat_reloc_{offsets,kind_codes,is_functions,target_indices}` to module globals
+`NV2_RELOC_*[131072]` (codegen_x86_linux.sio), mirroring the `NATIVE_ELF_BUF` pattern. Lifts the
+cap to 131072 (covers a 4096-clause corpus ≈106K relocs), removes 128KB of by-value aggregate
+from `NativeCompiler` (binary 103.60→103.37MB), and kills the O(n²) copy-out-modify-copy-back the
+in-struct array forced per reloc. **Verified:** test_smt 6/6 + run-pass green; known-UNSAT ladder
+bi_100..**bi_1000 (1.35MB .text)** all print correct `RESULT_UNSAT` (was SIGSEGV >256KB);
+mid600_unsat 0 unpatched rel32. The OpNot fix (`83513addb`) was orthogonal latent hardening; this
+reloc-table fix is what actually unblocked large corpora.
+
+---
+(original investigation below, kept for the record)
 
 ## TL;DR
 
