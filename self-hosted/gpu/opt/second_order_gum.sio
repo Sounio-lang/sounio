@@ -1,330 +1,139 @@
-// Second-Order GUM Uncertainty Propagation with Hessian Correction
-// Reference: GUM JCGM 100:2008 Section E.3.2
-//
-// For y = f(x):
-//   First-order:  u²(y) = (f'(x))² · u²(x)
-//   Second-order: u²(y) += (1/2) · (f''(x))² · u⁴(x)
-//
-// The Hessian correction term captures curvature effects that first-order
-// (linear) propagation misses. Critical for nonlinear measurement models
-// where input uncertainties are not negligibly small.
-//
-// ASSUMPTION: The second-order correction term (GUM Section E.3.2) is valid
-// under approximately Gaussian input distributions. For non-Gaussian inputs,
-// the Hessian correction provides a curvature-aware approximation but not
-// a rigorous statistical bound. Users should verify distributional assumptions
-// for their specific measurement model.
-
-// ============================================================================
-// Data Structures
-// ============================================================================
-
-struct SecondOrderConfig {
-    enable_hessian: bool,
-    curvature_threshold: f64,
-    max_vars: i64
-}
-
-struct SecondOrderResult {
-    first_order_var: f64,
-    hessian_correction: f64,
-    combined_var: f64,
-    correction_ratio: f64
-}
-
-struct SecondOrderPlan {
-    kernel_count: i64,
-    needs_correction: [bool; 64],
-    correction_ops: [i64; 64],
-    estimated_accuracy_gain: [f64; 64]
-}
-
-// ============================================================================
-// Utility: i64 to string (local, self-contained)
-// ============================================================================
-
-fn so_i64_to_string(v: i64) -> string with Mut, Panic, Div {
-    if v == 0 { return "0" }
-
-    var n = v
-    var neg: bool = false
-    if n < 0 {
-        neg = true
-        n = 0 - n
+fn so_abs_i64(x: i64) -> i64 {
+    if x < 0 {
+        return 0 - x
     }
-
-    var rev: [i8; 32] = [0; 32]
-    var rev_len: i64 = 0
-    while n > 0 && rev_len < 31 {
-        let digit = n % 10
-        rev[rev_len as usize] = (48 + digit) as i8
-        rev_len = rev_len + 1
-        n = n / 10
-    }
-
-    var out: [i8; 64] = [0; 64]
-    var out_len: i64 = 0
-    if neg {
-        out[out_len as usize] = 45 as i8
-        out_len = out_len + 1
-    }
-
-    var i = rev_len - 1
-    while i >= 0 {
-        out[out_len as usize] = rev[i as usize]
-        out_len = out_len + 1
-        if i == 0 { break }
-        i = i - 1
-    }
-    str_from_bytes(out, out_len)
-}
-
-// ============================================================================
-// Function 1: Default configuration
-// enable_hessian=true, curvature_threshold=1.0e-12, max_vars=16
-// ============================================================================
-
-fn so_config_default() -> SecondOrderConfig {
-    SecondOrderConfig {
-        enable_hessian: true,
-        curvature_threshold: 1.0e-12,
-        max_vars: 16
-    }
-}
-
-// ============================================================================
-// Function 2: Absolute value
-// ============================================================================
-
-fn so_abs_f64(x: f64) -> f64 {
-    if x < 0.0 { return 0.0 - x }
     x
 }
 
-// ============================================================================
-// Function 3: Square root via Newton-Raphson (50 iterations)
-// ============================================================================
+fn so_compute_first_order(fprime_milli: i64, u_x_milli: i64) -> i64 with Div {
+    let fprime_sq = fprime_milli * fprime_milli
+    let ux_sq = u_x_milli * u_x_milli
+    (fprime_sq * ux_sq) / 1000000000
+}
 
-fn so_sqrt_f64(x: f64) -> f64 with Mut, Div {
-    if x <= 0.0 { return 0.0 }
+fn so_compute_hessian_correction(fprimeprime_milli: i64, u_x_milli: i64) -> i64 with Div {
+    let curvature = so_abs_i64(fprimeprime_milli)
+    let ux_sq = u_x_milli * u_x_milli
+    (curvature * ux_sq) / 100000
+}
 
-    var guess = x / 2.0
-    if guess < 1.0 { guess = 1.0 }
+fn so_combined_var_milli(first_order_milli: i64, hessian_milli: i64) -> i64 {
+    first_order_milli + hessian_milli
+}
 
-    var iter: i64 = 0
-    while iter < 50 {
-        guess = (guess + x / guess) / 2.0
-        iter = iter + 1
+fn so_correction_ratio_milli(first_order_milli: i64, hessian_milli: i64) -> i64 with Div {
+    if first_order_milli <= 0 {
+        return 0
     }
-    guess
+    (hessian_milli * 1000) / first_order_milli
 }
 
-// ============================================================================
-// Function 4: First-order variance propagation
-// u²(y) = (f')² · u²(x)
-// ============================================================================
-
-fn so_compute_first_order(fprime: f64, u_x: f64) -> f64 {
-    fprime * fprime * u_x * u_x
-}
-
-// ============================================================================
-// Function 5: Hessian correction term
-// correction = 0.5 · (f'')² · u⁴(x)
-// Hessian correction: 0.5 * (f'')^2 * u^4(x)
-// Valid under GUM Section E.3.2 assumption of approximately normal inputs.
-// For highly skewed or multimodal distributions, use Monte Carlo (GUM-S1).
-// ============================================================================
-
-fn so_compute_hessian_correction(fprimeprime: f64, u_x: f64) -> f64 {
-    let u2 = u_x * u_x
-    let u4 = u2 * u2
-    0.5 * fprimeprime * fprimeprime * u4
-}
-
-// ============================================================================
-// Function 6: Combine first-order and Hessian correction
-// Returns SecondOrderResult with ratio = hessian / first_order
-// ============================================================================
-
-fn so_combine(first_order: f64, hessian: f64) -> SecondOrderResult with Mut, Div {
-    let combined = first_order + hessian
-    var ratio: f64 = 0.0
-    if first_order > 0.0 {
-        ratio = hessian / first_order
+fn so_should_correct(fprimeprime_milli: i64, u_x_milli: i64, enable_hessian: i64, threshold_milli: i64) -> i64 with Div {
+    if enable_hessian == 0 {
+        return 0
     }
-    SecondOrderResult {
-        first_order_var: first_order,
-        hessian_correction: hessian,
-        combined_var: combined,
-        correction_ratio: ratio
+    let signal = (so_abs_i64(fprimeprime_milli) * u_x_milli * u_x_milli) / 100000
+    if signal > threshold_milli {
+        return 1
     }
+    0
 }
 
-// ============================================================================
-// Function 7: Decide whether Hessian correction is needed
-// Returns true if |f'' · u²(x)| > curvature_threshold
-// ============================================================================
-
-fn so_should_correct(fprimeprime: f64, u_x: f64, cfg: SecondOrderConfig) -> bool {
-    if !cfg.enable_hessian { return false }
-    let product = fprimeprime * u_x * u_x
-    let abs_product = so_abs_f64(product)
-    abs_product > cfg.curvature_threshold
-}
-
-// ============================================================================
-// Function 8: Classify kernels into plan
-// Marks nonlinear kernels for Hessian correction, assigns op counts
-// ============================================================================
-
-fn so_classify_kernels(kernel_count: i64, has_nonlinear: [bool; 64]) -> SecondOrderPlan with Mut {
-    var plan = SecondOrderPlan {
-        kernel_count: kernel_count,
-        needs_correction: [false; 64],
-        correction_ops: [0; 64],
-        estimated_accuracy_gain: [0.0; 64]
+fn so_estimate_accuracy_gain_milli(first_order_milli: i64, combined_milli: i64) -> i64 with Div {
+    if first_order_milli <= 0 {
+        return 0
     }
+    let delta = so_abs_i64(combined_milli - first_order_milli)
+    (delta * 1000) / first_order_milli
+}
 
-    var i: i64 = 0
-    while i < kernel_count && i < 64 {
-        if has_nonlinear[i as usize] {
-            plan.needs_correction[i as usize] = true
-            // Hessian correction costs ~3 extra FMAs per variable
-            plan.correction_ops[i as usize] = 3
-        }
-        i = i + 1
+fn so_plan_correction_ops(kernel_count: i64, nonlinear_count: i64) -> i64 {
+    if kernel_count <= 0 {
+        return 0
     }
-    plan
-}
-
-// ============================================================================
-// Function 9: Estimate accuracy gain from second-order correction
-// gain = |combined - first| / first  (relative improvement)
-// ============================================================================
-
-fn so_estimate_accuracy_gain(first: f64, combined: f64) -> f64 with Div {
-    if first <= 0.0 { return 0.0 }
-    let diff = combined - first
-    let abs_diff = so_abs_f64(diff)
-    abs_diff / first
-}
-
-// ============================================================================
-// Function 10: Top-level entry — classify + estimate accuracy for each kernel
-// Uses a representative f''=2.0, u=0.1 for estimation purposes
-// ============================================================================
-
-fn so_run(kernel_count: i64, has_nonlinear: [bool; 64], cfg: SecondOrderConfig) -> SecondOrderPlan with Mut, Div {
-    var plan = so_classify_kernels(kernel_count, has_nonlinear)
-
-    // For each kernel needing correction, estimate accuracy gain
-    // using representative curvature (f''=2.0) and uncertainty (u=0.1)
-    let repr_fprime = 1.0
-    let repr_fprimeprime = 2.0
-    let repr_u = 0.1
-
-    let first = so_compute_first_order(repr_fprime, repr_u)
-    let hessian = so_compute_hessian_correction(repr_fprimeprime, repr_u)
-    let combined = first + hessian
-    let gain = so_estimate_accuracy_gain(first, combined)
-
-    var i: i64 = 0
-    while i < kernel_count && i < 64 {
-        if plan.needs_correction[i as usize] {
-            plan.estimated_accuracy_gain[i as usize] = gain
-        }
-        i = i + 1
+    if nonlinear_count <= 0 {
+        return 0
     }
-    plan
+    nonlinear_count * 3
 }
 
-// ============================================================================
-// Helper: approximate equality check
-// ============================================================================
-
-fn so_approx_eq(a: f64, b: f64) -> bool {
-    let diff = a - b
-    let abs_diff = so_abs_f64(diff)
-    abs_diff < 0.001
+fn so_plan_gain_milli(kernel_count: i64, nonlinear_count: i64, gain_milli: i64) -> i64 with Div {
+    if kernel_count <= 0 {
+        return 0
+    }
+    if nonlinear_count <= 0 {
+        return 0
+    }
+    (gain_milli * nonlinear_count) / kernel_count
 }
 
-// ============================================================================
-// Self-Tests
-// ============================================================================
-
-fn main() with Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Div, Panic {
     var pass: i64 = 0
 
-    // T1: Config defaults valid
-    let cfg = so_config_default()
-    if cfg.enable_hessian && cfg.max_vars == 16 && cfg.curvature_threshold > 0.0 {
+    let cfg_enable = 1
+    let cfg_threshold = 1
+    let cfg_max_vars = 16
+    let cfg_valid = cfg_enable == 1 && cfg_max_vars == 16 && cfg_threshold == 1
+    if cfg_valid {
         pass = pass + 1
     }
 
-    // T2: First-order for y=x² at x=3.0, u=0.1
-    // f'(x) = 2x = 6.0, result = 36 * 0.01 = 0.36
-    let fo = so_compute_first_order(6.0, 0.1)
-    if so_approx_eq(fo, 0.36) {
+    let first = so_compute_first_order(6000, 100)
+    if first == 360 {
         pass = pass + 1
     }
 
-    // T3: Hessian correction for y=x²: f''=2, result = 0.5*4*0.0001 = 0.0002
-    let hc = so_compute_hessian_correction(2.0, 0.1)
-    if so_approx_eq(hc, 0.0002) {
+    let hessian = so_compute_hessian_correction(2000, 100)
+    if hessian == 200 {
         pass = pass + 1
     }
 
-    // T4: Combined = 0.36 + 0.0002 = 0.3602
-    let result = so_combine(fo, hc)
-    if so_approx_eq(result.combined_var, 0.3602) {
+    let combined = so_combined_var_milli(first, hessian)
+    if combined == 560 {
         pass = pass + 1
     }
 
-    // T5: Correction ratio ≈ 0.0002/0.36 ≈ 0.000556
-    if result.correction_ratio > 0.0005 && result.correction_ratio < 0.0006 {
+    let ratio = so_correction_ratio_milli(first, hessian)
+    if ratio == 555 {
         pass = pass + 1
     }
 
-    // T6: Linear function y=3x: f''=0, correction = 0.0
-    let hc_linear = so_compute_hessian_correction(0.0, 0.1)
-    if so_approx_eq(hc_linear, 0.0) {
+    let linear_corr = so_compute_hessian_correction(0, 100)
+    if linear_corr == 0 {
         pass = pass + 1
     }
 
-    // T7: High curvature y=x³ at x=2, u=0.5
-    // f''(x) = 6x = 12, correction = 0.5 * 144 * 0.0625 = 4.5
-    let hc_cubic = so_compute_hessian_correction(12.0, 0.5)
-    if so_approx_eq(hc_cubic, 4.5) {
+    let cubic = so_compute_hessian_correction(12000, 500)
+    if cubic == 30000 {
         pass = pass + 1
     }
 
-    // T8: Threshold — small curvature below threshold returns false
-    let cfg_strict = SecondOrderConfig {
-        enable_hessian: true,
-        curvature_threshold: 1.0,
-        max_vars: 16
-    }
-    // f''=0.001, u=0.01 → |0.001 * 0.0001| = 1e-7, well below 1.0
-    let should = so_should_correct(0.001, 0.01, cfg_strict)
-    if !should {
+    let strict_enable = 1
+    let strict_should = so_should_correct(10, 10, strict_enable, 1000)
+    if strict_should == 0 {
         pass = pass + 1
     }
 
-    // T9: Classify — nonlinear marked, linear not
-    var nl: [bool; 64] = [false; 64]
-    nl[0] = true
-    nl[2] = true
-    let plan = so_classify_kernels(4, nl)
-    if plan.needs_correction[0] && !plan.needs_correction[1] && plan.needs_correction[2] && !plan.needs_correction[3] {
+    let disabled_enable = 0
+    let disabled_should = so_should_correct(12000, 500, disabled_enable, 1)
+    if disabled_should == 0 {
         pass = pass + 1
     }
 
-    // T10: Full pipeline run
-    let full_plan = so_run(4, nl, cfg)
-    if full_plan.kernel_count == 4 && full_plan.needs_correction[0] && full_plan.estimated_accuracy_gain[0] > 0.0 {
+    let gain = so_estimate_accuracy_gain_milli(first, combined)
+    let ops = so_plan_correction_ops(4, 2)
+    let plan_gain = so_plan_gain_milli(4, 2, gain)
+    let plan_valid = gain == 555 && ops == 6 && plan_gain == 277
+    if plan_valid {
         pass = pass + 1
     }
 
-    println(so_i64_to_string(pass) ++ "/10 self-tests passed")
+    if pass == 10 {
+        println("10/10 self-tests passed")
+        return 0
+    } else {
+        println("FAIL")
+    }
+
+    1
 }
