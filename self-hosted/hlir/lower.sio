@@ -1972,17 +1972,20 @@ pub fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i
     if target.kind == ExprKind::ExprFieldAccess {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(target.name) % 16
-        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_pair.1, field_idx, hlir_type_i64())
+        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
         s = field_ptr_pair.0
         return hlir_lower_store(s, field_ptr_pair.1, value_id)
     }
     if target.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, target.right)
         s = idx_pair.0
-        let elem_ptr_pair = hlir_lower_gep(s, base_pair.1, idx_pair.1, hlir_type_i64())
+        let idx_val = idx_pair.1
+        let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, hlir_type_i64())
         s = elem_ptr_pair.0
         return hlir_lower_store(s, elem_ptr_pair.1, value_id)
     }
@@ -2006,10 +2009,42 @@ pub fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with
         return hlir_lower_var(s, name, ty, init_pair.1)
     }
     if stmt.kind == StmtKind::StmtAssign {
-        let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
-        s = rhs_pair.0
         match stmt.target {
-            Some(t) => hlir_lower_assign_target(s, *t, rhs_pair.1),
+            Some(t) => {
+                let target_expr = *t
+                if target_expr.kind == ExprKind::ExprFieldAccess {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let field_idx = hlir_ast_name_hash(target_expr.name) % 16
+                    let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
+                    s = field_ptr_pair.0
+                    let ptr_val = field_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                if target_expr.kind == ExprKind::ExprIndex {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let idx_pair = hlir_lower_expr_opt(s, target_expr.right)
+                    s = idx_pair.0
+                    let idx_val = idx_pair.1
+                    let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, hlir_type_i64())
+                    s = elem_ptr_pair.0
+                    let ptr_val = elem_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                s = rhs_pair.0
+                let rhs_val = rhs_pair.1
+                hlir_lower_assign_target(s, target_expr, rhs_val)
+            },
             None => hlir_lower_report_error(s),
         }
     }
@@ -2072,11 +2107,13 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprBinary {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
+        let rhs_val = rhs_pair.1
         let op = hlir_ast_binary_to_hlir(expr.bin_op)
         let ty = hlir_ast_binary_result_ty(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, ty)
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, ty)
     }
 
     if expr.kind == ExprKind::ExprUnary {
@@ -2094,16 +2131,19 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         }
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(expr.name) % 16
-        return hlir_lower_field_access(s, base_pair.1, field_idx)
+        return hlir_lower_field_access(s, base_val, field_idx)
     }
 
     if expr.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, expr.right)
         s = idx_pair.0
-        return hlir_lower_index(s, base_pair.1, idx_pair.1)
+        let idx_val = idx_pair.1
+        return hlir_lower_index(s, base_val, idx_val)
     }
 
     if expr.kind == ExprKind::ExprCast {
@@ -2183,8 +2223,9 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprMethodCall {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         var arg_vals: [i64; 64] = [HLIR_INVALID_VALUE; 64]
-        arg_vals[0] = base_pair.1
+        arg_vals[0] = base_val
         let args_pair = hlir_lower_expr_list(s, expr.args, arg_vals, 1)
         s = args_pair.state
         var method_vals: [i64; 64] = args_pair.values
@@ -2280,10 +2321,12 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprRange {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
+        let rhs_val = rhs_pair.1
         let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, hlir_type_i64())
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprReturn {

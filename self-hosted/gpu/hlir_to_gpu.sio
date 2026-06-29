@@ -1469,46 +1469,101 @@ fn hlir_type_kind_to_gpu(kind: HlirTypeKind) -> GpuType {
     else { GpuType::GpuI64 }
 }
 
-// Map a binary op tag (HlirOpAdd..HlirOpFGe) to a GpuOpcode.
+// Map an HLIR v2 binary op tag (HLIR_BIN_*) to a GpuOpcode.
 fn hlir_bin_op_to_gpu_opcode(bin_op: i64) -> GpuOpcode {
-    if bin_op == HlirOpAdd || bin_op == HlirOpFAdd { GpuOpcode::GpuAdd }
-    else if bin_op == HlirOpSub || bin_op == HlirOpFSub { GpuOpcode::GpuSub }
-    else if bin_op == HlirOpMul || bin_op == HlirOpFMul { GpuOpcode::GpuMul }
-    else if bin_op == HlirOpDiv || bin_op == HlirOpFDiv { GpuOpcode::GpuDiv }
-    else if bin_op == HlirOpLt || bin_op == HlirOpFLt { GpuOpcode::GpuSetpLt }
-    else if bin_op == HlirOpLe || bin_op == HlirOpFLe { GpuOpcode::GpuSetpLe }
-    else if bin_op == HlirOpGt || bin_op == HlirOpFGt { GpuOpcode::GpuSetpGt }
-    else if bin_op == HlirOpGe || bin_op == HlirOpFGe { GpuOpcode::GpuSetpGe }
-    else if bin_op == HlirOpEq || bin_op == HlirOpFEq { GpuOpcode::GpuSetpEq }
-    else if bin_op == HlirOpNe || bin_op == HlirOpFNe { GpuOpcode::GpuSetpNe }
+    if bin_op == HLIR_BIN_ADD || bin_op == HLIR_BIN_FADD { GpuOpcode::GpuAdd }
+    else if bin_op == HLIR_BIN_SUB || bin_op == HLIR_BIN_FSUB { GpuOpcode::GpuSub }
+    else if bin_op == HLIR_BIN_MUL || bin_op == HLIR_BIN_FMUL { GpuOpcode::GpuMul }
+    else if bin_op == HLIR_BIN_SDIV || bin_op == HLIR_BIN_UDIV || bin_op == HLIR_BIN_FDIV { GpuOpcode::GpuDiv }
+    else if bin_op == HLIR_BIN_SLT || bin_op == HLIR_BIN_ULT || bin_op == HLIR_BIN_FOLT { GpuOpcode::GpuSetpLt }
+    else if bin_op == HLIR_BIN_SLE || bin_op == HLIR_BIN_ULE || bin_op == HLIR_BIN_FOLE { GpuOpcode::GpuSetpLe }
+    else if bin_op == HLIR_BIN_SGT || bin_op == HLIR_BIN_UGT || bin_op == HLIR_BIN_FOGT { GpuOpcode::GpuSetpGt }
+    else if bin_op == HLIR_BIN_SGE || bin_op == HLIR_BIN_UGE || bin_op == HLIR_BIN_FOGE { GpuOpcode::GpuSetpGe }
+    else if bin_op == HLIR_BIN_EQ || bin_op == HLIR_BIN_FOEQ { GpuOpcode::GpuSetpEq }
+    else if bin_op == HLIR_BIN_NE || bin_op == HLIR_BIN_FONE { GpuOpcode::GpuSetpNe }
     else { GpuOpcode::GpuAdd }
 }
 
 // Map a binary op tag to a GpuType.
-// IMPORTANT: the op-tag ranges interleave float-arith (7-11), int-logical (12-16),
-// int-compare Eq..Ge (17-22), float-compare FEq..FGe (23-28). The naive guard
-// [FAdd,FGe] swallowed integer comparisons into the float bucket (HlirOpLt=19 is
-// in [7,28]), so `i < n` was emitting setp.lt.f32 over %f. Classify explicitly.
+// IMPORTANT: classify explicit HLIR_BIN_* ranges. The legacy HlirOp* constants
+// are a different tag space and make source-level kernels lose compare width.
 // This is the WIDTH source ONLY for comparisons, where the HlirInstr result type
 // is bool and therefore useless for operand width; arithmetic/logical instrs
 // instead take width from instr.ty.kind at the HLIR_OP_BINARY site below.
 // World A (check.sio: gpu thread/block intrinsics typed i64) ⇒ every integer
 // operand of a comparison in these kernels is i64, so int-compare → GpuI64.
 fn hlir_bin_op_type(bin_op: i64) -> GpuType {
-    if bin_op >= HlirOpFEq && bin_op <= HlirOpFGe { GpuType::GpuF32 }
-    else if bin_op >= HlirOpFAdd && bin_op <= HlirOpFNeg { GpuType::GpuF32 }
-    else if bin_op >= HlirOpEq && bin_op <= HlirOpGe { GpuType::GpuI64 }
+    if bin_op >= HLIR_BIN_FOEQ && bin_op <= HLIR_BIN_FOGE { GpuType::GpuF32 }
+    else if bin_op >= HLIR_BIN_FADD && bin_op <= HLIR_BIN_FREM { GpuType::GpuF32 }
+    else if bin_op >= HLIR_BIN_EQ && bin_op <= HLIR_BIN_UGE { GpuType::GpuI64 }
     else { GpuType::GpuI64 }
+}
+
+fn gpu_kernel_bump_reg(kernel: GpuKernelIr, reg: i64, ty: GpuType) -> GpuKernelIr with Mut {
+    var k = kernel
+    if reg < 0 { return k }
+
+    let next = reg + 1
+    if ty == GpuType::GpuBool {
+        if next > k.max_reg_pred { k.max_reg_pred = next }
+    } else if ty == GpuType::GpuU32 {
+        if next > k.max_reg_u32 { k.max_reg_u32 = next }
+    } else if ty == GpuType::GpuI32 {
+        if next > k.max_reg_i32 { k.max_reg_i32 = next }
+    } else if ty == GpuType::GpuF32 {
+        if next > k.max_reg_f32 { k.max_reg_f32 = next }
+    } else if ty == GpuType::GpuF64 {
+        if next > k.max_reg_f64 { k.max_reg_f64 = next }
+    } else {
+        if next > k.max_reg_u64 { k.max_reg_u64 = next }
+    }
+
+    k
 }
 
 // Append a single GPU op to a GpuKernelIr. Returns the kernel with op appended.
 fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     if k.op_count < 1024 {
+        if op.opcode == GpuOpcode::GpuCvt {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.dst_ty)
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.src_ty)
+        } else if op.opcode == GpuOpcode::GpuSetpLt || op.opcode == GpuOpcode::GpuSetpLe ||
+                  op.opcode == GpuOpcode::GpuSetpEq || op.opcode == GpuOpcode::GpuSetpGe ||
+                  op.opcode == GpuOpcode::GpuSetpGt || op.opcode == GpuOpcode::GpuSetpNe {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, GpuType::GpuBool)
+            k = gpu_kernel_bump_reg(k, op.lhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.rhs_reg, op.ty)
+        } else if op.opcode == GpuOpcode::GpuLoadGlobal {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+        } else if op.opcode == GpuOpcode::GpuStoreGlobal {
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+        } else if op.opcode == GpuOpcode::GpuLoadParam {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+        } else if op.opcode == GpuOpcode::GpuBra {
+            k = gpu_kernel_bump_reg(k, op.pred_reg, GpuType::GpuBool)
+        } else {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.lhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.rhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+            k = gpu_kernel_bump_reg(k, op.pred_reg, GpuType::GpuBool)
+        }
         k.ops[k.op_count as usize] = op
         k.op_count = k.op_count + 1
     }
     k
+}
+
+fn hlir_gpu_type_size_bytes(ty: GpuType) -> i64 {
+    if ty == GpuType::GpuF64 || ty == GpuType::GpuI64 || ty == GpuType::GpuU64 || ty == GpuType::GpuPtr {
+        8
+    } else {
+        4
+    }
 }
 
 // Widen a 32-bit thread/block intrinsic result to i64 when the HLIR result type
@@ -1547,7 +1602,7 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         // vec_add_f64 — fixing the old hardcoded i32/f32). For comparisons the
         // result type is bool, useless for width, so fall back to the op-tag map
         // (int-compare → i64 over %rd, float-compare → f-width).
-        let is_compare = instr.bin_op >= HlirOpEq && instr.bin_op <= HlirOpFGe
+        let is_compare = instr.bin_op >= HLIR_BIN_EQ && instr.bin_op <= HLIR_BIN_FOGE
         if is_compare {
             op.ty = hlir_bin_op_type(instr.bin_op)
         } else {
@@ -1567,15 +1622,40 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         op.opcode = GpuOpcode::GpuStoreGlobal
         op.addr_reg = instr.store_ptr
         op.src_reg = instr.store_value
-        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        if instr.ty.kind == HlirTypeKind::HlirTypeVoid {
+            op.ty = GpuType::GpuI64
+        } else {
+            op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        }
         op.memory_space = GpuMemorySpace::GpuMemGlobal
         k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_GET_ELEMENT_PTR {
+        let elem_ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        let scale_reg = instr.result + 512
+
+        var scale = gpu_op_new()
+        scale.opcode = GpuOpcode::GpuMulImm
+        scale.dst_reg = scale_reg
+        scale.lhs_reg = instr.index
+        scale.rhs_imm = hlir_gpu_type_size_bytes(elem_ty)
+        scale.ty = GpuType::GpuU64
+        scale.dst_ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, scale)
+
+        var addr = gpu_op_new()
+        addr.opcode = GpuOpcode::GpuAdd
+        addr.dst_reg = instr.result
+        addr.lhs_reg = instr.base
+        addr.rhs_reg = scale_reg
+        addr.ty = GpuType::GpuU64
+        addr.dst_ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, addr)
     } else if op_kind == HLIR_OP_CONST {
         // Emit constant as immediate load into a virtual register
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
-        op.src_reg = 0
+        op.lhs_reg = 0
         op.rhs_imm = instr.constant.int_val
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
         k = gpu_kernel_append_op(k, op)
@@ -1584,7 +1664,7 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
-        op.src_reg = instr.src
+        op.lhs_reg = instr.src
         op.rhs_imm = 0
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
         k = gpu_kernel_append_op(k, op)
@@ -1695,11 +1775,22 @@ fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Pani
     while pi < func.param_count {
         if pi < 8 {
             let p = func.params[pi as usize]
+            let param_ty = hlir_type_kind_to_gpu(p.ty.kind)
             kernel.params[pi as usize] = GpuParam {
                 name: hlir_name_to_name(p.name),
-                ty: hlir_type_kind_to_gpu(p.ty.kind),
+                ty: param_ty,
             }
             kernel.param_count = kernel.param_count + 1
+
+            if p.value_id >= 0 {
+                var load_param = gpu_op_new()
+                load_param.opcode = GpuOpcode::GpuLoadParam
+                load_param.dst_reg = p.value_id
+                load_param.param_idx = pi
+                load_param.ty = param_ty
+                load_param.dst_ty = param_ty
+                kernel = gpu_kernel_append_op(kernel, load_param)
+            }
         }
         pi = pi + 1
     }
@@ -1718,7 +1809,14 @@ fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Pani
         // Lower instructions in this block
         var ii: i64 = 0
         while ii < block.instr_count {
-            kernel = hlir_instr_to_gpu_ops(kernel, block.instrs[ii as usize])
+            var instr = block.instrs[ii as usize]
+            if instr.op_kind == HLIR_OP_STORE {
+                let store_ty = hlir_function_lookup_local_type(func, instr.store_value)
+                if store_ty.kind != HlirTypeKind::HlirTypeVoid {
+                    instr.ty = store_ty
+                }
+            }
+            kernel = hlir_instr_to_gpu_ops(kernel, instr)
             ii = ii + 1
         }
 
