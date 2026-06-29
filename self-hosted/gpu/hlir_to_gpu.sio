@@ -2082,6 +2082,28 @@ fn hlir_function_to_epistemic_gpu_kernel(func: HlirFunction) -> GpuKernelIr with
 // Section 26 — End-to-end pipeline orchestrators (Sprint 28)
 // ============================================================================
 
+fn hlir_ptx_append_kernel_module(dst: PtxBuf, src: PtxBuf, include_header: bool) -> PtxBuf with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    if !include_header {
+        var newline_count: i64 = 0
+        while i < src.len && newline_count < 4 {
+            if src.data[i as usize] == 10 as i8 {
+                newline_count = newline_count + 1
+            }
+            i = i + 1
+        }
+    }
+    while i < src.len {
+        if out.len < 65536 {
+            out.data[out.len as usize] = src.data[i as usize]
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
 // Extract all kernel functions from an HlirModule, lower each to GpuKernelIr,
 // then lower each to PTX and concatenate into a single PtxBuf.
 fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
@@ -2097,7 +2119,7 @@ fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc
             let func = module.functions[fidx as usize]
             let gpu_kernel = hlir_function_to_gpu_kernel(func)
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -2129,7 +2151,7 @@ fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
                 gpu_kernel.shared_mem_bytes = tuned.shared_mem_bytes
             }
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -2187,7 +2209,7 @@ fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
     var pi: i64 = 0
     while pi < fused_count {
         let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, pi == 0)
         pi = pi + 1
     }
     combined
@@ -2208,7 +2230,7 @@ fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, 
             let func = module.functions[fidx as usize]
             let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -2676,7 +2698,7 @@ fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, P
     var pi: i64 = 0
     while pi < fused_count {
         let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, pi == 0)
         pi = pi + 1
     }
 
@@ -2738,7 +2760,7 @@ fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic
             combined = ptx_push_str(combined, "\n")
         }
         let ptx = gpu_lower_to_ptx(kernels[si as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, si == 0)
         si = si + 1
     }
 
@@ -2918,6 +2940,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 
     // Phase 7: Lower each kernel in topological order to PTX
     var loi: i64 = 0
+    var emitted_count: i64 = 0
     while loi < topo_count {
         // Find node at this topo position
         var node: i64 = -1
@@ -2932,7 +2955,8 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 
         if node >= 0 {
             let ptx = gpu_lower_to_ptx(kernels[node as usize])
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, emitted_count == 0)
+            emitted_count = emitted_count + 1
         }
 
         loi = loi + 1
