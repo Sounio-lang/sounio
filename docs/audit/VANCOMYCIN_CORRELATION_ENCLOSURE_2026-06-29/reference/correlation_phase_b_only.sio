@@ -1,0 +1,166 @@
+// Witness: Phase B only (correlation sweep). Exit code = failure count (0 = pass).
+// Assumes Phase A bands from production API; skips corner/grid checks.
+// Dispatch: docs/audit/VANCOMYCIN_CORRELATION_ENCLOSURE_2026-06-29/DISPATCH.md
+
+use clinical::vancomycin_pbpk::*
+use epistemic::knightian::*
+
+struct LcgState { seed: i64 }
+
+fn lcg_next(st: &!LcgState) -> i64 with Mut, Div, Panic {
+    let s = st.seed
+    let n = (1103515245 * s + 12345) % 2147483648
+    st.seed = n
+    n
+}
+
+fn lcg_unif(st: &!LcgState) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    (n as f64) / 2147483648.0
+}
+
+fn vs_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn vs_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn vs_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn vs_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { panic("negative exp domain") }
+    if x > 64.0 { panic("exp domain outside trough-screening contract") }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i32 = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i: i32 = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var j: i32 = 0
+        while j < (0 - k) {
+            result = result / 2.0
+            j = j + 1
+        }
+    }
+    result
+}
+
+fn vs_expm1_pos(theta: f64) -> f64 with Mut, Div, Panic {
+    if theta <= 0.0 { panic("invalid theta") }
+    if theta < 0.001 {
+        let t2 = theta * theta
+        let t3 = t2 * theta
+        let t4 = t3 * theta
+        let t5 = t4 * theta
+        return theta + t2 / 2.0 + t3 / 6.0 + t4 / 24.0 + t5 / 120.0
+    }
+    vs_exp(theta) - 1.0
+}
+
+fn vs_cmin(vc: f64, cl: f64, dose: f64, tau: f64) -> f64 with Mut, Div, Panic {
+    if vc <= 0.0 { panic("invalid vc") }
+    if cl <= 0.0 { panic("invalid cl") }
+    if dose <= 0.0 { panic("invalid dose") }
+    if tau <= 0.0 { panic("invalid tau") }
+    let theta = (cl * tau) / vc
+    let denom = vs_expm1_pos(theta)
+    if denom <= 0.0 { panic("invalid cmin denominator") }
+    (dose / vc) / denom
+}
+
+fn inside_band(x: f64, lo: f64, hi: f64) -> bool {
+    let scale = if hi > 1.0 { hi } else { 1.0 }
+    let eps = 0.000001 * scale
+    x >= lo - eps && x <= hi + eps
+}
+
+struct VcClPair { vc: f64, cl: f64 }
+
+fn corr_sample(st: &!LcgState,
+               vc_lo: f64, vc_hi: f64,
+               cl_lo: f64, cl_hi: f64,
+               rho: f64) -> VcClPair with Mut, Div, Panic {
+    let u1 = lcg_unif(st)
+    let u2 = lcg_unif(st)
+    let abs_rho = vs_abs(rho)
+    let mix = rho * (u1 - 0.5) + (1.0 - abs_rho) * (u2 - 0.5) + 0.5
+    let mix_c = vs_max(0.0, vs_min(1.0, mix))
+    let vc = vc_lo + (vc_hi - vc_lo) * u1
+    let cl = cl_lo + (cl_hi - cl_lo) * mix_c
+    VcClPair { vc: vc, cl: cl }
+}
+
+fn run_at_rho(st: &!LcgState,
+              vc_lo: f64, vc_hi: f64,
+              cl_lo: f64, cl_hi: f64,
+              dose: f64, tau: f64,
+              cmin_lo_band: f64, cmin_hi_band: f64,
+              rho: f64,
+              n: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var failures: i64 = 0
+    while i < n {
+        let pair = corr_sample(st, vc_lo, vc_hi, cl_lo, cl_hi, rho)
+        let cmin_actual = vs_cmin(pair.vc, pair.cl, dose, tau)
+        if !inside_band(cmin_actual, cmin_lo_band, cmin_hi_band) {
+            failures = failures + 1
+        }
+        i = i + 1
+    }
+    failures
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    let weight: f64 = 70.0
+    let crcl: f64 = 80.0
+    let dose: f64 = 1500.0
+    let tau: f64 = 12.0
+    let tdm: i64 = 3
+
+    let params = vp_default(weight, crcl)
+    let vc_box = vp_vc_to_pbox(&params, tdm)
+    let cl_box = vp_cl_to_pbox(&params, tdm)
+    let pbox = predict_cmin_knightian(weight, crcl, dose, tau, tdm)
+
+    let vc_lo = pb_lo_mean(&vc_box)
+    let vc_hi = pb_hi_mean(&vc_box)
+    let cl_lo = pb_lo_mean(&cl_box)
+    let cl_hi = pb_hi_mean(&cl_box)
+    let cmin_lo_band = pb_lo_mean(&pbox)
+    let cmin_hi_band = pb_hi_mean(&pbox)
+
+    if vc_lo <= 0.0 || vc_hi <= 0.0 || cl_lo <= 0.0 || cl_hi <= 0.0 { return 201 }
+    if vc_lo > vc_hi || cl_lo > cl_hi || cmin_lo_band > cmin_hi_band { return 202 }
+
+    var st = LcgState { seed: 1 }
+    let r1: f64 = 0.0 - 0.7
+    let r2: f64 = 0.0 - 0.3
+    let r3: f64 = 0.0
+    let r4: f64 = 0.3
+    let r5: f64 = 0.7
+    let nper: i64 = 50
+
+    var failures: i64 = 0
+    failures = failures + run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                                     cmin_lo_band, cmin_hi_band, r1, nper)
+    failures = failures + run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                                     cmin_lo_band, cmin_hi_band, r2, nper)
+    failures = failures + run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                                     cmin_lo_band, cmin_hi_band, r3, nper)
+    failures = failures + run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                                     cmin_lo_band, cmin_hi_band, r4, nper)
+    failures = failures + run_at_rho(&!st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                                     cmin_lo_band, cmin_hi_band, r5, nper)
+    return failures as i32
+}
