@@ -3,7 +3,22 @@
 Date: 2026-06-29
 Branch: `research/solver-ts3-parallel`, tip `83513addb`
 Supersedes: `MADAROS_128KB_CODE_PATCH_WALL_2026-06-29.md` (its root-cause is **wrong**)
-Status: **wall (a) RESOLVED** (commit `f5d4466cf`); issue (b) println(smt_solve) still open.
+Status: **BOTH RESOLVED** — wall (a) `f5d4466cf`; println (b) `af5610d84`. The DIMACS corpus
+now compiles AND runs to the correct answer end-to-end with the unmodified `println(result)`
+harness (small/mid600/bi_1000=1.35MB → 0=UNSAT; a SAT instance → 1).
+
+## RESOLUTION of (b) — imported-call return types not preseeded cross-module (`af5610d84`)
+
+The `println(smt_solve-result)` crash was NOT smt_solve-specific and NOT memory-corruption (the
+session's mid-investigation guess, disproved by an instrumented build). Real cause: the
+multi-module externs preseed registers cross-module STRUCT layouts but NOT function return
+types, so an IMPORTED callee's return type is empty in module.functions at body lowering →
+`let r = imported_i32_call()` isn't tagged scalar_kind=1 → println(r) routes to string `print`
+→ derefs the int as char* → SIGSEGV. Local calls work (own signatures are preseeded); test_smt
+passes only because it prints via string-compare. Fix: a module-global side table
+(LOWER_EXTERN_FN_RET_*: name-hash→1=int/2=f64) populated from sibling ASTs in the externs loop,
+consulted as a fallback in expr_result_is_int_ref. Trivial 2-file repro: `use mymod::*;
+println(ret5())` for `pub fn ret5()->i32`.
 
 ## RESOLUTION of (a) — the wall is the 4096 `flat_reloc` table cap (commit `f5d4466cf`)
 
