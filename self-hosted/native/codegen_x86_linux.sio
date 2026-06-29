@@ -6115,8 +6115,17 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     let rhs_float_marked = (flags / 4) & 1
     let lhs_known_int = if lhs >= 0 && lhs < 512 && (*nc).is_float_reg[lhs as usize] == 2 { 1 } else { 0 }
     let rhs_known_int = if rhs >= 0 && rhs < 512 && (*nc).is_float_reg[rhs as usize] == 2 { 1 } else { 0 }
-    let lhs_is_float = if lhs_float_marked == 1 && lhs_known_int == 0 { 1 } else { 0 }
-    let rhs_is_float = if rhs_float_marked == 1 && rhs_known_int == 0 { 1 } else { 0 }
+    // Path-sound float override: for arithmetic ops, also count an operand as float
+    // when the fixpoint typing (nc_compute_float_types) proved its register is a
+    // pure FLOAT — every reaching definition is float. This rescues f64 params /
+    // f64-derived intermediates that the lowering imm_flags bits miss (their idents
+    // classify via scalar_kind, unset for f64 params). Bitwise/shift/compare never
+    // override; they stay on the old marker-only path.
+    let op_is_arith = if op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv { 1 } else { 0 }
+    let lhs_typed_float = if op_is_arith == 1 && lhs >= 0 && lhs < 512 && (*nc).reg_type[lhs as usize] == 1 && (*nc).is_float_reg[lhs as usize] == 1 { 1 } else { 0 }
+    let rhs_typed_float = if op_is_arith == 1 && rhs >= 0 && rhs < 512 && (*nc).reg_type[rhs as usize] == 1 && (*nc).is_float_reg[rhs as usize] == 1 { 1 } else { 0 }
+    let lhs_is_float = if (lhs_float_marked == 1 || lhs_typed_float == 1) && lhs_known_int == 0 { 1 } else { 0 }
+    let rhs_is_float = if (rhs_float_marked == 1 || rhs_typed_float == 1) && rhs_known_int == 0 { 1 } else { 0 }
     if lhs_is_float == 1 || rhs_is_float == 1 {
         nc_core_load_temp_to_rax(nc, lhs)
         if lhs_is_float == 1 {
@@ -6385,9 +6394,93 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
     true
 }
 
+// Path-sound register float typing: a fixpoint over the IR that classifies every
+// register as UNKNOWN(0) / FLOAT(1) / INT(2) / CONFLICT(3). Each register's type
+// is the JOIN over all its definitions of that definition's computed type, and the
+// type of an ARITHMETIC result is derived from its OPERANDS' types (propagated) —
+// so `a*a` over f64 params is FLOAT while `i+1` over an int counter is INT, and a
+// register reused for both float and int across branches/loops becomes CONFLICT.
+// Iterating to a fixpoint (the lattice only moves up, so it converges) makes this
+// correct for loop-carried and merge values, unlike the linear is_float_reg scan.
+// nc_emit_core_binop treats an operand as float via this typing ONLY when it is a
+// pure FLOAT(1) — never when INT or CONFLICT — which is sound because FLOAT means
+// every reaching definition is float. f64 float literals still reach SSE via the
+// lowering imm_flags bits (their loadimm+marker pair makes them CONFLICT here).
+fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
+    var ty: [i64; 512] = [0; 512]
+    var changed = true
+    var iters = 0
+    while changed && iters < 24 {
+        changed = false
+        var i = 0
+        while i < (*func).instr_count && i < IR_MAX_INSTRS {
+            let op = (*func).instrs[i as usize].op
+            let d = (*func).instrs[i as usize].dst
+            let s1 = (*func).instrs[i as usize].src1
+            let s2 = (*func).instrs[i as usize].src2
+            let fl = (*func).instrs[i as usize].imm_flags
+            // def: type produced by this instruction (-1 = produces no recorded def)
+            var def = -1
+            if op == IrOpcode::IrNop {
+                if fl == IR_FLOAT_REG_MARKER_FLAG { def = 1 }
+            } else if op == IrOpcode::IrLoadImm {
+                def = 2
+            } else if op == IrOpcode::IrUnaryOp {
+                def = 2
+            } else if op == IrOpcode::IrCopy {
+                if s1 >= 0 && s1 < 512 { def = ty[s1 as usize] }
+            } else if op == IrOpcode::IrCall || op == IrOpcode::IrFieldGet || op == IrOpcode::IrIndexGet {
+                if fl == IR_FLOAT_REG_MARKER_FLAG { def = 1 } else { def = 2 }
+            } else if op == IrOpcode::IrBinOp {
+                let bop = (*func).instrs[i as usize].bin_op
+                if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
+                    let lf = ((fl / 2) & 1) == 1
+                    let rf = ((fl / 4) & 1) == 1
+                    let t1 = if s1 >= 0 && s1 < 512 { ty[s1 as usize] } else { 0 }
+                    let t2 = if s2 >= 0 && s2 < 512 { ty[s2 as usize] } else { 0 }
+                    if lf || rf || t1 == 1 || t2 == 1 {
+                        def = 1
+                    } else if t1 == 2 && t2 == 2 {
+                        def = 2
+                    } else {
+                        def = 0
+                    }
+                } else {
+                    def = 2
+                }
+            }
+            if d >= 0 && d < 512 && def >= 0 {
+                let cur = ty[d as usize]
+                var nv = cur
+                if cur == 0 {
+                    nv = def
+                } else if def == 0 {
+                    nv = cur
+                } else if cur == def {
+                    nv = cur
+                } else {
+                    nv = 3
+                }
+                if nv != cur {
+                    ty[d as usize] = nv
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        iters = iters + 1
+    }
+    var r = 0
+    while r < 512 {
+        (*nc).reg_type[r as usize] = ty[r as usize]
+        r = r + 1
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
     reset_function_state_mut(nc)
+    nc_compute_float_types(nc, func)
     let function_offset = (*nc).code.len
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
