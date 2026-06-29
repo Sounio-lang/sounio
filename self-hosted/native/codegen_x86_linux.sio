@@ -55,6 +55,11 @@ var NV2_RELOC_OFFSETS: [i64; 131072] = [0; 131072]
 var NV2_RELOC_KIND_CODES: [i64; 131072] = [0; 131072]
 var NV2_RELOC_IS_FUNCTIONS: [i64; 131072] = [0; 131072]
 var NV2_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
+// Capacity of the reloc table. Beyond it, relocs would be dropped -> unpatched call/branch
+// targets -> a CRASHING binary. So we set NV2_RELOC_OVERFLOW and LOUD-REJECT at ELF write
+// (mirrors a6c9a596f's IR_MAX_INSTRS loud-reject) rather than silently emit a broken ELF.
+let NV2_RELOC_CAP: i64 = 131072
+var NV2_RELOC_OVERFLOW: bool = false
 // Native-v2 direct-to-file ELF staging buffer (4 MiB). Module-scope BSS global
 // (Debt#4 ELF-cap fix: 256 KiB -> 4 MiB). Indexed directly by the file put_*
 // helpers (Option 2), exactly like NATIVE_ELF_BUF feeds nc_elf_put_*.
@@ -1347,6 +1352,7 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn native_v2_text_reset() with Mut, Panic {
     NATIVE_V2_TEXT_LEN = 0
+    NV2_RELOC_OVERFLOW = false
 }
 
 fn native_v2_text_byte_at(offset: i64) -> i8 with Panic, Div {
@@ -1677,12 +1683,16 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
-    if idx >= 0 && idx < 131072 {
+    if idx >= 0 && idx < NV2_RELOC_CAP {
         NV2_RELOC_OFFSETS[idx as usize] = patch_offset
         NV2_RELOC_KIND_CODES[idx as usize] = kind_code
         NV2_RELOC_IS_FUNCTIONS[idx as usize] = is_function
         NV2_RELOC_TARGET_INDICES[idx as usize] = target_index
         (*nc).flat_reloc_count = idx + 1
+    } else {
+        // Over capacity: would drop relocs -> unpatched calls. Flag for the loud reject
+        // at ELF write (no silently-broken binary).
+        NV2_RELOC_OVERFLOW = true
     }
 }
 
@@ -4655,7 +4665,7 @@ fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> 
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).flat_reloc_count && i < 131072 {
+    while i < (*nc).flat_reloc_count && i < NV2_RELOC_CAP {
         let patch_offset = NV2_RELOC_OFFSETS[i as usize]
         let kind_code = NV2_RELOC_KIND_CODES[i as usize]
         let is_function = NV2_RELOC_IS_FUNCTIONS[i as usize]
@@ -9461,6 +9471,14 @@ fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vadd
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
+    // Loud reject (mirrors a6c9a596f IR_MAX_INSTRS): if the reloc table overflowed, some
+    // call/branch targets are unpatched -> the ELF would crash. Refuse to write it.
+    if NV2_RELOC_OVERFLOW {
+        print("Error: relocation table overflow (> ")
+        print_int(NV2_RELOC_CAP)
+        print(" relocations) — refusing to emit a binary with unpatched call targets. Split the module.\n")
+        return 19
+    }
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
