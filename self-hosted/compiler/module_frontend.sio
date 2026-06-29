@@ -1330,17 +1330,25 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
 // callee symbol at the current fn_id when instr.name is empty.
 fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
     let old_id = instr.fn_id
-    if instr.name.len > 0 {
-        let new_id = ir_merge_find_function_name_index(module, instr.name)
+    var resolve_name = instr.name
+    if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
+        resolve_name = (*module).functions[old_id as usize].name
+    }
+    if resolve_name.len > 0 {
+        let new_id = ir_merge_find_function_name_index(module, resolve_name)
         if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
             return new_id
         }
     }
+    // Remap calls that still point at import stubs (ic=0) even when name-based
+    // lookup above failed — duplicate symbols can leave stale low fn_ids.
     if old_id >= 0 && old_id < (*module).fn_count {
-        let fallback_name = (*module).functions[old_id as usize].name
-        let new_id = ir_merge_find_function_name_index(module, fallback_name)
-        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
-            return new_id
+        if (*module).functions[old_id as usize].instr_count == 0 {
+            let stub_name = (*module).functions[old_id as usize].name
+            let new_id = ir_merge_find_function_name_index(module, stub_name)
+            if new_id >= 0 && new_id != old_id && (*module).functions[new_id as usize].instr_count > 0 {
+                return new_id
+            }
         }
     }
     old_id
@@ -1366,6 +1374,19 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
     }
 }
 
+fn ir_module_dump_find_name(module: &IrModule, label: Name, sym: Name) with IO, Mut, Div, Panic {
+    let idx = ir_merge_find_function_name_index(module, sym)
+    print("MERGE_DUMP: find(")
+    print(str_from_bytes(label.buf, label.len))
+    print(")=")
+    print_int(idx)
+    if idx >= 0 && idx < (*module).fn_count {
+        print(" ic=")
+        print_int((*module).functions[idx as usize].instr_count)
+    }
+    print("\n")
+}
+
 fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     print("MERGE_DUMP: fn_count=")
     print_int((*module).fn_count)
@@ -1373,20 +1394,17 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     let watch_pb = make_name("pb_vacuous")
     let watch_pred = make_name("predict_cmin_knightian")
     let watch_main = make_name("main")
-    let find_pb = ir_merge_find_function_name_index(module, watch_pb)
-    print("MERGE_DUMP: find(pb_vacuous)=")
-    print_int(find_pb)
-    if find_pb >= 0 && find_pb < (*module).fn_count {
-        print(" ic=")
-        print_int((*module).functions[find_pb as usize].instr_count)
-        print("\n")
-    } else {
-        print("\n")
-    }
+    ir_module_dump_find_name(module, make_name("pb_vacuous"), watch_pb)
+    ir_module_dump_find_name(module, make_name("pb_new"), make_name("pb_new"))
+    ir_module_dump_find_name(module, make_name("pb_lo_mean"), make_name("pb_lo_mean"))
+    ir_module_dump_find_name(module, make_name("vp_vc_to_pbox"), make_name("vp_vc_to_pbox"))
+    ir_module_dump_find_name(module, make_name("vp_default"), make_name("vp_default"))
     var fi: i64 = 0
     while fi < (*module).fn_count {
         let fname = (*module).functions[fi as usize].name
-        if ir_name_eq(fname, watch_pb) || ir_name_eq(fname, watch_pred) || ir_name_eq(fname, watch_main) {
+        if ir_name_eq(fname, watch_pb) || ir_name_eq(fname, watch_pred) || ir_name_eq(fname, watch_main)
+            || ir_name_eq(fname, make_name("pb_new")) || ir_name_eq(fname, make_name("pb_lo_mean"))
+            || ir_name_eq(fname, make_name("vp_vc_to_pbox")) || ir_name_eq(fname, make_name("vp_default")) {
             print("MERGE_DUMP: sym[")
             print_int(fi)
             print("] ")
@@ -1396,6 +1414,35 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
             print("\n")
         }
         fi = fi + 1
+    }
+    var vfi: i64 = 0
+    while vfi < (*module).fn_count {
+        if ir_name_eq((*module).functions[vfi as usize].name, make_name("vp_vc_to_pbox")) {
+            if (*module).functions[vfi as usize].instr_count > 0 {
+                print("MERGE_DUMP: vp_vc_to_pbox calls\n")
+                var ii: i64 = 0
+                while ii < (*module).functions[vfi as usize].instr_count {
+                    let ins = (*module).functions[vfi as usize].instrs[ii as usize]
+                    if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
+                        print("  call ii=")
+                        print_int(ii)
+                        print(" fn_id=")
+                        print_int(ins.fn_id)
+                        print(" name=")
+                        print(str_from_bytes(ins.name.buf, ins.name.len))
+                        if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+                            print(" ->")
+                            print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                            print(" ic=")
+                            print_int((*module).functions[ins.fn_id as usize].instr_count)
+                        }
+                        print("\n")
+                    }
+                    ii = ii + 1
+                }
+            }
+        }
+        vfi = vfi + 1
     }
     var pfi: i64 = 0
     while pfi < (*module).fn_count {
@@ -1430,32 +1477,48 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
         }
         pfi = pfi + 1
     }
+    // User main is the smallest `main` body (lowest instr_count) — merged modules
+    // and debug helpers can append larger `main` stubs later in fn_id space.
+    var user_main: i64 = 0 - 1
+    var user_main_ic: i64 = 1000000000
     var mfi: i64 = 0
     while mfi < (*module).fn_count {
         if ir_name_eq((*module).functions[mfi as usize].name, watch_main) {
-            print("MERGE_DUMP: main calls\n")
-            var ii: i64 = 0
-            while ii < (*module).functions[mfi as usize].instr_count {
-                let ins = (*module).functions[mfi as usize].instrs[ii as usize]
-                if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
-                    print("  call ii=")
-                    print_int(ii)
-                    print(" fn_id=")
-                    print_int(ins.fn_id)
-                    print(" name=")
-                    print(str_from_bytes(ins.name.buf, ins.name.len))
-                    if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
-                        print(" ->")
-                        print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
-                        print(" ic=")
-                        print_int((*module).functions[ins.fn_id as usize].instr_count)
-                    }
-                    print("\n")
-                }
-                ii = ii + 1
+            let mic = (*module).functions[mfi as usize].instr_count
+            if mic > 0 && mic < user_main_ic {
+                user_main = mfi
+                user_main_ic = mic
             }
         }
         mfi = mfi + 1
+    }
+    if user_main >= 0 {
+        print("MERGE_DUMP: user_main_idx=")
+        print_int(user_main)
+        print(" ic=")
+        print_int((*module).functions[user_main as usize].instr_count)
+        print("\n")
+        print("MERGE_DUMP: user_main calls\n")
+        var ii: i64 = 0
+        while ii < (*module).functions[user_main as usize].instr_count {
+            let ins = (*module).functions[user_main as usize].instrs[ii as usize]
+            if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
+                print("  call ii=")
+                print_int(ii)
+                print(" fn_id=")
+                print_int(ins.fn_id)
+                print(" name=")
+                print(str_from_bytes(ins.name.buf, ins.name.len))
+                if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+                    print(" ->")
+                    print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                    print(" ic=")
+                    print_int((*module).functions[ins.fn_id as usize].instr_count)
+                }
+                print("\n")
+            }
+            ii = ii + 1
+        }
     }
 }
 
@@ -1464,21 +1527,25 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
 fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, Panic {
     var out = module
     ir_module_resolve_named_calls(&! out)
-    // Write whole IrInstr slots back: in-place fn_id patches through &! out can be
-    // dropped by lean_single on nested array elements (same family as Box deref bug).
-    var fi: i64 = 0
-    while fi < out.fn_count {
-        var ii: i64 = 0
-        while ii < out.functions[fi as usize].instr_count {
-            let op = out.functions[fi as usize].instrs[ii as usize].op
-            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                var ins = out.functions[fi as usize].instrs[ii as usize]
-                ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
-                out.functions[fi as usize].instrs[ii as usize] = ins
+    // Two passes: duplicate import stubs (ic=0) can alias lowered bodies under the
+    // same name at higher fn_id; first pass may leave stale low indices.
+    var pass: i64 = 0
+    while pass < 2 {
+        var fi: i64 = 0
+        while fi < out.fn_count {
+            var ii: i64 = 0
+            while ii < out.functions[fi as usize].instr_count {
+                let op = out.functions[fi as usize].instrs[ii as usize].op
+                if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
+                    var ins = out.functions[fi as usize].instrs[ii as usize]
+                    ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
+                    out.functions[fi as usize].instrs[ii as usize] = ins
+                }
+                ii = ii + 1
             }
-            ii = ii + 1
+            fi = fi + 1
         }
-        fi = fi + 1
+        pass = pass + 1
     }
     out
 }

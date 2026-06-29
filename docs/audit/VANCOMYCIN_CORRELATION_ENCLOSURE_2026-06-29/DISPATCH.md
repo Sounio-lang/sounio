@@ -2,7 +2,7 @@
 
 **Opened:** 2026-06-29  
 **Blocker-ID:** `BLK-20260629-stdlib-vancomycin-correlation-enclosure`  
-**Status:** open — reclassified `compiler-semantics` (Madaros PBox marginal read)  
+**Status:** open — E2 bisection complete; compiler fix in progress (`module_frontend.sio`)  
 **Severity:** B1 (clinical E2E 2/3; dissertação Fréchet gate blocked on Madaros default)  
 **Class:** `compiler-semantics` (multimodule struct return / field read) — **not** `stdlib-math`  
 **Owner:** unassigned  
@@ -80,7 +80,32 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/clinical/test_vancomy
 
 ---
 
-## §4 — Root-cause hypothesis (E2)
+## §4 — IR dump evidence (E2, `SOUNIO_DUMP_MERGED_CALLS=1`)
+
+Merged module (59 fn) for `vc_pbox_lo_probe.sio`:
+
+| Symbol | fn_id | instr_count | Note |
+|---|---:|---:|---|
+| `vp_default` | 1 | 22 | lowered |
+| `vp_vc_to_pbox` | 2 | 35 | lowered |
+| `pb_lo_mean` | **3** | **0** | **import stub** |
+| `pb_lo_mean` | **21** | **3** | **real body** |
+| `pb_new` | 18 | 26 | lowered |
+| `ir_merge_find(pb_lo_mean)` | — | — | returns **21** (correct) |
+
+**Accessor bisection (Madaros vs lean_single, weight=70 crcl=80 dose=1500 tau=12 tdm=3):**
+
+| Witness | Madaros | lean_single |
+|---|---:|---:|
+| `pbox_vacuous_read.sio` (vacuous `pb_confidence`) | 0 | 0 |
+| `predict_confidence_probe.sio` | 211 | 0 |
+| `predict_gap_probe.sio` | 211 | 0 |
+| `predict_lo_mean_probe.sio` | 211 | 0 |
+| `vc_pbox_lo_probe.sio` | 211 | 0 |
+
+Vacuous early-return path OK; **production** `predict_cmin_knightian` + any `PBox` field read fails on Madaros (exit **211** = `lo/conf <= 0`), while lean_single passes. Not an enclosure-math defect.
+
+## §5 — Root-cause hypothesis (E2)
 
 1. **Not** Fréchet monotonicity math: lean_single runs the **full** Phase A + Phase B test green.
 2. **Not** Phase B correlation sampler in isolation: Phase A never runs on Madaros because marginals read as non-positive.
@@ -89,7 +114,7 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/clinical/test_vancomy
 
 ---
 
-## §5 — Acceptance gates
+## §6 — Acceptance gates
 
 | Gate | Required |
 |---|---|
@@ -104,7 +129,7 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/clinical/test_vancomy
 
 ---
 
-## §6 — Next action
+## §7 — Next action
 
 1. Compiler lane: IR dump merged calls for `vp_vc_to_pbox` consumer path (`SOUNIO_DUMP_MERGED_CALLS=1`), compare with resolved `pb_new` / field-layout indices (same playbook as `BLK-20260629-stdlib-sret-pbox-clinical`).
 2. Extend merge-finalize fix if additional stale `fn_id` or struct-return slots affect marginal `PBox` lifts.
@@ -112,11 +137,15 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/clinical/test_vancomy
 
 ---
 
-## §7 — Reference files
+## §8 — Reference files
 
 | File | Role |
 |---|---|
 | `reference/vc_pbox_lo_probe.sio` | **Primary** isolator |
+| `reference/predict_lo_mean_probe.sio` | Production predict → `pb_lo_mean` |
+| `reference/predict_confidence_probe.sio` | Production predict → `pb_confidence` |
+| `reference/predict_gap_probe.sio` | Production predict → `pb_gap` |
+| `reference/pb_new_direct_probe.sio` | Direct `pb_new` (Madaros **139**) |
 | `reference/correlation_band_probe.sio` | Marginal + Cmin band contract |
 | `reference/correlation_phase_a_only.sio` | Phase A failure count (= exit) |
 | `reference/correlation_phase_b_only.sio` | Phase B failure count (= exit) |

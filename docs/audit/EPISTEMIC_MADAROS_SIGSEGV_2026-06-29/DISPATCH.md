@@ -5,7 +5,7 @@
 **Status:** open  
 **Severity:** B2 (epistemic E2E 18/60 on Madaros; 10× exit 139 in `epistemic` filter)  
 **Class:** `compiler-runtime` (Madaros multimodule native) — **not** stdlib epistemic math  
-**Owner:** unassigned  
+**Owner:** Composer/compiler lane (serialized with correlation PBox fix)  
 **Lane:** Madaros default + `tests/run-pass/epistemic_*`  
 **Worktree:** `/workspace/sounio`  
 **Branch:** `research/solver-ts3-parallel`  
@@ -125,6 +125,12 @@ Forensic playbook: gdb on Madaros ELF, `SOUNIO_DUMP_MERGED_CALLS=1`, compare fn_
 
 ---
 
-## §8 — Next action
+## §8 — Coordination
+
+See `docs/audit/COORDINATION_2026-06-29_PBOX_LANES.md`. **No parallel edits** to `module_frontend.sio` on other worktrees until this cluster closes or handoff is recorded.
+
+GPU lanes (`/tmp/sounio-gpu-*`) and `claude/codegen-largestruct-fix` are **disjoint** (no active `module_frontend` conflict at tip).
+
+## §9 — Next action
 
 Assign compiler lane owner to bisect `epistemic_bmi.sio` + `epistemic_mcts.sio` on Madaros vs lean_single codegen diff. Stdlib lane: **read-only** audit + witness pins — no math edits on this Blocker-ID.
