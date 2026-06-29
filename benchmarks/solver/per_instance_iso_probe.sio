@@ -1,0 +1,69 @@
+//@ run-pass
+//@ description: in a fresh process touching ONE instance only, is β=0 stable across β-mixed solves?
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+fn gen(ctx: &!SmtContext, n_vars: i32, n_clauses: i32, seed: i64) with Mut, Div {
+    var st: i64 = seed
+    let m: i64 = 2147483648
+    var c: i32 = 0
+    while c < n_clauses {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var picked: [i32; 3] = [0 as i32; 3]
+        var k: i32 = 0
+        while k < 3 {
+            var v: i32 = 0
+            var ok: i32 = 0
+            while ok == 0 {
+                let raw = lcg_next(&! st)
+                v = ((raw * (n_vars as i64)) / m) as i32
+                ok = 1
+                var j: i32 = 0
+                while j < k {
+                    if picked[j] == v { ok = 0 }
+                    j = j + 1
+                }
+            }
+            picked[k] = v
+            let praw = lcg_next(&! st)
+            let pol = ((praw * 2) / m) as i32
+            lits[k] = v * 2 + pol
+            k = k + 1
+        }
+        smt_add_clause(ctx, &lits, 3)
+        c = c + 1
+    }
+}
+
+fn cell(seed: i64, beta_x100: i32) -> i32 with Mut, Div {
+    var ctx = smt_new()
+    gen(&! ctx, 50, 300, seed)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, 5)
+    smt_set_disc_beta_scale(&! ctx, (beta_x100 as f64) / 100.0)
+    let _r = smt_solve(&! ctx)
+    return smt_get_conflicts(&ctx)
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    // one instance only; β=0 should stay = clean value (99 for 3013) across β-mixed solves
+    let c1 = cell(3013, 0)
+    let c2 = cell(3013, 100)
+    let c3 = cell(3013, 0)
+    print("3013 b0_first="); print_int(c1 as i64)
+    print(" b100="); print_int(c2 as i64)
+    print(" b0_again="); print_int(c3 as i64)
+    if c1 == c3 { println("  => per-instance process is CLEAN (b0 stable)") }
+    else { println("  => per-instance NOT clean (need per-cell)") }
+    return 0
+}
