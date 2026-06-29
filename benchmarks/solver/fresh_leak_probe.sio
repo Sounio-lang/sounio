@@ -1,0 +1,91 @@
+//@ run-pass
+//@ description: locate the leak — after a contaminating solve, is a fresh smt_new() ctx actually zeroed?
+
+use theorem::smt::*
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+fn gen(ctx: &!SmtContext, n_vars: i32, n_clauses: i32, seed: i64) with Mut, Div {
+    var st: i64 = seed
+    let m: i64 = 2147483648
+    var c: i32 = 0
+    while c < n_clauses {
+        var lits: [i32; 8] = [0 as i32; 8]
+        var picked: [i32; 3] = [0 as i32; 3]
+        var k: i32 = 0
+        while k < 3 {
+            var v: i32 = 0
+            var ok: i32 = 0
+            while ok == 0 {
+                let raw = lcg_next(&! st)
+                v = ((raw * (n_vars as i64)) / m) as i32
+                ok = 1
+                var j: i32 = 0
+                while j < k {
+                    if picked[j] == v { ok = 0 }
+                    j = j + 1
+                }
+            }
+            picked[k] = v
+            let praw = lcg_next(&! st)
+            let pol = ((praw * 2) / m) as i32
+            lits[k] = v * 2 + pol
+            k = k + 1
+        }
+        smt_add_clause(ctx, &lits, 3)
+        c = c + 1
+    }
+}
+
+fn contaminate(seed: i64) with Mut, Div {
+    var ctx = smt_new()
+    gen(&! ctx, 50, 300, seed)
+    smt_set_no_ple(&! ctx, 1)
+    smt_set_score_mode(&! ctx, 5)
+    smt_set_disc_beta_scale(&! ctx, 0.0)
+    let _r = smt_solve(&! ctx)
+}
+
+// count garbage entries in a SUPPOSEDLY-fresh ctx (no clauses added yet)
+fn count_garbage(label: i32) with IO, Mut, Div {
+    var ctx = smt_new()
+    var i: i32 = 0
+    var g_disc: i32 = 0
+    var g_actm: i32 = 0
+    var g_actv: i32 = 0
+    var g_pa: i32 = 0
+    var g_pb: i32 = 0
+    while i < 1024 {
+        if smt_get_disc_s0(&ctx, i) != 0.0 { g_disc = g_disc + 1 }
+        if smt_get_act_mean(&ctx, i) != 0.0 { g_actm = g_actm + 1 }
+        if smt_get_act_var(&ctx, i) != 0.0 { g_actv = g_actv + 1 }
+        if smt_get_phase_alpha(&ctx, i) != 1.0 { g_pa = g_pa + 1 }
+        if smt_get_phase_beta(&ctx, i) != 1.0 { g_pb = g_pb + 1 }
+        i = i + 1
+    }
+    print("fresh-ctx garbage @"); print_int(label as i64)
+    print(": disc_s0!=0="); print_int(g_disc as i64)
+    print(" act_mean!=0="); print_int(g_actm as i64)
+    print(" act_var!=0="); print_int(g_actv as i64)
+    print(" phase_a!=1="); print_int(g_pa as i64)
+    print(" phase_b!=1="); print_int(g_pb as i64)
+    println(" (all should be 0 for a clean smt_new)")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    count_garbage(0)            // fresh ctx, no prior solve
+    contaminate(3000)
+    count_garbage(1)            // fresh ctx after one solve
+    contaminate(3013)
+    contaminate(3028)
+    count_garbage(2)            // fresh ctx after more solves
+    return 0
+}
