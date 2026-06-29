@@ -1,0 +1,84 @@
+// cyp3a45_midazolam.sio — CYP3A4/5 pharmacogenomics for midazolam.
+//
+// Midazolam is ~95% CYP3A-cleared (CYP3A4 + CYP3A5). Two pharmacogenes scale the
+// CYP3A intrinsic clearance CLint_h (which then flows through the well-stirred
+// first-pass and systemic clearance in ddi/cyp3a_competitive.sio):
+//
+//   CYP3A5*3 (rs776746): non-expressers (*3/*3) lack functional CYP3A5; *1
+//     carriers ("expressers") have higher total CYP3A activity.
+//       geno 0 = non-expresser (*3/*3, reference)   1 = expresser (*1 carrier)
+//   CYP3A4*22 (rs35599367): carriers have reduced CYP3A4 expression -> lower CL.
+//       carrier 0 = non-carrier (reference)          1 = *22 carrier
+//
+// Mirrors the pgx/cyp2d6_haloperidol.sio pattern (scale · prior_conf · cv · freq).
+// Sources: Kuehl 2001 (CYP3A5*3), Wang 2011/2014 (CYP3A4*22), Klein 2013
+// (frequencies), Shih 2013 (midazolam CYP3A5 effect).
+
+// CYP3A5 expresser status -> multiplicative scale on the CYP3A clearance fraction.
+pub fn mdz_cyp3a5_cl_scale(geno: i32) -> f64 {
+    if geno == 1 { return 1.30 }   // expresser: ~30% higher CYP3A clearance
+    return 1.0                      // non-expresser (reference)
+}
+
+// CYP3A4*22 carrier status -> multiplicative scale on the CYP3A clearance fraction.
+pub fn mdz_cyp3a4_22_cl_scale(carrier: i32) -> f64 {
+    if carrier == 1 { return 0.75 }  // *22 carrier: ~25% lower CYP3A4 clearance
+    return 1.0                        // non-carrier (reference)
+}
+
+// Adjust an intrinsic clearance for both CYP3A genes (CYP3A = fm of total).
+pub fn mdz_cyp3a_adjusted_clint(base_clint: f64, cyp3a5_geno: i32, cyp3a4_22: i32) -> f64 with Div, Panic {
+    let fm: f64 = 0.95
+    let scale = mdz_cyp3a5_cl_scale(cyp3a5_geno) * mdz_cyp3a4_22_cl_scale(cyp3a4_22)
+    let cl_other = base_clint * (1.0 - fm)
+    let cl_3a    = base_clint * fm * scale
+    return cl_other + cl_3a
+}
+
+// Prior confidence per CYP3A5 genotype (epistemic; well-characterised reference).
+pub fn mdz_cyp3a5_prior_conf(geno: i32) -> f64 {
+    if geno == 1 { return 0.60 }   // expresser: moderate data, more variability
+    return 0.75                     // non-expresser: well-characterised reference
+}
+
+// Coefficient of variation for the CYP3A clearance scale (GUM variance).
+pub fn mdz_cyp3a5_cl_cv(geno: i32) -> f64 {
+    if geno == 1 { return 0.35 }
+    return 0.25
+}
+
+// European allele/phenotype frequencies (CYP3A5 non-expresser dominant).
+pub fn mdz_cyp3a5_freq_european(geno: i32) -> f64 {
+    if geno == 0 { return 0.85 }   // non-expresser (*3/*3)
+    if geno == 1 { return 0.15 }   // expresser (*1 carrier)
+    return 0.0
+}
+
+// Sample a CYP3A5 genotype from a uniform draw u in [0,1).
+pub fn mdz_cyp3a5_sample(u: f64) -> i32 {
+    if u < 0.85 { return 0 }
+    return 1
+}
+
+// ─── Smoke tests ─────────────────────────────────────────────────────────────
+// Expresser raises CLint above the non-expresser reference.
+fn test_mdz_cyp3a5_expresser_higher() -> bool with Div, Panic {
+    let base = 1090.0
+    let non = mdz_cyp3a_adjusted_clint(base, 0, 0)
+    let exp = mdz_cyp3a_adjusted_clint(base, 1, 0)
+    return exp > non
+}
+
+// CYP3A4*22 carrier lowers CLint below reference.
+fn test_mdz_cyp3a4_22_lower() -> bool with Div, Panic {
+    let base = 1090.0
+    let non = mdz_cyp3a_adjusted_clint(base, 0, 0)
+    let car = mdz_cyp3a_adjusted_clint(base, 0, 1)
+    return car < non
+}
+
+// European frequencies sum to ~1.
+fn test_mdz_cyp3a5_freq_sum() -> bool {
+    let s = mdz_cyp3a5_freq_european(0) + mdz_cyp3a5_freq_european(1)
+    return s > 0.999 && s < 1.001
+}

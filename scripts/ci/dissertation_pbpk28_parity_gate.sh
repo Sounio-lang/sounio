@@ -860,3 +860,60 @@ halo_series_rmse d2occ "D2 occupancy" "HALOPERIDOL_D2_OCCUPANCY_PARITY_PASS" "HA
 
 echo
 echo "[pbpk28-parity] haloperidol CASO II canonical: plasma + BBB Kpuu + D2 occupancy all within ${RMSE_THRESHOLD_PCT}% RMSE (4th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cases 17-19: Midazolam — fifth canonical drug, the suite's first CYP3A
+# drug–drug interaction (DDI). PBPK14 well-stirred + mechanistic oral first-pass
+# (F = Fa·FG·FH) + competitive CYP3A inhibition by ketoconazole.
+#   17  solo oral PK                         Node ↔ Sounio, <1% RMSE
+#   18  ketoconazole-inhibited oral PK       Node ↔ Sounio, <1% RMSE
+#   19  DDI inhibition curve (AUCR vs I/Ki)  Node ↔ Sounio, <1% RMSE
+# A single hepatic CLint_h drives BOTH first-pass survival FH and systemic CL_h
+# (well-stirred closed form), so inhibition raises FH and lowers CL_h
+# consistently — no double-count — and the iconic oral midazolam+ketoconazole AUC
+# rise (~15×) emerges honestly (validated in validation/midazolam_ddi.sio). The
+# inhibitor is held static at steady state; both sides use a FIXED-STEP RK4
+# systemic integrator (the production scenario uses adaptive Tsit5 — an
+# intractable bit-for-bit parity target; gap disclosed in the gist).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Cases 17-19: Sounio ↔ Node midazolam (solo PK + ketoconazole DDI + AUCR curve)"
+
+MDZ_NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_midazolam_node.mjs"
+MDZ_SIO_LOG="$OUT_DIR/mdz_sounio.txt"
+MDZ_NODE_LOG="$OUT_DIR/mdz_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_midazolam.sio > "$MDZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case17] FAIL: Sounio midazolam ref returned non-zero" >&2
+  tail -n 20 "$MDZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_MIDAZOLAM_PARITY_DONE$' "$MDZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case17] FAIL: Sounio midazolam ref did not emit DONE" >&2; exit 1; fi
+node "$MDZ_NODE_RUNNER" > "$MDZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case17] FAIL: Node midazolam runner returned non-zero" >&2
+  tail -n 20 "$MDZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_MIDAZOLAM_PARITY_DONE$' "$MDZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case17] FAIL: Node midazolam runner did not emit DONE" >&2; exit 1; fi
+
+# RMSE over one MDZ|<series> (both logs emit them in the same order).
+mdz_series_rmse() {  # $1=series $2=expected-n $3=label $4=pass-marker $5=fail-marker
+  paste <(grep "^MDZ|$1=" "$MDZ_SIO_LOG"  | sed "s/^MDZ|$1=//") \
+        <(grep "^MDZ|$1=" "$MDZ_NODE_LOG" | sed "s/^MDZ|$1=//") \
+  | awk -v THR="$RMSE_THRESHOLD_PCT" -v EXP="$2" -v PASS="$4" -v FAILM="$5" -v LAB="$3" '
+      {d=($1+0)-($2+0); ss+=d*d; n++; a=($1<0?-($1+0):($1+0)); if(a>pk)pk=a}
+      END{ if(n!=EXP+0){printf "%s row count %d != %d\n",FAILM,n,EXP; exit 1}
+        rmse=sqrt(ss/n); pct=(pk>0)?100*rmse/pk:0;
+        if(pct<THR+0) printf "%s %d/%d within %s%% RMSE (%s, peak=%.4g)\n",PASS,n,EXP,THR,LAB,pk;
+        else { printf "%s %.4f%% RMSE (%s)\n",FAILM,pct,LAB; exit 1 } }'
+}
+
+echo "[pbpk28-parity:case17] midazolam solo oral PK (5 mg)"
+mdz_series_rmse plasma_solo 12 "plasma mg/L (solo)" "MIDAZOLAM_SOLO_PK_PARITY_PASS" "MIDAZOLAM_SOLO_PK_PARITY_FAIL"
+
+echo "[pbpk28-parity:case18] midazolam + ketoconazole inhibited oral PK (CYP3A DDI)"
+mdz_series_rmse plasma_inh 12 "plasma mg/L (+keto)" "MIDAZOLAM_DDI_PK_PARITY_PASS" "MIDAZOLAM_DDI_PK_PARITY_FAIL"
+
+echo "[pbpk28-parity:case19] midazolam DDI inhibition curve (AUCR across I/Ki, oral ~15× at I/Ki=8)"
+mdz_series_rmse aucr 8 "AUC ratio" "MIDAZOLAM_AUCR_PARITY_PASS" "MIDAZOLAM_AUCR_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity] midazolam CYP3A DDI canonical: solo PK + ketoconazole-inhibited PK + AUCR curve all within ${RMSE_THRESHOLD_PCT}% RMSE (5th canonical drug)"
