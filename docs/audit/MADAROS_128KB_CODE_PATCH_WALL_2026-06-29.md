@@ -75,6 +75,40 @@ corpus compiles to ~864KB AND **RUNS** to a real `SOUNIO_DIMACS_RESULT 0|1` (was
 the primary gate (println(i32) is already fixed so RUNs work). 4. STRETCH: the 4096-clause
 corpus compiles AND runs (also needs the 205-function compiler crash resolved).
 
+## UPDATE 2026-06-29 — PRECISE root cause (direct investigation)
+
+The "patch path" framing above is partly a red herring. With Debt#4 applied, the WRITE/PATCH
+paths are already correct to 4MB: `nc_emit_byte` (1394) dual-writes mirror+code.bytes;
+`nc_patch_u32_le` (1649) mirrors via `native_v2_text_patch_u8` (now `<4194304`);
+`apply_relocations_into` (4653) routes ALL relocs (call/rodata/data/fn-rip) through
+`nc_patch_u32_le`; the reloc applicability checks (`native_v2_reloc_is_call_patch` 4638,
+`is_rip_disp_patch` 4643) read via `native_v2_text_byte_at` (mirror, `<4194304`). Yet the
+864KB corpus still SIGSEGVs. The actual gap:
+
+**The by-value BUILTIN emit path truncates at the 128KB `CodeBuffer`.** Builtins
+(`print_int`/`print_f64`/etc.) are emitted by the by-value `emit_*` helpers (encode.sio)
+into a `CodeBuffer { bytes:[i8;131072] }` COPY, then `native_v2_persist_builtin_emit_into`
+(codegen_x86_linux.sio:3674) syncs them to the mirror via `native_v2_text_sync_from_narrow`
+(1350), whose loop at **line 1357** is `while i < (*nc).code.len && i < 131072 && i < 4194304`
+— bounded at 131072. Debt#4 added the `4194304` clause but CANNOT drop `i < 131072` because
+the SOURCE (`code.bytes`) is the 131072 by-value buffer. So any builtin emitted at code
+offset ≥131072 in a large module is **truncated at the source, before the mirror** → wrong
+`.text` → crash. (The dense-but-wrong `.text` is the user-function code via nc_emit_byte;
+the wrong spots are where builtins landed beyond 128KB.)
+
+This IS the aggregate-trap `CodeBuffer` (the struct Debt#4 deliberately did not widen). The
+mirror widening cannot rescue bytes lost in the 128KB by-value buffer upstream.
+
+**The real fix (a major refactor, two options):**
+- (A) Make `CodeBuffer.bytes` a module-level GLOBAL like the working 16MB `NATIVE_ELF_BUF`
+  (codegen_x86_linux.sio:40), so the by-value emit no longer caps at 131072. Touches the
+  struct in encode.sio/encode_core.sio/contract.sio/codegen.sio/codegen_x86_linux.sio — risk
+  the documented by-value-aggregate typecheck pressure, but a global (not by-value field)
+  sidesteps it (NATIVE_ELF_BUF proves multi-MB globals work).
+- (B) Re-route every builtin emitter (emit_builtin_print_int/_f64/...) through the
+  mirror-aware `nc_emit_byte` instead of the by-value `CodeBuffer emit_*` helpers.
+Either way, pair with Debt#4 (recover/debt4-4mb-wip) and verify the 600-clause corpus RUNS.
+
 ## Why deferred
 
 This is a multi-site codegen campaign on the aggregate-trap `CodeBuffer`. Three consecutive
