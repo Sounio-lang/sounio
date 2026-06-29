@@ -39,6 +39,28 @@ require_grep() {
     fi
 }
 
+require_egrep() {
+    local label="$1"
+    local pattern="$2"
+    local file="$3"
+    if grep -Eq "$pattern" "$file"; then
+        pass "$label"
+    else
+        fail "$label" "missing extended pattern $pattern in $file"
+    fi
+}
+
+reject_egrep() {
+    local label="$1"
+    local pattern="$2"
+    local file="$3"
+    if grep -Eq "$pattern" "$file"; then
+        fail "$label" "unexpected extended pattern $pattern in $file"
+    else
+        pass "$label"
+    fi
+}
+
 build_gpu() {
     local label="$1"
     local src="$2"
@@ -93,6 +115,21 @@ build_gpu "gpu_vec_add_e2e_builds" "tests/run-pass/gpu_vec_add_e2e.sio" "$E2E_PT
 require_grep "gpu_vec_add_e2e_entry" "\\.visible \\.entry vec_add" "$E2E_PTX"
 require_grep "gpu_vec_add_e2e_labels" "LBB0_" "$E2E_PTX"
 require_grep "gpu_vec_add_e2e_branches" "bra LBB0_" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_declares_pred_regs" "\\.reg \\.pred %p<[0-9]+>;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_declares_u64_regs" "\\.reg \\.b64 %rd<[0-9]+>;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_n_param" "ld\\.param\\.u64 %rd0, \\[n\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_a_param" "ld\\.param\\.u64 %rd1, \\[a\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_b_param" "ld\\.param\\.u64 %rd2, \\[b\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_c_param" "ld\\.param\\.u64 %rd3, \\[c\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_compares_tid_to_n" "setp\\.lt\\.s64 %p[0-9]+, %rd[0-9]+, %rd0;" "$E2E_PTX"
+reject_egrep "gpu_vec_add_e2e_rejects_degenerate_compare" "setp\\.[a-z]+\\.[a-z0-9]+ %p[0-9]+, %(r|rd)0, %(r|rd)0;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_scales_index" "mul\\.lo\\.u64 %rd[0-9]+, %rd[0-9]+, 8;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_addresses_a" "add\\.u64 %rd[0-9]+, %rd1, %rd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_addresses_b" "add\\.u64 %rd[0-9]+, %rd2, %rd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_addresses_c" "add\\.u64 %rd[0-9]+, %rd3, %rd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_loads_inputs" "ld\\.global\\.s64 %rd[0-9]+, \\[%rd[0-9]+\\];" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_adds_inputs" "add\\.s64 %rd[0-9]+, %rd[0-9]+, %rd[0-9]+;" "$E2E_PTX"
+require_egrep "gpu_vec_add_e2e_stores_output" "st\\.global\\.s64 \\[%rd[0-9]+\\], %rd[0-9]+;" "$E2E_PTX"
 
 echo ""
 echo "Summary: pass=$PASS fail=$FAIL"
