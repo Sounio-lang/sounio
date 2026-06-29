@@ -69,7 +69,7 @@ def generate(cnf_path: Path, out_path: Path, expected: str, instance_id: str) ->
         "use theorem::smt::*",
         "",
     ]
-    block_size = 96
+    block_size = 32
     for block_start in range(0, len(cnf.clauses), block_size):
         block_idx = block_start // block_size
         lines.append(f"fn add_block_{block_idx}(ctx: &!SmtContext) with Mut, Div {{")
