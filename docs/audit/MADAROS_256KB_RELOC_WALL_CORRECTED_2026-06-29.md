@@ -34,7 +34,20 @@ the 4096th reloc happened to land). The "256KB" was a coincidence of reloc densi
 `NV2_RELOC_*[131072]` (codegen_x86_linux.sio), mirroring the `NATIVE_ELF_BUF` pattern. Lifts the
 cap to 131072 (covers a 4096-clause corpus ≈106K relocs), removes 128KB of by-value aggregate
 from `NativeCompiler` (binary 103.60→103.37MB), and kills the O(n²) copy-out-modify-copy-back the
-in-struct array forced per reloc. **Verified:** test_smt 6/6 + run-pass green; known-UNSAT ladder
+in-struct array forced per reloc.
+
+**Hardening (`d7bf33814`):** the 131072 cap itself was made LOUD — `NV2_RELOC_OVERFLOW` flag set
+in `nc_add_flat_reloc`, loud reject (rc 19 + diagnostic) at ELF write — so an over-cap module
+fails loudly instead of silently emitting a binary with unpatched calls (the `a6c9a596f`
+IR_MAX_INSTRS philosophy). Fire-verified at a temporary cap=6000 (bi_200/6603 relocs rejected,
+bi_100/4000 compiled). DIMACS can't reach it (the 4MB ELF cap returns loud rc=13 at ~2800 clauses
+first); it's defensive. The native path now has NO silent-truncation cliff: IR-1024, reloc table,
+and the 4MB ELF/code caps all fail loudly.
+
+**On "Debt#4 alone is a regression":** that warning is now moot ON THIS BRANCH — Debt#4
+(`83513addb`) and the reloc fix (`f5d4466cf`) coexist here, so large programs compile AND run
+correctly (no live regression). The caveat only means: never cherry-pick Debt#4 to main WITHOUT
+`f5d4466cf` (they are one unit). **Verified:** test_smt 6/6 + run-pass green; known-UNSAT ladder
 bi_100..**bi_1000 (1.35MB .text)** all print correct `RESULT_UNSAT` (was SIGSEGV >256KB);
 mid600_unsat 0 unpatched rel32. The OpNot fix (`83513addb`) was orthogonal latent hardening; this
 reloc-table fix is what actually unblocked large corpora.
