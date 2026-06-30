@@ -664,7 +664,7 @@ fn lowerer_preseed_fn_signature_mut(
 
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     (*(*lo).module).functions[fn_id as usize].compile_strategy = strategy
-    (*(*lo).module).functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
+    (*(*lo).module).functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     (*(*lo).module).functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
     (*(*lo).module).functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -965,7 +965,7 @@ fn lowerer_preseed_program_items_mut(
                                     var module_box_sig = (*lo).module
                                     var fn_slot_sig = (*module_box_sig).functions[fn_id_sig as usize]
                                     fn_slot_sig.compile_strategy = strategy_sig
-                                    fn_slot_sig.returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
+                                    fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                     fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                     fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -1094,7 +1094,7 @@ fn ir_fast_summary_preseed_fn_signature(
     var module_value = (*module)
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     module_value.functions[fn_id as usize].compile_strategy = strategy
-    module_value.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
+    module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -1218,7 +1218,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     }
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     module_value.functions[fn_id as usize].compile_strategy = strategy
-    module_value.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
+    module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -1523,7 +1523,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             if fn_id >= 0 {
                                 let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                 module.functions[fn_id as usize].compile_strategy = strategy
-                                module.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
+                                module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -1608,7 +1608,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                     if fn_id >= 0 {
                                                         let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                                         module.functions[fn_id as usize].compile_strategy = strategy
-                                                        module.functions[fn_id as usize].returns_float = if lower_opt_type_is_f64(&(*fd).return_type) { 1 } else { 0 }
+                                                        module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -1923,7 +1923,7 @@ fn lowerer_lower_fn_item_mut(
     } else {
         (*strategy_func_box).compile_strategy = strategy
     }
-    (*strategy_func_box).returns_float = if lower_opt_type_is_f64(&fd.return_type) { 1 } else { 0 }
+    (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_named_name(&fd.return_type)
     (*lo).current_func = strategy_func_box
 
@@ -2176,6 +2176,21 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
     match *opt {
         Some(te) => lower_type_expr_is_array_of_f64(&(*te)),
         None => false,
+    }
+}
+
+// returns_float classification for a declared return type: 1 = scalar f64, 2 = an
+// f64 array (`[f64; N]`), 0 = other. The `2` lets a caller's `let r = mk()` (mk
+// returning an f64 array) flag `r` as a float-element local, so `r[i]` reads
+// classify as float instead of taking the integer path (cvtsi2sd corruption).
+// All consumers test `== 1`, so the new `2` value is inert for the scalar path.
+fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    if lower_opt_type_is_f64(opt) {
+        1
+    } else if lower_opt_type_is_array_of_f64(opt) {
+        2
+    } else {
+        0
     }
 }
 
@@ -5352,7 +5367,7 @@ impl Lowerer {
         var func = (*lo.module).functions[fn_id as usize]
         func.name = name
         func.compile_strategy = strategy
-        func.returns_float = if lower_opt_type_is_f64(return_type) { 1 } else { 0 }
+        func.returns_float = lower_opt_return_float_code(return_type)
         func.return_struct_name = lower_opt_type_named_name(return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -5976,7 +5991,7 @@ impl Lowerer {
         } else {
             (*lo.current_func).compile_strategy = strategy
         }
-        (*lo.current_func).returns_float = if lower_opt_type_is_f64(&fd.return_type) { 1 } else { 0 }
+        (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
 
         // Sprint 44: allocate profiling counter for instrumented functions
@@ -6150,7 +6165,7 @@ impl Lowerer {
         } else {
             (*lo.current_func).compile_strategy = strategy
         }
-        (*lo.current_func).returns_float = if lower_opt_type_is_f64(&fd.return_type) { 1 } else { 0 }
+        (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6429,6 +6444,27 @@ impl Lowerer {
         self.lower_stmt_ref(&s)
     }
 
+    // True iff `e` is a call to a function whose declared return type is an f64 array
+    // (returns_float == 2, set by lower_opt_return_float_code). Used so `let r = mk()`
+    // flags `r` as a float-element local — otherwise `r[i]` reads classify as integer
+    // and get cvtsi2sd-corrupted in arithmetic/comparisons.
+    fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprCall {
+            return false
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                if fn_id >= 0 && fn_id < self.module.fn_count {
+                    return self.module.functions[fn_id as usize].returns_float == 2
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lhs_lo = self
         match s.expr {
@@ -6483,6 +6519,8 @@ impl Lowerer {
             match s.expr {
                 Some(expr_box_arr) => {
                     if lower_expr_is_f64_array_literal_ref(&(*expr_box_arr)) {
+                        lo = lo.bind_local_array_elem_float(s.name)
+                    } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     }
                 }
