@@ -1,0 +1,144 @@
+// self-hosted::check::invariance — Invariant<T, G>: observables that carry their group
+//
+// Feature B (Equivalence Theory) decidable core. Companion to units.sio: where
+// units index a quantity by its dimension, an Invariant indexes an observable by
+// the GROUP under which it is invariant. Generalised dimensional analysis:
+// units → group equivariance.
+//
+// Architectural thesis: equivalence is indexed by a structure the compiler carries.
+// The invariance group answers "this observable is invariant under WHICH group?",
+// which is the difference between a comparison and a category error.
+//
+// Decidability boundary (do NOT breach): group membership is undecidable in general.
+// This module implements ONLY a finite lattice of named classes and their
+// intersection — that part is decidable (rank comparison). The heavy content — the
+// claim "this concrete measurement transform belongs to class C" — is a discharged
+// proof obligation destined for Lean 4 (see §Integration / deferred below); it is
+// NOT decided here. The type system stays decidable; the prover carries the rest.
+//
+// Invariance-group assignments (classical; cite in any external artefact, do not
+// web-search — Lorenz 1963; Hadamard 1898 → Hopf 1939 → Anosov 1967; Pesin 1977;
+// Manning 1979; Ollivier 2009; Lott–Villani 2009 / Sturm 2006):
+//   Topological entropy        — invariant under topological conjugacy — Homeo
+//   Hausdorff/Kaplan–Yorke dim — invariant under bi-Lipschitz          — BiLip
+//   Lyapunov exponent          — invariant under smooth conjugacy       — Diff1/DiffInf
+//                                (NOT topological, NOT time-rescaling)
+//
+// Lattice (total order; LARGER group ⇒ STRONGER, more robust invariant):
+//   Homeo (4) ⊃ BiLip (3) ⊃ Diff1 (2) ⊃ DiffInf (1)
+//
+// VERIFIED standalone (seed SRC OUT harness, exit 0) for the two acceptance cases
+// in docs/audit/EQUIVALENCE_THEORY_B_INVARIANT_SCAFFOLD_2026-06-22.md.
+
+pub enum Group { DiffInf, Diff1, BiLip, Homeo }
+
+// Rank in the chain; larger group ⇒ larger rank. Total order ⇒ no incomparable pairs.
+pub fn group_rank(g: Group) -> i64 {
+    if g == Group::Homeo { 4 }
+    else if g == Group::BiLip { 3 }
+    else if g == Group::Diff1 { 2 }
+    else { 1 }  // DiffInf
+}
+
+// a ⊆ b in the subgroup sense (a is at least as restrictive as b): rank(a) <= rank(b).
+pub fn group_subset(a: Group, b: Group) -> bool {
+    group_rank(a) <= group_rank(b)
+}
+
+// Intersection in the chain is the smaller (more restrictive / stronger) group.
+// Never empty for a total order, so the GROUP axis alone never rejects — rejection
+// comes from the frame-relation class (below), which is the load-bearing gate.
+pub fn group_intersect(a: Group, b: Group) -> Group {
+    if group_rank(a) <= group_rank(b) { a } else { b }
+}
+
+// Does a transform of finest class `c` belong to group `g`? A Diff1 map is also a
+// Homeo, but a mere-Homeo map is NOT Diff1 — so membership is rank(c) <= rank(g).
+pub fn transform_in_group(c: Group, g: Group) -> bool {
+    group_rank(c) <= group_rank(g)
+}
+
+// COMPARABILITY RULE (the type-checker gate): two observables of groups ga, gb whose
+// measurement frames are related by a transform of finest class `c` may be added,
+// compared, or ratioed IFF c ∈ (ga ∩ gb). The identity relation (same frame) is
+// DiffInf (rank 1) and is therefore always comparable.
+pub fn frames_comparable(ga: Group, gb: Group, c: Group) -> bool {
+    transform_in_group(c, group_intersect(ga, gb))
+}
+
+// ── Frame registry ──────────────────────────────────────────────────────────
+// A FrameId is an index assigned to a measurement setup. The registry records the
+// finest known transform CLASS relating two frames (the discharged-obligation table:
+// each entry corresponds to a Lean obligation "the transform Fa→Fb is in class C").
+// Until the Lean pipeline is wired (deferred), the registry stays a small fixed
+// table; an unknown relation between DISTINCT frames conservatively returns Homeo
+// (rank 4, least restrictive ⇒ most likely to reject), and identical frames return
+// DiffInf (identity ⇒ always comparable). This default-rejects unproven cross-frame
+// comparisons, which is the safe direction.
+
+pub struct FrameRelation { frame_a: i64, frame_b: i64, klass: Group }
+
+pub struct FrameRegistry {
+    entries: [FrameRelation; 64],
+    count: i64,
+}
+
+pub fn frame_registry_new() -> FrameRegistry {
+    FrameRegistry { entries: [FrameRelation { frame_a: 0, frame_b: 0, klass: Group::DiffInf }; 64], count: 0 }
+}
+
+// Finest known transform class relating frame_a → frame_b. Symmetric lookup.
+pub fn frame_relation_class(reg: &FrameRegistry, frame_a: i64, frame_b: i64) -> Group {
+    if frame_a == frame_b { return Group::DiffInf }  // identity
+    var i: i64 = 0
+    while i < reg.count {
+        let e = reg.entries[i as usize]
+        if (e.frame_a == frame_a && e.frame_b == frame_b)
+        || (e.frame_a == frame_b && e.frame_b == frame_a) {
+            return e.klass
+        }
+        i = i + 1
+    }
+    Group::Homeo  // unknown distinct-frame relation: conservative (most likely to reject)
+}
+
+// ── Rank ↔ Group bridge (used by the checker wiring) ─────────────────────────
+// The checker encodes the group of an `Invariant<T,G>` as a rank digit 1..4 in the
+// mangled type name; these helpers keep ALL lattice semantics in this module so the
+// checker bridge never re-implements the comparability arithmetic.
+pub fn group_from_rank(r: i64) -> Group {
+    if r >= 4 { Group::Homeo }
+    else if r == 3 { Group::BiLip }
+    else if r == 2 { Group::Diff1 }
+    else { Group::DiffInf }
+}
+
+// Conservative comparability when no Lean frame-obligation is discharged: the
+// relating transform is taken as Homeo (purely topological), so two observables of
+// ranks ra, rb may be combined iff Homeo ∈ (Ga ∩ Gb) — i.e. iff BOTH are Homeo-group
+// (topological) invariants. Stronger-invariant observables (Lyapunov/Diff1,
+// Hausdorff-dim/BiLip) are rejected until the frame relation is proven smoother.
+pub fn invariant_comparable_default_ranks(ra: i64, rb: i64) -> bool {
+    frames_comparable(group_from_rank(ra), group_from_rank(rb), Group::Homeo)
+}
+
+// ── Integration (type-checker wiring — IMPLEMENTED in check.sio) ─────────────
+// The comparability rule is enforced in the checker WITHOUT the 131-site TypeEntry
+// field churn, via name-mangling:
+//   * check.sio `checker_lower_named_type_with_args_mut` recognises `Invariant<T, G>`
+//     (G one of the four group names) and lowers it to a TyNamed "Invariant<rank>"
+//     (rank 1..4 via `invariance_rank_from_group_name`), inner = T.
+//   * check.sio `checker_check_binary_with_operand_types_inplace` decodes both
+//     operands' ranks (`invariant_group_rank_of_type`) and, when both are Invariant,
+//     rejects +,-,*,/,%,==,!=,<,<=,>,>= unless `invariant_comparable_default_ranks`
+//     (i.e. `frames_comparable(ga, gb, Homeo)`) holds — error E004 "these types
+//     cannot be combined with this operator".
+// Verified (madaros built from this source, `madaros --check`): Diff1/Diff1,
+// Diff1/Homeo, BiLip/BiLip → reject; Homeo/Homeo → accept; non-Invariant code
+// unaffected (identical to baseline).
+//
+// STILL DEFERRED: a true value-level FrameId (the rule currently uses the
+// conservative Homeo default for ALL cross-value comparisons rather than consulting
+// FrameRegistry per value-frame), and emitting the "transform ∈ class" claim as a
+// discharged Lean obligation (export surface orphaned — held pending the gap
+// decision). FrameRegistry above is the table those obligations will populate.

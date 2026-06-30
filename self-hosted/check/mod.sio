@@ -59,6 +59,13 @@ var CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS: [i64; 6] = [0; 6]
 var CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS: [bool; 36] = [false; 36]
 var CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT: [bool; 36] = [false; 36]
 
+fn check_mod_alloc_checker() -> *mut Checker with Alloc {
+    // The checker grew with the wider FnSigTable and TypeEnv capacities.
+    // Keep boot4/probe heap allocations ahead of the struct size so in-place
+    // checker paths cannot scribble past a stale literal allocation.
+    heap_alloc(134217728) as *mut Checker
+}
+
 fn check_policy_requirements_to_ir(
     opt: Option<Box<PolicyRequirementInfoList>>,
     out: [IrPolicyRequirementInfo; 8],
@@ -243,9 +250,9 @@ fn checker_collect_hyper_alg_from_type(
 }
 
 fn checker_infer_fn_hyper_algebra(checker: &Checker, fn_name: Name) -> i64 with Mut, Panic, Div, Alloc {
-    let sig_idx = checker.fn_sigs.find(fn_name)
+    let sig_idx = fn_sig_table_find(checker.fn_sigs, fn_name)
     if sig_idx < 0 { return -1 }
-    let sig = checker.fn_sigs.get(sig_idx)
+    let sig = fn_sig_table_get(checker.fn_sigs, sig_idx)
     var state = CheckerHyperAlgCollectState { found_alg: -1, found_any: 0, ambiguous: 0 }
 
     state = checker_collect_hyper_alg_from_type(sig.return_type, state)
@@ -492,11 +499,103 @@ fn check_program_witness(prog: Program) -> i64 with Mut, Panic, Div, Alloc, IO {
 // boot4-safe items verdict: uses *mut Checker to avoid IS_SPTR=4 struct-return corruption.
 // Returns 0=ok, 1=reject, 2=unknown. Takes same items pointer as check_items_witness_from_seed.
 pub fn check_items_verdict_boot4(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    check_items_verdict_boot4_with_module_path(items, empty_path())
+}
+
+pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, module_path: AstPath) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
+    (*checker_ptr).current_module = module_path
+    (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
-    if had_error == 1 { return 1 }
+    if had_error == 1 {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    heap_free(checker_ptr as i64)
+    if check_items_ontology_verdict(items) != 0 {
+        return 1
+    }
+    0
+}
+
+// Multi-module typecheck verdict: load all programs into a single checker so
+// cross-module names are resolvable, but perform the visibility check with
+// each program's real module_path as current_module.  Returns 0=ok, 1=reject.
+// Ontology semantic verdict. The boot4/Madaros in-place checker spine
+// (checker_collect_item_inplace) does not collect ItemOntology, so ontology
+// role/property/inverse axiom violations (E156–E160) slip through. The by-value
+// collect_ontology_def path cannot be reused here: threading the ~164KB Checker
+// through its deep recursion is miscompiled by the native backend (the large-
+// struct copy bug the *mut spine exists to avoid), so its error state is lost.
+// Instead validate axioms in place over the parsed AST via
+// checker_validate_ontology_items_inplace (no large copies). Returns 1 on any
+// ontology axiom error, 0 when clean.
+pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    checker_validate_ontology_items_inplace(checker_ptr, items)
+    let bad = if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 { 1 } else { 0 }
+    heap_free(checker_ptr as i64)
+    bad
+}
+
+pub fn check_modules_verdict_boot4(programs: &! [Program; 256], count: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    check_modules_verdict_boot4_with_visibility(programs, count, false)
+}
+
+pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], count: i64, enforce_visibility: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if count <= 0 {
+        return 0
+    }
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    (*checker_ptr).crate_root = (*programs)[0].module_path
+    // Visibility is authoritatively enforced by the per-module frontend pass
+    // (load_multimodule_ir), which has each module's `use`-import context and grants
+    // access to imported items. This all-modules-merged pass lacks that per-module
+    // import context, so re-enforcing definition-visibility here produces false E175/
+    // E176/E177 on the (legitimately imported) cross-module private functions that the
+    // single-crate compiler relies on. Defer visibility to the frontend.
+    (*checker_ptr).enforce_visibility = enforce_visibility
+
+    // Pass 1: collect signatures/definitions from every module into one shared
+    // set of tables.  Each item is stamped with its real defining_module so
+    // visibility checks can distinguish same-module from cross-module access.
+    var i: i64 = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_collect_items_inplace(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    // Pass 2: check function bodies module-by-module, with current_module set
+    // to the module being checked.  This is what makes E175/E176/E177 fire on
+    // cross-module access to private items.
+    i = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    heap_free(checker_ptr as i64)
+
+    // Ontology axiom validation per module (see check_items_ontology_verdict).
+    var k: i64 = 0
+    while k < count && k < 256 {
+        if check_items_ontology_verdict((*programs)[k as usize].items) != 0 {
+            return 1
+        }
+        k = k + 1
+    }
     0
 }
 
@@ -957,13 +1056,14 @@ pub fn check_ontology_side_table_cache_sourcecheck_subclass_verdict_probe(items:
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_sourcecheck_cache_subclass_verdict=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_sourcecheck_cache_subclass_verdict=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_sourcecheck_cache_subclass_verdict=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     var cache_checker = checker_new()
@@ -972,9 +1072,11 @@ pub fn check_ontology_side_table_cache_sourcecheck_subclass_verdict_probe(items:
     print("check_mod_sourcecheck_cache_subclass_verdict=query_enter\n")
     if ontology_kernel_is_subclass(cache_checker.ontology_kernel, child_idx, parent_idx) {
         print("check_mod_sourcecheck_cache_subclass_verdict=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_sourcecheck_cache_subclass_verdict=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -990,15 +1092,17 @@ pub fn check_ontology_side_table_cache_sourcecheck_subclass_verdict_v2_probe(ite
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_sourcecheck_cache_subclass_verdict_v2=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_sourcecheck_cache_subclass_verdict_v2=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_sourcecheck_cache_subclass_verdict_v2=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_subclass_verdict(source_path, child_id, parent_id)
 }
 
@@ -1014,22 +1118,25 @@ pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v1_p
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_kernel_v1=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v1=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v1=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     check_mod_hydrate_ontology_kernel_ptr_from_side_table_cache(checker_ptr, source_path)
     print("check_mod_same_checker_cache_kernel_v1=hydrate_ok\n")
     if ontology_kernel_is_subclass((*checker_ptr).ontology_kernel, child_idx, parent_idx) {
         print("check_mod_same_checker_cache_kernel_v1=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_kernel_v1=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1045,13 +1152,14 @@ pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v2_p
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_kernel_v2=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v2=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v2=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     var cache_checker = checker_new()
@@ -1061,9 +1169,11 @@ pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v2_p
     print("check_mod_same_checker_cache_kernel_v2=copy_ok\n")
     if ontology_kernel_is_subclass((*checker_ptr).ontology_kernel, child_idx, parent_idx) {
         print("check_mod_same_checker_cache_kernel_v2=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_kernel_v2=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1079,13 +1189,14 @@ pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v3_p
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_kernel_v3=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v3=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_kernel_v3=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     var cache_checker = checker_new()
@@ -1095,9 +1206,11 @@ pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v3_p
     print("check_mod_same_checker_cache_kernel_v3=copy_ok\n")
     if check_mod_ontology_kernel_ptr_is_subclass(checker_ptr, child_idx, parent_idx) {
         print("check_mod_same_checker_cache_kernel_v3=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_kernel_v3=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1140,13 +1253,14 @@ pub fn check_ontology_side_table_cache_same_checker_shadow_subclass_verdict_v1_p
         return ontology_side_table_cache_verdict_invalid_cache()
     }
     print("check_mod_same_checker_cache_shadow_v1=cache_valid\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_shadow_v1=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_shadow_v1=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     check_mod_hydrate_cache_shadow_ptr_from_side_table_cache(checker_ptr, source_path)
@@ -1156,6 +1270,7 @@ pub fn check_ontology_side_table_cache_same_checker_shadow_subclass_verdict_v1_p
     print("\n")
     if (*checker_ptr).ontology_cache_shadow_slot_count <= 0 {
         print("check_mod_same_checker_cache_shadow_v1=shadow_empty\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_shadow_v1=shadow_slot0=")
@@ -1169,9 +1284,11 @@ pub fn check_ontology_side_table_cache_same_checker_shadow_subclass_verdict_v1_p
     print("\n")
     if check_mod_cache_shadow_ptr_is_subclass(checker_ptr, child_id, parent_id) {
         print("check_mod_same_checker_cache_shadow_v1=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_shadow_v1=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1187,13 +1304,14 @@ pub fn check_ontology_side_table_cache_same_checker_sidecar_subclass_verdict_pro
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_sidecar=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_sidecar=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_sidecar=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     check_mod_ontocache_sidecar_hydrate_from_source(source_path)
@@ -1203,9 +1321,11 @@ pub fn check_ontology_side_table_cache_same_checker_sidecar_subclass_verdict_pro
     print("\n")
     if check_mod_ontocache_sidecar_is_subclass(child_id, parent_id) {
         print("check_mod_same_checker_cache_sidecar=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_sidecar=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1221,13 +1341,14 @@ pub fn check_ontology_side_table_cache_same_checker_sidecar_disjoint_verdict_pro
         return ontology_side_table_cache_verdict_reject()
     }
     print("check_mod_same_checker_cache_sidecar_disjoint=idx_ok\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_sidecar_disjoint=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_same_checker_cache_sidecar_disjoint=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     check_mod_ontocache_sidecar_hydrate_from_source(source_path)
@@ -1237,9 +1358,11 @@ pub fn check_ontology_side_table_cache_same_checker_sidecar_disjoint_verdict_pro
     print("\n")
     if check_mod_ontocache_sidecar_is_disjoint(left_id, right_id) {
         print("check_mod_same_checker_cache_sidecar_disjoint=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_same_checker_cache_sidecar_disjoint=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1421,13 +1544,14 @@ pub fn check_knowledge_context_ontocache_sidecar_verdict_probe(items: Option<Box
         return ontology_side_table_cache_verdict_invalid_cache()
     }
     print("check_mod_knowledge_context_ontocache_sidecar=cache_valid\n")
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     print("check_mod_knowledge_context_ontocache_sidecar=collect_ok\n")
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     print("check_mod_knowledge_context_ontocache_sidecar=check_ok\n")
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     check_mod_ontocache_sidecar_hydrate_from_source(source_path)
@@ -1437,27 +1561,39 @@ pub fn check_knowledge_context_ontocache_sidecar_verdict_probe(items: Option<Box
     print("\n")
     if check_mod_ontocache_knowledge_validate_from(items, items) == 0 {
         print("check_mod_knowledge_context_ontocache_sidecar=query_ok\n")
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
     print("check_mod_knowledge_context_ontocache_sidecar=query_reject\n")
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
-pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemList>>, source_path: string, module_path: AstPath) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
+    (*checker_ptr).current_module = module_path
+    (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    if check_items_ontology_verdict(items) != 0 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     if !ontology_side_table_cache_source_plan_valid(source_path) {
+        heap_free(checker_ptr as i64)
         return 0
     }
     check_mod_ontocache_sidecar_hydrate_from_source(source_path)
     if check_mod_ontocache_knowledge_validate_from(items, items) != 0 {
+        heap_free(checker_ptr as i64)
         return 1
     }
+    heap_free(checker_ptr as i64)
     0
 }
 
@@ -1470,18 +1606,21 @@ pub fn check_ontology_side_table_cache_sourcecheck_disjoint_verdict_probe(items:
     if left_idx < 0 || right_idx < 0 {
         return ontology_side_table_cache_verdict_reject()
     }
-    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
         return 1
     }
     var cache_checker = checker_new()
     cache_checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(cache_checker, source_path)
     if ontology_kernel_is_disjoint(cache_checker.ontology_kernel, left_idx, right_idx) {
+        heap_free(checker_ptr as i64)
         return ontology_side_table_cache_verdict_ok()
     }
+    heap_free(checker_ptr as i64)
     ontology_side_table_cache_verdict_reject()
 }
 
@@ -1514,6 +1653,9 @@ fn check_program_verdict(prog: Program) -> i64 with Mut, Panic, Div, Alloc, IO {
 
 pub fn check_program_with_artifacts(prog: Program) -> CheckArtifactsResult with Mut, Panic, Div, Alloc, IO {
     var checker = checker_new()
+    checker.current_module = prog.module_path
+    // The crate root is the module being checked in single-module contexts.
+    checker.crate_root = prog.module_path
     checker = checker.collect_items(prog.items)
     checker = checker.check_items(prog.items)
     CheckArtifactsResult {

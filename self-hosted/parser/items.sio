@@ -9,6 +9,24 @@ use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 
+fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    items_reverse_item_list_loop(items, None)
+}
+
+fn items_reverse_item_list_loop(
+    current: Option<Box<ItemList>>,
+    acc: Option<Box<ItemList>>,
+) -> Option<Box<ItemList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ItemList { head: (*node).head, tail: acc }
+            items_reverse_item_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
 impl Parser {
     // ============================================================
     // Parse a single item
@@ -18,11 +36,12 @@ impl Parser {
         let k = self.peek()
 
         // Handle optional 'pub' visibility
-        var is_pub = false
+        var visibility = visibility_private()
         var p = self
         if k == TokenKind::Pub {
-            is_pub = true
-            p = p.advance()
+            let vis_pair = p.parse_pub_visibility()
+            p = vis_pair.0
+            visibility = vis_pair.1
         }
 
         // Handle optional 'linear' or 'affine' modifier
@@ -67,72 +86,93 @@ impl Parser {
 
         let item_kind = parser_peek(p)
 
-        if item_kind == TokenKind::Fn {
-            p.parse_fn_item(is_pub, is_kernel)
+        // Detect "module NAME" declarations when module is treated as an identifier
+        // (the boot4-safe lexer returns Ident for "module" to avoid keyword conflicts).
+        var is_module_decl = false
+        if item_kind == TokenKind::Ident {
+            let probe_name = p.current_name()
+            if probe_name.len == 6
+                && probe_name.buf[0] == (109 as i8)
+                && probe_name.buf[1] == (111 as i8)
+                && probe_name.buf[2] == (100 as i8)
+                && probe_name.buf[3] == (117 as i8)
+                && probe_name.buf[4] == (108 as i8)
+                && probe_name.buf[5] == (101 as i8) {
+                let next_kind = parser_peek_ahead(p, 1)
+                if next_kind == TokenKind::ColonColon || next_kind == TokenKind::Ident || next_kind == TokenKind::Ontology {
+                    is_module_decl = true
+                }
+            }
+        }
+
+        if is_module_decl {
+            p.parse_module_item(visibility)
+        } else if item_kind == TokenKind::Fn {
+            p.parse_fn_item(visibility, is_kernel)
         } else if item_kind == TokenKind::Struct {
-            p.parse_struct_item(is_linear, is_affine, is_pub)
+            p.parse_struct_item(is_linear, is_affine, visibility)
         } else if item_kind == TokenKind::Enum {
-            p.parse_enum_item(is_pub)
+            p.parse_enum_item(visibility)
         } else if item_kind == TokenKind::Impl {
-            p.parse_impl_item(is_pub)
+            p.parse_impl_item(visibility)
         } else if item_kind == TokenKind::Type {
-            p.parse_type_alias_item(is_pub)
+            p.parse_type_alias_item(visibility)
         } else if item_kind == TokenKind::Const {
-            p.parse_global_let_item(is_pub)
+            p.parse_global_let_item(visibility)
         } else if item_kind == TokenKind::ModelsLower {
-            p.parse_models_item(is_pub)
+            p.parse_models_item(visibility)
         } else if item_kind == TokenKind::PolicyLower {
-            p.parse_policy_item(is_pub)
+            p.parse_policy_item(visibility)
         } else if item_kind == TokenKind::AcquisitionPolicyLower {
-            p.parse_acquisition_policy_item(is_pub)
+            p.parse_acquisition_policy_item(visibility)
         } else if item_kind == TokenKind::RecoursePolicyLower {
-            p.parse_recourse_policy_item(is_pub)
+            p.parse_recourse_policy_item(visibility)
         } else if item_kind == TokenKind::MonitoringPolicyLower {
-            p.parse_monitoring_policy_item(is_pub)
+            p.parse_monitoring_policy_item(visibility)
         } else if item_kind == TokenKind::TransitionPolicyLower {
-            p.parse_transition_policy_item(is_pub)
+            p.parse_transition_policy_item(visibility)
         } else if item_kind == TokenKind::TransitionProtocolLower {
-            p.parse_transition_protocol_item(is_pub)
+            p.parse_transition_protocol_item(visibility)
         } else if item_kind == TokenKind::AlternativePolicyLower {
-            p.parse_alternative_policy_item(is_pub)
+            p.parse_alternative_policy_item(visibility)
         } else if item_kind == TokenKind::AlternativeFrontierLower {
-            p.parse_alternative_frontier_item(is_pub)
+            p.parse_alternative_frontier_item(visibility)
         } else if item_kind == TokenKind::DecisionPolicyLower {
-            p.parse_decision_policy_item(is_pub)
+            p.parse_decision_policy_item(visibility)
         } else if item_kind == TokenKind::DeferralPolicyLower {
-            p.parse_deferral_policy_item(is_pub)
+            p.parse_deferral_policy_item(visibility)
         } else if item_kind == TokenKind::ValidationLower {
-            p.parse_validation_item(is_pub)
+            p.parse_validation_item(visibility)
         } else if item_kind == TokenKind::AuditLower {
-            p.parse_audit_item(is_pub)
+            p.parse_audit_item(visibility)
         } else if item_kind == TokenKind::Use {
-            p.parse_use_item(is_pub)
+            p.parse_use_item(visibility)
         } else if item_kind == TokenKind::Import {
-            p.parse_use_item(is_pub)
+            p.parse_use_item(visibility)
         } else if item_kind == TokenKind::Module {
-            p.parse_module_item(is_pub)
+            p.parse_module_item(visibility)
         } else if item_kind == TokenKind::Let {
-            p.parse_global_let_item(is_pub)
+            p.parse_global_let_item(visibility)
         } else if item_kind == TokenKind::Var {
-            p.parse_global_var_item(is_pub)
+            p.parse_global_var_item(visibility)
         } else if item_kind == TokenKind::Unit {
-            p.parse_unit_item(is_pub)
+            p.parse_unit_item(visibility)
         } else if item_kind == TokenKind::Effect {
-            p.parse_effect_item(is_pub)
+            p.parse_effect_item(visibility)
         } else if item_kind == TokenKind::Session {
-            p.parse_session_item(is_pub)
+            p.parse_session_item(visibility)
         } else if item_kind == TokenKind::Trait {
-            p.parse_trait_item(is_pub)
+            p.parse_trait_item(visibility)
         } else if item_kind == TokenKind::Algebra {
-            p.parse_algebra_item(is_pub)
+            parse_algebra_item(p, visibility)
         } else if item_kind == TokenKind::Study {
-            p.parse_study_item(is_pub)
+            parse_study_item(p, visibility)
         } else if item_kind == TokenKind::Ontology {
-            p.parse_ontology_item(is_pub)
+            parse_ontology_item(p, visibility)
         } else if item_kind == TokenKind::Extern {
-            p.parse_extern_fn_item(is_pub)
+            p.parse_extern_fn_item(visibility)
         } else if item_kind == TokenKind::Export {
-            p.parse_export_fn_item(is_pub)
+            p.parse_export_fn_item(visibility)
         } else {
             // Error recovery: skip token
             let span = p.current_span()
@@ -144,7 +184,7 @@ impl Parser {
             let result_item = Item {
                 kind: ItemKind::ItemFn,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: en,
                 fn_def: None,
                 struct_def: None,
@@ -179,14 +219,51 @@ impl Parser {
     }
 
     // ============================================================
+    // Visibility modifier: pub, pub(crate), pub(super), pub(path)
+    // ============================================================
+
+    fn parse_pub_visibility(self) -> (Parser, Visibility) with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'pub'
+        if parser_peek(p) == TokenKind::LParen {
+            p = p.advance()  // skip '('
+            let k = parser_peek(p)
+            if k == TokenKind::Crate {
+                p = p.advance()  // skip 'crate'
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_crate())
+            } else if k == TokenKind::Super {
+                p = p.advance()  // skip 'super'
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_super())
+            } else {
+                // pub(path::to)
+                let path_pair = p.parse_type_path()
+                p = path_pair.0
+                let path = path_pair.1
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_in(path))
+            }
+        } else {
+            (p, visibility_pub())
+        }
+    }
+
+    // ============================================================
     // Module declaration: module foo::bar
     // ============================================================
 
-    fn parse_module_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_module_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'module'
 
-        while parser_peek(p) != TokenKind::Newline && parser_peek(p) != TokenKind::Eof {
+        // Consume the module path (Ident (:: Ident)*) directly. The boot4-safe lexer
+        // (lex_source_to_globals) does NOT emit Newline tokens, so the previous
+        // "consume until Newline" loop ran to EOF and swallowed the entire file as a
+        // single item — leaving every subsequent fn/struct unparsed in multi-module
+        // compilation (the imported typecheck then saw 0 functions for these modules).
+        while parser_peek(p) == TokenKind::Ident
+            || parser_peek(p) == TokenKind::ColonColon
+            || parser_peek(p) == TokenKind::Ontology {
             p = p.advance_raw()
         }
         if parser_peek(p) == TokenKind::Newline {
@@ -197,7 +274,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemUnit,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: empty_name(),
             fn_def: None,
             struct_def: None,
@@ -233,7 +310,7 @@ impl Parser {
     // Global bindings (top-level): let/const NAME [: Type] = expr; var NAME [: Type] [= expr]
     // ============================================================
 
-    fn parse_global_let_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_global_let_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'let'
 
@@ -246,7 +323,19 @@ impl Parser {
 
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
-        // expr value not used in Item (global let initialiser stored separately)
+        let init_let_box = parser_take_expr_box()
+        if (*init_let_box).kind == ExprKind::ExprIntLit {
+            ast_record_global_var_init(name, (*init_let_box).int_val)
+        } else if (*init_let_box).kind == ExprKind::ExprUnary && (*init_let_box).un_op == UnaryOp::OpNeg {
+            match (*init_let_box).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIntLit {
+                        ast_record_global_var_init(name, 0 - (*operand).int_val)
+                    }
+                }
+                _ => {}
+            }
+        }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
@@ -255,13 +344,13 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
             enum_def: None,
             impl_def: None,
-            type_alias_ty: ty_pair.1,
+            type_alias_ty: None,
             policy_def: None,
             acquisition_policy_def: None,
             recourse_policy_def: None,
@@ -287,7 +376,7 @@ impl Parser {
         })
     }
 
-    fn parse_global_var_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_global_var_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'var'
 
@@ -297,11 +386,24 @@ impl Parser {
         // Optional type annotation
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
+        let global_ty: Option<Box<TypeExpr>> = ty_pair.1
 
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
-            // expr value not used in Item (global var initialiser stored separately)
+            let init_var_box = parser_take_expr_box()
+            if (*init_var_box).kind == ExprKind::ExprIntLit {
+                ast_record_global_var_init(name, (*init_var_box).int_val)
+            } else if (*init_var_box).kind == ExprKind::ExprUnary && (*init_var_box).un_op == UnaryOp::OpNeg {
+                match (*init_var_box).left {
+                    Some(operand) => {
+                        if (*operand).kind == ExprKind::ExprIntLit {
+                            ast_record_global_var_init(name, 0 - (*operand).int_val)
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
@@ -311,13 +413,13 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
             enum_def: None,
             impl_def: None,
-            type_alias_ty: ty_pair.1,
+            type_alias_ty: global_ty,
             policy_def: None,
             acquisition_policy_def: None,
             recourse_policy_def: None,
@@ -332,7 +434,7 @@ impl Parser {
             validation_def: None,
             audit_def: None,
             use_path: empty_path(),
-            use_glob: true,
+            use_glob: false,
             use_items: None,
             effect_def: None,
             session_decl: None,
@@ -347,7 +449,7 @@ impl Parser {
     // Function: fn name(params) -> RetType with Effects { body }
     // ============================================================
 
-    fn parse_fn_item(self, is_pub: bool, is_kernel: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_fn_item(self, visibility: Visibility, is_kernel: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let pfi_k = self.peek()
         if pfi_k != TokenKind::Fn {
             // Recovery: consume one token so callers never stall.
@@ -359,7 +461,7 @@ impl Parser {
             return (p_bad, Item {
                 kind: ItemKind::ItemFn,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: empty_name(),
                 fn_def: None,
                 struct_def: None,
@@ -445,7 +547,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: Some(Box::new(fn_def)),
             struct_def: None,
@@ -551,7 +653,7 @@ impl Parser {
     // Struct: struct Name { field: Type, ... }
     // ============================================================
 
-    fn parse_struct_item(self, is_linear: bool, is_affine: bool, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_struct_item(self, is_linear: bool, is_affine: bool, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'struct'
 
@@ -578,6 +680,8 @@ impl Parser {
                 let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
                 rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
                 if parser_peek(p) == TokenKind::Comma {
+                    p = p.advance()
+                } else if parser_peek(p) != TokenKind::Gt {
                     p = p.advance()
                 }
             }
@@ -619,7 +723,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemStruct,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: Some(Box::new(sdef)),
@@ -676,7 +780,7 @@ impl Parser {
     // Enum: enum Name { Variant1, Variant2, ... }
     // ============================================================
 
-    fn parse_enum_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_enum_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'enum'
 
@@ -735,7 +839,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemEnum,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -771,7 +875,7 @@ impl Parser {
     // Impl: impl Type { fn method() { } ... }
     // ============================================================
 
-    fn parse_impl_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_impl_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'impl'
 
@@ -791,7 +895,11 @@ impl Parser {
 
             if parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
                 if parser_peek(p) == TokenKind::Fn {
-                    let pair2 = p.parse_fn_item(false, false)
+                    // First arg is `visibility: Visibility` (a struct), NOT a bool. Passing
+                    // `false` here was an ABI mismatch (bool bits read as a Visibility) that
+                    // corrupted the call and SIGSEGV'd on every impl method; it built only
+                    // because the type error is a non-fatal warning. Methods default private.
+                    let pair2 = p.parse_fn_item(visibility_private(), false)
                     p = pair2.0
                     let method = pair2.1
                     rev_methods_opt = Some(Box::new(ItemList { head: method, tail: rev_methods_opt }))
@@ -806,7 +914,7 @@ impl Parser {
 
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         // Extract name from target type path
         let impl_name = extract_impl_name(target_ty)
@@ -816,7 +924,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemImpl,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: impl_name,
             fn_def: None,
             struct_def: None,
@@ -852,7 +960,7 @@ impl Parser {
     // Trait definition: trait Name { fn method(); ... }
     // ============================================================
 
-    fn parse_trait_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_trait_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'trait'
         let name = p.current_name()
@@ -868,7 +976,7 @@ impl Parser {
             rev_methods_opt = Some(Box::new(ItemList { head: method_item, tail: rev_methods_opt }))
         }
         p = p.expect(TokenKind::RBrace)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         let span = p.span_from(start)
         let tdef = TraitItemDef { name: name, methods: methods_opt, supertraits: None, span: span }
@@ -876,7 +984,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTrait,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -912,7 +1020,7 @@ impl Parser {
     // Type alias: type Name = Type
     // ============================================================
 
-    fn parse_type_alias_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_type_alias_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'type'
 
@@ -932,7 +1040,7 @@ impl Parser {
             return (p, Item {
                 kind: ItemKind::ItemTypeAlias,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: name,
                 fn_def: None,
                 struct_def: None,
@@ -975,7 +1083,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTypeAlias,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1011,7 +1119,7 @@ impl Parser {
     // Policy: policy Name for Type { require metric >= value }
     // ============================================================
 
-    fn parse_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'policy'
 
@@ -1074,7 +1182,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1106,7 +1214,7 @@ impl Parser {
         })
     }
 
-    fn parse_acquisition_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_acquisition_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'acquisition_policy'
 
@@ -1170,7 +1278,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAcquisitionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1202,7 +1310,7 @@ impl Parser {
         })
     }
 
-    fn parse_recourse_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_recourse_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'recourse_policy'
 
@@ -1266,7 +1374,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemRecoursePolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1298,7 +1406,7 @@ impl Parser {
         })
     }
 
-    fn parse_transition_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_transition_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'transition_policy'
 
@@ -1378,7 +1486,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTransitionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1410,7 +1518,7 @@ impl Parser {
         })
     }
 
-    fn parse_monitoring_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_monitoring_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'monitoring_policy'
 
@@ -1478,7 +1586,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemMonitoringPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1510,7 +1618,7 @@ impl Parser {
         })
     }
 
-    fn parse_transition_protocol_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_transition_protocol_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'transition_protocol'
 
@@ -1566,7 +1674,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTransitionProtocol,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1598,7 +1706,7 @@ impl Parser {
         })
     }
 
-    fn parse_alternative_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_alternative_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'alternative_policy'
 
@@ -1672,7 +1780,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAlternativePolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1704,7 +1812,7 @@ impl Parser {
         })
     }
 
-    fn parse_alternative_frontier_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_alternative_frontier_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'alternative_frontier'
 
@@ -1760,7 +1868,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAlternativeFrontier,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1972,7 +2080,7 @@ impl Parser {
     // Decision policy: decision_policy Name for Type { require metric >= value }
     // ============================================================
 
-    fn parse_decision_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_decision_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'decision_policy'
 
@@ -2020,7 +2128,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemDecisionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2052,7 +2160,7 @@ impl Parser {
         })
     }
 
-    fn parse_deferral_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_deferral_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'deferral_policy'
 
@@ -2108,7 +2216,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemDeferralPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2140,7 +2248,7 @@ impl Parser {
         })
     }
 
-    fn parse_models_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_models_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'models'
 
@@ -2180,7 +2288,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemModels,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2212,7 +2320,7 @@ impl Parser {
         })
     }
 
-    fn parse_validation_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_validation_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'validation'
 
@@ -2240,7 +2348,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemValidation,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2272,7 +2380,7 @@ impl Parser {
         })
     }
 
-    fn parse_audit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_audit_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'audit'
 
@@ -2318,7 +2426,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAudit,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2538,7 +2646,7 @@ impl Parser {
     // Use declaration: use path::to::module [::*]
     // ============================================================
 
-    fn parse_use_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_use_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = parser_advance(self)  // skip 'use'
 
@@ -2588,7 +2696,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemUse,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: empty_name(),
             fn_def: None,
             struct_def: None,
@@ -2654,7 +2762,7 @@ impl Parser {
         })
     }
 
-    fn parse_effect_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_effect_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'effect'
 
@@ -2697,7 +2805,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemEffect,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2729,7 +2837,7 @@ impl Parser {
         })
     }
 
-    fn parse_unit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_unit_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()   // consume 'unit'
 
@@ -2784,7 +2892,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemUnit,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2820,7 +2928,7 @@ impl Parser {
     // Session declaration: session Name { send T, recv T, close }
     // ============================================================
 
-    fn parse_session_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_session_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'session'
 
@@ -2926,7 +3034,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemSession,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2961,7 +3069,7 @@ impl Parser {
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
     // Also accept brace-form extern blocks and conservatively retain only the
     // first parsed declaration in the returned Item.
-    fn parse_extern_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
@@ -3010,17 +3118,17 @@ impl Parser {
             p = p.expect(TokenKind::RBrace)
             let span = p.span_from(start)
             if have_first {
-                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
-                return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false }
+                return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
             }
-            return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
         }
         if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
             p.had_error = true
             p.error_count = p.error_count + 1
             p = p.advance()
-            return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
         }
         p = p.advance()  // skip 'fn'
         let name = p.current_name()
@@ -3037,23 +3145,23 @@ impl Parser {
             p = p.advance()
         }
         let span = p.span_from(start)
-        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
-        (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false }
+        (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
     // Sprint 109: export "C" fn
-    fn parse_export_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_export_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'export'
         if parser_peek(p) == TokenKind::Extern {
-            return p.parse_extern_fn_item(true)
+            return p.parse_extern_fn_item(visibility)
         }
         if parser_peek(p) == TokenKind::StringLit {
             p = p.advance()
             if parser_peek(p) == TokenKind::Extern {
-                return p.parse_extern_fn_item(true)
+                return p.parse_extern_fn_item(visibility)
             }
         }
-        p.parse_fn_item(true, false)
+        p.parse_fn_item(visibility, false)
     }
 
 }
@@ -3784,7 +3892,7 @@ fn parse_algebra_op_decl(p: Parser) -> (Parser, AlgebraOpDecl) with Mut, IO, Pan
     })
 }
 
-fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_algebra_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'algebra'
 
@@ -3858,7 +3966,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     (pa, Item {
         kind: ItemKind::ItemAlgebra,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -3890,7 +3998,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     })
 }
 
-fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_study_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'study'
 
@@ -3924,7 +4032,8 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
         let entry_name = pa.current_name()
 
         if parser_peek(pa) == TokenKind::Fn {
-            let fn_pair = pa.parse_fn_item(false, false)
+            // visibility param is a Visibility struct, not a bool (see parse_impl_item).
+            let fn_pair = pa.parse_fn_item(visibility_private(), false)
             pa = fn_pair.0
         } else if entry_name.len == 10 && entry_name.buf[0] == 104 as i8 && entry_name.buf[9] == 115 as i8 {
             let hyp_pair = parse_study_hypothesis(pa)
@@ -4090,7 +4199,7 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
     (pa, Item {
         kind: ItemKind::ItemStudy,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -4127,7 +4236,7 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
 // ============================================================
 // Parses: ontology Name { class A; class B subclass_of A; disjoint X, Y }
 
-fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_ontology_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'ontology'
 
@@ -4221,24 +4330,25 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
                             pa = pa.advance()  // consume "where"
                             pa = pa.expect_ident()  // consume variable name (should match prop_name)
 
-                            // Parse comparison operator
+                            // Parse comparison operator. The lexer emits combined
+                            // tokens for >= <= == != (GtEq/LtEq/EqEq/BangEq) — the
+                            // earlier `Gt` then `Eq` two-token form never matched a
+                            // `>=`/`<=`, leaving prop_op=0 so weakening (E041) never
+                            // fired. Check the combined tokens directly (mirrors
+                            // types.sio's refinement-predicate parser).
                             if pa.peek() == TokenKind::Gt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 2  // GtEq
-                                } else {
-                                    prop_op = 1  // Gt
-                                }
+                                prop_op = 1  // Gt
+                            } else if pa.peek() == TokenKind::GtEq {
+                                pa = pa.advance()
+                                prop_op = 2  // GtEq
                             } else if pa.peek() == TokenKind::Lt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 4  // LtEq
-                                } else {
-                                    prop_op = 3  // Lt
-                                }
-                            } else if pa.peek() == TokenKind::EqEq {
+                                prop_op = 3  // Lt
+                            } else if pa.peek() == TokenKind::LtEq {
+                                pa = pa.advance()
+                                prop_op = 4  // LtEq
+                            } else if pa.peek() == TokenKind::EqEq || pa.peek() == TokenKind::Eq {
                                 pa = pa.advance()
                                 prop_op = 5  // Eq
                             } else if pa.peek() == TokenKind::BangEq {
@@ -4435,7 +4545,7 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
     (pa, Item {
         kind: ItemKind::ItemOntology,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,

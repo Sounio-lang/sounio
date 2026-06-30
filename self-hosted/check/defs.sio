@@ -5,7 +5,7 @@
 //   EnumTable    — enum name + variants
 //   FnSigTable   — fn name + params + return type + method info
 
-use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, StudyHypothesis, StudyOutcome, UnaryOp, empty_name, empty_path, empty_study_hypothesis, empty_study_outcome, name_eq}
+use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, StudyHypothesis, StudyOutcome, UnaryOp, Visibility, empty_name, empty_path, empty_study_hypothesis, empty_study_outcome, name_eq, visibility_private, visibility_pub}
 use lexer::span::{Span}
 use check::types::*
 
@@ -22,6 +22,13 @@ fn empty_field_info() -> FieldInfo {
     FieldInfo {
         name: Name { buf: [0; 128], len: 0 },
         ty: empty_type_entry(),
+    }
+}
+
+fn field_info_clone(info: &FieldInfo) -> FieldInfo with Mut, Alloc {
+    FieldInfo {
+        name: (*info).name,
+        ty: type_entry_clone(&(*info).ty),
     }
 }
 
@@ -73,6 +80,16 @@ fn field_info_list_count(opt: Option<Box<FieldInfoList>>) -> i64 with Mut, Panic
     }
 }
 
+fn field_info_list_clone(opt: &Option<Box<FieldInfoList>>) -> Option<Box<FieldInfoList>> with Mut, Alloc {
+    match *opt {
+        None => None
+        Some(list) => Some(Box::new(FieldInfoList {
+            head: field_info_clone(&(*list).head),
+            tail: field_info_list_clone(&(*list).tail),
+        }))
+    }
+}
+
 // ============================================================
 // Struct info
 // ============================================================
@@ -85,6 +102,10 @@ pub struct StructInfo {
     type_param_count: i64,
     type_param_names: [Name; 8],
     is_generic_template: bool,
+    visibility_kind: i64,
+    defining_module_id: i64,
+    visibility: Visibility,
+    defining_module: AstPath,
 }
 
 fn empty_struct_info() -> StructInfo {
@@ -96,6 +117,10 @@ fn empty_struct_info() -> StructInfo {
         type_param_count: 0,
         type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
         is_generic_template: false,
+        visibility_kind: VISIBILITY_PRIVATE,
+        defining_module_id: 0,
+        visibility: visibility_private(),
+        defining_module: empty_path(),
     }
 }
 
@@ -104,41 +129,88 @@ fn empty_struct_info() -> StructInfo {
 // ============================================================
 
 pub struct StructTable {
-    entries: [StructInfo; 128],
+    entries: [StructInfo; 4096],
     count: i64,
 }
 
 fn struct_table_new() -> StructTable {
     StructTable {
-        entries: [empty_struct_info(); 128],
+        entries: [empty_struct_info(); 4096],
         count: 0,
     }
 }
 
-impl StructTable {
-    fn add(self, info: StructInfo) -> StructTable with Mut, Panic, Div {
-        var tbl = self
-        if tbl.count < 128 {
-            tbl.entries[tbl.count] = info
-            tbl.count = tbl.count + 1
-        }
-        tbl
-    }
+// StructTable accessors (heap-indirect): table lives behind a `*mut StructTable`
+// in the Checker so by-value Checker copies share ONE table. See the FnSigTable
+// note above; same rationale and the same "never bind (*t) to a value" rule.
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) {
-                return i
+fn struct_table_add(t: *mut StructTable, info: StructInfo) with Mut, Panic, Div {
+    let idx = (*t).count
+    if idx < 4096 {
+        (*t).entries[idx as usize] = info
+        (*t).count = idx + 1
+    }
+}
+
+fn struct_table_find(t: *mut StructTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn struct_table_find_by_buf8(t: *mut StructTable, buf: [i8; 128]) -> i64 with Mut, Panic, Div {
+    // Match structs whose name matches the first min(len,8) bytes of buf.
+    // Called from checker_lower_ref_like_type_mut where only name.buf[0..7]
+    // (TypeEntry bytes 8-15, the *mut SRET window) are reliable.
+    var i: i64 = 0
+    while i < (*t).count {
+        let en = (*t).entries[i as usize]
+        if en.name.len > 0 {
+            let cmp_len = if en.name.len < 8 { en.name.len } else { 8 }
+            var ok: bool = true
+            var j: i64 = 0
+            while j < cmp_len {
+                if en.name.buf[j as usize] != buf[j as usize] { ok = false }
+                j = j + 1
             }
-            i = i + 1
+            if ok { return i }
         }
-        -1
+        i = i + 1
     }
+    0 - 1
+}
 
-    fn get(self, idx: i64) -> StructInfo with Panic, Div {
-        self.entries[idx]
+fn struct_table_get(t: *mut StructTable, idx: i64) -> StructInfo with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_struct_info()
+    } else {
+        (*t).entries[idx as usize]
     }
+}
+
+fn struct_table_get_visibility(t: *mut StructTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        visibility_private()
+    } else {
+        (*t).entries[idx as usize].visibility
+    }
+}
+
+fn struct_table_get_defining_module(t: *mut StructTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_path()
+    } else {
+        (*t).entries[idx as usize].defining_module
+    }
+}
+
+fn struct_table_alloc() -> *mut StructTable with Mut, Panic, Div, Alloc {
+    heap_alloc(8388608) as *mut StructTable
 }
 
 // ============================================================
@@ -222,6 +294,10 @@ pub struct EnumInfo {
     name: Name,
     variants: Option<Box<VariantInfoList>>,
     variant_count: i64,
+    visibility_kind: i64,
+    defining_module_id: i64,
+    visibility: Visibility,
+    defining_module: AstPath,
 }
 
 fn empty_enum_info() -> EnumInfo {
@@ -229,6 +305,10 @@ fn empty_enum_info() -> EnumInfo {
         name: Name { buf: [0; 128], len: 0 },
         variants: None,
         variant_count: 0,
+        visibility_kind: VISIBILITY_PRIVATE,
+        defining_module_id: 0,
+        visibility: visibility_private(),
+        defining_module: empty_path(),
     }
 }
 
@@ -237,52 +317,76 @@ fn empty_enum_info() -> EnumInfo {
 // ============================================================
 
 pub struct EnumTable {
-    entries: [EnumInfo; 32],
+    entries: [EnumInfo; 256],
     count: i64,
 }
 
 fn enum_table_new() -> EnumTable {
     EnumTable {
-        entries: [empty_enum_info(); 32],
+        entries: [empty_enum_info(); 256],
         count: 0,
     }
 }
 
-impl EnumTable {
-    fn add(self, info: EnumInfo) -> EnumTable with Mut, Panic, Div {
-        var tbl = self
-        if tbl.count < 32 {
-            tbl.entries[tbl.count] = info
-            tbl.count = tbl.count + 1
-        }
-        tbl
-    }
+// EnumTable accessors (heap-indirect): table behind a `*mut EnumTable` in the
+// Checker; by-value Checker copies share ONE table. See FnSigTable note above.
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) {
-                return i
-            }
-            i = i + 1
-        }
-        -1
+fn enum_table_add(t: *mut EnumTable, info: EnumInfo) with Mut, Panic, Div {
+    let idx = (*t).count
+    if idx < 256 {
+        (*t).entries[idx as usize] = info
+        (*t).count = idx + 1
     }
+}
 
-    fn get(self, idx: i64) -> EnumInfo with Panic, Div {
-        self.entries[idx]
-    }
-
-    fn find_variant_enum(self, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
-        var i: i64 = 0
-        while i < self.count {
-            if variant_info_list_has(self.entries[i].variants, variant_name) {
-                return i
-            }
-            i = i + 1
+fn enum_table_find(t: *mut EnumTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i].name, name) {
+            return i
         }
-        -1
+        i = i + 1
     }
+    0 - 1
+}
+
+fn enum_table_get(t: *mut EnumTable, idx: i64) -> EnumInfo with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_enum_info()
+    } else {
+        (*t).entries[idx as usize]
+    }
+}
+
+fn enum_table_get_visibility(t: *mut EnumTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        visibility_private()
+    } else {
+        (*t).entries[idx as usize].visibility
+    }
+}
+
+fn enum_table_get_defining_module(t: *mut EnumTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        empty_path()
+    } else {
+        (*t).entries[idx as usize].defining_module
+    }
+}
+
+fn enum_table_find_variant_enum(t: *mut EnumTable, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < (*t).count {
+        if variant_info_list_has((*t).entries[i].variants, variant_name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn enum_table_alloc() -> *mut EnumTable with Mut, Panic, Div, Alloc {
+    heap_alloc(524288) as *mut EnumTable
 }
 
 // ============================================================
@@ -298,6 +402,13 @@ fn empty_fn_param_info() -> FnParamInfo {
     FnParamInfo {
         name: Name { buf: [0; 128], len: 0 },
         ty: empty_type_entry(),
+    }
+}
+
+fn fn_param_info_clone(info: &FnParamInfo) -> FnParamInfo with Mut, Alloc {
+    FnParamInfo {
+        name: (*info).name,
+        ty: type_entry_clone(&(*info).ty),
     }
 }
 
@@ -333,6 +444,16 @@ fn fn_param_list_get(opt: Option<Box<FnParamList>>, idx: i64) -> FnParamInfo wit
                 fn_param_list_get((*list).tail, idx - 1)
             }
         }
+    }
+}
+
+fn fn_param_list_clone(opt: &Option<Box<FnParamList>>) -> Option<Box<FnParamList>> with Mut, Alloc {
+    match *opt {
+        None => None
+        Some(list) => Some(Box::new(FnParamList {
+            head: fn_param_info_clone(&(*list).head),
+            tail: fn_param_list_clone(&(*list).tail),
+        }))
     }
 }
 
@@ -1158,6 +1279,11 @@ pub struct FnSig {
     is_linear_closure: bool,      // true if captures linear resources => call exactly once
     linear_capture_count: i64,    // number of linear captures
     epistemic_epsilon: f64,       // combined GUM epsilon from Knowledge captures (-1.0 = none)
+    visibility_kind: i64,
+    defining_module_seg_count: i64,
+    defining_module_id: i64,
+    visibility: Visibility,
+    defining_module: AstPath,
 }
 
 fn empty_fn_sig() -> FnSig {
@@ -1176,6 +1302,11 @@ fn empty_fn_sig() -> FnSig {
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PRIVATE,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_private(),
+        defining_module: empty_path(),
     }
 }
 
@@ -1183,72 +1314,158 @@ fn empty_fn_sig() -> FnSig {
 // FnSig table
 // ============================================================
 
+// FnSigTable (CHUNKED, heap-indirect): the table lives behind a `*mut FnSigTable`
+// in the Checker so by-value Checker copies share ONE table. Storage is a linked
+// list of fixed-size chunks rather than one giant `[FnSig; N]` array. A per-module
+// checker with a handful of signatures uses a single ~0.75MB chunk; the cross-module
+// accumulator grows chunks on demand. This BOUNDS memory under the multi-module
+// frontend (which holds many checkers at once) -- a fixed huge cap allocated the
+// full array in every checker and exhausted memory on the self-compile. Chunks hold
+// inline `[FnSig; 512]` arrays, so element access is a single deref + array index
+// (Sounio has no raw-pointer `p[i]` and no sizeof, so neither flat-growable storage).
+
+pub struct FnSigChunk {
+    entries: [FnSig; 512],
+    next: *mut FnSigChunk,    // 0 == last chunk
+}
+
 pub struct FnSigTable {
-    entries: [FnSig; 64],
+    head: *mut FnSigChunk,    // 0 == empty
     count: i64,
 }
 
-fn fn_sig_table_new() -> FnSigTable {
-    FnSigTable {
-        entries: [empty_fn_sig(); 64],
-        count: 0,
-    }
+// One zeroed chunk via heap_alloc (calloc): entries start empty, next == 0.
+// 512 * <=1.5KB/FnSig ~= 0.75MB; over-provisioned, mmap-lazy.
+fn fn_sig_chunk_alloc() -> *mut FnSigChunk with Alloc {
+    heap_alloc(786432) as *mut FnSigChunk
 }
 
-impl FnSigTable {
-    fn add(self, sig: FnSig) -> (FnSigTable, i64) with Mut, Panic, Div {
-        var tbl = self
-        let idx = tbl.count
-        if tbl.count < 64 {
-            tbl.entries[tbl.count] = sig
-            tbl.count = tbl.count + 1
-        }
-        (tbl, idx)
-    }
+// Small table header (head ptr + count); calloc zeroes head to 0 and count to 0.
+fn fn_sig_table_alloc() -> *mut FnSigTable with Alloc {
+    heap_alloc(64) as *mut FnSigTable
+}
 
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if name_eq(self.entries[i].name, name) && !self.entries[i].is_method {
-                return i
+// Walk to (allocating chunks as needed) the chunk holding global index `gi`.
+fn fn_sig_table_chunk_for(t: *mut FnSigTable, gi: i64) -> *mut FnSigChunk with Mut, Panic, Div, Alloc {
+    if (*t).head == (0 as *mut FnSigChunk) {
+        (*t).head = fn_sig_chunk_alloc()
+    }
+    let chunk_no = gi / 512
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        if (*cur).next == (0 as *mut FnSigChunk) {
+            (*cur).next = fn_sig_chunk_alloc()
+        }
+        cur = (*cur).next
+        n = n + 1
+    }
+    cur
+}
+
+fn fn_sig_table_add(t: *mut FnSigTable, sig: FnSig) -> i64 with Mut, Panic, Div, Alloc {
+    let idx = (*t).count
+    // Bound runaway growth (never reached by a well-formed program).
+    if idx >= 1048576 {
+        return 0 - 1
+    }
+    let chunk = fn_sig_table_chunk_for(t, idx)
+    (*chunk).entries[(idx % 512) as usize] = sig
+    (*t).count = idx + 1
+    idx
+}
+
+fn fn_sig_table_get(t: *mut FnSigTable, idx: i64) -> FnSig with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        return empty_fn_sig()
+    }
+    let chunk_no = idx / 512
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        if cur == (0 as *mut FnSigChunk) {
+            return empty_fn_sig()
+        }
+        cur = (*cur).next
+        n = n + 1
+    }
+    if cur == (0 as *mut FnSigChunk) {
+        return empty_fn_sig()
+    }
+    (*cur).entries[(idx % 512) as usize]
+}
+
+fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if name_eq((*cur).entries[local as usize].name, name) && !(*cur).entries[local as usize].is_method {
+                return gi
             }
-            i = i + 1
+            local = local + 1
+            gi = gi + 1
         }
-        -1
+        cur = (*cur).next
     }
+    0 - 1
+}
 
-    fn find_method(self, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if self.entries[i].is_method && name_eq(self.entries[i].self_type_name, type_name) && name_eq(self.entries[i].name, method_name) {
-                return i
+fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if (*cur).entries[local as usize].is_method && name_eq((*cur).entries[local as usize].self_type_name, type_name) && name_eq((*cur).entries[local as usize].name, method_name) {
+                return gi
             }
-            i = i + 1
+            local = local + 1
+            gi = gi + 1
         }
-        -1
+        cur = (*cur).next
     }
+    0 - 1
+}
 
-    // Semantic method lookup: matches by TypeEntry kind+name instead of Name alone.
-    // Resolves ambiguity when two types in different modules share a name.
-    fn find_method_semantic(self, receiver_ty: TypeEntry, method_name: Name) -> i64 with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if self.entries[i].is_method && name_eq(self.entries[i].name, method_name) {
-                // Semantic match: compare type kind and name
-                let sig_ty = self.entries[i].self_type_entry
+// Semantic method lookup: matches by TypeEntry kind+name instead of Name alone.
+fn fn_sig_table_find_method_semantic(t: *mut FnSigTable, receiver_ty: TypeEntry, method_name: Name) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if (*cur).entries[local as usize].is_method && name_eq((*cur).entries[local as usize].name, method_name) {
+                let sig_ty = (*cur).entries[local as usize].self_type_entry
                 if sig_ty.kind == receiver_ty.kind && name_eq(sig_ty.name, receiver_ty.name) {
-                    return i
+                    return gi
                 }
             }
-            i = i + 1
+            local = local + 1
+            gi = gi + 1
         }
-        // Fallback to string-based lookup for backward compatibility
-        self.find_method(receiver_ty.name, method_name)
+        cur = (*cur).next
     }
+    // Fallback to string-based lookup for backward compatibility
+    fn_sig_table_find_method(t, receiver_ty.name, method_name)
+}
 
-    fn get(self, idx: i64) -> FnSig with Panic, Div {
-        self.entries[idx]
+fn fn_sig_table_get_visibility(t: *mut FnSigTable, idx: i64) -> Visibility with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        return visibility_private()
     }
+    fn_sig_table_get(t, idx).visibility
+}
+
+fn fn_sig_table_get_defining_module(t: *mut FnSigTable, idx: i64) -> AstPath with Mut, Panic, Div {
+    if idx < 0 || idx >= (*t).count {
+        return empty_path()
+    }
+    fn_sig_table_get(t, idx).defining_module
 }
 
 // ============================================================

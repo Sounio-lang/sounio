@@ -21,6 +21,7 @@ pub struct BorrowEntry {
     is_linear: bool,     // Whether this is a linear type variable
     consumed: bool,      // Whether a linear variable has been consumed
     scope_depth: i64,    // Scope where this entry was created
+    provenance: i64,     // escape provenance: 0=first-class (param/global/safe), 1=local (frame-bound ref)
 }
 
 fn empty_borrow_entry() -> BorrowEntry {
@@ -31,6 +32,7 @@ fn empty_borrow_entry() -> BorrowEntry {
         is_linear: false,
         consumed: false,
         scope_depth: 0,
+        provenance: 0,
     }
 }
 
@@ -92,6 +94,7 @@ impl BorrowEnv {
                 is_linear: is_linear,
                 consumed: false,
                 scope_depth: env.scope_depth,
+                provenance: 0,
             }
             env.count = env.count + 1
         }
@@ -108,6 +111,32 @@ impl BorrowEnv {
             i = i - 1
         }
         -1
+    }
+
+    // Scope depth where a name was bound (-1 if not tracked). Params are bound at
+    // depth 1 (the fn param scope); body-locals at depth >= 2 (the body block pushes
+    // a second scope). So scope_depth_of(name) >= 2 iff name is a frame-bound local.
+    fn scope_depth_of(self, name: Name) -> i64 with Mut, Panic, Div {
+        let idx = self.find(name)
+        if idx < 0 { return -1 }
+        self.entries[idx].scope_depth
+    }
+
+    // Escape provenance of a binding (0=first-class, 1=local); 0 if not tracked.
+    fn provenance_of(self, name: Name) -> i64 with Mut, Panic, Div {
+        let idx = self.find(name)
+        if idx < 0 { return 0 }
+        self.entries[idx].provenance
+    }
+
+    // Record the escape provenance of a binding (set after track at let/var sites).
+    fn set_provenance(self, name: Name, prov: i64) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx >= 0 {
+            env.entries[idx].provenance = prov
+        }
+        env
     }
 
     // Try to take a shared borrow (&x)

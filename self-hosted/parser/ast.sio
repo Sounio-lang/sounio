@@ -353,6 +353,7 @@ pub struct Stmt {
 
 pub struct MatchArm {
     pattern: Pattern,
+    guard: Option<Box<Expr> >,
     body: Expr,
     span: Span,
 }
@@ -815,6 +816,7 @@ pub enum TypeExprKind {
     TypeNamed,
     TypeReference,
     TypeRefMut,
+    TypeRawPtr,
     TypeArray,
     TypeTuple,
     TypeFn,
@@ -877,6 +879,11 @@ pub struct RefinementInfo {
     pred_int_val: i64,
     pred_float_val: f64,
     pred_is_float: bool,
+    compound_op: i64,
+    pred2_op: i64,
+    pred2_int_val: i64,
+    pred2_float_val: f64,
+    pred2_is_float: bool,
 }
 
 pub struct TypeExpr {
@@ -938,13 +945,63 @@ pub enum ItemKind {
     ItemOntology,
 }
 
+// ============================================================================
+// Visibility hierarchy
+// ============================================================================
+// Sounio does not yet support enum variants with payloads, so visibility is
+// represented as a tagged struct.  The parser accepts:
+//   (omitted)      -> Private
+//   pub            -> Pub
+//   pub(crate)     -> PubCrate
+//   pub(super)     -> PubSuper
+//   pub(path::to)  -> PubIn(path::to)
+
+pub struct Visibility {
+    kind: i64,
+    path: AstPath,
+}
+
+let VISIBILITY_PRIVATE: i64 = 0
+let VISIBILITY_PUB: i64 = 1
+let VISIBILITY_PUB_CRATE: i64 = 2
+let VISIBILITY_PUB_SUPER: i64 = 3
+let VISIBILITY_PUB_IN: i64 = 4
+
+pub fn visibility_private() -> Visibility {
+    Visibility { kind: VISIBILITY_PRIVATE, path: empty_path() }
+}
+
+pub fn visibility_pub() -> Visibility {
+    Visibility { kind: VISIBILITY_PUB, path: empty_path() }
+}
+
+pub fn visibility_pub_crate() -> Visibility {
+    Visibility { kind: VISIBILITY_PUB_CRATE, path: empty_path() }
+}
+
+pub fn visibility_pub_super() -> Visibility {
+    Visibility { kind: VISIBILITY_PUB_SUPER, path: empty_path() }
+}
+
+pub fn visibility_pub_in(path: AstPath) -> Visibility {
+    Visibility { kind: VISIBILITY_PUB_IN, path: path }
+}
+
+pub fn visibility_is_pub(v: Visibility) -> bool {
+    v.kind == VISIBILITY_PUB
+}
+
+pub fn visibility_to_bool(v: Visibility) -> bool {
+    v.kind != VISIBILITY_PRIVATE
+}
+
 pub struct Item {
     kind: ItemKind,
     span: Span,
 
-    // True if declared with `pub`.
-    // (Visibility is not fully enforced yet; this is used for module exports.)
-    is_pub: bool,
+    // Visibility of this item.  The parser produces this from `pub`,
+    // `pub(crate)`, `pub(super)`, or `pub(path)`.  Private by default.
+    visibility: Visibility,
 
     // For all: item name
     name: Name,
@@ -1157,7 +1214,7 @@ pub struct StudyDef {
     n_outcomes: i32,
 }
 
-fn empty_study_hypothesis() -> StudyHypothesis {
+pub fn empty_study_hypothesis() -> StudyHypothesis {
     StudyHypothesis {
         name: Name { buf: [0; 128], len: 0 },
         outcome: Name { buf: [0; 128], len: 0 },
@@ -1166,7 +1223,7 @@ fn empty_study_hypothesis() -> StudyHypothesis {
     }
 }
 
-fn empty_study_outcome() -> StudyOutcome {
+pub fn empty_study_outcome() -> StudyOutcome {
     StudyOutcome {
         name: Name { buf: [0; 128], len: 0 },
         is_primary: false,
@@ -1198,7 +1255,7 @@ pub struct OntologyClassDecl {
     span: Span,
 }
 
-fn empty_ontology_property_decl() -> OntologyPropertyDecl {
+pub fn empty_ontology_property_decl() -> OntologyPropertyDecl {
     OntologyPropertyDecl {
         name: Name { buf: [0; 128], len: 0 },
         type_name: Name { buf: [0; 128], len: 0 },
@@ -1301,4 +1358,46 @@ pub fn name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
         i = i + 1
     }
     true
+}
+
+// ============================================================
+// Global variable initializer side table
+// ============================================================
+
+pub var GLOBAL_VAR_INIT_COUNT: i64 = 0
+pub var GLOBAL_VAR_INIT_HASHES: [i64; 128] = [0; 128]
+pub var GLOBAL_VAR_INIT_VALUES: [i64; 128] = [0; 128]
+
+pub fn ast_name_hash(n: Name) -> i64 with Div {
+    var hash: i64 = 5381
+    var i = 0
+    while i < n.len {
+        hash = hash * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    if hash < 0 { 0 - hash } else { hash }
+}
+
+pub fn ast_reset_global_var_inits() with Mut {
+    GLOBAL_VAR_INIT_COUNT = 0
+}
+
+pub fn ast_record_global_var_init(name: Name, value: i64) with Mut, Div {
+    if GLOBAL_VAR_INIT_COUNT < 128 {
+        GLOBAL_VAR_INIT_HASHES[GLOBAL_VAR_INIT_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_VAR_INIT_VALUES[GLOBAL_VAR_INIT_COUNT as usize] = value
+        GLOBAL_VAR_INIT_COUNT = GLOBAL_VAR_INIT_COUNT + 1
+    }
+}
+
+pub fn ast_lookup_global_var_init(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
+            return GLOBAL_VAR_INIT_VALUES[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
