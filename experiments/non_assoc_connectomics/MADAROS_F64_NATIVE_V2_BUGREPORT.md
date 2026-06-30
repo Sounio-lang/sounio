@@ -113,3 +113,38 @@ artifact runs on Madaros, both in the full v2 backend (not the routing):
 Both are out of scope of the f64 routing fix. f64-heavy *scalar* programs now compile and
 run correctly on Madaros; the octonion artifact stays on lean_single until (1)+(2) land.
 No regression: integer + f64 programs compile and run correctly with the fixed binary.
+
+---
+
+## (a) str_from_bytes — ROOT CAUSE LOCATED (2026-06-30)
+
+`str_from_bytes` is **missing from the v2 backend's builtin table**. In
+`self-hosted/native/codegen_x86_linux.sio`, `native_v2_builtin_id_for_func_ref`
+(lines ~1065-1088) maps ~21 builtins (str_len=6, str_char_at=20, str_eq=7,
+str_slice=8, starts_with=9, str_concat=10, read_file=11, …) but has **no entry for
+str_from_bytes**. So a call to it returns id 0 (not-a-builtin) → treated as a call to a
+bodiless function → returns garbage/empty (matches m4: empty output, no crash).
+
+VM string representation (from `emit_builtin_str_concat`): null-terminated `char*` on a
+bump heap (`RuntimeContext.heap_cursor`).
+
+### Fix recipe (NOT applied — needs a working rebuild loop to verify; writing raw
+machine-code emitters blind is unsafe, doubly so now the binary is shared/promoted):
+1. Add recognizer `name_is_str_from_bytes(n)` ("str_from_bytes" = 14 bytes), mirroring
+   `name_is_str_concat`.
+2. Register an id (e.g. 22) in `native_v2_builtin_id_for_func_ref` and in the name-based
+   dispatch near line 4752 (`if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }`).
+3. Add to the id dispatch near line 5570:
+   `if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }`.
+4. Write `emit_builtin_str_from_bytes`: args rdi=buf, rsi=len → bump-allocate len+1 from
+   heap_cursor, copy len bytes (rep movsb or a byte loop like starts_with), store NUL at
+   end, return pointer in rax. Mirror `emit_builtin_str_concat`'s heap-alloc/copy/advance
+   sequence exactly (it is the canonical string-producing builtin).
+Verify: rebuild + m4 → "Hi".
+
+## (b) octonion-intrinsic SIGSEGV in v2 — NOT yet localized
+The full octonion artifact takes the (now-default) full merged-IR path but the v2 backend
+SIGSEGVs (exit 139) compiling the octonion intrinsics (`oct_mul`/`oct_associator` →
+`IrHyperMulO`/`IrAssociator`). Next step: determine whether the v2 path (`compile_ir_function_v2`)
+handles these IR opcodes at all (lower_ir.sio has `lower_hyper_mul_o_fano`/`lower_associator`,
+but the v2 machine-IR path may not route to them). Needs investigation + rebuild to verify.
