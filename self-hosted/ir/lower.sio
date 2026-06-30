@@ -4795,7 +4795,44 @@ impl Lowerer {
             }
             return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
         }
+        // An if-expression yields a float if either arm yields a float. Native
+        // codegen types the merge register flow-insensitively (last linear write
+        // wins), and an f64 literal arm (e.g. `else { 0.0 }`) lowers to IrLoadImm
+        // (int-flagged), so without this case `let k = if c { a/b } else { 0.0 }`
+        // leaves `k` untyped and a downstream `acc + k` cvtsi2sd-corrupts the bits.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_is_float_ref(&(*e).block) || self.opt_expr_result_is_float_ref(&(*e).else_expr)
+        }
         false
+    }
+
+    // True iff the block's value (its trailing expression statement) yields a
+    // float. A block whose last statement is a let/var/assign yields unit → false.
+    fn opt_block_tail_is_float_ref(self, blk_opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_is_float_ref(&(*blk)),
+            _ => false,
+        }
+    }
+
+    fn block_tail_is_float_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_is_float_ref(&stmt_ref.expr)
+                    } else {
+                        result = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
     }
 
     fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
@@ -8501,6 +8538,12 @@ impl Lowerer {
     }
 
     fn lower_if_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Type the merge register as a true JOIN of the two arms. Native codegen
+        // is flow-insensitive (the if-merge res inherits whichever ir_copy is last
+        // in linear order — the else arm), so an f64 if-expr whose else arm is an
+        // int-flagged value (e.g. an f64 literal via IrLoadImm) would otherwise
+        // leave res untyped and a downstream float consumer cvtsi2sd-corrupts it.
+        let res_is_float = self.expr_result_is_float_ref(e)
         let pair_cond = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_cond.0
         let cond = pair_cond.1
@@ -8537,6 +8580,9 @@ impl Lowerer {
         let else_reg = pair_else.1
         lo = lo.emit(ir_copy(res, else_reg))
         lo = lo.emit(ir_label(l_end))
+        if res_is_float {
+            lo = lo.emit(ir_mark_float_reg(res))
+        }
         (lo, res)
     }
 
