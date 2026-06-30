@@ -69,3 +69,25 @@ keep probing symmetric FC for octonions that the geometry rules out.
 Sources: Nature s41586-021-04268-7; arXiv 2210.02684, 2510.02853, 2506.13768;
 PMC3040354, PMC7888488, PMC11625415, PMC12513225; biorxiv 2025.11.16.688716;
 mdpi 15/21/11526.
+
+## Track C result (2026-06-30): directed connectivity TESTED — real but weak for ASD
+
+Ran the directed-connectivity probe (`scripts/directed_connectivity_test.py`) on ABIDE
+CC200 (N=988, LOSO 20 sites). Lag-1 cross-correlation M_ij=corr(x_i(t),x_j(t+1));
+directed part K=(M−Mᵀ)/2.
+
+- **Directed structure is REAL:** asymmetry ‖K‖/‖M‖ = **0.291** (substantial, not noise) —
+  lead-lag directionality genuinely exists, as the verdict predicted.
+- **But its ASD signal is weak:** directed part alone = **53.5%** balanced acc (vs symmetric
+  FC **65.9%**), and FC+directed = **62.7%** (worse than FC — the 19 900 weak directed
+  features overfit in LOSO).
+
+**Honest read:** the directed/lead-lag modality the verdict flagged is real but, at this
+(lag-1 cross-correlation) operationalization, carries only marginal autism-classification
+signal and does **not** add to symmetric FC. Caveat: one directed measure, naive
+high-dim features, simple linear LOSO — a dimensionality-reduced or model-based (sparse-DCM)
+directed estimate could differ. And note: composition of directed connectivity as matrices
+is associative, so this does not bear on *non-associativity* — it tests whether directed
+*structure* carries signal (it does, but weakly). Door 1 is now tested, not assumed; the
+remaining non-associativity home is sequence/working-memory composition (door 2), behavioral
+and outside this dataset.
