@@ -27,3 +27,4 @@ bit-identically and ties to `formal/OctonionAssociator.lean`.
 | `assignment_enumeration.py` | bounds the assignment freedom: only ~2/81 cross-sector-consistent, both at √(3/8) (§4.7) |
 | `centers_from_charges.py` | sector centers = electric charges, recovered mass-blind; compound-ratio forward checks (§4.8) |
 | `dynkin_swap_symbolic.py` | SymPy proof of the 7 algebraic identities in `formal/DynkinSwapMassLadder.lean` (§4.9) |
+| `identifiability_audit.py` | ADVERSARIAL: δ unidentified without charge-centers (flat χ²); charge-center match selective 0/20000 (§4.10) |

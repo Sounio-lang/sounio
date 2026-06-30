@@ -18,14 +18,18 @@ carries matching structure** (a fair, pre-committed, matched-capacity ablation g
 balanced-accuracy gap over an associative control). It is **absent from brain functional
 connectivity** (ABIDE rs-fMRI): three converging, fairly-powered tests — including an
 end-to-end learned embedding that had every chance to find it — return null, while the *same*
-machinery scores +35 on genuinely octonionic data. Its one strong empirical anchor is in
-**fermion masses**: the single algebraic constant δ²=3/8 fixed by the exceptional Jordan algebra
-J₃(O_C) is selected by real PDG mass ratios across three functional forms and three sectors
-(null-model p < 10⁻⁵), and a δ fit on the quark sector alone predicts the lepton sector
-held-out to ~2%. This is a genuine, quantified regularity — **not** a confirmed predictive
-theory (a residual formula-assignment freedom remains, some relations miss by ~10%, the
+machinery scores +35 on genuinely octonionic data. Its one suggestive anchor is in
+**fermion masses**: **given the electric-charge center assignment** of the exceptional Jordan
+algebra J₃(O_C), real PDG mass ratios are **consistent with** δ²=3/8 (the up sector's
+spread/center ratio = √(3/8)/(2/3) to 0.1%; given charge-centers the 5-ratio cluster is
+p < 10⁻⁵ vs random; the centers≈charges match is selective — 0/20000 scrambled spectra reproduce
+it). **Important conditioning (identifiability audit, §4.10):** with the sector centers left
+free, δ is *not* identified by the masses alone — χ²(δ) is flat; only fixing centers = electric
+charges pins δ to √(3/8). So the honest claim is conditional: *charges ⇒ δ²=3/8*, not *masses
+select δ²=3/8*. This is a genuine, quantified, conditional regularity — **not** a confirmed
+predictive theory (δ is unidentified without the charge input; some relations miss by ~10%; the
 source is a single-author program). Net: the octonion has "something more," but in physics,
-not the brain — and as suggestive structure, not yet established law.
+not the brain — and as suggestive, properly-conditioned structure, not established law.
 
 ---
 
@@ -191,9 +195,13 @@ mass input for the center) and inverting each single-edge form for the c_s it im
 | c/u | up | 0.6651 | 2/3 | −0.2% |
 | t/c | up | 0.6698 | 2/3 | +0.5% |
 
-The masses, given only δ=√(3/8), independently select **c_s = the electric charge** of each sector
-(up 0.667 vs 2/3 to 0.1%; lepton/down 0.986 vs 1 to 1.4%). The down sector takes center 1 (the
-electron charge) via the Dynkin swap, not its own 1/3. **Compound (two-edge) ratios** match
+Given δ=√(3/8), the implied centers match electric charges for **two of three** sectors — lepton
+1.007 vs 1 (+0.7%) and up 0.665/0.670 vs 2/3 (~0.1–0.5%). The down sector comes out ≈1, the
+**electron** charge (via the Dynkin swap), **not** its own 1/3 — and partly because center 1/3 < δ
+makes the form invalid, so this is forced by validity, not an independent charge recovery.
+*(And see §4.10: this recovery is conditional on δ being fixed; with δ free the centers and δ are
+co-determined.)* The δ inferred here is δ²≈0.379, **consistent with** 3/8=0.375 at the ~1% level,
+not exactly selected. **Compound (two-edge) ratios** match
 *forward* (δ and centers fixed, zero free parameter): b/s = (c/a)(c/b)|_{c=1} = 6.707 vs 6.690
 (+0.3%); μ/e = (c/a)·(δ+⅓)/(δ−⅓) = 14.10 vs 14.38 (−2.0%) — the (δ±⅓) factor is the Dynkin-swap
 1↔⅓ image (consistent; not independently re-derived here).
@@ -224,6 +232,28 @@ symbolically. The genuinely open step (stated, not encoded as an axiom): derivin
 *realises* the center↔spread exchange. This is the boundary between strong quantified regularity
 and first-principles law.
 
+### 4.10 Identifiability audit (adversarial — what survives, what doesn't)
+Two break-it tests (`identifiability_audit.py`):
+
+1. **δ is not identified by the masses alone.** §4.8 fixed δ=√(3/8) and then "recovered" the
+   centers — near-circular. Profiling the fit χ²(δ) with the sector centers left **free**: χ²(δ)
+   is **flat** across δ∈[0.40, 0.65] (max/min = 1.0). The lepton and down sectors (one ratio,
+   one free center each) fit *any* δ exactly; the up sector pins only the scale-free ratio
+   **δ/c_U = 0.918 = √(3/8)/(2/3) to 0.1%**, not δ itself. So δ=√(3/8) emerges **only** once the
+   centers are fixed to the electric charges. The honest statement is conditional:
+   *charge-centers ⇒ δ²=3/8*, **not** *masses select δ²=3/8*.
+2. **The charge-center match is selective (not manufactured).** Real masses give centers within
+   1.2% of {1, 1, 2/3}; over 20 000 scrambled mass spectra, **0** land that close. And the
+   5-ratio δ-cluster (given charge-centers) sits at p < 10⁻⁵ vs random (§4.4). So conditional on
+   the charge assignment, the agreement is real and unlikely by chance.
+
+**Reconciled honest claim:** the load-bearing input is the **electric-charge center assignment**
+(physically motivated, external). *Given* it, the fermion masses are consistent with the single
+algebraic constant δ²=3/8, selectively (p<10⁻⁵) and cross-sector-predictively (~2%). Without it,
+δ is unidentified. The remaining first-principles step (deriving the charge↔center and swap
+structure from E₆ triality) is exactly where the content lives — not in the algebra we can already
+prove.
+
 ---
 
 ## 5. Sounio artifact (reproducibility + formal anchoring)
@@ -247,7 +277,7 @@ a formally-verified non-associative algebra, and (next) ISO-GUM uncertainty prop
 |---|---|
 | Brain (ABIDE FC) | **No** — robust null (3 tests; tool calibrated at +35) |
 | Octonion as inductive bias | **Yes** — decisive (+35) when data carries the structure |
-| Fermion masses | **Yes, quantified** — masses select √(3/8), cross-sector predictive to ~2%, null p<10⁻⁵ |
+| Fermion masses | **Conditional** — *given charge-centers*, masses are consistent with δ²=3/8 (selective, p<10⁻⁵; cross-sector ~2%). δ is **unidentified** without the charge input (§4.10). |
 | Confirmed predictive theory | **Not yet** — assignment not re-derived mass-blind; ~10% misses; single-author |
 
 The honest lesson, repeated at every front: a different tool, algebra, or language does not
