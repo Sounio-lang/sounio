@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.macos-arm64-crash-fix-2026-06-13
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.macos-arm64-crash-fix-2026-06-13
+-->
+
 # macOS arm64 self-hosted compiler crash — root cause & fix (2026-06-13)
 
 Branch: `fix/silent-typecheck-diag` · Fixes at `c95690b2f` and `e55d11729`.

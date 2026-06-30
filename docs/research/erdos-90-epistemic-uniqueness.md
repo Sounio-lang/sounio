@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.erdos-90-epistemic-uniqueness
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.erdos-90-epistemic-uniqueness
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Erdős [90], reframed: an epistemic unit-distance graph (a Sounio capability study)
 
 *Companion to `stdlib/research/erdos90_epistemic.sio` and `…/erdos90_search_epistemic.sio`.

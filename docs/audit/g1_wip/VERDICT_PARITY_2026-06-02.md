@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.verdict-parity-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.verdict-parity-2026-06-02
+-->
+
 # Verdict-parity: E014 (usize index) + E003 (module-global mutation) — 2026-06-02
 
 Follow-up to [CRASH_CLASS_ZERO](CRASH_CLASS_ZERO_2026-06-02.md). The 3 programs that

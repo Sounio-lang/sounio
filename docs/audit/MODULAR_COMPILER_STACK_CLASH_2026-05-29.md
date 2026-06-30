@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.modular-compiler-stack-clash-2026-05-29
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.modular-compiler-stack-clash-2026-05-29
+-->
+
 # Modular compiler end-to-end: root-cause analysis (2026-05-29 / 30)
 
 > **⚠️ SUPERSEDED 2026-06-10** — the crash state described below no longer

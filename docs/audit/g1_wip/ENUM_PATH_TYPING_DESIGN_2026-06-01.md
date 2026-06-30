@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.enum-path-typing-design-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.enum-path-typing-design-2026-06-01
+-->
+
 # Enum-path typing — design note + scoping (2026-06-01)
 
 Output of the "enum-path typing session." No code was written: the session's real result is

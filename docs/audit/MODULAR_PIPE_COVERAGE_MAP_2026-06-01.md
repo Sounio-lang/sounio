@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.modular-pipe-coverage-map-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.modular-pipe-coverage-map-2026-06-01
+-->
+
 # Modular Compiler — Per-Type Pipe Coverage Map (2026-06-01)
 
 **Headline:** Landing G1 brings **9 of 61** broken types (15%) fully alive end-to-end with **zero new pipe work** — they already carry all six layers (token -> constructor/producer -> checker -> dedicated IR opcode -> lowering -> native codegen). The other **52 (85%)** still need work: **19** type-check but dead-end before the backend (no IR opcode / no lowering / no codegen), **2** parse a token but never produce a value, and **31** are inert enum slots wired only to dead helpers.

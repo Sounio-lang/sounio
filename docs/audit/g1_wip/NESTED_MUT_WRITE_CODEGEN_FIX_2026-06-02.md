@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.nested-mut-write-codegen-fix-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.nested-mut-write-codegen-fix-2026-06-02
+-->
+
 # Nested-`*mut`-write codegen bug — FIXED + validated; E008 spurious class eliminated (2026-06-02)
 
 Branch `codegen/nested-mut-write-fix` @ base `5082bf67e` (fall-through-fixed). Commit `89ddc753b`.

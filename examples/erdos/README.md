@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.erdos.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.erdos.readme
+-->
+
 # Erdős unit-distance / chromatic-number examples
 
 Sounio programs around two Erdős-flavoured problems on unit-distance graphs in the

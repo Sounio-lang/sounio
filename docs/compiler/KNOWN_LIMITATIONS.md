@@ -2,9 +2,9 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-05-27
-validated_by: PL adoption audit (docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md)
-source_of_truth: docs/serious-language/public-claim-registry.v1.tsv
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
 
 # Known Language Limitations
