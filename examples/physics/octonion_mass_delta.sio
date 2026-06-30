@@ -1,0 +1,263 @@
+// Octonion exceptional-Jordan fermion-mass delta-consistency + cross-sector held-out test.
+// Native Sounio port of the analysis (Python ref: scratchpad/delta_consistency.py,
+// heldout_crosssector.py). The exceptional Jordan algebra J3(O_C) FIXES delta^2 = 3/8;
+// this program checks whether real PDG fermion masses select that value, and whether a
+// delta fit on the QUARK sector predicts the LEPTON sector held-out (zero lepton input).
+//
+// All f64 values are printed as fixed-point integers (value * 1e6) — lean_single idiom.
+//
+// Stage 2 ties the analysis to the REAL octonion algebra (math::octonion) and the
+// formal obligation in formal/OctonionAssociator.lean: the associator [a,b,c] vanishes
+// on Fano-line (associative) triples and is nonzero off them (genuine non-associativity).
+
+use algebra::octonion::*;
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return 0.0 }
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// relative standard uncertainty of R = sqrt(ma/mb), from GUM propagation:
+//   u_rel(R) = (1/2) * sqrt( (ua/ma)^2 + (ub/mb)^2 )
+fn u_rel_ratio(ma: f64, ua: f64, mb: f64, ub: f64) -> f64 with Mut, Div, Panic {
+    let ra = ua / ma
+    let rb = ub / mb
+    0.5 * sqrt_q(ra*ra + rb*rb)
+}
+
+fn i64_to_string(v: i64) -> string with Mut, Panic, Div {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    while n > 0 && rev_len < 31 {
+        rev[rev_len as usize] = (48 + n % 10) as i8
+        rev_len = rev_len + 1
+        n = n / 10
+    }
+    var out: [i8; 64] = [0; 64]
+    var out_len: i64 = 0
+    if neg { out[out_len as usize] = 45 as i8; out_len = out_len + 1 }
+    var i = rev_len - 1
+    while i >= 0 {
+        out[out_len as usize] = rev[i as usize]
+        out_len = out_len + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(out, out_len)
+}
+
+fn fp_string(v: f64) -> string with Mut, Div, Panic {
+    // build "W.dddddd" (6 dp, fixed point) into ONE buffer, single str_from_bytes
+    // (avoids str_from_bytes buffer-reuse when concatenating multiple converted ints)
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    // whole part digits (reversed) into wrev
+    var wrev: [i8; 32] = [0; 32]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 31 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var pos: i64 = 0
+    if neg { buf[pos as usize] = 45 as i8; pos = pos + 1 }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]; pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8; pos = pos + 1   // '.'
+    // 6 fractional digits, zero-padded, most-significant first
+    var div = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8; pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn print_fp(label: string, v: f64) with IO, Mut, Div, Panic {
+    println(label ++ fp_string(v))
+}
+
+// inverse closed forms: implied delta from an observed sqrt-mass-ratio R
+fn inv_A(r: f64)  -> f64 with Div { (r - 1.0) / (r + 1.0) }              // R=(1+d)/(1-d)
+fn inv_C1(r: f64) -> f64 with Div { (2.0/3.0) * (r - 1.0) / (r + 1.0) }  // R=(2/3+d)/(2/3-d)
+fn inv_C2(r: f64) -> f64 with Div { (2.0/3.0) * (1.0 - 1.0/r) }          // R=(2/3)/(2/3-d)
+
+fn form_A(d: f64)   -> f64 with Div { (1.0 + d) / (1.0 - d) }
+fn form_Asq(d: f64) -> f64 with Div { (1.0 + d) * (1.0 + d) / (1.0 - d) }
+fn form_C1(d: f64)  -> f64 with Div { (2.0/3.0 + d) / (2.0/3.0 - d) }
+fn form_C2(d: f64)  -> f64 with Div { (2.0/3.0) / (2.0/3.0 - d) }
+
+fn ln_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    // atanh series: ln(x) = 2*atanh((x-1)/(x+1))
+    let y = (x - 1.0) / (x + 1.0)
+    var term = y
+    var sum = 0.0
+    var k = 0
+    let y2 = y * y
+    while k < 60 {
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        term = term * y2
+        k = k + 1
+    }
+    2.0 * sum
+}
+
+fn set_basis(v: &![f64; 8], j: i64) with Mut {
+    var i: i64 = 0
+    while i < 8 { v[i as usize] = 0.0; i = i + 1 }
+    v[j as usize] = 1.0
+}
+
+// associator norm |[e_i, e_j, e_k]| via the verified algebra::octonion product
+fn assoc_norm(i: i64, j: i64, k: i64) -> f64 with Mut, Div, Panic, NonAssoc {
+    var a: [f64; 8] = [0.0; 8]
+    var b: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+    set_basis(&!a, i); set_basis(&!b, j); set_basis(&!c, k)
+    var out: [f64; 8] = [0.0; 8]
+    oct_associator(&a, &b, &c, &!out)
+    sqrt_q(oct_norm_sq(&out))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    println("=== Octonion exceptional-Jordan fermion-mass delta test (Sounio/lean_single) ===")
+    let delta_th = sqrt_q(3.0 / 8.0)
+    print_fp("delta_theory = sqrt(3/8) = ", delta_th)
+
+    // PDG pole-ish masses (MeV)
+    let me  = 0.51099895
+    let mmu = 105.6583755
+    let mtau = 1776.86
+    let mu_ = 2.16
+    let md = 4.67
+    let ms = 93.4
+    let mc = 1270.0
+    let mb = 4180.0
+    let mt = 172570.0
+
+    println("")
+    println("(1) implied delta per ratio (3 functional forms, 3 sectors):")
+    print_fp("  tau/mu  (A)   -> ", inv_A(sqrt_q(mtau/mmu)))
+    print_fp("  s/d     (A)   -> ", inv_A(sqrt_q(ms/md)))
+    print_fp("  c/u     (C1)  -> ", inv_C1(sqrt_q(mc/mu_)))
+    print_fp("  t/c     (C2)  -> ", inv_C2(sqrt_q(mt/mc)))
+    // b/s uses Asq -> numeric solve below
+
+    // grid-fit delta on QUARK sector (s/d:A, b/s:Asq, c/u:C1, t/c:C2), least-squares in log
+    let r_sd = sqrt_q(ms/md)
+    let r_bs = sqrt_q(mb/ms)
+    let r_cu = sqrt_q(mc/mu_)
+    let r_tc = sqrt_q(mt/mc)
+    var best_d = 0.0
+    var best_err = 1.0e30
+    var d = 0.334
+    while d < 0.666 {
+        let e1 = ln_q(form_A(d))   - ln_q(r_sd)
+        let e2 = ln_q(form_Asq(d)) - ln_q(r_bs)
+        let e3 = ln_q(form_C1(d))  - ln_q(r_cu)
+        let e4 = ln_q(form_C2(d))  - ln_q(r_tc)
+        let err = e1*e1 + e2*e2 + e3*e3 + e4*e4
+        if err < best_err { best_err = err; best_d = d }
+        d = d + 0.0001
+    }
+    println("")
+    println("(2) cross-sector HELD-OUT: delta fit on QUARKS only ->")
+    print_fp("  delta_quark = ", best_d)
+    println("  predict LEPTONS (zero lepton data):")
+    print_fp("    sqrt(m_tau/m_mu) pred = ", form_A(best_d))
+    print_fp("    sqrt(m_tau/m_mu) obs  = ", sqrt_q(mtau/mmu))
+    let pred_mue = form_A(best_d) * (best_d + 1.0/3.0) / (best_d - 1.0/3.0)
+    print_fp("    sqrt(m_mu/m_e)   pred = ", pred_mue)
+    print_fp("    sqrt(m_mu/m_e)   obs  = ", sqrt_q(mmu/me))
+
+    println("")
+    println("(3) group-forced equalities (zero delta):")
+    print_fp("    Dynkin swap sqrt(m_tau/m_mu) = ", sqrt_q(mtau/mmu))
+    print_fp("                sqrt(m_s/m_d)    = ", sqrt_q(ms/md))
+    print_fp("    trace split sqrt(m_u/m_e)    = ", sqrt_q(mu_/me))
+    print_fp("                sqrt(m_d/m_e)    = ", sqrt_q(md/me))
+
+    println("")
+    println("(4) octonion non-associativity (real algebra, ties to OctonionAssociator.lean):")
+    print_fp("    |[e1,e2,e4]| (non-Fano, NON-assoc) = ", assoc_norm(1, 2, 4))
+    print_fp("    |[e1,e2,e3]| (Fano line, assoc)    = ", assoc_norm(1, 2, 3))
+    println("    forward theorem: Fano triple => associator 0; off-Fano => |assoc|=2")
+
+    // ---- (5) ISO GUM uncertainty (JCGM 100:2008) on implied delta -------------
+    // PDG 1-sigma mass uncertainties (MeV)
+    let ue = 0.0000001
+    let umu = 0.000002
+    let utau = 0.12
+    let uu = 0.49
+    let ud = 0.48
+    let us = 3.4
+    let uc = 20.0
+    let ut = 290.0
+    let dth = delta_th
+    println("")
+    println("(5) ISO GUM combined uncertainty on implied delta (k=1); z=(delta-sqrt(3/8))/u_c:")
+
+    // tau/mu, form A: delta=(R-1)/(R+1), ddelta/dR = 2/(R+1)^2
+    let R1 = sqrt_q(mtau/mmu)
+    let uR1 = R1 * u_rel_ratio(mtau, utau, mmu, umu)
+    let s1 = 2.0 / ((R1 + 1.0) * (R1 + 1.0))
+    let d1 = inv_A(R1); let ud1 = abs_f(s1) * uR1
+    print_fp("  tau/mu : delta = ", d1)
+    print_fp("           u_c   = ", ud1)
+    print_fp("           z     = ", (d1 - dth) / ud1)
+
+    // s/d, form A
+    let R2 = sqrt_q(ms/md)
+    let uR2 = R2 * u_rel_ratio(ms, us, md, ud)
+    let s2 = 2.0 / ((R2 + 1.0) * (R2 + 1.0))
+    let d2 = inv_A(R2); let ud2 = abs_f(s2) * uR2
+    print_fp("  s/d    : delta = ", d2)
+    print_fp("           u_c   = ", ud2)
+    print_fp("           z     = ", (d2 - dth) / ud2)
+
+    // c/u, form C1: delta=(2/3)(R-1)/(R+1), ddelta/dR = (4/3)/(R+1)^2
+    let R3 = sqrt_q(mc/mu_)
+    let uR3 = R3 * u_rel_ratio(mc, uc, mu_, uu)
+    let s3 = (4.0/3.0) / ((R3 + 1.0) * (R3 + 1.0))
+    let d3 = inv_C1(R3); let ud3 = abs_f(s3) * uR3
+    print_fp("  c/u    : delta = ", d3)
+    print_fp("           u_c   = ", ud3)
+    print_fp("           z     = ", (d3 - dth) / ud3)
+
+    // t/c, form C2: delta=(2/3)(1-1/R), ddelta/dR = (2/3)/R^2
+    let R4 = sqrt_q(mt/mc)
+    let uR4 = R4 * u_rel_ratio(mt, ut, mc, uc)
+    let s4 = (2.0/3.0) / (R4 * R4)
+    let d4 = inv_C2(R4); let ud4 = abs_f(s4) * uR4
+    print_fp("  t/c    : delta = ", d4)
+    print_fp("           u_c   = ", ud4)
+    print_fp("           z     = ", (d4 - dth) / ud4)
+    println("  (|z|<=1 => sqrt(3/8) within 1 combined standard uncertainty of that ratio)")
+    println("DONE")
+    0
+}
