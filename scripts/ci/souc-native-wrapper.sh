@@ -84,6 +84,28 @@ if ! RAW_SOUC="$(_resolve_raw_elf)"; then
   exit 127
 fi
 
+_detect_raw_mode() {
+  if [[ -n "${SOUNIO_SOUC_RAW_MODE:-}" ]]; then
+    echo "$SOUNIO_SOUC_RAW_MODE"
+    return 0
+  fi
+  local base
+  base="$(basename "$RAW_SOUC")"
+  if [[ "$base" == *madaros* ]]; then
+    echo "modular"
+    return 0
+  fi
+  local ident
+  ident="$("$RAW_SOUC" /dev/null /dev/null 2>/dev/null | head -n 1 || true)"
+  if grep -q "Madares v" <<<"$ident"; then
+    echo "modular"
+    return 0
+  fi
+  echo "legacy"
+}
+
+RAW_MODE="$(_detect_raw_mode)"
+
 usage() {
   cat <<USAGE
 souc-native-wrapper.sh — subcommand wrapper around $RAW_SOUC
@@ -105,6 +127,7 @@ USAGE
 info() {
   echo "wrapper:   $0"
   echo "raw_elf:   $RAW_SOUC"
+  echo "raw_mode:  $RAW_MODE"
   echo "stdlib:    ${SOUNIO_STDLIB_PATH:-<unset>}"
 }
 
@@ -121,6 +144,15 @@ souc_compile() {
   local src="$1"
   local out="$2"
   local log
+  if [[ "$RAW_MODE" == "modular" ]]; then
+    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || true
+    if [[ ! -s "$out" ]]; then
+      printf '%s\ntypecheck: failed\n' "$log"
+      return 1
+    fi
+    printf '%s' "$log"
+    return 0
+  fi
   log="$("$RAW_SOUC" "$src" "$out" 2>&1)" || true
   if [[ ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
     printf '%s\ntypecheck: failed\n' "$log"
@@ -139,6 +171,13 @@ case "${1:-}" in
       echo "error: check takes exactly 1 argument (file.sio)" >&2
       usage >&2
       exit 2
+    fi
+    if [[ "$RAW_MODE" == "modular" ]]; then
+      set +e
+      "$RAW_SOUC" --check "$1"
+      rc=$?
+      set -e
+      exit "$rc"
     fi
     tmp="$(mktemp /tmp/sounio-check-XXXXXX.elf)"
     trap 'rm -f "$tmp"' EXIT
