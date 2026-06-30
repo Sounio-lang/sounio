@@ -205,6 +205,25 @@ free knobs that would have made this "numerology" are pinned to {√(3/8), elect
 remains for a full first-principles claim: an independent derivation of the Dynkin-swap (δ±⅓)
 action and a genuinely held-out sector (neutrinos), neither computable today.
 
+### 4.9 Formal obligation and the two-center reconciliation
+`formal/DynkinSwapMassLadder.lean` separates what is **proved** (pure-ℝ algebra) from the one
+**representation-theory obligation** left open. Every algebraic identity is verified symbolically
+in `scripts/dynkin_swap_symbolic.py` (7/7 PASS):
+- Koide closed form `Q(c,δ) = 2δ²/(9c²) + 1/3`, and `Q = 2/3 ⟺ δ² = (3/2)c²`, so **δ² = 3/8 at
+  the diagonal center c = 1/2**.
+- The μ/e swap factor `(δ+⅓)/(δ−⅓)` is exactly the `c/a` edge with **center and spread exchanged**
+  (`caEdge δ ⅓`) — the algebraic signature of the Dynkin Z₂.
+- μ/e and b/s expand to the Table-I closed forms.
+
+**The two-center reconciliation (not a contradiction).** δ²=3/8 appears in two places with
+*different* centers — the diagonal Koide spectrum (center **1/2**) and the edge-ratio ladders
+(centers **1** and **2/3** = charges). These are consistent: the **same** δ = √6/4 simultaneously
+makes the center-1 edge `(1+δ)/(1−δ) = 4.16` match √(mτ/mμ) **and** makes the center-1/2 diagonal
+spectrum Koide-exact (Q = 2/3). One constant, two manifestations, linked through δ — verified
+symbolically. The genuinely open step (stated, not encoded as an axiom): deriving that triality
+*realises* the center↔spread exchange. This is the boundary between strong quantified regularity
+and first-principles law.
+
 ---
 
 ## 5. Sounio artifact (reproducibility + formal anchoring)
