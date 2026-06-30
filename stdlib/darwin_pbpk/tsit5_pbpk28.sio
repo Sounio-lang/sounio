@@ -46,7 +46,7 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
 
     // Big-S = h · (Σ Q + CL) / V_b — diagonal of the blood row.
     var sum_q = 0.0
-    var i = 1
+    var i: i32 = 1
     while i < 14 {
         sum_q = sum_q + p.q[i]
         i = i + 1
@@ -126,11 +126,91 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
 // Convenience: organ-average concentration C_avg,i = (V_v · C_v + V_t · C_t) / V_i
 // used by the visual encoding and the parity-gate's case 1 RMSE
 // computation. Blood (i=0) is just C_v[0].
-pub fn pbpk28_organ_average(s: PBPKState28, p: PBPKParams28, i: i64) -> f64 with Div {
+pub fn pbpk28_organ_average(s: PBPKState28, p: PBPKParams28, i: i32) -> f64 with Div {
     if i == 0 { return s.cv[0] }
     let vi = p.v_ref[i]
     let vf = p.vasc_frac[i]
     let vv = vi * vf
     let vt = vi * (1.0 - vf)
     return (vv * s.cv[i] + vt * s.ct[i]) / vi
+}
+
+// ============================================================================
+// PBPK28 ONTOLOGY CONCRETE CALLS (ChEBI + CYP3A4 enzymatic)
+// Callers (ep28_rapamycin_params, validations) invoke pbpk28_rapamycin_chebi_id()
+// + pbpk28_cyp3a4_enzymatic_process_id() (defined in drugs/rapamycin + epistemic).
+// We document and surface the identity pair from the tsit5_pbpk28 kernel module.
+// ============================================================================
+
+pub fn pbpk28_ontology_identities() -> (i32, i32) {
+    // concrete numeric IDs for chemical (rapamycin) + enzymatic (CYP3A4) -- the
+    // pbpk28_*_id() names are called upstream; here we return the pair directly
+    // so the kernel module participates in the ontology wiring.
+    (9168, 6805)
+}
+
+// ============================================================================
+// DT-CONVERGENCE HELPER (shared extractor for AUC dt-refinement logic)
+// ============================================================================
+// Multiple call sites (epistemic_pbpk28, epistemic_pbpk28_hessian, mc cross
+// validation, etc.) duplicate the 3-dt + rel_diff + order-ratio test for CN
+// (A-stable 2nd-order). This centralises the sim + metric computation here
+// using pbpk28_full_cn_step + trapezoidal AUC on blood. Small, pure-extract.
+
+fn p28_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn p28_finite(x: f64) -> bool {
+    if x != x { return false }
+    return p28_abs(x) < 1.0e12
+}
+
+// Blood AUC(0→t_end) via fixed-dt CN integrator. Initial condition puts
+// entire dose into central vascular compartment (bolus-IV). Uses rel_mid=0.0.
+// (Oral/SC depot support would require caller-managed A_depot + per-step rel;
+// simple bolus for now as used in convergence gates.)
+fn pbpk28_simulate_blood_auc_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
+    if dt <= 0.0 || t_end <= 0.0 { return 0.0 }
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose_mg / prm.v_ref[0]
+
+    var t = 0.0
+    var auc = 0.0
+    var c_prev = st.cv[0]
+    var steps: i32 = 0
+
+    while t < t_end {
+        if steps > 100000 { return 0.0 }  // guard against runaway
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
+        let c_new = st_new.cv[0]
+        if !p28_finite(c_new) { return 0.0 }
+        auc = auc + 0.5 * (c_prev + c_new) * dt_use
+        c_prev = c_new
+        t = t + dt_use
+        st = st_new
+        steps = steps + 1
+    }
+    return auc
+}
+
+// Public shared helper. Computes AUC at base_dt and base_dt/2; internally
+// also runs at base_dt/4 to obtain the diff-ratio (should be ~4 for order-2).
+// Returns (auc_base, auc_half, rel_diff, ratio).
+pub fn pbpk28_dt_convergence_auc(base_dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let auc_base  = pbpk28_simulate_blood_auc_dt(base_dt, prm, dose_mg, t_end)
+    let dt_half   = base_dt / 2.0
+    let auc_half  = pbpk28_simulate_blood_auc_dt(dt_half, prm, dose_mg, t_end)
+    let dt_q      = base_dt / 4.0
+    let auc_q     = pbpk28_simulate_blood_auc_dt(dt_q, prm, dose_mg, t_end)
+
+    let rel_diff = if auc_base > 1.0e-12 {
+        p28_abs(auc_base - auc_half) / auc_base
+    } else { 0.0 }
+    let diff1 = p28_abs(auc_base - auc_half)
+    let diff2 = p28_abs(auc_half - auc_q)
+    let ratio = if diff2 > 1.0e-12 { diff1 / diff2 } else { 0.0 }
+
+    (auc_base, auc_half, rel_diff, ratio)
 }
