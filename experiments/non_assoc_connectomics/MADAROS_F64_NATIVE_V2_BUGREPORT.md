@@ -61,7 +61,32 @@ Multimodule note: the full artifact (with `use algebra::octonion`) fails earlier
 — a separate imported-IR emit path, also worth a look, but the f64 ALU bug is upstream
 of it.
 
-## Suggested first fix
-Audit the native-v2 instruction selection for f64: ensure `f64` `+−*/` emit
-`addsd/subsd/mulsd/divsd` (not integer `add/imul/idiv`), and that the `f64 as i64` cast
-emits `cvttsd2si`. m2 returning exactly `0` for `3.0/8.0` is the smoking gun.
+## Suggested first fix (SUPERSEDED — see corrected root cause below)
+~~Audit the native-v2 instruction selection for f64~~ — this framing was wrong.
+
+## CORRECTED ROOT CAUSE (2026-06-30, after disassembling the emitted ELF)
+Scanned the m2 ELF for opcodes: **zero** `divsd/mulsd/addsd/subsd` (no SSE float ops at
+all), but `idiv`+`imul` present. The program isn't being generally compiled on the modular
+path at all:
+
+- Madaros (Horizon 3) routes these files through the **"compact modular IR table" path**
+  (`module_native_driver.sio` → `native_driver_write_imported_simple_ir_elf`).
+- That path's emitter, `module_native_simple_driver.sio::simple_driver_emit_fn`, is a
+  **bootstrap template stub**: it pattern-matches a fixed set of function "kinds"
+  (kind 1=tail-call, kind 2 = `mov eax,imm32; ret` = *return a constant*, kind 3=print, …)
+  and writes hand-crafted bytes. It is **not a general code generator**. m2 returned `0`
+  because it matched a "return constant" template; arbitrary f64/general code is unhandled.
+- The **f64-correct backend already exists**: `lower_ir.sio::lower_ir_binop` →
+  `emit_float_binop_code` → `emit_divsd_xmm0_xmm1` (encode.sio:1825, opcode 0x5E), with
+  `is_float_reg` tracking. It is reached only by `main.sio`'s direct path (`lower_instr`,
+  main.sio:5590), which the modular path bypasses.
+
+So the real gap is **backend routing**, not f64 instruction selection.
+
+### Correct fix (architectural, not a localized patch)
+Translate the compact modular IR records into `IrInstr` and drive `lower_instr` (the full
+`lower_ir.sio` lowering + regalloc + encode pipeline, already f64-correct) instead of
+`simple_driver_emit_fn`'s templates. Then `make build-madaros` (bootstrap rebuild) and
+re-test m2/m3/m4 (expect 375000 / 612372 / "Hi") + the multimodule octonion artifact.
+Substantial integration with bootstrap-fixed-point risk. Until then, f64-heavy code runs
+correctly on `lean_single` (which uses the full backend).
