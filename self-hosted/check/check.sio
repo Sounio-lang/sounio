@@ -32,6 +32,7 @@ use check::ontology_side_table_cache::{
     ontology_side_table_cache_verdict_ok,
     ontology_side_table_cache_verdict_reject,
 }
+use check::mod::{check_policy_requirements_to_ir}
 use parser::ast::*
 use ir::ir::*
 
@@ -527,12 +528,12 @@ fn collect_type_params_rec(opt: Option<Box<TypeParamDefList> >, acc: TypeParamBu
 
 // Build a mangled name for a monomorphized generic struct.
 // e.g. Pair + [i64] => Pair__i64, Map + [i64, f64] => Map__i64__f64
-fn mangle_generic_name(base: Name, args: TypeEntryList) -> Name with Mut, Panic, Div {
+fn mangle_generic_name(base: &Name, args: &TypeEntryList) -> Name with Mut, Panic, Div {
     var result = Name { buf: [0; 128], len: 0 }
     // Copy base name
     var i: i64 = 0
-    while i < base.len && i < 120 {
-        result.buf[i as usize] = base.buf[i as usize]
+    while i < (*base).len && i < 120 {
+        result.buf[i as usize] = (*base).buf[i as usize]
         i = i + 1
     }
     result.len = i
@@ -541,7 +542,7 @@ fn mangle_generic_name(base: Name, args: TypeEntryList) -> Name with Mut, Panic,
     result
 }
 
-fn mangle_append_args(result: &! Name, args: TypeEntryList) with Mut, Panic, Div {
+fn mangle_append_args(result: &! Name, args: &TypeEntryList) with Mut, Panic, Div {
     // Append "__"
     if (*result).len < 126 {
         (*result).buf[(*result).len as usize] = 95  // '_'
@@ -550,39 +551,39 @@ fn mangle_append_args(result: &! Name, args: TypeEntryList) with Mut, Panic, Div
         (*result).len = (*result).len + 1
     }
     // Append the type name for head
-    mangle_append_type_name(result, args.head)
+    mangle_append_type_name(result, &(*args).head)
     // Recurse for tail
-    match args.tail {
+    match (*args).tail {
         None => {}
-        Some(rest) => mangle_append_args(result, *rest)
+        Some(rest) => mangle_append_args(result, &(*rest))
     }
 }
 
-fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div {
+fn mangle_append_type_name(result: &! Name, ty: &TypeEntry) with Mut, Panic, Div {
     // For named types, copy the name; for primitives, use canonical short names
-    if ty.kind == TypeKind::TyI8 {
+    if (*ty).kind == TypeKind::TyI8 {
         mangle_append_literal(result, 105, 56, 0, 0, 2)  // "i8"
-    } else if ty.kind == TypeKind::TyI32 {
+    } else if (*ty).kind == TypeKind::TyI32 {
         mangle_append_literal(result, 105, 51, 50, 0, 3)  // "i32"
-    } else if ty.kind == TypeKind::TyI64 {
+    } else if (*ty).kind == TypeKind::TyI64 {
         mangle_append_literal(result, 105, 54, 52, 0, 3)  // "i64"
-    } else if ty.kind == TypeKind::TyU8 {
+    } else if (*ty).kind == TypeKind::TyU8 {
         mangle_append_literal(result, 117, 56, 0, 0, 2)  // "u8"
-    } else if ty.kind == TypeKind::TyU32 {
+    } else if (*ty).kind == TypeKind::TyU32 {
         mangle_append_literal(result, 117, 51, 50, 0, 3)  // "u32"
-    } else if ty.kind == TypeKind::TyU64 {
+    } else if (*ty).kind == TypeKind::TyU64 {
         mangle_append_literal(result, 117, 54, 52, 0, 3)  // "u64"
-    } else if ty.kind == TypeKind::TyF32 {
+    } else if (*ty).kind == TypeKind::TyF32 {
         mangle_append_literal(result, 102, 51, 50, 0, 3)  // "f32"
-    } else if ty.kind == TypeKind::TyF64 {
+    } else if (*ty).kind == TypeKind::TyF64 {
         mangle_append_literal(result, 102, 54, 52, 0, 3)  // "f64"
-    } else if ty.kind == TypeKind::TyBool {
+    } else if (*ty).kind == TypeKind::TyBool {
         mangle_append_literal(result, 98, 111, 111, 108, 4)  // "bool"
-    } else if ty.kind == TypeKind::TyNamed {
+    } else if (*ty).kind == TypeKind::TyNamed {
         // Copy the type's name
         var j: i64 = 0
-        while j < ty.name.len && (*result).len < 128 {
-            (*result).buf[(*result).len as usize] = ty.name.buf[j as usize]
+        while j < (*ty).name.len && (*result).len < 128 {
+            (*result).buf[(*result).len as usize] = (*ty).name.buf[j as usize]
             (*result).len = (*result).len + 1
             j = j + 1
         }
@@ -619,9 +620,8 @@ fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i
 // replace it with the corresponding concrete type argument.
 fn monomorphize_fields(
     fields: Option<Box<FieldInfoList> >,
-    tp_count: i64,
-    tp_names: [Name; 8],
-    args: TypeEntryList,
+    tp_buf: TypeParamBuf,
+    args: &TypeEntryList,
 ) -> (Option<Box<FieldInfoList> >, i64) with Mut, Panic, Div, Alloc {
     match fields {
         None => {
@@ -630,9 +630,11 @@ fn monomorphize_fields(
         }
         Some(fl) => {
             let head = (*fl).head
-            let new_ty = substitute_type_param(head.ty, tp_count, tp_names, args)
+            let args_for_head = type_entry_list_clone(args)
+            let args_for_rest = type_entry_list_clone(args)
+            let new_ty = substitute_type_param(head.ty, tp_buf, args_for_head)
             let new_head = FieldInfo { name: head.name, ty: new_ty }
-            let rest = monomorphize_fields((*fl).tail, tp_count, tp_names, args)
+            let rest = monomorphize_fields((*fl).tail, tp_buf, &args_for_rest)
             return (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
         }
     }
@@ -643,17 +645,17 @@ fn monomorphize_fields(
 // If ty is a TyNamed whose name matches a type parameter, replace with the concrete type.
 fn substitute_type_param(
     ty: TypeEntry,
-    tp_count: i64,
-    tp_names: [Name; 8],
+    tp_buf: TypeParamBuf,
     args: TypeEntryList,
 ) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let args_for_rec = type_entry_list_clone(&args)
     if !name_is_empty(ty.name) {
         // Check if this name matches any type parameter
         var idx: i64 = 0
-        while idx < tp_count {
-            if name_eq(ty.name, tp_names[idx]) {
+        while idx < tp_buf.count {
+            if name_eq(ty.name, tp_buf.names[idx]) {
                 // Found match — return the corresponding type argument
-                return type_entry_list_nth(args, idx)
+                return type_entry_list_nth(type_entry_list_clone(&args), idx)
             }
             idx = idx + 1
         }
@@ -661,14 +663,14 @@ fn substitute_type_param(
     var result = ty
     match ty.inner {
         Some(inner_ty) => {
-            let new_inner = substitute_type_param(*inner_ty, tp_count, tp_names, args)
+            let new_inner = substitute_type_param(*inner_ty, tp_buf, args_for_rec)
             result.inner = Some(Box::new(new_inner))
         }
         None => {}
     }
     match ty.tuple_elems {
         Some(elems) => {
-            result.tuple_elems = Some(Box::new(substitute_type_param_list(*elems, tp_count, tp_names, args)))
+            result.tuple_elems = Some(Box::new(substitute_type_param_list(*elems, tp_buf, type_entry_list_clone(&args))))
         }
         None => {}
     }
@@ -677,15 +679,14 @@ fn substitute_type_param(
 
 fn substitute_type_param_list(
     list: TypeEntryList,
-    tp_count: i64,
-    tp_names: [Name; 8],
+    tp_buf: TypeParamBuf,
     args: TypeEntryList,
 ) -> TypeEntryList with Mut, Panic, Div, Alloc {
-    let new_head = substitute_type_param(list.head, tp_count, tp_names, args)
+    let new_head = substitute_type_param(list.head, tp_buf, args)
     match list.tail {
         None => TypeEntryList { head: new_head, tail: None }
         Some(rest) => {
-            let new_tail = substitute_type_param_list(*rest, tp_count, tp_names, args)
+            let new_tail = substitute_type_param_list(*rest, tp_buf, type_entry_list_clone(&args))
             TypeEntryList { head: new_head, tail: Some(Box::new(new_tail)) }
         }
     }
@@ -703,10 +704,10 @@ fn type_entry_list_nth(list: TypeEntryList, n: i64) -> TypeEntry with Mut, Panic
     }
 }
 
-fn type_entry_list_count_value(list: TypeEntryList) -> i64 with Mut, Panic, Div {
-    match list.tail {
+fn type_entry_list_count_value(list: &TypeEntryList) -> i64 with Mut, Panic, Div {
+    match (*list).tail {
         None => 1
-        Some(rest) => 1 + type_entry_list_count_value(*rest)
+        Some(rest) => 1 + type_entry_list_count_value(&(*rest))
     }
 }
 
@@ -785,16 +786,17 @@ fn collect_fn_generic_names_from_params_in_tables(structs: *mut StructTable, enu
     }
 }
 
-fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_count: i64, tp_names: [Name; 8], args: TypeEntryList) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
+fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_buf: TypeParamBuf, args: TypeEntryList) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
     match opt {
         None => None
         Some(list) => {
             let head = (*list).head
+            let args_for_tail = type_entry_list_clone(&args)
             let new_head = FnParamInfo {
                 name: head.name,
-                ty: substitute_type_param(head.ty, tp_count, tp_names, args),
+                ty: substitute_type_param(head.ty, tp_buf, args),
             }
-            let new_tail = checker_substitute_fn_params((*list).tail, tp_count, tp_names, args)
+            let new_tail = checker_substitute_fn_params((*list).tail, tp_buf, args_for_tail)
             Some(Box::new(FnParamList { head: new_head, tail: new_tail }))
         }
     }
@@ -1114,7 +1116,7 @@ fn checker_note_type_error_mut(c: *mut Checker) with Mut {
 // Emit a fallback diagnostic when had_error was recorded without printing.
 // Boot4/modular path uses checker_check_items_inplace which notes errors via
 // checker_note_type_error_mut without emitting; this closes the silent gap.
-fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with IO {
+fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
     if (*c).had_error && !(*c).diag_emitted {
         print("error[E000]: type checking failed\n")
         (*c).diag_emitted = true
@@ -4990,7 +4992,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
             let si = struct_table_get((*c).structs, struct_idx)
-            let field_ty = field_info_list_find(si.fields, e.name)
+                    let field_ty = field_info_list_find(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
             }
@@ -5265,7 +5267,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         if tmpl_field_ty.kind == TypeKind::TyNamed {
                             var pi: i64 = 0
                             while pi < si.type_param_count {
-                                if name_eq(tmpl_field_ty.name, si.type_param_names[pi]) {
+                        if name_eq(tmpl_field_ty.name, si.type_param_names[pi]) {
                                     inferred.args[pi] = init_ty
                                     pi = si.type_param_count  // break
                                 } else {
@@ -5293,24 +5295,34 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 None => ty_error()
                 Some(args_box) => {
                     let args = *args_box
+                    let si_name = si.name
+                    let si_fields = field_info_list_clone(&si.fields)
+                    let si_type_param_count = si.type_param_count
+                    let si_type_param_names = si.type_param_names
+                    let si_is_linear = si.is_linear
+                    let si_visibility_kind = si.visibility_kind
+                    let si_defining_module_id = si.defining_module_id
+                    let si_visibility = si.visibility
+                    let si_defining_module = si.defining_module
                     // Mangled name (finalize 16683-16684).
-                    let mangled = mangle_generic_name(si.name, args)
+                    let mangled = mangle_generic_name(&si_name, &args)
                     // Monomorphize if not already present (finalize 16687-16702).
                     let existing_idx = struct_table_find((*c).structs, mangled)
                     if existing_idx < 0 {
-                        let mono_fields = monomorphize_fields(si.fields, si.type_param_count, si.type_param_names, args)
+                    let si_tp_buf = TypeParamBuf { names: si.type_param_names, count: si.type_param_count }
+                    let mono_fields = monomorphize_fields(si_fields, si_tp_buf, &args)
                         let mono_info = StructInfo {
                             name: mangled,
                             fields: mono_fields.0,
                             field_count: mono_fields.1,
-                            is_linear: si.is_linear,
+                            is_linear: si_is_linear,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                             is_generic_template: false,
-                            visibility_kind: si.visibility_kind,
-                            defining_module_id: si.defining_module_id,
-                            visibility: si.visibility,
-                            defining_module: si.defining_module,
+                            visibility_kind: si_visibility_kind,
+                            defining_module_id: si_defining_module_id,
+                            visibility: si_visibility,
+                            defining_module: si_defining_module,
                         }
                         // RUNTIME-RISK: ~160KB StructTable by-value SRET-store-back (see review).
                         struct_table_add((*c).structs, mono_info)
@@ -5713,9 +5725,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
-            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
+            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
             checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
-            checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
@@ -6305,20 +6317,20 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
-        var effective_params = direct_sig.params
+        var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
         match call_expr_type_args(e) {
             Some(type_arg_exprs) => {
                 let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, direct_sig.params, empty_type_param_buf())
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
                 generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
                 if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
                     if provided_type_arg_count != generic_names.count {
                         checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                     }
-                    effective_params = checker_substitute_fn_params(direct_sig.params, generic_names.count, generic_names.names, lowered_type_args)
-                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                 }
             }
             None => {}
@@ -6384,20 +6396,20 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
-        var effective_params = sig.params
+        var effective_params = fn_param_list_clone(&sig.params)
         var effective_return_type = sig.return_type
         match call_expr_type_args(e) {
             Some(type_arg_exprs) => {
                 let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, sig.params, empty_type_param_buf())
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
                 generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
                 if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
                     if provided_type_arg_count != generic_names.count {
                         checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                     }
-                    effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
-                    effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                 }
             }
             None => {}
@@ -12772,7 +12784,7 @@ fn expr_list_tail(opt: Option<Box<ExprList> >) -> Option<Box<ExprList> > with Al
 
 // Stage0 miscompiles passing Option<Box<T>> by value into *mut functions.
 // Use an explicit raw-pointer handle built in a non-*mut helper instead.
-struct ExprListHandle {
+pub struct ExprListHandle {
     ptr: *mut ExprList,
 }
 
@@ -12799,7 +12811,7 @@ fn expr_list_handle_count(h: ExprListHandle) -> i64 with Mut, Panic, Div {
     1 + expr_list_handle_count(expr_list_handle_next(h))
 }
 
-struct FnParamListHandle {
+pub struct FnParamListHandle {
     ptr: *mut FnParamList,
 }
 
@@ -12832,7 +12844,7 @@ fn fn_param_list_handle_get(h: FnParamListHandle, idx: i64) -> FnParamInfo with 
     empty_fn_param_info()
 }
 
-fn checker_fn_sig_has_effect(sig: FnSig, effect_id: i64) -> bool with Panic, Div {
+fn checker_fn_sig_has_effect(sig: FnSig, effect_id: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < sig.effect_count && i < 8 {
         if sig.effects[i] == effect_id {
@@ -12843,7 +12855,7 @@ fn checker_fn_sig_has_effect(sig: FnSig, effect_id: i64) -> bool with Panic, Div
     false
 }
 
-fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Panic, Div {
+fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic, Div {
     // Function values are compatible when the provided effect row is a subset
     // of the expected effect row: a pure fn can flow to `fn ... with Panic`,
     // but an effectful fn cannot flow to a pure fn slot.
@@ -13859,7 +13871,7 @@ fn checker_expr_is_int_literal_like(e: Expr) -> bool {
     }
 }
 
-fn checker_expr_list_all_int_literals(opt: Option<Box<ExprList> >) -> bool {
+fn checker_expr_list_all_int_literals(opt: Option<Box<ExprList> >) -> bool with Mut {
     var cur = opt
     var done = false
     while !done {
@@ -14155,9 +14167,17 @@ impl Checker {
                         let args_result = self.lower_type_expr_list(*args)
                         var c = args_result.0
                         let lowered_args = args_result.1
+                        let tmpl_name = tmpl.name
+                        let tmpl_fields = field_info_list_clone(&tmpl.fields)
+                        let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
+                        let tmpl_is_linear = tmpl.is_linear
+                        let tmpl_visibility_kind = tmpl.visibility_kind
+                        let tmpl_defining_module_id = tmpl.defining_module_id
+                        let tmpl_visibility = tmpl.visibility
+                        let tmpl_defining_module = tmpl.defining_module
 
                         // Build mangled name: Name__arg1__arg2
-                        let mangled = mangle_generic_name(name, lowered_args)
+                        let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
 
                         // Check if already monomorphized
                         let existing_idx = struct_table_find(c.structs, mangled)
@@ -14165,19 +14185,19 @@ impl Checker {
                             (c, ty_named(mangled))
                         } else {
                             // Monomorphize: substitute type params in fields
-                            let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, lowered_args)
+                            let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &lowered_args)
                             let mono_info = StructInfo {
                                 name: mangled,
                                 fields: mono_fields.0,
                                 field_count: mono_fields.1,
-                                is_linear: tmpl.is_linear,
+                                is_linear: tmpl_is_linear,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                             is_generic_template: false,
-                            visibility_kind: tmpl.visibility_kind,
-                            defining_module_id: tmpl.defining_module_id,
-                            visibility: tmpl.visibility,
-                            defining_module: tmpl.defining_module,
+                            visibility_kind: tmpl_visibility_kind,
+                            defining_module_id: tmpl_defining_module_id,
+                            visibility: tmpl_visibility,
+                            defining_module: tmpl_defining_module,
                             }
                             struct_table_add(c.structs, mono_info)
                             (c, ty_named(mangled))
@@ -19336,22 +19356,22 @@ impl Checker {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
-            var effective_params = sig.params
+            var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match call_expr_type_args(e) {
                 Some(type_arg_exprs) => {
                     let lowered_type_args_pair = c.lower_type_expr_list(*type_arg_exprs)
                     c = lowered_type_args_pair.0
                     let lowered_type_args = lowered_type_args_pair.1
-                    var generic_names = collect_fn_generic_names_from_params_in_tables(c.structs, c.enums, sig.params, empty_type_param_buf())
+                    var generic_names = collect_fn_generic_names_from_params_in_tables(c.structs, c.enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
                     generic_names = collect_fn_generic_names_from_type_in_tables(c.structs, c.enums, sig.return_type, generic_names)
                     if generic_names.count > 0 {
-                        let provided_type_arg_count = type_entry_list_count_value(lowered_type_args)
+                        let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
                         if provided_type_arg_count != generic_names.count {
                             c = c.report_error_at(e.span, 10, 0, 0, 0)
                         }
-                        effective_params = checker_substitute_fn_params(sig.params, generic_names.count, generic_names.names, lowered_type_args)
-                        effective_return_type = substitute_type_param(sig.return_type, generic_names.count, generic_names.names, lowered_type_args)
+                        effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                        effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                     }
                 }
                 None => {}
@@ -22123,27 +22143,35 @@ impl Checker {
             None => (self, ty_error())
             Some(args_box) => {
                 let args = *args_box
+                let tmpl_name = tmpl.name
+                let tmpl_fields = field_info_list_clone(&tmpl.fields)
+                let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
+                let tmpl_is_linear = tmpl.is_linear
+                let tmpl_visibility_kind = tmpl.visibility_kind
+                let tmpl_defining_module_id = tmpl.defining_module_id
+                let tmpl_visibility = tmpl.visibility
+                let tmpl_defining_module = tmpl.defining_module
                 // Build mangled name
-                let mangled = mangle_generic_name(tmpl.name, args)
+                let mangled = mangle_generic_name(&tmpl_name, &args)
 
                 // Check if already monomorphized
                 var c = self
                 let existing_idx = struct_table_find(c.structs, mangled)
                 if existing_idx < 0 {
                     // Monomorphize
-                    let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, args)
+                    let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &args)
                     let mono_info = StructInfo {
                         name: mangled,
                         fields: mono_fields.0,
                         field_count: mono_fields.1,
-                        is_linear: tmpl.is_linear,
+                        is_linear: tmpl_is_linear,
                     type_param_count: 0,
                     type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                     is_generic_template: false,
-                    visibility_kind: tmpl.visibility_kind,
-                    defining_module_id: tmpl.defining_module_id,
-                    visibility: tmpl.visibility,
-                    defining_module: tmpl.defining_module,
+                    visibility_kind: tmpl_visibility_kind,
+                    defining_module_id: tmpl_defining_module_id,
+                    visibility: tmpl_visibility,
+                    defining_module: tmpl_defining_module,
                     }
                     struct_table_add(c.structs, mono_info)
                 }
