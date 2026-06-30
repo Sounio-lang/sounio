@@ -13,6 +13,7 @@
          test-knowledge-runtime-guard-native-lowering \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
+         test-madaros-identity test-real-language-runner \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -69,6 +70,12 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 build-madaros:       ## Build the Stage1 modular compiler (Madaros)
 	@echo "→ Building Madaros (Stage1 modular compiler)"
 	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+
+test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio compiler
+	@bash scripts/gates/g6_madaros_identity.sh
+
+test-real-language-runner: ## Verify public souc CLI + REPL + Madaros identity
+	@bash scripts/ci/real_language_runner_gate.sh
 
 madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-end gate
 	@echo "→ Running Madaros full-functioning gate"
