@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.affine-nonassoc-uncertainty-2026-06-13
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.affine-nonassoc-uncertainty-2026-06-13
+-->
+
 # Affine arithmetic over a non-associative algebra: non-associativity as a noise symbol
 
 Status: **frontier opened — core mechanism designed, N=3 case proven (paper + execution), novelty boundary established against prior art.**
