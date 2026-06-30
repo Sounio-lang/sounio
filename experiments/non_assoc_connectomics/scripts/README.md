@@ -30,3 +30,4 @@ bit-identically and ties to `formal/OctonionAssociator.lean`.
 | `identifiability_audit.py` | ADVERSARIAL: δ unidentified without charge-centers (flat χ²); charge-center match selective 0/20000 (§4.10) |
 | `octonion_cd_correct.py` | **ERRATUM**: verified Cayley-Dickson octonions; the other scripts' table is non-alternative; +35 re-verified as +40 with true octonions |
 | `j3o_foundation.py` | verified J₃(𝕆) platform for the E₆ derivation: cubic norm well-defined, S₃ slot symmetry, G₂ automorphism (toward §4.9) |
+| `triality_principle.py` | DERIVED+verified Spin(8) triality: unique (B,C) per A (rank 56/56); g₂ derivations dim=14 → 3 generations from triality (toward §4.9) |
