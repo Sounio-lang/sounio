@@ -1,0 +1,112 @@
+//@ run-pass
+//@ expect-stdout: FCMP_ORACLE_PASS
+
+// Oracle matrix for f64 comparison codegen.
+//
+// Pins the correct behavior of the six f64 comparison operators and is the
+// validation target for the native float comparison emit fix. The known native bug
+// is that an f64 comparison whose float path is taken can load a float operand with
+// cvtsi2sd instead of movq, corrupting the test; the result path is entangled with
+// that load. Every comparison here runs over f64 params across three operand sources
+// param vs param, param vs literal, and computed subtraction results over equal,
+// positive, negative, mixed sign, zero and fractional values, each asserted against
+// the mathematically correct answer. Correct under lean_single; the run-pass harness
+// requires the FCMP_ORACLE_PASS sentinel.
+
+fn lt(a: f64, b: f64) -> bool { a < b }
+fn le(a: f64, b: f64) -> bool { a <= b }
+fn gt(a: f64, b: f64) -> bool { a > b }
+fn ge(a: f64, b: f64) -> bool { a >= b }
+fn eq(a: f64, b: f64) -> bool { a == b }
+fn ne(a: f64, b: f64) -> bool { a != b }
+
+// param-vs-literal forms (the abs_f64 `x < 0.0` shape)
+fn lt0(x: f64) -> bool { x < 0.0 }
+fn le0(x: f64) -> bool { x <= 0.0 }
+fn gt0(x: f64) -> bool { x > 0.0 }
+fn ge0(x: f64) -> bool { x >= 0.0 }
+fn eq1(x: f64) -> bool { x == 1.0 }
+fn ne1(x: f64) -> bool { x != 1.0 }
+
+fn fsub(a: f64, b: f64) -> f64 { a - b }
+fn fabs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } return x }
+
+// Records one assertion: returns 1 on match, else prints "FAIL <id>" and returns 0.
+fn rec(got: bool, want: bool, id: i64) -> i64 with IO {
+    if got == want { return 1 }
+    print("FAIL ")
+    print_int(id)
+    print("\n")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var total = 0
+
+    // --- param/param, all six operators, both outcomes ---
+    // equal operands (where an integer-bit hack can pass by luck)
+    total = total + 1; pass = pass + rec(lt(1.0, 1.0), false, 1)
+    total = total + 1; pass = pass + rec(le(1.0, 1.0), true, 2)
+    total = total + 1; pass = pass + rec(gt(1.0, 1.0), false, 3)
+    total = total + 1; pass = pass + rec(ge(1.0, 1.0), true, 4)
+    total = total + 1; pass = pass + rec(eq(1.0, 1.0), true, 5)
+    total = total + 1; pass = pass + rec(ne(1.0, 1.0), false, 6)
+
+    // positive ordering
+    total = total + 1; pass = pass + rec(lt(1.0, 2.0), true, 10)
+    total = total + 1; pass = pass + rec(gt(1.0, 2.0), false, 11)
+    total = total + 1; pass = pass + rec(le(2.0, 1.0), false, 12)
+    total = total + 1; pass = pass + rec(ge(2.0, 1.0), true, 13)
+
+    // negative ordering (bit pattern reversed vs magnitude)
+    total = total + 1; pass = pass + rec(lt(0.0 - 2.0, 0.0 - 1.0), true, 20)
+    total = total + 1; pass = pass + rec(gt(0.0 - 2.0, 0.0 - 1.0), false, 21)
+    total = total + 1; pass = pass + rec(le(0.0 - 1.0, 0.0 - 2.0), false, 22)
+    total = total + 1; pass = pass + rec(ge(0.0 - 1.0, 0.0 - 2.0), true, 23)
+
+    // mixed sign
+    total = total + 1; pass = pass + rec(gt(1.0, 0.0 - 1.0), true, 30)
+    total = total + 1; pass = pass + rec(lt(0.0 - 1.0, 1.0), true, 31)
+    total = total + 1; pass = pass + rec(eq(1.0, 0.0 - 1.0), false, 32)
+    total = total + 1; pass = pass + rec(ne(1.0, 0.0 - 1.0), true, 33)
+
+    // fractional
+    total = total + 1; pass = pass + rec(lt(0.1, 0.2), true, 40)
+    total = total + 1; pass = pass + rec(gt(0.3, 0.2), true, 41)
+    total = total + 1; pass = pass + rec(eq(0.3, 0.3), true, 42)
+
+    // --- param/literal (the `x < 0.0` shape) ---
+    total = total + 1; pass = pass + rec(lt0(0.0 - 2.0), true, 50)
+    total = total + 1; pass = pass + rec(lt0(2.0), false, 51)
+    total = total + 1; pass = pass + rec(gt0(2.0), true, 52)
+    total = total + 1; pass = pass + rec(gt0(0.0 - 2.0), false, 53)
+    total = total + 1; pass = pass + rec(le0(0.0), true, 54)
+    total = total + 1; pass = pass + rec(ge0(0.0), true, 55)
+    total = total + 1; pass = pass + rec(eq1(1.0), true, 56)
+    total = total + 1; pass = pass + rec(eq1(2.0), false, 57)
+    total = total + 1; pass = pass + rec(ne1(2.0), true, 58)
+
+    // --- computed operands (subtraction results fed into comparisons) ---
+    total = total + 1; pass = pass + rec(lt(fsub(3.0, 1.0), fsub(1.0, 3.0)), false, 60)
+    total = total + 1; pass = pass + rec(gt(fsub(3.0, 1.0), fsub(1.0, 3.0)), true, 61)
+    total = total + 1; pass = pass + rec(eq(fsub(2.0, 2.0), 0.0), true, 62)
+    total = total + 1; pass = pass + rec(lt(fsub(1.0, 1.0), 0.0), false, 63)
+
+    // --- abs pattern (the concrete regressing shape) ---
+    total = total + 1; pass = pass + rec(eq(fabs(0.0 - 2.0), 2.0), true, 70)
+    total = total + 1; pass = pass + rec(eq(fabs(2.0), 2.0), true, 71)
+    total = total + 1; pass = pass + rec(lt(fabs(fsub(1.0, 1.0)), 0.0001), true, 72)
+    total = total + 1; pass = pass + rec(lt(fabs(fsub(1.0, 2.0)), 0.0001), false, 73)
+
+    if pass == total {
+        println("FCMP_ORACLE_PASS")
+        return 0
+    }
+    print("FCMP_ORACLE_FAIL ")
+    print_int(pass)
+    print("/")
+    print_int(total)
+    print("\n")
+    return 1
+}

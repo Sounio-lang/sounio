@@ -1703,6 +1703,28 @@ fn lowerer_mark_local_ref_mut(
     }
 }
 
+// *mut analogue of bind_local_array_elem_float: record that a local/param array has
+// f64 elements, so `arr[i]` reads classify as float in arithmetic/comparisons. Single-
+// level store through the Box (safe under the by-value-aggregate miscompile). The
+// value-returning `(*lo) = (*lo).bind_local_array_elem_float(name)` form silently
+// dropped this update for f64 ARRAY PARAMS (local arrays thread `lo` by value and were
+// unaffected) — so `acf[i] + acf[j]` over an f64 array param fell to the integer path.
+fn lowerer_mark_local_array_elem_float_mut(
+    lo: &! Lowerer,
+    name: Name
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).array_elem_float[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 // *mut analogue of bind_local_struct_type: record a local/param's struct type so
 // `recv.method()` and `recv.field` resolve the receiver type. Single-level store through
 // the Box (safe under the by-value-aggregate miscompile). No-op for non-struct types.
@@ -1813,7 +1835,7 @@ fn lowerer_lower_fn_params_mut(
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
                 }
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
-                    (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
+                    lowerer_mark_local_array_elem_float_mut(lo, (*list).head.name)
                 }
                 current = &(*list).tail
             }
@@ -2120,6 +2142,15 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
 }
 
 fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    // Unwrap a single reference layer: `&[f64; N]` / `&![f64; N]` params (arrays passed
+    // by reference — slice/linalg/matvec helpers) are arrays-of-f64 for element float
+    // typing. Without this, `a[i] * b[i]` over such params fell to the integer path.
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ty) => return lower_type_expr_is_array_of_f64(&(*inner_ty)),
+            None => return false,
+        }
+    }
     if (*te).kind != TypeExprKind::TypeArray { return false }
     match (*te).inner {
         Some(inner_ty) => lower_type_expr_is_f64(&(*inner_ty)),
@@ -6412,7 +6443,30 @@ impl Lowerer {
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
         let reg = pair.1
-        lo = lo.bind_local(s.name, reg, is_mut)
+        // A `var` initialized from a bare identifier must own its storage. An ident
+        // lowers to the SOURCE local's register (lookup_local returns it directly), so
+        // binding the var to `reg` aliases them onto the same vreg/stack slot — a later
+        // `y = ...` then clobbers the source `x`, and reads of `x` return y's value.
+        // This corrupted `var y = x; ... y = f(y, x)` patterns (e.g. Newton's method
+        // `y = 0.5*(y + x/y)`, which drifted to sqrt(garbage) once x was overwritten).
+        // Computed initializers already yield a fresh dst reg, so only the bare-ident
+        // case needs an explicit copy into a fresh register.
+        var bind_reg = reg
+        if is_mut {
+            match s.expr {
+                Some(rhs_ident) => {
+                    if (*rhs_ident).kind == ExprKind::ExprIdent {
+                        let copy_pair = lo.fresh_reg()
+                        lo = copy_pair.0
+                        let copy_reg = copy_pair.1
+                        lo = lo.emit(ir_copy(copy_reg, reg))
+                        bind_reg = copy_reg
+                    }
+                }
+                _ => {}
+            }
+        }
+        lo = lo.bind_local(s.name, bind_reg, is_mut)
         // Closures step 2: if the RHS was a capturing closure, mark this local so a later
         // `name(args)` call injects the captured regs (direct call to the synthetic fn).
         if lo.pending_closure_fn_id >= 0 {
