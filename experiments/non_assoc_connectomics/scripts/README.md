@@ -28,3 +28,4 @@ bit-identically and ties to `formal/OctonionAssociator.lean`.
 | `centers_from_charges.py` | sector centers = electric charges, recovered mass-blind; compound-ratio forward checks (§4.8) |
 | `dynkin_swap_symbolic.py` | SymPy proof of the 7 algebraic identities in `formal/DynkinSwapMassLadder.lean` (§4.9) |
 | `identifiability_audit.py` | ADVERSARIAL: δ unidentified without charge-centers (flat χ²); charge-center match selective 0/20000 (§4.10) |
+| `octonion_cd_correct.py` | **ERRATUM**: verified Cayley-Dickson octonions; the other scripts' table is non-alternative; +35 re-verified as +40 with true octonions |

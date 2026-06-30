@@ -9,6 +9,24 @@ a pre-committed decision rule, or a null model.
 
 Date: 2026-06-30. Engine for Sounio artifacts: `souc-lean-single-x86_64`.
 
+> **ERRATUM (2026-06-30, self-reported).** The explicit 8-component octonion product
+> used in the numpy synthetic/brain scripts (§2–§3) is **not a genuine octonion
+> algebra** — it fails composition, alternativity, and Re(associator)=0 (verified
+> symbolically). It matched correct octonions on the basis triples originally
+> spot-checked but differs on 5/35 basis triples and on general elements. **Impact:**
+> (1) the **mass result (§4) is unaffected** — it is pure scalar arithmetic with no
+> octonion multiplication; (2) the **Sounio artifact's associator is unaffected** — it
+> uses the Fano-verified stdlib `algebra::octonion` (2.0/0.0); (3) the **§3
+> inductive-bias result re-verifies with correct Cayley–Dickson octonions** — the fair
+> ablation gives octonion−associative = **+40.0** on the octonionic task (vs the
+> reported +35.4) and −3.2 on the associative task, so the double-dissociation
+> conclusion *holds for genuine octonions*; (4) the **brain null (§2) survives** (a
+> non-associative detector found nothing; recalibrated to +40). Verified octonions and
+> the re-check: `scripts/octonion_cd_correct.py`. The §2–§3 numeric tables were
+> computed with the flawed table; their *conclusions* are confirmed, their exact
+> figures should be read as "computed with a non-alternative near-octonion, conclusion
+> re-verified with true octonions."
+
 ---
 
 ## 0. One-paragraph verdict
