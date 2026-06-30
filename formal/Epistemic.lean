@@ -18,9 +18,12 @@ References:
 
 `Float` in Lean 4 (leanc) is an opaque IEEE-754 double backed by C `double`.
 The Lean 4 core does **not** export a complete algebraic hierarchy for `Float`
-(no `Ring`, `LinearOrder`, etc.).  Where ordering inequalities cannot be
-closed by `ring` or `native_decide`, we declare them as `axiom` (valid
-IEEE-754 facts for finite non-NaN values, documented in §11).
+(no `Ring`, `LinearOrder`, etc.).  Where ordering/sign inequalities cannot be
+closed by `ring` or `native_decide`, we declare them as `axiom`. These are
+restricted to facts that DO hold for finite non-NaN binary64 (monotonicity,
+non-negativity, and the *exact* identities x+0, x*1, x/1, x-x). Associativity
+and distributivity are NOT among them — they are false for IEEE-754 and are
+deliberately absent (see §12).
 
 All non-inequality theorems are proved via `ring` or structural induction.
 -/
@@ -285,14 +288,12 @@ axiom float_le_trans (a b c : Float) : a ≤ b → b ≤ c → a ≤ c
 /-- Float addition is commutative. -/
 axiom float_add_comm (a b : Float) : a + b = b + a
 
-/-- Float addition is associative. -/
-axiom float_add_assoc (a b c : Float) : a + b + c = a + (b + c)
+-- [audit-removed] float_add_assoc: FALSE for IEEE-754 ((a+b)+c ≠ a+(b+c)).
 
 /-- Float multiplication is commutative. -/
 axiom float_mul_comm (a b : Float) : a * b = b * a
 
-/-- Float multiplication is associative. -/
-axiom float_mul_assoc (a b c : Float) : (a * b) * c = a * (b * c)
+-- [audit-removed] float_mul_assoc: FALSE for IEEE-754 (overflow breaks assoc).
 
 /-- Float addition right identity. -/
 axiom float_add_zero (a : Float) : a + 0.0 = a
@@ -312,8 +313,7 @@ axiom float_mul_zero (a : Float) : a * 0.0 = 0.0
 /-- Float multiplication left zero. -/
 axiom float_zero_mul (a : Float) : 0.0 * a = 0.0
 
-/-- Float left distributivity. -/
-axiom float_mul_add (a b c : Float) : a * (b + c) = a * b + a * c
+-- [audit-removed] float_mul_add: FALSE for IEEE-754 (rounding breaks distrib).
 
 /-- Float absolute value of one. -/
 axiom float_abs_one : Float.abs 1.0 = 1.0
@@ -414,31 +414,21 @@ theorem gemm_row_eps_nonneg (aVals aEps bVals bEps : List Float)
 -- §12. Concrete Float instance
 -- ---------------------------------------------------------------------------
 
-noncomputable instance : EpistemicField Float where
-  zero       := 0.0
-  one        := 1.0
-  abs        := Float.abs
-  le_refl    := float_le_refl
-  le_trans   := float_le_trans
-  le_antisymm := float_le_antisymm
-  add_nonneg := float_add_nonneg
-  add_le_add := float_add_le_add
-  mul_nonneg := float_mul_nonneg
-  mul_le_mul_of_nonneg_left := float_mul_le_mul_left
-  abs_nonneg := float_abs_nonneg
-  add_comm   := float_add_comm
-  add_assoc  := float_add_assoc
-  mul_comm   := float_mul_comm
-  mul_assoc  := float_mul_assoc
-  add_zero   := float_add_zero
-  zero_add   := float_zero_add
-  mul_one    := float_mul_one
-  one_mul    := float_one_mul
-  mul_zero   := float_mul_zero
-  zero_mul   := float_zero_mul
-  mul_add    := float_mul_add
-  abs_one    := float_abs_one
-  zero_nonneg := float_zero_nonneg
+-- §12. Concrete instances
+--
+-- NOTE (audit fix, 2026): there is intentionally NO `EpistemicField Float`
+-- instance. `EpistemicField` demands *exact* associativity/distributivity,
+-- which IEEE-754 binary64 does NOT satisfy (e.g. (a+b)+c ≠ a+(b+c) for
+-- a=1.0,b=1e16,c=-1e16; overflow breaks (a*b)*c = a*(b*c)). The former
+-- instance discharged these via axioms `float_add_assoc`/`float_mul_assoc`/
+-- `float_mul_add` that are FALSE of the intended model. They have been removed.
+--
+-- For exact reasoning, instantiate the abstract theorems at an exact ordered
+-- field (ℚ/ℝ). For Float runtime arithmetic, use the round-to-nearest-even
+-- bounded model in `SounioIEEE754Spec` (`Float.mul_rne_bound` /
+-- `Float.add_rne_bound`) and the `BoundedOrderedCarrier` interface in
+-- `SounioFloatInstance`, where the rounding error is carried as an explicit
+-- `eps_inf` budget (Higham 2002 §2.1) rather than wished away.
 
 -- ---------------------------------------------------------------------------
 -- §13. Summary: key correctness properties
