@@ -64,7 +64,12 @@ class Dual2Field (α : Type) extends Add α, Mul α where
   add_zero   : ∀ a : α, a + zero = a
   add_comm   : ∀ a b : α, a + b = b + a
   mul_comm   : ∀ a b : α, a * b = b * a
-  mul_assoc  : ∀ a b c : α, (a * b) * c = a * (b * c)
+-- [audit] `mul_assoc` is intentionally NOT a base-class field: it is FALSE
+-- for IEEE-754 Float. It is required by exactly one theorem
+-- (`symmetric_apply_unary`), which takes it as an explicit hypothesis — making
+-- the exactness condition visible at the use site instead of asserting a false
+-- law for every `Dual2Field Float` value. Exact ground rings (ℚ/ℤ/Nat) supply
+-- it trivially; Float supplies it only in the rounding-free regime.
 
 variable {α : Type} [F : Dual2Field α]
 
@@ -231,15 +236,25 @@ theorem symmetric_mul (a b : Dual2 α)
   rw [F.add_comm (a.grad j * b.grad k) (a.grad k * b.grad j)]
 
 /-- The unary chain rule preserves symmetry — soundness of the
-    transcendental Hessian emission path. -/
+    transcendental Hessian emission path.
+
+    EXACTNESS HYPOTHESIS `hassoc`: multiplication associativity on the
+    relevant α-values.  This is the precise condition under which the
+    transcendental Hessian is *exact*.  It holds unconditionally over any
+    associative ground ring (ℚ/ℤ/Nat).  Over IEEE-754 `Float` it holds in
+    the rounding-free regime (integer/dyadic operands whose triple products
+    are representable, or a power-of-two factor), so we expose it as an
+    explicit hypothesis rather than baking a false law into the
+    `Dual2Field Float` instance. -/
 theorem symmetric_apply_unary (fv fp fpp : α) (g : Dual2 α)
-    (hg : Symmetric g) :
+    (hg : Symmetric g)
+    (hassoc : ∀ a b c : α, (a * b) * c = a * (b * c)) :
     Symmetric (dual2ApplyUnary fv fp fpp g) := by
   intro j k
   simp only [dual2ApplyUnary]
   rw [hg j k]
   congr 1
-  rw [F.mul_assoc, F.mul_comm (g.grad j) (g.grad k), ← F.mul_assoc]
+  rw [hassoc, F.mul_comm (g.grad j) (g.grad k), ← hassoc]
 
 -- ---------------------------------------------------------------------------
 -- §8. Constant-propagation identities
@@ -455,9 +470,12 @@ is tightened to equality on the body-precision fragment, so on that fragment
   its values in `Knowledge<T>` before arithmetic silently loses Hessian
   information.  The current Phase 1 stdlib function `gum_second_order_variance`
   assumes the caller operates on `.value` directly (as shown in the tests).
-- **Non-associative algebras**: `dual2Mul` assumes `mul_assoc` (Dual2Field axiom).
-  For non-associative types (octonions, sedenions, matrices), the bilinear
-  product rule is invalid.  Phase 2 introduces a compile-time gate at
+- **Non-associative algebras**: the symmetry of the unary transcendental
+  Hessian (`symmetric_apply_unary`) requires `mul_assoc`, taken as an
+  EXPLICIT per-call hypothesis (no longer a `Dual2Field` class axiom).
+  For non-associative types (octonions, sedenions, matrices) — and for
+  IEEE-754 Float outside the rounding-free regime — that hypothesis is
+  unavailable, so the bilinear product rule is invalid.  Phase 2 introduces a compile-time gate at
   `lean_single.sio:11803` to refuse propagation unless `@reassoc(fano)` is
   annotated — but note: the gate is annotation-based and provides no Lean-level
   defence against false-positive annotation.  Incorrect annotation produces
@@ -467,13 +485,15 @@ is tightened to equality on the body-precision fragment, so on that fragment
 
 ## Axioms used
 
-None inside §1-§10.  The §11 Float instance axiomatises seven
+None inside §1-§10.  The §11 Float instance axiomatises SIX
 IEEE-754 arithmetic laws (`float_zero_mul_ax`, `float_mul_zero_ax`,
 `float_zero_add_ax`, `float_add_zero_ax`, `float_add_comm_ax`,
-`float_mul_comm_ax`, `float_mul_assoc_ax`) to discharge the
-`Dual2Field Float` instance.  The first five are exact for finite
-non-NaN values; `float_mul_comm_ax` is approximate; `float_mul_assoc_ax`
-is the trust-boundary axiom (false in general floats).
+`float_mul_comm_ax`) to discharge the `Dual2Field Float` instance.
+All six hold for finite non-NaN values (the additive/commutative/
+identity facts bit-exactly; the sign-of-zero products up to ±0).
+The false `mul_assoc` law is deliberately NOT axiomatised: it was the
+only IEEE-754-false axiom, is required by exactly one theorem, and is
+now an explicit hypothesis there.
 -/
 
 -- ---------------------------------------------------------------------------
@@ -490,23 +510,25 @@ multiplication (classic counterexample: `(1e20 * 1e-20) * 1e20 = 1e20`
 but `1e20 * (1e-20 * 1e20) = 1e40` under double precision) and does not
 respect `zero_add`/`add_comm` on NaN payloads.
 
-We declare seven arithmetic axioms below:
+We declare six arithmetic axioms below (and deliberately omit `mul_assoc`):
 
   * Three hold *exactly* for finite non-NaN values — IEEE-754 addition
     with `0.0` and commutative addition are bit-exact (`zero_add`,
     `add_zero`, `add_comm`).
-  * Four are *approximate* for finite non-NaN — `zero_mul`, `mul_zero`,
-    `mul_comm` hold with caveats for signed zero and under/overflow;
-    `mul_assoc` is the fundamental numerical-analysis trust boundary,
-    false in general for finite floats.
+  * Three are *near-exact* for finite non-NaN — `zero_mul`, `mul_zero`,
+    `mul_comm`; commutativity is bit-exact, the zero-products up to the
+    sign of zero (±0).
+  * `mul_assoc` is OMITTED entirely: it is the fundamental
+    numerical-analysis trust boundary, false in general for finite
+    floats, so it is never asserted as a law for Float.
 
-For the add-only body-precision canary (`GradientTopologyBridge §14c`),
-only the three exact axioms are exercised.  For consumers that use
-`dual2Mul` over Float (e.g. `SecondOrderGUM` product-rule proofs) the
-full seven-axiom set is exercised and the `mul_assoc` trust boundary
-applies.
+For the add-only body-precision canary (`GradientTopologyBridge §14c`)
+and the `dual2Mul` product-rule symmetry (`symmetric_mul`, which uses
+only `add_comm`), the proofs are EXACT over Float.  The one result that
+needs associativity (`symmetric_apply_unary`) takes it as an explicit
+hypothesis, so no Float consumer silently relies on a false law.
 
-These seven axioms match the convention adopted across numerical PL
+These six axioms match the convention adopted across numerical PL
 verification work (CompCert's Float model, LLVM's real-number axioms).
 They are intended to be discharged by a future Mathlib-backed proof path
 that routes Float arithmetic through `Real`-valued counterparts under
@@ -535,22 +557,21 @@ axiom float_add_comm_ax (a b : Float) : a + b = b + a
 /-- Float multiplication is commutative (approximate for finite non-NaN). -/
 axiom float_mul_comm_ax (a b : Float) : a * b = b * a
 
-/-- Float multiplication is associative.  **Trust boundary** — false in
-    general for finite floats; accepted as a numerical-PL axiom. -/
-axiom float_mul_assoc_ax (a b c : Float) : (a * b) * c = a * (b * c)
 
-/-- `Float` satisfies the `Dual2Field` interface.  `noncomputable` because
-    the algebraic laws are declared via the axioms above rather than
-    computed from IEEE-754 bit semantics. -/
+/-- `Float` satisfies the (associativity-free) `Dual2Field` interface.
+    `noncomputable` because the laws are declared via the kept IEEE-754
+    axioms — all true for finite non-NaN binary64: additive/multiplicative
+    commutativity and identities, and the sign-of-zero facts.  `mul_assoc`
+    is deliberately absent (false for IEEE-754); the one theorem needing it
+    (`symmetric_apply_unary`) takes it as an explicit per-call hypothesis. -/
 noncomputable instance instDual2FieldFloat : Dual2Field Float where
-  zero := 0.0
-  one := 1.0
+  zero     := 0.0
+  one      := 1.0
   zero_mul := float_zero_mul_ax
   mul_zero := float_mul_zero_ax
   zero_add := float_zero_add_ax
   add_zero := float_add_zero_ax
   add_comm := float_add_comm_ax
   mul_comm := float_mul_comm_ax
-  mul_assoc := float_mul_assoc_ax
 
 end Sounio.HessianAD
