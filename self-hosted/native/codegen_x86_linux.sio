@@ -6457,7 +6457,19 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
             } else if op == IrOpcode::IrLoadImm {
                 def = 2
             } else if op == IrOpcode::IrUnaryOp {
-                def = 2
+                let uop = (*func).instrs[i as usize].un_op
+                if uop == UnaryOp::OpNeg {
+                    let t1 = if s1 >= 0 && s1 < 512 { ty[s1 as usize] } else { 0 }
+                    if t1 == 1 {
+                        def = 1
+                    } else if t1 == 2 {
+                        def = 2
+                    } else {
+                        def = 0
+                    }
+                } else {
+                    def = 2
+                }
             } else if op == IrOpcode::IrCopy {
                 if s1 >= 0 && s1 < 512 { def = ty[s1 as usize] }
             } else if op == IrOpcode::IrCall || op == IrOpcode::IrFieldGet || op == IrOpcode::IrIndexGet {
@@ -6719,10 +6731,24 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // so fail LOUDLY (codegen error) rather than ship a silent miscompile.
             let uop = (*func).instrs[i as usize].un_op
             if uop == UnaryOp::OpNeg {
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-                nc_emit_neg_rax(nc)
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                let src1 = (*func).instrs[i as usize].src1
+                let src1_marked_float = if src1 >= 0 && src1 < 512 && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
+                let src1_typed_float = if src1 >= 0 && src1 < 512 && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
+                if src1_marked_float == 1 || src1_typed_float == 1 {
+                    nc_core_load_temp_to_rax(nc, src1)
+                    nc_emit_movq_xmm1_rax(nc)
+                    nc_emit_mov_rax_imm(nc, 0)
+                    nc_emit_movq_xmm0_rax(nc)
+                    nc_emit_subsd_xmm0_xmm1(nc)
+                    nc_emit_movq_rax_xmm0(nc)
+                    nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                    nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+                } else {
+                    nc_core_load_temp_to_rax(nc, src1)
+                    nc_emit_neg_rax(nc)
+                    nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                    nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                }
             } else if uop == UnaryOp::OpNot {
                 nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
                 (*nc).code = emit_not_bool_rax((*nc).code)
