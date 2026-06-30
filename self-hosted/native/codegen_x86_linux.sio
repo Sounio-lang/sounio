@@ -3621,14 +3621,41 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c
 }
 
+fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCompiler, src_start: i64) -> i64 with Mut, Panic, Div {
+    let append_base = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
+    var src = src_start
+    if (*nc).flat_rodata_len > 0 {
+        var bytes = (*nc).flat_rodata_bytes
+        var len = (*nc).flat_rodata_len
+        while src < updated.rodata.len && len < 8192 {
+            bytes[len as usize] = updated.rodata.bytes[src as usize]
+            len = len + 1
+            src = src + 1
+        }
+        (*nc).flat_rodata_bytes = bytes
+        (*nc).flat_rodata_len = len
+    } else {
+        var t = (*nc).rodata
+        while src < updated.rodata.len && t.len < 8192 {
+            t.bytes[t.len as usize] = updated.rodata.bytes[src as usize]
+            t.len = t.len + 1
+            src = src + 1
+        }
+        (*nc).rodata = t
+    }
+    append_base
+}
+
 fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCompiler) with Mut, Panic, Div {
+    let nc_rodata_len_before = (*nc).rodata.len
     (*nc).code = updated.code
-    (*nc).rodata = updated.rodata
+    let rodata_append_base = native_v2_rodata_append_updated_tail(nc, updated, nc_rodata_len_before)
     var ri = 0
     while ri < updated.relocs.count && ri < 4096 {
         let entry = updated.relocs.entries[ri as usize]
         if entry.kind.kind_code == 2 {
-            nc_add_rodata_reloc(nc, entry.offset, entry.target.target_index)
+            let adjusted = rodata_append_base + (entry.target.target_index - nc_rodata_len_before)
+            nc_add_rodata_reloc(nc, entry.offset, adjusted)
         } else if entry.kind.kind_code == 3 {
             nc_add_data_section_reloc(nc, entry.offset, entry.target.target_index)
         }
