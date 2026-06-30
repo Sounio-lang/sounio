@@ -489,6 +489,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ppcr.claims-ledger | repo_only | docs/ppcr/CLAIMS_LEDGER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ppcr.one-pager | repo_only | docs/ppcr/ONE_PAGER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ppcr.sounio-ppcr-map | repo_only | docs/ppcr/SOUNIO_PPCR_MAP.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.preprint.rapamycin-des-combo-outline | repo_only | docs/preprint/rapamycin_des_combo_outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-meta-analysis | repo_only | docs/proposals/epistemic-meta-analysis.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-workflows | repo_only | docs/proposals/epistemic-workflows.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.nma-nonassociative-algebra-note | repo_only | docs/proposals/nma_nonassociative_algebra_note.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

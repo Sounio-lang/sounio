@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.preprint.rapamycin-des-combo-outline
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.preprint.rapamycin-des-combo-outline
+-->
+
 # Cross-domain epistemic uncertainty quantification for drug-eluting stents
 
 **Working title**  
