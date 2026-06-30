@@ -148,3 +148,25 @@ SIGSEGVs (exit 139) compiling the octonion intrinsics (`oct_mul`/`oct_associator
 `IrHyperMulO`/`IrAssociator`). Next step: determine whether the v2 path (`compile_ir_function_v2`)
 handles these IR opcodes at all (lower_ir.sio has `lower_hyper_mul_o_fano`/`lower_associator`,
 but the v2 machine-IR path may not route to them). Needs investigation + rebuild to verify.
+
+---
+
+## (a) str_from_bytes — wired into v2, but runtime ABI segfault (2026-06-30, NOT promoted)
+
+Added `name_is_str_from_bytes` + builtin id 22 + dispatch + `emit_builtin_str_from_bytes`
+(`mov rax, rdi; ret` — return the buffer pointer, matching lean_single's
+"returns the address of the byte buffer" semantics). Rebuilt (scratch madaros-fix-a):
+- m2/m3 still correct (375000 / 612372) — no f64 regression.
+- m4 now **compiles** (builtin recognized; previously returned empty) but **SIGSEGVs at
+  runtime** (exit 139).
+
+So the missing-builtin was real but not the whole story: with the builtin wired, the fault
+moves to the **array-argument / builtin-call ABI**. `str_from_bytes(b, 2)` passes an array
+`[i8;8]` as arg0; the emitter assumes rdi = &b (as str_slice does for a string pointer), but
+the runtime segfault indicates the array address is not arriving in rdi the way a string
+pointer does (array-arg passing differs from pointer-arg passing in the v2 call path), or the
+returned stack-array pointer is mishandled by the caller. Needs: disassemble the m4 call site
+to confirm what's in rdi at the call, and/or inspect how the v2 backend lowers array
+arguments to a call. **fix-a was NOT promoted** — it would regress str_from_bytes from
+empty-output to crash. The promoted binary remains the f64-only fix (str_from_bytes returns
+empty, no crash).
