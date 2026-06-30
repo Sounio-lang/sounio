@@ -167,6 +167,19 @@ independently re-derived mass-blind here. The cross-functional-form consistency 
 three forms) is harder to reverse-engineer than per-ratio fitting, but a full kill requires a
 mass-blind derivation of the assignment + a truly held-out sector.
 
+**Enumeration bound on the assignment freedom (`assignment_enumeration.py`).** Triality forces
+each single-edge adjacent-generation ratio to be one of three ascending edge types
+(`b/a`, `c/a`, `c/b`) on the Sym³(3) triangle, with eigenvalues (c_s−δ, c_s, c_s+δ). Enumerating
+*all* 3⁴ edge assignments for the four single-edge ratios (τ/μ, s/d, c/u, t/c) and demanding a
+single cross-sector δ: only **16 of 81** are even valid (`c/b` always gives δ > c_s); the
+lepton and down ratios are **forced to `c/a`** (the `b/a` alternative implies δ ≈ 0.76, grossly
+inconsistent); and only **two** assignments have δ-spread ≤ 0.02, both landing at δ ≈ √(3/8)
+(0.616, 0.623). The genuine residual freedom is a mild **two-fold (`b/a` vs `c/a`) ambiguity in
+the up sector**, moving δ by ~±0.02 around √(3/8). So the assignment freedom on the single-edge
+ratios is **small and funnels to √(3/8)**, not free to fit arbitrary δ — though this does not
+cover the compound ratios (μ/e, b/s) or the sector centers (c_s = 2/3 vs 1), which remain
+structural inputs. Net: the confound is bounded and quantified, not eliminated.
+
 ---
 
 ## 5. Sounio artifact (reproducibility + formal anchoring)

@@ -24,3 +24,4 @@ bit-identically and ties to `formal/OctonionAssociator.lean`.
 | `singh_tableI_test.py` | Singh Table I vs PDG (§4.3) |
 | `delta_consistency.py` | δ-cluster + null p<1e-5 (§4.4) |
 | `heldout_crosssector.py` | quark→lepton held-out prediction (§4.5) |
+| `assignment_enumeration.py` | bounds the assignment freedom: only ~2/81 cross-sector-consistent, both at √(3/8) (§4.7) |
