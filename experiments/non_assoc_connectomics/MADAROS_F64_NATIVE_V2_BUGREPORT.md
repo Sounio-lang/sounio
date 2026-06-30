@@ -90,3 +90,26 @@ Translate the compact modular IR records into `IrInstr` and drive `lower_instr` 
 re-test m2/m3/m4 (expect 375000 / 612372 / "Hi") + the multimodule octonion artifact.
 Substantial integration with bootstrap-fixed-point risk. Until then, f64-heavy code runs
 correctly on `lean_single` (which uses the full backend).
+
+---
+
+## REBUILD VERIFIED (2026-06-30): f64 fix WORKS; two separate blocks remain
+
+Rebuilt Madaros with the routing fix (lean_single seed) and tested:
+
+| repro | before | after fix |
+|---|---|---|
+| m2 `(f64 3.0/8.0)*1e6 as i64` | 0 | **375000** ✓ FIXED |
+| m3 f64 Newton division | SIGFPE | **612372** ✓ FIXED |
+| m4 `str_from_bytes` | segfault | empty output, no crash (string still wrong) — separate builtin bug |
+| `octonion_mass_delta.sio` (multimodule, octonion intrinsics) | thin-link failed | takes the full merged-IR path (fix active) but the v2 backend SIGSEGVs (139) on octonion intrinsics |
+
+**Verdict:** the routing fix RESOLVES the f64 codegen bug for general code on Madaros
+(m2/m3 correct, verified). Two independent blockers remain before the full octonion
+artifact runs on Madaros, both in the full v2 backend (not the routing):
+1. `str_from_bytes` returns empty in the v2 backend (no longer segfaults).
+2. The v2 backend segfaults compiling the octonion intrinsics (`oct_mul`/`oct_associator`
+   lowering, `IrHyperMulO`/`IrAssociator` paths in lower_ir.sio).
+Both are out of scope of the f64 routing fix. f64-heavy *scalar* programs now compile and
+run correctly on Madaros; the octonion artifact stays on lean_single until (1)+(2) land.
+No regression: integer + f64 programs compile and run correctly with the fixed binary.
