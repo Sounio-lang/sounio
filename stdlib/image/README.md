@@ -12,5 +12,6 @@ Image processing with fixed-capacity buffers.
 - `image_width(img)`: Get image width
 - `image_height(img)`: Get image height
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+`tests/stdlib/image/test_image_core.sio` (check-only, Madaros gate)

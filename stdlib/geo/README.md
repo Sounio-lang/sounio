@@ -41,6 +41,6 @@ let ep2 = epoint2d_new(Epistemic::measured(3.0, 0.1), Epistemic::measured(4.0, 0
 let edist = epoint2d_distance(&ep1, &ep2)
 ```
 
-## Test Status
+## Tests
 
-4/4 tests passing.
+`tests/stdlib/geo/test_geo_core.sio` (check-only, Madaros gate)

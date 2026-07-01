@@ -12,5 +12,6 @@ Audio processing utilities with FFI wrappers.
 - `audio_buffer_size(buf)`: Get current size
 - `audio_buffer_sample_rate(buf)`: Get sample rate
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+`tests/stdlib/audio/test_audio_core.sio` (check-only, Madaros gate)

@@ -24,6 +24,11 @@ Quantum Field Theory and Standard Model foundations for Sounio.
 | `vertex.sio` | QED, QCD, weak charged/neutral current, Yukawa vertices |
 | `amplitude.sio` | e⁺e⁻ → μ⁺μ⁻, Møller, Bhabha, Z/Higgs decay widths |
 
+## Tests
+
+- `tests/stdlib/particle_physics/test_particle_physics_core.sio` — BSM, statistics, systematics (check-only)
+- `stdlib/particle_physics/lib.sio` — full inline regression driver (heavy; IO effects)
+
 ## Quick Example
 
 ```sio

@@ -11,5 +11,6 @@ Command-line argument parsing.
 - `args_get(args, idx)`: Get argument at index
 - `args_count(args)`: Get argument count
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+`tests/stdlib/cli/test_cli_core.sio` (check-only, Madaros gate)

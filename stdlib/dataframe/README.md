@@ -31,6 +31,6 @@ dataframe_push(&! df, "temperature", 23.5)
 let mean = ecolumn_mean(&df.columns[0])
 ```
 
-## Test Status
+## Tests
 
-11/11 tests passing.
+`tests/stdlib/dataframe/test_dataframe_core.sio` (check-only, Madaros gate)
