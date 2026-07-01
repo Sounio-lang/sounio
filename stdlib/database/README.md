@@ -34,6 +34,9 @@ execute(&! db, "INSERT INTO users VALUES ('Bob', 25)")
 let result = query(&db, "SELECT name, age FROM users WHERE age > 25")
 ```
 
-## Test Status
+## Tests
 
-10/10 tests passing.
+- `tests/stdlib/database/test_database_core.sio` — CRUD + drop (check-only)
+- `tests/stdlib_database/test_database_e2e.sio` — legacy run-pass harness
+
+FFI (`database::ffi::*`) exposes SQLite/libpq stubs returning errors until wired.

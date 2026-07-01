@@ -48,6 +48,9 @@ pub fn get_vertex(m: &Mesh, idx: i32) -> [f64; 3] {
 
 Functions returning arrays with `with Div` effect may cause typecheck errors. Avoid this combination.
 
-## Test Status
+## Tests
 
-5/5 tests passing.
+- `tests/stdlib/mesh/test_mesh_core.sio` — vertices, faces, area (check-only)
+- `tests/stdlib_mesh/test_mesh_e2e.sio` — legacy run-pass harness
+
+FFI render stubs: `mesh::ffi::wrapper::{mesh_render_gl, mesh_render_vulkan}` (no-op).
