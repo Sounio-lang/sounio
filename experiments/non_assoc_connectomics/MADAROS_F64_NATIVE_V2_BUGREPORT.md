@@ -170,3 +170,54 @@ to confirm what's in rdi at the call, and/or inspect how the v2 backend lowers a
 arguments to a call. **fix-a was NOT promoted** — it would regress str_from_bytes from
 empty-output to crash. The promoted binary remains the f64-only fix (str_from_bytes returns
 empty, no crash).
+
+---
+
+## (a) EXACT root cause found via disassembly (2026-06-30)
+
+Disassembled the m4 ELF (raw binary code segment fed to `objdump -b binary -m i386:x86-64`,
+since the ELF has no section headers). Found the call site:
+
+```
+mov rdi, [rbp-0x8]     ; rdi = local var "b" ([i8;8] array)
+mov rsi, [rbp-0x38]    ; rsi = 2 (len)
+call 0x40141b          ; str_from_bytes(rdi, rsi)   <- my new emitter: mov rax,rdi; ret
+```
+
+And the array-store code (for `b[0]=72; b[1]=105;`) reveals arrays in the v2 backend are
+**boxed/indirect, not raw byte buffers**:
+
+```
+mov rax, [rbp-8]              ; rax = "b" = a SLOT INDEX (small int), NOT a pointer
+imul rbx, rax, 0x30           ; rbx = slot_index * 48   (descriptor stride)
+mov rax, [RuntimeContext+0x18]; rax = array-descriptor-table base
+add rax, rbx
+mov rax, [rax]                ; DEREFERENCE -> rax = the REAL data pointer (descriptor field 0)
+...
+mov [rax + (i+4)*8], value    ; element i stored at data_ptr + 32 (4-qword header) + i*8
+                               ; (8 bytes PER i8 ELEMENT — uniform boxed representation)
+```
+
+So `rdi` at the `str_from_bytes` call site is a **slot index into an array-descriptor
+table**, not a byte-buffer address. My emitter (`mov rax,rdi; ret`, mirroring how
+`str_slice`/`str_concat` treat their args as raw `char*`) just echoes the slot index back —
+the caller (`println`) then dereferences that small integer as if it were a string pointer
+→ SIGSEGV. `str_slice`/`str_concat` never hit this because they only ever receive **strings**
+(already raw null-terminated `char*`, from literals/heap), never a stack-declared `[i8;N]`
+array — so this ABI mismatch was latent until `str_from_bytes` (the only builtin that takes
+an array argument) was wired up.
+
+### What a correct fix requires
+`emit_builtin_str_from_bytes` must, given `rdi`=slot index and `rsi`=len:
+1. Resolve the descriptor: `descriptor_ptr = [RuntimeContext+0x18] + rdi*48`.
+2. Load the real data pointer: `data_ptr = [descriptor_ptr]`.
+3. Bump-allocate `rsi+1` bytes from `RuntimeContext.heap_cursor` (mirror
+   `emit_builtin_str_concat`'s allocation phase) for a **packed** result buffer.
+4. Copy `rsi` bytes, reading each source byte from `[data_ptr + 32 + i*8]` (low byte of the
+   8-byte boxed element) and writing packed to `[result + i]`.
+5. NUL-terminate, return `result` in rax.
+This is a real fix (not a one-liner) requiring the exact descriptor stride (0x30) and header
+size (32 bytes / 4 qwords) confirmed above, plus a copy loop. Not applied this session —
+needs a dedicated rebuild-test cycle to get the encoding right; the promoted shared binary
+must not regress. Current promoted binary keeps the safe (non-crashing, wrong-output)
+str_from_bytes state; `madaros-fix-a` (the crashing version) stays unpromoted.
