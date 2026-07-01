@@ -221,3 +221,47 @@ size (32 bytes / 4 qwords) confirmed above, plus a copy loop. Not applied this s
 needs a dedicated rebuild-test cycle to get the encoding right; the promoted shared binary
 must not regress. Current promoted binary keeps the safe (non-crashing, wrong-output)
 str_from_bytes state; `madaros-fix-a` (the crashing version) stays unpromoted.
+
+---
+
+## (a) Complete fix recipe — all pieces identified, NOT hand-assembled (2026-06-30)
+
+Traced every constant and helper needed, all already exist and are used elsewhere (so
+they are trustworthy, tested code paths):
+
+- `native_v2_resolve_handle_to_object_base_rax(nc) -> nc` (codegen_x86_linux.sio:2691):
+  takes a handle in `rax`, returns the object's data pointer in `rax`. This is the exact
+  function `native_v2_core_emit_local_array_load_into` (line 7991, used for ordinary
+  `arr[i]` reads) calls — confirms it's the right, tested primitive.
+- `native_v2_handle_entry_size() = 48` (gc.sio:35) — matches the `imul rbx,rbx,0x30` seen
+  in the disassembly.
+- `native_v2_object_header_size() = 32` (gc.sio:27) — matches the `+4` qword offset (`(i+4)*8`)
+  seen for element access.
+- `nc_emit_load_rax_mem_rdx_rbx8` / `nc_emit_store_rax_mem_rdx_rbx8` (codegen_x86_linux.sio:1501):
+  raw `mov rax,[rdx+rbx*8]` / `mov [rdx+rbx*8],rax` — the exact element-read/write instruction,
+  confirmed byte-identical to the disassembled array-store code.
+
+So `emit_builtin_str_from_bytes(nc)` [rdi=handle, rsi=len] should:
+1. `rax=rdi; c = native_v2_resolve_handle_to_object_base_rax(c)` → `rax` = object_base.
+2. Bump-allocate `len+1` bytes from `heap_cursor` (mirror `emit_builtin_str_concat`'s Phase 3)
+   → result pointer.
+3. Loop `i` in `0..len`: read element via `object_base`, index `(i + 32/8)`, using
+   `nc_emit_load_rax_mem_rdx_rbx8` (rdx=object_base, rbx=i+4) → low byte is the packed byte;
+   write to `[result+i]`.
+4. NUL-terminate at `[result+len]`; return `result` in `rax`.
+
+### Why this was NOT hand-assembled and shipped
+Steps 3's loop requires a conditional branch (`jz`/`jnz` to a "done" label) whose relative
+displacement must be the exact byte count of the intervening instructions — this codebase's
+raw-builtin style (`emit_builtin_str_concat`, `emit_builtin_starts_with`) computes these by
+**manual byte-counting** (see e.g. `starts_with`'s comments `// jz match (skip 2+2+3+3+2=12)`),
+with no assembler/two-pass relocation available at this level (unlike full IR-compiled
+functions, which get real label/reloc support — see `IrIndexGet`/`IrIndexSet`'s clean
+label-based lowering at codegen_x86_linux.sio:6676, a SAFER model this builtin could follow
+in a future rewrite: expand `str_from_bytes` as small generated IR code with `IrIndexGet` +
+`IrBranchTrue`/`IrJump`, not a hand-written raw-bytes leaf function). A single miscounted
+byte here produces a silently wrong jump target (crash or, worse, silent memory
+corruption) that only surfaces after another ~10min rebuild — on a currently
+contended shared build box, and on a binary that gets promoted to shared use. Per this
+session's discipline (verify before promote, no blind machine-code), this is deliberately
+left as a precise, actionable spec rather than shipped code.
