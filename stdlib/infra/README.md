@@ -8,7 +8,10 @@ Umbrella for infrastructure modules with pure implementations and FFI stubs.
 | `wasm` | Module bytecode buffer | Wasmtime stubs |
 | `database` | In-memory tables | SQLite/libpq stubs |
 | `mesh` | Fixed-capacity mesh | OpenGL/Vulkan stubs |
+| `cache` | 64-entry KV cache | Redis stubs |
+| `serial` | RX/TX ring buffers | libftdi stubs |
+| `simulation` | Time series stats | GPU MC stubs |
 
 ## Tests
 
-`tests/stdlib/{queue,wasm,database,mesh}/test_*_core.sio` (check-only)
+`tests/stdlib/{queue,wasm,database,mesh,cache,serial,simulation}/test_*_core.sio` (check-only)

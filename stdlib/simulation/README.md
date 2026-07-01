@@ -32,6 +32,6 @@ etimeseries_push(&! ts, 1.0, Epistemic::measured(2.0, 0.1))
 let mean = etimeseries_mean(&ts)
 ```
 
-## Test Status
+## Tests
 
-3/3 tests passing.
+`tests/stdlib/simulation/test_simulation_core.sio` (check-only, Madaros gate)
