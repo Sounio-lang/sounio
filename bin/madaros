@@ -64,11 +64,14 @@ madaros — launcher for the Madaros modular compiler ($RAW_MADAROS)
 Usage:
   madaros --version                     print compiler identity
   madaros info                          print resolution path
-  madaros check <source.sio>            parse, resolve and typecheck
-  madaros build <source.sio> [-o OUT] [--backend native|gpu]
+  madaros check <source.sio|project-dir>
+                                      parse, resolve and typecheck
+  madaros build <source.sio|project-dir> [-o OUT] [--backend native|gpu]
                                       compile source to native ELF or GPU artifact
-  madaros compile <source.sio> [-o OUT] alias for build
-  madaros run <source.sio>              compile to a temp ELF and run it
+  madaros compile <source.sio|project-dir> [-o OUT]
+                                      alias for build
+  madaros run <source.sio|project-dir>
+                                      compile to a temp ELF and run it
   madaros pkg <subcommand>...           package-manager commands
   madaros <raw-compiler-args>...        pass through to the raw ELF
 
@@ -106,6 +109,105 @@ version() {
   local out
   out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
   echo "$out" | head -n 1
+}
+
+find_project_root() {
+  local start="${1:-$PWD}"
+  if [[ -f "$start" ]]; then
+    start="$(dirname "$start")"
+  fi
+  if [[ -d "$start" ]]; then
+    start="$(cd "$start" && pwd)"
+  else
+    return 1
+  fi
+  while [[ "$start" != "/" ]]; do
+    if [[ -f "$start/sounio.toml" ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    start="$(dirname "$start")"
+  done
+  return 1
+}
+
+project_manifest_value() {
+  local root="$1"
+  local key="$2"
+  python3 - "$root/sounio.toml" "$key" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(3)
+path, key = sys.argv[1], sys.argv[2]
+text = open(path, "rb").read().decode("utf-8")
+data = tomllib.loads(text)
+if key == "package.name":
+    print(data.get("package", {}).get("name", "sounio-project"))
+elif key == "entry":
+    bins = data.get("bin", [])
+    if isinstance(bins, list) and bins:
+        value = bins[0].get("path", "")
+        if value:
+            print(value)
+            raise SystemExit(0)
+    value = data.get("project", {}).get("entry", "")
+    if value:
+        print(value)
+        raise SystemExit(0)
+    value = data.get("lib", {}).get("path", "")
+    if value and "[[bin]]" not in text:
+        print(value)
+        raise SystemExit(0)
+    print("src/main.sio")
+else:
+    raise SystemExit(2)
+PY
+}
+
+resolve_source_or_project() {
+  local candidate="${1:-}"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local root=""
+  if [[ -n "$candidate" && -d "$candidate" ]]; then
+    root="$(find_project_root "$candidate" || true)"
+  else
+    root="$(find_project_root "$PWD" || true)"
+  fi
+  if [[ -z "$root" ]]; then
+    return 1
+  fi
+
+  local entry
+  entry="$(project_manifest_value "$root" entry)"
+  if [[ ! -f "$root/$entry" ]]; then
+    echo "error: project entry not found: $root/$entry" >&2
+    return 1
+  fi
+  printf '%s\n' "$root/$entry"
+}
+
+project_default_output() {
+  local root="$1"
+  local name
+  name="$(project_manifest_value "$root" package.name)"
+  mkdir -p "$root/target"
+  printf '%s\n' "$root/target/$name"
+}
+
+args_have_output() {
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-o" || "$arg" == "--output" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 _check_source_arg() {
@@ -264,29 +366,53 @@ case "$1" in
     info
     ;;
   check)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros check: missing source file" >&2
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros check requires <source.sio> or a project with sounio.toml" >&2
       exit 2
     fi
-    _run_raw_check "$2" "${@:3}"
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    _run_raw_check "$src" "$@"
     ;;
   build|compile)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros build: missing source file" >&2
-      exit 2
-    fi
-    if [[ "${2:-}" == "-h" || "${2:-}" == "--help" || "${2:-}" == "help" ]]; then
+    shift
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
       usage
       exit 0
     fi
-    _build_source "$2" "${@:3}"
-    ;;
-  run)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros run: missing source file" >&2
+    candidate="${1:-}"
+    if [[ -n "$candidate" && "$candidate" != -* ]]; then
+      shift
+    else
+      candidate=""
+    fi
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros build requires <source.sio> or a project with sounio.toml" >&2
       exit 2
     fi
-    _run_source "$2" "${@:3}"
+    project_root=""
+    if [[ -z "$candidate" || -d "$candidate" ]]; then
+      project_root="$(find_project_root "${candidate:-$PWD}" || true)"
+    fi
+    if [[ -n "$project_root" ]] && ! args_have_output "$@"; then
+      set -- "$@" -o "$(project_default_output "$project_root")"
+    fi
+    _build_source "$src" "$@"
+    ;;
+  run)
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros run requires <source.sio> or a project with sounio.toml" >&2
+      exit 2
+    fi
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    _run_source "$src" "$@"
     ;;
   -h|--help|help)
     usage

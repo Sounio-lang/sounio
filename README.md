@@ -248,8 +248,10 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 $SOUC --version                              # souc 1.0.0-beta.6
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
+$SOUC init hello_pkg && cd hello_pkg         # create a minimal sounio.toml project
+$SOUC check && $SOUC run && $SOUC build      # project entrypoint -> ELF
+$SOUC run examples/native/hello.sio          # compile to a temp ELF and execute it
 $SOUC compile examples/hello.sio -o /tmp/souc-next
-$SOUC run self-hosted/compiler/native_print_f64_smoke.sio
 $SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
@@ -306,11 +308,11 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 **Native startup cost.** Native execution still requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
 
-**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, and `build`, but broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
+**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, `build`, and `init`. When invoked inside a directory with `sounio.toml`, `check`, `run`, and `build` resolve the project entrypoint from `[[bin]].path`, `[project].entry`, or `src/main.sio`. Broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
 
 **Windows cross-compile.** The PE/COFF backend (3,508 lines) is production-grade. Use `--target x86_64-windows` to emit Windows binaries. No pre-built .exe is shipped in this checkout.
 
-**No REPL yet.** The checked self-hosted launcher does not support `repl`.
+**REPL.** The checked self-hosted launcher supports `souc repl` for a file-backed interactive loop.
 
 **Debug flags.** `--show-ast` and `--show-types` are supported as pass-through flags on the checked self-hosted launcher for `check`, `run`, `compile`, and `build`.
 

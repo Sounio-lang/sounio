@@ -13,7 +13,7 @@
          test-knowledge-runtime-guard-native-lowering \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
-         test-madaros-identity test-real-language-runner \
+         test-madaros-identity test-real-language-runner test-project-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -76,6 +76,9 @@ test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio
 
 test-real-language-runner: ## Verify public souc CLI + REPL + Madaros identity
 	@bash scripts/ci/real_language_runner_gate.sh
+
+test-project-spine: ## Verify sounio.toml project mode on souc and Madaros
+	@bash scripts/ci/project_spine_gate.sh
 
 madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-end gate
 	@echo "→ Running Madaros full-functioning gate"
