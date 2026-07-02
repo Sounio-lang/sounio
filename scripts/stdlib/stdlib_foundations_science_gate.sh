@@ -12,6 +12,7 @@ OUT_JSON="${STDLIB_FOUNDATIONS_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_fou
 GOLDEN_JSON="${STDLIB_FOUNDATIONS_GOLDEN:-$ROOT_DIR/tests/fixtures/foundations/pipeline_golden.v1.json}"
 PHYSICS_TEST="${STDLIB_SCIENCE_PHYSICS_TEST:-$ROOT_DIR/tests/stdlib/physics/test_foundations_science_e2e.sio}"
 CHEMISTRY_TEST="${STDLIB_SCIENCE_CHEMISTRY_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_foundations_science_e2e.sio}"
+KINETICS_TEST="${STDLIB_SCIENCE_KINETICS_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_kinetics_foundations_e2e.sio}"
 PHYSICS_SHARDS=(
   "${STDLIB_SCIENCE_PHYSICS_CLASSICAL_SHARD:-$ROOT_DIR/stdlib/physics/classical.sio}"
   "${STDLIB_SCIENCE_PHYSICS_EM_SHARD:-$ROOT_DIR/stdlib/physics/em.sio}"
@@ -21,6 +22,7 @@ PHYSICS_SHARDS=(
 CHEMISTRY_SHARDS=(
   "${STDLIB_SCIENCE_CHEMISTRY_ACIDS_SHARD:-$ROOT_DIR/stdlib/chemistry/acids.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_EQUIL_SHARD:-$ROOT_DIR/stdlib/chemistry/equilibrium.sio}"
+  "${STDLIB_SCIENCE_CHEMISTRY_STOICH_SHARD:-$ROOT_DIR/stdlib/chemistry/stoichiometry.sio}"
 )
 STRICT="${STDLIB_SCIENCE_FOUNDATIONS_STRICT:-0}"
 RUN_ENGINE="${STDLIB_FOUNDATIONS_RUN_ENGINE:-lean_single}"
@@ -69,11 +71,17 @@ run_shard() {
 
 PHYSICS_CHECK_OUT="$TMP_DIR/physics_check.out"
 CHEMISTRY_CHECK_OUT="$TMP_DIR/chemistry_check.out"
+KINETICS_CHECK_OUT="$TMP_DIR/kinetics_check.out"
 PHYSICS_RUN_OUT="$TMP_DIR/physics_run.out"
 CHEMISTRY_RUN_OUT="$TMP_DIR/chemistry_run.out"
 
 physics_check_rc="$(run_check "$PHYSICS_TEST" "$PHYSICS_CHECK_OUT")"
-chemistry_check_rc="$(run_check "$CHEMISTRY_TEST" "$CHEMISTRY_CHECK_OUT")"
+chemistry_foundations_check_rc="$(run_check "$CHEMISTRY_TEST" "$CHEMISTRY_CHECK_OUT")"
+kinetics_check_rc="$(run_check "$KINETICS_TEST" "$KINETICS_CHECK_OUT")"
+chemistry_check_rc=0
+if [[ "$chemistry_foundations_check_rc" -ne 0 || "$kinetics_check_rc" -ne 0 ]]; then
+  chemistry_check_rc=1
+fi
 : >"$PHYSICS_RUN_OUT"
 classical_shard="${PHYSICS_SHARDS[0]}"
 em_shard="${PHYSICS_SHARDS[1]}"
@@ -103,24 +111,30 @@ echo "[foundations-science] shard thermo rc=$thermo_run_rc" >&2
 : >"$CHEMISTRY_RUN_OUT"
 acids_shard="${CHEMISTRY_SHARDS[0]}"
 equil_shard="${CHEMISTRY_SHARDS[1]}"
+stoich_shard="${CHEMISTRY_SHARDS[2]}"
 acids_out="$TMP_DIR/chem_acids.out"
 equil_out="$TMP_DIR/chem_equilibrium.out"
+stoich_out="$TMP_DIR/chem_stoichiometry.out"
 acids_run_rc="$(run_shard "$acids_shard" "$acids_out")"
 equil_run_rc="$(run_shard "$equil_shard" "$equil_out")"
+stoich_run_rc="$(run_shard "$stoich_shard" "$stoich_out")"
 cat "$acids_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$equil_out" >>"$CHEMISTRY_RUN_OUT"
+cat "$stoich_out" >>"$CHEMISTRY_RUN_OUT"
 chemistry_run_rc=0
-if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 ]]; then
+if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 || "$stoich_run_rc" -ne 0 ]]; then
   chemistry_run_rc=1
 fi
 echo "[foundations-science] shard acids rc=$acids_run_rc" >&2
 echo "[foundations-science] shard equilibrium rc=$equil_run_rc" >&2
+echo "[foundations-science] shard stoichiometry rc=$stoich_run_rc" >&2
+echo "[foundations-science] kinetics check rc=$kinetics_check_rc" >&2
 
-python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" \
-  "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
-  "$physics_check_rc" "$chemistry_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
+python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" "$KINETICS_TEST" \
+  "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$KINETICS_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
+  "$physics_check_rc" "$chemistry_check_rc" "$kinetics_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
   "$classical_run_rc" "$em_run_rc" "$sr_run_rc" "$thermo_run_rc" \
-  "$acids_run_rc" "$equil_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
+  "$acids_run_rc" "$equil_run_rc" "$stoich_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
 import datetime
 import json
 import math
@@ -133,22 +147,26 @@ out_path = Path(sys.argv[2]).resolve()
 golden_path = Path(sys.argv[3]).resolve()
 physics_test = Path(sys.argv[4]).resolve()
 chemistry_test = Path(sys.argv[5]).resolve()
-physics_check_out_path = Path(sys.argv[6]).resolve()
-chemistry_check_out_path = Path(sys.argv[7]).resolve()
-physics_run_out_path = Path(sys.argv[8]).resolve()
-chemistry_run_out_path = Path(sys.argv[9]).resolve()
-physics_check_rc = int(sys.argv[10])
-chemistry_check_rc = int(sys.argv[11])
-physics_run_rc = int(sys.argv[12])
-chemistry_run_rc = int(sys.argv[13])
-classical_run_rc = int(sys.argv[14])
-em_run_rc = int(sys.argv[15])
-sr_run_rc = int(sys.argv[16])
-thermo_run_rc = int(sys.argv[17])
-acids_run_rc = int(sys.argv[18])
-equil_run_rc = int(sys.argv[19])
-strict = sys.argv[20] == "1"
-run_engine = sys.argv[21]
+kinetics_test = Path(sys.argv[6]).resolve()
+physics_check_out_path = Path(sys.argv[7]).resolve()
+chemistry_check_out_path = Path(sys.argv[8]).resolve()
+kinetics_check_out_path = Path(sys.argv[9]).resolve()
+physics_run_out_path = Path(sys.argv[10]).resolve()
+chemistry_run_out_path = Path(sys.argv[11]).resolve()
+physics_check_rc = int(sys.argv[12])
+chemistry_check_rc = int(sys.argv[13])
+kinetics_check_rc = int(sys.argv[14])
+physics_run_rc = int(sys.argv[15])
+chemistry_run_rc = int(sys.argv[16])
+classical_run_rc = int(sys.argv[17])
+em_run_rc = int(sys.argv[18])
+sr_run_rc = int(sys.argv[19])
+thermo_run_rc = int(sys.argv[20])
+acids_run_rc = int(sys.argv[21])
+equil_run_rc = int(sys.argv[22])
+stoich_run_rc = int(sys.argv[23])
+strict = sys.argv[24] == "1"
+run_engine = sys.argv[25]
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -178,8 +196,12 @@ chemistry_run_out = chemistry_run_out_path.read_text(encoding="utf-8", errors="r
 run_metrics = parse_metrics(physics_run_out + "\n" + chemistry_run_out)
 
 chem = run_metrics.get("chemistry", {})
-if chem.get("acids_ok") == 1.0 and chem.get("equilibrium_ok") == 1.0:
-    chem["tests_passed"] = 8.0
+if (
+    chem.get("acids_ok") == 1.0
+    and chem.get("equilibrium_ok") == 1.0
+    and chem.get("stoichiometry_ok") == 1.0
+):
+    chem["tests_passed"] = 13.0
 run_metrics["chemistry"] = chem
 
 phys = run_metrics.get("physics", {})
@@ -269,9 +291,15 @@ chemistry_lane = lane_row(
     chemistry_run_rc,
     "SCIENCE_CHEMISTRY_OK",
     chemistry_test,
-    "stdlib/chemistry/{acids,equilibrium}.sio",
+    "stdlib/chemistry/{acids,equilibrium,stoichiometry}.sio",
     chemistry_run_out,
 )
+chemistry_lane["kinetics_check"] = {
+    "check_test_path": kinetics_test.relative_to(root).as_posix() if kinetics_test.exists() else str(kinetics_test),
+    "check_exit_code": kinetics_check_rc,
+    "status": "pass" if kinetics_check_rc == 0 else "fail",
+    "run_blocker": "lean_single_nested_array_and_ref_indexing",
+}
 chemistry_lane["shard_runs"] = {
     "acids": {
         "path": "stdlib/chemistry/acids.sio",
@@ -282,6 +310,11 @@ chemistry_lane["shard_runs"] = {
         "path": "stdlib/chemistry/equilibrium.sio",
         "run_exit_code": equil_run_rc,
         "status": "pass" if equil_run_rc == 0 else "fail",
+    },
+    "stoichiometry": {
+        "path": "stdlib/chemistry/stoichiometry.sio",
+        "run_exit_code": stoich_run_rc,
+        "status": "pass" if stoich_run_rc == 0 else "fail",
     },
 }
 physics_lane["shard_runs"] = {
@@ -341,6 +374,7 @@ obj = {
         "madaros_f64_runtime_blocker=negative_subtraction_and_metric_print_SIGSEGV",
         f"physics_check_rc={physics_check_rc}",
         f"chemistry_check_rc={chemistry_check_rc}",
+        f"kinetics_check_rc={kinetics_check_rc}",
         f"physics_run_rc={physics_run_rc}",
         f"chemistry_run_rc={chemistry_run_rc}",
         f"classical_shard_rc={classical_run_rc}",
@@ -349,6 +383,8 @@ obj = {
         f"thermo_shard_rc={thermo_run_rc}",
         f"acids_shard_rc={acids_run_rc}",
         f"equilibrium_shard_rc={equil_run_rc}",
+        f"stoichiometry_shard_rc={stoich_run_rc}",
+        "kinetics_shard_run=skipped_lean_single_blocker",
     ],
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
