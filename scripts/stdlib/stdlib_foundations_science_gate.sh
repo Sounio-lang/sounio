@@ -15,6 +15,7 @@ CHEMISTRY_TEST="${STDLIB_SCIENCE_CHEMISTRY_TEST:-$ROOT_DIR/tests/stdlib/chemistr
 KINETICS_TEST="${STDLIB_SCIENCE_KINETICS_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_kinetics_foundations_e2e.sio}"
 THERMO_KT_TEST="${STDLIB_SCIENCE_THERMO_KT_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_thermochem_equilibrium_kt_e2e.sio}"
 THERMO_KINETICS_KT_TEST="${STDLIB_SCIENCE_THERMO_KINETICS_KT_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_thermochem_kinetics_kt_e2e.sio}"
+ONTOLOGY_TEST="${STDLIB_SCIENCE_ONTOLOGY_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_chemistry_ontology_e2e.sio}"
 PHYSICS_SHARDS=(
   "${STDLIB_SCIENCE_PHYSICS_CLASSICAL_SHARD:-$ROOT_DIR/stdlib/physics/classical.sio}"
   "${STDLIB_SCIENCE_PHYSICS_EM_SHARD:-$ROOT_DIR/stdlib/physics/em.sio}"
@@ -26,9 +27,11 @@ CHEMISTRY_SHARDS=(
   "${STDLIB_SCIENCE_CHEMISTRY_EQUIL_SHARD:-$ROOT_DIR/stdlib/chemistry/equilibrium.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_STOICH_SHARD:-$ROOT_DIR/stdlib/chemistry/stoichiometry.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_THERMO_SHARD:-$ROOT_DIR/stdlib/chemistry/thermochem.sio}"
+  "${STDLIB_SCIENCE_CHEMISTRY_ONTOLOGY_SHARD:-$ROOT_DIR/stdlib/chemistry/ontology.sio}"
 )
 STRICT="${STDLIB_SCIENCE_FOUNDATIONS_STRICT:-0}"
 RUN_ENGINE="${STDLIB_FOUNDATIONS_RUN_ENGINE:-lean_single}"
+CHECK_TIMEOUT_SEC="${STDLIB_SCIENCE_CHECK_TIMEOUT_SEC:-90}"
 
 # shellcheck source=lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
@@ -51,8 +54,16 @@ run_check() {
     return 0
   fi
   set +e
-  "$CHECK_SOUC" check "$src" >"$out" 2>&1
-  local rc=$?
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "${CHECK_TIMEOUT_SEC}s" "$CHECK_SOUC" check "$src" >"$out" 2>&1
+    local rc=$?
+    if [[ "$rc" -eq 124 ]]; then
+      echo "[foundations-science] check timeout (${CHECK_TIMEOUT_SEC}s): $src" >>"$out"
+    fi
+  else
+    "$CHECK_SOUC" check "$src" >"$out" 2>&1
+    local rc=$?
+  fi
   set -e
   echo "$rc"
 }
@@ -77,6 +88,7 @@ CHEMISTRY_CHECK_OUT="$TMP_DIR/chemistry_check.out"
 KINETICS_CHECK_OUT="$TMP_DIR/kinetics_check.out"
 THERMO_KT_CHECK_OUT="$TMP_DIR/thermo_kt_check.out"
 THERMO_KINETICS_KT_CHECK_OUT="$TMP_DIR/thermo_kinetics_kt_check.out"
+ONTOLOGY_CHECK_OUT="$TMP_DIR/ontology_check.out"
 PHYSICS_RUN_OUT="$TMP_DIR/physics_run.out"
 CHEMISTRY_RUN_OUT="$TMP_DIR/chemistry_run.out"
 
@@ -85,8 +97,9 @@ chemistry_foundations_check_rc="$(run_check "$CHEMISTRY_TEST" "$CHEMISTRY_CHECK_
 kinetics_check_rc="$(run_check "$KINETICS_TEST" "$KINETICS_CHECK_OUT")"
 thermo_kt_check_rc="$(run_check "$THERMO_KT_TEST" "$THERMO_KT_CHECK_OUT")"
 thermo_kinetics_kt_check_rc="$(run_check "$THERMO_KINETICS_KT_TEST" "$THERMO_KINETICS_KT_CHECK_OUT")"
+ontology_check_rc="$(run_check "$ONTOLOGY_TEST" "$ONTOLOGY_CHECK_OUT")"
 chemistry_check_rc=0
-if [[ "$chemistry_foundations_check_rc" -ne 0 || "$kinetics_check_rc" -ne 0 || "$thermo_kt_check_rc" -ne 0 || "$thermo_kinetics_kt_check_rc" -ne 0 ]]; then
+if [[ "$chemistry_foundations_check_rc" -ne 0 || "$kinetics_check_rc" -ne 0 || "$thermo_kt_check_rc" -ne 0 || "$thermo_kinetics_kt_check_rc" -ne 0 || "$ontology_check_rc" -ne 0 ]]; then
   chemistry_check_rc=1
 fi
 : >"$PHYSICS_RUN_OUT"
@@ -120,35 +133,41 @@ acids_shard="${CHEMISTRY_SHARDS[0]}"
 equil_shard="${CHEMISTRY_SHARDS[1]}"
 stoich_shard="${CHEMISTRY_SHARDS[2]}"
 thermo_shard="${CHEMISTRY_SHARDS[3]}"
+ontology_shard="${CHEMISTRY_SHARDS[4]}"
 acids_out="$TMP_DIR/chem_acids.out"
 equil_out="$TMP_DIR/chem_equilibrium.out"
 stoich_out="$TMP_DIR/chem_stoichiometry.out"
 thermo_out="$TMP_DIR/chem_thermochem.out"
+ontology_out="$TMP_DIR/chem_ontology.out"
 acids_run_rc="$(run_shard "$acids_shard" "$acids_out")"
 equil_run_rc="$(run_shard "$equil_shard" "$equil_out")"
 stoich_run_rc="$(run_shard "$stoich_shard" "$stoich_out")"
 thermochem_run_rc="$(run_shard "$thermo_shard" "$thermo_out")"
+ontology_run_rc="$(run_shard "$ontology_shard" "$ontology_out")"
 cat "$acids_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$equil_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$stoich_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$thermo_out" >>"$CHEMISTRY_RUN_OUT"
+cat "$ontology_out" >>"$CHEMISTRY_RUN_OUT"
 chemistry_run_rc=0
-if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 || "$stoich_run_rc" -ne 0 || "$thermochem_run_rc" -ne 0 ]]; then
+if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 || "$stoich_run_rc" -ne 0 || "$thermochem_run_rc" -ne 0 || "$ontology_run_rc" -ne 0 ]]; then
   chemistry_run_rc=1
 fi
 echo "[foundations-science] shard acids rc=$acids_run_rc" >&2
 echo "[foundations-science] shard equilibrium rc=$equil_run_rc" >&2
 echo "[foundations-science] shard stoichiometry rc=$stoich_run_rc" >&2
 echo "[foundations-science] shard thermochem rc=$thermochem_run_rc" >&2
+echo "[foundations-science] shard ontology rc=$ontology_run_rc" >&2
 echo "[foundations-science] kinetics check rc=$kinetics_check_rc" >&2
 echo "[foundations-science] thermo_kt check rc=$thermo_kt_check_rc" >&2
 echo "[foundations-science] thermo_kinetics_kt check rc=$thermo_kinetics_kt_check_rc" >&2
+echo "[foundations-science] ontology check rc=$ontology_check_rc" >&2
 
-python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" "$KINETICS_TEST" "$THERMO_KT_TEST" "$THERMO_KINETICS_KT_TEST" \
-  "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$KINETICS_CHECK_OUT" "$THERMO_KT_CHECK_OUT" "$THERMO_KINETICS_KT_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
-  "$physics_check_rc" "$chemistry_check_rc" "$kinetics_check_rc" "$thermo_kt_check_rc" "$thermo_kinetics_kt_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
+python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" "$KINETICS_TEST" "$THERMO_KT_TEST" "$THERMO_KINETICS_KT_TEST" "$ONTOLOGY_TEST" \
+  "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$KINETICS_CHECK_OUT" "$THERMO_KT_CHECK_OUT" "$THERMO_KINETICS_KT_CHECK_OUT" "$ONTOLOGY_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
+  "$physics_check_rc" "$chemistry_check_rc" "$kinetics_check_rc" "$thermo_kt_check_rc" "$thermo_kinetics_kt_check_rc" "$ontology_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
   "$classical_run_rc" "$em_run_rc" "$sr_run_rc" "$thermo_run_rc" \
-  "$acids_run_rc" "$equil_run_rc" "$stoich_run_rc" "$thermochem_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
+  "$acids_run_rc" "$equil_run_rc" "$stoich_run_rc" "$thermochem_run_rc" "$ontology_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
 import datetime
 import json
 import math
@@ -164,30 +183,34 @@ chemistry_test = Path(sys.argv[5]).resolve()
 kinetics_test = Path(sys.argv[6]).resolve()
 thermo_kt_test = Path(sys.argv[7]).resolve()
 thermo_kinetics_kt_test = Path(sys.argv[8]).resolve()
-physics_check_out_path = Path(sys.argv[9]).resolve()
-chemistry_check_out_path = Path(sys.argv[10]).resolve()
-kinetics_check_out_path = Path(sys.argv[11]).resolve()
-thermo_kt_check_out_path = Path(sys.argv[12]).resolve()
-thermo_kinetics_kt_check_out_path = Path(sys.argv[13]).resolve()
-physics_run_out_path = Path(sys.argv[14]).resolve()
-chemistry_run_out_path = Path(sys.argv[15]).resolve()
-physics_check_rc = int(sys.argv[16])
-chemistry_check_rc = int(sys.argv[17])
-kinetics_check_rc = int(sys.argv[18])
-thermo_kt_check_rc = int(sys.argv[19])
-thermo_kinetics_kt_check_rc = int(sys.argv[20])
-physics_run_rc = int(sys.argv[21])
-chemistry_run_rc = int(sys.argv[22])
-classical_run_rc = int(sys.argv[23])
-em_run_rc = int(sys.argv[24])
-sr_run_rc = int(sys.argv[25])
-phys_thermo_run_rc = int(sys.argv[26])
-acids_run_rc = int(sys.argv[27])
-equil_run_rc = int(sys.argv[28])
-stoich_run_rc = int(sys.argv[29])
-thermochem_run_rc = int(sys.argv[30])
-strict = sys.argv[31] == "1"
-run_engine = sys.argv[32]
+ontology_test = Path(sys.argv[9]).resolve()
+physics_check_out_path = Path(sys.argv[10]).resolve()
+chemistry_check_out_path = Path(sys.argv[11]).resolve()
+kinetics_check_out_path = Path(sys.argv[12]).resolve()
+thermo_kt_check_out_path = Path(sys.argv[13]).resolve()
+thermo_kinetics_kt_check_out_path = Path(sys.argv[14]).resolve()
+ontology_check_out_path = Path(sys.argv[15]).resolve()
+physics_run_out_path = Path(sys.argv[16]).resolve()
+chemistry_run_out_path = Path(sys.argv[17]).resolve()
+physics_check_rc = int(sys.argv[18])
+chemistry_check_rc = int(sys.argv[19])
+kinetics_check_rc = int(sys.argv[20])
+thermo_kt_check_rc = int(sys.argv[21])
+thermo_kinetics_kt_check_rc = int(sys.argv[22])
+ontology_check_rc = int(sys.argv[23])
+physics_run_rc = int(sys.argv[24])
+chemistry_run_rc = int(sys.argv[25])
+classical_run_rc = int(sys.argv[26])
+em_run_rc = int(sys.argv[27])
+sr_run_rc = int(sys.argv[28])
+phys_thermo_run_rc = int(sys.argv[29])
+acids_run_rc = int(sys.argv[30])
+equil_run_rc = int(sys.argv[31])
+stoich_run_rc = int(sys.argv[32])
+thermochem_run_rc = int(sys.argv[33])
+ontology_run_rc = int(sys.argv[34])
+strict = sys.argv[35] == "1"
+run_engine = sys.argv[36]
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -224,8 +247,9 @@ if (
     and chem.get("thermochem_ok") == 1.0
     and chem.get("kt_coupling_ok") == 1.0
     and chem.get("kt_full_kirchhoff_ok") == 1.0
+    and chem.get("ontology_ok") == 1.0
 ):
-    chem["tests_passed"] = 14.0
+    chem["tests_passed"] = 15.0
 run_metrics["chemistry"] = chem
 
 phys = run_metrics.get("physics", {})
@@ -315,7 +339,7 @@ chemistry_lane = lane_row(
     chemistry_run_rc,
     "SCIENCE_CHEMISTRY_OK",
     chemistry_test,
-    "stdlib/chemistry/{acids,equilibrium,stoichiometry,thermochem}.sio",
+    "stdlib/chemistry/{acids,equilibrium,stoichiometry,thermochem,ontology}.sio",
     chemistry_run_out,
 )
 chemistry_lane["kinetics_check"] = {
@@ -334,6 +358,12 @@ chemistry_lane["thermo_kinetics_kt_check"] = {
     "check_test_path": thermo_kinetics_kt_test.relative_to(root).as_posix() if thermo_kinetics_kt_test.exists() else str(thermo_kinetics_kt_test),
     "check_exit_code": thermo_kinetics_kt_check_rc,
     "status": "pass" if thermo_kinetics_kt_check_rc == 0 else "fail",
+    "run_blocker": "madaros_imported_run_SIGSEGV",
+}
+chemistry_lane["ontology_check"] = {
+    "check_test_path": ontology_test.relative_to(root).as_posix() if ontology_test.exists() else str(ontology_test),
+    "check_exit_code": ontology_check_rc,
+    "status": "pass" if ontology_check_rc == 0 else "fail",
     "run_blocker": "madaros_imported_run_SIGSEGV",
 }
 chemistry_lane["shard_runs"] = {
@@ -356,6 +386,11 @@ chemistry_lane["shard_runs"] = {
         "path": "stdlib/chemistry/thermochem.sio",
         "run_exit_code": thermochem_run_rc,
         "status": "pass" if thermochem_run_rc == 0 else "fail",
+    },
+    "ontology": {
+        "path": "stdlib/chemistry/ontology.sio",
+        "run_exit_code": ontology_run_rc,
+        "status": "pass" if ontology_run_rc == 0 else "fail",
     },
 }
 physics_lane["shard_runs"] = {
@@ -418,6 +453,7 @@ obj = {
         f"kinetics_check_rc={kinetics_check_rc}",
         f"thermo_kt_check_rc={thermo_kt_check_rc}",
         f"thermo_kinetics_kt_check_rc={thermo_kinetics_kt_check_rc}",
+        f"ontology_check_rc={ontology_check_rc}",
         f"physics_run_rc={physics_run_rc}",
         f"chemistry_run_rc={chemistry_run_rc}",
         f"classical_shard_rc={classical_run_rc}",
@@ -428,6 +464,7 @@ obj = {
         f"equilibrium_shard_rc={equil_run_rc}",
         f"stoichiometry_shard_rc={stoich_run_rc}",
         f"thermochem_shard_rc={thermochem_run_rc}",
+        f"ontology_shard_rc={ontology_run_rc}",
         "kinetics_shard_run=skipped_lean_single_blocker",
     ],
 }
