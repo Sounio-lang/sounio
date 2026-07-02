@@ -59,21 +59,4 @@ Phase 6 (in parallel): expanded Bayesian (Observe+multi-data EState, ident, stru
 
 **PBPK28 dissertation expansion (Task 5)**: Added digoxin_chebi, cyp3a4_enzyme_chebi, warfarin_chebi; GO xenobiotic_metabolic (6805), proteolysis (6508), abc_xenobiotic_transporter (8559), oxidative_demethylation (70989); Rhea 47261/55924 specific CYP + transport; pbpk28_drug_enzyme_chebi_map, extended species_to for pbpk28/cyp/pgp/proteolytic, knowledge_pbpk_drug_conc, pbpk_metabolic_crn_with_ontology in kinetics + tests/docs updated. Now every PBPK28 drug/enzyme (rapa/tacro/sema/vanco/midazolam/digoxin + CYP/P-gp/proteolysis) has concrete ChEBI+GO+Rhea.
 
-Chemistry is now bold, real, novel foundation ready.## PIVOT to Estatística Epistêmica (2026-06-30)
-
-Per user "vamos pivotar para: estatistica ou matematica???" and approved plan: primary focus now **Estatística Epistêmica** (GUM extensions, hybrid UQ, stochastic with effects, Bayesian).
-
-Math remains supporting (already strong in CN, solvers, PINN, fractional).
-
-**Implemented Phase 1 starter**: Enhanced `test_crn_effect_handlers()` (now with Prob, Observe) to demonstrate hybrid on same CRN:
-- GUM (analytic)
-- MC sampling
-- Stochastic (Prob path via simulate_stochastic_decay)
-- Observe effect for measurement (Bayesian collapse example)
-- Prints + combined epistemic var.
-
-See kinetics.sio: test_crn_effect_handlers for the demo prints "[ESTATÍSTICA HYBRID]".
-
-Next (plan): full hybrid fn, Bayesian over CRN, integrate with PBPK28 (build on prior REG AUDIT + fused contrib), runners, lit (e.g., hybrid vs pure GUM on lit mechanisms).
-
-This pivot keeps Sounio-only epistemic stats as the novelty edge for dissertation/preprint.
+Chemistry is now bold, real, novel foundation ready.
