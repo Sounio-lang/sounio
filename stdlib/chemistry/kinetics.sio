@@ -1,13 +1,13 @@
-// stdlib/chemistry/kinetics.sio — Real chemical kinetics foundations (import-free, check-green)
+// stdlib/chemistry/kinetics.sio — Real chemical kinetics foundations (import-free)
 //
 // E2E contract (tests/stdlib/chemistry/test_kinetics_foundations_e2e.sio):
 //   arrhenius, first_order_conc, real_metabolic_network, simulate_crn_euler
 //   Gate metrics: arrhenius_k_300K, metabolic_a_24h, crn_A_t2, first_order_t1
+// Eixo B: CRN epistemic GUM (Jacobian inside RHS) + GUM vs MC witness (import-free LCG).
 //@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"
 
 module chemistry::kinetics
 
-// Import-free entrypoint: Madaros run path fails on imported modules.
 let R: f64 = 8.314462618
 
 fn kin_abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
@@ -36,6 +36,40 @@ fn kin_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
         k = k + 1
     }
     sumv
+}
+
+fn kin_jac_get(j: &[f64; 16], row: i32, col: i32) -> f64 {
+    if row == 0 && col == 0 { j[0] }
+    else if row == 0 && col == 1 { j[1] }
+    else if row == 0 && col == 2 { j[2] }
+    else if row == 0 && col == 3 { j[3] }
+    else if row == 1 && col == 0 { j[4] }
+    else if row == 1 && col == 1 { j[5] }
+    else if row == 1 && col == 2 { j[6] }
+    else if row == 1 && col == 3 { j[7] }
+    else if row == 2 && col == 0 { j[8] }
+    else if row == 2 && col == 1 { j[9] }
+    else if row == 2 && col == 2 { j[10] }
+    else if row == 2 && col == 3 { j[11] }
+    else if row == 3 && col == 0 { j[12] }
+    else if row == 3 && col == 1 { j[13] }
+    else if row == 3 && col == 2 { j[14] }
+    else { j[15] }
+}
+
+fn kin_dcdk_get(g: &[f64; 12], row: i32, col: i32) -> f64 {
+    if row == 0 && col == 0 { g[0] }
+    else if row == 0 && col == 1 { g[1] }
+    else if row == 0 && col == 2 { g[2] }
+    else if row == 1 && col == 0 { g[3] }
+    else if row == 1 && col == 1 { g[4] }
+    else if row == 1 && col == 2 { g[5] }
+    else if row == 2 && col == 0 { g[6] }
+    else if row == 2 && col == 1 { g[7] }
+    else if row == 2 && col == 2 { g[8] }
+    else if row == 3 && col == 0 { g[9] }
+    else if row == 3 && col == 1 { g[10] }
+    else { g[11] }
 }
 
 // Arrhenius k = A exp(-Ea/RT) with GUM propagation (delta method, relative terms).
@@ -70,37 +104,16 @@ pub fn real_metabolic_network(t: f64) -> (f64, f64, f64) with Mut, Div, Panic {
     (ea, eb, ec)
 }
 
-// Simple CRN: A->B (k0), B->C (k1), A+B->D (k2). Stoich matrix Nu (4x3).
-fn kin_stoich_matrix() -> [[f64; 3]; 4] {
-    [
-        [-1.0, 0.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ]
-}
-
-fn kin_compute_rates(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 3] {
-    [
-        ks[0] * c[0],
-        ks[1] * c[1],
-        ks[2] * c[0] * c[1],
-    ]
-}
-
-pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] {
-    let nu = kin_stoich_matrix()
-    let rates = kin_compute_rates(c, ks)
+// Simple CRN: A->B (k0), B->C (k1), A+B->D (k2).
+pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] with Mut {
+    let r0 = ks[0] * c[0]
+    let r1 = ks[1] * c[1]
+    let r2 = ks[2] * c[0] * c[1]
     var dc: [f64; 4] = [0.0; 4]
-    var i: i32 = 0
-    while i < 4 {
-        var j: i32 = 0
-        while j < 3 {
-            dc[i] = dc[i] + nu[i][j] * rates[j]
-            j = j + 1
-        }
-        i = i + 1
-    }
+    dc[0] = 0.0 - r0 - r2
+    dc[1] = r0 - r1 - r2
+    dc[2] = r1
+    dc[3] = r2
     dc
 }
 
@@ -120,8 +133,8 @@ pub fn simulate_crn_euler(init: &[f64; 4], ks: &[f64; 3], dt: f64, steps: i64) -
     c
 }
 
-fn kin_crn_jacobian(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> [[f64; 4]; 4] with Mut, Div, Panic {
-    var j: [[f64; 4]; 4] = [[0.0; 4]; 4]
+fn kin_crn_jacobian_flat(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> [f64; 16] with Mut, Div, Panic {
+    var j: [f64; 16] = [0.0; 16]
     var s: i32 = 0
     while s < 4 {
         var cp: [f64; 4] = [c[0], c[1], c[2], c[3]]
@@ -130,34 +143,86 @@ fn kin_crn_jacobian(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> [[f64; 4]; 4] with
         cm[s] = cm[s] - eps
         let dc_p = dc_dt(&cp, ks)
         let dc_m = dc_dt(&cm, ks)
-        var i: i32 = 0
-        while i < 4 {
-            j[i][s] = (dc_p[i] - dc_m[i]) / (2.0 * eps)
-            i = i + 1
+        if s == 0 {
+            j[0] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            j[1] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            j[2] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            j[3] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        } else if s == 1 {
+            j[4] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            j[5] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            j[6] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            j[7] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        } else if s == 2 {
+            j[8] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            j[9] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            j[10] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            j[11] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        } else {
+            j[12] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            j[13] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            j[14] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            j[15] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
         }
         s = s + 1
     }
     j
 }
 
+fn kin_crn_ks_sensitivity_flat(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> [f64; 12] with Mut, Div, Panic {
+    var g: [f64; 12] = [0.0; 12]
+    var r: i32 = 0
+    while r < 3 {
+        var kp: [f64; 3] = [ks[0], ks[1], ks[2]]
+        kp[r] = kp[r] + eps
+        var km: [f64; 3] = [ks[0], ks[1], ks[2]]
+        km[r] = km[r] - eps
+        let dc_p = dc_dt(c, &kp)
+        let dc_m = dc_dt(c, &km)
+        if r == 0 {
+            g[0] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            g[3] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            g[6] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            g[9] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        } else if r == 1 {
+            g[1] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            g[4] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            g[7] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            g[10] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        } else {
+            g[2] = (dc_p[0] - dc_m[0]) / (2.0 * eps)
+            g[5] = (dc_p[1] - dc_m[1]) / (2.0 * eps)
+            g[8] = (dc_p[2] - dc_m[2]) / (2.0 * eps)
+            g[11] = (dc_p[3] - dc_m[3]) / (2.0 * eps)
+        }
+        r = r + 1
+    }
+    g
+}
+
+// Var' = (I + dt·J) Var (I + dt·J)ᵀ with diagonal Var; rate-param term via ∂(dc)/∂k.
 pub fn propagate_crn_unc(c: &[f64; 4], varc: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64) -> [f64; 4] with Mut, Div, Panic {
-    let jac = kin_crn_jacobian(c, ks, 1e-6)
+    let jac = kin_crn_jacobian_flat(c, ks, 1e-6)
+    let dcdk = kin_crn_ks_sensitivity_flat(c, ks, 1e-6)
     var new_var: [f64; 4] = [0.0; 4]
     var i: i32 = 0
     while i < 4 {
         var sum = 0.0
-        var k: i32 = 0
-        while k < 4 {
-            var inner = 0.0
-            var m: i32 = 0
-            while m < 4 {
-                inner = inner + jac[i][m] * varc[m] * jac[k][m]
-                m = m + 1
-            }
-            sum = sum + jac[i][k] * inner
-            k = k + 1
+        var m: i32 = 0
+        while m < 4 {
+            let gim = if i == m { 1.0 } else { 0.0 }
+            let gim_dt = gim + dt * kin_jac_get(&jac, i, m)
+            sum = sum + gim_dt * gim_dt * varc[m]
+            m = m + 1
         }
-        new_var[i] = sum + (uks[0] * uks[0] + uks[1] * uks[1] + uks[2] * uks[2]) * dt * dt * 0.01
+        var rate_term = 0.0
+        var r: i32 = 0
+        while r < 3 {
+            let dki = kin_dcdk_get(&dcdk, i, r)
+            rate_term = rate_term + (dt * dki) * (dt * dki) * (uks[r] * uks[r])
+            r = r + 1
+        }
+        new_var[i] = sum + rate_term
         i = i + 1
     }
     new_var
@@ -189,6 +254,145 @@ pub fn simulate_crn_epistemic(
         c[0], c[1], c[2], c[3],
         kin_sqrt_approx(v[0]), kin_sqrt_approx(v[1]), kin_sqrt_approx(v[2]), kin_sqrt_approx(v[3]),
     )
+}
+
+fn kin_rng_step(state: i64) -> i64 {
+    let next = (1664525 * state + 1013904223) % 4294967296
+    if next < 0 { next + 4294967296 } else { next }
+}
+
+fn kin_rng_uniform(state: i64) -> (f64, i64) {
+    let r = kin_rng_step(state)
+    (r as f64 / 4294967296.0, r)
+}
+
+fn kin_ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale: i32 = 0
+    while sx > 2.0 { sx = sx / 2.718281828459045; scale = scale + 1 }
+    while sx < 0.5 { sx = sx * 2.718281828459045; scale = scale - 1 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0)
+    result + (scale as f64)
+}
+
+fn kin_sample_norm_box(state: i64, mean: f64, sd: f64) -> (f64, i64) with Mut, Div, Panic {
+    var st = state
+    var u1 = 0.0
+    var u2 = 0.0
+    var s = 2.0
+    var att: i32 = 0
+    while s >= 1.0 || s <= 0.0 {
+        let (v1, st1) = kin_rng_uniform(st)
+        st = st1
+        u1 = v1 * 2.0 - 1.0
+        let (v2, st2) = kin_rng_uniform(st)
+        st = st2
+        u2 = v2 * 2.0 - 1.0
+        s = u1 * u1 + u2 * u2
+        att = att + 1
+        if att > 100 { return (mean + u1 * sd, st) }
+    }
+    let z = u1 * kin_sqrt_approx(0.0 - 2.0 * kin_ln_approx(s) / s)
+    (mean + z * sd, st)
+}
+
+// MC endpoint for species A after epistemic CRN integration (JCGM 101 witness).
+// RNG: LCG+Box-Muller fixture only — not a cryptographic ensemble; n_mc=100 for ratio band.
+pub fn mc_crn_epistemic_endpoint(
+    init_val: &[f64; 4],
+    init_std: &[f64; 4],
+    ks: &[f64; 3],
+    uks: &[f64; 3],
+    dt: f64,
+    steps: i64,
+    n_samples: i32,
+    seed: i32,
+) -> (f64, f64) with Mut, Div, Panic {
+    var rng_st = seed as i64
+    var sum = 0.0
+    var sumsq = 0.0
+    var n: i32 = 0
+    while n < n_samples {
+        var c0: [f64; 4] = [0.0; 4]
+        var i: i32 = 0
+        while i < 4 {
+            let (v, st1) = kin_sample_norm_box(rng_st, init_val[i], init_std[i])
+            rng_st = st1
+            c0[i] = if v < 0.0 { 0.0 } else { v }
+            i = i + 1
+        }
+        var kdraw: [f64; 3] = [0.0; 3]
+        var j: i32 = 0
+        while j < 3 {
+            let (kv, st2) = kin_sample_norm_box(rng_st, ks[j], uks[j])
+            rng_st = st2
+            kdraw[j] = if kv < 0.0 { 0.0 } else { kv }
+            j = j + 1
+        }
+        let out = simulate_crn_euler(&c0, &kdraw, dt, steps)
+        sum = sum + out[0]
+        sumsq = sumsq + out[0] * out[0]
+        n = n + 1
+    }
+    let mean = sum / (n_samples as f64)
+    let var_sample = if n_samples > 1 {
+        (sumsq - (sum * sum) / (n_samples as f64)) / ((n_samples - 1) as f64)
+    } else {
+        0.0
+    }
+    let sd = if var_sample > 0.0 { kin_sqrt_approx(var_sample) } else { 0.0 }
+    (mean, sd)
+}
+
+// GUM vs MC comparison on species-A endpoint (mean, u) pairs + sample count.
+pub fn compare_gum_mc_crn_epistemic(
+    init_val: &[f64; 4],
+    init_std: &[f64; 4],
+    ks: &[f64; 3],
+    uks: &[f64; 3],
+    dt: f64,
+    steps: i64,
+    n_mc: i32,
+    seed: i32,
+) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let (gum_a, _, _, _, gum_ua, _, _, _) = simulate_crn_epistemic(init_val, init_std, ks, uks, dt, steps)
+    let (mc_a, mc_ua) = mc_crn_epistemic_endpoint(init_val, init_std, ks, uks, dt, steps, n_mc, seed)
+    (gum_a, gum_ua, mc_a, mc_ua)
+}
+
+// Witness: GUM/MC SD ratio in [0.6, 1.6] with n_mc=100 (JCGM 101 sampling band, CRN nonlinear).
+pub fn test_gum_mc_agreement_witness() -> bool with Mut, Div, Panic {
+    let initv: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let inits: [f64; 4] = [0.01, 0.0, 0.0, 0.0]
+    let ks: [f64; 3] = [0.1, 0.05, 0.2]
+    let us: [f64; 3] = [0.001, 0.0005, 0.002]
+    let steps: i64 = 20
+    let (gum_a, _, _, _, gum_u, _, _, _) = simulate_crn_epistemic(&initv, &inits, &ks, &us, 0.1, steps)
+    let (mc_a, mc_u) = mc_crn_epistemic_endpoint(&initv, &inits, &ks, &us, 0.1, steps, 100, 42)
+    if mc_u <= 0.000000000001 { return false }
+    let ratio = gum_u / mc_u
+    let mean_ok = kin_check_near(gum_a, mc_a, 0.15)
+    let ratio_ok = ratio >= 0.6 && ratio <= 1.6
+    mean_ok && ratio_ok
+}
+
+pub fn gum_mc_ratio_a(
+    init_val: &[f64; 4],
+    init_std: &[f64; 4],
+    ks: &[f64; 3],
+    uks: &[f64; 3],
+    dt: f64,
+    steps: i64,
+    n_mc: i32,
+    seed: i32,
+) -> f64 with Mut, Div, Panic {
+    let (_, _, _, _, gum_u, _, _, _) = simulate_crn_epistemic(init_val, init_std, ks, uks, dt, steps)
+    let (_, mc_u) = mc_crn_epistemic_endpoint(init_val, init_std, ks, uks, dt, steps, n_mc, seed)
+    if mc_u <= 0.000000000001 { return 0.0 }
+    gum_u / mc_u
 }
 
 pub fn test_arrhenius() -> bool with Mut, Div, Panic {
@@ -231,7 +435,7 @@ pub fn test_dc_dt() -> bool with Mut, Div, Panic {
     let c: [f64; 4] = [1.0, 0.5, 0.2, 0.1]
     let ks: [f64; 3] = [0.1, 0.05, 0.2]
     let dc = dc_dt(&c, &ks)
-    kin_check_near(dc[0], -0.2, 0.1)
+    kin_check_near(dc[0], 0.0 - 0.2, 0.1)
 }
 
 fn kin_emit_metric(name: string, value: f64) with IO {
@@ -256,14 +460,24 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_crn() { p = p + 1 } else { f = f + 1; println("FAIL crn") }
     if test_crn_epistemic() { p = p + 1 } else { f = f + 1; println("FAIL crn epistemic") }
     if test_dc_dt() { p = p + 1 } else { f = f + 1; println("FAIL dc_dt") }
+    if test_gum_mc_agreement_witness() { p = p + 1 } else { f = f + 1; println("FAIL gum mc witness") }
 
     let (k_val, _) = arrhenius(1.0e13, 1.0e11, 103000.0, 1000.0, 300.0, 1.0)
     kin_emit_metric("arrhenius_k_300K", k_val)
     let (met_a, _, _) = real_metabolic_network(24.0)
     kin_emit_metric("metabolic_a_24h", met_a)
-    let crn_out = simulate_crn_euler(&[1.0, 0.0, 0.0, 0.0], &[0.1, 0.05, 0.2], 0.1, 20)
+    let crn_init: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let crn_ks: [f64; 3] = [0.1, 0.05, 0.2]
+    let crn_out = simulate_crn_euler(&crn_init, &crn_ks, 0.1, 20)
     kin_emit_metric("crn_A_t2", crn_out[0])
     kin_emit_metric("first_order_t1", first_order_conc(1.0, 0.1, 10.0))
+
+    let initv: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let inits: [f64; 4] = [0.01, 0.0, 0.0, 0.0]
+    let us: [f64; 3] = [0.001, 0.0005, 0.002]
+    let ratio_a = gum_mc_ratio_a(&initv, &inits, &crn_ks, &us, 0.1, 20, 100, 42)
+    kin_emit_metric("gum_mc_ratio_A", ratio_a)
+    kin_emit_metric("gum_mc_agreement_ok", kin_bool_to_f64(test_gum_mc_agreement_witness()))
     kin_emit_metric("kinetics_ok", kin_bool_to_f64(f == 0))
     kin_emit_metric("tests_passed", p as f64)
 
