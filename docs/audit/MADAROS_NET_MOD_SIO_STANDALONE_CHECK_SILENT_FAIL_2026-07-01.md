@@ -83,3 +83,63 @@ on any real gate today, but it is a latent trap for anyone who runs `souc check`
   construction (self-hosted/check/), where a same-directory sibling file's own top-level
   symbols may be getting merged with mod.sio's re-exports of those same symbols in a way
   that a `impl`-Type's method table does not tolerate.
+
+## Update 2026-07-02: two more lean_single (not Madaros) bugs found via CI, one fixed pragmatically
+
+This dispatch was written after testing exclusively against the locally-prebuilt Madaros
+binary (`bin/madaros-linux-x86_64`), because `artifacts/self-hosted/madaros` did not exist
+in this worktree and `bin/souc` silently fell back to whatever engine `_resolve_madaros`
+found — nothing in the session flagged that CI's "Full Test Suite" job (`souc-stage2`)
+uses a **freshly-bootstrapped `lean_single`**, a different engine entirely
+(`self-hosted/compiler/lean_single.sio`, not `self-hosted/compiler/main.sio`). PR #565's
+new `tests/stdlib/net/test_net_core.sio` passed every local check under Madaros and still
+failed CI. Rebuilding `lean_single` locally via `scripts/dev/souc-build-lock.sh
+./bin/souc-lean-single-x86_64 self-hosted/compiler/lean_single.sio /tmp/lean_fresh.elf`
+and testing against *that* reproduced the CI failure and two distinct, previously-unknown
+lean_single bugs (isolated with minimal repros outside stdlib, both independent of the
+Madaros bug above):
+
+**Bug A — inline fully-qualified paths need ≥3 segments.** `pkg::file::symbol()` (a
+2-segment path into a sibling file directly under the package root, e.g.
+`net::addr::ipv4_loopback()`) fails to resolve (`error: unknown identifier`), regardless
+of whether the target file has an explicit `module pkg::file` header. `pkg::subdir::file::
+symbol()` (3+ segments, e.g. `distributed::pure::types::registry_new()`) resolves fine.
+`use pkg::file::*;` followed by a *bare* call (e.g. `use net::addr::*; ipv4_loopback()`)
+works for 2-segment packages too — this is the workaround used in
+`tests/stdlib/net/test_addr_e2e.sio` (pre-existing) and now in the rewritten
+`tests/stdlib/net/test_net_core.sio`. This also affects `stdlib/http`/`stdlib/web`
+(`http::http::X`, `web::http::X` are 2-segment) — confirmed pre-existing on `main` before
+this branch (traced via `git show main:...`), not introduced here.
+`tests/stdlib/web/test_web.sio` is separately listed in
+`tests/known_failures/hardened_diagnostics_full_suite.txt` and is silently skipped by the
+CI harness rather than failing — that registration predates this branch too.
+
+**Bug B — qualified-path parameter type + co-scope glob import → false arity mismatch.**
+A function parameter typed as a qualified path (`fn f(x: &pkg::mod::Type)`) reports
+`error: arity mismatch` at *every* call site that also has `use pkg::mod::*` in scope,
+even when the call's argument count is correct. Reproduced in an isolated 2-file repro
+(package root file `pkg/addr.sio` exporting `Thing`/`thing_new`; nested `pkg/sub/wrapper.sio`
+exporting `take_thing(target: &pkg::addr::Thing)`; caller with both `use pkg::addr::*;
+use pkg::sub::wrapper::*;` in scope). Renaming the parameter away from a name that
+collides with the type path's own segment text (`addr: &pkg::addr::Thing` →
+`target: &pkg::addr::Thing`) fixes an *additional* co-occurring "duplicate parameter name"
+false positive but does not fix the arity mismatch itself.
+
+**Disposition:** Bug A and Bug B are both self-hosted/check checker bugs, not fixed here
+(§8 applies the same way as the impl+mod.sio bug above). Worked around pragmatically in
+`stdlib/net/ffi/wrapper.sio` by changing `tcp_connect`/`udp_send` to take raw IPv4 octets
++ port (`i64` primitives) instead of `&net::addr::SocketAddr` — arguably better FFI-stub
+design anyway (a real syscall boundary needs primitives, not an opaque struct reference),
+and `tests/stdlib/net/test_net_core.sio` was rewritten to use `use pkg::mod::*` + bare
+calls throughout instead of inline fully-qualified paths. Verified against a freshly
+rebuilt `lean_single` (matching CI's `souc-stage2` build path) via
+`scripts/run_sio_test_suite.sh --filter test_net_core` (and no regression on
+`test_addr_e2e`, `test_distributed_core`, `test_http_e2e`).
+
+**Process lesson:** local dev testing in this worktree defaulted to Madaros
+(`bin/madaros-linux-x86_64`, prebuilt, present from earlier unrelated work) without any
+visible fallback notice, while CI's authoritative gate uses a freshly-bootstrapped
+`lean_single`. The two engines disagree on real, checker-level behavior (not just
+performance). Before trusting a local `souc check` result as CI-equivalent, confirm which
+engine `bin/souc info` (or `_resolve_madaros`) actually resolved to, or rebuild
+`lean_single` from source and test against that directly.
