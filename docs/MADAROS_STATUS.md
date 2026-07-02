@@ -10,27 +10,28 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 # Madaros Status — coordination note for the fleet
 
 > **TL;DR:** Madaros is the **default compiler**: `bin/souc` routes to Madaros.
-> The 2026-06-21 blocker cluster in GitHub issue #356 is closed on
-> `main@4c452498c`: source-to-ELF global/BSS witnesses are controls, #313 is
-> closed, and promoted-workspace self-build parity is green. Do not treat stale
-> worktrees or old raw ELFs as current evidence. Sync `main`, use the checked
-> prebuilt or rebuild, run the named gates, and classify any new failure against
-> current post-merge evidence rather than reopening the closed blocker set.
+> As of 2026-07-02, default routing is receipt-gated: ungated
+> `artifacts/self-hosted/madaros` is demoted, and the wrappers fall back to the
+> verified-green `bin/madaros-relocgate` before the checked prebuilt. The proof
+> path is `make madaros-full-gate`; that gate now includes the imported-SMT
+> 6/6 regression suite and writes a `.gate-receipt` only after a non-skipped SMT
+> pass.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
 `bin/souc` is now a thin CLI wrapper that routes `check`/`compile`/`run`/`--version`/
-`info` to Madaros (via `bin/madaros` → `artifacts/self-hosted/madaros`, or the
-checked prebuilt `bin/madaros-linux-x86_64` when the local build artifact is
-absent). The legacy single-file `lean_single` engine that `bin/souc` used to be
-is preserved as `bin/souc-lean-single-x86_64`.
+`info` to Madaros via `bin/madaros`. The Madaros raw ELF selection order is:
+explicit env override, receipt-gated `artifacts/self-hosted/madaros`, verified
+`bin/madaros-relocgate`, then checked prebuilt `bin/madaros-linux-x86_64`. The
+legacy single-file `lean_single` engine that `bin/souc` used to be is preserved
+as `bin/souc-lean-single-x86_64`.
 
 - **Force the legacy engine:** `SOUNIO_SOUC_ENGINE=lean_single bin/souc <args>`.
 - **lean_single stays the bootstrap seed** (`make build`, `make build-madaros`) and the
   canonical fixed-point ELF — it is just no longer the default *user-facing* compiler.
-- If the local build artifact is absent, `bin/souc` uses the checked prebuilt
-  `bin/madaros-linux-x86_64` first. It only falls back to lean_single if no
-  Madaros raw ELF is available.
+- If the local build artifact is absent or lacks a matching `.gate-receipt`,
+  `bin/souc` uses `bin/madaros-relocgate` first. It only falls back to the checked
+  prebuilt, then lean_single, if no verified Madaros raw ELF is available.
 - *Madaros-builds-Madaros* (swapping the build seed to Madaros) is a **separate, larger
   milestone — not done here.** lean_single still compiles the bootstrap.
 
@@ -59,6 +60,13 @@ is preserved as `bin/souc-lean-single-x86_64`.
   taking write ownership. `scripts/ci/madaros_open_blockers_probe.sh
   --diagnose-lowering` now confirms closed expectations for the former
   BSS/global and self-build witnesses.
+- **2026-07-02 safety update:** `bin/souc`, `bin/madaros`, and
+  `scripts/lib/resolve_madaros.sh` no longer trust ungated
+  `artifacts/self-hosted/madaros`. The artifact must have
+  `artifacts/self-hosted/madaros.gate-receipt` containing the current ELF sha256;
+  otherwise the default route falls back to `bin/madaros-relocgate` with a loud
+  warning. This prevents a stale raw artifact from silently becoming the public
+  compiler.
 
 Do not say "Madaros is production-ready" merely because #356 is closed. Say the
 specific 2026-06-21 blocker cluster is closed, then use the production-ready
@@ -93,7 +101,13 @@ PASS: source build to native ELF
 PASS: source run
 PASS: native-v2 ABI/backend witnesses
 PASS: package manager self-test
+PASS: imported-SMT solver gate (6/6 against freshly built binary)
 ```
+
+When the imported-SMT section passes without
+`SOUNIO_MADAROS_FULL_GATE_SKIP_SMT=1`, the gate writes
+`artifacts/self-hosted/madaros.gate-receipt` with the artifact sha256. A skipped
+SMT section never writes that receipt.
 
 Re-verified at the current tip (fresh build from source through `051ddf9ae`,
 which lands a 7-bug IR/SSA/codegen batch; `fns=9612`) — same result, all checks
@@ -113,13 +127,15 @@ MADAROS_RAW_BIN=artifacts/self-hosted/madaros bin/madaros check /tmp
 ## What stale state looks like (and why it lies)
 
 A `bin/madaros` launcher or a local raw `artifacts/self-hosted/madaros` ELF that
-was **built before `17d1157be`** still carries the old behavior — that binary is
-**not evidence** about current `main`. Likewise, lanes under
+was **built before `17d1157be`**, or rebuilt later but not proven by a matching
+`.gate-receipt`, still carries stale risk — stale raw binaries are **not** evidence
+about current source health. Likewise, lanes under
 `/workspace/sounio-checker`, `/workspace/sounio-semcall-main`,
 `/workspace/sounio-project-spine`, etc. may hold old checker code or local edits.
 You cannot conclude "Madaros is broken" from any of those without first bringing
-in `17d1157be` and either using the checked prebuilt `bin/madaros-linux-x86_64`
-or **rebuilding `artifacts/self-hosted/madaros`**.
+in `17d1157be` and either using `bin/madaros-relocgate`, the checked prebuilt
+`bin/madaros-linux-x86_64`, or **rebuilding `artifacts/self-hosted/madaros`** and
+letting `make madaros-full-gate` produce the receipt.
 
 ## Sync before debugging
 
@@ -144,10 +160,8 @@ make madaros-full-gate
 
 ## One-line coordination phrase
 
-> Madaros is the default `bin/souc` compiler on current `origin/main`, and the
-> 2026-06-21 #356 blocker cluster is closed on `main@4c452498c`: #313 is closed,
-> source-to-ELF BSS/global witnesses are controls, and promoted-workspace
-> self-build parity is green. Please sync to current `origin/main`, avoid stale
-> raw ELFs as evidence, and use `scripts/dev/madaros_readiness_status.sh
-> --check-compiler-lane` plus `scripts/ci/madaros_open_blockers_probe.sh
-> --diagnose-lowering` before changing compiler-owned files.
+> Madaros is the default `bin/souc` compiler. The current safe route is
+> receipt-gated: prefer a proven `artifacts/self-hosted/madaros`, otherwise use
+> `bin/madaros-relocgate` before the checked prebuilt. Do not treat stale raw ELFs
+> as evidence; use `make madaros-full-gate` for proof and
+> `scripts/ci/madaros_operational_contract_gate.sh` for cheap contract drift.
