@@ -194,3 +194,69 @@ call chain, not just direct symbol/arity resolution.
 Verified against a freshly rebuilt `lean_single` via `scripts/run_sio_test_suite.sh
 --filter`, no regression on the full set of tests already fixed in this dispatch's
 earlier updates.
+
+## Update 2026-07-02 (continued): closing most of issue #567 (Bug A cluster), plus a Madaros-only regression and a "halt, don't fix" call on stdlib/chemistry/kinetics.sio
+
+Fixed 6 of #567's 7 files (`test_equilibrium_acids`, `test_serialization`,
+`test_thermo_sr_e2e`, `test_viz_core`, `test_particle_physics_core`,
+`test_graphics_core`) the same way as the Bug A/D fixes above: `use pkg::mod::*;` +
+bare calls, plus un-nesting a triple-nested qualified call in `test_graphics_core.sio`
+(same Bug D shape). Two incidental content bugs surfaced and were fixed at the root:
+
+- `stdlib/chemistry/equilibrium.sio` and `stdlib/chemistry/acids.sio` each had an
+  **unused** `use epistemic::knowledge::Epistemic;` (the named-import Bug C shape,
+  documented in issue #568) that was silently dead code — deleted rather than converted,
+  since nothing in either file referenced `Epistemic`.
+- `stdlib/chemistry/equilibrium.sio`, `stdlib/chemistry/kinetics.sio`, and
+  `stdlib/physics/sr.sio` each had `use constants::physical::X as get_R;` /
+  `use constants::physical::speed_of_light_approx;` (Bug C shapes) — converted to
+  `use constants::physical::*;` and renamed the 1-2 call sites per file back to the
+  real name (`get_R()` → `gas_constant_approx()`).
+- `stdlib/chemistry/kinetics.sio` additionally had `use plot::epistemic as epi_plot;`
+  (a *module-alias* variant of Bug C) used as a namespace prefix at 6 call sites —
+  converted to `use plot::epistemic::*;` and stripped the `epi_plot::` prefix at each
+  site — and `use special::caputo;` + `caputo::fn(...)` qualified-via-bare-module-alias
+  calls (4 sites) — converted to `use special::caputo::*;` + bare calls.
+- `stdlib/autodiff/grad.sio`'s `struct Dual { val: f64, dot: f64 }` had neither the
+  struct nor its fields marked `pub` — `stdlib/chemistry/kinetics.sio` constructs `Dual`
+  literals directly once `Dual` became reachable via `use autodiff::grad::*;`, which
+  needs `pub` on both the struct and its fields (same shape as the `stdlib/web`
+  `pub`-visibility fixes from the networking wave). Fixed.
+- `tests/stdlib/viz/test_viz_core.sio` itself asserted `scene.data_count != 0` on a
+  field that **does not exist** on `VizScene` (confirmed via `grep`) — a pre-existing
+  test bug, masked until now by the qualified-call failure occurring first. Replaced
+  with the real field `series_count` (also zero-initialized by `viz_scene_new()`),
+  preserving the test's evident intent (assert a fresh scene has no data yet).
+
+**Madaris-only regression, documented not fixed:** all 6 fixed files now fail standalone
+`souc check` under Madaros (confirmed via `git show HEAD:<file>` that the *originals*
+passed Madaros cleanly before this change) despite passing cleanly under a freshly
+rebuilt `lean_single`. This is the same class of engine divergence as this dispatch's
+original finding (Madaros and lean_single disagree on `use module::*;`-adjacent checker
+behavior) — not investigated further per the same "flag, don't fix Madaros-only checker
+quirks" reasoning as above. No CI gate exercises Madaros for these files.
+
+**Halt call: `stdlib/chemistry/kinetics.sio` is out of scope for a quick fix.** The 7th
+file, `tests/stdlib/chemistry/test_kinetics_core.sio`, remains failing after the same
+import fixes above (which did land real, verified improvements — Bug C's imports now
+resolve, `Dual` literals now construct). Once the qualified-path/import layer was fixed,
+`souc check` under lean_single surfaced roughly 100+ *additional*, independent errors
+throughout kinetics.sio's ~2000 lines: dozens of "arity mismatch" (the Bug D shape,
+recurring at ~28 distinct call sites, not just the 1-2 seen elsewhere), "unknown
+identifier `[`" (a parser/checker issue with array literals, ~35 occurrences),
+"private struct field access [struct=ODESolution]" (another un-`pub`bed struct, same
+shape as `Dual` above but a different type), 6 distinct "tail type mismatch" sites, and
+a **genuinely nonexistent** imported symbol (`use epistemic::ode::{..., 
+ode_system_chem_simple, ...};` — confirmed via `grep -n ode_system_chem_simple
+stdlib/epistemic/ode.sio` returning nothing). This is consistent with kinetics.sio never
+having been fully type-checked by any compiler before — it was always accessed via
+inline fully-qualified calls that never resolved under lean_single at all (Bug A), so no
+one has run the whole file through lean_single's checker until this investigation.
+Fixing kinetics.sio properly is a dedicated stdlib-content triage task, not a follow-on
+to a qualified-path bug fix — filed as a separate issue rather than attempted here.
+
+Verified via `scripts/run_sio_test_suite.sh --filter` against a freshly rebuilt
+`lean_single`: all 6 fixed files pass, no regression on the full set of tests fixed
+earlier this week (`test_net_core`, `test_env_present`, `test_classical_e2e`,
+`test_dataframe_core`, `test_audio_core`, `test_geo_core`, `test_simulation_core`,
+`test_distributed_core`, `test_http_e2e`).
