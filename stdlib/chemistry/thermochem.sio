@@ -76,15 +76,6 @@ pub fn thermo_k_from_delta_g(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) w
     (k, thermo_abs_f64(k) * rel)
 }
 
-// ΔG(T) with Kirchhoff-shifted ΔH(T) and reference ΔS (coupled K(T) path).
-pub fn delta_g_at_t_kirchhoff(
-    dh_ref: f64, udh_ref: f64, ds: f64, uds: f64,
-    dcp: f64, udcp: f64, t_ref: f64, t: f64, ut: f64,
-) -> (f64, f64) with Mut, Div, Panic {
-    let (dh_t, udh_t) = kirchhoff_delta_h(dh_ref, udh_ref, dcp, udcp, t_ref, t)
-    delta_g_from_h_s(dh_t, udh_t, ds, uds, t, ut)
-}
-
 // ΔG = ΔH − TΔS with first-order GUM (independent inputs).
 pub fn delta_g_from_h_s(dh: f64, udh: f64, ds: f64, uds: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if t <= 0.0 { return (0.0, 0.0) }
@@ -125,10 +116,57 @@ pub fn hess_delta_h(
 pub fn kirchhoff_delta_h(dh1: f64, udh1: f64, dcp: f64, udcp: f64, t1: f64, t2: f64) -> (f64, f64) with Mut, Div, Panic {
     let dt = if t2 >= t1 { t2 - t1 } else { t1 - t2 }
     let dh2 = dh1 + dcp * dt
-    let u_dt = thermo_abs_f64(dcp) * 0.0
     let u_dcp = thermo_abs_f64(dt) * udcp
-    let udh2 = thermo_combine_unc(udh1, thermo_combine_unc(u_dt, u_dcp))
+    let udh2 = thermo_combine_unc(udh1, u_dcp)
     (dh2, udh2)
+}
+
+// Kirchhoff: ΔS(T2) = ΔS(T1) + ΔCp ln(T2/T1)  (constant ΔCp, JCGM 100 integrated form).
+pub fn kirchhoff_delta_s(ds1: f64, uds1: f64, dcp: f64, udcp: f64, t1: f64, t2: f64) -> (f64, f64) with Mut, Div, Panic {
+    if t1 <= 0.0 || t2 <= 0.0 { return (0.0, 0.0) }
+    let ratio = if t2 >= t1 { t2 / t1 } else { t1 / t2 }
+    let ln_r = thermo_ln_ratio_approx(ratio)
+    let ds2 = ds1 + dcp * ln_r
+    let u_ln = thermo_abs_f64(udcp * ln_r)
+    let u_dcp = thermo_abs_f64(dcp) * 0.01
+    let uds2 = thermo_combine_unc(uds1, thermo_combine_unc(u_ln, u_dcp))
+    (ds2, uds2)
+}
+
+// Partial lane: ΔH(T) Kirchhoff + constant ΔS (legacy; omits ΔS(T)).
+pub fn delta_g_at_t_kirchhoff(
+    dh_ref: f64, udh_ref: f64, ds: f64, uds: f64,
+    dcp: f64, udcp: f64, t_ref: f64, t: f64, ut: f64,
+) -> (f64, f64) with Mut, Div, Panic {
+    let (dh_t, udh_t) = kirchhoff_delta_h(dh_ref, udh_ref, dcp, udcp, t_ref, t)
+    delta_g_from_h_s(dh_t, udh_t, ds, uds, t, ut)
+}
+
+// Full Kirchhoff lane: ΔH(T) and ΔS(T) at reference T_ref.
+pub fn delta_g_at_t_full_kirchhoff(
+    dh_ref: f64, udh_ref: f64, ds_ref: f64, uds_ref: f64,
+    dcp: f64, udcp: f64, t_ref: f64, t: f64, ut: f64,
+) -> (f64, f64) with Mut, Div, Panic {
+    let (dh_t, udh_t) = kirchhoff_delta_h(dh_ref, udh_ref, dcp, udcp, t_ref, t)
+    let (ds_t, uds_t) = kirchhoff_delta_s(ds_ref, uds_ref, dcp, udcp, t_ref, t)
+    delta_g_from_h_s(dh_t, udh_t, ds_t, uds_t, t, ut)
+}
+
+// ln K(T) from full Kirchhoff ΔG(T).
+pub fn ln_k_at_t_full_kirchhoff(
+    dh_ref: f64, udh_ref: f64, ds_ref: f64, uds_ref: f64,
+    dcp: f64, udcp: f64, t_ref: f64, t: f64,
+) -> f64 with Mut, Div, Panic {
+    let (dg, _) = delta_g_at_t_full_kirchhoff(dh_ref, udh_ref, ds_ref, uds_ref, dcp, udcp, t_ref, t, 0.5)
+    ln_k_from_delta_g(dg, t)
+}
+
+// Scale a CRN rate constant by ln(K(T)/K(T_ref)) with dampening β (mass-action coupling).
+pub fn scale_rate_for_ln_k_delta(k_ref: f64, ln_delta: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    let arg = beta * ln_delta
+    if arg < -50.0 { return 0.0 }
+    if arg > 50.0 { return k_ref * thermo_exp_approx(50.0) }
+    k_ref * thermo_exp_approx(arg)
 }
 
 // van't Hoff: ln(K2/K1) = −(ΔH/R)(1/T2 − 1/T1); returns ln(K2/K1) and uncertainty.
@@ -178,6 +216,13 @@ pub fn test_kirchhoff_water() -> bool with Mut, Div, Panic {
     thermo_check_near(dh373, 0.0 - 282755.0, 2500.0) && udh2 > udh
 }
 
+pub fn test_kirchhoff_delta_s_water() -> bool with Mut, Div, Panic {
+    let (ds298, uds) = water_formation_entropy()
+    let (dcp, udcp) = water_formation_dcp()
+    let (ds350, uds2) = kirchhoff_delta_s(ds298, uds, dcp, udcp, 298.15, 350.0)
+    thermo_check_near(ds350, 0.0 - 156.7, 2.0) && uds2 > uds
+}
+
 pub fn test_entropy_roundtrip() -> bool with Mut, Div, Panic {
     let (dh, udh) = water_formation_enthalpy()
     let (ds_ref, uds) = water_formation_entropy()
@@ -207,7 +252,7 @@ pub fn test_kt_coupling_const_hs_witness() -> bool with Mut, Div, Panic {
     thermo_check_near(ln_ratio_dg, ln_ratio_vh, 0.5)
 }
 
-// Kirchhoff lane: ΔH(T)+const ΔS omits ΔS(T); deviation from van't Hoff is pilot band [0.5,2.0] on ln ratio.
+// Partial Kirchhoff (ΔH only): deviation from van't Hoff is pilot band [0.5,2.0] on ln ratio.
 pub fn test_kt_coupling_kirchhoff_band() -> bool with Mut, Div, Panic {
     let (dh, udh) = water_formation_enthalpy()
     let (ds, uds) = water_formation_entropy()
@@ -222,6 +267,22 @@ pub fn test_kt_coupling_kirchhoff_band() -> bool with Mut, Div, Panic {
     let (ln_ratio_vh, _) = vanthoff_ln_k_ratio(dh, udh, t1, t2, 0.5, 0.5)
     let dev = thermo_f64_sub(ln_ratio_k, ln_ratio_vh)
     dev >= 0.5 && dev <= 2.0
+}
+
+// Full Kirchhoff ΔH(T)+ΔS(T): ln(K2/K1) matches van't Hoff within 0.15 (water anchor).
+pub fn test_kt_coupling_full_kirchhoff_witness() -> bool with Mut, Div, Panic {
+    let (dh, udh) = water_formation_enthalpy()
+    let (ds, uds) = water_formation_entropy()
+    let (dcp, udcp) = water_formation_dcp()
+    let t1 = 298.15
+    let t2 = 350.0
+    let (dg1, _) = delta_g_from_h_s(dh, udh, ds, uds, t1, 0.5)
+    let (dg2f, _) = delta_g_at_t_full_kirchhoff(dh, udh, ds, uds, dcp, udcp, t1, t2, 0.5)
+    let ln_k1 = ln_k_from_delta_g(dg1, t1)
+    let ln_k2f = ln_k_from_delta_g(dg2f, t2)
+    let ln_ratio_full = ln_k2f - ln_k1
+    let (ln_ratio_vh, _) = vanthoff_ln_k_ratio(dh, udh, t1, t2, 0.5, 0.5)
+    thermo_check_near(ln_ratio_full, ln_ratio_vh, 0.15)
 }
 
 fn thermo_emit_metric(name: string, value: f64) with IO {
@@ -245,21 +306,28 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_entropy_roundtrip() { p = p + 1 } else { f = f + 1; println("FAIL entropy") }
     if test_vanthoff_sign() { p = p + 1 } else { f = f + 1; println("FAIL vanthoff") }
     if test_kt_coupling_const_hs_witness() { p = p + 1 } else { f = f + 1; println("FAIL kt coupling") }
+    if test_kirchhoff_delta_s_water() { p = p + 1 } else { f = f + 1; println("FAIL kirchhoff ds") }
     if test_kt_coupling_kirchhoff_band() { p = p + 1 } else { f = f + 1; println("FAIL kt kirchhoff band") }
+    if test_kt_coupling_full_kirchhoff_witness() { p = p + 1 } else { f = f + 1; println("FAIL kt full kirchhoff") }
 
     let (dh, udh) = water_formation_enthalpy()
     let (ds, uds) = water_formation_entropy()
     let (dcp, udcp) = water_formation_dcp()
-    let (dg, _) = delta_g_from_h_s(dh, udh, ds, uds, 298.15, 0.5)
-    let (dh373, _) = kirchhoff_delta_h(dh, udh, dcp, udcp, 298.15, 373.15)
-    let (ln_k, _) = vanthoff_ln_k_ratio(dh, udh, 298.15, 350.0, 0.5, 0.5)
-    let ln_k298 = ln_k_from_delta_g(dg, 298.15)
+    let t1 = 298.15
+    let t2 = 350.0
+    let (dg, _) = delta_g_from_h_s(dh, udh, ds, uds, t1, 0.5)
+    let (dh373, _) = kirchhoff_delta_h(dh, udh, dcp, udcp, t1, 373.15)
+    let (ln_k, _) = vanthoff_ln_k_ratio(dh, udh, t1, t2, 0.5, 0.5)
+    let ln_k298 = ln_k_from_delta_g(dg, t1)
+    let ln_k350 = ln_k_at_t_full_kirchhoff(dh, udh, ds, uds, dcp, udcp, t1, t2)
 
     thermo_emit_metric("water_dg_298K_J", dg)
     thermo_emit_metric("water_dh_373K_J", dh373)
     thermo_emit_metric("vanthoff_ln_k_350", ln_k)
     thermo_emit_metric("ln_k_water_298", ln_k298)
+    thermo_emit_metric("ln_k_water_350", ln_k350)
     thermo_emit_metric("kt_coupling_ok", thermo_bool_to_f64(test_kt_coupling_const_hs_witness()))
+    thermo_emit_metric("kt_full_kirchhoff_ok", thermo_bool_to_f64(test_kt_coupling_full_kirchhoff_witness()))
     thermo_emit_metric("thermochem_ok", thermo_bool_to_f64(f == 0))
     thermo_emit_metric("tests_passed", p as f64)
 

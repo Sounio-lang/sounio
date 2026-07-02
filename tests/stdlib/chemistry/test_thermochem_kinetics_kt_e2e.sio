@@ -1,0 +1,60 @@
+//@ check-only
+//@ expect-stdout: SCIENCE_CHEMISTRY_OK
+// K(T) → CRN: thermochem ln K shift scales mass-action rate; CRN endpoint shifts.
+
+use chemistry::thermochem
+use chemistry::kinetics
+use chemistry::stoichiometry
+
+fn tk_emit_metric(name: string, value: f64) with IO {
+    print("SCIENCE_METRIC chemistry ")
+    print(name)
+    print(" ")
+    print(value)
+    print("\n")
+}
+
+fn tk_bool_to_f64(v: bool) -> f64 {
+    if v { 1.0 } else { 0.0 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let _stoi = stoichiometry::moles_from_mass(18.0, 18.0)
+    var ok: i32 = 0
+
+    if thermochem::test_kt_coupling_full_kirchhoff_witness() { ok = ok + 1 }
+    if kinetics::test_crn() { ok = ok + 1 }
+
+    let (dh, udh) = thermochem::water_formation_enthalpy()
+    let (ds, uds) = thermochem::water_formation_entropy()
+    let (dcp, udcp) = thermochem::water_formation_dcp()
+    let t1 = 298.15
+    let t2 = 350.0
+
+    let ln_k298 = thermochem::ln_k_at_t_full_kirchhoff(dh, udh, ds, uds, dcp, udcp, t1, t1)
+    let ln_k350 = thermochem::ln_k_at_t_full_kirchhoff(dh, udh, ds, uds, dcp, udcp, t1, t2)
+    let ln_delta = ln_k350 - ln_k298
+
+    let init: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let ks298: [f64; 3] = [0.1, 0.05, 0.2]
+    let k3_350 = thermochem::scale_rate_for_ln_k_delta(ks298[2], ln_delta, 0.05)
+    let ks350: [f64; 3] = [0.1, 0.05, k3_350]
+
+    let out298 = kinetics::simulate_crn_euler(&init, &ks298, 0.1, 20)
+    let out350 = kinetics::simulate_crn_euler(&init, &ks350, 0.1, 20)
+
+    let crn_ok = out350[0] < out298[0] && ln_delta < 0.0 && k3_350 < ks298[2]
+
+    tk_emit_metric("crn_A_t2_298K", out298[0])
+    tk_emit_metric("crn_A_t2_350K", out350[0])
+    tk_emit_metric("ln_k_delta_350_298", ln_delta)
+    tk_emit_metric("kt_crn_coupling_ok", tk_bool_to_f64(crn_ok))
+    tk_emit_metric("tests_passed", ok as f64)
+
+    if ok < 2 || !crn_ok {
+        return 1
+    }
+
+    print("SCIENCE_CHEMISTRY_OK\n")
+    return 0
+}
