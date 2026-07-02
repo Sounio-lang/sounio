@@ -260,3 +260,35 @@ Verified via `scripts/run_sio_test_suite.sh --filter` against a freshly rebuilt
 earlier this week (`test_net_core`, `test_env_present`, `test_classical_e2e`,
 `test_dataframe_core`, `test_audio_core`, `test_geo_core`, `test_simulation_core`,
 `test_distributed_core`, `test_http_e2e`).
+
+## Update 2026-07-02 (continued): issue #566 closed as a kinetics.sio duplicate; issue #568's two files split — one fixed, one also blocked by kinetics.sio
+
+**Issue #566** (`test_pbpk_ontology.sio` failing both CI jobs) was investigated next.
+Converting its inline fully-qualified calls to `use chemistry::kinetics::*;` (the
+standard Bug A fix) immediately surfaced ~274 of the same pre-existing errors already
+inventoried in issue #575 — this is the identical `stdlib/chemistry/kinetics.sio`
+content debt, reached through a different test file that happens to call a different
+(also-broken) subset of the module's functions. Reverted the test-file edit (trading 4
+clear "unknown identifier" errors for 274 confusing ones fixes nothing) and closed #566
+as a duplicate of #575 rather than tracking the same root cause twice.
+
+**Issue #568**'s two files split into one real fix and one partial, both via the
+established Bug C workaround:
+
+- `tests/stdlib/physics/test_em_e2e.sio`: root cause was in `stdlib/physics/em.sio`
+  itself (`use constants::physical::speed_of_light_approx;`, 1 usage site) — converted
+  to `use constants::physical::*;`. Unlike kinetics.sio, `em.sio` is a normal-sized
+  (419-line) file with no other latent debt — fixed cleanly, verified passing.
+- `tests/stdlib/chemistry/test_lib_surface.sio` imports one named symbol each from THREE
+  modules (`chemistry::kinetics::test_arrhenius`, `chemistry::equilibrium::test_k_dg`,
+  `chemistry::acids::test_ph`) but never calls any of them — it's a pure "does this
+  import surface resolve" smoke test. The `equilibrium`/`acids` imports fixed cleanly
+  (glob, matching the already-verified #567 fixes to those two files). The `kinetics`
+  import hits the exact same #575 wall as #566 — reverted to its original (still Bug-C-
+  broken) form rather than glob-importing and drowning the signal in 274 unrelated
+  errors. Net effect: this file's own error count dropped from 3 to 1, but it does
+  **not** flip to passing — it remains blocked on #575, same as #566 was.
+
+Verified via `scripts/run_sio_test_suite.sh --filter`: `test_em_e2e` passes;
+`test_lib_surface` still fails (expected, tracked against #575); no regression on the
+full set of tests fixed earlier this week.
