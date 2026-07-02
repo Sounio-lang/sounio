@@ -61,7 +61,7 @@ Current telemetry truth:
 | Lane | E2E test (Madaros `check`) | Run shard (`lean_single`) | E2E `run` (Madaros) |
 |---|---|---|---|
 | chemistry | `tests/stdlib/chemistry/test_foundations_science_e2e.sio` — pass | `stdlib/chemistry/acids.sio` + `equilibrium.sio` — pass | blocked (imported-module SIGSEGV) |
-| physics | `tests/stdlib/physics/test_foundations_science_e2e.sio` — pass | `tests/stdlib/foundations/shards/physics_foundations_shard.sio` — pass | blocked (imported-module SIGSEGV) |
+| physics | `tests/stdlib/physics/test_foundations_science_e2e.sio` — pass | `stdlib/physics/{classical,em,sr,thermo}.sio` — pass | blocked (imported-module SIGSEGV) |
 
 E2E harness: `//@ check-only` until Madaros multi-import run is fixed. Gate runs import-free shards via `STDLIB_FOUNDATIONS_RUN_ENGINE=lean_single` (default).
 

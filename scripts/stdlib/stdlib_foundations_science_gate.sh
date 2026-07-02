@@ -12,7 +12,12 @@ OUT_JSON="${STDLIB_FOUNDATIONS_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_fou
 GOLDEN_JSON="${STDLIB_FOUNDATIONS_GOLDEN:-$ROOT_DIR/tests/fixtures/foundations/pipeline_golden.v1.json}"
 PHYSICS_TEST="${STDLIB_SCIENCE_PHYSICS_TEST:-$ROOT_DIR/tests/stdlib/physics/test_foundations_science_e2e.sio}"
 CHEMISTRY_TEST="${STDLIB_SCIENCE_CHEMISTRY_TEST:-$ROOT_DIR/tests/stdlib/chemistry/test_foundations_science_e2e.sio}"
-PHYSICS_SHARD="${STDLIB_SCIENCE_PHYSICS_SHARD:-$ROOT_DIR/tests/stdlib/foundations/shards/physics_foundations_shard.sio}"
+PHYSICS_SHARDS=(
+  "${STDLIB_SCIENCE_PHYSICS_CLASSICAL_SHARD:-$ROOT_DIR/stdlib/physics/classical.sio}"
+  "${STDLIB_SCIENCE_PHYSICS_EM_SHARD:-$ROOT_DIR/stdlib/physics/em.sio}"
+  "${STDLIB_SCIENCE_PHYSICS_SR_SHARD:-$ROOT_DIR/stdlib/physics/sr.sio}"
+  "${STDLIB_SCIENCE_PHYSICS_THERMO_SHARD:-$ROOT_DIR/stdlib/physics/thermo.sio}"
+)
 CHEMISTRY_SHARDS=(
   "${STDLIB_SCIENCE_CHEMISTRY_ACIDS_SHARD:-$ROOT_DIR/stdlib/chemistry/acids.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_EQUIL_SHARD:-$ROOT_DIR/stdlib/chemistry/equilibrium.sio}"
@@ -69,7 +74,31 @@ CHEMISTRY_RUN_OUT="$TMP_DIR/chemistry_run.out"
 
 physics_check_rc="$(run_check "$PHYSICS_TEST" "$PHYSICS_CHECK_OUT")"
 chemistry_check_rc="$(run_check "$CHEMISTRY_TEST" "$CHEMISTRY_CHECK_OUT")"
-physics_run_rc="$(run_shard "$PHYSICS_SHARD" "$PHYSICS_RUN_OUT")"
+: >"$PHYSICS_RUN_OUT"
+classical_shard="${PHYSICS_SHARDS[0]}"
+em_shard="${PHYSICS_SHARDS[1]}"
+sr_shard="${PHYSICS_SHARDS[2]}"
+thermo_shard="${PHYSICS_SHARDS[3]}"
+classical_out="$TMP_DIR/phys_classical.out"
+em_out="$TMP_DIR/phys_em.out"
+sr_out="$TMP_DIR/phys_sr.out"
+thermo_out="$TMP_DIR/phys_thermo.out"
+classical_run_rc="$(run_shard "$classical_shard" "$classical_out")"
+em_run_rc="$(run_shard "$em_shard" "$em_out")"
+sr_run_rc="$(run_shard "$sr_shard" "$sr_out")"
+thermo_run_rc="$(run_shard "$thermo_shard" "$thermo_out")"
+cat "$classical_out" >>"$PHYSICS_RUN_OUT"
+cat "$em_out" >>"$PHYSICS_RUN_OUT"
+cat "$sr_out" >>"$PHYSICS_RUN_OUT"
+cat "$thermo_out" >>"$PHYSICS_RUN_OUT"
+physics_run_rc=0
+if [[ "$classical_run_rc" -ne 0 || "$em_run_rc" -ne 0 || "$sr_run_rc" -ne 0 || "$thermo_run_rc" -ne 0 ]]; then
+  physics_run_rc=1
+fi
+echo "[foundations-science] shard classical rc=$classical_run_rc" >&2
+echo "[foundations-science] shard em rc=$em_run_rc" >&2
+echo "[foundations-science] shard sr rc=$sr_run_rc" >&2
+echo "[foundations-science] shard thermo rc=$thermo_run_rc" >&2
 
 : >"$CHEMISTRY_RUN_OUT"
 acids_shard="${CHEMISTRY_SHARDS[0]}"
@@ -88,8 +117,9 @@ echo "[foundations-science] shard acids rc=$acids_run_rc" >&2
 echo "[foundations-science] shard equilibrium rc=$equil_run_rc" >&2
 
 python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" \
-  "$PHYSICS_SHARD" "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
+  "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
   "$physics_check_rc" "$chemistry_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
+  "$classical_run_rc" "$em_run_rc" "$sr_run_rc" "$thermo_run_rc" \
   "$acids_run_rc" "$equil_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
 import datetime
 import json
@@ -103,19 +133,22 @@ out_path = Path(sys.argv[2]).resolve()
 golden_path = Path(sys.argv[3]).resolve()
 physics_test = Path(sys.argv[4]).resolve()
 chemistry_test = Path(sys.argv[5]).resolve()
-physics_shard = Path(sys.argv[6]).resolve()
-physics_check_out_path = Path(sys.argv[7]).resolve()
-chemistry_check_out_path = Path(sys.argv[8]).resolve()
-physics_run_out_path = Path(sys.argv[9]).resolve()
-chemistry_run_out_path = Path(sys.argv[10]).resolve()
-physics_check_rc = int(sys.argv[11])
-chemistry_check_rc = int(sys.argv[12])
-physics_run_rc = int(sys.argv[13])
-chemistry_run_rc = int(sys.argv[14])
-acids_run_rc = int(sys.argv[15])
-equil_run_rc = int(sys.argv[16])
-strict = sys.argv[17] == "1"
-run_engine = sys.argv[18]
+physics_check_out_path = Path(sys.argv[6]).resolve()
+chemistry_check_out_path = Path(sys.argv[7]).resolve()
+physics_run_out_path = Path(sys.argv[8]).resolve()
+chemistry_run_out_path = Path(sys.argv[9]).resolve()
+physics_check_rc = int(sys.argv[10])
+chemistry_check_rc = int(sys.argv[11])
+physics_run_rc = int(sys.argv[12])
+chemistry_run_rc = int(sys.argv[13])
+classical_run_rc = int(sys.argv[14])
+em_run_rc = int(sys.argv[15])
+sr_run_rc = int(sys.argv[16])
+thermo_run_rc = int(sys.argv[17])
+acids_run_rc = int(sys.argv[18])
+equil_run_rc = int(sys.argv[19])
+strict = sys.argv[20] == "1"
+run_engine = sys.argv[21]
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -148,6 +181,16 @@ chem = run_metrics.get("chemistry", {})
 if chem.get("acids_ok") == 1.0 and chem.get("equilibrium_ok") == 1.0:
     chem["tests_passed"] = 8.0
 run_metrics["chemistry"] = chem
+
+phys = run_metrics.get("physics", {})
+if (
+    phys.get("classical_ok") == 1.0
+    and phys.get("em_ok") == 1.0
+    and phys.get("sr_ok") == 1.0
+    and phys.get("thermo_ok") == 1.0
+):
+    phys["tests_passed"] = 15.0
+run_metrics["physics"] = phys
 
 def lane_row(
     lane: str,
@@ -217,7 +260,7 @@ physics_lane = lane_row(
     physics_run_rc,
     "SCIENCE_PHYSICS_OK",
     physics_test,
-    physics_shard.relative_to(root).as_posix() if physics_shard.exists() else str(physics_shard),
+    "stdlib/physics/{classical,em,sr,thermo}.sio",
     physics_run_out,
 )
 chemistry_lane = lane_row(
@@ -242,10 +285,25 @@ chemistry_lane["shard_runs"] = {
     },
 }
 physics_lane["shard_runs"] = {
-    "physics_foundations": {
-        "path": physics_shard.relative_to(root).as_posix() if physics_shard.exists() else str(physics_shard),
-        "run_exit_code": physics_run_rc,
-        "status": "pass" if physics_run_rc == 0 else "fail",
+    "classical": {
+        "path": "stdlib/physics/classical.sio",
+        "run_exit_code": classical_run_rc,
+        "status": "pass" if classical_run_rc == 0 else "fail",
+    },
+    "em": {
+        "path": "stdlib/physics/em.sio",
+        "run_exit_code": em_run_rc,
+        "status": "pass" if em_run_rc == 0 else "fail",
+    },
+    "sr": {
+        "path": "stdlib/physics/sr.sio",
+        "run_exit_code": sr_run_rc,
+        "status": "pass" if sr_run_rc == 0 else "fail",
+    },
+    "thermo": {
+        "path": "stdlib/physics/thermo.sio",
+        "run_exit_code": thermo_run_rc,
+        "status": "pass" if thermo_run_rc == 0 else "fail",
     },
 }
 
@@ -285,6 +343,10 @@ obj = {
         f"chemistry_check_rc={chemistry_check_rc}",
         f"physics_run_rc={physics_run_rc}",
         f"chemistry_run_rc={chemistry_run_rc}",
+        f"classical_shard_rc={classical_run_rc}",
+        f"em_shard_rc={em_run_rc}",
+        f"sr_shard_rc={sr_run_rc}",
+        f"thermo_shard_rc={thermo_run_rc}",
         f"acids_shard_rc={acids_run_rc}",
         f"equilibrium_shard_rc={equil_run_rc}",
     ],
