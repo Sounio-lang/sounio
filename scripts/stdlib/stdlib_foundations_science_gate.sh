@@ -23,6 +23,7 @@ CHEMISTRY_SHARDS=(
   "${STDLIB_SCIENCE_CHEMISTRY_ACIDS_SHARD:-$ROOT_DIR/stdlib/chemistry/acids.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_EQUIL_SHARD:-$ROOT_DIR/stdlib/chemistry/equilibrium.sio}"
   "${STDLIB_SCIENCE_CHEMISTRY_STOICH_SHARD:-$ROOT_DIR/stdlib/chemistry/stoichiometry.sio}"
+  "${STDLIB_SCIENCE_CHEMISTRY_THERMO_SHARD:-$ROOT_DIR/stdlib/chemistry/thermochem.sio}"
 )
 STRICT="${STDLIB_SCIENCE_FOUNDATIONS_STRICT:-0}"
 RUN_ENGINE="${STDLIB_FOUNDATIONS_RUN_ENGINE:-lean_single}"
@@ -112,29 +113,34 @@ echo "[foundations-science] shard thermo rc=$thermo_run_rc" >&2
 acids_shard="${CHEMISTRY_SHARDS[0]}"
 equil_shard="${CHEMISTRY_SHARDS[1]}"
 stoich_shard="${CHEMISTRY_SHARDS[2]}"
+thermo_shard="${CHEMISTRY_SHARDS[3]}"
 acids_out="$TMP_DIR/chem_acids.out"
 equil_out="$TMP_DIR/chem_equilibrium.out"
 stoich_out="$TMP_DIR/chem_stoichiometry.out"
+thermo_out="$TMP_DIR/chem_thermochem.out"
 acids_run_rc="$(run_shard "$acids_shard" "$acids_out")"
 equil_run_rc="$(run_shard "$equil_shard" "$equil_out")"
 stoich_run_rc="$(run_shard "$stoich_shard" "$stoich_out")"
+thermo_run_rc="$(run_shard "$thermo_shard" "$thermo_out")"
 cat "$acids_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$equil_out" >>"$CHEMISTRY_RUN_OUT"
 cat "$stoich_out" >>"$CHEMISTRY_RUN_OUT"
+cat "$thermo_out" >>"$CHEMISTRY_RUN_OUT"
 chemistry_run_rc=0
-if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 || "$stoich_run_rc" -ne 0 ]]; then
+if [[ "$acids_run_rc" -ne 0 || "$equil_run_rc" -ne 0 || "$stoich_run_rc" -ne 0 || "$thermo_run_rc" -ne 0 ]]; then
   chemistry_run_rc=1
 fi
 echo "[foundations-science] shard acids rc=$acids_run_rc" >&2
 echo "[foundations-science] shard equilibrium rc=$equil_run_rc" >&2
 echo "[foundations-science] shard stoichiometry rc=$stoich_run_rc" >&2
+echo "[foundations-science] shard thermochem rc=$thermo_run_rc" >&2
 echo "[foundations-science] kinetics check rc=$kinetics_check_rc" >&2
 
 python3 - "$ROOT_DIR" "$OUT_JSON" "$GOLDEN_JSON" "$PHYSICS_TEST" "$CHEMISTRY_TEST" "$KINETICS_TEST" \
   "$PHYSICS_CHECK_OUT" "$CHEMISTRY_CHECK_OUT" "$KINETICS_CHECK_OUT" "$PHYSICS_RUN_OUT" "$CHEMISTRY_RUN_OUT" \
   "$physics_check_rc" "$chemistry_check_rc" "$kinetics_check_rc" "$physics_run_rc" "$chemistry_run_rc" \
   "$classical_run_rc" "$em_run_rc" "$sr_run_rc" "$thermo_run_rc" \
-  "$acids_run_rc" "$equil_run_rc" "$stoich_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
+  "$acids_run_rc" "$equil_run_rc" "$stoich_run_rc" "$thermo_run_rc" "$STRICT" "$RUN_ENGINE" <<'PY'
 import datetime
 import json
 import math
@@ -165,8 +171,9 @@ thermo_run_rc = int(sys.argv[20])
 acids_run_rc = int(sys.argv[21])
 equil_run_rc = int(sys.argv[22])
 stoich_run_rc = int(sys.argv[23])
-strict = sys.argv[24] == "1"
-run_engine = sys.argv[25]
+thermo_run_rc = int(sys.argv[24])
+strict = sys.argv[25] == "1"
+run_engine = sys.argv[26]
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -200,8 +207,9 @@ if (
     chem.get("acids_ok") == 1.0
     and chem.get("equilibrium_ok") == 1.0
     and chem.get("stoichiometry_ok") == 1.0
+    and chem.get("thermochem_ok") == 1.0
 ):
-    chem["tests_passed"] = 13.0
+    chem["tests_passed"] = 14.0
 run_metrics["chemistry"] = chem
 
 phys = run_metrics.get("physics", {})
@@ -291,7 +299,7 @@ chemistry_lane = lane_row(
     chemistry_run_rc,
     "SCIENCE_CHEMISTRY_OK",
     chemistry_test,
-    "stdlib/chemistry/{acids,equilibrium,stoichiometry}.sio",
+    "stdlib/chemistry/{acids,equilibrium,stoichiometry,thermochem}.sio",
     chemistry_run_out,
 )
 chemistry_lane["kinetics_check"] = {
@@ -315,6 +323,11 @@ chemistry_lane["shard_runs"] = {
         "path": "stdlib/chemistry/stoichiometry.sio",
         "run_exit_code": stoich_run_rc,
         "status": "pass" if stoich_run_rc == 0 else "fail",
+    },
+    "thermochem": {
+        "path": "stdlib/chemistry/thermochem.sio",
+        "run_exit_code": thermo_run_rc,
+        "status": "pass" if thermo_run_rc == 0 else "fail",
     },
 }
 physics_lane["shard_runs"] = {
@@ -384,6 +397,7 @@ obj = {
         f"acids_shard_rc={acids_run_rc}",
         f"equilibrium_shard_rc={equil_run_rc}",
         f"stoichiometry_shard_rc={stoich_run_rc}",
+        f"thermochem_shard_rc={thermo_run_rc}",
         "kinetics_shard_run=skipped_lean_single_blocker",
     ],
 }

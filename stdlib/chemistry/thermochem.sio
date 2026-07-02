@@ -1,23 +1,171 @@
-// stdlib/chemistry/thermochem.sio — Real (ALL REAL)
+// stdlib/chemistry/thermochem.sio — Chemical thermochemistry foundations (import-free)
+//
+// E2E contract: Hess formation enthalpy sum, ΔG = ΔH − TΔS, Kirchhoff ΔH(T), van't Hoff K(T).
+// Literature anchor (NIST-style, 298.15 K): H2 + ½O2 → H2O(l), ΔH°f = −285.83 kJ/mol.
+//@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"
 
 module chemistry::thermochem
 
+let R: f64 = 8.314462618
+
 fn thermo_abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn thermo_check_near(a: f64, b: f64, tol: f64) -> bool { thermo_abs_f64(a - b) < tol }
+fn thermo_f64_sub(a: f64, b: f64) -> f64 {
+    if a >= b { a - b } else { b - a }
+}
+fn thermo_check_near(a: f64, b: f64, tol: f64) -> bool { thermo_f64_sub(a, b) < tol }
 
-pub fn test_dg() -> bool {
-    thermo_check_near(-20000.0, -20000.0, 100.0)
+fn thermo_sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i32 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
 }
 
-pub fn test_hess() -> bool {
-    thermo_check_near(-30000.0, -30000.0, 100.0)
+fn thermo_combine_unc(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    thermo_sqrt_approx(a * a + b * b)
 }
 
-fn main() -> i32 with IO {
+// ΔG = ΔH − TΔS with first-order GUM (independent inputs).
+pub fn delta_g_from_h_s(dh: f64, udh: f64, ds: f64, uds: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
+    if t <= 0.0 { return (0.0, 0.0) }
+    let dg = dh - t * ds
+    let term_tds = t * uds
+    let term_sdt = ds * ut
+    let udg = thermo_combine_unc(udh, thermo_combine_unc(term_tds, term_sdt))
+    (dg, udg)
+}
+
+// ΔS = (ΔH − ΔG) / T with GUM.
+pub fn entropy_from_h_g(dh: f64, udh: f64, dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
+    if t <= 0.0 { return (0.0, 0.0) }
+    let ds = (dh - dg) / t
+    let u_num = thermo_combine_unc(udh, udg)
+    let u_ds = u_num / t
+    let u_t = thermo_abs_f64((dh - dg) * ut / (t * t))
+    (ds, thermo_combine_unc(u_ds, u_t))
+}
+
+// Hess: ΔH_rxn = Σ ν_i ΔH_f,i  (up to four terms, ν signed stoich coefficients).
+pub fn hess_delta_h(
+    nu0: f64, hf0: f64, uhf0: f64,
+    nu1: f64, hf1: f64, uhf1: f64,
+    nu2: f64, hf2: f64, uhf2: f64,
+    nu3: f64, hf3: f64, uhf3: f64,
+) -> (f64, f64) with Mut, Div, Panic {
+    let dh = nu0 * hf0 + nu1 * hf1 + nu2 * hf2 + nu3 * hf3
+    let u0 = thermo_abs_f64(nu0) * uhf0
+    let u1 = thermo_abs_f64(nu1) * uhf1
+    let u2 = thermo_abs_f64(nu2) * uhf2
+    let u3 = thermo_abs_f64(nu3) * uhf3
+    let udh = thermo_combine_unc(thermo_combine_unc(u0, u1), thermo_combine_unc(u2, u3))
+    (dh, udh)
+}
+
+// Kirchhoff: ΔH(T2) ≈ ΔH(T1) + ΔCp (T2 − T1).
+pub fn kirchhoff_delta_h(dh1: f64, udh1: f64, dcp: f64, udcp: f64, t1: f64, t2: f64) -> (f64, f64) with Mut, Div, Panic {
+    let dt = if t2 >= t1 { t2 - t1 } else { t1 - t2 }
+    let dh2 = dh1 + dcp * dt
+    let u_dt = thermo_abs_f64(dcp) * 0.0
+    let u_dcp = thermo_abs_f64(dt) * udcp
+    let udh2 = thermo_combine_unc(udh1, thermo_combine_unc(u_dt, u_dcp))
+    (dh2, udh2)
+}
+
+// van't Hoff: ln(K2/K1) = −(ΔH/R)(1/T2 − 1/T1); returns ln(K2/K1) and uncertainty.
+pub fn vanthoff_ln_k_ratio(dh: f64, udh: f64, t1: f64, t2: f64, ut1: f64, ut2: f64) -> (f64, f64) with Mut, Div, Panic {
+    if t1 <= 0.0 || t2 <= 0.0 { return (0.0, 0.0) }
+    let inv1 = 1.0 / t1
+    let inv2 = 1.0 / t2
+    let dinv = inv2 - inv1
+    let ln_ratio = 0.0 - (dh / R) * dinv
+    let u_dinv = thermo_sqrt_approx((ut1 / (t1 * t1)) * (ut1 / (t1 * t1)) + (ut2 / (t2 * t2)) * (ut2 / (t2 * t2)))
+    let u_ln = thermo_abs_f64(dinv / R) * udh + thermo_abs_f64(dh / R) * u_dinv
+    (ln_ratio, u_ln)
+}
+
+// H2 + ½O2 → H2O(l): ΔH°f(H2O,l) = −285.83 kJ/mol (NIST WebBook, 298.15 K).
+pub fn water_formation_enthalpy() -> (f64, f64) {
+    (0.0 - 285830.0, 500.0)
+}
+
+// Standard ΔS° ≈ −163.3 J/(mol·K) for H2(g) + ½O2(g) → H2O(l).
+pub fn water_formation_entropy() -> (f64, f64) {
+    (0.0 - 163.3, 2.0)
+}
+
+pub fn test_delta_g_h_s() -> bool with Mut, Div, Panic {
+    let (dh, udh) = water_formation_enthalpy()
+    let (ds, uds) = water_formation_entropy()
+    let (dg, udg) = delta_g_from_h_s(dh, udh, ds, uds, 298.15, 0.5)
+    thermo_check_near(dg, 0.0 - 237167.0, 2000.0) && udg > 0.0
+}
+
+pub fn test_hess_water() -> bool with Mut, Div, Panic {
+    let (hf_h2o, uhf) = water_formation_enthalpy()
+    let (dh, udh) = hess_delta_h(1.0, hf_h2o, uhf, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    thermo_check_near(dh, 0.0 - 285830.0, 1000.0) && udh > 0.0
+}
+
+pub fn test_kirchhoff_water() -> bool with Mut, Div, Panic {
+    let (dh298, udh) = water_formation_enthalpy()
+    let dcp = 41.0
+    let (dh373, udh2) = kirchhoff_delta_h(dh298, udh, dcp, 2.0, 298.15, 373.15)
+    thermo_check_near(dh373, 0.0 - 282755.0, 2500.0) && udh2 > udh
+}
+
+pub fn test_entropy_roundtrip() -> bool with Mut, Div, Panic {
+    let (dh, udh) = water_formation_enthalpy()
+    let (ds_ref, uds) = water_formation_entropy()
+    let (dg, udg) = delta_g_from_h_s(dh, udh, ds_ref, uds, 298.15, 0.5)
+    let (ds, _) = entropy_from_h_g(dh, udh, dg, udg, 298.15, 0.5)
+    thermo_check_near(ds, ds_ref, 5.0)
+}
+
+pub fn test_vanthoff_sign() -> bool with Mut, Div, Panic {
+    let (dh, udh) = water_formation_enthalpy()
+    let (ln_ratio, u) = vanthoff_ln_k_ratio(dh, udh, 298.15, 350.0, 0.5, 0.5)
+    ln_ratio < 0.0 && u > 0.0
+}
+
+fn thermo_emit_metric(name: string, value: f64) with IO {
+    print("SCIENCE_METRIC chemistry ")
+    print(name)
+    print(" ")
+    print(value)
+    print("\n")
+}
+
+fn thermo_bool_to_f64(v: bool) -> f64 {
+    if v { 1.0 } else { 0.0 }
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i32 = 0
     var f: i32 = 0
-    if test_dg() { p = p + 1 } else { f = f + 1; println("FAIL thermochem") }
-    if test_hess() { p = p + 1 } else { f = f + 1; println("FAIL hess") }
-    if f == 0 { println("THERMOCHEM REAL PASS (phase3+)") } else { println("THERMOCHEM FAIL") }
+    if test_delta_g_h_s() { p = p + 1 } else { f = f + 1; println("FAIL dg hs") }
+    if test_hess_water() { p = p + 1 } else { f = f + 1; println("FAIL hess") }
+    if test_kirchhoff_water() { p = p + 1 } else { f = f + 1; println("FAIL kirchhoff") }
+    if test_entropy_roundtrip() { p = p + 1 } else { f = f + 1; println("FAIL entropy") }
+    if test_vanthoff_sign() { p = p + 1 } else { f = f + 1; println("FAIL vanthoff") }
+
+    let (dh, udh) = water_formation_enthalpy()
+    let (ds, uds) = water_formation_entropy()
+    let (dg, _) = delta_g_from_h_s(dh, udh, ds, uds, 298.15, 0.5)
+    let (dh373, _) = kirchhoff_delta_h(dh, udh, 41.0, 2.0, 298.15, 373.15)
+    let (ln_k, _) = vanthoff_ln_k_ratio(dh, udh, 298.15, 350.0, 0.5, 0.5)
+
+    thermo_emit_metric("water_dg_298K_J", dg)
+    thermo_emit_metric("water_dh_373K_J", dh373)
+    thermo_emit_metric("vanthoff_ln_k_350", ln_k)
+    thermo_emit_metric("thermochem_ok", thermo_bool_to_f64(f == 0))
+    thermo_emit_metric("tests_passed", p as f64)
+
+    if f == 0 {
+        println("THERMOCHEM FOUNDATIONS REAL ALL PASS (phase3+)")
+        print("SCIENCE_CHEMISTRY_OK\n")
+        return 0
+    }
+    println("THERMOCHEM FAILS")
     return f
 }
