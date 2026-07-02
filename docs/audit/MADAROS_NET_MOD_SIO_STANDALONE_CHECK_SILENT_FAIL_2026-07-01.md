@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-net-mod-sio-standalone-check-silent-fail-2026-07-01
 authority: repo_only
 audience: users
-last_validated: 2026-07-01
-validated_by: Claude
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-net-mod-sio-standalone-check-silent-fail-2026-07-01
 -->
 
