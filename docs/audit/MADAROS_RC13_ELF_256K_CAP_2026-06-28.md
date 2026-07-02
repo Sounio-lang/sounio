@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-rc13-elf-256k-cap-2026-06-28
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-rc13-elf-256k-cap-2026-06-28
+-->
+
 # Madaros forensic dispatch — `rc=13` 256 KiB ELF cap blocks Level-3 SMT corpus
 
 Date: 2026-06-28

@@ -4228,7 +4228,7 @@ fn gpu_op_default() -> GpuOp {
     }
 }
 
-fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Div {
+pub fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Div {
     var k = gpu_kernel_new()
 
     // Kernel name: "epi_wmma_mm16" (13 chars)
@@ -4263,12 +4263,13 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     //      %rd14..%rd20 (provenance offset, output addrs)
     // f32: %f0..%f3  (C/D frags — C input = D output for A*B+0 pattern)
     //      %f4 (eps_A), %f5 (eps_B)
-    //      %f6 (|D[0]| norm_A), %f7 (|D[2]| norm_B)
+    //      %f6 (|D[0]| norm_A, then reused as real 0.0 const after %f8/%f9 land)
+    //      %f7 (|D[2]| norm_B)
     //      %f8 (eps_A*|D[2]|), %f9 (eps_B*|D[0]|)
-    //      %f10 (combined), %f11 (combined^2)
-    //      %f12..%f15 (doubling chain: 2sq, 4sq, 8sq, 16sq)
-    //      %f16 (eps_out = sqrt(16*combined^2))
-    // pred: %p0 (A valid), %p1 (B valid), %p2 (AND result)
+    //      %f10 (f8^2), %f11 (f9^2), %f12 (U^2 = f10+f11, RSS quadrature)
+    //      %f13..%f16 (doubling chain: 2*U^2, 4*U^2, 8*U^2, 16*U^2)
+    //      %f17 (eps_out = sqrt(16*U^2))
+    // pred: %p0 (A valid: eps_A>=0), %p1 (B valid: eps_B>=0), %p2 (AND result)
 
     var idx: i64 = 0
 
@@ -4434,12 +4435,18 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
 
     // ═══ EPISTEMIC SHADOW PATH (GUM JCGM 100:2008) ════════════
     //
-    // Conservative tile-level uncertainty approximation:
-    //   ε_C = sqrt(K) · (|D[0]|·ε_B + |D[2]|·ε_A)
-    //       = sqrt(16 · (|A_norm|·ε_B + |B_norm|·ε_A)²)
+    // GUM law of propagation of uncertainty for C = A·B with A, B independent
+    // (no covariance term — v1 does not model input correlation):
+    //   U² = ε_A²·|B|² + ε_B²·|A|²
+    //   ε_C = sqrt(K · U²)   (K=16 identical-variance terms summed in quadrature)
+    //
+    // Previously this computed ε_C = sqrt(K)·(ε_A|B| + ε_B|A|), i.e. it squared
+    // a linear sum instead of summing squares — that carries a spurious cross
+    // term 2·ε_A·ε_B·|A|·|B| that inflates the uncertainty above the true RSS
+    // value for uncorrelated inputs. Fixed below to square each term first.
     //
     // Uses D output fragments as norm representatives (as in reference PTX).
-    // Doubling chain: combined² → 2·sq → 4·sq → 8·sq → 16·sq → sqrt
+    // Doubling chain: U² → 2·U² → 4·U² → 8·U² → 16·U² → sqrt
 
     // %f6 = abs(%f0)  — |D[0]| used as norm_A approximation
     op = gpu_op_default()
@@ -4481,38 +4488,41 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f10 = %f8 + %f9  — combined = ε_A·|B| + ε_B·|A|
+    // GUM/JCGM 100:2008 quadrature (RSS) combination for independent A, B:
+    //   U² = ε_A²·|B|² + ε_B²·|A|²    (no cross term — A, B assumed uncorrelated;
+    //                                   v1 does not model covariance, see note below)
+    // %f10 = %f8 * %f8  — (ε_A·|B|)²
     op = gpu_op_default()
-    op.opcode = GpuOpcode::GpuAdd
+    op.opcode = GpuOpcode::GpuMul
     op.dst_reg = 10
     op.lhs_reg = 8
+    op.rhs_reg = 8
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f11 = %f9 * %f9  — (ε_B·|A|)²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 11
+    op.lhs_reg = 9
     op.rhs_reg = 9
     op.ty = GpuType::GpuF32
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f11 = %f10 * %f10  — combined²
-    op = gpu_op_default()
-    op.opcode = GpuOpcode::GpuMul
-    op.dst_reg = 11
-    op.lhs_reg = 10
-    op.rhs_reg = 10
-    op.ty = GpuType::GpuF32
-    k.ops[idx] = op
-    idx = idx + 1
-
-    // Doubling chain: multiply combined² by 16 using 4× add-to-self
-    // %f12 = %f11 + %f11  — 2·sq
+    // %f12 = %f10 + %f11  — U² = ε_A²|B|² + ε_B²|A|² (true RSS, cross term dropped)
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuAdd
     op.dst_reg = 12
-    op.lhs_reg = 11
+    op.lhs_reg = 10
     op.rhs_reg = 11
     op.ty = GpuType::GpuF32
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f13 = %f12 + %f12  — 4·sq
+    // Doubling chain: multiply U² by 16 (tile size K) using 4× add-to-self
+    // %f13 = %f12 + %f12  — 2·U²
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuAdd
     op.dst_reg = 13
@@ -4522,7 +4532,7 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f14 = %f13 + %f13  — 8·sq
+    // %f14 = %f13 + %f13  — 4·U²
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuAdd
     op.dst_reg = 14
@@ -4532,7 +4542,7 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f15 = %f14 + %f14  — 16·sq = 16·combined²
+    // %f15 = %f14 + %f14  — 8·U²
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuAdd
     op.dst_reg = 15
@@ -4542,26 +4552,46 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     k.ops[idx] = op
     idx = idx + 1
 
-    // %f16 = sqrt(%f15) = sqrt(16·combined²) = 4·|combined|
-    // GUM-compliant tile-level uncertainty: ε_C = sqrt(K)·combined
+    // %f16 = %f15 + %f15  — 16·U² = K·U² (K=16 independent-term quadrature sum)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 16
+    op.lhs_reg = 15
+    op.rhs_reg = 15
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f17 = sqrt(%f16) = sqrt(K·U²)
+    // GUM-compliant tile-level uncertainty: ε_C = sqrt(K · (ε_A²|B|² + ε_B²|A|²))
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuSqrt
-    op.dst_reg = 16
-    op.src_reg = 15
+    op.dst_reg = 17
+    op.src_reg = 16
     op.ty = GpuType::GpuF32
     op.dst_ty = GpuType::GpuF32
     k.ops[idx] = op
     idx = idx + 1
 
     // ═══ VALIDITY PATH ═════════════════════════════════════════
+    // %f6 (norm_A) is dead after computing %f8/%f9 above — reuse it to
+    // synthesize a genuine 0.0 f32 constant (self-subtract is exact in IEEE754
+    // for any finite operand; there is no float-immediate-load opcode in this IR).
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSub
+    op.dst_reg = 6        // %f6 = zero
+    op.lhs_reg = 4         // eps_A
+    op.rhs_reg = 4
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
     // %p0 = (ε_A >= 0)  — A uncertainty is valid (non-negative)
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuSetpGe
     op.dst_reg = 0       // %p0
     op.lhs_reg = 4       // eps_A (f32 reg %f4)
-    op.rhs_reg = 11      // combined² (always >= 0, used as rhs=0.0 approximation)
-    // setp.ge.f32 %p0, %f4, %f11 — true when eps_A >= combined² (positive bias)
-    // For this simplified first implementation, we AND two non-negative predicates.
+    op.rhs_reg = 6       // real 0.0
     op.ty = GpuType::GpuF32
     k.ops[idx] = op
     idx = idx + 1
@@ -4571,7 +4601,7 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     op.opcode = GpuOpcode::GpuSetpGe
     op.dst_reg = 1       // %p1
     op.lhs_reg = 5       // eps_B (f32 reg %f5)
-    op.rhs_reg = 11      // same trick
+    op.rhs_reg = 6       // real 0.0
     op.ty = GpuType::GpuF32
     k.ops[idx] = op
     idx = idx + 1
@@ -4602,9 +4632,15 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     // But first load A_prov and B_prov. We need additional addresses.
     // Actually, params 6 and 7 are C_vld and C_prv (output only).
     // We don't load input provenance for this simplified kernel.
-    // Instead, set provenance = OR of param pointers (a simplified lineage tag, monotonic union).
+    //
+    // KNOWN LIMITATION (v1, not fixed in this pass): provenance is set to the
+    // bitwise OR of the A/B value pointers, not a real lineage/history merge.
+    // This repo has no established GPU-side provenance-merge convention to
+    // follow yet (tensor_epistemic.sio only allocates a provenance register,
+    // it doesn't define a merge law) — a real fix needs that design decided
+    // first, not a mechanical swap here. Tracked as an open follow-up.
 
-    // %rd16 = %rd2 OR %rd4  — A_val_ptr OR B_val_ptr (simplified provenance, monotonic union)
+    // %rd16 = %rd2 OR %rd4  — A_val_ptr OR B_val_ptr (KNOWN-LIMITED provenance, see above)
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuOr
     op.dst_reg = 16
@@ -4666,11 +4702,11 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     k.ops[idx] = op
     idx = idx + 1
 
-    // ─── Store C_eps (%f16 = uncertainty) ──────────────────────
+    // ─── Store C_eps (%f17 = uncertainty) ──────────────────────
     op = gpu_op_default()
     op.opcode = GpuOpcode::GpuStoreGlobal
     op.addr_reg = 18     // C_eps addr
-    op.src_reg = 16      // %f16 (eps_out = sqrt(16*combined²))
+    op.src_reg = 17      // %f17 (eps_out = sqrt(K·U²), true RSS quadrature)
     op.ty = GpuType::GpuF32
     op.dst_ty = GpuType::GpuF32
     k.ops[idx] = op
@@ -4709,7 +4745,7 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     // Register allocation counts
     k.max_reg_u32 = 9    // %r<9>: r0=tid, r1=ctaid, r2=ntid, r3..r6=A frags, r7..r8=B frags
     k.max_reg_u64 = 21   // %rd<21>: rd0..rd20
-    k.max_reg_f32 = 17   // %f<17>: f0..f16
+    k.max_reg_f32 = 18   // %f<18>: f0..f17
     k.max_reg_pred = 3   // %p<3>: p0, p1, p2
     k.max_reg_f64 = 0
     k.max_reg_i32 = 0

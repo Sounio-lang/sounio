@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.coordination-2026-06-29-pbox-lanes
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.coordination-2026-06-29-pbox-lanes
+-->
+
 # Lane coordination — PBox / Madaros regressions (2026-06-29)
 
 **Authority:** parallel work contract (`.claude/PARALLEL_BLOCKER_CONTRACT.md`)  

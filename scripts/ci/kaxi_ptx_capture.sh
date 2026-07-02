@@ -41,6 +41,7 @@ PATTERNS=(
     conf_gate
     octonion_assoc octonion_mul sedenion_mul
     pbpk_2comp_gum_4step
+    epistemic_scorer source_epistemic_scorer_f64
 )
 
 # Mode name : flag passed to kaxi-emit-ptx (empty = default f64)

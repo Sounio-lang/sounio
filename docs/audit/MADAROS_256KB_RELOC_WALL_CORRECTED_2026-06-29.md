@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-256kb-reloc-wall-corrected-2026-06-29
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-256kb-reloc-wall-corrected-2026-06-29
+-->
+
 # Madaros large-module wall — CORRECTED diagnosis (supersedes the 128KB framing)
 
 Date: 2026-06-29

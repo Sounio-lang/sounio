@@ -3405,6 +3405,107 @@ pub fn kaxi_emit_epistemic_scorer_asm() -> KaxiAsmBuf with Mut, Panic, Div, Allo
     gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 14)
 }
 
+// UCB epistemic scorer, f64 precision: score[i] = act_mean[i] + beta * sqrt(act_var[i])
+//
+// Same layout and register plan as kaxi_emit_epistemic_scorer_asm (packed,
+// single-pointer buffer, 8-byte f64 stride instead of 4-byte f32), but routed
+// through the typed K-AXI builder (gpu_lower_to_kaxi_typed) with mode 0
+// (default/f64) instead of the forced f32_mode auto-promotion. Address/index
+// arithmetic (tid, ntid, N-scaled offsets) is left untyped (types=0, u64
+// integer path); only the value-carrying ops (loads, sqrt, mul, add, store)
+// are marked types[i]=1 (f64), matching the kaxi_emit_source_fma_f64_asm
+// convention. See self-hosted/gpu/kaxi_to_ptx.sio kaxi_lower_add/mul/
+// load_global/store_global mode==0 branches: they dispatch to f64 codegen
+// only when the per-line type annotation says so.
+pub fn kaxi_emit_source_epistemic_scorer_f64_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+    var types: [i64; 256] = [0; 256]
+
+    // r0 = tid.x  (thread index i) — address/integer, untyped.
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    // r1 = ntid.x  (N = blockDim.x) — address/integer, untyped.
+    opcodes[1] = GPU_IR_GET_NTID
+    dsts[1] = 1
+
+    // r2 = act_mean[i] = mem[i] — value load, f64.
+    opcodes[2] = GPU_IR_LOAD_GLOBAL
+    dsts[2] = 2
+    src_a[2] = 0
+    types[2] = 1
+
+    // r3 = N + i  (address of act_var[i]) — address/integer, untyped.
+    opcodes[3] = GPU_IR_ADD
+    dsts[3] = 3
+    src_a[3] = 1
+    src_b[3] = 0
+
+    // r4 = act_var[i] = mem[N+i] — value load, f64.
+    opcodes[4] = GPU_IR_LOAD_GLOBAL
+    dsts[4] = 4
+    src_a[4] = 3
+    types[4] = 1
+
+    // r5 = 2*N — address/integer, untyped.
+    opcodes[5] = GPU_IR_ADD
+    dsts[5] = 5
+    src_a[5] = 1
+    src_b[5] = 1
+
+    // r6 = 3*N  (address of scalar beta) — address/integer, untyped.
+    opcodes[6] = GPU_IR_ADD
+    dsts[6] = 6
+    src_a[6] = 5
+    src_b[6] = 1
+
+    // r7 = beta = mem[3N] — value load, f64.
+    opcodes[7] = GPU_IR_LOAD_GLOBAL
+    dsts[7] = 7
+    src_a[7] = 6
+    types[7] = 1
+
+    // r8 = sqrt(act_var[i]) — value, f64 (mode-0 sqrt is unconditionally f64).
+    opcodes[8] = GPU_IR_SQRT
+    dsts[8] = 8
+    src_a[8] = 4
+    types[8] = 1
+
+    // r9 = beta * sqrt(act_var[i]) — value, f64.
+    opcodes[9] = GPU_IR_MUL
+    dsts[9] = 9
+    src_a[9] = 7
+    src_b[9] = 8
+    types[9] = 1
+
+    // r10 = act_mean[i] + beta * sqrt(act_var[i]) — value, f64.
+    opcodes[10] = GPU_IR_ADD
+    dsts[10] = 10
+    src_a[10] = 2
+    src_b[10] = 9
+    types[10] = 1
+
+    // r11 = 2*N + i  (address of score[i]) — address/integer, untyped.
+    opcodes[11] = GPU_IR_ADD
+    dsts[11] = 11
+    src_a[11] = 5
+    src_b[11] = 0
+
+    // mem[2N+i] = score[i] — value store, f64.
+    opcodes[12] = GPU_IR_STORE_GLOBAL
+    src_a[12] = 10
+    src_b[12] = 11
+    types[12] = 1
+
+    opcodes[13] = GPU_IR_RET
+
+    gpu_lower_to_kaxi_typed(opcodes, dsts, src_a, src_b, imm, types, 14)
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc < 1 {
@@ -3431,6 +3532,7 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch")
         println("  epistemic_dual_output_f32 - separate value/uncertainty output sketch")
         println("  epistemic_scorer          - UCB scorer: score[i] = mean[i] + beta*sqrt(var[i])")
+        println("  source_epistemic_scorer_f64 - UCB scorer, f64 precision (typed, mode 0)")
         println("  self-check                - run K-AXI self-check suite")
         return 1
     }
@@ -3554,6 +3656,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_pbpk_2comp_gum_4step_asm()
     } else if str_eq(pattern, "epistemic_scorer") {
         buf = kaxi_emit_epistemic_scorer_asm()
+    } else if str_eq(pattern, "source_epistemic_scorer_f64") {
+        buf = kaxi_emit_source_epistemic_scorer_f64_asm()
     } else if str_eq(pattern, "self-check") {
         let ok = kaxi_self_check()
         if ok {
