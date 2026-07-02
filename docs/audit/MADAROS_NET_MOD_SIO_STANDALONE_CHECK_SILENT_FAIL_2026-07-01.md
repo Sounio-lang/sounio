@@ -143,3 +143,54 @@ visible fallback notice, while CI's authoritative gate uses a freshly-bootstrapp
 performance). Before trusting a local `souc check` result as CI-equivalent, confirm which
 engine `bin/souc info` (or `_resolve_madaros`) actually resolved to, or rebuild
 `lean_single` from source and test against that directly.
+
+## Update 2026-07-02 (continued): Bug D — qualified call nested as an argument miscounts the outer call's arity
+
+Found while fixing issue #569 (the "arity mismatch" cluster: `tests/stdlib/dataframe/
+test_dataframe_core.sio`, `tests/stdlib/audio/test_audio_core.sio`, `tests/stdlib/geo/
+test_geo_core.sio`, `tests/stdlib/simulation/test_simulation_core.sio`). Issue #569 had
+speculated this cluster might share Bug B's root cause (qualified-path parameter type +
+co-scope glob import) — checked and **ruled out**: none of the 4 files' failing calls
+have a qualified-path parameter type anywhere in scope. The real, distinct trigger,
+isolated with a minimal 2-file repro outside stdlib:
+
+```sio
+// stdlib/pkg/sub/inner.sio
+module pkg::sub::inner
+pub fn two_args(a: i64, b: i64) -> i64 { a + b }
+
+// main.sio
+fn outer(x: i64, y: i64) -> bool { x == y }
+
+fn main() -> i64 {
+    let r1 = outer(pkg::sub::inner::two_args(1, 2), 3)   // error: arity mismatch (on outer!)
+    let r2 = pkg::sub::inner::two_args(1, 2)              // fine — same call, standalone
+    0
+}
+```
+
+A fully-qualified call (`pkg::subdir::file::symbol(...)`, 3+ segments — already known to
+resolve per Bug A) used as an **argument expression nested inside another call**
+(`outer(qualified_call(...), other_arg)`) produces a false `arity mismatch` on the
+*outer* call, even though both calls individually have the correct argument count. The
+identical call used as its own standalone statement (not nested) does not trigger it.
+Madaros does not reproduce this (checks OK); confirmed lean_single-only, same as Bugs A
+and B.
+
+All 4 affected files had the exact same shape: `near(pkg::pure::types::fn(args), literal)`
+— a qualified accessor call nested directly inside a `near()` (approx-equality) helper
+call. Fixed by rewriting to `use pkg::pure::types::*;` (matching the established Bug A
+workaround) *and* binding each nested call's result to a local `let` first, e.g.
+`let v = fn(args); if !near(v, literal) { ... }` — the local-binding step was kept even
+though `use` already de-qualifies the call, since Bug D was isolated for *qualified*
+nested calls specifically and a bare nested call was not independently verified safe;
+binding first avoids the ambiguity regardless. `tests/stdlib/simulation/
+test_simulation_core.sio` also had a separate `error: unknown field access` on
+`ts.n_points` (a `pub` field, so not a visibility issue) that resolved once `ts` was
+constructed via the `use`-imported bare `timeseries_new()` instead of a fully-qualified
+call — consistent with Bug A/D also disrupting return-type tracking through a qualified
+call chain, not just direct symbol/arity resolution.
+
+Verified against a freshly rebuilt `lean_single` via `scripts/run_sio_test_suite.sh
+--filter`, no regression on the full set of tests already fixed in this dispatch's
+earlier updates.
