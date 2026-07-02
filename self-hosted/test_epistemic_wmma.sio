@@ -34,13 +34,16 @@ fn ewmma_near_f64(a: f64, b: f64, tol: f64) -> bool {
     abs_diff <= tol
 }
 
-// GUM tile-level uncertainty formula (conservative):
-//   ε_C = sqrt(K) · (|A_norm| · ε_B + |B_norm| · ε_A)
-// where K = 16 for m16n16k16 WMMA tile.
+// GUM/JCGM 100:2008 quadrature (RSS) uncertainty formula for C = A·B with
+// A, B independent (no covariance term modeled):
+//   U² = (|A_norm|·ε_B)² + (|B_norm|·ε_A)²
+//   ε_C = sqrt(K · U²)
+// where K = 16 for m16n16k16 WMMA tile (16 independent-term quadrature sum).
 fn ewmma_gum_uncertainty(eps_a: f64, norm_a: f64, eps_b: f64, norm_b: f64) -> f64 with Mut, Panic, Div {
-    let combined = ewmma_abs_f64(norm_a) * eps_b + ewmma_abs_f64(norm_b) * eps_a
-    let sqrt_k = ewmma_sqrt_f64(16.0)  // = 4.0
-    sqrt_k * combined
+    let term1 = ewmma_abs_f64(norm_a) * eps_b
+    let term2 = ewmma_abs_f64(norm_b) * eps_a
+    let u2 = term1 * term1 + term2 * term2
+    ewmma_sqrt_f64(16.0 * u2)
 }
 
 // ============================================================================
@@ -79,13 +82,13 @@ fn test_wmma_ptx_has_provenance_xor() -> bool with Mut, Panic, Div, Alloc {
     ptx_str_contains(s, "xor.b64")
 }
 
-// T5: PTX declares 17 f32 registers (C/D frags + eps + shadow)
+// T5: PTX declares 18 f32 registers (C/D frags + eps + shadow + real-zero const)
 fn test_wmma_ptx_reg_count() -> bool with Mut, Panic, Div, Alloc {
     let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
     let ptx = gpu_lower_to_ptx(ir)
     let s = ptx_to_string(ptx)
-    // Expect: .reg .f32 %f<17>
-    ptx_str_contains(s, ".reg .f32 %f<17>")
+    // Expect: .reg .f32 %f<18>
+    ptx_str_contains(s, ".reg .f32 %f<18>")
 }
 
 // ============================================================================
@@ -101,11 +104,12 @@ fn test_wmma_eps_zero_identity() -> bool with Mut, Panic, Div {
 
 // T7: Known epsilon values produce analytically correct output
 //     Given ε_A = 0.1, |A| = 2.0, ε_B = 0.2, |B| = 3.0:
-//     combined = |2.0| * 0.2 + |3.0| * 0.1 = 0.4 + 0.3 = 0.7
-//     ε_C = sqrt(16) * 0.7 = 4.0 * 0.7 = 2.8
+//     term1 = |2.0| * 0.2 = 0.4, term2 = |3.0| * 0.1 = 0.3
+//     U² = 0.4² + 0.3² = 0.16 + 0.09 = 0.25
+//     ε_C = sqrt(16 * 0.25) = sqrt(4.0) = 2.0
 fn test_wmma_eps_quadrature() -> bool with Mut, Panic, Div {
     let eps_out = ewmma_gum_uncertainty(0.1, 2.0, 0.2, 3.0)
-    ewmma_near_f64(eps_out, 2.8, 1.0e-10)
+    ewmma_near_f64(eps_out, 2.0, 1.0e-10)
 }
 
 // T8: Doubling input uncertainty increases output uncertainty
