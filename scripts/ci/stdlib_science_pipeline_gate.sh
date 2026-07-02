@@ -751,8 +751,15 @@ echo "[stdlib-science-gate] status_summary=$status_summary"
 
 if [[ "$status_summary" == "pass" ]]; then
   echo "STDLIB_SCIENCE_PIPELINE_GATE_PASS"
-  exit 0
+else
+  echo "error: STDLIB_SCIENCE_PIPELINE_GATE_${status_summary^^}" >&2
+  exit 1
 fi
 
-echo "error: STDLIB_SCIENCE_PIPELINE_GATE_${status_summary^^}" >&2
-exit 1
+if [[ "${STDLIB_SCIENCE_FOUNDATIONS_ENABLE:-1}" == "1" ]]; then
+  echo "[stdlib-science-gate] foundations science lane (strict=${STDLIB_SCIENCE_FOUNDATIONS_STRICT:-1})"
+  STDLIB_SCIENCE_FOUNDATIONS_STRICT="${STDLIB_SCIENCE_FOUNDATIONS_STRICT:-1}" \
+    bash "$ROOT_DIR/scripts/stdlib/stdlib_foundations_science_gate.sh"
+fi
+
+exit 0

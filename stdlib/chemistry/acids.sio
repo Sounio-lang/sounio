@@ -1,15 +1,18 @@
 // stdlib/chemistry/acids.sio — Real Acids/Bases + Analytical (Phase 3+ breadth, ALL REAL)
+//
+// E2E contract (tests/stdlib/chemistry/test_foundations_science_e2e.sio):
+//   ph, henderson_hasselbalch, titration_ph, calibrate, mm_rate
+//   Gate metrics: ph_milli≈3, hh_acetate≈4.76, titration_ph≈1.5, calib_slope≈1, mm_rate≈5
 //@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"
 
 module chemistry::acids
 
-use epistemic::knowledge::Epistemic;
-
-// FULL ChEBI ontology (real acetic acid CHEBI:15366 etc. for provenance in pH/titration)
-use chemistry::ontology;
-
+// Madaros runtime: f64 subtraction returns 0 when minuend < subtrahend — route via larger operand first.
 fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+fn f64_sub(a: f64, b: f64) -> f64 {
+    if a >= b { a - b } else { b - a }
+}
+fn check_near(a: f64, b: f64, tol: f64) -> bool { f64_sub(a, b) < tol }
 
 fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
@@ -18,18 +21,41 @@ fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
 
 fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
-    let z = (x - 1.0) / (x + 1.0);
-    var sum = z; var term = z; var k = 1;
-    while k < 20 {
-        term = term * z * z;
-        sum = sum + term / (2.0 * (k as f64) + 1.0);
-        k = k + 1;
+    var negate = false
+    var y = x
+    if x < 1.0 {
+        negate = true
+        y = 1.0 / x
     }
-    2.0 * sum
+    let z = f64_sub(y, 1.0) / (y + 1.0)
+    // Array accumulator: Madaros aliases `sum`/`term` locals after ~4 loop iterations.
+    var acc: [f64; 1] = [z]
+    var term = z
+    var k = 1
+    while k < 20 {
+        term = term * z * z
+        acc[0] = acc[0] + term / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    let val = acc[0] + acc[0]
+    if negate { 0.0 - val } else { val }
 }
 
 fn log10_approx(x: f64) -> f64 with Mut, Div, Panic {
-    ln_approx(x) / ln_approx(10.0)
+    if x <= 0.0 { return 0.0 }
+    var norm = x
+    var decade: i32 = 0
+    while norm < 1.0 {
+        norm = norm * 10.0
+        decade = decade - 1
+    }
+    while norm >= 10.0 {
+        norm = norm / 10.0
+        decade = decade + 1
+    }
+    let ln_norm = ln_approx(norm)
+    let ln10 = ln_approx(10.0)
+    (decade as f64) + (ln_norm / ln10)
 }
 
 // pH with GUM
@@ -49,15 +75,17 @@ pub fn henderson_hasselbalch(pka: f64, upka: f64, ratio: f64, ur: f64) -> (f64, 
 
 // Analytical: simple titration curve numeric (strong acid + base)
 pub fn titration_ph(vol_acid: f64, conc_acid: f64, vol_base: f64, conc_base: f64) -> f64 with Mut, Div, Panic {
-    let moles_acid = vol_acid * conc_acid;
-    let moles_base = vol_base * conc_base;
-    let excess = moles_base - moles_acid;
-    if excess > 0.0 {
-        let oh = excess / (vol_acid + vol_base);
-        return 14.0 + log10_approx(oh); // wait sign, actually 14 - pOH
-    } else if excess < 0.0 {
-        let h = (0.0 - excess) / (vol_acid + vol_base);
-        return 0.0 - log10_approx(h);
+    let moles_acid = vol_acid * conc_acid
+    let moles_base = vol_base * conc_base
+    let total_vol = vol_acid + vol_base
+    if moles_base > moles_acid {
+        let excess_base = f64_sub(moles_base, moles_acid)
+        let oh = excess_base / total_vol
+        return 14.0 + log10_approx(oh)
+    } else if moles_acid > moles_base {
+        let excess_acid = f64_sub(moles_acid, moles_base)
+        let h = excess_acid / total_vol
+        return 0.0 - log10_approx(h)
     }
     7.0
 }
@@ -77,9 +105,10 @@ pub fn calibrate(x: &[f64; 5], y: &[f64; 5], ux: f64, uy: f64) -> (f64, f64, f64
     }
     let denom = n * sxx - sx * sx;
     let slope = (n * sxy - sx * sy) / denom;
-    let inter = (sy - slope * sx) / n;
+    let inter = if sy >= slope * sx { f64_sub(sy, slope * sx) / n } else { 0.0 - f64_sub(slope * sx, sy) / n };
     // GUM for slope unc ~ uy / sqrt( sum (x - meanx)^2 )
-    let varx = (sxx / n) - (sx/n)*(sx/n);
+    let meanx = sx / n
+    let varx = if (sxx / n) >= meanx * meanx { f64_sub(sxx / n, meanx * meanx) } else { 0.0 };
     let uslope = uy / sqrt_approx(n * varx * 5.0); // rough
     let uinter = uy * sqrt_approx( (1.0/n) + (sx*sx)/(n*n*varx) );
     (slope, uslope, inter, uinter)
@@ -121,13 +150,46 @@ pub fn test_mm() -> bool with Mut, Div, Panic {
     check_near(r, 5.0, 0.5) && ur > 0.0
 }
 
+fn acid_emit_metric(name: string, value: f64) with IO {
+    print("SCIENCE_METRIC chemistry ")
+    print(name)
+    print(" ")
+    print(value)
+    print("\n")
+}
+
+fn acid_bool_to_f64(v: bool) -> f64 {
+    if v { 1.0 } else { 0.0 }
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
-    var p: i32 = 0; var f: i32 = 0;
+    var p: i32 = 0
+    var f: i32 = 0
     if test_ph() { p = p + 1 } else { f = f + 1; println("FAIL ph") }
     if test_hh() { p = p + 1 } else { f = f + 1; println("FAIL hh") }
     if test_titration() { p = p + 1 } else { f = f + 1; println("FAIL titration") }
     if test_calib() { p = p + 1 } else { f = f + 1; println("FAIL calib") }
     if test_mm() { p = p + 1 } else { f = f + 1; println("FAIL mm") }
-    if f == 0 { println("ACIDS + ANALYTICAL + BIOCHEM REAL ALL PASS (phase3+4)") } else { println("ACIDS FAILS") }
+
+    let (ph_val, _) = ph(1.0e-3, 1e-5)
+    acid_emit_metric("ph_milli", ph_val)
+    let (hh_val, _) = henderson_hasselbalch(4.76, 0.01, 1.0, 0.05)
+    acid_emit_metric("hh_acetate", hh_val)
+    acid_emit_metric("titration_ph", titration_ph(0.1, 0.1, 0.05, 0.1))
+    var xs: [f64; 5] = [0.0, 1.0, 2.0, 3.0, 4.0]
+    var ys: [f64; 5] = [0.1, 1.1, 2.0, 3.1, 4.0]
+    let (cal_slope, _, _, _) = calibrate(&xs, &ys, 0.0, 0.1)
+    acid_emit_metric("calib_slope", cal_slope)
+    let (mm_r, _) = mm_rate(10.0, 0.1, 1.0, 0.05, 1.0, 0.05)
+    acid_emit_metric("mm_rate", mm_r)
+    acid_emit_metric("acids_ok", acid_bool_to_f64(f == 0))
+    acid_emit_metric("tests_passed", p as f64)
+
+    if f == 0 {
+        println("ACIDS + ANALYTICAL + BIOCHEM REAL ALL PASS (phase3+4)")
+        print("SCIENCE_CHEMISTRY_OK\n")
+        return 0
+    }
+    println("ACIDS FAILS")
     return f
 }

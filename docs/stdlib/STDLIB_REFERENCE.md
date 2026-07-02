@@ -56,6 +56,26 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 Current telemetry truth:
 - strict mode is fail-closed by design; `runtime_regression_summary.status` must be `pass` for strict CI success.
 
+## Foundations Science Snapshot (physics + chemistry)
+
+| Lane | E2E test (Madaros `check`) | Run shard (`lean_single`) | E2E `run` (Madaros) |
+|---|---|---|---|
+| chemistry | `tests/stdlib/chemistry/test_foundations_science_e2e.sio` — pass | `stdlib/chemistry/acids.sio` + `equilibrium.sio` — pass | blocked (imported-module SIGSEGV) |
+| physics | `tests/stdlib/physics/test_foundations_science_e2e.sio` — pass | `tests/stdlib/foundations/shards/physics_foundations_shard.sio` — pass | blocked (imported-module SIGSEGV) |
+
+E2E harness: `//@ check-only` until Madaros multi-import run is fixed. Gate runs import-free shards via `STDLIB_FOUNDATIONS_RUN_ENGINE=lean_single` (default).
+
+Wired from `scripts/ci/stdlib_science_pipeline_gate.sh` when `STDLIB_SCIENCE_FOUNDATIONS_ENABLE=1` (default), strict by default:
+
+```bash
+export SOUNIO_STDLIB_PATH=$PWD/stdlib
+bash scripts/stdlib/stdlib_foundations_science_gate.sh
+STDLIB_SCIENCE_FOUNDATIONS_STRICT=1 bash scripts/stdlib/stdlib_foundations_science_gate.sh
+```
+
+Artifact: `artifacts/stdlib/stdlib_foundations_science_status.v1.json` (includes per-shard `run_exit_code`)  
+Golden: `tests/fixtures/foundations/pipeline_golden.v1.json`
+
 ## Hyper Execution Snapshot
 
 | Metric | Value |
@@ -125,6 +145,7 @@ STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib/stdlib_foundations_science_gate.sh
 bash scripts/stdlib_reliability_gate.sh
 ```
 
