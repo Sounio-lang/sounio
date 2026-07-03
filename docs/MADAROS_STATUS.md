@@ -17,15 +17,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 > imported-SMT solver gate (6/6) regression suite and writes a `.gate-receipt`
 > only after a non-skipped SMT pass.
 > **Canonical greenline (2026-07-03):** protected `canon/madaros-greenline`
-> currently points at PR #591 merge commit
-> `3df24a04af6b35e4f710663accb03f9f97825b0a`. Its compiler proof base is PR
-> #586 (`bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`): `madaros_full_gate.sh`
-> passed with imported SMT 6/6 and wrote
+> advances only by PR+checks; for the live tip, run
+> `git ls-remote --heads origin canon/madaros-greenline`. Its compiler proof
+> base is PR #586 (`bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`):
+> `madaros_full_gate.sh` passed with imported SMT 6/6 and wrote
 > `artifacts/self-hosted/madaros.gate-receipt`
 > (`sha256=0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`,
-> `smt_skip=0`). Subsequent protected-branch PRs #587-#591 were docs/tooling
-> coordination updates, and PR #591 passed `Madaros Greenline Gate`, `Full Test
-> Suite`, `Lean Proofs`, `Contracts`, self-host checks, lint, website, and Vercel.
+> `smt_skip=0`). Subsequent protected-branch PRs #587-#592 were docs/tooling
+> coordination updates; PR #591 passed the required gate set for the
+> cleanup-planner evidence upgrade, and PR #592 passed it for this status sync.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
@@ -79,12 +79,15 @@ as `bin/souc-lean-single-x86_64`.
   or the checked prebuilt with a loud warning. This prevents default routing
   from silently selecting a stale raw artifact.
 - **2026-07-03 canonical greenline lock (landed):** remote branch
-  `canon/madaros-greenline` is protected and currently points at PR #591 merge
-  commit `3df24a04af6b35e4f710663accb03f9f97825b0a`; the initial compiler-proof
-  landing remains PR #586 at `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`. The
-  branch requires PR flow; stale reviews are dismissed, admins are enforced,
-  force-push is disabled, deletion is disabled, and strict required status
-  checks are enabled. Required checks:
+  `canon/madaros-greenline` is protected; use
+  `git ls-remote --heads origin canon/madaros-greenline` for the live tip. The
+  initial compiler-proof landing remains PR #586 at
+  `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`; PR #591 later merged the
+  cleanup-planner evidence upgrade at
+  `3df24a04af6b35e4f710663accb03f9f97825b0a`. The branch requires PR flow;
+  stale reviews are dismissed, admins are enforced, force-push is disabled,
+  deletion is disabled, and strict required status checks are enabled. Required
+  checks:
   `Contracts`, `Full Test Suite`, `Lean Proofs`, `Native Self-Host (Linux x86_64)`,
   `Native Self-Host (macOS arm64)`, `Sounio Lint`,
   `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`, and
@@ -149,8 +152,8 @@ When the imported-SMT section passes without
 `artifacts/self-hosted/madaros.gate-receipt` with the artifact sha256 and
 `smt_skip=0`. A skipped SMT section is non-green and never writes that receipt.
 
-Canonical `canon/madaros-greenline` status: **proof-green and merged via PR
-#586; current protected head is PR #591**. On 2026-07-03, a fresh source rebuild produced
+Canonical `canon/madaros-greenline` status: **proof-green since PR #586; live
+tip is remote state**. On 2026-07-03, a fresh source rebuild produced
 `artifacts/self-hosted/madaros` with sha256
 `0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`; the six
 `tests/stdlib/theorem/test_smt_*.sio` fixtures all passed, and
@@ -160,6 +163,8 @@ full suite, source-bootstrap self-host, both native self-host jobs, contracts,
 lint, and website before the merge.
 GitHub CI for PR #591 passed the same required protection set before merging the
 cleanup-planner evidence upgrade at `3df24a04af6b35e4f710663accb03f9f97825b0a`.
+GitHub CI for PR #592 then passed the same protection set before merging the
+status synchronization at `246cd44e59026b8ca6fecd72336e631036015f07`.
 
 Root cause of the previous imported-SMT failure: the compact imported-simple IR
 builder misclassified control/non-call expressions as call thunks. In the
