@@ -352,6 +352,7 @@ require_madaros_proof_anchor() {
 
 require_file docs/MADAROS_STATUS.md
 require_file docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
+require_file docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md
 require_file docs/status/madaros_main_proof_17d115.md
 require_file AGENTS.md
 require_file CLAUDE.md
@@ -363,6 +364,7 @@ require_file scripts/lib/resolve_madaros.sh
 require_file scripts/ci/build_modular_madaros.sh
 require_file scripts/ci/madaros_full_gate.sh
 require_file scripts/ci/madaros_source_to_elf_gate.sh
+require_executable scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh
 require_executable scripts/dev/madaros_two_gate.sh
 require_executable scripts/dev/madaros_worktree_cleanup_plan.sh
 require_executable scripts/dev/madaros_worktree_cleanup_approval.sh
@@ -385,7 +387,10 @@ require_grep 'ungated' docs/MADAROS_STATUS.md
 require_grep 'artifacts/self-hosted/madaros' docs/MADAROS_STATUS.md
 require_grep 'binary is **not evidence**' docs/MADAROS_STATUS.md
 require_grep 'scripts/ci/madaros_operational_contract_gate.sh' docs/MADAROS_STATUS.md
+require_grep 'scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh' docs/MADAROS_STATUS.md
 require_grep 'scripts/dev/madaros_worktree_cleanup_plan.sh' docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
+require_grep 'PRE-EXISTING MODULE-COMBINATION BREAKAGE' docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md
+require_grep 'gpu::kernel_ir' docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md
 
 require_grep 'scripts/lib/resolve_madaros.sh' AGENTS.md
 require_grep 'docs/MADAROS_STATUS.md' AGENTS.md
@@ -410,9 +415,15 @@ require_grep 'receipt_ok' scripts/ci/madaros_full_gate.sh
 require_grep 'SOUNIO_MADAROS_FULL_GATE_SKIP_SMT' scripts/ci/madaros_full_gate.sh
 require_grep 'imported-SMT solver gate' scripts/ci/madaros_full_gate.sh
 require_grep 'write_gate_receipt' scripts/ci/madaros_full_gate.sh
+require_grep 'kernel_ir__lower_to_ptx__ptx' scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh
+require_grep 'error\[E175' scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh
+require_grep 'error\[E177' scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh
+require_grep 'error\[E046' scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh
 require_grep 'Madaros Greenline Gate' .github/workflows/ci.yml
 require_grep 'make madaros-full-gate' .github/workflows/ci.yml
 require_grep 'scripts/dev/madaros_two_gate.sh artifacts/self-hosted/madaros' .github/workflows/ci.yml
+require_grep 'scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh' .github/workflows/ci.yml
+require_grep 'scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh' .github/workflows/madaros-prebuilt-refresh.yml
 require_grep 'madaros_source_to_elf_gate.sh' .github/workflows/madaros-prebuilt-refresh.yml
 require_grep 'source-to-ELF' .github/workflows/madaros-prebuilt-refresh.yml
 
