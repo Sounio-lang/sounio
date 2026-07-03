@@ -84,6 +84,12 @@ No SIGSEGV was observed.
 
 These exact cases are now covered by `make madaros-full-gate`.
 
-## Coordination Rule
+## Historical Coordination Rule
 
-Madaros is green on `origin/main@17d1157be`. Agents must fetch/rebase or reset to that commit, rebuild `artifacts/self-hosted/madaros`, and run `make madaros-full-gate` before treating checker/Madaros failures as current evidence. Dirty worktrees and stale raw binaries are not evidence against the current Madaros state.
+Madaros was proven green on `origin/main@17d1157be` on 2026-06-14. This record is
+a historical proof anchor for the broad full-gate shape, not a current reset
+target. For current work, use the live branch named in `docs/MADAROS_STATUS.md`
+and verify with `make madaros-full-gate` (or the protected-branch
+`Madaros Greenline Gate`) before treating checker/Madaros failures as current
+evidence. Dirty worktrees and stale raw binaries are not evidence against the
+current Madaros state.

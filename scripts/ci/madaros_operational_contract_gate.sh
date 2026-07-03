@@ -8,7 +8,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-GREEN_BASE="17d1157be540d32bb583dd03ca7072a6026e2027"
+HISTORICAL_MAIN_GREEN_BASE="17d1157be540d32bb583dd03ca7072a6026e2027"
+CANONICAL_GREENLINE_PROOF_BASE="bf46bda919596ce71b8fc35dc29cb3a31ff01d7b"
 
 fail() {
   echo "[madaros-contract] FAIL: $*" >&2
@@ -273,6 +274,26 @@ require_no_uncommented_mutation() {
   ' "$plan_sh" || fail "cleanup planner emitted an uncommented mutating command: $plan_sh"
 }
 
+require_madaros_proof_anchor() {
+  local -a accepted_anchors=(
+    "$CANONICAL_GREENLINE_PROOF_BASE"
+    "$HISTORICAL_MAIN_GREEN_BASE"
+  )
+  local anchor
+
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+
+  for anchor in "${accepted_anchors[@]}"; do
+    if git merge-base --is-ancestor "$anchor" HEAD; then
+      return 0
+    fi
+  done
+
+  fail "HEAD does not contain an accepted Madaros proof anchor: canonical greenline $CANONICAL_GREENLINE_PROOF_BASE or historical main $HISTORICAL_MAIN_GREEN_BASE"
+}
+
 require_file docs/MADAROS_STATUS.md
 require_file docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
 require_file docs/status/madaros_main_proof_17d115.md
@@ -293,12 +314,11 @@ require_executable scripts/dev/madaros_cleanup_suggested_manifest.sh
 require_executable scripts/dev/madaros_worktree_salvage_packet.sh
 require_file .github/workflows/ci.yml
 
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git merge-base --is-ancestor "$GREEN_BASE" HEAD ||
-    fail "HEAD does not contain Madaros green base $GREEN_BASE"
-fi
+require_madaros_proof_anchor
 
 require_grep 'bin/souc` routes to Madaros' docs/MADAROS_STATUS.md
+require_grep 'bf46bda919596ce71b8fc35dc29cb3a31ff01d7b' docs/MADAROS_STATUS.md
+require_grep '17d1157be' docs/MADAROS_STATUS.md
 require_grep 'receipt-gated' docs/MADAROS_STATUS.md
 require_grep 'bin/madaros-relocgate' docs/MADAROS_STATUS.md
 require_grep 'artifacts/self-hosted/madaros.gate-receipt' docs/MADAROS_STATUS.md
