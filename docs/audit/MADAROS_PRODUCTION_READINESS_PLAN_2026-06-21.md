@@ -29,9 +29,11 @@ Current baseline:
 - `main` CI after #377: success
   (<https://github.com/Sounio-lang/sounio/actions/runs/27909711839>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
-  `madaros_full_gate` succeeded. The promoted workspace local self-build still
-  segfaults and is tracked separately as a workspace parity blocker.
-- Canonical live blocker: GitHub issue #356.
+  `madaros_full_gate` succeeded. The former promoted-workspace local self-build
+  segfault is now closed by the current local `build_rc_0` witness and remains a
+  regression control.
+- Former canonical blocker GitHub issue #356 is closed; keep its witnesses as
+  regression controls, not as live blockers.
 - Protected dirty primary checkout: `/workspace/sounio`.
 - `/workspace/sounio` is stale relative to `origin/main` and must not be used
   as evidence for current `main` behavior until it is explicitly reconciled.
@@ -51,21 +53,18 @@ The audit resolves into this execution order:
 2. Keep Codex and Claude write sets serialized. Codex owns governance, probes,
    issue hygiene, and validation. Claude owns the active compiler/codegen lane
    unless ownership transfers explicitly.
-3. Close `BLK-20260621-codex-source-elf-normal-bss` before returning to larger
-   Root 2/SRET witnesses. The first passing proof must be the minimal current
-   global read/write witnesses, not archived Root 2 notes.
-4. Treat `BLK-20260621-codex-madaros-build-segfault` as promoted-workspace
-   parity unless a compiler owner proves a semantic root. GitHub
-   `Madaros Prebuilt Refresh` remains the authoritative seed-decoupled
-   production build path while it is green.
-5. After the BSS/global blocker changes behavior, update
-   `scripts/ci/madaros_open_blockers_probe.sh` from known-open expectations to
-   closed expectations and only then promote the witnesses into the regular
-   source-to-ELF gate.
+3. Keep `BLK-20260621-codex-source-elf-normal-bss` closed with the minimal
+   current global read/write witnesses, not archived Root 2 notes.
+4. Keep `BLK-20260621-codex-madaros-build-segfault` closed with a local
+   promoted-workspace self-build witness (`build_rc_0`) plus the existing
+   seed-decoupled production build path while it is green.
+5. Treat `scripts/ci/madaros_open_blockers_probe.sh` as the closed-blocker
+   regression control and `scripts/ci/madaros_source_to_elf_gate.sh` as the
+   promoted source-to-ELF proof for the BSS/global witnesses.
 6. Merge only after the focused local gates and post-merge `main` CI agree with
    the blocker records.
 
-The next actionable compiler command for the owning compiler lane is:
+The closed-blocker regression command is:
 
 ```bash
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
@@ -121,7 +120,7 @@ Madaros is production-ready only when all of these are true:
 | Root 2 operator gate | Acceptance probes are packaged but intentionally red while blocker is open | #354 plus post-merge `main` CI |
 | Root 2 target-worktree gate | Current `main` can run the gate against older active compiler lanes via `--root` | #355 plus post-merge `main` CI |
 | Root 2/BSS lowerer floor | BSS globals lower through the stable mut path; native_v2/build global witnesses are healthy | #362 plus post-merge `main` CI |
-| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call, BSS, and local workspace self-build parity witnesses executable without promoting them to production manifests | #363/#367/#369 plus post-merge `main` CI |
+| Closed blocker regression probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps former direct-call, BSS, and local workspace self-build parity blockers executable as closed regression controls | #363/#367/#369 plus post-merge `main` CI and 2026-07-03 local revalidation |
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
 | Worktree disposition queue | Current worktree/branch/PR disposition queue is committed and merged | #372 plus post-merge `main` CI |
@@ -191,41 +190,41 @@ Actions:
    source-to-ELF readiness blockers in #356. Keep Root 2/SRET gates as
    regression guards, but do not treat them as the only production blocker.
 
-Current source-to-ELF compiler blocker:
+Closed source-to-ELF compiler blocker:
 
 ```text
 Blocker-ID: BLK-20260621-codex-source-elf-normal-bss
-Status: classified
+Status: closed
 Severity: B1
 Class: compiler-semantics
-Owner: Claude compiler/codegen lane unless ownership transfers explicitly
+Owner: none active; witnesses are regression controls
 Lane: Madaros source-to-ELF global/BSS lowering
 Worktree: /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
 Branch: worktree-agent-adc1cd8b9d52ba53b
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
-Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
-Files-Read-Only: scripts/ci/madaros_open_blockers_probe.sh, scripts/ci/madaros_source_to_elf_gate.sh, scripts/dev/madaros_readiness_status.sh
-Do-Not-Touch: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio unless ownership transfers explicitly
+Files-Owned: scripts/ci/madaros_open_blockers_probe.sh, scripts/ci/madaros_source_to_elf_gate.sh, scripts/dev/madaros_readiness_status.sh
+Files-Read-Only: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
+Do-Not-Touch: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio unless a new regression opens
 Repro: env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering
-Observed: global_read_exit4 normal/native_v2/build => compile_rc_139; global_store_exit7 build => compile_rc_139
+Observed: global_read_exit4 normal/native_v2/build exits 4; global_store_exit7 build exits 7; lowering diagnostics reach bodies_done with all handoff markers present
 Expected: global_read_exit4 exits 4 and global_store_exit7 exits 7 from emitted ELF, without raw Madaros compile segfault
-Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh is updated from known-open to closed-BSS expectations and passes; scripts/ci/madaros_source_to_elf_gate.sh also passes
+Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh passes; scripts/ci/madaros_source_to_elf_gate.sh passes
 Evidence-Level: E3
-Evidence: https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4762337445
+Evidence: 2026-07-03 local runs of scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering and scripts/ci/madaros_source_to_elf_gate.sh; historical issue record https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4762337445
 Fallback-Path: none
 Legacy-Kept: yes
 LLM-Offload: not-required
-Next-Action: inspect the standard source-to-ELF/native emission path after successful typecheck and merged-IR capture, especially global/BSS symbol allocation or emission
+Next-Action: keep the probe and source-to-ELF gate in the production-readiness check set; open a new blocker only if either witness regresses
 ```
 
-Current promoted-workspace parity blocker:
+Closed promoted-workspace parity blocker:
 
 ```text
 Blocker-ID: BLK-20260621-codex-madaros-build-segfault
-Status: classified
+Status: closed
 Severity: B2
 Class: platform-resource
-Owner: integration shepherd / workspace-runtime lane unless compiler owner proves semantic root
+Owner: none active; local self-build witness is a regression control
 Lane: promoted workspace local self-build parity
 Worktree: /workspace/sounio
 Branch: main
@@ -234,15 +233,15 @@ Files-Owned: none by Codex
 Files-Read-Only: scripts/ci/build_modular_madaros.sh, scripts/dev/souc-build-lock.sh, self-hosted/compiler/main.sio
 Do-Not-Touch: bin/madaros, bin/souc, self-hosted/compiler/main.sio unless a focused parity lane is opened
 Repro: env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/ci/build_modular_madaros.sh /tmp/sounio-madaros-self-build-check/madaros
-Observed: clean promoted-workspace build exits rc=139 while GitHub Madaros Prebuilt Refresh build+gate succeeds on the same commit
+Observed: local promoted-workspace self-build exits build_rc_0 through scripts/ci/madaros_open_blockers_probe.sh
 Expected: local promoted workspace build agrees with remote seed-decoupled build, or docs/gates explicitly mark local workspace self-build as non-authoritative for production readiness
-Acceptance-Gate: local build_modular_madaros.sh passes in a clean workspace worktree, or release/readiness docs classify GitHub prebuilt refresh as authoritative and local workspace self-build as a platform/parity blocker
+Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh reports self_build_madaros build_rc_0
 Evidence-Level: E4
 Evidence: https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4763092558
 Fallback-Path: GitHub Madaros Prebuilt Refresh remains authoritative while green because local promoted workspace self-build is classified as platform/parity
 Legacy-Kept: yes
 LLM-Offload: not-required
-Next-Action: investigate workspace/runtime parity, not broad compiler bootstrap failure, unless a compiler owner proves a semantic root
+Next-Action: keep self_build_madaros as a regression control; use GitHub prebuilt refresh and madaros_full_gate for broader production proof
 ```
 
 Exit:
@@ -261,19 +260,15 @@ Actions:
 2. Treat `BLK-20260621-codex-source-elf-direct-call-arg` as closed by current
    `main` evidence. It is now a passing control in
    `scripts/ci/madaros_open_blockers_probe.sh`.
-3. Fix `BLK-20260621-codex-source-elf-normal-bss`. Current evidence shows raw
-   Madaros compile segfault before ELF production for global read/store in
-   normal/native_v2/build coverage.
-4. Treat `BLK-20260621-codex-madaros-build-segfault` as a promoted-workspace
-   parity blocker. Current remote `Madaros Prebuilt Refresh` evidence proves
-   that the seed-decoupled build and `madaros_full_gate` can succeed on GitHub
-   for `1d0dc6baa`; current local workspace evidence still reproduces
-   `build_rc_139`.
-5. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
-   until the open-blocker probe reports changed behavior and the blocker record
-   is updated or closed.
+3. Treat `BLK-20260621-codex-source-elf-normal-bss` as closed by current
+   evidence: global read/write witnesses execute with the expected exit codes
+   and `scripts/ci/madaros_source_to_elf_gate.sh` is green.
+4. Treat `BLK-20260621-codex-madaros-build-segfault` as closed by current local
+   evidence: `self_build_madaros` reports `build_rc_0`.
+5. Keep the former blockers in `scripts/ci/madaros_open_blockers_probe.sh` and
+   `tests/madaros/source_to_elf/manifest.tsv` as regression controls.
 
-Current localization for the BSS/global blocker:
+Superseded localization for the BSS/global blocker:
 
 - Direct raw-ELF execution of `bin/madaros-linux-x86_64` reproduces `rc=139`
   for `global_read_exit4.sio` and `global_store_exit7.sio`; the wrapper is not
@@ -296,7 +291,7 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/run_sio_test_suite.sh <focused-suite> --verbose
 ```
 
-Known-open blocker probe:
+Closed blocker regression probe:
 
 ```bash
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
@@ -328,8 +323,7 @@ Exit:
 - The local workspace self-build parity blocker is either fixed, explicitly
   scoped as non-authoritative for production readiness, or tracked outside the
   compiler-semantics lane.
-- The open-blocker probe is updated or removed because the witnesses no longer
-  match known-open behavior.
+- The open-blocker probe remains as a closed-blocker regression control.
 
 ## Phase 3 — Land Compiler Repair
 
@@ -435,10 +429,11 @@ Exit:
 
 ## Immediate Next Commands
 
-For the compiler owner:
+For a compiler owner, only after a fresh compiler-owner worktree is opened and
+claimed:
 
 ```bash
-cd /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
+cd <current-compiler-owner-worktree>
 git status --short --branch
 
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
@@ -448,7 +443,7 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bin/souc check self-hosted/native/codegen_x86_linux.sio
 
-# After the lane is check-clean:
+# After the lane is check-clean and explicitly owns compiler files:
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   scripts/ci/madaros_open_blockers_probe.sh
 

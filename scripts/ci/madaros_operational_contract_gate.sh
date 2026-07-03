@@ -34,24 +34,31 @@ require_file docs/status/madaros_main_proof_17d115.md
 require_file AGENTS.md
 require_file CLAUDE.md
 require_file Makefile
+require_file .gitignore
 require_executable bin/souc
 require_executable bin/madaros
 require_file scripts/lib/resolve_madaros.sh
 require_file scripts/ci/build_modular_madaros.sh
 require_file scripts/ci/madaros_full_gate.sh
 require_file scripts/ci/madaros_source_to_elf_gate.sh
+require_executable scripts/dev/madaros_two_gate.sh
+require_file .github/workflows/ci.yml
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git merge-base --is-ancestor "$GREEN_BASE" HEAD ||
     fail "HEAD does not contain Madaros green base $GREEN_BASE"
 fi
 
-require_grep 'Madaros is **green on `origin/main`' docs/MADAROS_STATUS.md
 require_grep 'bin/souc` routes to Madaros' docs/MADAROS_STATUS.md
+require_grep 'receipt-gated' docs/MADAROS_STATUS.md
+require_grep 'bin/madaros-relocgate' docs/MADAROS_STATUS.md
+require_grep 'artifacts/self-hosted/madaros.gate-receipt' docs/MADAROS_STATUS.md
+require_grep 'imported-SMT solver gate (6/6)' docs/MADAROS_STATUS.md
 require_grep 'bin/madaros-linux-x86_64' docs/MADAROS_STATUS.md
 require_grep 'make madaros-full-gate' docs/MADAROS_STATUS.md
-require_grep 'stale raw `artifacts/self-hosted/madaros`' docs/MADAROS_STATUS.md
-require_grep 'binaries are **not** evidence' docs/MADAROS_STATUS.md
+require_grep 'ungated' docs/MADAROS_STATUS.md
+require_grep 'artifacts/self-hosted/madaros' docs/MADAROS_STATUS.md
+require_grep 'binary is **not evidence**' docs/MADAROS_STATUS.md
 require_grep 'scripts/ci/madaros_operational_contract_gate.sh' docs/MADAROS_STATUS.md
 
 require_grep 'scripts/lib/resolve_madaros.sh' AGENTS.md
@@ -72,11 +79,26 @@ require_grep 'error[E176' scripts/ci/madaros_full_gate.sh
 require_grep 'error[E177' scripts/ci/madaros_full_gate.sh
 require_grep '--native-v2-emit-sret' scripts/ci/madaros_full_gate.sh
 require_grep 'pkg self-test' scripts/ci/madaros_full_gate.sh
+require_grep 'resolve_raw_madaros' scripts/ci/madaros_full_gate.sh
+require_grep 'receipt_ok' scripts/ci/madaros_full_gate.sh
+require_grep 'SOUNIO_MADAROS_FULL_GATE_SKIP_SMT' scripts/ci/madaros_full_gate.sh
+require_grep 'imported-SMT solver gate' scripts/ci/madaros_full_gate.sh
+require_grep 'write_gate_receipt' scripts/ci/madaros_full_gate.sh
+require_grep 'Madaros Greenline Gate' .github/workflows/ci.yml
+require_grep 'make madaros-full-gate' .github/workflows/ci.yml
+require_grep 'scripts/dev/madaros_two_gate.sh artifacts/self-hosted/madaros' .github/workflows/ci.yml
 require_grep 'madaros_source_to_elf_gate.sh' .github/workflows/madaros-prebuilt-refresh.yml
 require_grep 'source-to-ELF' .github/workflows/madaros-prebuilt-refresh.yml
 
 require_grep 'DEFAULT ENGINE: Madaros' bin/souc
+require_grep '.gate-receipt' bin/souc
+require_grep 'bin/madaros-relocgate' bin/souc
+require_grep '.gate-receipt' bin/madaros
+require_grep 'bin/madaros-relocgate' bin/madaros
+require_grep '.gate-receipt' scripts/lib/resolve_madaros.sh
+require_grep 'bin/madaros-relocgate' scripts/lib/resolve_madaros.sh
 require_grep 'bin/madaros-linux-x86_64' bin/souc
 require_grep 'exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros"' bin/souc
+require_grep 'artifacts/self-hosted/madaros.gate-receipt' .gitignore
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
