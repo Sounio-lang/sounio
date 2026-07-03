@@ -10,27 +10,35 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 # Madaros Status — coordination note for the fleet
 
 > **TL;DR:** Madaros is the **default compiler**: `bin/souc` routes to Madaros.
-> The 2026-06-21 blocker cluster in GitHub issue #356 is closed on
-> `main@4c452498c`: source-to-ELF global/BSS witnesses are controls, #313 is
-> closed, and promoted-workspace self-build parity is green. Do not treat stale
-> worktrees or old raw ELFs as current evidence. Sync `main`, use the checked
-> prebuilt or rebuild, run the named gates, and classify any new failure against
-> current post-merge evidence rather than reopening the closed blocker set.
+> As of 2026-07-03, default routing is receipt-gated: ungated
+> `artifacts/self-hosted/madaros` is demoted, and the wrappers fall back to
+> `bin/madaros-relocgate` when present, then the checked prebuilt.
+> The proof path is `make madaros-full-gate`; that gate now includes the
+> imported-SMT solver gate (6/6) regression suite and writes a `.gate-receipt`
+> only after a non-skipped SMT pass.
+> **Current greenline WIP note (2026-07-03):** `work/madaros-greenline-codex`
+> has a fresh proof-green artifact. `madaros_full_gate.sh` passed with imported
+> SMT 6/6 and wrote `artifacts/self-hosted/madaros.gate-receipt`
+> (`sha256=0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`,
+> `smt_skip=0`). The WIP still needs normal PR review before it can update the
+> protected canonical branch.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
 `bin/souc` is now a thin CLI wrapper that routes `check`/`compile`/`run`/`--version`/
-`info` to Madaros (via `bin/madaros` → `artifacts/self-hosted/madaros`, or the
-checked prebuilt `bin/madaros-linux-x86_64` when the local build artifact is
-absent). The legacy single-file `lean_single` engine that `bin/souc` used to be
-is preserved as `bin/souc-lean-single-x86_64`.
+`info` to Madaros via `bin/madaros`. The Madaros raw ELF selection order is:
+explicit env override, receipt-gated `artifacts/self-hosted/madaros`, optional
+`bin/madaros-relocgate`, then checked prebuilt `bin/madaros-linux-x86_64`. The
+legacy single-file `lean_single` engine that `bin/souc` used to be is preserved
+as `bin/souc-lean-single-x86_64`.
 
 - **Force the legacy engine:** `SOUNIO_SOUC_ENGINE=lean_single bin/souc <args>`.
 - **lean_single stays the bootstrap seed** (`make build`, `make build-madaros`) and the
   canonical fixed-point ELF — it is just no longer the default *user-facing* compiler.
-- If the local build artifact is absent, `bin/souc` uses the checked prebuilt
-  `bin/madaros-linux-x86_64` first. It only falls back to lean_single if no
-  Madaros raw ELF is available.
+- If the local build artifact is absent or lacks a matching `.gate-receipt`,
+  `bin/souc` uses `bin/madaros-relocgate` when present, otherwise the checked
+  prebuilt. It only falls back to lean_single if no verified Madaros raw ELF is
+  available.
 - *Madaros-builds-Madaros* (swapping the build seed to Madaros) is a **separate, larger
   milestone — not done here.** lean_single still compiles the bootstrap.
 
@@ -59,6 +67,43 @@ is preserved as `bin/souc-lean-single-x86_64`.
   taking write ownership. `scripts/ci/madaros_open_blockers_probe.sh
   --diagnose-lowering` now confirms closed expectations for the former
   BSS/global and self-build witnesses.
+- **2026-07-03 safety update:** `bin/madaros` and
+  `scripts/lib/resolve_madaros.sh` no longer trust ungated
+  `artifacts/self-hosted/madaros`. The artifact must have
+  `artifacts/self-hosted/madaros.gate-receipt` containing the current ELF sha256;
+  otherwise the default route falls back to `bin/madaros-relocgate` when present
+  or the checked prebuilt with a loud warning. This prevents default routing
+  from silently selecting a stale raw artifact.
+- **2026-07-03 canonical greenline lock (observed during lane setup):** remote branch
+  `canon/madaros-greenline` points at `origin/main@735b89800f47301e0217a3992441553be0cb9ee7`
+  and was observed protected: PR review required (`1` approval), stale reviews dismissed,
+  conversations resolved, admins enforced, force-push disabled, deletion disabled,
+  and current CI checks required (`Contracts`, `Full Test Suite`, `Lean Proofs`,
+  `Native Self-Host (Linux x86_64)`, `Native Self-Host (macOS arm64)`,
+  `Sounio Lint`, `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`).
+  `work/madaros-greenline-codex` is the writable Codex work branch derived from
+  the same SHA. **Hardening landed in this work branch:** `.github/workflows/ci.yml`
+  now defines the named `Madaros Greenline Gate`, which runs `make
+  madaros-full-gate` and then `scripts/dev/madaros_two_gate.sh
+  artifacts/self-hosted/madaros`. Remaining GitHub-admin step after PR stability:
+  add that check to the required protection contexts.
+
+## Cross-lane TODOs
+
+- **GPU/PTX module-combination blocker documented and pushed:** see
+  `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
+  in commit `8ea996fe3` on branch `gpu/epistemic-tensor-core-next`. Repro symptom:
+  importing `gpu::kernel_ir::*`, `gpu::lower_to_ptx::*`, and `gpu::ptx::*` together
+  fails typecheck even with an empty `main` (`335`x E175, `18`x E177, `5`x E046).
+  Why it escaped: `self-hosted/gpu/mod.sio` does not import `lower_to_ptx.sio`, so the
+  intended `GpuKernelIr -> PTX` combination was not validated as a proper module graph.
+  Ruled out: not `IR_MAX_INSTRS`, not the known native-codegen segfault, not a stale
+  binary. Impact: blocks any new PTX driver outside the existing `bin/kretikos`
+  K-AXI dispatch from compiling to native ELF. Next steps: bisect pairwise module
+  combinations, audit `pub` consistency across `self-hosted/gpu/`, and add a CI gate
+  for this exact import combination. Cross-reference siblings:
+  `docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md` and
+  `docs/audit/EPISTEMIC_MADAROS_SIGSEGV_2026-06-29/`.
 
 Do not say "Madaros is production-ready" merely because #356 is closed. Say the
 specific 2026-06-21 blocker cluster is closed, then use the production-ready
@@ -80,8 +125,8 @@ It does not replace the compiler proof. It prevents drift in the committed agent
 instructions, `bin/souc` default-wrapper contract, `scripts/dev/e2e_gate.sh`, and
 `scripts/ci/madaros_full_gate.sh` coverage.
 
-Independently verified at `17d1157be` (fresh build from source, **not** a
-prebuilt artifact) — **10/10 PASS**:
+Historical baseline at `17d1157be` (fresh build from source, **not** a
+prebuilt artifact) covered the broad full-gate shape:
 
 ```
 PASS: version
@@ -95,9 +140,28 @@ PASS: native-v2 ABI/backend witnesses
 PASS: package manager self-test
 ```
 
-Re-verified at the current tip (fresh build from source through `051ddf9ae`,
-which lands a 7-bug IR/SSA/codegen batch; `fns=9612`) — same result, all checks
-PASS. The green state is not tip-fragile.
+When the imported-SMT section passes without
+`SOUNIO_MADAROS_FULL_GATE_SKIP_SMT=1`, the gate writes
+`artifacts/self-hosted/madaros.gate-receipt` with the artifact sha256 and
+`smt_skip=0`. A skipped SMT section is non-green and never writes that receipt.
+
+Current `work/madaros-greenline-codex` status: **proof-green locally, pending PR
+review/merge**. On 2026-07-03, a fresh source rebuild produced
+`artifacts/self-hosted/madaros` with sha256
+`0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`; the six
+`tests/stdlib/theorem/test_smt_*.sio` fixtures all passed, and
+`madaros_full_gate.sh` exited 0 and wrote a receipt with `smt_tests=6/6` and
+`smt_skip=0`.
+
+Root cause of the previous imported-SMT failure: the compact imported-simple IR
+builder misclassified control/non-call expressions as call thunks. In the
+minimal `use theorem::smt::*` repro, it first emitted a `kind=1` call target for
+`if` (`target_hash=5863476`) and then for a field expression
+`ctx.n_conflicts`; neither target existed in the imported-simple function table,
+so the compact writer returned `rc=1`, fell back to the full IR path, and the
+fallback segfaulted (`rc=139`). The greenline fix adds an imported-simple table
+probe and guards call-thunk classification so only real call syntax reaches the
+callee path; the compact writer now emits the SMT import directly.
 
 The previously-dangerous bad-input case is fixed on **both** paths (clean error,
 `rc=1`, **no SIGSEGV**):
@@ -107,19 +171,22 @@ artifacts/self-hosted/madaros --check /tmp
 # error: at /tmp:0:0 - could not read input file   (rc=1)
 
 MADAROS_RAW_BIN=artifacts/self-hosted/madaros bin/madaros check /tmp
-# error: at /tmp:0:0 - could not read input file   (rc=1)
+# error: madaros check requires <source.sio> or a project with sounio.toml   (rc=2)
 ```
 
 ## What stale state looks like (and why it lies)
 
 A `bin/madaros` launcher or a local raw `artifacts/self-hosted/madaros` ELF that
-was **built before `17d1157be`** still carries the old behavior — that binary is
-**not evidence** about current `main`. Likewise, lanes under
+was **built before `17d1157be`**, or rebuilt later but not proven by a matching
+`.gate-receipt`, still carries stale risk — a stale raw binary is **not evidence**
+about current source health. Likewise, lanes under
 `/workspace/sounio-checker`, `/workspace/sounio-semcall-main`,
 `/workspace/sounio-project-spine`, etc. may hold old checker code or local edits.
 You cannot conclude "Madaros is broken" from any of those without first bringing
-in `17d1157be` and either using the checked prebuilt `bin/madaros-linux-x86_64`
-or **rebuilding `artifacts/self-hosted/madaros`**.
+in `17d1157be` and either using `bin/madaros-relocgate` when present, the checked
+prebuilt `bin/madaros-linux-x86_64`, or **rebuilding
+`artifacts/self-hosted/madaros`** and letting `make madaros-full-gate` produce
+the receipt.
 
 ## Sync before debugging
 
@@ -144,10 +211,8 @@ make madaros-full-gate
 
 ## One-line coordination phrase
 
-> Madaros is the default `bin/souc` compiler on current `origin/main`, and the
-> 2026-06-21 #356 blocker cluster is closed on `main@4c452498c`: #313 is closed,
-> source-to-ELF BSS/global witnesses are controls, and promoted-workspace
-> self-build parity is green. Please sync to current `origin/main`, avoid stale
-> raw ELFs as evidence, and use `scripts/dev/madaros_readiness_status.sh
-> --check-compiler-lane` plus `scripts/ci/madaros_open_blockers_probe.sh
-> --diagnose-lowering` before changing compiler-owned files.
+> Madaros is the default `bin/souc` compiler. The current safe route is
+> receipt-gated: prefer a proven `artifacts/self-hosted/madaros`, otherwise use
+> `bin/madaros-relocgate` when present before the checked prebuilt. Do not treat
+> stale raw ELFs as evidence; use `make madaros-full-gate` for proof and
+> `scripts/ci/madaros_operational_contract_gate.sh` for cheap contract drift.

@@ -31,6 +31,54 @@ scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue
 scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
 ```
 
+## Current Overlay — 2026-07-03
+
+This section supersedes the open-queue facts below without deleting the
+historical 2026-06-21 record.
+
+Current accepted baseline:
+
+- `origin/main`: `735b89800f47301e0217a3992441553be0cb9ee7`
+- `canon/madaros-greenline`: same SHA, remote branch protected
+- `work/madaros-greenline-codex`: same SHA, writable Codex work branch
+- Main CI: success on run `28641819629`
+
+The canonical branch protection currently requires:
+
+- pull request review with `1` approval
+- stale reviews dismissed
+- conversations resolved
+- admins enforced
+- force-push disabled
+- deletion disabled
+- strict status checks:
+  `Contracts`, `Full Test Suite`, `Lean Proofs`,
+  `Native Self-Host (Linux x86_64)`, `Native Self-Host (macOS arm64)`,
+  `Sounio Lint`, `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`
+
+Greenline hardening update: `scripts/dev/madaros_two_gate.sh` is now wired into
+the named CI job `Madaros Greenline Gate` in this work branch. Local proof on
+2026-07-03 reports `two_gate: A=6/6 B=pass` against
+`artifacts/self-hosted/madaros`. Remaining GitHub-admin step after PR stability:
+add `Madaros Greenline Gate` to the protected branch's required status checks.
+
+Current open PR queue:
+
+| PR | Base | Head | State | Madaros disposition |
+|---|---|---|---|---|
+| [#582](https://github.com/Sounio-lang/sounio/pull/582) | `research/solver-ts3-parallel` | `gpu/epistemic-wmma-driver-fixes` | ready, non-main base | Excluded from main production-readiness unless explicitly promoted. |
+| [#541](https://github.com/Sounio-lang/sounio/pull/541) | `main` | `feat/octonion-mass-delta` | draft, conflicting | Keep draft; requires split/rebase/focused gates before compiler-owner review. |
+
+Current worktree audit status:
+
+- `scripts/dev/worktree_branch_audit.sh --check /tmp/current-worktree-audit.tsv`
+  returns red: `total=53`, `dirty=35`, `critical_dirty=20`,
+  `unallowed_critical_dirty=20` when run without the readiness allowlist.
+- `scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue` and
+  `scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap` pass.
+- Phase 5 cleanup remains open. This is not permission to delete anything:
+  apply push-before-delete and owner approval before cleanup.
+
 ## Recently Closed (context)
 
 | PR | Branch | Disposition | Evidence |

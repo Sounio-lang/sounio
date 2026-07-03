@@ -17,9 +17,11 @@
 # Engine selection (in order):
 #   SOUNIO_SOUC_BIN=<elf>          -> exec that ELF directly (raw, lean_single CLI)
 #   SOUNIO_SOUC_ENGINE=lean_single -> force the legacy lean_single ELF
-#   (default)                      -> Madaros; if its raw ELF is not built, fall
-#                                     back to lean_single with a visible notice so
-#                                     no caller hard-breaks in an unbuilt checkout.
+#   (default)                      -> Madaros; trust artifacts/self-hosted/madaros
+#                                     only when its .gate-receipt matches and proves
+#                                     the SMT gate was not skipped; otherwise
+#                                     prefer bin/madaros-relocgate when present
+#                                     before the checked prebuilt.
 #
 # Environment passthrough:
 #   SOUNIO_STDLIB_PATH   forwarded to whichever engine runs
@@ -34,11 +36,34 @@ LEAN_SINGLE="$ROOT_DIR/bin/souc-lean-single-x86_64"
 
 _is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c2 "$1" 2>/dev/null)" != '#!' ]]; }
 
-# Resolve the Madaros raw ELF, mirroring bin/madaros's resolution order.
+_madaros_receipt_ok() {
+  local elf="$1"
+  local receipt="$elf.gate-receipt"
+  [[ -f "$receipt" ]] || return 1
+  local want
+  want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want" ]] || return 1
+  grep -Fq "$want" "$receipt" || return 1
+  grep -Fxq "smt_skip=0" "$receipt"
+}
+
+# Resolve the Madaros raw ELF, mirroring bin/madaros's receipt-gated order.
 _resolve_madaros() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
-              "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}"; do
+    if _is_elf "$cand"; then echo "$cand"; return 0; fi
+  done
+
+  local artifact="$ROOT_DIR/artifacts/self-hosted/madaros"
+  if _is_elf "$artifact"; then
+    if _madaros_receipt_ok "$artifact"; then
+      echo "$artifact"
+      return 0
+    fi
+    echo "warning: using ungated $artifact skipped; export MADAROS_RAW_BIN=$ROOT_DIR/bin/madaros-relocgate for the verified-green binary" >&2
+  fi
+
+  for cand in "$ROOT_DIR/bin/madaros-relocgate" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
     if _is_elf "$cand"; then echo "$cand"; return 0; fi
   done
   return 1

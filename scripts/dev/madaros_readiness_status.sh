@@ -34,7 +34,7 @@ Usage: scripts/dev/madaros_readiness_status.sh [options]
 
 Print the current Madaros production-readiness control surface: baseline,
 local audit status, GitHub issue/PR/CI state when gh is available, and the
-next gates that close the active blocker.
+regression/production gates that keep the closed blocker cluster honest.
 
 Options:
   --refresh-gh          git fetch origin before reading origin/main
@@ -54,7 +54,7 @@ Options:
   --strict             exit nonzero if audit or optional gates fail
   --production-ready   exit nonzero if current blocker records still prevent
                        saying Madaros is production-ready; also runs the
-                       known-open blocker probe
+                       closed-blocker regression probe
   -h, --help           show this help
 USAGE
 }
@@ -344,11 +344,11 @@ run_open_blockers_probe() {
     OPEN_BLOCKERS_FAILED=1
   elif awk -F '\t' 'NR > 1 && $6 == "still_open" { found = 1 } END { exit found ? 0 : 1 }' "$OPEN_BLOCKERS_REPORT"; then
     echo "status[open_blockers]=fail"
-    echo "reason=open_blockers_still_open"
+    echo "reason=closed_blocker_regression_still_open"
     OPEN_BLOCKERS_FAILED=1
   else
     echo "status[open_blockers]=pass"
-    echo "reason=no_known_open_witnesses_reproduced"
+    echo "reason=closed_blocker_regressions_match_expectations"
   fi
 
   if [[ "$OPEN_BLOCKERS_FAILED" != "0" && "$STRICT" == "1" && "$IN_PRODUCTION_READY_CHECK" != "1" ]]; then
@@ -407,20 +407,20 @@ cat <<'EOF'
 2. issue #356 blocker records
 3. scripts/ci/madaros_open_blockers_probe.sh
 4. scripts/ci/madaros_source_to_elf_gate.sh
-5. one active compiler owner for the BSS/global blocker
+5. no stale active compiler-owner claim for closed BSS/global blockers
 6. scripts/dev/madaros_pr_resolution_queue.sh
 EOF
 
-section "Active Blockers"
+section "Closed Blocker Regression Controls"
 cat <<'EOF'
 BLK-20260621-codex-source-elf-normal-bss
   class=compiler-semantics
-  owner=Claude compiler/codegen lane unless ownership transfers explicitly
-  acceptance=global_read_exit4 exits 4; global_store_exit7 exits 7; open-blocker probe converted from known-open to closed expectation; source-to-ELF gate green
+  status=closed; witnesses are regression controls
+  acceptance=global_read_exit4 exits 4; global_store_exit7 exits 7; source-to-ELF gate green
 
 BLK-20260621-codex-madaros-build-segfault
   class=platform-resource
-  owner=integration shepherd / workspace-runtime lane unless compiler owner proves semantic root
+  status=closed; local promoted-workspace self-build exits build_rc_0
   acceptance=local promoted workspace build agrees with GitHub prebuilt refresh, or remains explicitly non-authoritative for production readiness
 EOF
 
@@ -547,7 +547,7 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
       echo "reason=open_blockers_not_closed"
       echo "open_blockers_report=$OPEN_BLOCKERS_REPORT"
       echo "open_blockers_out=$OPEN_BLOCKERS_OUT_DIR"
-      echo "required=known-open blocker witnesses must stop reproducing, or expectations must be updated after the compiler fix"
+      echo "required=closed blocker regression witnesses must stay on closed expectations"
     fi
     PRODUCTION_READY_FAILED=1
   fi
@@ -555,17 +555,18 @@ fi
 
 section "Next Gates"
 cat <<'EOF'
-Compiler owner:
+Closed blocker regression controls:
   env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
     scripts/ci/madaros_open_blockers_probe.sh
 
-To localize the current BSS/global phase before editing compiler files:
+Optional lowering diagnostics for regression triage:
   env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
     scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering
 
-After BSS/global behavior changes:
-  update scripts/ci/madaros_open_blockers_probe.sh from known-open expectations to closed expectations
+Source-to-ELF proof for the closed BSS/global cluster:
   bash scripts/ci/madaros_source_to_elf_gate.sh
+
+Production readiness still also requires:
   PR CI green
   post-merge main CI green
 

@@ -10,8 +10,8 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/ci/madaros_open_blockers_probe.sh [options]
 
-Reproduce known-open Madaros production blockers without promoting them into
-required-pass source-to-ELF manifests.
+Exercise the former known-open Madaros production blockers as closed regression
+controls without promoting them into broader source-to-ELF manifests.
 
 Options:
   --diagnose-lowering  also run a read-only frontend/body-lowering trace for
@@ -313,9 +313,9 @@ fi
 cat "$REPORT"
 
 if awk -F '\t' 'NR > 1 && $6 == "changed" { found = 1 } END { exit found ? 0 : 1 }' "$REPORT"; then
-  echo "[madaros-open-blockers] CHANGED: at least one known-open blocker witness changed; inspect $REPORT and update/close blocker records" >&2
+  echo "[madaros-open-blockers] CHANGED: at least one closed blocker regression witness changed; inspect $REPORT" >&2
   exit 1
 fi
 
-echo "[madaros-open-blockers] PASS: tracked blocker witnesses match expected status"
+echo "[madaros-open-blockers] PASS: tracked closed blocker witnesses match expected status"
 echo "[madaros-open-blockers] report=$REPORT"
