@@ -15,7 +15,11 @@ merge of PR #572)
 Class: **PRE-EXISTING MODULE-COMBINATION BREAKAGE** (hundreds of typecheck errors,
 independent of any function body or call site — reproducible with an empty `main`)
 Status: root-caused to "this exact 3-module combination is apparently never exercised
-together in CI"; NOT fixed; NOT attempted beyond the diagnosis below
+together in CI"; documented and sent in commit `8ea996fe3` on
+`gpu/epistemic-tensor-core-next`. Repair status as of 2026-07-03:
+`work/gpu-ptx-combo-fix-codex` has a local patch that makes the pairwise import
+witness pass 4/4; pending review/commit/PR before this can be treated as landed
+branch truth.
 
 > Found while trying to write a CLI driver
 > (`self-hosted/gpu/kretikos_emit_epistemic_wmma.sio`) to emit PTX for the
@@ -160,20 +164,31 @@ already rejects the module combination before codegen is reached. This blocked
 `gpu_build_epistemic_wmma_matmul_16x16_ir`'s PTX for DGX Spark hardware verification) from
 ever reaching the native-codegen stage on this branch.
 
-## Proposed next step (not attempted here)
+## TODO / repair status
 
-1. Bisect by importing `gpu::lower_to_ptx` and `gpu::ptx` alone (no `kernel_ir`) and vice
-   versa, to narrow which pairwise combination first breaks — this dispatch only
-   established that all three together break, not which pair.
-2. Audit `pub`/private-modifier consistency across the whole `self-hosted/gpu/` tree in one
-   pass (grep for struct/fn declarations missing `pub` that are referenced via `::*`
-   imports from outside their own file) rather than patching one symbol at a time as each
-   is hit — the repeated pattern (`Name`, `GpuOp`, and now this) suggests a systemic gap,
-   not isolated typos.
-3. Add a CI check that runs `souc check` on `gpu::kernel_ir` + `gpu::lower_to_ptx` +
-   `gpu::ptx` together (e.g. via `mod.sio` gaining a `use gpu::lower_to_ptx::*` line, if
-   that's semantically correct for the orchestrator to own) so this combination is never
-   silently unvalidated again.
+- **Documented and sent:** this dispatch lives at
+  `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`,
+  commit `8ea996fe3` on `gpu/epistemic-tensor-core-next`.
+- **Original reproducible symptom:** empty-main import of
+  `gpu::kernel_ir::*` + `gpu::lower_to_ptx::*` + `gpu::ptx::*` failed with
+  335 `E175`, 18 `E177`, and 5 `E046`.
+- **Why it slipped through:** `self-hosted/gpu/mod.sio` does not import
+  `lower_to_ptx.sio`, so the normal checked GPU module graph never validated this
+  combination.
+- **Ruled out:** not `IR_MAX_INSTRS`, not the native-codegen segfault, not a stale
+  pinned binary.
+- **Impact:** blocks any new PTX driver outside `bin/kretikos` that needs
+  `gpu_lower_to_ptx`.
+- **2026-07-03 local repair in progress:** isolated branch
+  `work/gpu-ptx-combo-fix-codex` restores the cross-module public API surface,
+  fixes `GpuOp` literal shape drift, makes `ptx.sio` self-contained for
+  `starts_with`/i64 emission, and adds
+  `scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh`.
+- **Current local acceptance evidence:** the witness passes all four combinations:
+  `kernel_ir+lower_to_ptx`, `lower_to_ptx+ptx`, `kernel_ir+ptx`, and
+  `kernel_ir+lower_to_ptx+ptx`.
+- **Remaining before landing:** review/commit/PR this branch repair, then wire the
+  witness into CI for this GPU branch so the combination cannot silently regress.
 
 ## Cross-references
 
