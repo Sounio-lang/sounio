@@ -45,6 +45,11 @@ It writes:
 The planner is intentionally non-destructive. It never runs `git push`,
 `git reset`, `git clean`, `git branch -D`, or `git worktree remove`.
 
+`scripts/dev/madaros_readiness_status.sh --strict` prints a
+`cleanup_plan_command=...` line after the worktree audit section, using the
+exact audit TSV path from that run. That is the operator handoff from red
+strict-audit output to this cleanup planner.
+
 ## Current Blocker To `--strict`
 
 Readiness production proof is green, but the stricter worktree audit still

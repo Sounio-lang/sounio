@@ -30,6 +30,7 @@ require_grep() {
 }
 
 require_file docs/MADAROS_STATUS.md
+require_file docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
 require_file docs/status/madaros_main_proof_17d115.md
 require_file AGENTS.md
 require_file CLAUDE.md
@@ -42,6 +43,7 @@ require_file scripts/ci/build_modular_madaros.sh
 require_file scripts/ci/madaros_full_gate.sh
 require_file scripts/ci/madaros_source_to_elf_gate.sh
 require_executable scripts/dev/madaros_two_gate.sh
+require_executable scripts/dev/madaros_worktree_cleanup_plan.sh
 require_file .github/workflows/ci.yml
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -60,6 +62,7 @@ require_grep 'ungated' docs/MADAROS_STATUS.md
 require_grep 'artifacts/self-hosted/madaros' docs/MADAROS_STATUS.md
 require_grep 'binary is **not evidence**' docs/MADAROS_STATUS.md
 require_grep 'scripts/ci/madaros_operational_contract_gate.sh' docs/MADAROS_STATUS.md
+require_grep 'scripts/dev/madaros_worktree_cleanup_plan.sh' docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
 
 require_grep 'scripts/lib/resolve_madaros.sh' AGENTS.md
 require_grep 'docs/MADAROS_STATUS.md' AGENTS.md
@@ -100,5 +103,8 @@ require_grep 'bin/madaros-relocgate' scripts/lib/resolve_madaros.sh
 require_grep 'bin/madaros-linux-x86_64' bin/souc
 require_grep 'exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros"' bin/souc
 require_grep 'artifacts/self-hosted/madaros.gate-receipt' .gitignore
+require_grep 'cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh' scripts/dev/madaros_readiness_status.sh
+require_grep 'It never runs git push, git reset, git clean, git branch -D, or' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'owner confirmation required before any archive, push, or removal' scripts/dev/madaros_worktree_cleanup_plan.sh
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
