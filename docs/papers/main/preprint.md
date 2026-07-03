@@ -2,7 +2,7 @@
 topic_id: repo.docs.papers.main.preprint
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-07-03
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.preprint
 -->
@@ -17,13 +17,13 @@ Faculdade São Leopoldo Mandic, Campinas, SP, Brazil
 
 D.C.A. ORCID: 0009-0001-8671-8878
 
-March 2026
+July 2026
 
 ---
 
 ## Abstract
 
-We present a GPU compiler transformation that generates first-order GUM-style (JCGM 100:2008) uncertainty propagation alongside every arithmetic instruction in GPU kernel code, with optional correlated-input and second-order extensions. For each value register in emitted PTX, the compiler produces three shadow registers — uncertainty variance, validity predicate, and provenance bitset — that implement the law of propagation of uncertainty without programmer intervention. We study whether epistemic metadata can guide five GPU-specific execution-time optimizations without violating a specified uncertainty budget: (1) warp-level ballot voting on validity predicates to gate budget-bounded dual-path execution, (2) Shannon entropy of the uncertainty distribution for kernel variant selection, (3) provenance-aware topological DAG scheduling with automatic stream parallelism, (4) speculative guards for refinement kernels below an uncertainty threshold, and (5) provenance-weighted kernel fusion scoring. Across a pharmacokinetic case study involving four noisy sensors, the technique eliminates approximately 190 lines of manual variance mathematics per CUDA kernel. Overhead is characterized by an instruction count model (Section 3.3); hardware benchmarks are in progress. We situate this work against Enzyme's shadow registers for automatic differentiation and Uncertain\<T\>'s first-order uncertain types, arguing that GUM variance propagation through GPU tensor cores occupies an unaddressed point in the design space.
+We present a compiler synthesis that couples first-order GUM-style (JCGM 100:2008) uncertainty propagation with GPU kernel emission, including WMMA tensor-core paths. The contribution is architectural integration — not new uncertainty formulas — but automatic shadow-register emission at the PTX level, typed via `Knowledge<T>`, with optional correlated-input and second-order extensions. For each value register, the compiler maintains variance, validity, and provenance shadows that implement the law of propagation of uncertainty without programmer intervention. We study whether epistemic metadata can guide five GPU-specific execution-time optimizations under a formal uncertainty budget: (1) warp-level ballot voting on validity predicates for budget-bounded dual-path execution, (2) Shannon entropy of the relative-uncertainty distribution for kernel variant selection, (3) provenance-aware DAG scheduling with automatic stream parallelism, (4) speculative guards for refinement kernels below an uncertainty threshold, and (5) provenance-weighted kernel fusion scoring. A pharmacokinetic case study with four noisy sensors eliminates approximately 190 lines of manual variance mathematics per CUDA kernel. Instruction-count overhead is modelled exactly in Section 3.3; preliminary NVIDIA L4 GEMM measurements show a 2.19× geometric-mean latency ratio versus cuBLAS SGEMM before isolating shadow-register cost. We differentiate from Enzyme (Jacobian AD shadows), Puffin [16] (CPU uncertainty compiler), and GBEES-GPU [19] (grid-based Bayesian propagation), arguing that analytical GUM shadows through WMMA occupy an unaddressed design point.
 
 ---
 
@@ -39,29 +39,41 @@ This is a *mechanical transformation* of the same arithmetic the programmer alre
 
 ### The gap
 
-Three bodies of work surround this space without occupying it:
+Five categories of prior work surround this space without occupying the same design point:
 
 1. **Automatic differentiation on GPU.** Enzyme [2] inserts shadow registers alongside value registers in LLVM IR to propagate partial derivatives through GPU kernels. The structural mechanism — compiler-generated shadow computation in GPU IR — is analogous to our approach. However, Enzyme propagates *Jacobian entries* ($\partial f/\partial x_i$), not *combined variance* ($u_c^2(y)$). These are different mathematical objects with different composition rules (derivatives chain-multiply; variances quadrature-sum).
 
 2. **Uncertain types.** Bornholt et al. [3] introduced Uncertain\<T\> as a first-order type for uncertain data in managed languages. The type-level concept is valuable, but Uncertain\<T\> uses Monte Carlo sampling at runtime (not analytical propagation) and has no GPU backend.
 
-3. **CPU uncertainty libraries.** Python's `uncertainties` [4] and Julia's `Measurements.jl` [5] propagate uncertainty at the library level. Both are CPU-only, with measured overheads of 1,400x and 50-1,500x respectively [6,7], and neither can be used inside GPU kernels.
+3. **CPU uncertainty libraries and compilers.** Python's `uncertainties` [4], Julia's `Measurements.jl` [5], and Puffin [16] propagate uncertainty on CPU — the last as an automatic uncertainty compiler that rewrites source to call intrusive UQ routines. All are CPU-only, with reported overheads of 50–1,500× for library approaches [6,7], and none emit GPU PTX or WMMA shadow lanes.
 
-No prior work generates GUM-compliant variance propagation at the compiler level targeting GPU instruction sets. This paper fills that gap.
+4. **GPU distribution propagation.** GBEES-GPU [19] propagates high-dimensional probability distributions on GPU via grid-based Bayesian estimation. It targets full distribution evolution (Eulerian phase-space grids), not per-instruction analytical GUM variance shadows fused with general kernel arithmetic.
+
+5. **Tensor-core numerics.** Blanchard et al. [13], Fasi et al. [14], and Khattak and Mikaitis [20] characterize *rounding error* and hardware non-IEEE behaviour of NVIDIA tensor cores. Our work propagates *measurement uncertainty* (a runtime quantity attached to input data) through WMMA instructions — a different quantity with different composition rules.
+
+No prior system combines: (i) compiler-emitted first-order GUM variance shadows, (ii) PTX/WMMA instruction-level integration, and (iii) language-level `Knowledge<T>` typing with provenance gates. This paper studies that synthesis.
 
 ### Contributions
 
-We present five techniques, implemented in the Sounio compiler, that are — to our knowledge — novel:
+**Primary (design synthesis).**
 
-1. **Epistemic shadow lanes** (Section 3): a compiler pass that, for each arithmetic instruction on a value register `%r_val`, emits GUM variance propagation on a shadow register `%r_eps`, validity conjunction on `%p_valid`, and provenance OR-merge on `%r_prov`. Provenance uses bitwise OR (monotonic union) — not XOR — ensuring idempotent accumulation ($\text{prov}(a) \mathbin{|} \text{prov}(a) = \text{prov}(a)$, unlike XOR which self-cancels).
+1. **Epistemic shadow lanes** (Section 3): a compiler pass that, for each arithmetic instruction on a value register `%r_val`, emits GUM variance propagation on `%r_eps`, validity conjunction on `%p_valid`, and provenance OR-merge on `%r_prov`. Provenance uses bitwise OR (monotonic union) — not XOR — ensuring idempotent accumulation ($\text{prov}(a) \mathbin{|} \text{prov}(a) = \text{prov}(a)$).
 
-2. **Warp-vote epistemic fast-path** (Section 4.1): dual-path PTX where `vote.sync.ballot` on the validity predicate gates whether the warp executes full shadow propagation or a *budget-bounded* fast path that computes conservative uncertainty upper bounds. No prior system uses warp-level ballot voting on epistemic predicates. Critically, the fast path still propagates uncertainty — it does not skip shadow computation entirely, because small uncertainty $\neq$ zero uncertainty.
+2. **WMMA shadow tiles** (Section 2): dual `mma.sync.aligned` paths — one for values, one for uncertainty fragments — with element-wise quadrature across the inner dimension $k$, extending GUM product rules to tensor-core GEMM tiles.
 
-3. **Entropy-gated kernel dispatch** (Section 4.2): the host computes Shannon entropy $H(\epsilon)$ of the input uncertainty distribution and selects between kernel variants. No prior GPU compiler uses information-theoretic measures of data uncertainty for dispatch decisions. We note that entropy thresholds are currently calibrated for raw epsilon in $[0, 1]$; normalization to relative uncertainty ($\epsilon / |x|$) for unit-independence is straightforward but not yet implemented.
+3. **Five GPU-specific epistemic optimizations** (Section 4): warp-vote budget-bounded fast paths, entropy-gated dispatch, provenance-aware multi-stream scheduling, speculative refinement guards, and provenance-weighted fusion scoring — each gated by formal uncertainty budgets rather than ad hoc thresholds.
 
-4. **Provenance-aware DAG scheduling** (Section 4.3): kernels with disjoint provenance tags (determined by bitset intersection) are assigned to separate CUDA streams. The compiler emits structured metadata; the host glue parses it and generates multi-stream launch code.
+**Secondary (engineering).**
 
-5. **Speculative epistemic execution** (Section 4.4): uncertainty-threshold guards that conditionally defer refinement kernels when aggregate uncertainty is below a configurable $\epsilon$. The threshold must be tied to a formal uncertainty budget to be scientifically meaningful — an ad hoc runtime convention is insufficient.
+4. **Multi-backend emission** (Section 3.4): the same shadow-lane logic targets PTX, Metal, and SPIR-V backends from a single compiler IR.
+
+5. **Programmer effort elimination** (Section 5.1): a pharmacokinetic four-sensor fusion case study requires zero additional lines versus ~190 lines of manual CUDA variance plumbing.
+
+**Honest scope (what we do not claim).**
+
+- We do not claim the first uncertainty compiler; Puffin [16] already rewrites source for intrusive UQ on CPU.
+- We do not claim novel GUM formulas; the propagation rules follow JCGM 100:2008 [1].
+- We do not claim state-of-the-art GPU throughput; L4 GEMM measurements (Section 5.2) are preliminary and do not yet isolate shadow-register overhead from compiler maturity effects.
 
 ---
 
@@ -77,11 +89,11 @@ The GUM [1] specifies variance propagation for elementary operations assuming un
 | `div.f64 %c, %a, %b` | $u^2(a)/b^2 + a^2 u^2(b)/b^4$ | Eq. (10) |
 | `sqrt.f64 %c, %a` | $u^2(a) / (4a)$ | Eq. (13) |
 
-For tensor core operations (`mma.sync.aligned`), the variance of the output tile $C = AB$ is computed element-wise:
+For tensor core operations (`mma.sync.aligned`), the compiler emits **two** WMMA instructions per accumulation step: one on value fragments $(A, B)$ producing $C$, and one on uncertainty fragments $(u^2(A), u^2(B))$ with the same tile geometry. The output-tile variance is computed element-wise by quadrature (root-sum-square) across the inner dimension $k$:
 
 $$u^2(C_{ij}) = \sum_k \left[ B_{kj}^2 \cdot u^2(A_{ik}) + A_{ik}^2 \cdot u^2(B_{kj}) \right]$$
 
-which requires a shadow WMMA tile operating on uncertainty fragment operands alongside the data tile.
+This is the GUM product rule applied per $(i,j,k)$ triple, then summed — not a single WMMA on Jacobians. The shadow WMMA reuses the value tile's $k$-loop structure but operates on variance fragment operands in f64 (or f32 on backends without native f64).
 
 ---
 
@@ -122,7 +134,7 @@ and.pred  %p_c_valid, %p_a_valid, %p_b_valid;
 or.b64   %r_c_prov, %r_a_prov, %r_b_prov;
 ```
 
-A single source multiplication becomes 8 PTX instructions (1 value + 5 variance + 1 validity + 1 provenance). The shadow computation adds 7 instructions per multiply, 3 per add, and 9 per divide — a 4–10x instruction count overhead depending on the operation mix. Wall-clock overhead is expected to be lower than the instruction ratio due to instruction-level parallelism and operand reuse, but this must be verified with hardware benchmarks (Section 7.1).
+A single source multiplication becomes 8 PTX instructions (1 value + 5 variance + 1 validity + 1 provenance). The shadow computation adds 7 instructions per multiply, 3 per add, and 9 per divide — yielding an exact instruction-count ratio of 4–10× depending on operation mix (Section 3.3). Any wall-clock reduction below this ratio remains unverified and architecture-dependent (Section 5.2).
 
 ### 3.3 Overhead Model
 
@@ -130,7 +142,7 @@ For a kernel with $A$ additions, $M$ multiplications, and $D$ divisions, the ins
 
 $$\text{overhead} = \frac{A \cdot 4 + M \cdot 8 + D \cdot 10}{A + M + D}$$
 
-giving a range of 4x (addition-dominated) to 10x (division-dominated) in instruction count. This may yield substantially lower wall-clock overhead than the raw instruction ratio — shadow operations reuse operands already in registers, and GPU architectures hide latency through warp-level parallelism — but the magnitude of that reduction is architecture- and occupancy-dependent and requires hardware measurement (Section 7.2).
+The coefficients 4, 8, and 10 are exact instruction counts per operation class (Section 3.2). For pure addition kernels the ratio is exactly 4; for pure division kernels exactly 10. Mapping this ratio directly to a 4–10× *wall-clock* range assumes uniform per-instruction latency — an assumption we have not verified. Shadow operations may reuse operands already in registers and benefit from warp-level parallelism, but the magnitude of any wall-clock reduction is architecture-, occupancy-, and register-pressure-dependent (Section 5.2, Section 7.3).
 
 ### 3.4 Multi-Backend Emission
 
@@ -275,14 +287,14 @@ We compare the code required to compute drug concentration with GUM uncertainty 
 
 | Method | Overhead factor | GPU? | Analytical? | Source |
 |--------|----------------|------|-------------|--------|
-| Sounio shadow lanes | 4–10x instr. count (model) | Yes | Yes (GUM) | Section 3.3 |
+| Sounio shadow lanes | 4–10× instr. count (exact model); 2.19× L4 GEMM latency (preliminary) | Yes | Yes (GUM) | Sections 3.3, 5.2 |
 | Manual CUDA C++ | Same (if correct) | Yes | Yes | Manual |
 | Python `uncertainties` [4] | ~1,400x (reported) | No | Yes | Issue tracker [6] |
 | Julia `Measurements.jl` [5] | ~50–1,500x (reported) | No | Yes | Issue tracker [7] |
 | Monte Carlo ($10^4$ samples) | $\sim$10,000x | Yes | No | By construction |
 | Monte Carlo ($10^6$ samples) | $\sim$1,000,000x | Yes | No | By construction |
 
-**Important caveats.** The shadow lane overhead (4–10x instruction count depending on operation mix) is a *model prediction* based on instruction counting (Section 3.3). Wall-clock overhead depends on instruction-level parallelism, register pressure, occupancy, and memory latency hiding — factors not captured by the instruction model. Hardware benchmarks are in progress (Section 7.1). The overheads reported for `uncertainties` and `Measurements.jl` come from user-filed issue reports, not controlled benchmarks; we cite them as motivation, not as rigorous comparisons. Unlike Monte Carlo, analytical propagation provides exact first-order results in a single pass.
+**Important caveats.** The instruction-count ratio in Section 3.3 is an exact arithmetic model, not a measured wall-clock bound. Preliminary NVIDIA L4 (Ada Lovelace, sm\_89) GEMM measurements show a 2.19× geometric-mean latency ratio versus cuBLAS SGEMM at dimensions 1024–8192; these runs used `epistemic_enabled=false` and therefore do not yet isolate shadow-register overhead from compiler maturity effects. Full shadow-lane wall-clock characterization remains future work (Section 7.3). The overheads reported for `uncertainties` and `Measurements.jl` come from user-filed issue reports, not controlled benchmarks; we cite them as motivation, not as rigorous comparisons. Unlike Monte Carlo, analytical propagation provides exact first-order results in a single pass.
 
 ### 5.3 Correctness
 
@@ -302,15 +314,29 @@ The epistemic GPU stack comprises 9,122 lines of Sounio across 10 self-hosted mo
 
 ## 6. Related Work
 
-**Automatic differentiation on GPU.** Enzyme [2] is the closest structural precedent: it inserts shadow registers in LLVM IR for reverse-mode AD through GPU kernels. Our shadow lanes differ in *what* they propagate (GUM variance, not Jacobians) and *how* they compose (quadrature sum, not chain rule). The two techniques are complementary — Enzyme could compute the sensitivity coefficients that GUM requires for correlated inputs.
+**Table 1. Design-space positioning.** Rows summarize what each system propagates, whether it targets GPU kernels, and whether it is compiler-integrated. “Analytical GUM” means first-order variance quadrature per JCGM 100:2008, not Monte Carlo or full distribution grids.
 
-**Uncertain types.** Uncertain\<T\> [3] demonstrated first-order uncertain types in managed languages, but used Monte Carlo sampling and had no GPU backend. Probabilistic programming languages (Pyro [11], Stan [12]) model uncertainty through Bayesian inference on GPU, but are inference frameworks rather than general-purpose languages.
+| System | Quantity propagated | GPU kernels | Compiler-integrated | Analytical GUM | WMMA shadows |
+|--------|--------------------:|:-----------:|:-------------------:|:--------------:|:------------:|
+| Puffin [16] | Epistemic + aleatory UQ | No | Yes (source rewrite) | Intrusive | No |
+| Enzyme [2] | Jacobian entries | Yes | Yes (LLVM IR) | No (AD chain rule) | No |
+| Uncertain\<T\> [3] | Monte Carlo samples | No | No (library type) | No | No |
+| `uncertainties` [4] / `Measurements.jl` [5] | GUM variance | No | No | Yes | No |
+| GBEES-GPU [19] | Phase-space distributions | Yes | No | No (grid Bayes) | No |
+| Fasi et al. [14] / Khattak & Mikaitis [20] | Rounding / hardware error | N/A | No | No | Analysis only |
+| **Sounio shadow lanes** | **GUM variance + provenance** | **Yes** | **Yes (self-hosted)** | **Yes** | **Yes** |
 
-**Tensor core error analysis.** Blanchard et al. [13] and Fasi et al. [14] characterized the numerical error of NVIDIA tensor cores through mathematical analysis. Our work differs fundamentally: we propagate *measurement uncertainty* (a runtime quantity attached to input data) through WMMA instructions, not *rounding error* (a hardware property).
+**Automatic differentiation on GPU.** Enzyme [2] is the closest structural precedent: shadow registers in LLVM IR for reverse-mode AD through GPU kernels. Our lanes differ in *what* they propagate (combined variance $u_c^2$, not Jacobian entries) and *how* they compose (quadrature sum, not chain rule). The techniques are complementary — Enzyme could supply sensitivity coefficients for correlated GUM inputs.
 
-**CPU uncertainty tools.** The GUM Tree Calculator [15], Python `uncertainties` [4], Julia `Measurements.jl` [5], and Puffin [16] all implement uncertainty propagation on CPU. None target GPU, and all suffer significant overhead (50-1,500x) compared to analytical propagation at the compiler level.
+**Uncertainty compilers and CPU libraries.** Puffin [16] is, to our knowledge, the only prior work explicitly framed as an “uncertainty compiler,” but it targets CPU Python source and intrusive UQ library calls — not PTX/WMMA emission. The GUM Tree Calculator [15], Python `uncertainties` [4], and Julia `Measurements.jl` [5] provide analytical GUM on CPU with reported overheads of 50–1,500× [6,7].
 
-**GPU kernel dispatch.** Stream-K++ [8] and Triton's autotuner [10] select kernel variants based on performance characteristics. LithOS [17] atomizes kernels for fine-grained scheduling. None use information-theoretic measures of data properties for dispatch decisions.
+**GPU uncertainty propagation.** GBEES-GPU [19] accelerates grid-based Bayesian estimation for nonlinear dynamics on GPU. It evolves full probability distributions over phase space; our shadows track per-register GUM variance alongside ordinary kernel arithmetic.
+
+**Uncertain types and probabilistic programming.** Uncertain\<T\> [3] demonstrated first-order uncertain types in managed languages via Monte Carlo sampling, with no GPU backend. Pyro [11] and Stan [12] model uncertainty through Bayesian inference — inference frameworks, not general-purpose kernel compilers.
+
+**Tensor core numerics.** Blanchard et al. [13], Fasi et al. [14], and Khattak and Mikaitis [20] characterize rounding behaviour and hardware non-IEEE features of NVIDIA tensor cores. We propagate *measurement uncertainty* attached to input data through WMMA — a distinct quantity from hardware rounding error.
+
+**GPU kernel dispatch.** Stream-K++ [8] and Triton's autotuner [10] select kernel variants from performance characteristics. LithOS [17] atomizes kernels for fine-grained scheduling. None use information-theoretic measures of input uncertainty for dispatch decisions.
 
 ---
 
@@ -370,6 +396,21 @@ Epistemic shadow lanes demonstrate that first-order GUM uncertainty propagation 
 
 ---
 
+## Software Availability and Reproducibility
+
+Source code, compiler tests, and benchmark artefacts are maintained in the public Sounio repository: <https://github.com/Sounio-lang/sounio>. The epistemic GPU stack lives under `self-hosted/gpu/`; shadow-lane correctness tests are in `tests/gpu/`. Preliminary L4 GEMM measurements cited in Section 5.2 are documented in `benchmarks/results/NVIDIA_L4_BENCHMARKS.md` with machine-readable data in `benchmarks/results/l4_raw_data.json`. To reproduce the compiler check surface:
+
+```bash
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+./bin/souc check self-hosted/gpu/hlir_to_gpu.sio
+./bin/souc run tests/run-pass/epistemic_kernel_shadow.sio
+bash scripts/run_sio_test_suite.sh epistemic_kernel_shadow
+```
+
+GPU wall-clock reproduction requires NVIDIA CUDA hardware and the dispatch scripts referenced in the benchmark report.
+
+---
+
 ## References
 
 [1] JCGM 100:2008, "Evaluation of measurement data — Guide to the expression of uncertainty in measurement (GUM)," Joint Committee for Guides in Metrology, 2008.
@@ -402,8 +443,12 @@ Epistemic shadow lanes demonstrate that first-order GUM uncertainty propagation 
 
 [15] B. D. Hall, "GTC: The GUM Tree Calculator," Measurement Standards Laboratory of New Zealand.
 
-[16] A. Gray, M. De Angelis, and S. Ferson, "Towards an automatic uncertainty compiler," Int. J. Approximate Reasoning, 2023.
+[16] N. Gray, M. De Angelis, and S. Ferson, "The Creation of Puffin, the Automatic Uncertainty Compiler," arXiv:2110.10153, 2021; Int. J. Approximate Reasoning, 2023.
 
 [17] P. H. Coppock et al., "LithOS: An operating system for efficient machine learning on GPUs," in Proc. SOSP, 2025.
 
 [18] JCGM 101:2008, "Supplement 1 to the GUM — Propagation of distributions using a Monte Carlo method," 2008.
+
+[19] B. L. Hanson, C. Rubio, A. García-Gutiérrez, and T. Bewley, "GBEES-GPU: An efficient parallel GPU algorithm for high-dimensional nonlinear uncertainty propagation," arXiv:2508.13986, 2025.
+
+[20] F. A. Khattak and M. Mikaitis, "Accurate Models of NVIDIA Tensor Cores," arXiv:2512.07004, 2025.
