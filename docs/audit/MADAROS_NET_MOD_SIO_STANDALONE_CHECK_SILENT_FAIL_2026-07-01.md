@@ -292,3 +292,33 @@ established Bug C workaround:
 Verified via `scripts/run_sio_test_suite.sh --filter`: `test_em_e2e` passes;
 `test_lib_surface` still fails (expected, tracked against #575); no regression on the
 full set of tests fixed earlier this week.
+
+## Update 2026-07-03: issue #570 (unknown-field-access / type-mismatch cluster) — real bug, not stdlib content, same shape as Bug A/D's return-type-tracking gap
+
+Issue #570 was filed at low confidence — it was unclear whether `test_mesh_core.sio` and
+`test_serial_core.sio` had genuine content bugs or were hitting a checker issue.
+Confirmed **checker issue**, not content: `stdlib/mesh/pure/types.sio` (`Mesh`) and
+`stdlib/serial/pure/types.sio` (`SerialConfig`/`SerialBuffer`) all already had every
+field correctly `pub`, and `mesh_get_vertex` already correctly returns `[f64; 3]`. Both
+test files call their target module functions via *3-segment* fully-qualified paths
+(`mesh::pure::types::mesh_get_vertex(...)`, `serial::pure::types::serial_config_new(...)`)
+— already known to *resolve* fine per Bug A (3+ segments), so this isn't Bug A. Instead:
+the checker fails to track the **return type** of a 3-segment fully-qualified call
+correctly for later use — indexing the result (`v[0]` on a `mesh_get_vertex(...)`
+result) or field-accessing it (`cfg.baud_rate` on a `serial_config_new(...)` result)
+then fails with a type/field error, even though the value's real type is completely
+correct.
+
+This is the same underlying gap already noted for `tests/stdlib/simulation/
+test_simulation_core.sio`'s `ts.n_points` fix two updates ago in this dispatch ("Bug
+A/D also disrupting return-type tracking through a qualified call chain, not just direct
+symbol/arity resolution") — confirmed here to also apply at 3 segments, not just 2, and
+to indexing as well as field access. Fixed both files the same way: `use pkg::mod::*;`
++ bare calls (binding the qualified call's result to a `let`/`var` first, then indexing/
+field-accessing the *locally-typed* value, resolves cleanly). No stdlib source files
+needed changes this time — `mesh/pure/types.sio` and `serial/pure/types.sio` were
+already correct.
+
+Verified against both Madaros and a freshly rebuilt `lean_single`: both files pass
+cleanly on both engines (no Madaros-only regression this time, unlike the #567/#568
+fixes). No regression on the full set of tests fixed earlier this week.
