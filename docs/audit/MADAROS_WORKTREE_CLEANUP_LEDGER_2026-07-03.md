@@ -85,6 +85,33 @@ optional `DIR.tar.gz` + sha256. It does **not** push branches, remove worktrees,
 delete files, reset, or clean; it is evidence for the operator decision, not the
 cleanup itself.
 
+After reviewing the packet, create the machine-readable approval template:
+
+```bash
+scripts/dev/madaros_worktree_cleanup_approval.sh template \
+  --plan-tsv /tmp/madaros-cleanup-plan/madaros-cleanup-plan.tsv \
+  --out-dir /tmp/madaros-cleanup-approval
+```
+
+The template defaults every row to `decision=hold`. The operator must edit rows
+to one of `approve_salvage_remove`, `approve_discard_remove`, or
+`approve_remove_clean`, and must fill `approver`, `approved_utc`, and
+`approval_id`. Validate and render the reviewed commands with:
+
+```bash
+scripts/dev/madaros_worktree_cleanup_approval.sh validate \
+  --manifest-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.tsv
+scripts/dev/madaros_worktree_cleanup_approval.sh render \
+  --manifest-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.tsv \
+  --out-dir /tmp/madaros-cleanup-approved
+```
+
+Rendered mutating commands stay commented unless the renderer is invoked with
+`--allow-mutating-output` and
+`SOUNIO_MADAROS_CLEANUP_APPROVAL=I_ACCEPT_PUSH_BEFORE_DELETE`. This preserves
+the explicit approval boundary while making the post-approval command stream
+reviewable and reproducible.
+
 ## Current Blocker To `--strict`
 
 Readiness production proof is green, but the stricter worktree audit still

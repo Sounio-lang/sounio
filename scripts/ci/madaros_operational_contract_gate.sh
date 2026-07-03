@@ -134,6 +134,61 @@ require_salvage_packet_evidence() {
   [[ ! -e "$out_dir.tar.gz" ]] || fail "salvage packet wrote tarball despite --no-tar"
 }
 
+require_cleanup_approval_evidence() {
+  local tmp_dir audit_tsv out_dir manifest approved render_out commands actual_header expected_header validate_out
+  tmp_dir="$(mktemp -d /tmp/madaros-contract-approval.XXXXXX)"
+  audit_tsv="$tmp_dir/worktree-audit.tsv"
+  out_dir="$tmp_dir/template"
+
+  printf 'path\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tcritical_dirty\tcritical_vs_base\tpr\n' > "$audit_tsv"
+  printf '%s\tdetached\t%s\t\tdirty\t1\t0\t0\tM scripts/dev/madaros_worktree_cleanup_approval.sh\tscripts/dev/madaros_worktree_cleanup_approval.sh\t\n' \
+    "$ROOT_DIR" "$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" >> "$audit_tsv"
+
+  SOUNIO_MADAROS_CLEANUP_ALLOW_RE='^$' \
+    scripts/dev/madaros_worktree_cleanup_approval.sh template --audit-tsv "$audit_tsv" --out-dir "$out_dir" >/dev/null
+
+  manifest="$out_dir/madaros-cleanup-approval.tsv"
+  require_file "$manifest"
+
+  expected_header='decision	approver	approved_utc	approval_id	category	path	branch	head	state	dirty_count	remote_ref	salvage_ref	disposition	critical_dirty	critical_vs_base	operator_note'
+  IFS= read -r actual_header < "$manifest"
+  [[ "$actual_header" == "$expected_header" ]] ||
+    fail "cleanup approval template header drifted: $actual_header"
+
+  validate_out="$(scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$manifest")"
+  grep -Fq 'actionable_rows=0' <<<"$validate_out" ||
+    fail "cleanup approval default template should have zero actionable rows"
+
+  approved="$tmp_dir/approved.tsv"
+  awk -F '\t' 'BEGIN { OFS = "\t" }
+    NR == 1 { print; next }
+    NR == 2 {
+      $1 = "approve_salvage_remove"
+      $2 = "operator"
+      $3 = "2026-07-03T00:00:00Z"
+      $4 = "APPROVAL-fixture"
+      $16 = "fixture approval row"
+    }
+    { print }
+  ' "$manifest" > "$approved"
+
+  validate_out="$(scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$approved")"
+  grep -Fq 'actionable_rows=1' <<<"$validate_out" ||
+    fail "cleanup approval approved fixture should have one actionable row"
+
+  render_out="$tmp_dir/render"
+  scripts/dev/madaros_worktree_cleanup_approval.sh render --manifest-tsv "$approved" --out-dir "$render_out" >/dev/null
+  commands="$render_out/madaros-cleanup-approved.commands.sh"
+  require_file "$commands"
+  require_grep '# git push origin' "$commands"
+  require_grep '# git worktree remove' "$commands"
+  require_no_uncommented_mutation "$commands"
+
+  if scripts/dev/madaros_worktree_cleanup_approval.sh render --manifest-tsv "$approved" --out-dir "$tmp_dir/blocked" --allow-mutating-output >/dev/null 2>&1; then
+    fail "cleanup approval render allowed mutating output without confirmation token"
+  fi
+}
+
 require_no_uncommented_mutation() {
   local plan_sh="$1"
   awk '
@@ -159,6 +214,7 @@ require_file scripts/ci/madaros_full_gate.sh
 require_file scripts/ci/madaros_source_to_elf_gate.sh
 require_executable scripts/dev/madaros_two_gate.sh
 require_executable scripts/dev/madaros_worktree_cleanup_plan.sh
+require_executable scripts/dev/madaros_worktree_cleanup_approval.sh
 require_executable scripts/dev/madaros_worktree_salvage_packet.sh
 require_file .github/workflows/ci.yml
 
@@ -226,9 +282,12 @@ require_grep 'unique_commits_origin_main' scripts/dev/madaros_worktree_cleanup_p
 require_grep 'tracked_diff_added' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'critical_vs_base' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep '# evidence=origin_main_unique:' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh' scripts/dev/madaros_readiness_status.sh
+require_grep 'I_ACCEPT_PUSH_BEFORE_DELETE' scripts/dev/madaros_worktree_cleanup_approval.sh
 require_grep 'tracked/staged binary diffs' scripts/dev/madaros_worktree_salvage_packet.sh
 require_grep 'No branches pushed or worktrees removed' scripts/dev/madaros_worktree_salvage_packet.sh
 require_cleanup_planner_evidence
+require_cleanup_approval_evidence
 require_salvage_packet_evidence
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
