@@ -15,7 +15,9 @@ Usage: scripts/dev/madaros_worktree_cleanup_plan.sh [options]
 
 Build a non-destructive cleanup plan for Madaros critical dirty worktrees.
 The script writes an audit TSV, a classified cleanup TSV, and a commented shell
-plan. It never runs git push, git reset, git clean, git branch -D, or
+plan. The cleanup TSV includes unique-commit counts, dirty tracked/untracked
+file counts, tracked diff numstat, critical-vs-base paths, and a suggested
+salvage ref. It never runs git push, git reset, git clean, git branch -D, or
 git worktree remove.
 
 Options:
@@ -171,6 +173,36 @@ slug_for_path() {
   basename "$1" | sed 's/[^A-Za-z0-9._-]\+/-/g; s/^-//; s/-$//'
 }
 
+archive_branch_for_path() {
+  printf 'archive/madaros-%s' "$(slug_for_path "$1")"
+}
+
+count_commits() {
+  local wt_path="$1" rev_range="$2"
+  git -C "$wt_path" rev-list --count "$rev_range" 2>/dev/null || printf '?'
+}
+
+dirty_file_counts() {
+  local wt_path="$1"
+  git -C "$wt_path" status --porcelain 2>/dev/null | awk '
+    /^\?\?/ { untracked++; next }
+    { tracked++ }
+    END { printf "%d %d", tracked, untracked }
+  '
+}
+
+tracked_diff_numstat() {
+  local wt_path="$1"
+  git -C "$wt_path" diff --numstat 2>/dev/null | awk '
+    {
+      files++
+      if ($1 ~ /^[0-9]+$/) added += $1
+      if ($2 ~ /^[0-9]+$/) deleted += $2
+    }
+    END { printf "%d %d %d", files, added, deleted }
+  '
+}
+
 emit_unallowed_rows() {
   awk -F '\t' -v allow_re="$ALLOW_RE" -v OFS=$'\034' '
     NR > 1 && $9 != "" {
@@ -185,22 +217,34 @@ emit_unallowed_rows() {
 emit_plan_rows() {
   awk -F '\t' -v OFS=$'\034' '
     NR > 1 {
-      print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+      print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22
     }
   ' "$PLAN_TSV"
 }
 
 {
-  printf 'category\tpath\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tremote_ref\tprs\tcritical_dirty\tdisposition\n'
+  printf 'category\tpath\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tremote_ref\tprs\tunique_commits_origin_main\tunique_commits_upstream\ttracked_dirty_files\tuntracked_dirty_files\ttracked_diff_files\ttracked_diff_added\ttracked_diff_deleted\tsalvage_ref\tcritical_dirty\tcritical_vs_base\tdisposition\n'
 
-  emit_unallowed_rows | while IFS=$'\034' read -r path branch head upstream state dirty_count ahead behind critical_dirty critical_vs pr; do
+  emit_unallowed_rows | while IFS=$'\034' read -r path branch head upstream state dirty_count ahead behind critical_dirty critical_vs _audit_pr; do
     remote_ref="$(remote_ref_for_branch "$branch")"
     prs="$(prs_for_branch "$branch")"
     category="$(category_for_row "$path" "$branch")"
     disposition="$(disposition_for_category "$category" "$remote_ref" "$prs")"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    unique_origin_main="$(count_commits "$path" "origin/main..HEAD")"
+    if [[ -n "$upstream" ]]; then
+      unique_upstream="$(count_commits "$path" "$upstream..HEAD")"
+    else
+      unique_upstream=""
+    fi
+    read -r tracked_dirty untracked_dirty <<<"$(dirty_file_counts "$path")"
+    read -r tracked_diff_files tracked_diff_added tracked_diff_deleted <<<"$(tracked_diff_numstat "$path")"
+    salvage_ref="$(archive_branch_for_path "$path")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$category" "$path" "$branch" "$head" "$upstream" "$state" "$dirty_count" \
-      "$ahead" "$behind" "$remote_ref" "$prs" "$critical_dirty" "$disposition"
+      "$ahead" "$behind" "$remote_ref" "$prs" "$unique_origin_main" "$unique_upstream" \
+      "$tracked_dirty" "$untracked_dirty" "$tracked_diff_files" "$tracked_diff_added" \
+      "$tracked_diff_deleted" "$salvage_ref" "$critical_dirty" "$critical_vs" "$disposition"
   done
 } > "$PLAN_TSV"
 
@@ -216,15 +260,16 @@ set -euo pipefail
 
 HEADER
 
-  emit_plan_rows | while IFS=$'\034' read -r category path branch head upstream state dirty_count ahead behind remote_ref prs critical_dirty disposition; do
+  emit_plan_rows | while IFS=$'\034' read -r category path branch head upstream state dirty_count ahead behind remote_ref prs unique_origin_main unique_upstream tracked_dirty untracked_dirty tracked_diff_files tracked_diff_added tracked_diff_deleted salvage_ref critical_dirty critical_vs_base disposition; do
     path_q="$(quote_sh "$path")"
-    archive_branch="archive/madaros-$(slug_for_path "$path")"
-    archive_q="$(quote_sh "$archive_branch")"
+    archive_q="$(quote_sh "$salvage_ref")"
+    patch_q="$(quote_sh "/tmp/$(basename "$path").dirty.patch")"
     echo "# category=$category branch=$branch head=$head remote_ref=$remote_ref"
     echo "# disposition=$disposition"
+    echo "# evidence=origin_main_unique:$unique_origin_main upstream_unique:${unique_upstream:-n/a} tracked_dirty:$tracked_dirty untracked_dirty:$untracked_dirty tracked_diff:$tracked_diff_files files +$tracked_diff_added -$tracked_diff_deleted critical_vs_base:${critical_vs_base:-none}"
     echo "git -C $path_q status --short --branch"
     echo "git -C $path_q diff --stat"
-    echo "git -C $path_q diff > /tmp/$(basename "$path").dirty.patch"
+    echo "git -C $path_q diff > $patch_q"
     if [[ "$category" == "active_other_lane_wip" || "$category" == "unclassified" ]]; then
       echo "# owner confirmation required before any archive, push, or removal"
       echo

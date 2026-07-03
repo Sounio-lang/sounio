@@ -38,7 +38,10 @@ scripts/dev/madaros_worktree_cleanup_plan.sh
 It writes:
 
 - `worktree-audit.tsv` — raw `scripts/dev/worktree_branch_audit.sh` inventory.
-- `madaros-cleanup-plan.tsv` — classified unallowed critical dirty worktrees.
+- `madaros-cleanup-plan.tsv` — classified unallowed critical dirty worktrees,
+  including `unique_commits_origin_main`, `unique_commits_upstream`,
+  tracked/untracked dirty file counts, tracked diff numstat,
+  `critical_vs_base`, and a suggested `salvage_ref`.
 - `madaros-cleanup-plan.commands.sh` — inspection and salvage commands, with
   mutating push/remove commands commented out.
 

@@ -29,6 +29,82 @@ require_grep() {
   grep -Fq -- "$pattern" "$file" || fail "missing marker in $file: $pattern"
 }
 
+require_cleanup_planner_evidence() {
+  local tmp_dir audit_tsv out_dir plan_tsv plan_sh real_out real_plan real_sh head actual_header expected_header row_count evidence_count
+  tmp_dir="$(mktemp -d /tmp/madaros-contract-cleanup.XXXXXX)"
+  audit_tsv="$tmp_dir/worktree-audit.tsv"
+  out_dir="$tmp_dir/out"
+  head="$(git rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
+
+  printf 'path\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tcritical_dirty\tcritical_vs_base\tpr\n' > "$audit_tsv"
+  printf '%s\tdetached\t%s\t\tdirty\t1\t0\t0\tM scripts/dev/madaros_worktree_cleanup_plan.sh\tscripts/dev/madaros_worktree_cleanup_plan.sh\t\n' \
+    "$ROOT_DIR" "$head" >> "$audit_tsv"
+
+  SOUNIO_MADAROS_CLEANUP_ALLOW_RE='^$' \
+    scripts/dev/madaros_worktree_cleanup_plan.sh --audit-tsv "$audit_tsv" --out-dir "$out_dir" >/dev/null
+
+  plan_tsv="$out_dir/madaros-cleanup-plan.tsv"
+  plan_sh="$out_dir/madaros-cleanup-plan.commands.sh"
+  require_file "$plan_tsv"
+  require_file "$plan_sh"
+
+  expected_header='category	path	branch	head	upstream	state	dirty_count	ahead	behind	remote_ref	prs	unique_commits_origin_main	unique_commits_upstream	tracked_dirty_files	untracked_dirty_files	tracked_diff_files	tracked_diff_added	tracked_diff_deleted	salvage_ref	critical_dirty	critical_vs_base	disposition'
+  IFS= read -r actual_header < "$plan_tsv"
+  [[ "$actual_header" == "$expected_header" ]] ||
+    fail "cleanup planner header drifted: $actual_header"
+
+  awk -F '\t' '
+    NR == 2 {
+      if (NF != 22) {
+        exit 1
+      }
+      if ($12 == "" || $14 == "" || $15 == "" || $16 == "" || $17 == "" || $18 == "") {
+        exit 1
+      }
+      if ($19 !~ /^archive\/madaros-/ || $21 == "") {
+        exit 1
+      }
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$plan_tsv" || fail "cleanup planner evidence row missing or malformed"
+
+  grep -Eq '^# evidence=origin_main_unique:[^ ]+ upstream_unique:[^ ]+ tracked_dirty:[0-9]+ untracked_dirty:[0-9]+ tracked_diff:[0-9]+ files \+[0-9]+ -[0-9]+ critical_vs_base:' "$plan_sh" ||
+    fail "cleanup planner command evidence comment missing"
+
+  require_no_uncommented_mutation "$plan_sh"
+
+  # Live audit validates row shape and non-destructive output; cleanup counts may drift.
+  real_out="$tmp_dir/real"
+  scripts/dev/madaros_worktree_cleanup_plan.sh --out-dir "$real_out" >/dev/null
+  real_plan="$real_out/madaros-cleanup-plan.tsv"
+  real_sh="$real_out/madaros-cleanup-plan.commands.sh"
+  require_file "$real_plan"
+  require_file "$real_sh"
+  IFS= read -r actual_header < "$real_plan"
+  [[ "$actual_header" == "$expected_header" ]] ||
+    fail "real cleanup planner header drifted: $actual_header"
+  awk -F '\t' 'NR > 1 && NF != 22 { exit 1 }' "$real_plan" ||
+    fail "real cleanup planner emitted a malformed row"
+  row_count="$(awk 'NR > 1 { rows++ } END { print rows + 0 }' "$real_plan")"
+  evidence_count="$(grep -c '^# evidence=origin_main_unique:' "$real_sh" || true)"
+  [[ "$row_count" == "$evidence_count" ]] ||
+    fail "real cleanup planner evidence comments do not match rows: rows=$row_count evidence=$evidence_count"
+  require_no_uncommented_mutation "$real_sh"
+}
+
+require_no_uncommented_mutation() {
+  local plan_sh="$1"
+  awk '
+    /^[[:space:]]*git[[:space:]]+push([[:space:]]|$)/ { exit 1 }
+    /^[[:space:]]*git[[:space:]]+worktree[[:space:]]+remove([[:space:]]|$)/ { exit 1 }
+    /^[[:space:]]*git[[:space:]]+branch[[:space:]]+-[dD]([[:space:]]|$)/ { exit 1 }
+    /^[[:space:]]*git[[:space:]]+-C[[:space:]][^[:space:]]+[[:space:]]+(reset|clean)([[:space:]]|$)/ { exit 1 }
+  ' "$plan_sh" || fail "cleanup planner emitted an uncommented mutating command: $plan_sh"
+}
+
 require_file docs/MADAROS_STATUS.md
 require_file docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
 require_file docs/status/madaros_main_proof_17d115.md
@@ -104,7 +180,12 @@ require_grep 'bin/madaros-linux-x86_64' bin/souc
 require_grep 'exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros"' bin/souc
 require_grep 'artifacts/self-hosted/madaros.gate-receipt' .gitignore
 require_grep 'cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh' scripts/dev/madaros_readiness_status.sh
-require_grep 'It never runs git push, git reset, git clean, git branch -D, or' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'git push, git reset, git clean, git branch -D' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'owner confirmation required before any archive, push, or removal' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'unique_commits_origin_main' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'tracked_diff_added' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'critical_vs_base' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep '# evidence=origin_main_unique:' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_cleanup_planner_evidence
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
