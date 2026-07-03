@@ -590,6 +590,10 @@ Integration shepherd:
   scripts/dev/madaros_readiness_status.sh --strict
   scripts/dev/madaros_worktree_cleanup_plan.sh
   scripts/dev/madaros_worktree_cleanup_approval.sh template --plan-tsv /tmp/madaros-cleanup-plan/madaros-cleanup-plan.tsv --out-dir /tmp/madaros-cleanup-approval
+  scripts/dev/madaros_cleanup_suggested_manifest.sh \
+    --manifest-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.tsv \
+    --decisions-tsv /tmp/madaros-cleanup-decision-packet/suggested-cleanup-decisions.tsv \
+    --out-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.suggested-unapproved.tsv
   scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
   scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue
   scripts/dev/madaros_readiness_status.sh --production-ready

@@ -99,8 +99,22 @@ to one of `approve_salvage_remove`, `approve_discard_remove`,
 `approver`, `approved_utc`, and `approval_id`. `approve_keep_active_allowlist`
 means "this dirty worktree remains a live owned lane"; it is valid approval
 metadata for readiness/audit allowlisting, but the renderer emits only
-inspection commands and no cleanup/push/remove commands for that row. Validate
-and render the reviewed commands with:
+inspection commands and no cleanup/push/remove commands for that row.
+
+If a reviewed recommendations file exists, generate an operator-review manifest
+without manually copying decisions:
+
+```bash
+scripts/dev/madaros_cleanup_suggested_manifest.sh \
+  --manifest-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.tsv \
+  --decisions-tsv /tmp/madaros-cleanup-decision-packet/suggested-cleanup-decisions.tsv \
+  --out-tsv /tmp/madaros-cleanup-approval/madaros-cleanup-approval.suggested-unapproved.tsv
+```
+
+The suggested manifest is intentionally **not approval**: every actionable row
+uses `TODO_REQUIRED` approval fields, so validation must fail until the operator
+fills `approver`, `approved_utc`, and `approval_id`. Validate and render the
+reviewed commands with:
 
 ```bash
 scripts/dev/madaros_worktree_cleanup_approval.sh validate \
