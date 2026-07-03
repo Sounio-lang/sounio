@@ -28,6 +28,8 @@ Completed before this ledger:
   `0fdaa2b1c740c6e04b533eee0b90e335b3bf728f`.
 - PR #591 merged planner evidence columns plus live-audit shape validation at
   `3df24a04af6b35e4f710663accb03f9f97825b0a`.
+- PR #592 synchronized the status docs after PR #591 at
+  `246cd44e59026b8ca6fecd72336e631036015f07`.
 - `canon/madaros-greenline` is protected, force-push/delete are disabled,
   admins are enforced, strict required checks are enabled, and
   `Madaros Greenline Gate` is required.
