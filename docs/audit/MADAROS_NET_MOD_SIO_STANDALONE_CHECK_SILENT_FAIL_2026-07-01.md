@@ -467,3 +467,76 @@ untouched, out of this issue's scope.
 Verified against a freshly rebuilt `lean_single`: all 3 kinetics-cluster tests plus the
 other 18 tests fixed this week still pass (21 total, zero regressions). Madaros shows
 the same pre-existing E011 divergence already documented above — not new.
+
+## Update 2026-07-03 (continued): issue #580 (ode.sio audit) — one more severe new bug found, this week's audit chain closed
+
+Picked up issue #580 (`stdlib/epistemic/ode.sio` had ~14 pre-existing, non-fatal
+errors — the last item in this whole audit chain). All fixed; the file now checks with
+zero real errors (only the expected "no main" library-file artifact).
+
+**5 "effect not declared in function signature"** — `estate_set` (mutates `s.values`/
+`s.variances`, needed `Mut`, never declared), `ode_params_set` (same shape), and
+`print_uncertainty_budget` (needed `Mut` alongside its existing `with IO` — the
+"missing" effect wasn't obvious from the error text alone; found by testing `Mut`
+directly, matching this week's most common gap). Ordinary test-authoring omissions
+(#571's shape), not checker bugs.
+
+**Bug H — a `*ref = ...` dereference-assignment lexically following an earlier
+function-call statement in the same function corrupts lean_single's type inference for
+that assignment, even for a pure literal write with no arithmetic.** By far the most
+severe bug found this week — it isn't specific to arithmetic, tuples, qualified paths,
+or literals; it's about control flow shape. Isolated progressively with minimal repros
+outside stdlib:
+```sio
+fn noop() -> i64 { 0 }
+fn write_only(n: &!i64) with Mut {
+    noop()
+    *n = 999          // error: arithmetic operands must have matching numeric types
+}                      // (a LITERAL write, no arithmetic operator anywhere in source)
+```
+`*n = 999` as the function's *first* statement (no preceding call) works fine. Reading
+`*n` into a local *before* any call, then using the local, works fine. A plain `var`
+counter (not a dereferenced reference) increments correctly after any number of
+preceding calls. Only a dereference EXPRESSION (`*ref`, read or write) appearing
+textually after an earlier call statement, in the same function, is corrupted — and the
+call itself needn't touch the reference in question, or take any arguments at all
+(`noop()` takes none). The fix: extract the dereference-assignment into its own tiny
+function, called as an ordinary statement from the outer function:
+```sio
+fn bump_n(n: &!i64) with Mut { *n = *n + 1 }     // safe: this IS its first statement
+fn outer(n: &!i64) with Mut {
+    noop()
+    bump_n(n)        // fine — the deref lives inside bump_n, not here
+}
+```
+Applied this exact pattern to `stdlib/epistemic/ode.sio`'s `rk4_step` and `rk45_step`,
+which call `ode_rhs_dispatch(...)` 4-6 times each, incrementing a `n_evals: &!i64`
+counter inline after every call (`*n_evals = *n_evals + 1`, 10 total sites across both
+functions) — extracted to a shared `bump_n_evals(n: &!i64)` helper, called instead of
+the inline dereference at each site.
+
+**Why this didn't already break `compute_jacobian_state`/`compute_jacobian_params`**,
+which use the identical `*n_evals = *n_evals + 2` pattern and share the same parameter
+name: their increment sites are the *first* dereference of `n_evals` reached inside a
+nested loop body that itself contains the preceding `ode_rhs_dispatch`-family calls —
+still technically "after a call", so this is likely a difference in exactly which
+prior-call/prior-deref sequences trigger the corruption rather than a clean rule; not
+fully characterized. Left untouched since they don't currently error — flagging here so
+a future compiler-side fix attempt knows this pair exists as a "control" case that
+currently passes.
+
+**Result:** `stdlib/epistemic/ode.sio` now checks with zero errors (previously 14, plus
+5 more effect-annotation gaps found once those were fixed first and the arithmetic
+errors could be isolated cleanly). `stdlib/chemistry/kinetics.sio`'s own residual error
+count (tracked separately, non-fatal, unrelated to this issue) is unchanged by this fix.
+
+This closes out the full audit chain opened by issue #575: every file transitively
+reachable from `tests/stdlib/chemistry/test_kinetics_core.sio` now checks clean, and
+`Full Test Suite` CI reached 0 failures for the first time this week (1310 pass) as of
+this issue's merge — `Contracts` (previously failing since before this week's work
+began, via an unrelated specialized ontology-validation driver) also went green,
+apparently as a side effect of `ontology.sio`'s cleanup in the #579 update above.
+
+Verified against a freshly rebuilt `lean_single`: all 21 tests fixed this week still
+pass, zero regressions. Madaros shows the same pre-existing E011 divergence already
+documented above — not new.
