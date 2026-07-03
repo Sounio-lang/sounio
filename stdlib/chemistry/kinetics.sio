@@ -17,14 +17,16 @@ use special::caputo::*;  // for fractional deep item (Caputo + epistemic)
 // Uses the typed bridge for compile-time subsumption + nominal types on species.
 // Enables Knowledge<CHEBI_xxx>, refinement by ontology class, provenance in epistemic CRN.
 // FULL ontology integration (reexported from chemistry::ontology using real ChEBI typed bridge)
-use chemistry::ontology;
+use chemistry::ontology::*;
 
 // Real terminal graphs and statistics (Sounio native, no external libs)
 use plot::epistemic::*;
 use plot::line;
 use plot::bar;
 
-let R: f64 = gas_constant_approx();
+// module-level `let` initialized from a function call fails to propagate its f64
+// type to later arithmetic (lean_single checker bug) — use a fn instead of a let.
+fn r_const() -> f64 { gas_constant_approx() }
 
 fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
@@ -66,7 +68,7 @@ fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
 // Real Arrhenius full GUM
 pub fn arrhenius(a: f64, ua: f64, ea: f64, uea: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if t <= 0.0 { return (0.0, 0.0); }
-    let rt = R * t;
+    let rt = r_const() * t;
     let expo = exp_approx(0.0 - ea / rt);
     let k = a * expo;
     let rel = (if a != 0.0 { ua / abs_f64(a) } else { 0.0 }) + (ea / rt) * ((if ea != 0.0 { uea / abs_f64(ea) } else { 0.0 }) + (if t != 0.0 { ut / abs_f64(t) } else { 0.0 }));
@@ -77,21 +79,22 @@ pub fn arrhenius(a: f64, ua: f64, ea: f64, uea: f64, t: f64, ut: f64) -> (f64, f
 // Reaction with Epistemic k. Network simulation with nominal + variance propagation via numeric Jacobian (delta method GUM).
 
 // --- FULL real ontology bridge (delegates to chemistry::ontology with ChEBI) ---
-pub fn big_crn_species_chebi(idx: i64) -> ontology::IRI {
-    ontology::species_to_chebi_iri(idx, "big_crn")
+pub fn big_crn_species_chebi(idx: i64) -> IRI {
+    let mech_big_crn: string = "big_crn";
+    species_to_chebi_iri(idx, &mech_big_crn)
 }
 
-pub fn chebi_water() -> ontology::CHEBI_15377 {
-    ontology::water()
+pub fn chebi_water() -> CHEBI_15377 {
+    water()
 }
 
 pub fn ontology_linked_water_conc(val: f64, u: f64) -> (f64, f64) {
-    let (v, uv, _) = ontology::epistemic_water_conc(val, u);
+    let (v, uv, _) = epistemic_water_conc(val, u);
     (v, uv)
 }
 
-pub fn attach_chebi_to_crn_output(vals: &[f64; 8], us: &[f64; 8], mechanism: &str) -> ([f64; 8], [f64; 8], [ontology::IRI; 8]) {
-    ontology::attach_chebi_to_crn_output(vals, us, mechanism)
+pub fn attach_chebi_to_crn_output(vals: &[f64; 8], us: &[f64; 8], mechanism: &str) -> ([f64; 8], [f64; 8], [IRI; 8]) {
+    attach_chebi_to_crn_output(vals, us, mechanism)
 }
 
 // --- end ontology bridge
@@ -554,11 +557,12 @@ pub fn test_pbpk_bridge() -> bool with Mut, Div, Panic {
 }
 
 // PBPK28 metabolic CRN with full ontology (ChEBI + GO + Rhea from expanded map)
-pub fn pbpk_metabolic_crn_with_ontology(drug_idx: i64, init_conc: f64, t: f64) -> (f64, f64, ontology::IRI) with Mut, Div, Panic {
+pub fn pbpk_metabolic_crn_with_ontology(drug_idx: i64, init_conc: f64, t: f64) -> (f64, f64, IRI) with Mut, Div, Panic {
     // use pbpk28 map + cyp GO + rhea
-    let chebi = ontology::species_to_chebi_iri(drug_idx, "pbpk28");
-    let go = ontology::cyp3a4_metabolism_iri();
-    let rhea = ontology::rhea_cyp3a4_oxidation();
+    let mech_pbpk28: string = "pbpk28";
+    let chebi = species_to_chebi_iri(drug_idx, &mech_pbpk28);
+    let go = cyp3a4_metabolism_iri();
+    let rhea = rhea_cyp3a4_oxidation();
     // simple demo decay using bridge + attach
     let (cl, ucl) = pbpk_bridge_demo(init_conc, 0.05, 0.005, t);
     let _ = (go, rhea); // wired for provenance
@@ -598,10 +602,11 @@ pub fn simulate_metabolic_pathway(init: &[f64; 3], dt: f64, steps: i64) -> [f64;
 }
 
 pub fn test_richer_metabolic() -> bool with Mut, Div, Panic {
-    let out = simulate_metabolic_pathway(&[1.0, 0.0, 0.0], 0.2, 120); // ~24h units
+    let init_richer_metabolic: [f64; 3] = [1.0, 0.0, 0.0];
+    let out = simulate_metabolic_pathway(&init_richer_metabolic, 0.2, 120); // ~24h units
     // FULL ontology for every compound
-    let d_chebi = ontology::drug_chebi();
-    let m1_chebi = ontology::m1_chebi();
+    let d_chebi = drug_chebi();
+    let m1_chebi = m1_chebi();
     let _k_h2o: CHEBI_15377 = chebi_water();
     check_near(out[2], 0.4, 0.2) && out[1] > 0.0 && d_chebi.id > 0 && m1_chebi.id > 0   // M2 product appears
 }
@@ -657,7 +662,8 @@ pub fn simulate_general_crn(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64,
     var t = 0.0; var s = 0;
     while s < steps {
         // full simple RK4 using general rates (real for variable networks)
-        let r1 = compute_rates_general(&[y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]], ks, nu, nrxn);
+        let c8: [f64; 8] = [y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]];
+        let r1 = compute_rates_general(&c8, ks, nu, nrxn);
         let k1 = general_dc(nu, &r1, nsp);
         var y2: [f64; 8] = [0.0; 8]; var ii=0; while ii<nsp { y2[ii] = y[ii] + 0.5*dt*k1[ii]; ii=ii+1; }
         let r2 = compute_rates_general(&y2, ks, nu, nrxn);
@@ -762,11 +768,15 @@ pub fn test_structural_ensemble() -> bool with Mut, Div, Panic {
     // probs from "posterior" (e.g. 70% main route, 30% alt - like literature model prob)
     let probs_arr: [f64; 2] = [0.7, 0.3];
 
+    let se_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let se_inits: [f64; 8] = [0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let se_ks: [f64; 8] = [0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0];
+    let se_uks: [f64; 8] = [0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0];
     let (ov, ou) = simulate_crn_structural_ensemble(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], // initv
-        &[0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0], // inits (unc)
-        &[0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0], // ks
-        &[0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0], // uks
+        &se_initv, // initv
+        &se_inits, // inits (unc)
+        &se_ks, // ks
+        &se_uks, // uks
         &nus_arr,
         &probs_arr,
         3 as i64, 2 as i64, 0.2, 50 as i64, 2 as i64
@@ -848,11 +858,15 @@ pub fn test_fractional_ensemble() -> bool with Mut, Div, Panic {
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.3); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.3);
     let nus_arr: [MatNM; 2] = [nu1, nu2];
     let probs_arr: [f64; 2] = [0.7, 0.3];
+    let fe_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let fe_inits: [f64; 8] = [0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let fe_ks: [f64; 8] = [0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0];
+    let fe_uks: [f64; 8] = [0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0];
     let (ov, ou) = simulate_fractional_structural_ensemble(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0],
+        &fe_initv,
+        &fe_inits,
+        &fe_ks,
+        &fe_uks,
         &nus_arr,
         &probs_arr,
         0.8,  // alpha lit for anomalous
@@ -1002,15 +1016,18 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     println("=== LIT VALIDATION (GRI-Mech/Marinov1995, EMA/Brill2015 midazolam, Sopasakis2017/Mtshali2023 frac, CRNN/arXiv) ===");
 
     // Big CRN H2O2 vs exact from Marinov/GRI (scaled H2O=0.18 tol 0.05) + FULL ChEBI ontology for EVERY compound
-    let big = simulate_big_crn(&[0.5,0.5,0.0,0.0,0.5,0.0], 0.01, 100);
+    let lit_big_crn_init: [f64; 6] = [0.5,0.5,0.0,0.0,0.5,0.0];
+    let big = simulate_big_crn(&lit_big_crn_init, 0.01, 100);
     let lit_h2o = 0.18; let tol_h2o = 0.05;
     let pass_h2o = check_near(big[5], lit_h2o, tol_h2o) && big[5] > 0.1;
     // Check ontology for every single compound in the sim
-    let chebi_map = ontology::full_big_crn_chebi_map();
+    let chebi_map = full_big_crn_chebi_map();
     let all_chebi_ok = chebi_map[0].id == 49637 && chebi_map[1].id == 15379 && chebi_map[2].id == 29191 &&
                        chebi_map[3].id == 25805 && chebi_map[4].id == 18276 && chebi_map[5].id == 15377;
     let h2o_chebi = big_crn_species_chebi(5);
-    let (w_v, w_u, w_iri) = attach_chebi_to_crn_output(&big, &[0.03;8], "big_crn");
+    let lit_big_crn_u: [f64; 8] = [0.03;8];
+    let mech_big_crn2: string = "big_crn";
+    let (w_v, w_u, w_iri) = attach_chebi_to_crn_output(&big, &lit_big_crn_u, &mech_big_crn2);
     // FULL Knowledge<CHEBI_15377> for the lit water in this test
     let _k_water: CHEBI_15377 = chebi_water();
     println("H2O2 H2O lit={} act={} tol={} {} | ChEBI_iri={} (water CHEBI_15377) {} | Knowledge<CHEBI_15377> demo | all_compounds_ontology={}", lit_h2o, big[5], tol_h2o, if pass_h2o "LIT PASS" else "LIT FAIL", h2o_chebi.id, if h2o_chebi.id == 15377 { "ONTOLOGY PASS" } else { "" }, if all_chebi_ok { "ALL PASS" } else { "FAIL" });
@@ -1067,13 +1084,19 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     println("GUM for PINN k: u_c from Dual sens + EState data LIT GUM PASS");
 
     // Fractional ensemble LIT (combo)
+    let lit_fe_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let lit_fe_inits: [f64; 8] = [0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let lit_fe_ks: [f64; 8] = [0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0];
+    let lit_fe_uks: [f64; 8] = [0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0];
+    let lit_fe_nus: [MatNM; 2] = [matnm_new(3 as i64,2 as i64), matnm_new(3 as i64,2 as i64)];
+    let lit_fe_probs: [f64; 2] = [0.7,0.3];
     let (fe_ov, fe_ou) = simulate_fractional_structural_ensemble(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[matnm_new(3 as i64,2 as i64), matnm_new(3 as i64,2 as i64)],
-        &[0.7,0.3],
+        &lit_fe_initv,
+        &lit_fe_inits,
+        &lit_fe_ks,
+        &lit_fe_uks,
+        &lit_fe_nus,
+        &lit_fe_probs,
         0.8,
         3 as i64,2 as i64,0.2,50 as i64,2 as i64
     );
@@ -1100,7 +1123,8 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     var nu_b = matnm_new(3 as i64, 2 as i64);
     nu_b = matnm_set(nu_b, 0 as i64, 0 as i64, -1.0); nu_b = matnm_set(nu_b, 1 as i64, 0 as i64, 1.0);
     nu_b = matnm_set(nu_b, 1 as i64, 1 as i64, -1.0); nu_b = matnm_set(nu_b, 2 as i64, 1 as i64, 1.0);
-    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, 25, 8);
+    let bayes_lit_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, 25, 8);
     let lit_bk = 0.11; let tol_b = 0.08;
     let pass_b = check_near(bk, lit_bk, tol_b) && bid > 1.0;
     println("BAYES post_k lit={} act={} ident={} {}", lit_bk, bk, bid, if pass_b "LIT PASS" else "LIT FAIL");
@@ -1146,7 +1170,8 @@ pub fn simulate_enzyme_crn(init: &[f64; 4], dt: f64, steps: i64) -> [f64; 4] wit
 }
 
 pub fn test_enzyme_crn() -> bool with Mut, Div, Panic {
-    let out = simulate_enzyme_crn(&[0.05, 2.0, 0.0, 0.0], 0.02, 300);
+    let enzyme_init: [f64; 4] = [0.05, 2.0, 0.0, 0.0];
+    let out = simulate_enzyme_crn(&enzyme_init, 0.02, 300);
     check_near(out[3], 0.7, 0.25) && out[0] > 0.01  // P formed, E not depleted
     // also via general for super mix
     var nu_e = matnm_new(4 as i64, 3 as i64);
@@ -1154,11 +1179,12 @@ pub fn test_enzyme_crn() -> bool with Mut, Div, Panic {
     nu_e = matnm_set(nu_e, 2 as i64, 1 as i64, -1.0); nu_e = matnm_set(nu_e, 0 as i64, 1 as i64, 1.0); nu_e = matnm_set(nu_e, 1 as i64, 1 as i64, 1.0); // ES -> E+S
     nu_e = matnm_set(nu_e, 2 as i64, 2 as i64, -1.0); nu_e = matnm_set(nu_e, 0 as i64, 2 as i64, 1.0); nu_e = matnm_set(nu_e, 3 as i64, 2 as i64, 1.0); // ES -> E+P
     let ks_e: [f64; 8] = [1.2, 0.3, 0.8, 0.0,0.0,0.0,0.0,0.0];
-    let outg = simulate_general_crn(&[0.05,2.0,0.0,0.0,0.0,0.0,0.0,0.0], &ks_e, nu_e, 4 as i64, 3 as i64, 0.02, 300 as i64);
+    let enzyme_general_init: [f64; 8] = [0.05,2.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let outg = simulate_general_crn(&enzyme_general_init, &ks_e, nu_e, 4 as i64, 3 as i64, 0.02, 300 as i64);
     // FULL ontology for every compound in enzyme CRN
-    let e_chebi = ontology::enzyme_chebi();
-    let s_chebi = ontology::substrate_chebi();
-    let p_chebi = ontology::product_chebi();
+    let e_chebi = enzyme_chebi();
+    let s_chebi = substrate_chebi();
+    let p_chebi = product_chebi();
     let _k_h2o: CHEBI_15377 = chebi_water();  // FULL Knowledge<CHEBI_15377>
     outg[3] > 0.4 && e_chebi.id > 0 && s_chebi.id > 0 && p_chebi.id > 0
 }
@@ -1183,10 +1209,11 @@ pub fn simulate_extended_metabolic(init: &[f64; 4], dt: f64, steps: i64) -> [f64
 }
 
 pub fn test_extended_metabolic() -> bool with Mut, Div, Panic {
-    let out = simulate_extended_metabolic(&[1.0,0.0,0.0,0.0], 0.2, 120);
+    let ext_metabolic_init: [f64; 4] = [1.0,0.0,0.0,0.0];
+    let out = simulate_extended_metabolic(&ext_metabolic_init, 0.2, 120);
     // FULL for every
     let _k_h2o: CHEBI_15377 = chebi_water();
-    let m_chebi = ontology::m1_chebi();
+    let m_chebi = m1_chebi();
     check_near(out[3], 0.35, 0.2) && out[2] > 0.1 && m_chebi.id > 0
 }
 
@@ -1210,7 +1237,11 @@ pub fn bench_structural_ensemble(n_plaus: i64, steps: i64) -> f64 with Mut, Div,
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.5); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.5);
     let nus_arr: [MatNM; 2] = [nu1, nu2];
     let ps: [f64; 2] = [0.7, 0.3];
-    let (ov, ou) = simulate_crn_structural_ensemble(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &[0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &[0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0], &[0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0], &nus_arr, &ps, 3 as i64, 2 as i64, 0.2, steps, n_plaus);
+    let bse_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bse_inits: [f64; 8] = [0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bse_ks: [f64; 8] = [0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bse_uks: [f64; 8] = [0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (ov, ou) = simulate_crn_structural_ensemble(&bse_initv, &bse_inits, &bse_ks, &bse_uks, &nus_arr, &ps, 3 as i64, 2 as i64, 0.2, steps, n_plaus);
     ou[2]  // combined structural unc as benchmark metric (lit plausible routes)
 }
 
@@ -1277,11 +1308,15 @@ pub fn bench_fractional_ensemble(n_plaus: i64, steps: i64, alpha: f64) -> f64 wi
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.3); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.3);
     let nus_arr: [MatNM; 2] = [nu1, nu2];
     let ps: [f64; 2] = [0.7, 0.3];
+    let bfe_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bfe_inits: [f64; 8] = [0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bfe_ks: [f64; 8] = [0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0];
+    let bfe_uks: [f64; 8] = [0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0];
     let (ov, ou) = simulate_fractional_structural_ensemble(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.01,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.05,0.02,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.005,0.002,0.0,0.0,0.0,0.0,0.0,0.0],
+        &bfe_initv,
+        &bfe_inits,
+        &bfe_ks,
+        &bfe_uks,
         &nus_arr, &ps, alpha, 3 as i64, 2 as i64, 0.2, steps, n_plaus
     );
     ou[2]  // unc from frac + structural
@@ -1301,7 +1336,8 @@ pub fn coupled_rate(base_k: f64, total: f64, k_eq: f64) -> f64 with Mut, Div, Pa
 
 pub fn test_coupled_crn_equil() -> bool with Mut, Div, Panic {
     let keff = coupled_rate(0.1, 1.0, 10.0);
-    let out = simulate_crn(&[1.0, 0.0, 0.0, 0.0], 0.1, 15);
+    let coupled_crn_init: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
+    let out = simulate_crn(&coupled_crn_init, 0.1, 15);
     check_near(keff, 0.12, 0.05) && out[1] > 0.1
 }
 
@@ -1321,7 +1357,8 @@ pub fn pbpk_full_metabolic(init_d: f64, u_d: f64, t: f64) -> ([f64; 4], [f64; 4]
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 2 as i64, -1.0); // clearance on M1
     let ks_gen: [f64; 8] = [0.05, 0.02, 0.01, 0.0,0.0,0.0,0.0,0.0];
-    let _ = simulate_general_crn(&[init_d,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &ks_gen, nu, 4 as i64, 3 as i64, 0.33, steps / (2 as i64));
+    let pbpk_full_gen_init: [f64; 8] = [init_d,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let _ = simulate_general_crn(&pbpk_full_gen_init, &ks_gen, nu, 4 as i64, 3 as i64, 0.33, steps / (2 as i64));
     ([ov[0],ov[1],ov[2],ov[3]], [ou[0],ou[1],ou[2],ou[3]])
 }
 
@@ -1543,10 +1580,10 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
 
     // 1. Ontology for every compound
     println("=== 1. ONTOLOGIA REAL (ChEBI) - todo composto tem identidade formal ===");
-    let h2o   = ontology::h2o_chebi();
-    let o2    = ontology::o2_chebi();
-    let drug  = ontology::drug_chebi();
-    let m1    = ontology::m1_chebi();
+    let h2o   = h2o_chebi();
+    let o2    = o2_chebi();
+    let drug  = drug_chebi();
+    let m1    = m1_chebi();
     println("H2O  = CHEBI:{} | O2 = CHEBI:{} | Drug = CHEBI:{} | M1 = CHEBI:{}", h2o.id, o2.id, drug.id, m1.id);
     println("→ ChEBI grounding para CADA composto.\n");
 
@@ -1560,9 +1597,13 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
     let nus: [MatNM; 2] = [nu1, nu2];
     let probs: [f64; 2] = [0.72, 0.28];
 
+    let demo_ens_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let demo_ens_inits: [f64; 8] = [0.02,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let demo_ens_ks: [f64; 8] = [0.08,0.025,0.0,0.0,0.0,0.0,0.0,0.0];
+    let demo_ens_uks: [f64; 8] = [0.006,0.003,0.0,0.0,0.0,0.0,0.0,0.0];
     let (ens_v, ens_u) = simulate_fractional_structural_ensemble(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &[0.02,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        &[0.08,0.025,0.0,0.0,0.0,0.0,0.0,0.0], &[0.006,0.003,0.0,0.0,0.0,0.0,0.0,0.0],
+        &demo_ens_initv, &demo_ens_inits,
+        &demo_ens_ks, &demo_ens_uks,
         &nus, &probs, 0.82, 3, 2, 0.25, 40, 2
     );
     println("Ensemble M1 @24h = {} ± {}", ens_v[1], ens_u[1]);
@@ -1570,7 +1611,8 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
     let (stoch_v, stoch_u) = simulate_stochastic_decay(1.0, 0.03, 0.07, 24.0, 60);
 
     // 3. Bayesian + Observe
-    let (post_k, post_u, ident) = bayesian_structural_posterior(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, 35);
+    let demo_bayes_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (post_k, post_u, ident) = bayesian_structural_posterior(&demo_bayes_initv, &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, 35);
     let _kw: CHEBI_15377 = chebi_water();
 
     // 4. REAL STATISTICS (native computation)
@@ -1634,7 +1676,9 @@ pub fn simulate_observed_general() -> f64 with Mut, Div, Panic, Observe {
     // demo: run general then "observe" final with effect (unique modeling of measurement process)
     var nu = matnm_new(3 as i64,2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
-    let ov = simulate_general_crn(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &[0.1,0.05,0.0,0.0,0.0,0.0,0.0,0.0], nu, 3 as i64,2 as i64,0.1,10 as i64);
+    let obs_gen_init: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let obs_gen_ks: [f64; 8] = [0.1,0.05,0.0,0.0,0.0,0.0,0.0,0.0];
+    let ov = simulate_general_crn(&obs_gen_init, &obs_gen_ks, nu, 3 as i64,2 as i64,0.1,10 as i64);
     observe_conc(ov[2])
 }
 
@@ -1654,8 +1698,9 @@ pub fn test_sounio_epistemic_dual() -> bool with Mut, Div, Panic {
 
 // Simple sensitivity (finite diff for phase4 UQ)
 pub fn sensitivity_demo(k: f64, delta: f64) -> f64 with Mut, Div, Panic {
-    let base = simulate_crn(&[1.0,0.0,0.0,0.0], 0.1, 10)[0];
-    let pert = simulate_crn(&[1.0,0.0,0.0,0.0], 0.1, 10)[0]; // would perturb k but demo
+    let sens_demo_init: [f64; 4] = [1.0,0.0,0.0,0.0];
+    let base = simulate_crn(&sens_demo_init, 0.1, 10)[0];
+    let pert = simulate_crn(&sens_demo_init, 0.1, 10)[0]; // would perturb k but demo
     (pert - base) / delta
 }
 
@@ -1682,7 +1727,7 @@ pub fn test_autodiff_sens() -> bool with Mut, Div, Panic {
 // Ontology integration test: ChEBI bridge + nominal type coercion + usage in CRN context
 pub fn test_chemistry_chebi_ontology() -> bool with IO {
     let h2o_iri = big_crn_species_chebi(5);
-    let h2o_typed = ontology::water();  // via the full module
+    let h2o_typed = water();  // via the full module
     let (conc, u) = ontology_linked_water_conc(0.18, 0.02); // from lit H2O in BigCRN
     // FULL Knowledge<CHEBI_15377>
     let _k_chebi: CHEBI_15377 = h2o_typed;
@@ -1777,7 +1822,7 @@ fn main() -> i32 with Mut, Div, Panic, IO, Prob, Observe {
     if test_regulatory_provenance() { p = p + 1 } else { f = f + 1; println("FAIL regulatory provenance") }
     if test_bench_scale() { p = p + 1 } else { f = f + 1; println("FAIL bench scale") }
     if test_chemistry_chebi_ontology() { p = p + 1 } else { f = f + 1; println("FAIL chemistry chebi ontology") }
-    if ontology::test_all_compounds_chibi() { p = p + 1 } else { f = f + 1; println("FAIL all compounds chibi") }
+    if test_all_compounds_chibi() { p = p + 1 } else { f = f + 1; println("FAIL all compounds chibi") }
     if super_chemical_showcase() { p = p + 1 } else { f = f + 1; println("FAIL super chemical showcase") }
     if test_pbpk_metabolic_crn_ontology() { p = p + 1 } else { f = f + 1; println("FAIL pbpk metabolic crn ontology") }
 
@@ -1832,7 +1877,8 @@ pub fn simulate_stochastic_general_crn(
     let dt = if steps > 0 { total_t / (steps as f64) } else { total_t };
     var s: i64 = 0;
     while s < steps {
-        let props = compute_rates_general(&[y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]], ks, nu, nrxn);
+        let y8: [f64; 8] = [y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]];
+        let props = compute_rates_general(&y8, ks, nu, nrxn);
         var tot_a = 0.0;
         var r: i64 = 0; while r < nrxn { tot_a = tot_a + props[r]; r = r + 1; }
         if tot_a <= 0.000001 { break; }
@@ -1923,7 +1969,8 @@ pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Ob
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
-    let (_, pu, id) = simulate_bayesian_posterior_crn(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 40, n_samples);
+    let bench_scale_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (_, pu, id) = simulate_bayesian_posterior_crn(&bench_scale_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 40, n_samples);
     // scale metric: smaller post_u + high ident with larger n
     pu + (if id > 2.0 { 0.0 } else { 0.1 })
 }
@@ -2062,8 +2109,9 @@ pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe {
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
+    let bayes_ident_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
     let (pk, pu, idsc) = simulate_bayesian_posterior_crn(
-        &[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10
+        &bayes_ident_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10
     );
     // fuller sampling gives reasonable post
     check_near(pk, 0.12, 0.1) && pu > 0.0 && pu < 0.15 && idsc > 0.5
@@ -2077,7 +2125,8 @@ pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe {
     let mps: [f64; 2] = [0.7, 0.3];
     let datas: [f64; 4] = [0.52, 0.38, 0.28, 0.19];
     let dus: [f64; 4] = [0.04, 0.03, 0.04, 0.03];
-    let (pk, pu, id) = bayesian_structural_posterior(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, 25);
+    let bsp_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (pk, pu, id) = bayesian_structural_posterior(&bsp_initv, &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, 25);
     check_near(pk, 0.11, 0.1) && pu > 0.005 && id > 1.0
 }
 
@@ -2088,7 +2137,8 @@ pub fn bayesian_identifiability_crn(data_v: f64, data_u: f64, prior_k: f64, prio
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
-    let (pk, pu, _) = simulate_bayesian_posterior_crn(&[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0], &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, 20, 6);
+    let ident_crn_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (pk, pu, _) = simulate_bayesian_posterior_crn(&ident_crn_initv, &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, 20, 6);
     (pk, pu)
 }
 

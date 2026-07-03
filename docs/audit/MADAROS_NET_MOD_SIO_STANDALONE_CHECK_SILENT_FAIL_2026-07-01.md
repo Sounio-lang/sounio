@@ -322,3 +322,86 @@ already correct.
 Verified against both Madaros and a freshly rebuilt `lean_single`: both files pass
 cleanly on both engines (no Madaros-only regression this time, unlike the #567/#568
 fixes). No regression on the full set of tests fixed earlier this week.
+
+## Update 2026-07-03: issue #575 (kinetics.sio full audit) — two new bugs found and fixed, test now passes
+
+Picked up issue #575 (`stdlib/chemistry/kinetics.sio` had ~100+ pre-existing errors,
+never fully type-checked before this week's investigation). Two more previously-unknown
+`lean_single` checker bugs found and isolated with minimal repros outside stdlib —
+fixing both, plus the two isolated content bugs already flagged in #575's filing,
+brought `tests/stdlib/chemistry/test_kinetics_core.sio` from 274 errors (rc=1, blocking)
+down to a passing state.
+
+**Bug E — `&[literal, ...]` (a reference to an inline array literal) as a call argument
+fails to parse.** Isolated:
+```sio
+fn takes_arr(a: &[f64; 3]) -> f64 { a[0] }
+fn main() -> f64 {
+    takes_arr(&[1.0, 0.0, 0.0])   // error: unknown identifier `[` + arity mismatch
+}
+```
+`&variable_name` (a reference to an already-bound local) works fine; only the inline
+literal form breaks. Workaround: bind the literal to a local `let` first (with an
+explicit `[T; N]` type annotation), then pass `&local_var`. This was by far the largest
+contributor to kinetics.sio's error count — a subagent applied the fix at 25 call sites
+across the file (many were the same repeated 8-element "demo initial concentration"
+vector reused across different test functions), reducing errors from 274 → 81. Also
+affects string literals passed where `&str` is expected (`fn f(s: &str)`, called as
+`f("literal")`) — same root cause, same workaround
+(`let s: string = "literal"; f(&s)`), used to fix 3 more sites in kinetics.sio.
+
+**Bug F — a module-level `let CONST: f64 = some_fn();` (initialized from a function
+call, not a literal) doesn't propagate its declared type to later arithmetic.**
+Isolated:
+```sio
+fn get_const() -> f64 { 8.314 }
+let R: f64 = get_const()          // module-level, from a function call
+fn f(t: f64) -> f64 { R * t }     // error: arithmetic operands must have matching numeric types
+```
+A module-level `let` initialized from a *literal* (`let R: f64 = 8.314`) does NOT
+trigger this — only the function-call-initializer form does. Workaround: replace the
+module-level `let` with a zero-arg function (`fn r_const() -> f64 { get_const() }`) and
+call it at each use site instead of referencing a bare constant. Fixed in both
+`stdlib/chemistry/kinetics.sio` (1 site) and `stdlib/chemistry/equilibrium.sio` (6
+sites) — the latter's existing `let R: f64 = gas_constant_approx();` was the direct
+cause of the "44 arithmetic operand" errors tolerated as non-fatal (marker-present) in
+the #567 update above; now genuinely fixed rather than merely tolerated.
+
+**Also fixed (content bugs, not checker bugs, per #575's original filing):**
+- `stdlib/epistemic/ode.sio`: added the missing `ode_system_chem_simple()` preset
+  (confirmed via `grep` to not exist anywhere in stdlib before this) — `system_id: 5,
+  n_dims: 4`, matching the sibling presets' pattern (`ode_system_exp_decay`,
+  `ode_system_pbpk_14`, etc.) and the first call site's `EState` dimensionality.
+- `stdlib/epistemic/ode.sio`: `ODESolution` struct + its `n_steps` field needed `pub`
+  (same shape as the `Dual` fix in #567's PR) — `kinetics.sio` reads `sol.n_steps`
+  cross-module.
+- `stdlib/chemistry/kinetics.sio`: converted the bare-module-import qualified-call
+  pattern `use chemistry::ontology; ontology::fn(...)` to
+  `use chemistry::ontology::*; fn(...)` (Bug C's bare-module-alias variant, same shape
+  as the `caputo::`/`epi_plot::` fixes from #567's PR) — 24 call/type-reference sites.
+
+**Result:** `tests/stdlib/chemistry/test_kinetics_core.sio` now passes (rc=0,
+`compile: fns=785`). Re-testing the two other tests blocked on kinetics.sio's debt
+(`test_pbpk_ontology.sio` from the closed-duplicate #566, and `test_lib_surface.sio`'s
+remaining scope from #568) — both **also now pass** once their Bug-A-broken
+`chemistry::kinetics::*` references were re-converted to `use chemistry::kinetics::*;`
+(previously reverted in both cases specifically because the underlying kinetics.sio
+wall made this conversion counterproductive; the wall is now gone).
+
+**Residual, separately-tracked debt (not fixed here, filed as new issues):** kinetics.sio
+transitively pulls in `stdlib/chemistry/ontology.sio` (24 of its own pre-existing
+errors: 16 "comparison operands must have the same type", 4 E001, 2 "unknown identifier
+`[`" — likely Bug E recurring, not yet isolated per-site, 1 tail-type-mismatch, 1
+ordered-comparison) and `stdlib/epistemic/ode.sio` (14 of its own: 10 "arithmetic
+operands", 4 E001) — both **non-fatal** per the harness's marker-based pass/fail logic
+(same tolerance pattern as equilibrium.sio's residual errors in the #567 update above),
+so they do not block any test today, but represent the same kind of "never fully
+type-checked" content debt kinetics.sio had. Filed separately rather than fixed in this
+pass, matching the precedent set for kinetics.sio itself.
+
+Verified against a freshly rebuilt `lean_single` via `scripts/run_sio_test_suite.sh
+--filter` for all 3 previously-failing tests plus the full regression set from earlier
+this week (21 tests total, all pass). Also verified Madaros: the 3 kinetics-cluster
+tests show the same pre-existing "no method named for this type" (E011) Madaros-only
+divergence already documented for `equilibrium.sio`/`acids.sio` in the #567 update — not
+a new regression, inherited from those two modules.
