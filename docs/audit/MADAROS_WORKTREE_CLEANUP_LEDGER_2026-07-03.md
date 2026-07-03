@@ -72,6 +72,19 @@ uncommented mutating commands.
 exact audit TSV path from that run. That is the operator handoff from red
 strict-audit output to this cleanup planner.
 
+For a portable non-destructive evidence bundle before the approval decision,
+run:
+
+```bash
+scripts/dev/madaros_worktree_salvage_packet.sh --tarball
+```
+
+That wraps the cleanup planner and writes per-worktree status, tracked/staged
+binary diffs, short logs, untracked-file manifests, size indexes, and an
+optional `DIR.tar.gz` + sha256. It does **not** push branches, remove worktrees,
+delete files, reset, or clean; it is evidence for the operator decision, not the
+cleanup itself.
+
 ## Current Blocker To `--strict`
 
 Readiness production proof is green, but the stricter worktree audit still
