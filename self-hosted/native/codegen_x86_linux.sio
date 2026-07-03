@@ -1084,6 +1084,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
     if name_is_assert((*func).name) { return 21 }
+    if name_is_str_from_bytes((*func).name) { return 22 }
     0
 }
 
@@ -3488,6 +3489,133 @@ fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c
 }
 
+// str_from_bytes(buf, len) -> string. Matches lean_single semantics
+// (lean_single.sio: "Returns the address of the byte buffer as a string pointer").
+//
+// rdi = buf: a native-v2 local/param [i8;N] array, passed as a HANDLE (slot index
+// into the handle table, stride native_v2_handle_entry_size()), not a raw pointer —
+// same representation ordinary arr[i] reads resolve via
+// native_v2_resolve_handle_to_object_base_rax. The object's data is a
+// native_v2_object_header_size()-byte header followed by one 8-byte-boxed slot per
+// element (uniform representation, even for i8) — same layout
+// native_v2_core_emit_local_array_load_into reads with resolve + mov rax,[rdx+rbx*8].
+// rsi = len (element count).
+//
+// This allocates len+1 bytes from the heap (mirroring emit_builtin_str_concat),
+// unpacks the low byte of each boxed element into the packed buffer, and
+// null-terminates it — producing a real *u8 the caller can dereference directly.
+fn emit_builtin_str_from_bytes(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Prologue
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 32)
+
+    // Save len at [rbp-8]
+    c.code = emit_mov_reg_reg(c.code, 0, 6)             // rax = rsi (len)
+    c.code = emit_store_rax_rbp_disp32(c.code, -8)
+
+    // Resolve buf handle (rdi) -> object base pointer, save at [rbp-16]
+    c.code = emit_mov_reg_reg(c.code, 0, 7)             // rax = rdi (handle)
+    c = native_v2_resolve_handle_to_object_base_rax(c)   // rax = object base
+    c.code = emit_store_rax_rbp_disp32(c.code, -16)
+
+    // Allocate len+1 bytes from RuntimeContext.heap_cursor; result = old cursor
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_store_rax_rbp_disp32(c.code, -24)     // save result ptr at [rbp-24]
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)       // rax = len
+    // add rax, 1 — raw: 48 83 c0 01 (mirrors emit_builtin_str_concat)
+    var ab = c.code
+    ab = emit_byte(ab, 0x48)
+    ab = emit_byte(ab, 0x83)
+    ab = emit_byte(ab, 0xc0)
+    ab = emit_byte(ab, 0x01)
+    c.code = ab                                          // rax = len + 1
+    c.code = emit_mov_rcx_rax(c.code)                   // rcx = total
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_add_reg_reg(c.code, 0, 1)             // rax = cursor + total
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // Copy-loop setup:
+    //   rdx = object base (fixed)
+    //   rbx = element index, starts at header_words (native_v2_object_header_size()/8)
+    //   rsi = dest ptr (result), running
+    //   rcx = remaining element count (countdown from len)
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)      // rax = object base
+    c.code = emit_mov_reg_reg(c.code, 2, 0)             // rdx = object base
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)  // rbx = header_words
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = result ptr
+    c.code = emit_mov_reg_reg(c.code, 6, 0)             // rsi = result ptr
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)       // rax = len
+    c.code = emit_mov_reg_reg(c.code, 1, 0)             // rcx = len
+
+    // copy_loop: (byte offsets from loop top)
+    //   0:  test rcx, rcx           — 3 bytes (48 85 c9)
+    //   3:  jz done_copy            — 2 bytes (rel8, skip 4+2+3+3+3+2 = 17)
+    //   5:  mov rax, [rdx+rbx*8]    — 4 bytes (48 8b 04 da) — unpack boxed element
+    //   9:  mov [rsi], al          — 2 bytes (88 06)         — store its low byte
+    //   11: inc rbx                — 3 bytes (48 ff c3)
+    //   14: inc rsi                — 3 bytes (48 ff c6)
+    //   17: dec rcx                — 3 bytes (48 ff c9)
+    //   20: jmp copy_loop          — 2 bytes (rel8, back 22 bytes to offset 0)
+    //   22: done_copy:
+    var lb = c.code
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0x85)
+    lb = emit_byte(lb, 0xc9)                             // test rcx, rcx
+    c.code = lb
+    c.code = emit_jz_rel8(c.code, 17)                    // jz done_copy
+
+    lb = c.code
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0x8b)
+    lb = emit_byte(lb, 0x04)
+    lb = emit_byte(lb, 0xda)                             // mov rax, [rdx+rbx*8]
+    lb = emit_byte(lb, 0x88)
+    lb = emit_byte(lb, 0x06)                             // mov [rsi], al
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc3)                             // inc rbx
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc6)                             // inc rsi
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc9)                             // dec rcx
+    c.code = lb
+    c.code = emit_jmp_rel8(c.code, -22)                  // jmp copy_loop
+    // done_copy:
+
+    // Null-terminate + return result pointer
+    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 0)      // mov byte [rsi], 0
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = result ptr
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// "str_from_bytes" = 14 chars
+fn name_is_str_from_bytes(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 14 { return false }
+    if n.buf[0] != 115 as i8 { return false }    // 's'
+    if n.buf[1] != 116 as i8 { return false }    // 't'
+    if n.buf[2] != 114 as i8 { return false }    // 'r'
+    if n.buf[3] != 95 as i8 { return false }     // '_'
+    if n.buf[4] != 102 as i8 { return false }    // 'f'
+    if n.buf[5] != 114 as i8 { return false }    // 'r'
+    if n.buf[6] != 111 as i8 { return false }    // 'o'
+    if n.buf[7] != 109 as i8 { return false }    // 'm'
+    if n.buf[8] != 95 as i8 { return false }     // '_'
+    if n.buf[9] != 98 as i8 { return false }     // 'b'
+    if n.buf[10] != 121 as i8 { return false }   // 'y'
+    if n.buf[11] != 116 as i8 { return false }   // 't'
+    if n.buf[12] != 101 as i8 { return false }   // 'e'
+    if n.buf[13] != 115 as i8 { return false }   // 's'
+    true
+}
+
 // starts_with(s: *u8, prefix: *u8) -> i64 (1 if starts with, 0 if not)
 // Compares prefix against beginning of s until prefix reaches null.
 fn emit_builtin_starts_with(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -4769,6 +4897,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
     // M5: file I/O builtins
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
@@ -5563,6 +5692,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
     if builtin_id == 21 { emit_builtin_assert_into(nc); return }
+    if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
