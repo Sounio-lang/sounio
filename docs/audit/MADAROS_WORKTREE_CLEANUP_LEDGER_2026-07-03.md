@@ -85,6 +85,20 @@ optional `DIR.tar.gz` + sha256. It does **not** push branches, remove worktrees,
 delete files, reset, or clean; it is evidence for the operator decision, not the
 cleanup itself.
 
+For the full operator decision packet in one command, run:
+
+```bash
+scripts/dev/madaros_cleanup_decision_packet.sh --tarball
+```
+
+This writes a timestamped `/tmp/madaros-cleanup-decision-packet-*` directory and
+updates `/tmp/madaros-latest-decision-packet.path`. The packet includes the
+current audit TSV, cleanup plan, approval template, suggested unapproved
+manifest, hold-only rendered commands, salvage evidence packet, README, and
+operator draft. It never fills operator approval fields; suggested non-`hold`
+rows keep `TODO_REQUIRED` approval fields, so validation must fail until the
+operator fills them.
+
 After reviewing the packet, create the machine-readable approval template:
 
 ```bash

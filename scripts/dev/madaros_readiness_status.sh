@@ -491,6 +491,7 @@ if [[ "$RUN_AUDIT" == "1" ]]; then
   fi
   run_status_command audit \
     "${audit_env[@]}" scripts/dev/worktree_branch_audit.sh --check "$audit_out"
+  echo "decision_packet_command=scripts/dev/madaros_cleanup_decision_packet.sh --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-decision-packet"
   echo "cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-plan"
   echo "cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh template --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-approval"
 fi
@@ -588,6 +589,7 @@ Production readiness still also requires:
 Integration shepherd:
   scripts/ci/madaros_blocker_contract_gate.sh
   scripts/dev/madaros_readiness_status.sh --strict
+  scripts/dev/madaros_cleanup_decision_packet.sh --tarball
   scripts/dev/madaros_worktree_cleanup_plan.sh
   scripts/dev/madaros_worktree_cleanup_approval.sh template --plan-tsv /tmp/madaros-cleanup-plan/madaros-cleanup-plan.tsv --out-dir /tmp/madaros-cleanup-approval
   scripts/dev/madaros_cleanup_suggested_manifest.sh \

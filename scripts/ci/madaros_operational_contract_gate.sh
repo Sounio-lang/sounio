@@ -264,6 +264,62 @@ require_cleanup_suggested_manifest_evidence() {
   require_no_uncommented_mutation "$commands"
 }
 
+require_cleanup_decision_packet_evidence() {
+  local tmp_dir audit_tsv decisions out_dir latest_pointer stdout_path suggested commands pointer_value
+  tmp_dir="$(mktemp -d /tmp/madaros-contract-decision-packet.XXXXXX)"
+  audit_tsv="$tmp_dir/worktree-audit.tsv"
+  decisions="$tmp_dir/suggested-cleanup-decisions.tsv"
+  out_dir="$tmp_dir/packet"
+  latest_pointer="$tmp_dir/latest.path"
+  stdout_path="$tmp_dir/stdout.txt"
+
+  printf 'path\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tcritical_dirty\tcritical_vs_base\tpr\n' > "$audit_tsv"
+  printf '%s\tdetached\t%s\t\tdirty\t1\t0\t0\tM scripts/dev/madaros_cleanup_decision_packet.sh\tscripts/dev/madaros_cleanup_decision_packet.sh\t\n' \
+    "$ROOT_DIR" "$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" >> "$audit_tsv"
+
+  printf 'path\tsuggested_action\tmanifest_decision_if_operator_approves\trequires_approver_fields\tnote\n' > "$decisions"
+  printf '%s\tapprove_salvage_remove\tapprove_salvage_remove\tyes\tfixture suggested salvage remains unapproved\n' "$ROOT_DIR" >> "$decisions"
+
+  SOUNIO_MADAROS_CLEANUP_ALLOW_RE='^$' \
+    scripts/dev/madaros_cleanup_decision_packet.sh \
+      --audit-tsv "$audit_tsv" \
+      --decisions-tsv "$decisions" \
+      --out-dir "$out_dir" \
+      --latest-pointer "$latest_pointer" \
+      --no-tar > "$stdout_path"
+
+  require_file "$out_dir/README.txt"
+  require_file "$out_dir/operator-approval-draft.md"
+  require_file "$out_dir/worktree-audit.tsv"
+  require_file "$out_dir/cleanup-plan/madaros-cleanup-plan.tsv"
+  require_file "$out_dir/approval-template/madaros-cleanup-approval.tsv"
+  require_file "$out_dir/suggested-cleanup-decisions.tsv"
+  require_file "$out_dir/madaros-cleanup-approval.suggested-unapproved.tsv"
+  require_file "$out_dir/salvage-packet/README.txt"
+  require_file "$latest_pointer"
+
+  pointer_value="$(cat "$latest_pointer")"
+  [[ "$pointer_value" == "$out_dir" ]] ||
+    fail "decision packet latest pointer drifted: $pointer_value"
+
+  require_grep 'suggested_manifest_validate_rc=1' "$out_dir/README.txt"
+  require_grep 'expected_fail_until_operator_fills_approver_fields' "$out_dir/README.txt"
+  require_grep 'Agents must' "$out_dir/operator-approval-draft.md"
+  require_grep 'packet_root=' "$stdout_path"
+  require_grep 'latest_pointer=' "$stdout_path"
+
+  suggested="$out_dir/madaros-cleanup-approval.suggested-unapproved.tsv"
+  if scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$suggested" >/dev/null 2>&1; then
+    fail "decision packet suggested manifest validated before operator approval fields were filled"
+  fi
+
+  commands="$out_dir/approval-rendered/madaros-cleanup-approved.commands.sh"
+  require_file "$commands"
+  require_no_uncommented_mutation "$commands"
+  [[ ! -e "$out_dir/salvage-packet.tar.gz" ]] ||
+    fail "decision packet wrote salvage tarball despite --no-tar"
+}
+
 require_no_uncommented_mutation() {
   local plan_sh="$1"
   awk '
@@ -371,7 +427,9 @@ require_grep 'bin/madaros-linux-x86_64' bin/souc
 require_grep 'exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros"' bin/souc
 require_grep 'artifacts/self-hosted/madaros.gate-receipt' .gitignore
 require_grep 'cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh' scripts/dev/madaros_readiness_status.sh
+require_grep 'decision_packet_command=scripts/dev/madaros_cleanup_decision_packet.sh' scripts/dev/madaros_readiness_status.sh
 require_grep 'audit_allow_manifest_decision=approve_keep_active_allowlist' scripts/dev/madaros_readiness_status.sh
+require_grep 'scripts/dev/madaros_cleanup_decision_packet.sh --tarball' scripts/dev/madaros_readiness_status.sh
 require_grep 'git push, git reset, git clean, git branch -D' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'owner confirmation required before any archive, push, or removal' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'unique_commits_origin_main' scripts/dev/madaros_worktree_cleanup_plan.sh
@@ -382,6 +440,7 @@ require_grep 'cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_appr
 require_grep 'I_ACCEPT_PUSH_BEFORE_DELETE' scripts/dev/madaros_worktree_cleanup_approval.sh
 require_grep 'approve_keep_active_allowlist' scripts/dev/madaros_worktree_cleanup_approval.sh
 require_grep 'madaros_cleanup_suggested_manifest.sh' docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
+require_grep 'madaros_cleanup_decision_packet.sh --tarball' docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
 require_grep 'keep_active_allowlist  -> approve_keep_active_allowlist' scripts/dev/madaros_cleanup_suggested_manifest.sh
 require_grep 'SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST' scripts/dev/worktree_branch_audit.sh
 require_grep 'tracked/staged binary diffs' scripts/dev/madaros_worktree_salvage_packet.sh
@@ -389,6 +448,7 @@ require_grep 'No branches pushed or worktrees removed' scripts/dev/madaros_workt
 require_cleanup_planner_evidence
 require_cleanup_approval_evidence
 require_cleanup_suggested_manifest_evidence
+require_cleanup_decision_packet_evidence
 require_salvage_packet_evidence
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
