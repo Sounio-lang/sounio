@@ -16,12 +16,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 > The proof path is `make madaros-full-gate`; that gate now includes the
 > imported-SMT solver gate (6/6) regression suite and writes a `.gate-receipt`
 > only after a non-skipped SMT pass.
-> **Current greenline WIP note (2026-07-03):** `work/madaros-greenline-codex`
-> has a fresh proof-green artifact. `madaros_full_gate.sh` passed with imported
-> SMT 6/6 and wrote `artifacts/self-hosted/madaros.gate-receipt`
+> **Canonical greenline (2026-07-03):** PR #586 landed on protected
+> `canon/madaros-greenline` at merge commit
+> `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`. The branch is proof-green:
+> `madaros_full_gate.sh` passed with imported SMT 6/6 and wrote
+> `artifacts/self-hosted/madaros.gate-receipt`
 > (`sha256=0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`,
-> `smt_skip=0`). The WIP still needs normal PR review before it can update the
-> protected canonical branch.
+> `smt_skip=0`), and GitHub required checks include `Madaros Greenline Gate`.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
@@ -74,19 +75,17 @@ as `bin/souc-lean-single-x86_64`.
   otherwise the default route falls back to `bin/madaros-relocgate` when present
   or the checked prebuilt with a loud warning. This prevents default routing
   from silently selecting a stale raw artifact.
-- **2026-07-03 canonical greenline lock (observed during lane setup):** remote branch
-  `canon/madaros-greenline` points at `origin/main@735b89800f47301e0217a3992441553be0cb9ee7`
-  and was observed protected: PR review required (`1` approval), stale reviews dismissed,
-  conversations resolved, admins enforced, force-push disabled, deletion disabled,
-  and current CI checks required (`Contracts`, `Full Test Suite`, `Lean Proofs`,
-  `Native Self-Host (Linux x86_64)`, `Native Self-Host (macOS arm64)`,
-  `Sounio Lint`, `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`).
-  `work/madaros-greenline-codex` is the writable Codex work branch derived from
-  the same SHA. **Hardening landed in this work branch:** `.github/workflows/ci.yml`
-  now defines the named `Madaros Greenline Gate`, which runs `make
-  madaros-full-gate` and then `scripts/dev/madaros_two_gate.sh
-  artifacts/self-hosted/madaros`. Remaining GitHub-admin step after PR stability:
-  add that check to the required protection contexts.
+- **2026-07-03 canonical greenline lock (landed):** remote branch
+  `canon/madaros-greenline` points at PR #586 merge commit
+  `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b` and is protected: PR flow
+  required, stale reviews dismissed, admins enforced, force-push disabled,
+  deletion disabled, and strict required status checks enabled. Required checks:
+  `Contracts`, `Full Test Suite`, `Lean Proofs`, `Native Self-Host (Linux x86_64)`,
+  `Native Self-Host (macOS arm64)`, `Sounio Lint`,
+  `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`, and
+  `Madaros Greenline Gate`. Review approvals are set to `0` because the repo
+  currently exposes only the PR author as collaborator; the enforced lock is
+  PR+checks.
 
 ## Cross-lane TODOs
 
@@ -145,13 +144,15 @@ When the imported-SMT section passes without
 `artifacts/self-hosted/madaros.gate-receipt` with the artifact sha256 and
 `smt_skip=0`. A skipped SMT section is non-green and never writes that receipt.
 
-Current `work/madaros-greenline-codex` status: **proof-green locally, pending PR
-review/merge**. On 2026-07-03, a fresh source rebuild produced
+Canonical `canon/madaros-greenline` status: **proof-green and merged via PR
+#586**. On 2026-07-03, a fresh source rebuild produced
 `artifacts/self-hosted/madaros` with sha256
 `0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`; the six
 `tests/stdlib/theorem/test_smt_*.sio` fixtures all passed, and
 `madaros_full_gate.sh` exited 0 and wrote a receipt with `smt_tests=6/6` and
-`smt_skip=0`.
+`smt_skip=0`. GitHub CI for PR #586 also passed `Madaros Greenline Gate`, Lean,
+full suite, source-bootstrap self-host, both native self-host jobs, contracts,
+lint, and website before the merge.
 
 Root cause of the previous imported-SMT failure: the compact imported-simple IR
 builder misclassified control/non-call expressions as call thunks. In the
