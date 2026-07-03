@@ -95,6 +95,45 @@ require_cleanup_planner_evidence() {
   require_no_uncommented_mutation "$real_sh"
 }
 
+require_salvage_packet_evidence() {
+  local tmp_dir audit_tsv out_dir packet_root metadata file_index actual_header expected_header
+  tmp_dir="$(mktemp -d /tmp/madaros-contract-salvage.XXXXXX)"
+  audit_tsv="$tmp_dir/worktree-audit.tsv"
+  out_dir="$tmp_dir/packet"
+
+  printf 'path\tbranch\thead\tupstream\tstate\tdirty_count\tahead\tbehind\tcritical_dirty\tcritical_vs_base\tpr\n' > "$audit_tsv"
+  printf '%s\tdetached\t%s\t\tdirty\t1\t0\t0\tM scripts/dev/madaros_worktree_salvage_packet.sh\tscripts/dev/madaros_worktree_salvage_packet.sh\t\n' \
+    "$ROOT_DIR" "$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" >> "$audit_tsv"
+
+  SOUNIO_MADAROS_CLEANUP_ALLOW_RE='^$' \
+    scripts/dev/madaros_worktree_salvage_packet.sh --audit-tsv "$audit_tsv" --out-dir "$out_dir" --no-tar >/dev/null
+
+  require_file "$out_dir/README.txt"
+  require_file "$out_dir/madaros-cleanup-plan.tsv"
+  require_file "$out_dir/file-index.txt"
+  require_file "$out_dir/tracked-diff-sizes.tsv"
+  require_file "$out_dir/untracked-counts.tsv"
+  require_file "$out_dir/logs/cleanup-planner.stdout"
+
+  expected_header='category	path	branch	head	upstream	state	dirty_count	ahead	behind	remote_ref	prs	unique_commits_origin_main	unique_commits_upstream	tracked_dirty_files	untracked_dirty_files	tracked_diff_files	tracked_diff_added	tracked_diff_deleted	salvage_ref	critical_dirty	critical_vs_base	disposition'
+  IFS= read -r actual_header < "$out_dir/madaros-cleanup-plan.tsv"
+  [[ "$actual_header" == "$expected_header" ]] ||
+    fail "salvage packet cleanup-plan header drifted: $actual_header"
+
+  packet_root="$out_dir/per-worktree/$(basename "$ROOT_DIR")"
+  metadata="$packet_root/metadata.txt"
+  file_index="$out_dir/file-index.txt"
+  require_file "$metadata"
+  require_file "$packet_root/status.short.txt"
+  require_file "$packet_root/tracked.diff"
+  require_file "$packet_root/staged.diff"
+  require_file "$packet_root/untracked.files.txt"
+  require_file "$packet_root/untracked.sizes.tsv"
+  require_grep 'suggested_salvage_ref=archive/madaros-' "$metadata"
+  require_grep 'per-worktree/' "$file_index"
+  [[ ! -e "$out_dir.tar.gz" ]] || fail "salvage packet wrote tarball despite --no-tar"
+}
+
 require_no_uncommented_mutation() {
   local plan_sh="$1"
   awk '
@@ -120,6 +159,7 @@ require_file scripts/ci/madaros_full_gate.sh
 require_file scripts/ci/madaros_source_to_elf_gate.sh
 require_executable scripts/dev/madaros_two_gate.sh
 require_executable scripts/dev/madaros_worktree_cleanup_plan.sh
+require_executable scripts/dev/madaros_worktree_salvage_packet.sh
 require_file .github/workflows/ci.yml
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -186,6 +226,9 @@ require_grep 'unique_commits_origin_main' scripts/dev/madaros_worktree_cleanup_p
 require_grep 'tracked_diff_added' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'critical_vs_base' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep '# evidence=origin_main_unique:' scripts/dev/madaros_worktree_cleanup_plan.sh
+require_grep 'tracked/staged binary diffs' scripts/dev/madaros_worktree_salvage_packet.sh
+require_grep 'No branches pushed or worktrees removed' scripts/dev/madaros_worktree_salvage_packet.sh
 require_cleanup_planner_evidence
+require_salvage_packet_evidence
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
