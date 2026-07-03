@@ -113,6 +113,14 @@ as `bin/souc-lean-single-x86_64`.
   for this exact import combination. Cross-reference siblings:
   `docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md` and
   `docs/audit/EPISTEMIC_MADAROS_SIGSEGV_2026-06-29/`.
+- **Canon regression guard now present:** `scripts/ci/madaros_gpu_ptx_pairwise_import_witness.sh`
+  checks the pairwise and full import matrix for `gpu::kernel_ir::*`,
+  `gpu::lower_to_ptx::*`, and `gpu::ptx::*`. It runs in `Madaros Greenline Gate`
+  and in the prebuilt-refresh gate chain, so canon/prebuilt publication cannot
+  silently lose this module graph again. If `gpu/epistemic-tensor-core-next`
+  still reproduces the historical E175/E177/E046 cluster, the substantive repair
+  remains branch-local there: compare against canon, then audit `pub`/shape drift
+  across `self-hosted/gpu/`.
 
 Do not say "Madaros is production-ready" merely because #356 is closed. Say the
 specific 2026-06-21 blocker cluster is closed, then use the production-ready

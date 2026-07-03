@@ -2,13 +2,14 @@
 
 ## Madaros GPU/PTX module-combination guard
 
-- [ ] Track the GPU/PTX module-combination blocker documented in
+- [x] Track the GPU/PTX module-combination blocker documented in
   `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
   and summarized in `docs/MADAROS_STATUS.md`.
-- [ ] Keep a CI-visible regression guard for the normal module graph import
+- [x] Keep a CI-visible regression guard for the normal module graph import
   combination: `gpu::kernel_ir::*` + `gpu::lower_to_ptx::*` + `gpu::ptx::*`.
 - [ ] Follow-up lane: bisect pairwise module combinations and audit `pub`
-  visibility across `self-hosted/gpu/` if the guard regresses.
+  visibility across `self-hosted/gpu/` on `gpu/epistemic-tensor-core-next` if
+  that branch still reproduces the historical error cluster.
 
 # Lane 8c — Regulatory Dossier Generator (dissertation contribution #3 wrapper)
 
