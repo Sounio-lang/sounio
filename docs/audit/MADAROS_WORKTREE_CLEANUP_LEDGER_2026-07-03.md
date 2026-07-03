@@ -30,6 +30,8 @@ Completed before this ledger:
   `3df24a04af6b35e4f710663accb03f9f97825b0a`.
 - PR #592 synchronized the status docs after PR #591 at
   `246cd44e59026b8ca6fecd72336e631036015f07`.
+- PR #593 removed stale live-tip wording from the status docs at
+  `6f0d9ec8c5289f717d668f773d2e54a8d8d9bbdb`.
 - `canon/madaros-greenline` is protected, force-push/delete are disabled,
   admins are enforced, strict required checks are enabled, and
   `Madaros Greenline Gate` is required.
@@ -70,13 +72,19 @@ strict-audit output to this cleanup planner.
 ## Current Blocker To `--strict`
 
 Readiness production proof is green, but the stricter worktree audit still
-reports dirty critical worktrees:
+reports dirty critical worktrees. The exact `total` and `critical_vs_base`
+counts drift as clean coordination worktrees are created or removed; the live
+authority is the repro command below. The stable blocker is still
+`unallowed_critical_dirty=19`.
+
+Sample observed after PR #593:
 
 ```text
-total=56
-dirty=36
+total=62
+dirty=37
 critical_dirty=21
 unallowed_critical_dirty=19
+critical_vs_base=48
 ```
 
 Repro command:
