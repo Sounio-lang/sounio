@@ -67,6 +67,19 @@ as `bin/souc-lean-single-x86_64`.
   otherwise the default route falls back to `bin/madaros-relocgate` with a loud
   warning. This prevents a stale raw artifact from silently becoming the public
   compiler.
+- **GPU/PTX TODO registration (2026-07-03):** documented and sent:
+  `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`,
+  commit `8ea996fe3` on `gpu/epistemic-tensor-core-next`. It records the reproducible
+  empty-main import failure (`335 E175 + 18 E177 + 5 E046`), why `mod.sio` missed it
+  (`lower_to_ptx.sio` was not imported), ruled-out causes (`IR_MAX_INSTRS`, native
+  codegen SIGSEGV, stale binary), impact (new PTX drivers outside `bin/kretikos`),
+  and next steps (pairwise bisection, `pub` audit across `self-hosted/gpu/`, and a CI
+  witness for the module combination).
+- **GPU branch compiler-lane caveat:** `gpu/epistemic-tensor-core-next` may contain this
+  status text before carrying the actual receipt-gated wrapper files and
+  `bin/madaros-relocgate`. Verify `bin/madaros` and `scripts/lib/resolve_madaros.sh`
+  locally before claiming the safe compiler route on that branch; merge/rebase the
+  protected `canon/madaros-greenline` compiler lane before final landing.
 
 Do not say "Madaros is production-ready" merely because #356 is closed. Say the
 specific 2026-06-21 blocker cluster is closed, then use the production-ready
