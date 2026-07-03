@@ -29,6 +29,22 @@ Completed before this ledger:
 This ledger does **not** approve deletion. It exists so the eventual cleanup can
 be reviewed and run with a push-before-delete rule instead of ad hoc `rm -rf`.
 
+The reproducible dry-run planner is:
+
+```bash
+scripts/dev/madaros_worktree_cleanup_plan.sh
+```
+
+It writes:
+
+- `worktree-audit.tsv` — raw `scripts/dev/worktree_branch_audit.sh` inventory.
+- `madaros-cleanup-plan.tsv` — classified unallowed critical dirty worktrees.
+- `madaros-cleanup-plan.commands.sh` — inspection and salvage commands, with
+  mutating push/remove commands commented out.
+
+The planner is intentionally non-destructive. It never runs `git push`,
+`git reset`, `git clean`, `git branch -D`, or `git worktree remove`.
+
 ## Current Blocker To `--strict`
 
 Readiness production proof is green, but the stricter worktree audit still
@@ -96,6 +112,7 @@ For every detached worktree before deletion:
 1. Retire the already-merged greenline worktree:
 
    ```bash
+   scripts/dev/madaros_worktree_cleanup_plan.sh --out-dir /tmp/madaros-cleanup-plan
    git -C /tmp/sounio-madaros-greenline-codex diff > /tmp/madaros-greenline-codex-leftover.patch
    git worktree remove /tmp/sounio-madaros-greenline-codex
    git branch -D work/madaros-greenline-codex
