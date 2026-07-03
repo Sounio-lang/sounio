@@ -133,6 +133,10 @@ bash scripts/ci/madaros_operational_contract_gate.sh
 It does not replace the compiler proof. It prevents drift in the committed agent
 instructions, `bin/souc` default-wrapper contract, `scripts/dev/e2e_gate.sh`, and
 `scripts/ci/madaros_full_gate.sh` coverage.
+The gate accepts either of two proof anchors: the canonical protected greenline
+proof landing PR #586 (`bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`) or the
+historical `origin/main` proof baseline `17d1157be540d32bb583dd03ca7072a6026e2027`.
+Do not treat the historical baseline as a reset target for the current greenline.
 
 Historical baseline at `17d1157be` (fresh build from source, **not** a
 prebuilt artifact) covered the broad full-gate shape:
