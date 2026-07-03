@@ -197,6 +197,72 @@ require_cleanup_approval_evidence() {
   fi
 }
 
+require_cleanup_suggested_manifest_evidence() {
+  local tmp_dir manifest decisions suggested approved validate_out render_out commands
+  tmp_dir="$(mktemp -d /tmp/madaros-contract-suggested-manifest.XXXXXX)"
+  manifest="$tmp_dir/approval-template.tsv"
+  decisions="$tmp_dir/suggested-cleanup-decisions.tsv"
+  suggested="$tmp_dir/suggested-unapproved.tsv"
+  approved="$tmp_dir/approved.tsv"
+
+  printf 'decision\tapprover\tapproved_utc\tapproval_id\tcategory\tpath\tbranch\thead\tstate\tdirty_count\tremote_ref\tsalvage_ref\tdisposition\tcritical_dirty\tcritical_vs_base\toperator_note\n' > "$manifest"
+  printf 'hold\tTODO\tTODO\tTODO\tactive_other_lane_wip\t/tmp/active-lane\twork/active\t%s\tdirty\t1\tnone\tarchive/madaros-active-lane\tdo not remove; confirm owner\tM self-hosted/ir/lower.sio\tself-hosted/ir/lower.sio\tTODO\n' \
+    "$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" >> "$manifest"
+  printf 'hold\tTODO\tTODO\tTODO\tstale_local_temp\t/tmp/salvage-lane\twork/salvage\t%s\tdirty\t1\tnone\tarchive/madaros-salvage-lane\tcheck unique commits; push archive/salvage before removal\tM self-hosted/compiler/module_native_driver.sio\tself-hosted/compiler/module_native_driver.sio\tTODO\n' \
+    "$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" >> "$manifest"
+
+  printf 'path\tsuggested_action\tmanifest_decision_if_operator_approves\trequires_approver_fields\tnote\n' > "$decisions"
+  printf '/tmp/active-lane\tkeep_active_allowlist\thold_or_allowlist\toperator_owner_ack\tfixture active lane stays alive\n' >> "$decisions"
+  printf '/tmp/salvage-lane\tapprove_salvage_remove\tapprove_salvage_remove\tyes\tfixture salvage before remove\n' >> "$decisions"
+
+  scripts/dev/madaros_cleanup_suggested_manifest.sh \
+    --manifest-tsv "$manifest" \
+    --decisions-tsv "$decisions" \
+    --out-tsv "$suggested" >/dev/null
+  require_file "$suggested"
+  awk -F '\t' '
+    NR > 1 && $6 == "/tmp/active-lane" {
+      found_active = ($1 == "approve_keep_active_allowlist" &&
+        $2 == "TODO_REQUIRED" && $3 == "TODO_REQUIRED" &&
+        $4 == "APPROVAL-TODO_REQUIRED")
+    }
+    NR > 1 && $6 == "/tmp/salvage-lane" {
+      found_salvage = ($1 == "approve_salvage_remove" &&
+        $2 == "TODO_REQUIRED" && $3 == "TODO_REQUIRED" &&
+        $4 == "APPROVAL-TODO_REQUIRED")
+    }
+    END {
+      exit (found_active && found_salvage) ? 0 : 1
+    }
+  ' "$suggested" || fail "suggested manifest did not mark active/salvage rows correctly"
+
+  if scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$suggested" >/dev/null 2>&1; then
+    fail "suggested unapproved manifest validated before operator approval fields were filled"
+  fi
+
+  awk -F '\t' 'BEGIN { OFS = "\t" }
+    NR == 1 { print; next }
+    $1 != "hold" {
+      $2 = "operator"
+      $3 = "2026-07-03T00:00:00Z"
+      $4 = "APPROVAL-fixture-" NR
+    }
+    { print }
+  ' "$suggested" > "$approved"
+
+  validate_out="$(scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$approved")"
+  grep -Fq 'actionable_rows=2' <<<"$validate_out" ||
+    fail "approved suggested manifest should have two actionable rows"
+
+  render_out="$tmp_dir/render"
+  scripts/dev/madaros_worktree_cleanup_approval.sh render --manifest-tsv "$approved" --out-dir "$render_out" >/dev/null
+  commands="$render_out/madaros-cleanup-approved.commands.sh"
+  require_file "$commands"
+  require_grep 'decision=approve_keep_active_allowlist' "$commands"
+  require_grep 'keep-active allowlist approved; no cleanup action rendered' "$commands"
+  require_no_uncommented_mutation "$commands"
+}
+
 require_no_uncommented_mutation() {
   local plan_sh="$1"
   awk '
@@ -223,6 +289,7 @@ require_file scripts/ci/madaros_source_to_elf_gate.sh
 require_executable scripts/dev/madaros_two_gate.sh
 require_executable scripts/dev/madaros_worktree_cleanup_plan.sh
 require_executable scripts/dev/madaros_worktree_cleanup_approval.sh
+require_executable scripts/dev/madaros_cleanup_suggested_manifest.sh
 require_executable scripts/dev/madaros_worktree_salvage_packet.sh
 require_file .github/workflows/ci.yml
 
@@ -294,11 +361,14 @@ require_grep '# evidence=origin_main_unique:' scripts/dev/madaros_worktree_clean
 require_grep 'cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh' scripts/dev/madaros_readiness_status.sh
 require_grep 'I_ACCEPT_PUSH_BEFORE_DELETE' scripts/dev/madaros_worktree_cleanup_approval.sh
 require_grep 'approve_keep_active_allowlist' scripts/dev/madaros_worktree_cleanup_approval.sh
+require_grep 'madaros_cleanup_suggested_manifest.sh' docs/audit/MADAROS_WORKTREE_CLEANUP_LEDGER_2026-07-03.md
+require_grep 'keep_active_allowlist  -> approve_keep_active_allowlist' scripts/dev/madaros_cleanup_suggested_manifest.sh
 require_grep 'SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST' scripts/dev/worktree_branch_audit.sh
 require_grep 'tracked/staged binary diffs' scripts/dev/madaros_worktree_salvage_packet.sh
 require_grep 'No branches pushed or worktrees removed' scripts/dev/madaros_worktree_salvage_packet.sh
 require_cleanup_planner_evidence
 require_cleanup_approval_evidence
+require_cleanup_suggested_manifest_evidence
 require_salvage_packet_evidence
 
 echo "[madaros-contract] PASS: status doc, agent contract, default wrapper, and gate wiring are aligned"
