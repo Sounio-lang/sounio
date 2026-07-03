@@ -126,10 +126,18 @@ fn smt_ln_f64(x: f64) -> f64 with Div {
     // m ∈ [1, 2), y = (m-1)/(m+1) ∈ [0, 1/3)
     let y = (m - 1.0) / (m + 1.0)
     let y2 = y * y
-    // 2 * (y + y³/3 + y⁵/5 + ... + y¹⁹/19) — 10 terms, error < y²⁰/21 < 1e-12
-    let s = y * (1.0 + y2 * (0.33333333333 + y2 * (0.2 + y2 * (0.14285714286 +
-            y2 * (0.11111111111 + y2 * (0.09090909091 + y2 * (0.07692307692 +
-            y2 * (0.06666666667 + y2 * (0.05882352941 + y2 * 0.05263157895)))))))))
+    // 2 * (y + y^3/3 + y^5/5 + ... + y^19/19). Keep this iterative:
+    // the self-hosted importer currently cannot lower the deeply nested Horner form.
+    var s: f64 = y
+    var ypow: f64 = y * y2
+    var denom: f64 = 3.0
+    var k: i32 = 0
+    while k < 9 {
+        s = s + ypow / denom
+        ypow = ypow * y2
+        denom = denom + 2.0
+        k = k + 1
+    }
     let ln_2: f64 = 0.69314718055994530941
     return 2.0 * s + (n as f64) * ln_2
 }
@@ -268,12 +276,6 @@ pub fn smt_new() -> SmtContext {
         lia_bounds: [0; 64],
         lia_var_map: [(0 - 1) as i32; 64],
     }
-}
-
-fn smt_clause_end(ctx: &!SmtContext) -> i64 {
-    if ctx.n_clauses <= 0 { return 0 }
-    let last = ctx.n_clauses - 1
-    return ctx.clause_start[last] + ctx.clause_len[last]
 }
 
 fn smt_lit_var(lit: i64) -> i32 with Div {
@@ -1287,7 +1289,11 @@ pub fn smt_add_clause(ctx: &!SmtContext, lits: &[i32; 8], n_lits: i32) with Mut,
     if n_lits > 8 { return }
     if ctx.n_clauses >= 4096 { return }
     let clause_idx = ctx.n_clauses
-    let start = smt_clause_end(ctx)
+    var start: i64 = 0
+    if clause_idx > 0 {
+        let prev_clause_idx: i32 = clause_idx - 1
+        start = ctx.clause_start[prev_clause_idx] + ctx.clause_len[prev_clause_idx]
+    }
     if start + (n_lits as i64) > 16384 { return }
     ctx.clause_start[clause_idx] = start
     ctx.clause_len[clause_idx] = n_lits as i64
@@ -1323,7 +1329,7 @@ pub fn smt_solve_with_assumptions(ctx: &!SmtContext, assumptions: &[i32; 8], n_a
     }
 
     let result = smt_solve(ctx)
-    // smt_solve and smt_clause_end only read clause slots below ctx.n_clauses.
+    // smt_solve only reads clause slots below ctx.n_clauses.
     // Restoring the count is the rollback boundary for temporary assumptions.
     ctx.n_clauses = saved_n_clauses
     ctx.n_vars = saved_n_vars

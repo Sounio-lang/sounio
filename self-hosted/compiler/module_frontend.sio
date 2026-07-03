@@ -25,10 +25,10 @@ fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div 
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT: i64 = 0
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 256] = [0; 256]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 256] = [0; 256]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 256] = [0; 256]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 256] = [0; 256]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -2268,6 +2268,17 @@ fn module_frontend_name_is_print_int(name: Name) -> bool {
     name.buf[8] == (116 as i8)
 }
 
+fn module_frontend_name_is_control_keyword(name: Name) -> bool with Mut, Panic, Div {
+    module_frontend_name_eq_str(name, "if") ||
+    module_frontend_name_eq_str(name, "else") ||
+    module_frontend_name_eq_str(name, "while") ||
+    module_frontend_name_eq_str(name, "return") ||
+    module_frontend_name_eq_str(name, "match") ||
+    module_frontend_name_eq_str(name, "let") ||
+    module_frontend_name_eq_str(name, "var") ||
+    module_frontend_name_eq_str(name, "for")
+}
+
 fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr {
     var instr = ir_call(dst, 0 - 1, fn_name, None, 0)
     instr.fn_id = 0 - 1
@@ -4229,8 +4240,9 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
     check_modules_verdict_boot4(&! programs, loaded)
 }
 
-fn module_frontend_lower_programs_array_direct_box(
+fn module_frontend_lower_programs_array_direct_box_with_paths(
     programs: &! [Program; 256],
+    file_paths: [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
@@ -4241,7 +4253,11 @@ fn module_frontend_lower_programs_array_direct_box(
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
     print("lower_array: seed_begin\n")
-    let seed_items = (*programs)[0].items
+    var seed_items = (*programs)[0].items
+    if str_len(file_paths[0]) > 0 && file_exists(file_paths[0]) {
+        let seed_prog_lower = load_module_file(file_paths[0])
+        seed_items = seed_prog_lower.items
+    }
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
@@ -4264,7 +4280,11 @@ fn module_frontend_lower_programs_array_direct_box(
                 print("lower_array: dep_begin ")
                 print_int(i)
                 print("\n")
-                let dep_items = (*programs)[i as usize].items
+                var dep_items = (*programs)[i as usize].items
+                if str_len(file_paths[i]) > 0 && file_exists(file_paths[i]) {
+                    let dep_prog_lower = load_module_file(file_paths[i])
+                    dep_items = dep_prog_lower.items
+                }
                 let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
@@ -4389,6 +4409,15 @@ fn module_frontend_lower_programs_array_direct_box(
     }
 }
 
+fn module_frontend_lower_programs_array_direct_box(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
+    var no_file_paths: [string; 256] = [""; 256]
+    module_frontend_lower_programs_array_direct_box_with_paths(programs, no_file_paths, loaded, trace)
+}
+
 fn module_frontend_lower_programs_array_boxed(
     programs: &! [Program; 256],
     loaded: i64,
@@ -4510,6 +4539,7 @@ fn module_frontend_lower_program_full_traced(
 
 fn module_frontend_merge_imported_into(
     programs: &! [Program; 256],
+    file_paths: [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace,
     out_module: &! IrModule
@@ -4528,7 +4558,7 @@ fn module_frontend_merge_imported_into(
 
     // Per-module check_program_with_artifacts cannot see cross-module imports and
     // either rejects (E137) or spins; multimodule verdict above is authoritative.
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box_with_paths(programs, file_paths, loaded, trace)
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
@@ -4635,7 +4665,7 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
-    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+    let lowered = module_frontend_lower_programs_array_direct_box_with_paths(&! programs, file_paths, loaded, &! trace)
     print("imported_compile: lower_done\n")
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -4666,9 +4696,15 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     if module_frontend_dump_merged_calls_enabled() {
         ir_module_dump_merge_calls(&merged_module)
     }
+    print("imported_compile: parser_reset_before\n")
     parser_reset_last_errors()
+    print("imported_compile: target_resolve_before\n")
     let target_spec = native_resolve_target("native", "auto", false)
+    print("imported_compile: native_emit_before\n")
     let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)
+    print("imported_compile: native_emit_after rc=")
+    print_int(write_rc)
+    print("\n")
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
@@ -5052,7 +5088,7 @@ fn module_frontend_source_body_final_call_callee(data: string, body: i64, end: i
 fn module_frontend_imported_simple_global_reset() with Mut, Panic {
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = 0
     var i: i64 = 0
-    while i < 64 {
+    while i < 256 {
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[i as usize] = 0
@@ -5067,7 +5103,7 @@ fn module_frontend_imported_simple_global_push_fn(
     fn_pos: i64,
     size: i64
 ) with IO, Mut, Panic, Div {
-    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 64 {
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 256 {
         return
     }
     let idx = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
@@ -5234,6 +5270,7 @@ fn module_frontend_imported_simple_global_push_fn(
                 } else {
                     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
                     let callee = module_frontend_source_ident_at(data, expr2, size)
+                    let after_callee = module_frontend_source_skip_ws(data, expr2 + callee.len, size)
                     if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
                         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
@@ -5247,6 +5284,9 @@ fn module_frontend_imported_simple_global_push_fn(
                             }
                         }
                     } else if callee.len > 0 &&
+                              !module_frontend_name_is_control_keyword(callee) &&
+                              after_callee < size &&
+                              data[after_callee as usize] == (40 as i8) &&
                               !(callee.buf[0] >= (48 as i8) && callee.buf[0] <= (57 as i8)) {
                         let two_args_literal = module_frontend_source_call_two_i64_literals_packed(data, expr2 + callee.len, size)
                         var two_args = two_args_literal
@@ -5296,7 +5336,7 @@ fn module_frontend_lower_source_file_simple_global(
     }
     let data = read_file(path)
     var i: i64 = 0
-    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
+    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 256 {
         if module_frontend_source_is_fn_at(data, i, size) {
             module_frontend_imported_simple_global_push_fn(path, data, i, size)
         }
@@ -5652,7 +5692,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     }
 
     var merged_module = ir_empty_module()
-    if !module_frontend_merge_imported_into(&! programs, loaded, trace, &! merged_module) {
+    if !module_frontend_merge_imported_into(&! programs, file_paths, loaded, trace, &! merged_module) {
         return multimodule_ir_error("ir_lowering_failed")
     }
 
