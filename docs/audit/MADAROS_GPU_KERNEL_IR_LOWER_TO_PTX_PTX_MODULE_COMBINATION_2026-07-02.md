@@ -9,13 +9,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 # Madaros forensic dispatch — `gpu::kernel_ir` + `gpu::lower_to_ptx` + `gpu::ptx` fail to check together
 
-Date: 2026-07-02
+Date: 2026-07-02, resolved 2026-07-03
 Branch: `gpu/epistemic-tensor-core-next` (base: `research/solver-ts3-parallel` @ `65f44e60c`,
-merge of PR #572)
+merge of PR #572); fix landed on `fix/gpu-lower-to-ptx-module-combo`
 Class: **PRE-EXISTING MODULE-COMBINATION BREAKAGE** (hundreds of typecheck errors,
 independent of any function body or call site — reproducible with an empty `main`)
-Status: root-caused to "this exact 3-module combination is apparently never exercised
-together in CI"; NOT fixed; NOT attempted beyond the diagnosis below
+Status: **FIXED** (`souc check` verdict=0 on all three files together, and on the
+`kretikos_emit_epistemic_wmma.sio` driver this was blocking). See "Resolution" below.
+The three root causes were NOT what the diagnosis section originally guessed
+(the diagnosis correctly named privacy-annotation drift as one factor, but there were
+two more independent bugs stacked underneath it — see Resolution).
 
 > Found while trying to write a CLI driver
 > (`self-hosted/gpu/kretikos_emit_epistemic_wmma.sio`) to emit PTX for the
@@ -174,6 +177,51 @@ ever reaching the native-codegen stage on this branch.
    `gpu::ptx` together (e.g. via `mod.sio` gaining a `use gpu::lower_to_ptx::*` line, if
    that's semantically correct for the orchestrator to own) so this combination is never
    silently unvalidated again.
+
+## Resolution (2026-07-03)
+
+Bisected pairwise as step 1 above suggested: `kernel_ir + lower_to_ptx` alone reproduced
+357 of the 358 errors; `lower_to_ptx` alone (which has its own internal `use` of both
+other modules) reproduced 334 as **E137 "use of undeclared variable"** instead of
+E175/E177/E046 — a different error class, which turned out to be the first real clue.
+Three independent, stacked bugs, found in this order:
+
+1. **`lower_to_ptx.sio` had lost its own `use gpu::kernel_ir::*` / `use gpu::ptx::*`
+   lines** (and `gpu_lower_to_ptx`'s `pub`) at some point in this branch's churn — every
+   reference inside it to `GpuKernelIr`, `PtxBuf`, `ptx_buf_new()`, etc. was genuinely
+   undeclared in that file's own scope. `use` in Sounio is **not transitive** — a
+   dependency's own `use` lines only resolve symbols for that dependency's own body; they
+   don't extend the importer's visible symbol set. Restored both `use` lines.
+2. **`kernel_ir.sio` had 5 struct literals with a duplicated field key** (`rhs_reg` or
+   `lhs_reg` given two different `key: value` entries in the same `GpuOp { ... }`
+   literal — 24 pairs for a 23-field struct). This is what E046 ("wrong number of fields")
+   actually meant; the count check runs before any duplicate-key check. All 5 were
+   address-computation ops (`GpuAdd`/`GpuSetpLt`/`GpuStoreSharedPred`) built from a copied
+   template that kept both the template's placeholder value and the real one. Removed the
+   redundant copy in each, keeping the meaningful value.
+3. **`ptx.sio` called `i64_to_string`, which it never defined or imported** (it only exists
+   in `lower_to_ptx.sio` and `opt/warp_vote_fastpath.sio` — importing either from `ptx.sio`
+   would be circular, since `lower_to_ptx.sio` imports `gpu::ptx`). Added a local copy.
+4. **Privacy-annotation drift, confirmed as real and widespread, not a one-off**: in
+   `kernel_ir.sio`, the `Name`/`GpuOp`/`GpuParam`/`GpuKernelIr` structs and their fields,
+   all 12 top-level enums, and 131/132 top-level functions were missing `pub`. In
+   `ptx.sio`, `PtxBuf` and all 147 of its top-level functions were missing `pub`. Both
+   files exist specifically to be shared libraries for the rest of the GPU backend, so
+   blanket `pub` (not selective) is the correct fix, applied via a scripted pass rather
+   than fixing one symbol at a time as each was hit by a different caller.
+
+**Verified:** `souc check` now passes (`verdict=0`, no errors) on `kernel_ir.sio`,
+`ptx.sio`, `lower_to_ptx.sio` individually and together, and on
+`self-hosted/gpu/kretikos_emit_epistemic_wmma.sio` (the driver this was blocking).
+`souc build` of that driver now gets past typecheck and IR merge — down to a 1-function
+merged IR from the ~240–330 seen before this fix — and reaches native codegen, where it
+hits the **separate**, already-tracked, open Madaros SIGSEGV cluster
+(`docs/audit/EPISTEMIC_MADAROS_SIGSEGV_2026-06-29/`). That is out of scope for this
+dispatch; getting a real native ELF (and from there, PTX for DGX Spark hardware
+verification) still depends on that separate bug being fixed.
+
+Fix commit: `fix(gpu): resolve gpu::kernel_ir+lower_to_ptx+ptx module-combination
+breakage` on `fix/gpu-lower-to-ptx-module-combo`.
 
 ## Cross-references
 
