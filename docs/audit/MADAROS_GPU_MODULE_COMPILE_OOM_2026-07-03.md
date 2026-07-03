@@ -53,9 +53,10 @@ EOF
 ## Root cause
 
 `bin/madaros` (the launcher wrapper, not the compiler itself) hardcodes
-`ulimit -v 16777216` (16 GiB virtual memory) at four call sites (lines 133, 224, 233, 305)
-before invoking the raw compiler ELF. Compiling `kernel_ir.sio` genuinely needs more than
-that:
+`ulimit -v 16777216` (16 GiB virtual memory) at two call sites (lines 165, 229 — the
+`build` and generic-invocation paths; a third, unrelated site at line 126 caps the
+`--check` path at 8 GiB instead) before invoking the raw compiler ELF. Compiling
+`kernel_ir.sio` genuinely needs more than that:
 
 ```bash
 RAW_MADAROS="$(readlink -f artifacts/self-hosted/madaros)"
@@ -82,8 +83,9 @@ multi-megabyte per value) passed and returned **by value** rather than by refere
 lowering/merge stage (`module_frontend_lower_program_items_box_traced_with_externs`,
 `self-hosted/compiler/module_frontend.sio`) appears to process the whole loaded module
 regardless of what's actually reachable from `main` (same pattern already established in
-`docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md` — see that doc's own
-finding that 3 unrelated large functions in this same file block *any* importer). If each
+`docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md` — see
+that doc's own finding that 3 unrelated large functions in this same file block *any*
+importer). If each
 of ~130 functions' IR representation carries megabyte-scale value-type data through
 several lowering/merge passes without freeing intermediate copies, tens of GiB adds up
 fast.
@@ -116,9 +118,12 @@ fast.
   repo-wide zero-caller scan). Not attempted to remove/measure individually since the
   scale mismatch (need to close a ~45 GiB gap; 9 small dead functions won't do it) makes
   it not worth the risk of deleting live-looking code on a guess.
-- **Not `IR_MAX_INSTRS`** (the sibling `docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md`
-  finding) — that's a separate, already-documented cap hit by 3 specific large functions;
-  raising it was tried and reverted in the prior dispatch's investigation and doesn't
+- **Not `IR_MAX_INSTRS`** (the cap defined in `docs/audit/
+  MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md`, hit for this file per the finding
+  in `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`)
+  — that's a separate, already-documented cap hit by 3 specific large functions
+  (`gpu_build_gemm_shared_ir`, `gpu_build_conv2d_ir`, `gpu_build_epistemic_tiled_gemm_ir`);
+  raising it was tried and reverted in that prior dispatch's investigation and doesn't
   touch this crash (this crash happens during general IR lowering/merge of the *whole*
   module, not specifically inside those 3 functions).
 
@@ -165,7 +170,7 @@ used for the reproduction above) is the only known way through it today.
 2. Bisect the ~130 functions in `kernel_ir.sio` for the ones with the largest individual
    memory footprint during lowering (not just "large IR instruction count" — a function
    can have modest instruction count but still carry a huge value-typed local like
-   `[GpuKernelIr; 64]`) and prioritize converting *those* to reference-based signatures
+   `[GpuKernelIr; 64]`) and prioritise converting *those* to reference-based signatures
    first, rather than a whole-file rewrite.
 3. Decide, with whoever owns Madaros CI resource budgets, whether raising `ulimit -v` is
    acceptable for this specific launcher path and by how much, informed by real CI runner
@@ -174,14 +179,17 @@ used for the reproduction above) is the only known way through it today.
 ## Cross-references
 
 - `docs/audit/EPISTEMIC_MADAROS_SIGSEGV_2026-06-29/DISPATCH.md` — the broader, still-open
-  SIGSEGV cluster this dispatch's finding likely explains (or explains a subset of) — that
-  dispatch's own multi-session forensic history (§7a/§7b, commits `ea683ebef`,
-  `ca47b5cb6`, `91249fd87`, etc.) never previously identified `ulimit -v`/virtual-memory
-  exhaustion as a factor; worth revisiting whether some of its "fixed" and "open" items are
-  actually the same resource-ceiling issue observed on different inputs.
-- `docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md` — separate cap, same
-  file (`kernel_ir.sio`), same "whole module gets processed regardless of reachability"
-  pattern.
+  SIGSEGV cluster this dispatch's finding likely explains (or explains a subset of). As of
+  this branch, that dispatch's own forensic history (a single §7, "Suggested compiler
+  bisection order") never identifies `ulimit -v`/virtual-memory exhaustion as a factor;
+  worth revisiting whether some of its "fixed" and "open" items are actually the same
+  resource-ceiling issue observed on different inputs. (An earlier draft of this cross-
+  reference cited specific commit hashes and a §7a/§7b split that do not exist in this
+  branch's version of `DISPATCH.md` — corrected here; do not carry those citations forward.)
+- `docs/audit/MADAROS_IR_MAX_INSTRS_1024_TRUNCATION_2026-06-28.md` — defines the general
+  `IR_MAX_INSTRS` cap concept (demonstrated there via a synthetic `theorem::smt` harness,
+  unrelated to `kernel_ir.sio`); the specific finding that 3 functions in `kernel_ir.sio`
+  hit this cap lives in the `MODULE_COMBINATION` doc below, not in this one.
 - `docs/audit/MADAROS_RC13_ELF_256K_CAP_2026-06-28.md` — the loud error this crash's repro
   hits immediately *after* removing the `ulimit -v` cap, confirming the segfault and the
   256 KiB ELF cap are two different, sequential blockers on the same path.
