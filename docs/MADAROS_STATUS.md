@@ -93,7 +93,9 @@ as `bin/souc-lean-single-x86_64`.
   `Source-Bootstrap Self-Host (Linux x86_64)`, `Website`, and
   `Madaros Greenline Gate`. Review approvals are set to `0` because the repo
   currently exposes only the PR author as collaborator; the enforced lock is
-  PR+checks.
+  PR+checks. The `CI` workflow also runs on pushes to
+  `canon/madaros-greenline`, so the protected branch tip gets the same named
+  status contexts after merge instead of relying only on the pre-merge PR run.
 
 ## Cross-lane TODOs
 
