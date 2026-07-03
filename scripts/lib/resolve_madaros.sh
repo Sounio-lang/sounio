@@ -19,7 +19,22 @@ _SOUNIO_RESOLVE_MADAROS_LOADED=1
 _SOUNIO_MADAROS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SOUNIO_MADAROS_ROOT_DIR="${_SOUNIO_MADAROS_ROOT_DIR:-$(cd "$_SOUNIO_MADAROS_LIB_DIR/../.." && pwd)}"
 
-# Resolve MADAROS_BIN: explicit env → repo wrapper → repo raw ELF → PATH fallback.
+# A raw artifacts/self-hosted/madaros is trusted only when its gate receipt
+# contains the current ELF sha256 and proves the SMT gate was not skipped.
+# Otherwise it is demoted below relocgate.
+_sounio_madaros_receipt_ok() {
+  local elf="$1"
+  local receipt="$elf.gate-receipt"
+  [[ -f "$receipt" ]] || return 1
+  local want
+  want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want" ]] || return 1
+  grep -Fq "$want" "$receipt" || return 1
+  grep -Fxq "smt_skip=0" "$receipt"
+}
+
+# Resolve MADAROS_BIN: explicit env → repo wrapper → gated raw ELF →
+# relocgate (verified-green) → checked-in prebuilt → explicit PATH opt-in.
 _sounio_resolve_madaros_bin() {
   if [[ -n "${MADAROS_BIN:-}" && -x "$MADAROS_BIN" ]]; then
     echo "$MADAROS_BIN"
@@ -36,7 +51,15 @@ _sounio_resolve_madaros_bin() {
   fi
   local raw_elf="$_SOUNIO_MADAROS_ROOT_DIR/artifacts/self-hosted/madaros"
   if [[ -x "$raw_elf" ]]; then
-    echo "$raw_elf"
+    if _sounio_madaros_receipt_ok "$raw_elf"; then
+      echo "$raw_elf"
+      return 0
+    fi
+    echo "warning: using ungated $raw_elf skipped; export MADAROS_RAW_BIN=$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros-relocgate for the verified-green binary" >&2
+  fi
+  local relocgate="$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros-relocgate"
+  if [[ -x "$relocgate" ]]; then
+    echo "$relocgate"
     return 0
   fi
   local prebuilt="$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros-linux-x86_64"
@@ -44,12 +67,13 @@ _sounio_resolve_madaros_bin() {
     echo "$prebuilt"
     return 0
   fi
-  if command -v madaros >/dev/null 2>&1; then
+  if [[ "${SOUNIO_MADAROS_ALLOW_PATH_FALLBACK:-0}" == "1" ]] && command -v madaros >/dev/null 2>&1; then
+    echo "warning: resolve_madaros using PATH fallback because SOUNIO_MADAROS_ALLOW_PATH_FALLBACK=1" >&2
     command -v madaros
     return 0
   fi
   echo "error: resolve_madaros: no Madaros binary found" >&2
-  echo "  tried: MADAROS_BIN, SOUNIO_MADAROS_BIN, $wrapper, $raw_elf, $prebuilt, PATH" >&2
+  echo "  tried: MADAROS_BIN, SOUNIO_MADAROS_BIN, $wrapper, $raw_elf (receipt-gated), $relocgate, $prebuilt, PATH opt-in" >&2
   echo "  run: make build-madaros" >&2
   return 1
 }

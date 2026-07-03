@@ -12,7 +12,7 @@
 #   madaros --version
 #   madaros info
 #   madaros check input.sio
-#   madaros build input.sio -o out.elf
+#   madaros build input.sio [-o OUT] [--backend native|gpu]
 #   madaros run input.sio
 #   madaros pkg ...
 #
@@ -31,18 +31,52 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Resolve the underlying modular raw ELF.
 # Resolution order:
 #   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
-#   2. artifacts/self-hosted/madaros (built by make build-madaros)
-#   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
+#   2. artifacts/self-hosted/madaros, only with a matching .gate-receipt
+#      proving the SMT gate was not skipped
+#   3. bin/madaros-relocgate (verified-green fallback)
+#   4. bin/madaros-linux-x86_64 (checked-in prebuilt)
+_is_modular_elf() {
+  [[ -n "${1:-}" && -x "$1" && "$(head -c 2 "$1" 2>/dev/null)" != "#!" ]]
+}
+
+_madaros_receipt_ok() {
+  local elf="$1"
+  local receipt="$elf.gate-receipt"
+  [[ -f "$receipt" ]] || return 1
+  local want
+  want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want" ]] || return 1
+  grep -Fq "$want" "$receipt" || return 1
+  grep -Fxq "smt_skip=0" "$receipt"
+}
+
 _resolve_modular_elf() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
-    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}"; do
+    if _is_modular_elf "$cand"; then
       echo "$cand"
       return 0
     fi
   done
+
+  local artifact="$ROOT_DIR/artifacts/self-hosted/madaros"
+  if _is_modular_elf "$artifact"; then
+    if _madaros_receipt_ok "$artifact"; then
+      echo "$artifact"
+      return 0
+    fi
+    echo "warning: using ungated $artifact skipped; export MADAROS_RAW_BIN=$ROOT_DIR/bin/madaros-relocgate for the verified-green binary" >&2
+  fi
+
+  for cand in "$ROOT_DIR/bin/madaros-relocgate" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if _is_modular_elf "$cand"; then
+      echo "$cand"
+      return 0
+    fi
+  done
+
   echo "error: madaros: no modular compiler raw ELF found" >&2
-  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $artifact (receipt-gated), $ROOT_DIR/bin/madaros-relocgate, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
   echo "  run: make build-madaros" >&2
   return 1
 }
@@ -64,10 +98,14 @@ madaros — launcher for the Madaros modular compiler ($RAW_MADAROS)
 Usage:
   madaros --version                     print compiler identity
   madaros info                          print resolution path
-  madaros check <source.sio>            parse, resolve and typecheck
-  madaros build <source.sio> [-o OUT]   compile source to a native ELF
-  madaros compile <source.sio> [-o OUT] alias for build
-  madaros run <source.sio>              compile to a temp ELF and run it
+  madaros check <source.sio|project-dir>
+                                      parse, resolve and typecheck
+  madaros build <source.sio|project-dir> [-o OUT] [--backend native|gpu]
+                                      compile source to native ELF or GPU artifact
+  madaros compile <source.sio|project-dir> [-o OUT]
+                                      alias for build
+  madaros run <source.sio|project-dir>
+                                      compile to a temp ELF and run it
   madaros pkg <subcommand>...           package-manager commands
   madaros <raw-compiler-args>...        pass through to the raw ELF
 
@@ -78,6 +116,12 @@ Common modular-compiler modes:
   madaros --native-v2-emit-scalar N     emit a scalar witness
   madaros --version-json                emit version metadata
   madaros pkg ...                       package manager commands
+
+GPU build options:
+  --backend gpu                         emit PTX via the public GPU build path
+  --gpu-target <target>                 raw GPU target (default: cuda-sm80)
+  --gpu-binary-format <fmt>             raw GPU format/mode selector
+  --gpu-precision <f32|f64>             compatibility alias for GPU mode
 
 Environment:
   SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
@@ -99,6 +143,105 @@ version() {
   local out
   out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
   echo "$out" | head -n 1
+}
+
+find_project_root() {
+  local start="${1:-$PWD}"
+  if [[ -f "$start" ]]; then
+    start="$(dirname "$start")"
+  fi
+  if [[ -d "$start" ]]; then
+    start="$(cd "$start" && pwd)"
+  else
+    return 1
+  fi
+  while [[ "$start" != "/" ]]; do
+    if [[ -f "$start/sounio.toml" ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    start="$(dirname "$start")"
+  done
+  return 1
+}
+
+project_manifest_value() {
+  local root="$1"
+  local key="$2"
+  python3 - "$root/sounio.toml" "$key" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(3)
+path, key = sys.argv[1], sys.argv[2]
+text = open(path, "rb").read().decode("utf-8")
+data = tomllib.loads(text)
+if key == "package.name":
+    print(data.get("package", {}).get("name", "sounio-project"))
+elif key == "entry":
+    bins = data.get("bin", [])
+    if isinstance(bins, list) and bins:
+        value = bins[0].get("path", "")
+        if value:
+            print(value)
+            raise SystemExit(0)
+    value = data.get("project", {}).get("entry", "")
+    if value:
+        print(value)
+        raise SystemExit(0)
+    value = data.get("lib", {}).get("path", "")
+    if value and "[[bin]]" not in text:
+        print(value)
+        raise SystemExit(0)
+    print("src/main.sio")
+else:
+    raise SystemExit(2)
+PY
+}
+
+resolve_source_or_project() {
+  local candidate="${1:-}"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local root=""
+  if [[ -n "$candidate" && -d "$candidate" ]]; then
+    root="$(find_project_root "$candidate" || true)"
+  else
+    root="$(find_project_root "$PWD" || true)"
+  fi
+  if [[ -z "$root" ]]; then
+    return 1
+  fi
+
+  local entry
+  entry="$(project_manifest_value "$root" entry)"
+  if [[ ! -f "$root/$entry" ]]; then
+    echo "error: project entry not found: $root/$entry" >&2
+    return 1
+  fi
+  printf '%s\n' "$root/$entry"
+}
+
+project_default_output() {
+  local root="$1"
+  local name
+  name="$(project_manifest_value "$root" package.name)"
+  mkdir -p "$root/target"
+  printf '%s\n' "$root/target/$name"
+}
+
+args_have_output() {
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-o" || "$arg" == "--output" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 _check_source_arg() {
@@ -126,10 +269,11 @@ _run_raw_check() {
   ( ulimit -v 8388608 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --check "$src" "$@" )
 }
 
-_parse_output_path() {
-  local fallback="$1"
-  shift
-  local out="$fallback"
+_parse_build_options() {
+  BUILD_OUT="a.out"
+  BUILD_BACKEND="native"
+  BUILD_GPU_TARGET="cuda-sm80"
+  BUILD_GPU_BINARY_FORMAT=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -o|--output)
@@ -137,7 +281,46 @@ _parse_output_path() {
           echo "error: madaros build: $1 requires a path" >&2
           return 2
         fi
-        out="$2"
+        BUILD_OUT="$2"
+        shift 2
+        ;;
+      --backend)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --backend requires native or gpu" >&2
+          return 2
+        fi
+        BUILD_BACKEND="$2"
+        shift 2
+        ;;
+      --gpu-target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-target requires a target" >&2
+          return 2
+        fi
+        BUILD_GPU_TARGET="$2"
+        shift 2
+        ;;
+      --gpu-binary-format)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-binary-format requires a format" >&2
+          return 2
+        fi
+        BUILD_GPU_BINARY_FORMAT="$2"
+        shift 2
+        ;;
+      --gpu-precision)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-precision requires f32 or f64" >&2
+          return 2
+        fi
+        case "$2" in
+          f32) BUILD_GPU_BINARY_FORMAT="f32" ;;
+          f64) BUILD_GPU_BINARY_FORMAT="" ;;
+          *)
+            echo "error: madaros build: unsupported --gpu-precision: $2" >&2
+            return 2
+            ;;
+        esac
         shift 2
         ;;
       *)
@@ -146,7 +329,14 @@ _parse_output_path() {
         ;;
     esac
   done
-  echo "$out"
+  case "$BUILD_BACKEND" in
+    native|"") BUILD_BACKEND="native" ;;
+    gpu) ;;
+    *)
+      echo "error: madaros build: unsupported backend: $BUILD_BACKEND" >&2
+      return 2
+      ;;
+  esac
 }
 
 _build_source() {
@@ -157,10 +347,23 @@ _build_source() {
     echo "error: madaros build: source is empty: $src" >&2
     return 1
   fi
-  local out
-  out="$(_parse_output_path a.out "$@")"
+  _parse_build_options "$@"
+  local out="$BUILD_OUT"
   mkdir -p "$(dirname "$out")"
   rm -f "$out"
+  if [[ "$BUILD_BACKEND" == "gpu" ]]; then
+    local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
+    if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
+      gpu_args+=(--gpu-binary-format "$BUILD_GPU_BINARY_FORMAT")
+    fi
+    # Guard: 16 GB vmem + 300 s timeout
+    ( ulimit -v 16777216 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "${gpu_args[@]}" )
+    if [[ ! -s "$out" ]]; then
+      echo "error: madaros build: compiler produced no GPU artifact at $out" >&2
+      return 1
+    fi
+    return 0
+  fi
   # Guard: 16 GB vmem + 300 s timeout
   ( ulimit -v 16777216 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
   if [[ ! -s "$out" ]]; then
@@ -197,25 +400,53 @@ case "$1" in
     info
     ;;
   check)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros check: missing source file" >&2
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros check requires <source.sio> or a project with sounio.toml" >&2
       exit 2
     fi
-    _run_raw_check "$2" "${@:3}"
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    _run_raw_check "$src" "$@"
     ;;
   build|compile)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros build: missing source file" >&2
+    shift
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+      usage
+      exit 0
+    fi
+    candidate="${1:-}"
+    if [[ -n "$candidate" && "$candidate" != -* ]]; then
+      shift
+    else
+      candidate=""
+    fi
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros build requires <source.sio> or a project with sounio.toml" >&2
       exit 2
     fi
-    _build_source "$2" "${@:3}"
+    project_root=""
+    if [[ -z "$candidate" || -d "$candidate" ]]; then
+      project_root="$(find_project_root "${candidate:-$PWD}" || true)"
+    fi
+    if [[ -n "$project_root" ]] && ! args_have_output "$@"; then
+      set -- "$@" -o "$(project_default_output "$project_root")"
+    fi
+    _build_source "$src" "$@"
     ;;
   run)
-    if [[ $# -lt 2 ]]; then
-      echo "error: madaros run: missing source file" >&2
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros run requires <source.sio> or a project with sounio.toml" >&2
       exit 2
     fi
-    _run_source "$2" "${@:3}"
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    _run_source "$src" "$@"
     ;;
   -h|--help|help)
     usage

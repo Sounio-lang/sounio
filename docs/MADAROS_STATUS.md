@@ -80,6 +80,14 @@ as `bin/souc-lean-single-x86_64`.
   `bin/madaros-relocgate`. Verify `bin/madaros` and `scripts/lib/resolve_madaros.sh`
   locally before claiming the safe compiler route on that branch; merge/rebase the
   protected `canon/madaros-greenline` compiler lane before final landing.
+- **Stacked compiler-route port (2026-07-03):** `work/madaros-route-port-codex`
+  ports the protected greenline resolver/full-gate files onto the green GPU/PTX
+  witness branch and refreshes `bin/madaros-linux-x86_64` to the proved artifact
+  hash `0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`.
+  Local proof on that branch: default `bin/madaros run
+  tests/stdlib/theorem/test_smt_solver_basic.sio` exits 0, `scripts/dev/madaros_two_gate.sh
+  bin/madaros-linux-x86_64` reports `two_gate: A=6/6 B=pass`, and
+  `scripts/ci/madaros_full_gate.sh` exits 0 with imported-SMT 6/6.
 
 Do not say "Madaros is production-ready" merely because #356 is closed. Say the
 specific 2026-06-21 blocker cluster is closed, then use the production-ready
