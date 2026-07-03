@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 BASE_REF="${SOUNIO_AUDIT_BASE_REF:-origin/main}"
 INCLUDE_PRS="${SOUNIO_AUDIT_INCLUDE_PRS:-0}"
+ALLOW_MANIFEST="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST:-}"
 CHECK_MODE=0
 OUT=""
 
@@ -25,6 +26,10 @@ Check-mode environment:
   SOUNIO_AUDIT_MAX_DIRTY                 optional
   SOUNIO_AUDIT_MAX_OPEN_PR               optional
   SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE   optional awk regex for allowed paths
+  SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST
+                                             optional cleanup approval TSV;
+                                             approve_keep_active_allowlist rows
+                                             allow exact worktree paths
 USAGE
 }
 
@@ -56,6 +61,15 @@ done
 
 if [[ -z "$OUT" ]]; then
   OUT="$(mktemp /tmp/sounio-worktree-audit.XXXXXX.tsv)"
+fi
+
+if [[ -n "$ALLOW_MANIFEST" ]]; then
+  [[ -f "$ALLOW_MANIFEST" ]] || {
+    echo "error: allow manifest not found: $ALLOW_MANIFEST" >&2
+    exit 2
+  }
+  scripts/dev/madaros_worktree_cleanup_approval.sh validate \
+    --manifest-tsv "$ALLOW_MANIFEST" >/dev/null
 fi
 
 CRITICAL_PATHS=(
@@ -161,10 +175,49 @@ write_rows() {
 } > "$OUT"
 
 echo "audit_tsv=$OUT"
+if [[ -n "$ALLOW_MANIFEST" ]]; then
+  echo "allow_manifest=$ALLOW_MANIFEST"
+  echo "allow_manifest_decision=approve_keep_active_allowlist"
+fi
 summary="$(
   awk -F '\t' '
+    function strip_cr(value) {
+      sub(/\r$/, "", value)
+      return value
+    }
+    function load_allow_manifest(manifest, line, fields, n, header_seen) {
+      if (manifest == "") {
+        return
+      }
+      while ((getline line < manifest) > 0) {
+        line = strip_cr(line)
+        if (line == "" || line ~ /^#/) {
+          continue
+        }
+        if (!header_seen) {
+          header_seen = 1
+          continue
+        }
+        n = split(line, fields, "\t")
+        if (n >= 6 && fields[1] == "approve_keep_active_allowlist" && fields[6] != "") {
+          allow_manifest_path[fields[6]] = 1
+        }
+      }
+      close(manifest)
+    }
+    function path_allowed(path) {
+      if (allow_critical_dirty_re != "" && path ~ allow_critical_dirty_re) {
+        return 1
+      }
+      if (path in allow_manifest_path) {
+        return 1
+      }
+      return 0
+    }
     BEGIN {
       allow_critical_dirty_re = ENVIRON["SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE"]
+      allow_critical_dirty_manifest = ENVIRON["SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST"]
+      load_allow_manifest(allow_critical_dirty_manifest)
     }
     NR > 1 {
       total++
@@ -172,7 +225,7 @@ summary="$(
       if ($5 ~ /^PRUNABLE/) prunable++
       if ($9 != "") {
         critical_dirty++
-        if (allow_critical_dirty_re == "" || $1 !~ allow_critical_dirty_re) {
+        if (!path_allowed($1)) {
           unallowed_critical_dirty++
         }
       }
@@ -203,13 +256,48 @@ check_threshold() {
 
 echo "critical_dirty_worktrees:"
 awk -F '\t' '
+  function strip_cr(value) {
+    sub(/\r$/, "", value)
+    return value
+  }
+  function load_allow_manifest(manifest, line, fields, n, header_seen) {
+    if (manifest == "") {
+      return
+    }
+    while ((getline line < manifest) > 0) {
+      line = strip_cr(line)
+      if (line == "" || line ~ /^#/) {
+        continue
+      }
+      if (!header_seen) {
+        header_seen = 1
+        continue
+      }
+      n = split(line, fields, "\t")
+      if (n >= 6 && fields[1] == "approve_keep_active_allowlist" && fields[6] != "") {
+        allow_manifest_path[fields[6]] = 1
+      }
+    }
+    close(manifest)
+  }
+  function path_allowed(path) {
+    if (allow_critical_dirty_re != "" && path ~ allow_critical_dirty_re) {
+      return 1
+    }
+    if (path in allow_manifest_path) {
+      return 1
+    }
+    return 0
+  }
   BEGIN {
     allow_critical_dirty_re = ENVIRON["SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE"]
+    allow_critical_dirty_manifest = ENVIRON["SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST"]
+    load_allow_manifest(allow_critical_dirty_manifest)
   }
   NR > 1 {
     if ($9 != "") {
       prefix = "unallowed"
-      if (allow_critical_dirty_re != "" && $1 ~ allow_critical_dirty_re) {
+      if (path_allowed($1)) {
         prefix = "allowed"
       }
       print "- [" prefix "] " $1 " | " $2 " | " $9

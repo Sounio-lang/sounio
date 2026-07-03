@@ -169,6 +169,13 @@ Later status-only PRs continue to advance by the same required protection set;
 use the live merge history command above for the current tip instead of relying
 on a hand-maintained PR range.
 
+For worktree hygiene, `scripts/dev/madaros_worktree_cleanup_approval.sh`
+supports `approve_keep_active_allowlist` rows in reviewed approval manifests.
+Those rows require the normal approver fields, render no cleanup commands, and
+can be passed to `scripts/dev/madaros_readiness_status.sh --strict` via
+`SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST=<manifest.tsv>` so active owned
+lanes are explicit instead of hidden inside a broad regex.
+
 Root cause of the previous imported-SMT failure: the compact imported-simple IR
 builder misclassified control/non-call expressions as call thunks. In the
 minimal `use theorem::smt::*` repro, it first emitted a `kind=1` call target for

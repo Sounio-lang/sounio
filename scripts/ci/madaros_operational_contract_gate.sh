@@ -168,13 +168,19 @@ require_cleanup_approval_evidence() {
       $3 = "2026-07-03T00:00:00Z"
       $4 = "APPROVAL-fixture"
       $16 = "fixture approval row"
+      print
+      $1 = "approve_keep_active_allowlist"
+      $4 = "APPROVAL-fixture-keep-active"
+      $16 = "fixture keep-active allowlist row"
+      print
+      next
     }
     { print }
   ' "$manifest" > "$approved"
 
   validate_out="$(scripts/dev/madaros_worktree_cleanup_approval.sh validate --manifest-tsv "$approved")"
-  grep -Fq 'actionable_rows=1' <<<"$validate_out" ||
-    fail "cleanup approval approved fixture should have one actionable row"
+  grep -Fq 'actionable_rows=2' <<<"$validate_out" ||
+    fail "cleanup approval approved fixture should have two actionable rows"
 
   render_out="$tmp_dir/render"
   scripts/dev/madaros_worktree_cleanup_approval.sh render --manifest-tsv "$approved" --out-dir "$render_out" >/dev/null
@@ -182,6 +188,8 @@ require_cleanup_approval_evidence() {
   require_file "$commands"
   require_grep '# git push origin' "$commands"
   require_grep '# git worktree remove' "$commands"
+  require_grep 'decision=approve_keep_active_allowlist' "$commands"
+  require_grep 'keep-active allowlist approved; no cleanup action rendered' "$commands"
   require_no_uncommented_mutation "$commands"
 
   if scripts/dev/madaros_worktree_cleanup_approval.sh render --manifest-tsv "$approved" --out-dir "$tmp_dir/blocked" --allow-mutating-output >/dev/null 2>&1; then
@@ -276,6 +284,7 @@ require_grep 'bin/madaros-linux-x86_64' bin/souc
 require_grep 'exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros"' bin/souc
 require_grep 'artifacts/self-hosted/madaros.gate-receipt' .gitignore
 require_grep 'cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh' scripts/dev/madaros_readiness_status.sh
+require_grep 'audit_allow_manifest_decision=approve_keep_active_allowlist' scripts/dev/madaros_readiness_status.sh
 require_grep 'git push, git reset, git clean, git branch -D' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'owner confirmation required before any archive, push, or removal' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'unique_commits_origin_main' scripts/dev/madaros_worktree_cleanup_plan.sh
@@ -284,6 +293,8 @@ require_grep 'critical_vs_base' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep '# evidence=origin_main_unique:' scripts/dev/madaros_worktree_cleanup_plan.sh
 require_grep 'cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh' scripts/dev/madaros_readiness_status.sh
 require_grep 'I_ACCEPT_PUSH_BEFORE_DELETE' scripts/dev/madaros_worktree_cleanup_approval.sh
+require_grep 'approve_keep_active_allowlist' scripts/dev/madaros_worktree_cleanup_approval.sh
+require_grep 'SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST' scripts/dev/worktree_branch_audit.sh
 require_grep 'tracked/staged binary diffs' scripts/dev/madaros_worktree_salvage_packet.sh
 require_grep 'No branches pushed or worktrees removed' scripts/dev/madaros_worktree_salvage_packet.sh
 require_cleanup_planner_evidence

@@ -50,6 +50,9 @@ Manifest decisions:
   approve_salvage_remove  archive/salvage first, then remove
   approve_discard_remove  save patch evidence, then discard/remove
   approve_remove_clean    remove only if the row is clean in the source plan
+  approve_keep_active_allowlist
+                          keep active under operator-approved audit allowlist;
+                          render emits inspection only, never cleanup commands
 USAGE
 }
 
@@ -196,7 +199,7 @@ write_template() {
   } > "$manifest"
   echo "approval_manifest=$manifest"
   echo "plan_tsv=$PLAN_TSV"
-  echo "edit_decisions=hold|approve_salvage_remove|approve_discard_remove|approve_remove_clean"
+  echo "edit_decisions=hold|approve_salvage_remove|approve_discard_remove|approve_remove_clean|approve_keep_active_allowlist"
 }
 
 validate_manifest() {
@@ -226,7 +229,8 @@ validate_manifest() {
     $1 != "hold" &&
     $1 != "approve_salvage_remove" &&
     $1 != "approve_discard_remove" &&
-    $1 != "approve_remove_clean" {
+    $1 != "approve_remove_clean" &&
+    $1 != "approve_keep_active_allowlist" {
       printf "error: row %d has invalid decision: %s\n", NR, $1 > "/dev/stderr"
       failed = 1
     }
@@ -342,6 +346,10 @@ HEADER
           if [[ "$branch" != "detached" ]]; then
             render_line "git branch -d $branch_q" 1
           fi
+          ;;
+        approve_keep_active_allowlist)
+          echo "# keep-active allowlist approved; no cleanup action rendered for this row"
+          echo "# pass this manifest via SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST to readiness/audit gates"
           ;;
       esac
       echo

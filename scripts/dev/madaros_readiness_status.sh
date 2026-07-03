@@ -475,10 +475,22 @@ fi
 if [[ "$RUN_AUDIT" == "1" ]]; then
   section "Worktree Audit"
   audit_allow_default="^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|$ROOT_DIR)$"
+  audit_allow_re="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE:-${SOUNIO_MADAROS_CLEANUP_ALLOW_RE:-$audit_allow_default}}"
+  audit_allow_manifest="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST:-}"
   audit_out="${SOUNIO_MADAROS_READINESS_AUDIT_OUT:-$(mktemp /tmp/sounio-madaros-readiness-audit.XXXXXX.tsv)}"
+  echo "audit_allow_regex=$audit_allow_re"
+  if [[ -n "$audit_allow_manifest" ]]; then
+    echo "audit_allow_manifest=$audit_allow_manifest"
+    echo "audit_allow_manifest_decision=approve_keep_active_allowlist"
+  else
+    echo "audit_allow_manifest=<unset>"
+  fi
+  audit_env=(env "SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE=$audit_allow_re")
+  if [[ -n "$audit_allow_manifest" ]]; then
+    audit_env+=("SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST=$audit_allow_manifest")
+  fi
   run_status_command audit \
-    env SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE:-$audit_allow_default}" \
-      scripts/dev/worktree_branch_audit.sh --check "$audit_out"
+    "${audit_env[@]}" scripts/dev/worktree_branch_audit.sh --check "$audit_out"
   echo "cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-plan"
   echo "cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh template --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-approval"
 fi
