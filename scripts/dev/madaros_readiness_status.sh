@@ -15,6 +15,7 @@ IN_PRODUCTION_READY_CHECK=0
 COMPILER_LANE_PATH="${SOUNIO_MADAROS_COMPILER_LANE:-/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b}"
 REFRESH_GH=0
 STRICT=0
+STRICT_FAILED=0
 PRODUCTION_READY=0
 PRODUCTION_READY_FAILED=0
 COMPILER_PR_OVERLAP_FAILED=0
@@ -127,14 +128,14 @@ run_status_command() {
   if "$@"; then
     echo "status[$label]=pass"
     return 0
+  else
+    local rc=$?
+    echo "status[$label]=fail rc=$rc"
+    if [[ "$STRICT" == "1" ]]; then
+      STRICT_FAILED=1
+    fi
+    return 0
   fi
-
-  local rc=$?
-  echo "status[$label]=fail rc=$rc"
-  if [[ "$STRICT" == "1" ]]; then
-    return "$rc"
-  fi
-  return 0
 }
 
 summarize_check_log() {
@@ -478,6 +479,7 @@ if [[ "$RUN_AUDIT" == "1" ]]; then
   run_status_command audit \
     env SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE:-$audit_allow_default}" \
       scripts/dev/worktree_branch_audit.sh --check "$audit_out"
+  echo "cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-plan"
 fi
 
 if [[ "$CHECK_COMPILER_LANE" == "1" ]]; then
@@ -573,6 +575,7 @@ Production readiness still also requires:
 Integration shepherd:
   scripts/ci/madaros_blocker_contract_gate.sh
   scripts/dev/madaros_readiness_status.sh --strict
+  scripts/dev/madaros_worktree_cleanup_plan.sh
   scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
   scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue
   scripts/dev/madaros_readiness_status.sh --production-ready
@@ -591,5 +594,9 @@ if [[ "$RUN_SOURCE_TO_ELF" == "1" ]]; then
 fi
 
 if [[ "$PRODUCTION_READY" == "1" && "$PRODUCTION_READY_FAILED" != "0" ]]; then
+  exit 1
+fi
+
+if [[ "$STRICT" == "1" && "$PRODUCTION_READY" != "1" && "$STRICT_FAILED" != "0" ]]; then
   exit 1
 fi
