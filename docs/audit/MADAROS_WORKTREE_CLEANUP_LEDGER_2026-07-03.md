@@ -20,6 +20,14 @@ Completed before this ledger:
   `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`.
 - PR #587 merged into `canon/madaros-greenline` at
   `4419f2097913de65e36665d442a65c6f64d5f3ca`.
+- PR #588 merged the first cleanup ledger at
+  `2bfe06b4cea88e86c0875e4c9069526c2292e9fc`.
+- PR #589 merged the non-destructive cleanup planner at
+  `95d689462126b34f57fc25d83b45dc8dbf3c01cc`.
+- PR #590 merged readiness handoff wiring at
+  `0fdaa2b1c740c6e04b533eee0b90e335b3bf728f`.
+- PR #591 merged planner evidence columns plus live-audit shape validation at
+  `3df24a04af6b35e4f710663accb03f9f97825b0a`.
 - `canon/madaros-greenline` is protected, force-push/delete are disabled,
   admins are enforced, strict required checks are enabled, and
   `Madaros Greenline Gate` is required.
@@ -47,6 +55,10 @@ It writes:
 
 The planner is intentionally non-destructive. It never runs `git push`,
 `git reset`, `git clean`, `git branch -D`, or `git worktree remove`.
+As of PR #591, `scripts/ci/madaros_operational_contract_gate.sh` also exercises
+the planner on a deterministic fixture and on the live worktree audit stream,
+checking the 22-column TSV shape, evidence-comment coverage, and absence of
+uncommented mutating commands.
 
 `scripts/dev/madaros_readiness_status.sh --strict` prints a
 `cleanup_plan_command=...` line after the worktree audit section, using the
