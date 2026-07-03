@@ -14,7 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 This ledger is the non-destructive disposition record for the remaining
 Madaros readiness cleanup work after the protected greenline landed.
 
-Completed before this ledger:
+Key completed PRs in this ledger series:
 
 - PR #586 merged into `canon/madaros-greenline` at
   `bf46bda919596ce71b8fc35dc29cb3a31ff01d7b`.
@@ -32,6 +32,9 @@ Completed before this ledger:
   `246cd44e59026b8ca6fecd72336e631036015f07`.
 - PR #593 removed stale live-tip wording from the status docs at
   `6f0d9ec8c5289f717d668f773d2e54a8d8d9bbdb`.
+- Later status-only PRs may advance `canon/madaros-greenline`; use
+  `git log --oneline --merges origin/canon/madaros-greenline` for the live
+  merge list instead of treating this section as exhaustive.
 - `canon/madaros-greenline` is protected, force-push/delete are disabled,
   admins are enforced, strict required checks are enabled, and
   `Madaros Greenline Gate` is required.

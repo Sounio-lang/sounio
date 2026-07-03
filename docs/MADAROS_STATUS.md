@@ -23,10 +23,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 > `madaros_full_gate.sh` passed with imported SMT 6/6 and wrote
 > `artifacts/self-hosted/madaros.gate-receipt`
 > (`sha256=0441113419b71ed0fa24348ae8ef0ad0f2a0ff9a38a13ada3409c283984d7d19`,
-> `smt_skip=0`). Subsequent protected-branch PRs #587-#593 were docs/tooling
-> coordination updates; PR #591 passed the required gate set for the
-> cleanup-planner evidence upgrade, PR #592 passed it for the post-#591 status
-> sync, and PR #593 passed it for stale-tip wording cleanup.
+> `smt_skip=0`). Subsequent protected-branch PRs are docs/tooling coordination
+> updates unless their PR text says otherwise; for the live merge history, run
+> `git log --oneline --merges origin/canon/madaros-greenline`.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
@@ -164,10 +163,9 @@ full suite, source-bootstrap self-host, both native self-host jobs, contracts,
 lint, and website before the merge.
 GitHub CI for PR #591 passed the same required protection set before merging the
 cleanup-planner evidence upgrade at `3df24a04af6b35e4f710663accb03f9f97825b0a`.
-GitHub CI for PR #592 then passed the same protection set before merging the
-status synchronization at `246cd44e59026b8ca6fecd72336e631036015f07`.
-GitHub CI for PR #593 then passed the same protection set before merging the
-stale-tip wording cleanup at `6f0d9ec8c5289f717d668f773d2e54a8d8d9bbdb`.
+Later status-only PRs continue to advance by the same required protection set;
+use the live merge history command above for the current tip instead of relying
+on a hand-maintained PR range.
 
 Root cause of the previous imported-SMT failure: the compact imported-simple IR
 builder misclassified control/non-call expressions as call thunks. In the
