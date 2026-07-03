@@ -146,7 +146,25 @@ pub fn full_big_crn_chebi_map() -> [IRI; 6] {
 
 pub fn species_to_chebi_iri(species_idx: i64, mechanism: &str) -> IRI {
     // Delegate to FULL per-compound for consistency
-    if mechanism == "big_crn" || mechanism == "h2o2" {
+    //
+    // Bare string literals compared against a `&str` parameter fail lean_single's
+    // checker ("comparison operands must have the same type" — a bare literal
+    // infers as `string`, not `&str`); bind each to a local `string` first and
+    // compare against its reference, matching the workaround already used
+    // elsewhere in this stdlib wave for the same class of bug.
+    let mech_big_crn: string = "big_crn";
+    let mech_h2o2: string = "h2o2";
+    let mech_metabolic: string = "metabolic";
+    let mech_pbpk: string = "pbpk";
+    let mech_pbpk28: string = "pbpk28";
+    let mech_cyp: string = "cyp";
+    let mech_cyp3a4: string = "cyp3a4";
+    let mech_pgp: string = "pgp";
+    let mech_transport: string = "transport";
+    let mech_proteolytic: string = "proteolytic";
+    let mech_peptide: string = "peptide";
+    let mech_enzyme: string = "enzyme";
+    if mechanism == &mech_big_crn || mechanism == &mech_h2o2 {
         match species_idx {
             0 => h_atom_chebi(),
             1 => o2_chebi(),
@@ -156,7 +174,7 @@ pub fn species_to_chebi_iri(species_idx: i64, mechanism: &str) -> IRI {
             5 => h2o_chebi(),
             _ => iri_new(0),
         }
-    } else if mechanism == "metabolic" || mechanism == "pbpk" || mechanism == "pbpk28" {
+    } else if mechanism == &mech_metabolic || mechanism == &mech_pbpk || mechanism == &mech_pbpk28 {
         match species_idx {
             0 => water_iri(),
             1 => drug_chebi(),
@@ -168,25 +186,25 @@ pub fn species_to_chebi_iri(species_idx: i64, mechanism: &str) -> IRI {
             7 => semaglutide_chebi(),
             _ => iri_new(100000 + species_idx),
         }
-    } else if mechanism == "cyp" || mechanism == "cyp3a4" {
+    } else if mechanism == &mech_cyp || mechanism == &mech_cyp3a4 {
         match species_idx {
             0 => cyp3a4_enzyme_chebi(),
             1 => midazolam_chebi(), // probe substrate
             2 => tacrolimus_chebi(),
             _ => iri_new(6805), // fall to xeno GO id
         }
-    } else if mechanism == "pgp" || mechanism == "transport" {
+    } else if mechanism == &mech_pgp || mechanism == &mech_transport {
         match species_idx {
             0 => digoxin_chebi(),
             1 => rapamycin_chebi(),
             _ => pgp_transport_iri(),
         }
-    } else if mechanism == "proteolytic" || mechanism == "peptide" {
+    } else if mechanism == &mech_proteolytic || mechanism == &mech_peptide {
         match species_idx {
             0 => semaglutide_chebi(),
             _ => proteolysis_process_iri(),
         }
-    } else if mechanism == "enzyme" {
+    } else if mechanism == &mech_enzyme {
         match species_idx {
             0 => enzyme_chebi(),
             1 => substrate_chebi(),
@@ -214,22 +232,33 @@ fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) <= tol }
 // ============================================================================
 
 // Example: epistemic concentration of water with full ChEBI provenance
-pub fn epistemic_water_conc(val: f64, u: f64) -> (f64, f64, IRI) {
+//
+// Returns (IRI, value, uncertainty) rather than (value, uncertainty, IRI): a struct
+// type in the LAST position of a 3-tuple confuses lean_single's type inference for
+// the tuple's middle numeric element (isolated with a minimal repro outside stdlib;
+// `f64` first/middle positions are fine, `f64` last next to a struct is fine too —
+// only a non-numeric type strictly in position 2 of 3 breaks it). Reordering avoids
+// the bug entirely; both of this function's 2 call sites were updated to match.
+pub fn epistemic_water_conc(val: f64, u: f64) -> (IRI, f64, f64) {
     let chebi = water_iri();
     // In full system: this would feed Knowledge[CHEBI_15377] { value, variance, ontology: chebi, ... }
-    (val, u, chebi)
+    (chebi, val, u)
 }
 
 // Used in CRN outputs to attach ontology grounding (for audit, reports)
 // Supports pbpk/pbpk28 for PBPK28 drug mappings (extended)
-pub fn attach_chebi_to_crn_output(vals: &[f64; 8], us: &[f64; 8], mechanism: &str) -> ([f64; 8], [f64; 8], [IRI; 8]) {
+pub fn attach_chebi_to_crn_output(vals: &[f64; 8], us: &[f64; 8], mechanism: &str) -> ([f64; 8], [f64; 8], [IRI; 8]) with Mut {
     var iris: [IRI; 8] = [iri_new(0); 8];
-    var n = if mechanism == "pbpk" || mechanism == "pbpk28" || mechanism == "cyp" || mechanism == "pgp" { 8 } else { 6 };
+    let acco_pbpk: string = "pbpk";
+    let acco_pbpk28: string = "pbpk28";
+    let acco_cyp: string = "cyp";
+    let acco_pgp: string = "pgp";
+    var n = if mechanism == &acco_pbpk || mechanism == &acco_pbpk28 || mechanism == &acco_cyp || mechanism == &acco_pgp { 8 } else { 6 };
     var i = 0; while i < n && i < 8 {
         iris[i] = species_to_chebi_iri(i as i64, mechanism);
         i = i + 1;
     }
-    (vals, us, iris)
+    (*vals, *us, iris)
 }
 
 // PBPK28 drug/enzyme map (ChEBI for compounds + enzymes)
@@ -265,19 +294,27 @@ pub fn test_chebi_water_nominal() -> bool {
 }
 
 pub fn test_chebi_crn_species_mapping() -> bool {
-    let h2o = species_to_chebi_iri(5, "big_crn");
-    let o2 = species_to_chebi_iri(1, "big_crn");
+    let mech_test_big_crn: string = "big_crn";
+    let h2o = species_to_chebi_iri(5, &mech_test_big_crn);
+    let o2 = species_to_chebi_iri(1, &mech_test_big_crn);
     // Water uses real, others documented standard
     h2o.id == CHEBI_15377_ID && o2.id == 15379
 }
 
-pub fn test_epistemic_ontology_linked() -> bool {
-    let (v, u, iri) = epistemic_water_conc(0.18, 0.02);  // from BigCRN lit H2O
-    let (v2, u2, _) = attach_chebi_to_crn_output(&[0.5,0.5,0.0,0.0,0.5,0.18,0.0,0.0], &[0.0;8], "big_crn");
-    check_near(v, 0.18, 0.05) && u > 0.0 && iri.id == CHEBI_15377_ID && v2[5] == 0.18
+pub fn test_epistemic_ontology_linked() -> bool with Mut {
+    let (iri, v, u) = epistemic_water_conc(0.18, 0.02);  // from BigCRN lit H2O
+    let test_vals: [f64; 8] = [0.5,0.5,0.0,0.0,0.5,0.18,0.0,0.0];
+    let test_us: [f64; 8] = [0.0;8];
+    let mech_test_big_crn2: string = "big_crn";
+    let (v2, u2, _) = attach_chebi_to_crn_output(&test_vals, &test_us, &mech_test_big_crn2);
+    let near_ok = check_near(v, 0.18, 0.05);
+    let u_ok = u > 0.0;
+    let iri_ok = iri.id == CHEBI_15377_ID;
+    let v2_ok = v2[5] == 0.18;
+    near_ok && u_ok && iri_ok && v2_ok
 }
 
-pub fn test_chemistry_full_ontology() -> bool with IO {
+pub fn test_chemistry_full_ontology() -> bool with IO, Mut {
     let ok1 = test_chebi_water_nominal();
     let ok2 = test_chebi_crn_species_mapping();
     let ok3 = test_epistemic_ontology_linked();

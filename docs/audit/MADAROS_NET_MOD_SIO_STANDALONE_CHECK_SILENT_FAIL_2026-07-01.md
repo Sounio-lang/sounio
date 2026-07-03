@@ -405,3 +405,65 @@ this week (21 tests total, all pass). Also verified Madaros: the 3 kinetics-clus
 tests show the same pre-existing "no method named for this type" (E011) Madaros-only
 divergence already documented for `equilibrium.sio`/`acids.sio` in the #567 update — not
 a new regression, inherited from those two modules.
+
+## Update 2026-07-03 (continued): issue #579 (ontology.sio audit) — one more new bug found, file down to zero errors
+
+Picked up issue #579 (`stdlib/chemistry/ontology.sio` had ~24 pre-existing, non-fatal
+errors). All 24 fixed; the file now checks with zero errors. Breakdown:
+
+**16 "comparison operands must have the same type"** — all the same root cause as the
+string-literal-argument issue from #575's PR, but for `==` comparisons instead of call
+arguments: `mechanism == "big_crn"` (comparing a `&str` parameter against a bare string
+literal, which infers as `string` not `&str`) fails. Same workaround: bind the literal
+to a local `string` first, compare against its reference (`let lit: string = "big_crn";
+mechanism == &lit`). Fixed at every comparison site across `species_to_chebi_iri` (12
+distinct literals) and `attach_chebi_to_crn_output` (4 literals, reused from the first
+function's set since both take a `mechanism: &str` parameter with the same literal
+vocabulary).
+
+**4 E001 + 2 "unknown identifier `[`" + 1 arity mismatch** — the already-known Bug E
+(inline array/string literal as a call argument) recurring in this file's own test
+functions (`species_to_chebi_iri(5, "big_crn")`, `attach_chebi_to_crn_output(&[...],
+&[...], "big_crn")`) — same fix, bind to locals first.
+
+**3 "effect not declared in function signature"** — `attach_chebi_to_crn_output` (array
+mutation via `iris[i] = ...`, needed `with Mut`, never declared) and its 2 transitive
+callers needed the same effect propagated up their own signatures — ordinary
+test-authoring omissions, same shape as issue #571's fix, not checker bugs.
+
+**Bug G — a struct type in the LAST position of a 3-tuple confuses lean_single's type
+inference for the tuple's *middle* element.** Isolated with a minimal repro outside
+stdlib:
+```sio
+struct Foo { id: i64 }
+fn f(val: f64, u: f64) -> (f64, f64, Foo) { (val, u, Foo { id: 1 }) }
+fn main() -> bool {
+    let (v, u, iri) = f(0.18, 0.02);
+    u > 0.0   // error: ordered comparison requires matching numeric operands
+}
+```
+Isolated further: `(f64, f64, f64)` (all-numeric) works fine; `(Foo, f64, f64)` (struct
+*first*) works fine; only a struct in position 2-of-2 (i.e. last, with something before
+it) corrupts the *middle* f64's inferred type — `let u2: f64 = u;` in the repro above
+reports `expected f64, got i64`, i.e. the checker doesn't just lose the type, it assigns
+the wrong concrete one. Access via `.1` field syntax instead of destructuring hits the
+identical error, so this isn't specific to `let (a, b, c) = ...` pattern-matching syntax
+— it's the tuple type's own internal element-type bookkeeping. `stdlib/chemistry/
+ontology.sio`'s `epistemic_water_conc(val, u) -> (f64, f64, IRI)` matched this exact
+shape (struct last, 2 f64s before it) and had exactly 2 real call sites (one in this
+file's own test, one in `stdlib/chemistry/kinetics.sio`). Fixed by reordering the
+return tuple to `(IRI, f64, f64)` (struct first) and updating both call sites'
+destructuring order to match — this is a public-API change to `epistemic_water_conc`,
+justified as a workaround for a confirmed checker bug with a fully enumerated, tiny
+blast radius (grepped for all callers before changing).
+
+**Result:** `stdlib/chemistry/ontology.sio` now checks with zero errors (previously 24).
+`stdlib/chemistry/kinetics.sio`'s own remaining error count also dropped by one (the
+`epistemic_water_conc` tail-type-mismatch this file had been carrying) — its residual
+14 errors (separately tracked, non-fatal, same file this whole dispatch update-chain has
+been about) are otherwise unchanged; `stdlib/epistemic/ode.sio`'s 14 (issue #580) are
+untouched, out of this issue's scope.
+
+Verified against a freshly rebuilt `lean_single`: all 3 kinetics-cluster tests plus the
+other 18 tests fixed this week still pass (21 total, zero regressions). Madaros shows
+the same pre-existing E011 divergence already documented above — not new.
