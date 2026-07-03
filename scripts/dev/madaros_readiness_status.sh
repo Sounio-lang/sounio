@@ -480,6 +480,7 @@ if [[ "$RUN_AUDIT" == "1" ]]; then
     env SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE="${SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE:-$audit_allow_default}" \
       scripts/dev/worktree_branch_audit.sh --check "$audit_out"
   echo "cleanup_plan_command=scripts/dev/madaros_worktree_cleanup_plan.sh --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-plan"
+  echo "cleanup_approval_command=scripts/dev/madaros_worktree_cleanup_approval.sh template --audit-tsv $audit_out --out-dir /tmp/madaros-cleanup-approval"
 fi
 
 if [[ "$CHECK_COMPILER_LANE" == "1" ]]; then
@@ -576,6 +577,7 @@ Integration shepherd:
   scripts/ci/madaros_blocker_contract_gate.sh
   scripts/dev/madaros_readiness_status.sh --strict
   scripts/dev/madaros_worktree_cleanup_plan.sh
+  scripts/dev/madaros_worktree_cleanup_approval.sh template --plan-tsv /tmp/madaros-cleanup-plan/madaros-cleanup-plan.tsv --out-dir /tmp/madaros-cleanup-approval
   scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
   scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue
   scripts/dev/madaros_readiness_status.sh --production-ready
