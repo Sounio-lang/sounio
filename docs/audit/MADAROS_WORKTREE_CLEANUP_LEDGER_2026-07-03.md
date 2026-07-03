@@ -94,9 +94,13 @@ scripts/dev/madaros_worktree_cleanup_approval.sh template \
 ```
 
 The template defaults every row to `decision=hold`. The operator must edit rows
-to one of `approve_salvage_remove`, `approve_discard_remove`, or
-`approve_remove_clean`, and must fill `approver`, `approved_utc`, and
-`approval_id`. Validate and render the reviewed commands with:
+to one of `approve_salvage_remove`, `approve_discard_remove`,
+`approve_remove_clean`, or `approve_keep_active_allowlist`, and must fill
+`approver`, `approved_utc`, and `approval_id`. `approve_keep_active_allowlist`
+means "this dirty worktree remains a live owned lane"; it is valid approval
+metadata for readiness/audit allowlisting, but the renderer emits only
+inspection commands and no cleanup/push/remove commands for that row. Validate
+and render the reviewed commands with:
 
 ```bash
 scripts/dev/madaros_worktree_cleanup_approval.sh validate \
@@ -111,6 +115,20 @@ Rendered mutating commands stay commented unless the renderer is invoked with
 `SOUNIO_MADAROS_CLEANUP_APPROVAL=I_ACCEPT_PUSH_BEFORE_DELETE`. This preserves
 the explicit approval boundary while making the post-approval command stream
 reviewable and reproducible.
+
+To make approved active lanes count as allowed in the strict readiness audit,
+reuse the same reviewed manifest:
+
+```bash
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_MANIFEST=/tmp/madaros-cleanup-approval/madaros-cleanup-approval.tsv \
+  scripts/dev/madaros_readiness_status.sh --strict
+```
+
+Rows are allowed by exact worktree path only when their decision is
+`approve_keep_active_allowlist` and the approval manifest validates. The legacy
+regex allowlist (`SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE`, or
+`SOUNIO_MADAROS_CLEANUP_ALLOW_RE` through readiness) remains a union fallback
+for operator-controlled anchored path patterns.
 
 ## Current Blocker To `--strict`
 
