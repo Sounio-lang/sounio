@@ -80,10 +80,10 @@ counts drift as clean coordination worktrees are created or removed; the live
 authority is the repro command below. The stable blocker is still
 `unallowed_critical_dirty=19`.
 
-Sample observed after PR #593:
+Sample observed after PR #595 while generating the approval packet:
 
 ```text
-total=62
+total=64
 dirty=37
 critical_dirty=21
 unallowed_critical_dirty=19
@@ -115,6 +115,60 @@ For every detached worktree before deletion:
 2. Commit or archive a patch of dirty changes.
 3. Push the salvage branch.
 4. Only then remove the worktree.
+
+## Approval Packet Snapshot - post-PR #595
+
+Generated non-destructively with:
+
+```bash
+scripts/dev/madaros_worktree_cleanup_plan.sh --out-dir /tmp/madaros-cleanup-approval-packet-plan
+```
+
+Planner categories:
+
+```text
+planned_worktrees=19
+active_other_lane_wip=8
+detached_risky=4
+greenline_leftover=2
+stale_local_temp=5
+```
+
+This snapshot is an approval aid, **not** approval. Some clean coordination
+companions are listed even though they are not part of the 19 strict-blocker
+rows, because removing them after approval would reduce local clutter. The
+approval decision can be split into these buckets:
+
+| Bucket | Items in packet | Operator decision needed |
+|---|---:|---|
+| Clean status/coordination companions already represented by merged PRs | 4 | After explicit approval, remove local worktrees/branches only if `git status --short` is still clean. |
+| Dirty greenline/status leftovers | 2 strict rows + 1 companion | Review patches; either salvage/commit/push an archive branch or explicitly discard before removal. |
+| Detached wrapper/gate duplicates | 2 | Archive branch plus patch required before removal (`madaros-main-port`, `phase03-step5-clean`). |
+| Detached broad/lower/GC probes | 2 | Preserve or archive as future lowering/GC evidence; do not treat as wrapper cleanup. |
+| Active/future F64/Lane V/variance work | 5 audited paths | Preserve as active lanes or salvage under explicit branch names; do not delete as cleanup residue. |
+| Stale local temp branches | 5 | Review unique commits and dirty patches; push archive/salvage refs before any retirement. |
+
+Read-only subagent audit (2026-07-03) refined the first cleanup pass:
+
+- Clean local status/coordination worktrees: `/tmp/sounio-madaros-cleanup-evidence`,
+  `/tmp/sounio-madaros-status-current`, `/tmp/sounio-madaros-post-593-status`,
+  `/tmp/sounio-madaros-status-no-pr-range`. These were clean at audit time and
+  are likely removal candidates after explicit approval.
+- Dirty greenline/status leftovers: `/tmp/sounio-madaros-greenline-codex`
+  (2 compiler files, 426 insertions / 34 deletions) and
+  `/tmp/sounio-madaros-greenline-status` (`worktree_audit.tsv` untracked).
+- Detached wrapper/gate duplicates: `/tmp/sounio-madaros-main-port-20260702`
+  and `/tmp/sounio-phase03-step5-clean` overlap PR #586/#587 wrapper/gate paths
+  (`bin/madaros`, `scripts/ci/madaros_full_gate.sh`,
+  `scripts/lib/resolve_madaros.sh`, `scripts/dev/madaros_two_gate.sh`) and need
+  archive/patch before cleanup.
+- Preserve/salvage future-lane work: `/workspace/sounio-greenfirst`,
+  `/tmp/sounio-phase03-4e68`, `/tmp/sounio-phase03-step5-fix`,
+  `/tmp/sounio-phase03-step5-lowerfix-min`, and `/tmp/sounio-bdf64-bridge`.
+  These hold green-first, Phase03, F64, or Lane V/variance-looking compiler work.
+- Detached broad/lower probes: `/tmp/sounio-madaros-lower-known-test-20260702`
+  and `/workspace/sounio-gc-fix-20260701` do not overlap the wrapper/gate PRs
+  directly, but contain lowering/GC evidence and should be archived if retired.
 
 ## Disposition Table
 
