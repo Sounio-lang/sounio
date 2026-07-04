@@ -21415,15 +21415,27 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 && type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) {
-                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
-                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+            // A raw pointer (VAR_TY 11) always allows the store below. A ref (VAR_TY
+            // 10) shares the identical inner-type hash encoding (ptr_hash_* delegate
+            // straight to ref_hash_*) and the identical runtime representation (an
+            // address value in the variable's slot) — it was previously excluded here
+            // entirely, so `*n = v` for `n: &!T` compiled with only a non-fatal
+            // warning and NO store instruction emitted at all (issue #620). Only a
+            // *mutable* ref (`&!T`, ref_hash_mut != 0) may be written through; a
+            // shared ref (`&T`) must still be rejected.
+            let lvar_ty = VAR_TY[lvi as usize]
+            let lvar_hash = VAR_TY_HASH[lvi as usize]
+            let is_raw_ptr = lvar_ty == 11 && type_is_pointer_like(lvar_ty, lvar_hash)
+            let is_mut_ref = lvar_ty == 10 && ref_hash_mut(lvar_hash) != 0
+            if lvi >= 0 && (is_raw_ptr || is_mut_ref) {
+                let inner_ty = ptr_hash_inner_ty(lvar_hash)
+                let inner_hash = ptr_hash_inner_hash(lvar_hash)
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 emit_store_to_pointer_offset_x86(lslot, 0, inner_ty, inner_hash)
             } else {
-                tc_error(name_tok, "dereference assignment requires raw pointer binding")
+                tc_error(name_tok, "dereference assignment requires a raw pointer or a mutable (&!T) reference binding")
             }
         } else {
             tc_undefined_var(name_tok)
@@ -32629,15 +32641,23 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let lslot = var_find(ns, ne)
         if lslot >= 0 {
             let lvi = var_find_idx(ns, ne)
-            if lvi >= 0 && VAR_TY[lvi as usize] == 11 && type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) {
-                let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
-                let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+            // See the x86 twin above (compile_deref_store_x86-equivalent) for the
+            // full rationale — issue #620: a mutable ref (VAR_TY 10, &!T) shares the
+            // raw pointer's inner-type hash encoding and runtime representation and
+            // must be allowed to store, not just VAR_TY 11 raw pointers.
+            let lvar_ty = VAR_TY[lvi as usize]
+            let lvar_hash = VAR_TY_HASH[lvi as usize]
+            let is_raw_ptr = lvar_ty == 11 && type_is_pointer_like(lvar_ty, lvar_hash)
+            let is_mut_ref = lvar_ty == 10 && ref_hash_mut(lvar_hash) != 0
+            if lvi >= 0 && (is_raw_ptr || is_mut_ref) {
+                let inner_ty = ptr_hash_inner_ty(lvar_hash)
+                let inner_hash = ptr_hash_inner_hash(lvar_hash)
                 if ty_eq(inner_ty, inner_hash, rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 emit_store_to_pointer_offset_a64(lslot, 0, inner_ty, inner_hash)
             } else {
-                tc_error(name_tok, "dereference assignment requires raw pointer binding")
+                tc_error(name_tok, "dereference assignment requires a raw pointer or a mutable (&!T) reference binding")
             }
         } else {
             tc_undefined_var(name_tok)
