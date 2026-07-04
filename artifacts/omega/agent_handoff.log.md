@@ -48,6 +48,37 @@ status: lock-released
 ---
 
 agent: codex
+time_utc: 2026-07-04T00:00:00Z
+files:
+  - docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md
+  - docs/research/madaros-v2-swarm-workflow-2026-07-04.md
+  - .agent-orchestration/coordination/madaros_v2_sota_lane_lock_2026-07-04.md
+  - docs/governance/topic-registry.v1.json
+  - docs/governance/DOCS_ACCEPTANCE_REPORT.md
+  - docs/governance/DOCS_AUTHORITY_MATRIX.md
+intent: |
+  CLAIM: Madaros v2 SOTA+++ architecture lane is now isolated and locked.
+  Branch/worktree: work/madaros-v2-sota-codex at /tmp/sounio-madaros-v2-sota-codex,
+  based on gpu/epistemic-tensor-core-next@88f4282fe45a. This lane owns only
+  the Madaros v2 architecture plan, swarm workflow, coordination lock, handoff,
+  and generated docs governance metadata. It does not claim the compiler is
+  fixed and does not touch active GPU/E-KAN implementation WIP in /workspace/sounio.
+checks:
+  - ./sounio-whereami --quick
+  - git status --short --branch
+  - git worktree list
+notes: |
+  Swarm was requested/approved. Subagent spawn was attempted but the pool returned
+  `agent thread limit reached`; the routed swarm workflow is now encoded in
+  docs/research/madaros-v2-swarm-workflow-2026-07-04.md with model/effort roles
+  and disjoint write-sets for Wave A/B. Next concrete implementation lane after
+  plan lock: S1 canonical source/AST/module-graph receipt skeleton and tiny gate.
+commit: pending
+status: lock-open
+
+---
+
+agent: codex
 time_utc: 2026-05-13T12:27:09Z
 files:
   - scripts/ci/track_a_nv2_parity_inventory.sh

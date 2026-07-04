@@ -475,6 +475,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.paper | repo_only | docs/papers/main/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.preprint | repo_only | docs/papers/main/preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.readme | repo_only | docs/papers/main/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.main.shadow-lanes-arxiv.shadow-lanes-arxiv-draft | repo_only | docs/papers/main/shadow-lanes-arxiv/shadow_lanes_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.sounio-arxiv-draft | repo_only | docs/papers/main/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.medrxiv-abstract | repo_only | docs/papers/medrxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.outline | repo_only | docs/papers/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -615,6 +616,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-sota-plus-plus-plan-2026-07-04 | historical | docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-swarm-workflow-2026-07-04 | historical | docs/research/madaros-v2-swarm-workflow-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.madore-spindle-q3q11-2026-05-30 | historical | docs/research/madore-spindle-q3q11-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-f32-cohort-analysis | historical | docs/research/moonshot-a-abide-f32-cohort-analysis.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-transport-conditioned-orc | historical | docs/research/moonshot-a-abide-transport-conditioned-orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
