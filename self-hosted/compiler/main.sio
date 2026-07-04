@@ -67,6 +67,7 @@ use ir::opt_cleanup::*
 use ir::egraph::*
 use ir::loop_opt::*
 use ir::tailcall::*
+use hlir::mod::*
 use native::regalloc::*
 use native::peephole::*
 use interop::server::*
@@ -1010,6 +1011,7 @@ struct CompilerOptions {
     cache_stats: bool,
     verbose: bool,
     emit_ast: bool,
+    emit_hlir: bool,
     emit_tokens: bool,
     emit_manifest: bool,
     gpu_target: string,
@@ -2936,7 +2938,7 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
-    if opts.emit_manifest || opts.emit_ast || opts.emit_tokens {
+    if opts.emit_manifest || opts.emit_ast || opts.emit_hlir || opts.emit_tokens {
         return false
     }
     if str_len(opts.gpu_target) > 0 {
@@ -3346,6 +3348,7 @@ fn print_help() with IO {
     println("  --cache-stats          Print thin-link cache hit/miss counters")
     println("  -v, --verbose          Verbose output")
     println("  --emit-ast             Print AST to stdout")
+    println("  --emit-hlir            Print canonical Madaros v2 S3 HLIR JSON to stdout")
     println("  --emit-tokens          Print tokens to stdout")
     println("  --emit-manifest        Print epistemic audit manifest JSON to stdout")
     println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
@@ -3422,6 +3425,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var cache_stats = false
     var verbose = false
     var emit_ast = false
+    var emit_hlir = false
     var emit_tokens = false
     var emit_manifest = false
     var gpu_target = ""
@@ -3470,6 +3474,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         }
         else if arg == "--emit-ast" {
             emit_ast = true
+        }
+        else if arg == "--emit-hlir" {
+            emit_hlir = true
         }
         else if arg == "--emit-tokens" {
             emit_tokens = true
@@ -3538,6 +3545,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         cache_stats: cache_stats,
         verbose: verbose,
         emit_ast: emit_ast,
+        emit_hlir: emit_hlir,
         emit_tokens: emit_tokens,
         emit_manifest: emit_manifest,
         gpu_target: gpu_target,
@@ -4981,6 +4989,426 @@ fn compile_emit_ast_from_source(path: string) -> CompileResult with IO, Mut, Pan
     }
 }
 
+fn compiler_s3_hlir_print_name_json(name: HlirName) with IO, Mut, Panic, Div {
+    print("\"")
+    var i: i64 = 0
+    while i < name.len {
+        let ch = name.buf[i as usize] as i64
+        if ch == 34 {
+            print("\\\"")
+        } else if ch == 92 {
+            print("\\\\")
+        } else if ch == 10 {
+            print("\\n")
+        } else if ch == 13 {
+            print("\\r")
+        } else if ch == 9 {
+            print("\\t")
+        } else {
+            print_char(ch)
+        }
+        i = i + 1
+    }
+    print("\"")
+}
+
+fn compiler_s3_hlir_print_i64(value: i64) with IO, Mut, Panic, Div {
+    print(int_to_string(value))
+}
+
+fn compiler_s3_hlir_print_f64(value: f64) with IO, Mut, Panic, Div {
+    let abs_value = if value < 0.0 { 0.0 - value } else { value }
+    let scaled = (abs_value * 1000.0) as i64
+    let whole = scaled / 1000
+    let frac = scaled - whole * 1000
+    if value < 0.0 {
+        print("-")
+    }
+    compiler_s3_hlir_print_i64(whole)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    compiler_s3_hlir_print_i64(frac)
+}
+
+fn compiler_s3_hlir_print_type_kind(kind: HlirTypeKind) with IO {
+    if kind == HlirTypeKind::HlirTypeVoid { print("void"); return }
+    if kind == HlirTypeKind::HlirTypeBool { print("bool"); return }
+    if kind == HlirTypeKind::HlirTypeI8 { print("i8"); return }
+    if kind == HlirTypeKind::HlirTypeI16 { print("i16"); return }
+    if kind == HlirTypeKind::HlirTypeI32 { print("i32"); return }
+    if kind == HlirTypeKind::HlirTypeI64 { print("i64"); return }
+    if kind == HlirTypeKind::HlirTypeI128 { print("i128"); return }
+    if kind == HlirTypeKind::HlirTypeU8 { print("u8"); return }
+    if kind == HlirTypeKind::HlirTypeU16 { print("u16"); return }
+    if kind == HlirTypeKind::HlirTypeU32 { print("u32"); return }
+    if kind == HlirTypeKind::HlirTypeU64 { print("u64"); return }
+    if kind == HlirTypeKind::HlirTypeU128 { print("u128"); return }
+    if kind == HlirTypeKind::HlirTypeF32 { print("f32"); return }
+    if kind == HlirTypeKind::HlirTypeF64 { print("f64"); return }
+    if kind == HlirTypeKind::HlirTypePtr { print("ptr"); return }
+    if kind == HlirTypeKind::HlirTypeArray { print("array"); return }
+    if kind == HlirTypeKind::HlirTypeStruct { print("struct"); return }
+    if kind == HlirTypeKind::HlirTypeTuple { print("tuple"); return }
+    if kind == HlirTypeKind::HlirTypeFunction { print("function"); return }
+    if kind == HlirTypeKind::HlirTypeKnowledge { print("knowledge"); return }
+    if kind == HlirTypeKind::HlirTypeContest { print("contest"); return }
+    if kind == HlirTypeKind::HlirTypeRobust { print("robust"); return }
+    if kind == HlirTypeKind::HlirTypeValidated { print("validated"); return }
+    if kind == HlirTypeKind::HlirTypeIntervention { print("intervention"); return }
+    if kind == HlirTypeKind::HlirTypeCounterfactual { print("counterfactual"); return }
+    print("other")
+}
+
+fn compiler_s3_hlir_print_type_json(ty: HlirType) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_type_kind(ty.kind)
+    print("\",\"inner_type_idx\":")
+    compiler_s3_hlir_print_i64(ty.inner_type_idx)
+    print(",\"array_len\":")
+    compiler_s3_hlir_print_i64(ty.array_len)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(ty.name)
+    print(",\"type_elems\":[")
+    var i: i64 = 0
+    while i < ty.type_elem_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(ty.type_elems[i as usize])
+        i = i + 1
+    }
+    print("],\"type_elem_count\":")
+    compiler_s3_hlir_print_i64(ty.type_elem_count)
+    print(",\"epsilon_bound\":")
+    compiler_s3_hlir_print_f64(ty.epsilon_bound)
+    print(",\"provenance_id\":")
+    compiler_s3_hlir_print_i64(ty.provenance_id)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_const_kind(kind: HlirConstKind) with IO {
+    if kind == HlirConstKind::HlirConstUnit { print("unit"); return }
+    if kind == HlirConstKind::HlirConstBool { print("bool"); return }
+    if kind == HlirConstKind::HlirConstInt { print("int"); return }
+    if kind == HlirConstKind::HlirConstFloat { print("float"); return }
+    if kind == HlirConstKind::HlirConstString { print("string"); return }
+    if kind == HlirConstKind::HlirConstCString { print("cstring"); return }
+    if kind == HlirConstKind::HlirConstArray { print("array"); return }
+    if kind == HlirConstKind::HlirConstStruct { print("struct"); return }
+    if kind == HlirConstKind::HlirConstNull { print("null"); return }
+    if kind == HlirConstKind::HlirConstUndef { print("undef"); return }
+    if kind == HlirConstKind::HlirConstFunctionRef { print("function_ref"); return }
+    if kind == HlirConstKind::HlirConstGlobalRef { print("global_ref"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_const_json(c: HlirConstant) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_const_kind(c.kind)
+    print("\",\"bool_val\":")
+    if c.bool_val { print("true") } else { print("false") }
+    print(",\"int_val\":")
+    compiler_s3_hlir_print_i64(c.int_val)
+    print(",\"float_val\":")
+    compiler_s3_hlir_print_f64(c.float_val)
+    print(",\"string_val\":")
+    compiler_s3_hlir_print_name_json(c.string_val)
+    print(",\"ref_name\":")
+    compiler_s3_hlir_print_name_json(c.ref_name)
+    print(",\"elem_indices\":[")
+    var i: i64 = 0
+    while i < c.elem_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(c.elem_indices[i as usize])
+        i = i + 1
+    }
+    print("],\"elem_count\":")
+    compiler_s3_hlir_print_i64(c.elem_count)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_op_kind(op: i64) with IO {
+    if op == HLIR_OP_CONST { print("const"); return }
+    if op == HLIR_OP_COPY { print("copy"); return }
+    if op == HLIR_OP_BINARY { print("binary"); return }
+    if op == HLIR_OP_UNARY { print("unary"); return }
+    if op == HLIR_OP_CALL { print("call"); return }
+    if op == HLIR_OP_CALL_DIRECT { print("call_direct"); return }
+    if op == HLIR_OP_LOAD { print("load"); return }
+    if op == HLIR_OP_STORE { print("store"); return }
+    if op == HLIR_OP_GET_FIELD_PTR { print("get_field_ptr"); return }
+    if op == HLIR_OP_GET_ELEMENT_PTR { print("get_element_ptr"); return }
+    if op == HLIR_OP_ALLOCA { print("alloca"); return }
+    if op == HLIR_OP_CAST { print("cast"); return }
+    if op == HLIR_OP_PHI { print("phi"); return }
+    if op == HLIR_OP_EXTRACT_VALUE { print("extract_value"); return }
+    if op == HLIR_OP_INSERT_VALUE { print("insert_value"); return }
+    if op == HLIR_OP_TUPLE { print("tuple"); return }
+    if op == HLIR_OP_ARRAY { print("array"); return }
+    if op == HLIR_OP_STRUCT { print("struct"); return }
+    if op == HLIR_OP_PERFORM_EFFECT { print("perform_effect"); return }
+    if op == HLIR_OP_PUSH_HANDLER { print("push_handler"); return }
+    if op == HLIR_OP_POP_HANDLER { print("pop_handler"); return }
+    if op == HLIR_OP_DISPATCH_EFFECT { print("dispatch_effect"); return }
+    if op == HLIR_OP_SELECT { print("select"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_instr_json(instr: HlirInstr) with IO, Mut, Panic, Div {
+    print("{\"result\":")
+    compiler_s3_hlir_print_i64(instr.result)
+    print(",\"op\":\"")
+    compiler_s3_hlir_print_op_kind(instr.op_kind)
+    print("\",\"op_kind\":")
+    compiler_s3_hlir_print_i64(instr.op_kind)
+    print(",\"ty\":")
+    compiler_s3_hlir_print_type_json(instr.ty)
+    print(",\"constant\":")
+    compiler_s3_hlir_print_const_json(instr.constant)
+    print(",\"src\":")
+    compiler_s3_hlir_print_i64(instr.src)
+    print(",\"bin_op\":")
+    compiler_s3_hlir_print_i64(instr.bin_op)
+    print(",\"lhs\":")
+    compiler_s3_hlir_print_i64(instr.lhs)
+    print(",\"rhs\":")
+    compiler_s3_hlir_print_i64(instr.rhs)
+    print(",\"call_name\":")
+    compiler_s3_hlir_print_name_json(instr.call_name)
+    print(",\"call_args\":[")
+    var i: i64 = 0
+    while i < instr.call_arg_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(instr.call_args[i as usize])
+        i = i + 1
+    }
+    print("],\"call_arg_count\":")
+    compiler_s3_hlir_print_i64(instr.call_arg_count)
+    print(",\"effect_name\":")
+    compiler_s3_hlir_print_name_json(instr.effect_name)
+    print(",\"effect_op\":")
+    compiler_s3_hlir_print_name_json(instr.effect_op)
+    print(",\"select_cond\":")
+    compiler_s3_hlir_print_i64(instr.select_cond)
+    print(",\"select_true\":")
+    compiler_s3_hlir_print_i64(instr.select_true)
+    print(",\"select_false\":")
+    compiler_s3_hlir_print_i64(instr.select_false)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_term_kind(kind: i64) with IO {
+    if kind == HLIR_TERM_RETURN { print("return"); return }
+    if kind == HLIR_TERM_BRANCH { print("branch"); return }
+    if kind == HLIR_TERM_COND_BRANCH { print("cond_branch"); return }
+    if kind == HLIR_TERM_SWITCH { print("switch"); return }
+    if kind == HLIR_TERM_UNREACHABLE { print("unreachable"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_terminator_json(term: HlirTerminator) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_term_kind(term.kind)
+    print("\",\"kind_id\":")
+    compiler_s3_hlir_print_i64(term.kind)
+    print(",\"return_value\":")
+    compiler_s3_hlir_print_i64(term.return_value)
+    print(",\"branch_target\":")
+    compiler_s3_hlir_print_i64(term.branch_target)
+    print(",\"cond_value\":")
+    compiler_s3_hlir_print_i64(term.cond_value)
+    print(",\"then_block\":")
+    compiler_s3_hlir_print_i64(term.then_block)
+    print(",\"else_block\":")
+    compiler_s3_hlir_print_i64(term.else_block)
+    print(",\"switch_value\":")
+    compiler_s3_hlir_print_i64(term.switch_value)
+    print(",\"switch_default\":")
+    compiler_s3_hlir_print_i64(term.switch_default)
+    print(",\"switch_case_count\":")
+    compiler_s3_hlir_print_i64(term.switch_case_count)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_block_json(block: HlirBlock) with IO, Mut, Panic, Div {
+    print("{\"id\":")
+    compiler_s3_hlir_print_i64(block.id)
+    print(",\"label\":")
+    compiler_s3_hlir_print_name_json(block.label)
+    print(",\"params\":[")
+    var p: i64 = 0
+    while p < block.param_count {
+        if p > 0 { print(",") }
+        let param = block.params[p as usize]
+        print("{\"value_id\":")
+        compiler_s3_hlir_print_i64(param.value_id)
+        print(",\"ty\":")
+        compiler_s3_hlir_print_type_json(param.ty)
+        print("}")
+        p = p + 1
+    }
+    print("],\"param_count\":")
+    compiler_s3_hlir_print_i64(block.param_count)
+    print(",\"instrs\":[")
+    var i: i64 = 0
+    while i < block.instr_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_instr_json(block.instrs[i as usize])
+        i = i + 1
+    }
+    print("],\"instr_count\":")
+    compiler_s3_hlir_print_i64(block.instr_count)
+    print(",\"terminator\":")
+    compiler_s3_hlir_print_terminator_json(block.terminator)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_param_json(param: HlirParam) with IO, Mut, Panic, Div {
+    print("{\"value_id\":")
+    compiler_s3_hlir_print_i64(param.value_id)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(param.name)
+    print(",\"ty\":")
+    compiler_s3_hlir_print_type_json(param.ty)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_function_json(func: HlirFunction) with IO, Mut, Panic, Div {
+    print("{\"id\":")
+    compiler_s3_hlir_print_i64(func.id)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(func.name)
+    print(",\"link_name\":")
+    compiler_s3_hlir_print_name_json(func.link_name)
+    print(",\"params\":[")
+    var p: i64 = 0
+    while p < func.param_count {
+        if p > 0 { print(",") }
+        compiler_s3_hlir_print_param_json(func.params[p as usize])
+        p = p + 1
+    }
+    print("],\"param_count\":")
+    compiler_s3_hlir_print_i64(func.param_count)
+    print(",\"return_type\":")
+    compiler_s3_hlir_print_type_json(func.return_type)
+    print(",\"effects\":[")
+    var e: i64 = 0
+    while e < func.effect_count {
+        if e > 0 { print(",") }
+        compiler_s3_hlir_print_name_json(func.effects[e as usize])
+        e = e + 1
+    }
+    print("],\"effect_count\":")
+    compiler_s3_hlir_print_i64(func.effect_count)
+    print(",\"blocks\":[")
+    var b: i64 = 0
+    while b < func.block_count {
+        if b > 0 { print(",") }
+        compiler_s3_hlir_print_block_json(func.blocks[b as usize])
+        b = b + 1
+    }
+    print("],\"block_count\":")
+    compiler_s3_hlir_print_i64(func.block_count)
+    print(",\"local_count\":")
+    compiler_s3_hlir_print_i64(func.local_count)
+    print(",\"is_kernel\":")
+    if func.is_kernel { print("true") } else { print("false") }
+    print(",\"is_variadic\":")
+    if func.is_variadic { print("true") } else { print("false") }
+    print(",\"is_exported\":")
+    if func.is_exported { print("true") } else { print("false") }
+    print(",\"compile_strategy\":\"")
+    print(hlir_strategy_name(func.compile_strategy))
+    print("\"}")
+}
+
+fn compiler_s3_hlir_print_module_json(module: HlirModule) with IO, Mut, Panic, Div {
+    print("{\"name\":")
+    compiler_s3_hlir_print_name_json(module.name)
+    print(",\"functions\":[")
+    var f: i64 = 0
+    while f < module.fn_count {
+        if f > 0 { print(",") }
+        compiler_s3_hlir_print_function_json(module.functions[f as usize])
+        f = f + 1
+    }
+    print("],\"function_count\":")
+    compiler_s3_hlir_print_i64(module.fn_count)
+    print(",\"globals\":[")
+    var g: i64 = 0
+    while g < module.global_count {
+        if g > 0 { print(",") }
+        let global = module.globals[g as usize]
+        print("{\"id\":")
+        compiler_s3_hlir_print_i64(global.id)
+        print(",\"name\":")
+        compiler_s3_hlir_print_name_json(global.name)
+        print(",\"ty\":")
+        compiler_s3_hlir_print_type_json(global.ty)
+        print(",\"has_init\":")
+        if global.has_init { print("true") } else { print("false") }
+        print(",\"is_const\":")
+        if global.is_const { print("true") } else { print("false") }
+        print("}")
+        g = g + 1
+    }
+    print("],\"global_count\":")
+    compiler_s3_hlir_print_i64(module.global_count)
+    print(",\"typedefs\":[")
+    var t: i64 = 0
+    while t < module.typedef_count {
+        if t > 0 { print(",") }
+        let td = module.typedefs[t as usize]
+        print("{\"name\":")
+        compiler_s3_hlir_print_name_json(td.name)
+        print(",\"field_count\":")
+        compiler_s3_hlir_print_i64(td.field_count)
+        print("}")
+        t = t + 1
+    }
+    print("],\"typedef_count\":")
+    compiler_s3_hlir_print_i64(module.typedef_count)
+    print("}")
+}
+
+fn compile_emit_hlir_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let program = load_module_file(path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        var hlir_errors = compile_errors_new()
+        hlir_errors = compile_errors_push(hlir_errors, "error: HLIR emission failed during parsing")
+        return CompileResult {
+            success: false,
+            errors: hlir_errors,
+            output: "",
+        }
+    }
+
+    let frontend_verdict = module_frontend_check_items_with_source_context(program.items, path)
+    if frontend_verdict != 0 {
+        var check_errors = compile_errors_new()
+        check_errors = compile_errors_push(check_errors, "error: HLIR emission failed during frontend typecheck")
+        return CompileResult {
+            success: false,
+            errors: check_errors,
+            output: "",
+        }
+    }
+
+    let module = hlir_lower_module(program)
+
+    print("{\"schema\":\"madaros.hlir.module/0.2\",\"stage\":\"S3\",\"source\":\"")
+    print(path)
+    print("\",\"normalized_ids\":true,\"source_to_hlir\":\"compiler_native_hlir_lower_module\",\"ownership_effect_normalization\":\"hlir_lower_module_v0\",\"module\":")
+    compiler_s3_hlir_print_module_json(module)
+    print("}")
+    print("\n")
+    CompileResult {
+        success: true,
+        errors: compile_errors_new(),
+        output: "stdout",
+    }
+}
+
 // ============================================================================
 // COMPILATION PIPELINE
 // ============================================================================
@@ -5016,6 +5444,10 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     if opts.emit_ast {
         return compile_emit_ast_from_source(opts.input_file)
+    }
+
+    if opts.emit_hlir {
+        return compile_emit_hlir_from_source(opts.input_file)
     }
 
     if str_eq(opts.target, "llvm") {
@@ -27857,6 +28289,16 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     }
     if compiler_mode_has_flag(args, "--version-json") {
         run_version_json_mode()
+        return
+    }
+    let quiet_structured_emit = compiler_mode_has_flag(args, "--emit-hlir")
+    if quiet_structured_emit {
+        let opts = parse_options(args)
+        let result = compile(opts)
+        if !result.success {
+            compiler_print_errors(result.errors)
+            panic("emit-hlir failed")
+        }
         return
     }
     println("Madares v0.80.0 -- the Sounio self-hosted compiler")

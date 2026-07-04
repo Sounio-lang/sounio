@@ -80,8 +80,13 @@ literature scout rather than a claim carried by this plan.
   - `scripts/dev/madaros_two_gate.sh` exists.
   - `self-hosted/hlir/ir.sio` previously defined duplicate
     `HlirTypeContest` and `HlirTypeRobust` enum entries. The duplicate enum
-    audit is now closed by `scripts/dev/madaros_v2_s3_readiness_gate.sh`.
-    Native HLIR roundtrip/hash remains the S3 completion blocker.
+    audit is now closed by `scripts/dev/madaros_v2_s3_readiness_gate.sh`, and
+    the native HLIR JSON/hash/roundtrip completion gate is now
+    `scripts/dev/madaros_v2_s3_gate.sh`.
+  - `bin/madaros --emit-hlir <source>` emits compiler-native
+    `madaros.hlir.module/0.2` JSON through `hlir_lower_module`, and
+    `bin/madaros s3-receipt <source> [--out-dir OUT]` writes deterministic S3
+    receipts for S4 consumers.
   - `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
     exists and records the GPU/PTX module-combination failure.
 - `docs/MADAROS_STATUS.md` says Madaros is the default `bin/souc` compiler and
@@ -261,22 +266,34 @@ E-KAN status:
 
 Purpose: normalize control/data flow into a durable SSA-like compiler IR.
 
+Implementation status (2026-07-04): S3 is implemented for the compiler-native
+HLIR JSON/hash/roundtrip boundary. `bin/madaros --emit-hlir <source>` now
+parses, frontend-checks, lowers through `hlir_lower_module`, and emits clean
+`madaros.hlir.module/0.2` JSON without a banner. `bin/madaros s3-receipt
+<source> [--out-dir OUT]` writes the HLIR JSON plus a
+`madaros.v2.s3.receipt/0.1` receipt. `scripts/dev/madaros_v2_s3_gate.sh`
+validates deterministic byte-identical re-emission, JSON parse/roundtrip hash,
+module/function/block/instruction count consistency, and representative
+string/call/control/GPU-PTX-import witnesses. S4 is now ready to consume the
+HLIR JSON hash; S4 optimization is not implemented by this status.
+
 Canonical artifact:
 - canonical HLIR module hash with normalized IDs, blocks, values, effects,
   ownership marks, and type layout placeholders.
 
 Gate:
+- `scripts/dev/madaros_v2_s3_gate.sh`.
 - HLIR serialization roundtrip.
-- source -> HIR -> HLIR deterministic hash.
+- source -> checked front-end -> HLIR deterministic hash.
 - no duplicate enum definitions or accidental semantic aliases in core type
   systems. `scripts/dev/madaros_v2_s3_readiness_gate.sh` now enforces unique
   `HlirTypeKind` variants and required epistemic variants.
 
 Rule:
 - HLIR owns high-level optimization legality. GPU KernelIR does not.
-- The duplicate enum audit is closed, but HLIR is not declared stable until a
-  native HLIR serializer plus roundtrip/hash gate exists. The file is a useful
-  starting surface, not yet the S3 canonical artifact.
+- The S3 claim is the native HLIR serialization/hash/roundtrip boundary. It is
+  not a claim that all later optimizer legality proofs, e-graph rewrites, or
+  E-KAN approximations are implemented.
 
 ### S4 - Eq/E-KAN optimization IR
 

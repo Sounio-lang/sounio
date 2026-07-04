@@ -47,4 +47,4 @@ if missing:
 print(f"[madaros-v2-s3] HlirTypeKind variants={len(seen)} duplicates=0")
 PY
 
-echo "[madaros-v2-s3] PASS: HLIR type enum unique; native HLIR roundtrip gate still pending"
+echo "[madaros-v2-s3] PASS: HLIR type enum unique; native HLIR roundtrip is covered by madaros_v2_s3_gate.sh"

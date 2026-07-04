@@ -3109,3 +3109,54 @@ status: lock-released
   - Acceptance gate: source -> HIR -> HLIR deterministic hash plus HLIR
     serialization roundtrip gate passes.
   - Next action: add native HLIR serializer and roundtrip/hash gate.
+
+## 2026-07-04 — Madaros v2 S3 native HLIR serialization and S4-ready contract
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `self-hosted/compiler/main.sio`
+  - `bin/madaros`
+  - `scripts/dev/madaros_v2_s3_receipt.py`
+  - `scripts/dev/madaros_v2_s3_gate.sh`
+  - `scripts/dev/madaros_v2_s3_readiness_gate.sh`
+  - `tests/madaros/v2_s3/manifest.tsv`
+  - `docs/research/madaros-v2-s3-hlir-serialization-2026-07-04.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-s2-contract-scaffold-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added `--emit-hlir` to the self-hosted Madaros compiler.
+  - The S3 emitter runs parse -> module frontend check -> `hlir_lower_module`
+    and serializes the real `HlirModule` as `madaros.hlir.module/0.2` JSON.
+  - Structured emit mode now skips the startup banner so stdout is machine JSON.
+  - S3 JSON string and numeric emission avoids the older `print_int`/manifest
+    f64 printers that truncated output in this path.
+  - Added `bin/madaros s3-receipt <source> [--out-dir OUT]`.
+  - Added deterministic S3 receipt generation and gate coverage over hello,
+    recursive/control-flow, and GPU/PTX-combination witness sources.
+- Local proof:
+  - `env SOUNIO_STDLIB_PATH=$PWD/stdlib make build-madaros` passed and produced
+    `artifacts/self-hosted/madaros` (103468447 bytes).
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/madaros --emit-hlir examples/hello.sio` emitted clean parseable JSON.
+  - Re-emitting `examples/hello.sio` was byte-identical; parsed facts:
+    schema `madaros.hlir.module/0.2`, 1 function, 1 block, 3 instructions,
+    byte sha `8b0f6e4f43e2...`.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s3_receipt.py` passed.
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s3_gate.sh scripts/dev/madaros_v2_s3_readiness_gate.sh` passed.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/madaros s3-receipt examples/hello.sio --out-dir /tmp/madaros-s3-one` emitted schema `madaros.v2.s3.receipt/0.1` with `s4_ready = true`.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s3_gate.sh` passed:
+    - `hello`: fns=1, instrs=3, `hlir_sha=8b0f6e4f43e2`
+    - `recursion_fact`: fns=2, instrs=11, `hlir_sha=b29607f429c0`
+    - `gpu_ptx_combo`: fns=1, instrs=2, `hlir_sha=1f7594d8dfb4`
+- Blocker closed:
+  - Blocker-ID: `MADAROS-V2-S3-HLIR-ROUNDTRIP-2026-07-04`
+  - Severity: P2
+  - Class: compiler architecture / missing HLIR canonical serialization
+  - Evidence level: source-built compiler, wrapper receipt, deterministic gate,
+    parseable JSON, roundtrip hash.
+  - Owner: closed by Codex on this lane.
+  - Acceptance gate: `scripts/dev/madaros_v2_s3_gate.sh` passes.
+  - Next action: start S4 e-graph/E-KAN optimizer receipt lane from the S3 HLIR
+    JSON/hash contract. S4 is not implemented yet.

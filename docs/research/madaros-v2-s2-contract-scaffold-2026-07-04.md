@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.madaros-v2-s2-contract-scaffold-2026-07-04
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -81,19 +82,27 @@ env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros \
 [madaros-v2-s2] PASS: deterministic S2 contract scaffold; native typed HIR not yet emitted
 ```
 
-## S3 readiness companion
+## S3 companion
 
-`scripts/dev/madaros_v2_s3_readiness_gate.sh` now performs the first bounded S3
-readiness check: `HlirTypeKind` variants in `self-hosted/hlir/ir.sio` must be
-unique and must retain the required epistemic variants.
+`scripts/dev/madaros_v2_s3_readiness_gate.sh` remains the bounded S3 hygiene
+check: `HlirTypeKind` variants in `self-hosted/hlir/ir.sio` must be unique and
+must retain the required epistemic variants.
 
 The duplicate `HlirTypeContest` / `HlirTypeRobust` entries were removed from
-`self-hosted/hlir/ir.sio`. The current S3 readiness gate passes:
+`self-hosted/hlir/ir.sio`. S3 is now completed for the native HLIR
+JSON/hash/roundtrip boundary by:
+
+- `bin/madaros --emit-hlir <source>`
+- `bin/madaros s3-receipt <source> [--out-dir OUT]`
+- `scripts/dev/madaros_v2_s3_receipt.py`
+- `scripts/dev/madaros_v2_s3_gate.sh`
+
+The current S3 gate passes:
 
 ```text
 [madaros-v2-s3] HlirTypeKind variants=42 duplicates=0
-[madaros-v2-s3] PASS: HLIR type enum unique; native HLIR roundtrip gate still pending
+[madaros-v2-s3] PASS: native HLIR JSON deterministic, parseable, roundtrippable, S4-ready
 ```
 
-S3 is still not complete. The remaining contractual step is a native HLIR
-serializer plus roundtrip/hash gate.
+S4 can now consume stable HLIR JSON hashes. S4 e-graph/E-KAN optimization
+receipts remain future work.

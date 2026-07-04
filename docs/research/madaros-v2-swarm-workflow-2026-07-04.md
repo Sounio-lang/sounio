@@ -190,10 +190,18 @@ The scaffold is intentionally honest: `s2_complete = false` and
 serializer. The S2 gate emits deterministic JSON/TSV sidecars for hello,
 imported SMT, self-hosted S2 contract, and GPU/PTX import-combination cases.
 
-S3 readiness now has a bounded gate:
+S3 now has a native HLIR JSON/hash/roundtrip gate:
 
 - `scripts/dev/madaros_v2_s3_readiness_gate.sh`
+- `scripts/dev/madaros_v2_s3_gate.sh`
+- `scripts/dev/madaros_v2_s3_receipt.py`
+- `bin/madaros --emit-hlir`
+- `bin/madaros s3-receipt`
 - `self-hosted/hlir/ir.sio` duplicate `HlirTypeContest` / `HlirTypeRobust`
   variants removed.
 
-Native HLIR roundtrip/hash remains the S3 completion blocker.
+The S3 gate validates byte-identical deterministic re-emission, parseable
+`madaros.hlir.module/0.2` JSON, canonical JSON roundtrip hash, structural
+count consistency, and representative string/call/control/GPU-PTX-import
+witnesses. S4 can now consume HLIR JSON hashes; S4 e-graph/E-KAN optimization
+receipts remain future work.
