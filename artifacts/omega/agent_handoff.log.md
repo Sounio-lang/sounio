@@ -3120,6 +3120,7 @@ status: lock-released
   - `bin/madaros`
   - `scripts/dev/madaros_v2_s3_receipt.py`
   - `scripts/dev/madaros_v2_s3_gate.sh`
+  - `scripts/dev/madaros_v2_s4_preflight_gate.sh`
   - `scripts/dev/madaros_v2_s3_readiness_gate.sh`
   - `tests/madaros/v2_s3/manifest.tsv`
   - `docs/research/madaros-v2-s3-hlir-serialization-2026-07-04.md`
@@ -3136,6 +3137,9 @@ status: lock-released
   - Added `bin/madaros s3-receipt <source> [--out-dir OUT]`.
   - Added deterministic S3 receipt generation and gate coverage over hello,
     recursive/control-flow, and GPU/PTX-combination witness sources.
+  - Added S4 preflight gate that consumes S3 gate artifacts and emits
+    `madaros.v2.s4.preflight/0.1` with `s4_ready = true` and
+    `s4_implemented = false`.
 - Local proof:
   - `env SOUNIO_STDLIB_PATH=$PWD/stdlib make build-madaros` passed and produced
     `artifacts/self-hosted/madaros` (103468447 bytes).
@@ -3150,6 +3154,9 @@ status: lock-released
     - `hello`: fns=1, instrs=3, `hlir_sha=8b0f6e4f43e2`
     - `recursion_fact`: fns=2, instrs=11, `hlir_sha=b29607f429c0`
     - `gpu_ptx_combo`: fns=1, instrs=2, `hlir_sha=1f7594d8dfb4`
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s4_preflight_gate.sh` passed:
+    `cases=3`, `ops=binary,call_direct,const`, preflight sha
+    `7bf28f714080...`.
 - Blocker closed:
   - Blocker-ID: `MADAROS-V2-S3-HLIR-ROUNDTRIP-2026-07-04`
   - Severity: P2
@@ -3159,4 +3166,5 @@ status: lock-released
   - Owner: closed by Codex on this lane.
   - Acceptance gate: `scripts/dev/madaros_v2_s3_gate.sh` passes.
   - Next action: start S4 e-graph/E-KAN optimizer receipt lane from the S3 HLIR
-    JSON/hash contract. S4 is not implemented yet.
+    JSON/hash contract and the `madaros.v2.s4.preflight/0.1` input contract.
+    S4 optimization is not implemented yet.

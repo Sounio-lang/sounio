@@ -195,6 +195,7 @@ S3 now has a native HLIR JSON/hash/roundtrip gate:
 - `scripts/dev/madaros_v2_s3_readiness_gate.sh`
 - `scripts/dev/madaros_v2_s3_gate.sh`
 - `scripts/dev/madaros_v2_s3_receipt.py`
+- `scripts/dev/madaros_v2_s4_preflight_gate.sh`
 - `bin/madaros --emit-hlir`
 - `bin/madaros s3-receipt`
 - `self-hosted/hlir/ir.sio` duplicate `HlirTypeContest` / `HlirTypeRobust`
@@ -204,4 +205,7 @@ The S3 gate validates byte-identical deterministic re-emission, parseable
 `madaros.hlir.module/0.2` JSON, canonical JSON roundtrip hash, structural
 count consistency, and representative string/call/control/GPU-PTX-import
 witnesses. S4 can now consume HLIR JSON hashes; S4 e-graph/E-KAN optimization
-receipts remain future work.
+receipts remain future work. The S4-ready boundary is executable through
+`scripts/dev/madaros_v2_s4_preflight_gate.sh`, which emits
+`madaros.v2.s4.preflight/0.1` with `s4_ready = true` and
+`s4_implemented = false`.

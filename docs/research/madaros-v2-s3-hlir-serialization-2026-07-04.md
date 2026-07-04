@@ -30,6 +30,8 @@ implemented here.
   - `<case>.s3.hlir.json`
   - `<case>.s3.receipt.json`
 - `scripts/dev/madaros_v2_s3_gate.sh` validates representative S3 witnesses.
+- `scripts/dev/madaros_v2_s4_preflight_gate.sh` consumes the S3 gate artifacts
+  and proves they are usable as the input contract for the next optimizer lane.
 
 ## Gate contract
 
@@ -76,3 +78,21 @@ S3 now provides the artifact S4 needs: a stable HLIR JSON byte hash and a
 canonical JSON roundtrip hash. S4 still needs a separate implementation and
 gate for e-graph/E-KAN rewrite receipts, proof obligations, exact fallback
 semantics, and domain-bounded approximation validation.
+
+The S4-ready claim is executable through:
+
+```bash
+env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros \
+  SOUNIO_STDLIB_PATH=$PWD/stdlib \
+  bash scripts/dev/madaros_v2_s4_preflight_gate.sh
+```
+
+Observed local result on 2026-07-04:
+
+```text
+[madaros-v2-s4-preflight] ok cases=3 ops=binary,call_direct,const sha=7bf28f714080
+[madaros-v2-s4-preflight] PASS: S3 HLIR receipts are consumable by S4; S4 optimizer remains future work
+```
+
+The preflight receipt uses schema `madaros.v2.s4.preflight/0.1` and records
+`s4_ready = true` with `s4_implemented = false`.

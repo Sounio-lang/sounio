@@ -87,6 +87,9 @@ literature scout rather than a claim carried by this plan.
     `madaros.hlir.module/0.2` JSON through `hlir_lower_module`, and
     `bin/madaros s3-receipt <source> [--out-dir OUT]` writes deterministic S3
     receipts for S4 consumers.
+  - `scripts/dev/madaros_v2_s4_preflight_gate.sh` consumes the S3 gate receipts
+    and emits `madaros.v2.s4.preflight/0.1`, proving the S4 input contract
+    without claiming S4 optimization is implemented.
   - `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
     exists and records the GPU/PTX module-combination failure.
 - `docs/MADAROS_STATUS.md` says Madaros is the default `bin/souc` compiler and
@@ -275,7 +278,8 @@ parses, frontend-checks, lowers through `hlir_lower_module`, and emits clean
 validates deterministic byte-identical re-emission, JSON parse/roundtrip hash,
 module/function/block/instruction count consistency, and representative
 string/call/control/GPU-PTX-import witnesses. S4 is now ready to consume the
-HLIR JSON hash; S4 optimization is not implemented by this status.
+HLIR JSON hash; `scripts/dev/madaros_v2_s4_preflight_gate.sh` makes this
+readiness executable. S4 optimization is not implemented by this status.
 
 Canonical artifact:
 - canonical HLIR module hash with normalized IDs, blocks, values, effects,
@@ -299,6 +303,13 @@ Rule:
 
 Purpose: introduce non-destructive optimization and scientific symbolic
 surrogate reasoning without losing exact semantics.
+
+Preflight status (2026-07-04): S4 is ready to start, not implemented.
+`scripts/dev/madaros_v2_s4_preflight_gate.sh` consumes the S3 gate output and
+verifies stable HLIR byte/canonical hashes, compiler-native lowering markers,
+function/block/instruction metadata, representative `const`/`call_direct`/
+`binary` ops, and `return`/`branch`/`cond_branch` terminators. The preflight
+receipt records `s4_ready = true` and `s4_implemented = false`.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
