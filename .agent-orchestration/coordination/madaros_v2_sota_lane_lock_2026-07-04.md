@@ -10,6 +10,7 @@ Lane: Madaros v2 SOTA+++ architecture and staged implementation spine
 Base: `gpu/epistemic-tensor-core-next` at `88f4282fe45adec3fa0c1b358c97779286f7861b`
 Branch: `work/madaros-v2-sota-codex`
 Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+Canonical branch: `canon/madaros-v2-sota`
 Merge target: protected compiler coordination branch first, not direct `main`
 
 ## Lock Rule
@@ -20,10 +21,17 @@ No agent should edit the files listed under `Write-Set` from another worktree
 without an explicit ownership transfer in `artifacts/omega/agent_handoff.log.md`.
 Read-only review is allowed.
 
-This is an operational lock, not a GitHub branch-protection ruleset. If remote
-admin permissions are available, the next hardening step is to protect a
-canonical branch such as `canon/madaros-v2-sota` and require PRs from
-`work/madaros-v2-sota-*` branches.
+Remote lock:
+
+- Branch `canon/madaros-v2-sota` was pushed at commit `d335817289e3`.
+- GitHub ruleset `Lock canon/madaros-v2-sota` was created with id `18510679`.
+- Enforcement: `active`.
+- Rules: deletion blocked, non-fast-forward blocked, pull request required.
+- `current_user_can_bypass`: `never`.
+
+The work branch remains `work/madaros-v2-sota-codex`. Agents write to work
+branches and propose PRs into the canonical branch; no one writes directly to
+`canon/madaros-v2-sota`.
 
 ## Write-Set
 

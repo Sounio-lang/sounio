@@ -73,6 +73,10 @@ notes: |
   docs/research/madaros-v2-swarm-workflow-2026-07-04.md with model/effort roles
   and disjoint write-sets for Wave A/B. Next concrete implementation lane after
   plan lock: S1 canonical source/AST/module-graph receipt skeleton and tiny gate.
+  Remote hard lock added: branch `canon/madaros-v2-sota` at `d335817289e3`,
+  GitHub ruleset id `18510679`, active, deletion blocked, non-fast-forward
+  blocked, pull_request required, current_user_can_bypass=never. Work remains on
+  `work/madaros-v2-sota-codex`.
 commit: pending
 status: lock-open
 
