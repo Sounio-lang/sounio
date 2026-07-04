@@ -78,9 +78,10 @@ literature scout rather than a claim carried by this plan.
   `work/madaros-v2-sota-codex`):
   - `bin/madaros-relocgate` exists and is executable.
   - `scripts/dev/madaros_two_gate.sh` exists.
-  - `self-hosted/hlir/ir.sio` defines duplicate `HlirTypeContest` and
-    `HlirTypeRobust` enum entries at lines found by
-    `rg -n "HlirTypeContest|HlirTypeRobust" self-hosted/hlir/ir.sio`.
+  - `self-hosted/hlir/ir.sio` previously defined duplicate
+    `HlirTypeContest` and `HlirTypeRobust` enum entries. The duplicate enum
+    audit is now closed by `scripts/dev/madaros_v2_s3_readiness_gate.sh`.
+    Native HLIR roundtrip/hash remains the S3 completion blocker.
   - `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
     exists and records the GPU/PTX module-combination failure.
 - `docs/MADAROS_STATUS.md` says Madaros is the default `bin/souc` compiler and
@@ -166,10 +167,10 @@ real compiler-native top-level AST sidecar. The receipt schema is
 `madaros.v2.s1.receipt/0.2`; `canonical_ast_sha256` is non-null and is computed
 from `madaros.stage1.ast/0.1` bytes emitted by `--emit-ast`. The L1
 `canonical_source_graph_sha256` remains as a secondary source/module witness.
-Broader source-built compiler acceptance remains blocked because the freshly
-rebuilt `artifacts/self-hosted/madaros` fails the normal full gate at
-`test_smt_adaptive_epistemic.sio`. See
-`docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`.
+Broader source-built compiler acceptance is now green: the freshly rebuilt
+`artifacts/self-hosted/madaros` passes `scripts/ci/madaros_full_gate.sh`,
+including imported-SMT 6/6, and passes `scripts/dev/madaros_v2_s1_gate.sh`.
+The old `test_smt_adaptive_epistemic.sio` source-built blocker is closed.
 
 Canonical artifact:
 - `MadarosV2S1Receipt` with source hash, include/import graph, canonical AST
@@ -241,6 +242,17 @@ Gate:
 - type/effect diagnostics must be structured, not crash or bulk E175/E177/E046
   spew.
 
+Implementation status (2026-07-04): a deterministic S2 contract scaffold is
+implemented in `scripts/dev/madaros_v2_s2_receipt.py`,
+`scripts/dev/madaros_v2_s2_gate.sh`, `bin/madaros s2-receipt`, and
+`self-hosted/compiler/madaros_v2_s2_receipt.sio`.
+
+This is deliberately not a native typed-HIR completion claim. The receipt
+records `claim_level = s2_contract_scaffold`, `s2_complete = false`,
+`typed_hir_sha256 = null`, and
+`typed_hir_status = not_emitted_by_current_madaros`. S2 completion remains
+blocked on a compiler-native typed-HIR/THIR serializer and roundtrip hash gate.
+
 E-KAN status:
 - declaration surface only: basis family, domains, uncertainty model,
   approximation intent. No optimizer rewrite yet.
@@ -257,14 +269,14 @@ Gate:
 - HLIR serialization roundtrip.
 - source -> HIR -> HLIR deterministic hash.
 - no duplicate enum definitions or accidental semantic aliases in core type
-  systems. `self-hosted/hlir/ir.sio` currently has duplicated
-  `HlirTypeContest` / `HlirTypeRobust` enum entries that should be audited
-  before this stage is considered contractual.
+  systems. `scripts/dev/madaros_v2_s3_readiness_gate.sh` now enforces unique
+  `HlirTypeKind` variants and required epistemic variants.
 
 Rule:
 - HLIR owns high-level optimization legality. GPU KernelIR does not.
-- HLIR is not declared stable while the duplicate enum audit is open. The file
-  is a useful starting surface, not the S3 canonical artifact.
+- The duplicate enum audit is closed, but HLIR is not declared stable until a
+  native HLIR serializer plus roundtrip/hash gate exists. The file is a useful
+  starting surface, not yet the S3 canonical artifact.
 
 ### S4 - Eq/E-KAN optimization IR
 

@@ -16,8 +16,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.madar
 # Madaros v2 S1 receipt implementation
 
 Status: S1 AST receipt witness implemented and locally gated against a freshly
-built Stage1 artifact. Operational full-gate status is still blocked by the
-known source-built Madaros SMT regression noted below.
+built Stage1 artifact. The source-built Madaros SMT regression noted below is
+now closed; the same artifact passes the full Madaros gate including imported
+SMT 6/6.
 
 Worktree: `/tmp/sounio-madaros-v2-sota-codex`
 Branch: `work/madaros-v2-sota-codex`
@@ -116,7 +117,7 @@ Raw-ELF determinism was also checked with two direct
 byte-identical and matched the hashes above. Wrapper parity was checked for
 `hello` with `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros`.
 
-## Operational blocker
+## Operational blocker (closed)
 
 The freshly built `artifacts/self-hosted/madaros` still does **not** earn the
 normal full-gate receipt:
@@ -130,9 +131,10 @@ env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros \
 [madaros-full] FAIL: imported-SMT solver gate failed
 ```
 
-The same SMT case passes on `bin/madaros-relocgate`. This keeps the broader
-source-built compiler lane blocked even though the S1 AST receipt lane is now
-literal and deterministic.
+This blocker is closed as of 2026-07-04. The source-built
+`artifacts/self-hosted/madaros` now passes `scripts/ci/madaros_full_gate.sh`,
+including imported-SMT solver gate 6/6, and writes a local gate receipt. S1
+also remains green on the same artifact.
 
 ## Wave B subagents
 

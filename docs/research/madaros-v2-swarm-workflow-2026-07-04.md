@@ -172,7 +172,28 @@ S1b update: `canonical_ast_sha256` is now a real compiler-native AST sidecar
 hash (`madaros.v2.s1.receipt/0.2`, `madaros.stage1.ast/0.1`) emitted through a
 small `--emit-ast` Stage1 path. The gate now byte-compares receipt JSON, AST
 JSON, and module-edge TSV for the four S1 gate cases. The broader source-built
-compiler lane remains blocked: the freshly rebuilt `artifacts/self-hosted/madaros`
-passes S1 but fails `scripts/ci/madaros_full_gate.sh` at
-`test_smt_adaptive_epistemic.sio`, while `bin/madaros-relocgate` passes that SMT
-case.
+compiler lane is now green: the freshly rebuilt `artifacts/self-hosted/madaros`
+passes `scripts/ci/madaros_full_gate.sh`, including imported-SMT 6/6, and
+passes `scripts/dev/madaros_v2_s1_gate.sh`.
+
+## Wave C S2/S3 Status
+
+S2 contract scaffold landed on 2026-07-04:
+
+- `scripts/dev/madaros_v2_s2_receipt.py`
+- `scripts/dev/madaros_v2_s2_gate.sh`
+- `self-hosted/compiler/madaros_v2_s2_receipt.sio`
+- `bin/madaros s2-receipt`
+
+The scaffold is intentionally honest: `s2_complete = false` and
+`typed_hir_sha256 = null` until Madaros exposes a native typed-HIR/THIR
+serializer. The S2 gate emits deterministic JSON/TSV sidecars for hello,
+imported SMT, self-hosted S2 contract, and GPU/PTX import-combination cases.
+
+S3 readiness now has a bounded gate:
+
+- `scripts/dev/madaros_v2_s3_readiness_gate.sh`
+- `self-hosted/hlir/ir.sio` duplicate `HlirTypeContest` / `HlirTypeRobust`
+  variants removed.
+
+Native HLIR roundtrip/hash remains the S3 completion blocker.

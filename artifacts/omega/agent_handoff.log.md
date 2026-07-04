@@ -3048,3 +3048,64 @@ status: lock-released
   - Owner: closed by Codex on this lane.
   - Acceptance gate: `scripts/ci/madaros_full_gate.sh` source-built PASS + normal gate receipt.
   - Next action: commit/push this focused compiler fix; then proceed to S2 planning from a green source-built base.
+
+## 2026-07-04 — Madaros v2 S2 scaffold and S3 readiness gate
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Subagents:
+  - Godel — S2 contract auditor, medium, read-only
+  - Descartes — S3 HLIR readiness auditor, medium, read-only
+- Files changed:
+  - `bin/madaros`
+  - `scripts/dev/madaros_v2_s2_receipt.py`
+  - `scripts/dev/madaros_v2_s2_gate.sh`
+  - `scripts/dev/madaros_v2_s3_readiness_gate.sh`
+  - `self-hosted/compiler/madaros_v2_s2_receipt.sio`
+  - `self-hosted/hlir/ir.sio`
+  - `tests/madaros/v2_s2/manifest.tsv`
+  - `docs/research/madaros-v2-s2-contract-scaffold-2026-07-04.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added `bin/madaros s2-receipt <source> [--out-dir OUT]`.
+  - Added deterministic S2 scaffold receipts with S1 linkage, public symbol,
+    import audit, effect, refinement, epistemic declaration, and structured
+    diagnostic sidecars.
+  - Kept the S2 claim honest: `s2_complete = false`,
+    `typed_hir_sha256 = null`, and
+    `typed_hir_status = not_emitted_by_current_madaros`.
+  - Added bounded S3 readiness gate for unique `HlirTypeKind` variants.
+  - Removed duplicate `HlirTypeContest` / `HlirTypeRobust` enum entries from
+    `self-hosted/hlir/ir.sio`.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s2_receipt.py` passed.
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s2_gate.sh scripts/dev/madaros_v2_s3_readiness_gate.sh` passed.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/madaros s2-receipt examples/hello.sio --out-dir /tmp/madaros-s2-wrapper-smoke` emitted schema `madaros.v2.s2.receipt/0.1` with scaffold/null typed-HIR status.
+  - `bash scripts/dev/madaros_v2_s3_readiness_gate.sh` passed: `HlirTypeKind variants=42 duplicates=0`.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s1_gate.sh` passed.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s2_gate.sh` passed.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_full_gate.sh` passed, including imported-SMT solver gate `6/6`.
+- Remaining blocker:
+  - Blocker-ID: `MADAROS-V2-S2-NATIVE-THIR-SERIALIZER-2026-07-04`
+  - Severity: P2
+  - Class: compiler architecture / missing native serialization boundary
+  - Evidence level: repo-local S2 audit plus executable S2 scaffold gate.
+  - Owner: next Madaros v2 compiler-front-end lane
+  - Acceptance gate: native typed-HIR/THIR serializer emits deterministic
+    non-null hash; S2 receipt upgrades from scaffold to complete; roundtrip hash
+    gate passes.
+  - Next action: implement compiler-native typed-HIR/THIR emission before
+    promoting S2 from scaffold to complete.
+- Remaining blocker:
+  - Blocker-ID: `MADAROS-V2-S3-HLIR-ROUNDTRIP-2026-07-04`
+  - Severity: P2
+  - Class: compiler architecture / missing HLIR canonical serialization
+  - Evidence level: S3 readiness gate passes the enum hygiene blocker, but no
+    native HLIR roundtrip/hash gate exists yet.
+  - Owner: next Madaros v2 HLIR lane
+  - Acceptance gate: source -> HIR -> HLIR deterministic hash plus HLIR
+    serialization roundtrip gate passes.
+  - Next action: add native HLIR serializer and roundtrip/hash gate.
