@@ -124,13 +124,27 @@ for S1-S7. Include deterministic hashing, translation validation,
 differential CPU/GPU/WASM, counterexample fuzzing, and offload policy triggers.
 ```
 
-## Current Capacity
+## Wave A Status
 
-Attempted on 2026-07-04:
+Attempted earlier on 2026-07-04:
 
 ```text
 multi_agent spawn explorer -> agent thread limit reached
 ```
 
-Treat this as a temporary capacity limit, not a design change. The lane remains
-locked and swarm-ready.
+After retry, Wave A launched and completed:
+
+| Scout | Role | Result |
+|---|---|---|
+| Copernicus | Compiler architecture scout | complete |
+| Hume | Literature/SOTA scout | complete |
+| Ampere | E-KAN semantics scout | complete |
+| Ptolemy | Validation and receipts scout | complete |
+
+Integrated synthesis:
+
+- `docs/research/madaros-v2-wave-a-scout-synthesis-2026-07-04.md`
+
+The lane is no longer merely swarm-ready; Wave A has run. Wave B should start
+with one S1 receipt worker and keep all other implementation lanes read-only
+until the S1 receipt gate exists.

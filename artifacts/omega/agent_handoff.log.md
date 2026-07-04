@@ -77,6 +77,12 @@ notes: |
   GitHub ruleset id `18510679`, active, deletion blocked, non-fast-forward
   blocked, pull_request required, current_user_can_bypass=never. Work remains on
   `work/madaros-v2-sota-codex`.
+  Wave A was later retried and completed with four read-only scouts:
+  Copernicus (compiler architecture), Hume (literature/SOTA), Ampere (E-KAN
+  semantics), and Ptolemy (validation/receipts). Integrated synthesis is in
+  docs/research/madaros-v2-wave-a-scout-synthesis-2026-07-04.md. It records S0
+  local health, E-KAN overclaim boundaries, S1 receipt requirements, and three
+  blockers: contract drift, HLIR duplicate enums, and missing WASM parity gate.
 commit: pending
 status: lock-open
 
