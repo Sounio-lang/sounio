@@ -5,8 +5,9 @@ IEEE     = sounio-ieee-cise
 POPL     = popl2027/main
 PLDI     = epistemic-types/main
 ARXIV_MD = sounio_arxiv_draft.md
+SHADOW_ARXIV = shadow-lanes-arxiv
 
-.PHONY: all ieee popl pldi arxiv clean
+.PHONY: all ieee popl pldi arxiv shadow-lanes-arxiv clean
 
 all: ieee
 
@@ -36,6 +37,10 @@ arxiv: $(ARXIV_MD)
 	pandoc $(ARXIV_MD) -o sounio_arxiv_draft.pdf --pdf-engine=pdflatex \
 		--variable=geometry:margin=1in --variable=fontsize:11pt || \
 		echo "pandoc not available; $(ARXIV_MD) is the canonical arXiv source"
+
+# GPU Shadow Lanes arXiv bundle (TeX + refs.bib tarball)
+shadow-lanes-arxiv:
+	cd $(SHADOW_ARXIV) && python3 md_to_tex.py ../preprint.md && ./package_arxiv.sh
 
 clean:
 	rm -f *.aux *.bbl *.blg *.log *.out *.toc *.pdf
