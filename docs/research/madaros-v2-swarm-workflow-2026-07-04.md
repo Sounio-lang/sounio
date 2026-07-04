@@ -148,3 +148,30 @@ Integrated synthesis:
 The lane is no longer merely swarm-ready; Wave A has run. Wave B should start
 with one S1 receipt worker and keep all other implementation lanes read-only
 until the S1 receipt gate exists.
+
+## Wave B S1 Status
+
+S1/L1 receipt implementation landed on 2026-07-04:
+
+- `bin/madaros s1-receipt <source.sio> [--out-dir OUT]`
+- `scripts/dev/madaros_v2_s1_receipt.py`
+- `scripts/dev/madaros_v2_s1_gate.sh`
+- `self-hosted/compiler/madaros_v2_s1_receipt.sio`
+- `tests/madaros/v2_s1/gpu_ptx_combo.sio`
+- `docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`
+
+Wave B S1 subagents:
+
+| Agent | Role | Model | Effort | Mode | Result |
+|---|---|---|---|---|---|
+| Rawls | parser/module surface scout | `gpt-5.4-mini` | medium | read-only | complete |
+| Pauli | S1 gate scout | `gpt-5.4-mini` | medium | read-only | complete |
+| Peirce | S1 completion auditor | `gpt-5.4` | high | read-only | complete |
+
+The current S1 boundary is intentionally honest: `canonical_ast_sha256` remains
+`null` until Stage1 exposes a stable machine-readable AST serializer. The stable
+L1 artifact is `canonical_source_graph_sha256` plus the JSON receipt and TSV
+module-edge table. Native S1b should move implementation into
+`self-hosted/compiler/module_frontend.sio` using digest helpers from
+`self-hosted/compiler/module_loader.sio`, but only after it can reproduce the
+current JSON/TSV bytes for the four S1 gate cases.

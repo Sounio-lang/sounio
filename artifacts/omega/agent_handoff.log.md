@@ -2956,3 +2956,24 @@ checks:
   - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
 commit: pending
 status: lock-released
+## 2026-07-04 — Madaros v2 S1/L1 receipt implementation
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Subagents:
+  - Rawls — parser/module surface scout, `gpt-5.4-mini`, medium, read-only
+  - Pauli — S1 gate scout, `gpt-5.4-mini`, medium, read-only
+  - Peirce — S1 completion auditor, `gpt-5.4`, high, read-only
+- Files added/changed:
+  - `bin/madaros` (`s1-receipt` subcommand)
+  - `scripts/dev/madaros_v2_s1_receipt.py`
+  - `scripts/dev/madaros_v2_s1_gate.sh`
+  - `self-hosted/compiler/madaros_v2_s1_receipt.sio`
+  - `tests/madaros/v2_s1/gpu_ptx_combo.sio`
+  - `docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`
+- Gate: `bash scripts/dev/madaros_v2_s1_gate.sh`
+- Latest local result: `PASS: 4 receipts deterministic + contract module checks`
+- Boundary: `canonical_ast_sha256` is intentionally `null` until Stage1 exposes
+  a stable machine-readable AST serializer. Current L1 stable artifact is
+  `canonical_source_graph_sha256` plus JSON receipt and TSV module-edge table.

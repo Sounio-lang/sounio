@@ -161,6 +161,13 @@ Rule:
 Purpose: produce a deterministic, canonical representation of parsed source and
 module dependencies before type checking or optimization.
 
+Implementation status (2026-07-04): S1/L1 receipt surface exists and is gated,
+with an explicit AST boundary. The live Stage1 route does not yet expose a
+stable machine-readable AST serializer, so `canonical_ast_sha256` remains `null`
+and the deterministic artifact is `canonical_source_graph_sha256` plus the
+JSON/TSV receipt pair. See
+`docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`.
+
 Canonical artifact:
 - `MadarosV2S1Receipt` with source hash, include/import graph, canonical AST
   hash, parser version, diagnostic summary, and module path table.
@@ -211,6 +218,7 @@ Gate:
   `lower_to_ptx.sio` + `ptx.sio` combination that `mod.sio` previously missed.
 - no IR_MAX_INSTRS escape hatch as a "fix"; if caps fire, the receipt must say
   which phase and which module caused it.
+- current L1 gate: `bash scripts/dev/madaros_v2_s1_gate.sh`.
 
 Non-goal:
 - no type checking, no E-KAN optimization, no ABI decisions.
