@@ -161,11 +161,14 @@ Rule:
 Purpose: produce a deterministic, canonical representation of parsed source and
 module dependencies before type checking or optimization.
 
-Implementation status (2026-07-04): S1/L1 receipt surface exists and is gated,
-with an explicit AST boundary. The live Stage1 route does not yet expose a
-stable machine-readable AST serializer, so `canonical_ast_sha256` remains `null`
-and the deterministic artifact is `canonical_source_graph_sha256` plus the
-JSON/TSV receipt pair. See
+Implementation status (2026-07-04): S1 receipt surface now emits and gates a
+real compiler-native top-level AST sidecar. The receipt schema is
+`madaros.v2.s1.receipt/0.2`; `canonical_ast_sha256` is non-null and is computed
+from `madaros.stage1.ast/0.1` bytes emitted by `--emit-ast`. The L1
+`canonical_source_graph_sha256` remains as a secondary source/module witness.
+Broader source-built compiler acceptance remains blocked because the freshly
+rebuilt `artifacts/self-hosted/madaros` fails the normal full gate at
+`test_smt_adaptive_epistemic.sio`. See
 `docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`.
 
 Canonical artifact:

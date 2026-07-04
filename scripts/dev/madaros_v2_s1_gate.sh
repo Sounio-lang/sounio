@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Madaros v2 S1 gate: deterministic source/module receipt witnesses.
+# Madaros v2 S1 gate: deterministic compiler-native AST/source/module receipt witnesses.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,12 +31,15 @@ run_case() {
 
   cmp "$a_dir/$case_id.s1.receipt.json" "$b_dir/$case_id.s1.receipt.json" >/dev/null
   cmp "$a_dir/$case_id.s1.module_edges.tsv" "$b_dir/$case_id.s1.module_edges.tsv" >/dev/null
+  cmp "$a_dir/$case_id.s1.ast.json" "$b_dir/$case_id.s1.ast.json" >/dev/null
 
-  python3 - "$a_dir/$case_id.s1.receipt.json" <<'PY'
+  python3 - "$a_dir/$case_id.s1.receipt.json" "$a_dir/$case_id.s1.ast.json" <<'PY'
+import hashlib
 import json
 import sys
 
 path = sys.argv[1]
+ast_path = sys.argv[2]
 with open(path, encoding="utf-8") as fh:
     data = json.load(fh)
 
@@ -50,30 +53,43 @@ required = [
     "module_graph",
     "module_graph_sha256",
     "canonical_ast_sha256",
+    "canonical_ast_relpath",
     "canonical_ast_status",
     "ast_surface_kind",
     "ast_boundary",
+    "ast_serializer_version",
     "canonical_source_graph_sha256",
     "canonical_source_graph_status",
     "diagnostic_count",
     "diagnostics_sha256",
     "phase_caps",
+    "ast_emit",
     "compiler_check",
     "receipt_sha256",
 ]
 missing = [key for key in required if key not in data]
 if missing:
     raise SystemExit(f"missing fields: {missing}")
-if data["schema_version"] != "madaros.v2.s1.receipt/0.1":
+if data["schema_version"] != "madaros.v2.s1.receipt/0.2":
     raise SystemExit("bad schema_version")
-if data["canonical_ast_sha256"] is not None:
-    raise SystemExit("canonical_ast_sha256 must remain null until Stage1 exposes a stable AST serializer")
-if data["canonical_ast_status"] != "blocked_until_stable_stage1_ast_serializer":
+with open(ast_path, "rb") as fh:
+    ast_sha = hashlib.sha256(fh.read()).hexdigest()
+if data["canonical_ast_sha256"] != ast_sha:
+    raise SystemExit("canonical_ast_sha256 does not match AST sidecar")
+if data["canonical_ast_sha256"] == hashlib.sha256(b"").hexdigest():
+    raise SystemExit("canonical_ast_sha256 must not be the empty hash")
+if not data["canonical_ast_relpath"].endswith(".s1.ast.json"):
+    raise SystemExit("unexpected AST sidecar path")
+if data["canonical_ast_status"] != "stable_stage1_ast_serializer":
     raise SystemExit("unexpected AST status")
-if data["ast_surface_kind"] != "opaque":
+if data["ast_surface_kind"] != "compiler_native_top_level_ast_json":
     raise SystemExit("unexpected AST surface kind")
+if data["ast_serializer_version"] != "madaros.stage1.ast/0.1":
+    raise SystemExit("unexpected AST serializer version")
 if data["canonical_source_graph_status"] != "stable_l1_source_import_public_symbol_surrogate":
     raise SystemExit("unexpected source-graph boundary")
+if data["ast_emit"]["ast_emit_rc"] != 0 or data["ast_emit"]["ast_emit_status"] != "emit_ast_ok":
+    raise SystemExit(f"AST emit failed: {data['ast_emit']}")
 if not data["module_graph"]:
     raise SystemExit("empty module graph")
 if data["compiler_check"]["compiler_check_rc"] != 0:

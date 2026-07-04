@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S1 source/module-graph receipt.
+"""Emit a Madaros v2 S1 AST/source/module-graph receipt.
 
 S1 is intentionally before type checking and lowering. This tool records a
-deterministic source/import graph plus a compiler check witness for the source
-being observed. The current compiler does not expose a stable AST serialization
-API, so canonical_ast_sha256 remains null. The L1 deterministic surrogate is
-recorded separately as canonical_source_graph_sha256.
+deterministic compiler-native Stage1 AST sidecar, source/import graph, and
+compiler check witness for the source being observed. The source graph remains
+as a secondary L1 witness; canonical_ast_sha256 is the S1 completion witness.
 """
 
 from __future__ import annotations
@@ -21,8 +20,10 @@ import sys
 from pathlib import Path
 
 
-SCHEMA_VERSION = "madaros.v2.s1.receipt/0.1"
-AST_BOUNDARY = "s1_l1_text_import_public_symbol_surrogate"
+SCHEMA_VERSION = "madaros.v2.s1.receipt/0.2"
+AST_BOUNDARY = "stage1_parser_top_level_ast"
+AST_SERIALIZER_VERSION = "madaros.stage1.ast/0.1"
+SOURCE_GRAPH_BOUNDARY = "s1_l1_text_import_public_symbol_surrogate"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 IMPORT_RE = re.compile(r"^\s*use\s+(.+?)(?:\s*;)?\s*$")
 MODULE_RE = re.compile(r"^\s*module\s+([A-Za-z_][A-Za-z0-9_:]*)")
@@ -216,6 +217,42 @@ def run_compiler_check(compiler: Path, source: Path, timeout_s: int) -> dict:
     }
 
 
+def run_compiler_emit_ast(compiler: Path, source: Path, root: Path, timeout_s: int, ast_path: Path) -> dict:
+    source_arg = relpath(source, root)
+    proc = subprocess.run(
+        [str(compiler), "--emit-ast", source_arg],
+        cwd=str(root),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout_s,
+        check=False,
+    )
+    out = proc.stdout or ""
+    ast_lines = [
+        line
+        for line in out.splitlines()
+        if line.startswith("{\"schema\":\"" + AST_SERIALIZER_VERSION + "\"")
+    ]
+    if proc.returncode != 0 or len(ast_lines) != 1:
+        ast_path.write_text("", encoding="utf-8")
+        return {
+            "ast_emit_rc": proc.returncode,
+            "ast_emit_status": "emit_ast_failed",
+            "ast_emit_output_sha256": sha256_text(out),
+            "ast_emit_output_tail": "\n".join(out.splitlines()[-12:]),
+        }
+
+    ast_bytes = (ast_lines[0] + "\n").encode("utf-8")
+    ast_path.write_bytes(ast_bytes)
+    return {
+        "ast_emit_rc": proc.returncode,
+        "ast_emit_status": "emit_ast_ok",
+        "ast_emit_output_sha256": sha256_text(out),
+        "ast_emit_output_tail": "\n".join(out.splitlines()[-12:]),
+    }
+
+
 def stable_json_sha(payload: object) -> str:
     data = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return sha256_text(data)
@@ -232,7 +269,7 @@ def emit(args: argparse.Namespace) -> int:
     module_graph_payload = {"modules": modules, "unresolved_imports": unresolved}
     module_graph_sha = stable_json_sha(module_graph_payload)
     canonical_source_graph_payload = {
-        "boundary": AST_BOUNDARY,
+        "boundary": SOURCE_GRAPH_BOUNDARY,
         "source": relpath(source, root),
         "modules": [
             {
@@ -247,6 +284,11 @@ def emit(args: argparse.Namespace) -> int:
         ],
         "unresolved_imports": unresolved,
     }
+    stem = args.case_id or source.stem
+    ast_path = out_dir / f"{stem}.s1.ast.json"
+    ast_emit = run_compiler_emit_ast(compiler, source, root, args.timeout_s, ast_path)
+    ast_bytes = ast_path.read_bytes()
+    ast_sha = sha256_bytes(ast_bytes)
     compiler_witness = run_compiler_check(compiler, source, args.timeout_s)
     receipt = {
         "schema_version": SCHEMA_VERSION,
@@ -259,10 +301,12 @@ def emit(args: argparse.Namespace) -> int:
         "module_graph": modules,
         "module_graph_sha256": module_graph_sha,
         "unresolved_imports": unresolved,
-        "canonical_ast_sha256": None,
-        "canonical_ast_status": "blocked_until_stable_stage1_ast_serializer",
-        "ast_surface_kind": "opaque",
+        "canonical_ast_sha256": ast_sha,
+        "canonical_ast_relpath": ast_path.name,
+        "canonical_ast_status": "stable_stage1_ast_serializer",
+        "ast_surface_kind": "compiler_native_top_level_ast_json",
         "ast_boundary": AST_BOUNDARY,
+        "ast_serializer_version": AST_SERIALIZER_VERSION,
         "canonical_source_graph_sha256": stable_json_sha(canonical_source_graph_payload),
         "canonical_source_graph_status": "stable_l1_source_import_public_symbol_surrogate",
         "public_symbol_count": sum(item["public_symbol_count"] for item in modules),
@@ -274,6 +318,7 @@ def emit(args: argparse.Namespace) -> int:
             "observed_modules": len(modules),
             "unresolved_imports": len(unresolved),
         },
+        "ast_emit": ast_emit,
         "compiler_check": compiler_witness,
         "generated_at_utc": "1970-01-01T00:00:00Z" if args.deterministic_time else _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
@@ -281,7 +326,6 @@ def emit(args: argparse.Namespace) -> int:
     receipt_for_hash["receipt_sha256"] = ""
     receipt["receipt_sha256"] = stable_json_sha(receipt_for_hash)
 
-    stem = args.case_id or source.stem
     receipt_path = out_dir / f"{stem}.s1.receipt.json"
     edges_path = out_dir / f"{stem}.s1.module_edges.tsv"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -301,6 +345,8 @@ def emit(args: argparse.Namespace) -> int:
                 fh.write(f"{entry['module_id']}\t{entry['path']}\t{to_id}\t{to_path}\t{module}\n")
 
     print(f"receipt={receipt_path}")
+    print(f"canonical_ast={ast_path}")
+    print(f"canonical_ast_sha256={receipt['canonical_ast_sha256']}")
     print(f"module_edges={edges_path}")
     print(f"receipt_sha256={receipt['receipt_sha256']}")
     print(f"module_graph_sha256={receipt['module_graph_sha256']}")

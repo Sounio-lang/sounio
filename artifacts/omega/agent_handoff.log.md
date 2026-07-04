@@ -2977,3 +2977,44 @@ status: lock-released
 - Boundary: `canonical_ast_sha256` is intentionally `null` until Stage1 exposes
   a stable machine-readable AST serializer. Current L1 stable artifact is
   `canonical_source_graph_sha256` plus JSON receipt and TSV module-edge table.
+
+## 2026-07-04 — Madaros v2 S1 AST receipt upgrade
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Subagents:
+  - Halley — AST wiring scout, `gpt-5.4-mini`, medium, read-only
+  - Meitner — strict S1 completion auditor, `gpt-5.4`, high, read-only
+- Files changed:
+  - `self-hosted/compiler/main.sio`
+  - `scripts/dev/madaros_v2_s1_receipt.py`
+  - `scripts/dev/madaros_v2_s1_gate.sh`
+  - `docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+- What changed:
+  - Added a small compiler-native `--emit-ast` Stage1 path in `main.sio`.
+  - Bumped S1 receipt schema to `madaros.v2.s1.receipt/0.2`.
+  - Added `.s1.ast.json` sidecars and required non-empty `canonical_ast_sha256`.
+  - Updated S1 gate to byte-compare receipt JSON, AST JSON, and module-edge TSV.
+- Local proof:
+  - `make build-madaros` produced `artifacts/self-hosted/madaros`
+    sha256 `20ab674365f98293e3908cb6e940e311e2674edc7fbf46101cb83c8c4602d776`.
+  - Raw `--emit-ast` and wrapper `MADAROS_RAW_BIN=... ./bin/madaros --emit-ast`
+    matched for `examples/hello.sio`.
+  - Raw direct two-run AST determinism passed for `hello`, `smt_basic`,
+    `selfhost_s1_contract`, and `gpu_ptx_combo`.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s1_gate.sh`
+    passed.
+- Operational blocker:
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_full_gate.sh`
+    fails at `test_smt_adaptive_epistemic.sio rc=1`.
+  - The same SMT case passes on `bin/madaros-relocgate`.
+  - Blocker-ID: `MADAROS-V2-S1-FULL-GATE-SMT-ADAPTIVE-2026-07-04`
+  - Severity: P1
+  - Class: source-built compiler operational regression / source-to-green gap
+  - Evidence: rebuilt artifact compiles and S1-gates, but full gate imported-SMT section fails on `test_smt_adaptive_epistemic.sio`; relocgate passes.
+  - Owner: next compiler recovery lane
+  - Acceptance gate: `scripts/ci/madaros_full_gate.sh` passes against freshly rebuilt `artifacts/self-hosted/madaros` and writes/earns the normal gate receipt.
+  - Next action: bisect source-built artifact vs `bin/madaros-relocgate` on imported SMT adaptive path; inspect compact modular IR route difference (`Merged IR: 91` failing vs relocgate `Merged IR: 76` passing).

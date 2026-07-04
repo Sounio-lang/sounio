@@ -168,10 +168,11 @@ Wave B S1 subagents:
 | Pauli | S1 gate scout | `gpt-5.4-mini` | medium | read-only | complete |
 | Peirce | S1 completion auditor | `gpt-5.4` | high | read-only | complete |
 
-The current S1 boundary is intentionally honest: `canonical_ast_sha256` remains
-`null` until Stage1 exposes a stable machine-readable AST serializer. The stable
-L1 artifact is `canonical_source_graph_sha256` plus the JSON receipt and TSV
-module-edge table. Native S1b should move implementation into
-`self-hosted/compiler/module_frontend.sio` using digest helpers from
-`self-hosted/compiler/module_loader.sio`, but only after it can reproduce the
-current JSON/TSV bytes for the four S1 gate cases.
+S1b update: `canonical_ast_sha256` is now a real compiler-native AST sidecar
+hash (`madaros.v2.s1.receipt/0.2`, `madaros.stage1.ast/0.1`) emitted through a
+small `--emit-ast` Stage1 path. The gate now byte-compares receipt JSON, AST
+JSON, and module-edge TSV for the four S1 gate cases. The broader source-built
+compiler lane remains blocked: the freshly rebuilt `artifacts/self-hosted/madaros`
+passes S1 but fails `scripts/ci/madaros_full_gate.sh` at
+`test_smt_adaptive_epistemic.sio`, while `bin/madaros-relocgate` passes that SMT
+case.
