@@ -141,6 +141,109 @@ fn v1_i6_img(poisoned: bool) -> EisaxImage with Mut, Panic, Div {
     eisax_encode(b)
 }
 
+fn v1_arith_high_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 40)
+    b.consts[0] = 2.0
+    b.consts[1] = 4.0
+    b.consts[2] = 0.5
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 20
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 21
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 22
+    b.as_[2] = 2
+    b.ops[3] = op_eadd()
+    b.dsts[3] = 30
+    b.as_[3] = 20
+    b.bs_[3] = 21
+    b.ops[4] = op_esub()
+    b.dsts[4] = 31
+    b.as_[4] = 30
+    b.bs_[4] = 22
+    b.ops[5] = op_emul()
+    b.dsts[5] = 32
+    b.as_[5] = 31
+    b.bs_[5] = 21
+    b.ops[6] = op_ediv()
+    b.dsts[6] = 33
+    b.as_[6] = 32
+    b.bs_[6] = 20
+    b.ops[7] = op_esqrt()
+    b.dsts[7] = 34
+    b.as_[7] = 33
+    b.ops[8] = op_emov()
+    b.dsts[8] = 40
+    b.as_[8] = 34
+    b.ops[9] = op_egate()
+    b.dsts[9] = 40
+    b.ops[10] = op_ehalt()
+    b.n_code = 11
+    eisax_encode(b)
+}
+
+fn v1_fuel_high_img(fuel: i64) -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, fuel)
+    b.consts[0] = 1.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 20
+    b.as_[0] = 0
+    b.ops[1] = op_ebr()
+    b.as_[1] = 1
+    b.n_code = 2
+    eisax_encode(b)
+}
+
+fn v1_branch_high_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0e16
+    b.consts[1] = 1.0
+    b.consts[2] = 0.0 - 1.0
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 33
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 34
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 35
+    b.as_[2] = 33
+    b.bs_[2] = 34
+    b.ops[3] = op_esub()
+    b.dsts[3] = 36
+    b.as_[3] = 35
+    b.bs_[3] = 33
+    b.ops[4] = op_ebrz()
+    b.as_[4] = 36
+    b.bs_[4] = 6
+    b.ops[5] = op_ehalt()
+    b.ops[6] = op_econst()
+    b.dsts[6] = 37
+    b.as_[6] = 2
+    b.ops[7] = op_ebrn()
+    b.as_[7] = 37
+    b.bs_[7] = 9
+    b.ops[8] = op_ehalt()
+    b.ops[9] = op_egate()
+    b.dsts[9] = 36
+    b.ops[10] = op_egate()
+    b.dsts[10] = 37
+    b.ops[11] = op_ehalt()
+    b.n_code = 12
+    eisax_encode(b)
+}
+
 fn v0_golden_img() -> EisaxImage with Mut, Panic, Div {
     var b = eisax_build_new()
     b.consts[0] = 0.5
@@ -178,7 +281,10 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if m1b.status != 0 { fails = fails + 1 }
     if m1b.len != y1_len { fails = fails + 1 }
     if cksum(&buf, m1b.len) != y1_ck { fails = fails + 1 }
-    if y1_len != 9171 { fails = fails + 1 }
+    // Pin updated 9171 -> 9326 with the full-highreg migration: egate gained a
+    // conditional last_written refresh (poisoned dst) and the poisoned-branch
+    // path now snapshots last_written = a, matching EVM receipt discipline.
+    if y1_len != 9326 { fails = fails + 1 }
 
     // Y2
     if eisax_validate(v1_loop_img()) != 0 { fails = fails + 1 }
@@ -226,7 +332,45 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if h20.status != 0 { fails = fails + 1 }
     if h20.len <= 0 { fails = fails + 1 }
 
+    // Y9a: v1-arith-high — full arithmetic chain (eadd/esub/emul/ediv/esqrt +
+    // emov) entirely on e20..e40 registers translates deterministically.
+    // Runtime conformance vs the EVM is the v1-arith-high gate lane.
+    let a1 = bridge_translate(v1_arith_high_img(), &!buf)
+    if a1.status != 0 { fails = fails + 1 }
+    if a1.len <= 0 { fails = fails + 1 }
+    let a1_len = a1.len
+    let a1_ck = cksum(&buf, a1.len)
+    let a2 = bridge_translate(v1_arith_high_img(), &!buf)
+    if a2.len != a1_len || cksum(&buf, a2.len) != a1_ck { fails = fails + 1 }
+
+    // Y9b: v1-fuel-high — fuel exhaustion whose last write is e20. Fuel is a
+    // baked immediate, so different budgets must produce different ELFs; and
+    // the e20 image must differ from the e5 image of the same shape (the
+    // last-written snapshot targets a different register block). The dynamic
+    // reg=e20 stop=fuel receipt is enforced byte-for-byte by the v1-fuel-high
+    // gate lane.
+    let fh5 = bridge_translate(v1_fuel_high_img(5), &!buf)
+    if fh5.status != 0 { fails = fails + 1 }
+    let fh5_ck = cksum(&buf, fh5.len)
+    let fh9 = bridge_translate(v1_fuel_high_img(9), &!buf)
+    if fh9.status != 0 { fails = fails + 1 }
+    if fh5.len == fh9.len && fh5_ck == cksum(&buf, fh9.len) { fails = fails + 1 }
+    let fl5 = bridge_translate(v1_fuel_img(5), &!buf)
+    if fl5.status != 0 { fails = fails + 1 }
+    if fh5.len == fl5.len && fh5_ck == cksum(&buf, fl5.len) { fails = fails + 1 }
+
+    // Y9c: v1-branch-high — ebrz/ebrn + frail counting where the tested
+    // registers are high (e33..e37); deterministic translation. The frail=1
+    // receipt pair is enforced by the v1-branch-high gate lane.
+    let b1 = bridge_translate(v1_branch_high_img(), &!buf)
+    if b1.status != 0 { fails = fails + 1 }
+    if b1.len <= 0 { fails = fails + 1 }
+    let b1_len = b1.len
+    let b1_ck = cksum(&buf, b1.len)
+    let b2 = bridge_translate(v1_branch_high_img(), &!buf)
+    if b2.len != b1_len || cksum(&buf, b2.len) != b1_ck { fails = fails + 1 }
+
     assert(fails == 0)
-    println("ALL PASS: eisa bridge v1 Y1 ... Y8")
+    println("ALL PASS: eisa bridge v1 Y1 ... Y9")
     0
 }

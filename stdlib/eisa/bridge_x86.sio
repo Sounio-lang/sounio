@@ -78,11 +78,26 @@ use eisa::core::*
 // after all templates are placed (NOT a measure-then-reemit two-pass; the
 // patch list is semantically equivalent for static targets).
 //
-// v1 caveats (V1e, honest limitations):
-//   * High-register arithmetic/template coverage is still partial in the
-//     bridge path (v1e-rump currently runs on the low-window arithmetic
-//     trail plus high-register gate visibility). Full e0..e63 arithmetic
-//     templating remains tracked as follow-up work.
+// v1 state layout (highreg migration): register indices are TOTAL over
+// 0..63 and memory slots over 0..31 via reg_*_off_v1 / mem_*_off_v1. Low
+// indices (r < 16, s < 8) resolve into the v0-compatible block so v0 bytes
+// stay pinned; high indices resolve into the disjoint v1 block
+// (v1_reg_base..v1_state_size). Every v1 template — emov, eload, estore,
+// eadd, esub, emul, ediv, esqrt, econst, egate, ebrz/ebrn poison+frail,
+// fuel guard, u-lane -0.0 normalisation, and the fuel-stop epilogue's
+// dynamic last_written snapshot — goes through these total maps, so any
+// dst/a/b in 0..63 is supported (conformance: v1-arith-high, v1-fuel-high,
+// v1-branch-high gate lanes; e20 econst+egate trail is v1-highreg).
+//
+// v1 caveats (post-highreg, honest limitations):
+//   * The fuel-stop receipt's last-written snapshot (sc slots 36/55/61-63)
+//     is refreshed at write effects and at the EVM's canonicalisation
+//     points (poisoned gate/estore/branch); the equivalence argument
+//     assumes registers never hold non-canonical bad lanes with a clear
+//     poison flag, which both sides guarantee by construction.
+//   * v1 images are capped by the 65536-byte emission buffer; large
+//     n_code images can overflow it and return status 3 (no lane pins the
+//     boundary).
 // =============================================================================
 
 pub struct BridgeMeta {
@@ -140,14 +155,12 @@ fn v1_reg_base() -> i64 { 2048 }
 fn v1_poison_base() -> i64 { 4096 }
 fn v1_mem_base() -> i64 { 4608 }
 fn v1_mem_poison_base() -> i64 { 5632 }
-fn v1_tmp_base() -> i64 { 5888 }
 fn v1_rl(r: i64, lane: i64) -> i64 { v1_reg_base() + r * 32 + lane * 8 }
 fn v1_rp(r: i64) -> i64 { v1_poison_base() + r * 8 }
-fn v1_off_gate_count() -> i64 { 2560 }
-fn v1_off_frail_count() -> i64 { 2568 }
-fn v1_off_br_poisoned() -> i64 { 2576 }
-fn v1_off_fuel_left() -> i64 { 2584 }
-fn v1_off_last_written() -> i64 { 2592 }
+// v1 runtime counters live in the v0 scratch region (sc slots 32-36, 55,
+// 61-63), NOT in the v1 block: sc(32)=fuel_left, sc(33)=gate_count,
+// sc(34)=frail_count, sc(35)=br_poisoned, sc(36)=last_written idx,
+// sc(55)=last poison, sc(61..63)=last val/ehi/u snapshot.
 fn v1_state_size() -> i64 { 6400 }
 fn v1_strings_off() -> i64 { 6656 }
 
@@ -162,6 +175,50 @@ fn rp(r: i64) -> i64 { 512 + r * 8 }
 fn ml(s: i64, lane: i64) -> i64 { 640 + s * 32 + lane * 8 }
 fn mp(s: i64) -> i64 { 896 + s * 8 }
 fn sc(i: i64) -> i64 { 960 + i * 8 }
+
+// ---- total register/memory offset maps (v1 path, r in 0..63, s in 0..31) ----
+// Low indices live in the v0-compatible block, high indices in the v1 block.
+// These functions are TOTAL over the v1 index space; every v1 template must go
+// through them so the state layout can never be partially migrated again.
+fn reg_val_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 0) } else { v1_rl(r, 0) }
+}
+
+fn reg_ehi_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 1) } else { v1_rl(r, 1) }
+}
+
+fn reg_elo_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 2) } else { v1_rl(r, 2) }
+}
+
+fn reg_u_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 3) } else { v1_rl(r, 3) }
+}
+
+fn reg_poison_off_v1(r: i64) -> i64 {
+    if r < 16 { rp(r) } else { v1_rp(r) }
+}
+
+fn mem_val_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 0) } else { v1_mem_base() + s * 32 }
+}
+
+fn mem_ehi_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 1) } else { v1_mem_base() + s * 32 + 8 }
+}
+
+fn mem_elo_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 2) } else { v1_mem_base() + s * 32 + 16 }
+}
+
+fn mem_u_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 3) } else { v1_mem_base() + s * 32 + 24 }
+}
+
+fn mem_poison_off_v1(s: i64) -> i64 {
+    if s < 8 { mp(s) } else { v1_mem_poison_base() + s * 8 }
+}
 
 // f64 bit-pattern constants (sign 0)
 fn f64bits(exp: i64, mant: i64) -> i64 { exp * 4503599627370496 + mant }
@@ -544,16 +601,31 @@ fn em_dd_mulf(
 // ---- poison / lane helpers --------------------------------------------------
 fn em_set_poison(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
     var pp = setx(out, p, 0, c_nan())
-    pp = st(out, pp, 0, rl(r, 0))    // val = NaN
+    pp = st(out, pp, 0, reg_val_off_v1(r))    // val = NaN
     pp = pxor(out, pp, 0, 0)
-    pp = st(out, pp, 0, rl(r, 1))    // ehi = 0
-    pp = st(out, pp, 0, rl(r, 2))    // elo = 0
+    pp = st(out, pp, 0, reg_ehi_off_v1(r))    // ehi = 0
+    pp = st(out, pp, 0, reg_elo_off_v1(r))    // elo = 0
     pp = setx(out, pp, 0, c_inf())
-    pp = st(out, pp, 0, rl(r, 3))    // u = +Inf
+    pp = st(out, pp, 0, reg_u_off_v1(r))      // u = +Inf
     pp = put8(out, pp, 0x48)
     pp = put8(out, pp, 0xB8)
-    pp = put64(out, pp, 1)           // mov rax,1
-    pp = mov_mem_rax(out, pp, rp(r)) // poison = 1
+    pp = put64(out, pp, 1)                    // mov rax,1
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(r)) // poison = 1
+    pp
+}
+
+fn em_set_mem_poison(out: &![i8; 65536], p: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, mem_val_off_v1(s))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, mem_ehi_off_v1(s))
+    pp = st(out, pp, 0, mem_elo_off_v1(s))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, mem_u_off_v1(s))
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, mem_poison_off_v1(s))
     pp
 }
 
@@ -564,25 +636,25 @@ fn em_set_poison(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div
 // Returns new p with rax = 1 when bad else 0, and poisons r when bad.
 fn em_normalize(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
     // check exponent field == 0x7FF for val, ehi, elo; and u sign bit
-    var pp = mov_rax_mem(out, p, rl(r, 0))
+    var pp = mov_rax_mem(out, p, reg_val_off_v1(r))
     pp = shr_rax(out, pp, 52)
     pp = and_rax(out, pp, 2047)
     pp = cmp_rax(out, pp, 2047)
     let j1 = pp + 2
     pp = jcc(out, pp, 0x84, 0)       // je bad
-    pp = mov_rax_mem(out, pp, rl(r, 1))
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(r))
     pp = shr_rax(out, pp, 52)
     pp = and_rax(out, pp, 2047)
     pp = cmp_rax(out, pp, 2047)
     let j2 = pp + 2
     pp = jcc(out, pp, 0x84, 0)
-    pp = mov_rax_mem(out, pp, rl(r, 2))
+    pp = mov_rax_mem(out, pp, reg_elo_off_v1(r))
     pp = shr_rax(out, pp, 52)
     pp = and_rax(out, pp, 2047)
     pp = cmp_rax(out, pp, 2047)
     let j3 = pp + 2
     pp = jcc(out, pp, 0x84, 0)
-    pp = mov_rax_mem(out, pp, rl(r, 3))
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(r))
     pp = shr_rax(out, pp, 63)
     pp = test_rax(out, pp)
     let j4 = pp + 2
@@ -624,71 +696,79 @@ fn em_u_from_two(
 fn em_arith(
     out: &![i8; 65536], p: i64, op: i64, a: i64, b: i64, ns_off: i64
 ) -> i64 with Mut, Panic, Div {
+    let av = reg_val_off_v1(a)
+    let ah_ = reg_ehi_off_v1(a)
+    let al_ = reg_elo_off_v1(a)
+    let au = reg_u_off_v1(a)
+    let bv = reg_val_off_v1(b)
+    let bh_ = reg_ehi_off_v1(b)
+    let bl_ = reg_elo_off_v1(b)
+    let bu = reg_u_off_v1(b)
     var pp = p
     if op == 2 {
         // eadd
-        pp = em_two_sum(out, pp, rl(a, 0), rl(b, 0), sc(12), sc(13))
+        pp = em_two_sum(out, pp, av, bv, sc(12), sc(13))
         pp = ld(out, pp, 0, sc(12))
         pp = st(out, pp, 0, sc(8))                     // val
-        pp = em_dd_add(out, pp, rl(a, 1), rl(a, 2), rl(b, 1), rl(b, 2), sc(14), sc(15))
+        pp = em_dd_add(out, pp, ah_, al_, bh_, bl_, sc(14), sc(15))
         pp = pxor(out, pp, 0, 0)
         pp = st(out, pp, 0, sc(16))                    // zero
         pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
         // u = sqrt(x.u^2 + y.u^2)
-        pp = ld(out, pp, 0, rl(a, 3))
+        pp = ld(out, pp, 0, au)
         pp = st(out, pp, 0, sc(24))
-        pp = ld(out, pp, 0, rl(b, 3))
+        pp = ld(out, pp, 0, bu)
         pp = st(out, pp, 0, sc(25))
         pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
         return pp
     }
     if op == 3 {
         // esub: two_sum(x.val, 0 - y.val); err = dd_add(dd_sub(x.err,y.err), s.lo)
-        pp = ld(out, pp, 1, rl(b, 0))
+        pp = ld(out, pp, 1, bv)
         pp = pxor(out, pp, 0, 0)
         pp = sse(out, pp, 0x5C, 0, 1)                  // 0 - y.val
         pp = st(out, pp, 0, sc(17))
-        pp = em_two_sum(out, pp, rl(a, 0), sc(17), sc(12), sc(13))
+        pp = em_two_sum(out, pp, av, sc(17), sc(12), sc(13))
         pp = ld(out, pp, 0, sc(12))
         pp = st(out, pp, 0, sc(8))
         // neg y.err
-        pp = ld(out, pp, 1, rl(b, 1))
+        pp = ld(out, pp, 1, bh_)
         pp = pxor(out, pp, 0, 0)
         pp = sse(out, pp, 0x5C, 0, 1)
         pp = st(out, pp, 0, sc(18))
-        pp = ld(out, pp, 1, rl(b, 2))
+        pp = ld(out, pp, 1, bl_)
         pp = pxor(out, pp, 0, 0)
         pp = sse(out, pp, 0x5C, 0, 1)
         pp = st(out, pp, 0, sc(19))
-        pp = em_dd_add(out, pp, rl(a, 1), rl(a, 2), sc(18), sc(19), sc(14), sc(15))
+        pp = em_dd_add(out, pp, ah_, al_, sc(18), sc(19), sc(14), sc(15))
         pp = pxor(out, pp, 0, 0)
         pp = st(out, pp, 0, sc(16))
         pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
-        pp = ld(out, pp, 0, rl(a, 3))
+        pp = ld(out, pp, 0, au)
         pp = st(out, pp, 0, sc(24))
-        pp = ld(out, pp, 0, rl(b, 3))
+        pp = ld(out, pp, 0, bu)
         pp = st(out, pp, 0, sc(25))
         pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
         return pp
     }
     if op == 4 {
         // emul
-        pp = em_two_prod(out, pp, rl(a, 0), rl(b, 0), sc(12), sc(13))
+        pp = em_two_prod(out, pp, av, bv, sc(12), sc(13))
         pp = ld(out, pp, 0, sc(12))
         pp = st(out, pp, 0, sc(8))                     // val = p.hi
-        pp = em_dd_mulf(out, pp, rl(a, 1), rl(a, 2), rl(b, 0), sc(20), sc(21))
-        pp = em_dd_mulf(out, pp, rl(b, 1), rl(b, 2), rl(a, 0), sc(22), sc(23))
+        pp = em_dd_mulf(out, pp, ah_, al_, bv, sc(20), sc(21))
+        pp = em_dd_mulf(out, pp, bh_, bl_, av, sc(22), sc(23))
         pp = em_dd_add(out, pp, sc(20), sc(21), sc(22), sc(23), sc(14), sc(15))
         pp = pxor(out, pp, 0, 0)
         pp = st(out, pp, 0, sc(16))
         pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
         // t1 = y.val * x.u ; t2 = x.val * y.u
-        pp = ld(out, pp, 0, rl(b, 0))
-        pp = ld(out, pp, 1, rl(a, 3))
+        pp = ld(out, pp, 0, bv)
+        pp = ld(out, pp, 1, au)
         pp = sse(out, pp, 0x59, 0, 1)
         pp = st(out, pp, 0, sc(24))
-        pp = ld(out, pp, 0, rl(a, 0))
-        pp = ld(out, pp, 1, rl(b, 3))
+        pp = ld(out, pp, 0, av)
+        pp = ld(out, pp, 1, bu)
         pp = sse(out, pp, 0x59, 0, 1)
         pp = st(out, pp, 0, sc(25))
         pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
@@ -696,12 +776,12 @@ fn em_arith(
     }
     // op == 5 : ediv  (non-zero divisor path; zero divisor handled by caller)
     // q = x.val / y.val
-    pp = ld(out, pp, 0, rl(a, 0))
-    pp = ld(out, pp, 1, rl(b, 0))
+    pp = ld(out, pp, 0, av)
+    pp = ld(out, pp, 1, bv)
     pp = sse(out, pp, 0x5E, 0, 1)                      // q
     pp = st(out, pp, 0, sc(8))                         // val = q
     // p = two_prod(q, y.val)
-    pp = em_two_prod(out, pp, sc(8), rl(b, 0), sc(12), sc(13))
+    pp = em_two_prod(out, pp, sc(8), bv, sc(12), sc(13))
     // residual_dd = dd_sub(dd_from_f64(x.val), p) = dd_add({x.val,0}, neg p)
     pp = ld(out, pp, 1, sc(12))
     pp = pxor(out, pp, 0, 0)
@@ -713,25 +793,25 @@ fn em_arith(
     pp = st(out, pp, 0, sc(19))
     pp = pxor(out, pp, 0, 0)
     pp = st(out, pp, 0, sc(16))
-    pp = em_dd_add(out, pp, rl(a, 0), sc(16), sc(18), sc(19), sc(14), sc(15))
+    pp = em_dd_add(out, pp, av, sc(16), sc(18), sc(19), sc(14), sc(15))
     // res = dd_to_f64(residual) / y.val
     pp = ld(out, pp, 0, sc(14))
     pp = ld(out, pp, 1, sc(15))
     pp = sse(out, pp, 0x58, 0, 1)
-    pp = ld(out, pp, 1, rl(b, 0))
+    pp = ld(out, pp, 1, bv)
     pp = sse(out, pp, 0x5E, 0, 1)
     pp = st(out, pp, 0, sc(17))                        // res
     // err = dd_add(dd_sub(dd_mulf(x.err, 1/y), dd_mulf(y.err, q/y)), res)
     pp = setx(out, pp, 0, c_one())
-    pp = ld(out, pp, 1, rl(b, 0))
+    pp = ld(out, pp, 1, bv)
     pp = sse(out, pp, 0x5E, 0, 1)                      // 1/y
     pp = st(out, pp, 0, sc(26))
     pp = ld(out, pp, 0, sc(8))
-    pp = ld(out, pp, 1, rl(b, 0))
+    pp = ld(out, pp, 1, bv)
     pp = sse(out, pp, 0x5E, 0, 1)                      // q/y
     pp = st(out, pp, 0, sc(27))
-    pp = em_dd_mulf(out, pp, rl(a, 1), rl(a, 2), sc(26), sc(20), sc(21))
-    pp = em_dd_mulf(out, pp, rl(b, 1), rl(b, 2), sc(27), sc(22), sc(23))
+    pp = em_dd_mulf(out, pp, ah_, al_, sc(26), sc(20), sc(21))
+    pp = em_dd_mulf(out, pp, bh_, bl_, sc(27), sc(22), sc(23))
     // neg the second term then dd_add
     pp = ld(out, pp, 1, sc(22))
     pp = pxor(out, pp, 0, 0)
@@ -746,26 +826,26 @@ fn em_arith(
     pp = st(out, pp, 0, sc(16))
     pp = em_dd_add(out, pp, sc(14), sc(15), sc(17), sc(16), sc(9), sc(10))
     // u = (1/|y.val|) * sqrt(x.u^2 + (q*y.u)^2)
-    pp = ld(out, pp, 0, rl(a, 3))
+    pp = ld(out, pp, 0, au)
     pp = st(out, pp, 0, sc(24))
     pp = ld(out, pp, 0, sc(8))
-    pp = ld(out, pp, 1, rl(b, 3))
+    pp = ld(out, pp, 1, bu)
     pp = sse(out, pp, 0x59, 0, 1)                      // q*y.u
     pp = st(out, pp, 0, sc(25))
     pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
     // scale by 1/|y.val|
-    pp = ld(out, pp, 0, rl(b, 0))
+    pp = ld(out, pp, 0, bv)
     pp = pxor(out, pp, 1, 1)
     pp = ucomi(out, pp, 0, 1)
     let jpos = pp + 2
     pp = jcc(out, pp, 0x87, 0)                         // ja  -> y>0, keep
-    pp = ld(out, pp, 1, rl(b, 0))
+    pp = ld(out, pp, 1, bv)
     pp = pxor(out, pp, 0, 0)
     pp = sse(out, pp, 0x5C, 0, 1)                      // 0 - y  (abs for y<0)
     let jdone = pp + 1
     pp = jmp32(out, pp, 0)
     let keep_lbl = pp
-    pp = ld(out, pp, 0, rl(b, 0))                      // y>0 branch: ay = y
+    pp = ld(out, pp, 0, bv)                            // y>0 branch: ay = y
     let after_lbl = pp
     patch32(out, jpos, keep_lbl - (jpos + 4))
     patch32(out, jdone, after_lbl - (jdone + 4))
@@ -806,15 +886,15 @@ fn em_finish(out: &![i8; 65536], p: i64, dst: i64) -> i64 with Mut, Panic, Div {
     pp = jcc(out, pp, 0x85, 0)
     // ok path: copy result lanes to dst, poison=0
     pp = ld(out, pp, 0, sc(8))
-    pp = st(out, pp, 0, rl(dst, 0))
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
     pp = ld(out, pp, 0, sc(9))
-    pp = st(out, pp, 0, rl(dst, 1))
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
     pp = ld(out, pp, 0, sc(10))
-    pp = st(out, pp, 0, rl(dst, 2))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
     pp = ld(out, pp, 0, sc(11))
-    pp = st(out, pp, 0, rl(dst, 3))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
     pp = xor_rax(out, pp)
-    pp = mov_mem_rax(out, pp, rp(dst))
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
     let jok = pp + 1
     pp = jmp32(out, pp, 0)
     let poison_lbl = pp
@@ -831,13 +911,13 @@ fn em_finish(out: &![i8; 65536], p: i64, dst: i64) -> i64 with Mut, Panic, Div {
 // ---- opcode templates -------------------------------------------------------
 fn em_econst(out: &![i8; 65536], p: i64, dst: i64, bits: i64) -> i64 with Mut, Panic, Div {
     var pp = setx(out, p, 0, bits)
-    pp = st(out, pp, 0, rl(dst, 0))
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
     pp = pxor(out, pp, 0, 0)
-    pp = st(out, pp, 0, rl(dst, 1))
-    pp = st(out, pp, 0, rl(dst, 2))
-    pp = st(out, pp, 0, rl(dst, 3))
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
     pp = xor_rax(out, pp)
-    pp = mov_mem_rax(out, pp, rp(dst))
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
     pp
 }
 
@@ -854,7 +934,7 @@ fn em_binop(
     var jz = 0
     var has_jz = false
     if op == 5 {
-        pp = ld(out, pp, 0, rl(b, 0))
+        pp = ld(out, pp, 0, reg_val_off_v1(b))
         pp = pxor(out, pp, 1, 1)
         pp = ucomi(out, pp, 0, 1)
         jz = pp + 2
@@ -877,18 +957,22 @@ fn em_binop(
 }
 
 fn em_esqrt(out: &![i8; 65536], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 with Mut, Panic, Div {
+    let av = reg_val_off_v1(a)
+    let ah_ = reg_ehi_off_v1(a)
+    let al_ = reg_elo_off_v1(a)
+    let au = reg_u_off_v1(a)
     var pp = em_normalize(out, p, a)
     pp = test_rax(out, pp)
     let jp = pp + 2
     pp = jcc(out, pp, 0x85, 0)                  // jne POISON
     // if x.val <= 0 -> exact zero
-    pp = ld(out, pp, 0, rl(a, 0))
+    pp = ld(out, pp, 0, av)
     pp = pxor(out, pp, 1, 1)
     pp = ucomi(out, pp, 0, 1)
     let jz = pp + 2
     pp = jcc(out, pp, 0x86, 0)                  // jbe ZEROPATH
     // sqrt body
-    pp = ld(out, pp, 0, rl(a, 0))
+    pp = ld(out, pp, 0, av)
     pp = call32(out, pp, ns_off)
     pp = st(out, pp, 0, sc(8))                  // z = val
     pp = em_two_prod(out, pp, sc(8), sc(8), sc(12), sc(13))
@@ -903,7 +987,7 @@ fn em_esqrt(out: &![i8; 65536], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 wi
     pp = st(out, pp, 0, sc(19))
     pp = pxor(out, pp, 0, 0)
     pp = st(out, pp, 0, sc(16))
-    pp = em_dd_add(out, pp, rl(a, 0), sc(16), sc(18), sc(19), sc(14), sc(15))
+    pp = em_dd_add(out, pp, av, sc(16), sc(18), sc(19), sc(14), sc(15))
     // res = (r.hi + r.lo) / (2z)
     pp = ld(out, pp, 0, sc(14))
     pp = ld(out, pp, 1, sc(15))
@@ -920,12 +1004,12 @@ fn em_esqrt(out: &![i8; 65536], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 wi
     pp = setx(out, pp, 0, c_one())
     pp = sse(out, pp, 0x5E, 0, 2)               // 1/(2z)
     pp = st(out, pp, 0, sc(26))
-    pp = em_dd_mulf(out, pp, rl(a, 1), rl(a, 2), sc(26), sc(22), sc(23))
+    pp = em_dd_mulf(out, pp, ah_, al_, sc(26), sc(22), sc(23))
     pp = pxor(out, pp, 0, 0)
     pp = st(out, pp, 0, sc(16))
     pp = em_dd_add(out, pp, sc(22), sc(23), sc(17), sc(16), sc(9), sc(10))
     // u = x.u / (2z)
-    pp = ld(out, pp, 0, rl(a, 3))
+    pp = ld(out, pp, 0, au)
     pp = ld(out, pp, 2, sc(8))
     pp = setx(out, pp, 3, c_two())
     pp = sse(out, pp, 0x59, 2, 3)
@@ -937,12 +1021,12 @@ fn em_esqrt(out: &![i8; 65536], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 wi
     // ZEROPATH
     let zero_lbl = pp
     pp = pxor(out, pp, 0, 0)
-    pp = st(out, pp, 0, rl(dst, 0))
-    pp = st(out, pp, 0, rl(dst, 1))
-    pp = st(out, pp, 0, rl(dst, 2))
-    pp = st(out, pp, 0, rl(dst, 3))
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
     pp = xor_rax(out, pp)
-    pp = mov_mem_rax(out, pp, rp(dst))
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
     let jend2 = pp + 1
     pp = jmp32(out, pp, 0)
     let poison_lbl = pp
@@ -956,30 +1040,30 @@ fn em_esqrt(out: &![i8; 65536], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 wi
 }
 
 fn em_estore(out: &![i8; 65536], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
-    var pp = ld(out, p, 0, rl(reg, 0))
-    pp = st(out, pp, 0, ml(slot, 0))
-    pp = ld(out, pp, 0, rl(reg, 1))
-    pp = st(out, pp, 0, ml(slot, 1))
-    pp = ld(out, pp, 0, rl(reg, 2))
-    pp = st(out, pp, 0, ml(slot, 2))
-    pp = ld(out, pp, 0, rl(reg, 3))
-    pp = st(out, pp, 0, ml(slot, 3))
-    pp = mov_rax_mem(out, pp, rp(reg))
-    pp = mov_mem_rax(out, pp, mp(slot))
+    var pp = ld(out, p, 0, reg_val_off_v1(reg))
+    pp = st(out, pp, 0, mem_val_off_v1(slot))
+    pp = ld(out, pp, 0, reg_ehi_off_v1(reg))
+    pp = st(out, pp, 0, mem_ehi_off_v1(slot))
+    pp = ld(out, pp, 0, reg_elo_off_v1(reg))
+    pp = st(out, pp, 0, mem_elo_off_v1(slot))
+    pp = ld(out, pp, 0, reg_u_off_v1(reg))
+    pp = st(out, pp, 0, mem_u_off_v1(slot))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(reg))
+    pp = mov_mem_rax(out, pp, mem_poison_off_v1(slot))
     pp
 }
 
 fn em_eload(out: &![i8; 65536], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
-    var pp = ld(out, p, 0, ml(slot, 0))
-    pp = st(out, pp, 0, rl(reg, 0))
-    pp = ld(out, pp, 0, ml(slot, 1))
-    pp = st(out, pp, 0, rl(reg, 1))
-    pp = ld(out, pp, 0, ml(slot, 2))
-    pp = st(out, pp, 0, rl(reg, 2))
-    pp = ld(out, pp, 0, ml(slot, 3))
-    pp = st(out, pp, 0, rl(reg, 3))
-    pp = mov_rax_mem(out, pp, mp(slot))
-    pp = mov_mem_rax(out, pp, rp(reg))
+    var pp = ld(out, p, 0, mem_val_off_v1(slot))
+    pp = st(out, pp, 0, reg_val_off_v1(reg))
+    pp = ld(out, pp, 0, mem_ehi_off_v1(slot))
+    pp = st(out, pp, 0, reg_ehi_off_v1(reg))
+    pp = ld(out, pp, 0, mem_elo_off_v1(slot))
+    pp = st(out, pp, 0, reg_elo_off_v1(reg))
+    pp = ld(out, pp, 0, mem_u_off_v1(slot))
+    pp = st(out, pp, 0, reg_u_off_v1(reg))
+    pp = mov_rax_mem(out, pp, mem_poison_off_v1(slot))
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(reg))
     pp
 }
 
@@ -993,19 +1077,19 @@ fn em_egate(
     // prefix "...prog=..gate=..reg=e.. val=s"
     pp = write_str(out, pp, base + s.p0off[gi as usize], s.p0len[gi as usize])
     // val
-    pp = mov_rax_mem(out, pp, rl(dst, 0))
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(dst))
     pp = call32(out, pp, dp_off)
     // " roundoff=s"
     pp = write_str(out, pp, base + s.ro, s.rolen)
-    pp = mov_rax_mem(out, pp, rl(dst, 1))
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(dst))
     pp = call32(out, pp, dp_off)
     // " u=s"
     pp = write_str(out, pp, base + s.lu, s.lulen)
-    pp = mov_rax_mem(out, pp, rl(dst, 3))
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(dst))
     pp = call32(out, pp, dp_off)
     // " poisoned="
     pp = write_str(out, pp, base + s.po, s.polen)
-    pp = mov_rax_mem(out, pp, rp(dst))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(dst))
     pp = call32(out, pp, pu_off)
     // "\n"
     pp = write_str(out, pp, base + s.nl, 1)
@@ -1016,188 +1100,14 @@ fn em_egate(
 fn em_v1_set_last_written(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
     var pp = mov_rax_imm64(out, p, r)
     pp = mov_mem_rax(out, pp, sc(36))
-    pp = mov_rax_mem(out, pp, rl(r, 0))
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(r))
     pp = mov_mem_rax(out, pp, sc(61))
-    pp = mov_rax_mem(out, pp, rl(r, 1))
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(r))
     pp = mov_mem_rax(out, pp, sc(62))
-    pp = mov_rax_mem(out, pp, rl(r, 3))
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(r))
     pp = mov_mem_rax(out, pp, sc(63))
-    pp = mov_rax_mem(out, pp, rp(r))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(r))
     pp = mov_mem_rax(out, pp, sc(55))
-    pp
-}
-
-fn em_v1_set_last_written_hi(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
-    var pp = mov_rax_imm64(out, p, r)
-    pp = mov_mem_rax(out, pp, sc(36))
-    pp = mov_rax_mem(out, pp, v1_rl(r, 0))
-    pp = mov_mem_rax(out, pp, sc(61))
-    pp = mov_rax_mem(out, pp, v1_rl(r, 1))
-    pp = mov_mem_rax(out, pp, sc(62))
-    pp = mov_rax_mem(out, pp, v1_rl(r, 3))
-    pp = mov_mem_rax(out, pp, sc(63))
-    pp = mov_rax_mem(out, pp, v1_rp(r))
-    pp = mov_mem_rax(out, pp, sc(55))
-    pp
-}
-
-fn reg_val_off_v1(r: i64) -> i64 {
-    if r < 16 { rl(r, 0) } else { v1_rl(r, 0) }
-}
-
-fn reg_ehi_off_v1(r: i64) -> i64 {
-    if r < 16 { rl(r, 1) } else { v1_rl(r, 1) }
-}
-
-fn reg_elo_off_v1(r: i64) -> i64 {
-    if r < 16 { rl(r, 2) } else { v1_rl(r, 2) }
-}
-
-fn reg_u_off_v1(r: i64) -> i64 {
-    if r < 16 { rl(r, 3) } else { v1_rl(r, 3) }
-}
-
-fn reg_poison_off_v1(r: i64) -> i64 {
-    if r < 16 { rp(r) } else { v1_rp(r) }
-}
-
-fn mem_val_off_v1(s: i64) -> i64 {
-    if s < 8 { ml(s, 0) } else { v1_mem_base() + s * 32 }
-}
-
-fn mem_ehi_off_v1(s: i64) -> i64 {
-    if s < 8 { ml(s, 1) } else { v1_mem_base() + s * 32 + 8 }
-}
-
-fn mem_elo_off_v1(s: i64) -> i64 {
-    if s < 8 { ml(s, 2) } else { v1_mem_base() + s * 32 + 16 }
-}
-
-fn mem_u_off_v1(s: i64) -> i64 {
-    if s < 8 { ml(s, 3) } else { v1_mem_base() + s * 32 + 24 }
-}
-
-fn mem_poison_off_v1(s: i64) -> i64 {
-    if s < 8 { mp(s) } else { v1_mem_poison_base() + s * 8 }
-}
-
-fn em_v1_normalize_reg_idx(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
-    let vo = reg_val_off_v1(r)
-    let eo = reg_ehi_off_v1(r)
-    let lo = reg_elo_off_v1(r)
-    let uo = reg_u_off_v1(r)
-    let po = reg_poison_off_v1(r)
-    var pp = mov_rax_mem(out, p, vo)
-    pp = shr_rax(out, pp, 52)
-    pp = and_rax(out, pp, 2047)
-    pp = cmp_rax(out, pp, 2047)
-    let j1 = pp + 2
-    pp = jcc(out, pp, 0x84, 0)
-    pp = mov_rax_mem(out, pp, eo)
-    pp = shr_rax(out, pp, 52)
-    pp = and_rax(out, pp, 2047)
-    pp = cmp_rax(out, pp, 2047)
-    let j2 = pp + 2
-    pp = jcc(out, pp, 0x84, 0)
-    pp = mov_rax_mem(out, pp, lo)
-    pp = shr_rax(out, pp, 52)
-    pp = and_rax(out, pp, 2047)
-    pp = cmp_rax(out, pp, 2047)
-    let j3 = pp + 2
-    pp = jcc(out, pp, 0x84, 0)
-    pp = mov_rax_mem(out, pp, uo)
-    pp = shr_rax(out, pp, 63)
-    pp = test_rax(out, pp)
-    let j4 = pp + 2
-    pp = jcc(out, pp, 0x85, 0)
-    pp = xor_rax(out, pp)
-    let j5 = pp + 1
-    pp = jmp32(out, pp, 0)
-    let bad = pp
-    pp = setx(out, pp, 0, c_nan())
-    pp = st(out, pp, 0, vo)
-    pp = pxor(out, pp, 0, 0)
-    pp = st(out, pp, 0, eo)
-    pp = st(out, pp, 0, lo)
-    pp = setx(out, pp, 0, c_inf())
-    pp = st(out, pp, 0, uo)
-    pp = mov_rax_imm64(out, pp, 1)
-    pp = mov_mem_rax(out, pp, po)
-    pp = mov_rax_imm64(out, pp, 1)
-    let done = pp
-    patch32(out, j1, bad - (j1 + 4))
-    patch32(out, j2, bad - (j2 + 4))
-    patch32(out, j3, bad - (j3 + 4))
-    patch32(out, j4, bad - (j4 + 4))
-    patch32(out, j5, done - (j5 + 4))
-    pp
-}
-
-fn v1_tmp(i: i64) -> i64 { v1_tmp_base() + i * 8 }
-
-fn em_v1_save_low012(out: &![i8; 65536], p: i64) -> i64 with Mut, Panic, Div {
-    var pp = mov_rax_mem(out, p, rl(0, 0)); pp = mov_mem_rax(out, pp, v1_tmp(0))
-    pp = mov_rax_mem(out, pp, rl(0, 1)); pp = mov_mem_rax(out, pp, v1_tmp(1))
-    pp = mov_rax_mem(out, pp, rl(0, 2)); pp = mov_mem_rax(out, pp, v1_tmp(2))
-    pp = mov_rax_mem(out, pp, rl(0, 3)); pp = mov_mem_rax(out, pp, v1_tmp(3))
-    pp = mov_rax_mem(out, pp, rp(0)); pp = mov_mem_rax(out, pp, v1_tmp(4))
-    pp = mov_rax_mem(out, pp, rl(1, 0)); pp = mov_mem_rax(out, pp, v1_tmp(5))
-    pp = mov_rax_mem(out, pp, rl(1, 1)); pp = mov_mem_rax(out, pp, v1_tmp(6))
-    pp = mov_rax_mem(out, pp, rl(1, 2)); pp = mov_mem_rax(out, pp, v1_tmp(7))
-    pp = mov_rax_mem(out, pp, rl(1, 3)); pp = mov_mem_rax(out, pp, v1_tmp(8))
-    pp = mov_rax_mem(out, pp, rp(1)); pp = mov_mem_rax(out, pp, v1_tmp(9))
-    pp = mov_rax_mem(out, pp, rl(2, 0)); pp = mov_mem_rax(out, pp, v1_tmp(10))
-    pp = mov_rax_mem(out, pp, rl(2, 1)); pp = mov_mem_rax(out, pp, v1_tmp(11))
-    pp = mov_rax_mem(out, pp, rl(2, 2)); pp = mov_mem_rax(out, pp, v1_tmp(12))
-    pp = mov_rax_mem(out, pp, rl(2, 3)); pp = mov_mem_rax(out, pp, v1_tmp(13))
-    pp = mov_rax_mem(out, pp, rp(2)); pp = mov_mem_rax(out, pp, v1_tmp(14))
-    pp
-}
-
-fn em_v1_restore_low012(out: &![i8; 65536], p: i64) -> i64 with Mut, Panic, Div {
-    var pp = mov_rax_mem(out, p, v1_tmp(0)); pp = mov_mem_rax(out, pp, rl(0, 0))
-    pp = mov_rax_mem(out, pp, v1_tmp(1)); pp = mov_mem_rax(out, pp, rl(0, 1))
-    pp = mov_rax_mem(out, pp, v1_tmp(2)); pp = mov_mem_rax(out, pp, rl(0, 2))
-    pp = mov_rax_mem(out, pp, v1_tmp(3)); pp = mov_mem_rax(out, pp, rl(0, 3))
-    pp = mov_rax_mem(out, pp, v1_tmp(4)); pp = mov_mem_rax(out, pp, rp(0))
-    pp = mov_rax_mem(out, pp, v1_tmp(5)); pp = mov_mem_rax(out, pp, rl(1, 0))
-    pp = mov_rax_mem(out, pp, v1_tmp(6)); pp = mov_mem_rax(out, pp, rl(1, 1))
-    pp = mov_rax_mem(out, pp, v1_tmp(7)); pp = mov_mem_rax(out, pp, rl(1, 2))
-    pp = mov_rax_mem(out, pp, v1_tmp(8)); pp = mov_mem_rax(out, pp, rl(1, 3))
-    pp = mov_rax_mem(out, pp, v1_tmp(9)); pp = mov_mem_rax(out, pp, rp(1))
-    pp = mov_rax_mem(out, pp, v1_tmp(10)); pp = mov_mem_rax(out, pp, rl(2, 0))
-    pp = mov_rax_mem(out, pp, v1_tmp(11)); pp = mov_mem_rax(out, pp, rl(2, 1))
-    pp = mov_rax_mem(out, pp, v1_tmp(12)); pp = mov_mem_rax(out, pp, rl(2, 2))
-    pp = mov_rax_mem(out, pp, v1_tmp(13)); pp = mov_mem_rax(out, pp, rl(2, 3))
-    pp = mov_rax_mem(out, pp, v1_tmp(14)); pp = mov_mem_rax(out, pp, rp(2))
-    pp
-}
-
-fn em_v1_stage_reg_to_low(out: &![i8; 65536], p: i64, src_r: i64, low_r: i64) -> i64 with Mut, Panic, Div {
-    let vo = reg_val_off_v1(src_r)
-    let eo = reg_ehi_off_v1(src_r)
-    let lo = reg_elo_off_v1(src_r)
-    let uo = reg_u_off_v1(src_r)
-    let po = reg_poison_off_v1(src_r)
-    var pp = mov_rax_mem(out, p, vo); pp = mov_mem_rax(out, pp, rl(low_r, 0))
-    pp = mov_rax_mem(out, pp, eo); pp = mov_mem_rax(out, pp, rl(low_r, 1))
-    pp = mov_rax_mem(out, pp, lo); pp = mov_mem_rax(out, pp, rl(low_r, 2))
-    pp = mov_rax_mem(out, pp, uo); pp = mov_mem_rax(out, pp, rl(low_r, 3))
-    pp = mov_rax_mem(out, pp, po); pp = mov_mem_rax(out, pp, rp(low_r))
-    pp
-}
-
-fn em_v1_stage_low_to_reg(out: &![i8; 65536], p: i64, low_r: i64, dst_r: i64) -> i64 with Mut, Panic, Div {
-    let vo = reg_val_off_v1(dst_r)
-    let eo = reg_ehi_off_v1(dst_r)
-    let lo = reg_elo_off_v1(dst_r)
-    let uo = reg_u_off_v1(dst_r)
-    let po = reg_poison_off_v1(dst_r)
-    var pp = mov_rax_mem(out, p, rl(low_r, 0)); pp = mov_mem_rax(out, pp, vo)
-    pp = mov_rax_mem(out, pp, rl(low_r, 1)); pp = mov_mem_rax(out, pp, eo)
-    pp = mov_rax_mem(out, pp, rl(low_r, 2)); pp = mov_mem_rax(out, pp, lo)
-    pp = mov_rax_mem(out, pp, rl(low_r, 3)); pp = mov_mem_rax(out, pp, uo)
-    pp = mov_rax_mem(out, pp, rp(low_r)); pp = mov_mem_rax(out, pp, po)
     pp
 }
 
@@ -1232,16 +1142,16 @@ fn em_v1_emit_receipt(
     pp = mov_rax_imm64(out, pp, dst)
     pp = call32(out, pp, pu_off)
     pp = write_str(out, pp, base + s.val, s.vallen)
-    pp = mov_rax_mem(out, pp, rl(dst, 0))
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(dst))
     pp = call32(out, pp, dp_off)
     pp = write_str(out, pp, base + s.ro, s.rolen)
-    pp = mov_rax_mem(out, pp, rl(dst, 1))
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(dst))
     pp = call32(out, pp, dp_off)
     pp = write_str(out, pp, base + s.lu, s.lulen)
-    pp = mov_rax_mem(out, pp, rl(dst, 3))
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(dst))
     pp = call32(out, pp, dp_off)
     pp = write_str(out, pp, base + s.po, s.polen)
-    pp = mov_rax_mem(out, pp, rp(dst))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(dst))
     pp = or_rax_mem(out, pp, sc(35))
     if force_poison_one == 1 {
         pp = mov_rax_imm64(out, pp, 1)
@@ -1287,41 +1197,6 @@ fn em_v1_emit_fuel_stop_receipt(
     pp = mov_rax_mem(out, pp, sc(34))
     pp = call32(out, pp, pu_off)
     pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
-    pp = write_str(out, pp, base + s.nl, 1)
-    pp
-}
-
-fn em_v1_emit_receipt_hi(
-    out: &![i8; 65536],
-    p: i64,
-    dst: i64,
-    pu_off: i64,
-    dp_off: i64,
-    s: &StrsV1
-) -> i64 with Mut, Panic, Div {
-    let base = c_base()
-    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
-    pp = mov_rax_mem(out, pp, sc(33))
-    pp = call32(out, pp, pu_off)
-    pp = write_str(out, pp, base + s.reg, s.reglen)
-    pp = mov_rax_imm64(out, pp, dst)
-    pp = call32(out, pp, pu_off)
-    pp = write_str(out, pp, base + s.val, s.vallen)
-    pp = mov_rax_mem(out, pp, v1_rl(dst, 0))
-    pp = call32(out, pp, dp_off)
-    pp = write_str(out, pp, base + s.ro, s.rolen)
-    pp = mov_rax_mem(out, pp, v1_rl(dst, 1))
-    pp = call32(out, pp, dp_off)
-    pp = write_str(out, pp, base + s.lu, s.lulen)
-    pp = mov_rax_mem(out, pp, v1_rl(dst, 3))
-    pp = call32(out, pp, dp_off)
-    pp = write_str(out, pp, base + s.po, s.polen)
-    pp = mov_rax_mem(out, pp, v1_rp(dst))
-    pp = or_rax_mem(out, pp, sc(35))
-    pp = call32(out, pp, pu_off)
-    pp = write_str(out, pp, base + s.frail, s.fraillen)
-    pp = mov_rax_mem(out, pp, sc(34))
-    pp = call32(out, pp, pu_off)
     pp = write_str(out, pp, base + s.nl, 1)
     pp
 }
@@ -1845,61 +1720,72 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
         let a = eisax_code_a(img, i)
         let b = eisax_code_b(img, i)
 
-        if dst >= 16 || a >= 16 || b >= 16 {
-            if op != op_ebr() && op != op_ehalt() && op != op_econst() && op != op_egate() {
-                return BridgeMeta { len: 0, status: 43 }
-            }
-            if dst >= 64 || a >= 64 || b >= 64 {
-                return BridgeMeta { len: 0, status: 45 }
-            }
+        // operand ranges are enforced by eisax_validate (regs 0..63,
+        // mem 0..31, branch targets 0..n); keep a cheap defensive dst guard.
+        if dst < 0 || dst >= 64 {
+            return BridgeMeta { len: 0, status: 45 }
         }
 
         if op == op_econst() {
-            if dst < 16 {
-                p = em_econst(out, p, dst, const_bits(img, a))
-                p = em_v1_normalize_u_lane(out, p, rl(dst, 3))
-                p = em_v1_set_last_written(out, p, dst)
-            } else {
-                p = setx(out, p, 0, const_bits(img, a))
-                p = st(out, p, 0, v1_rl(dst, 0))
-                p = pxor(out, p, 0, 0)
-                p = st(out, p, 0, v1_rl(dst, 1))
-                p = st(out, p, 0, v1_rl(dst, 2))
-                p = st(out, p, 0, v1_rl(dst, 3))
-                p = xor_rax(out, p)
-                p = mov_mem_rax(out, p, v1_rp(dst))
-                p = em_v1_normalize_u_lane(out, p, v1_rl(dst, 3))
-                p = em_v1_set_last_written_hi(out, p, dst)
-            }
+            p = em_econst(out, p, dst, const_bits(img, a))
+            p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+            p = em_v1_set_last_written(out, p, dst)
         } else {
-            if op == op_eadd() || op == op_esub() || op == op_ediv() {
+            if op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv() {
                 p = em_binop(out, p, op, dst, a, b, ns_off)
-                p = em_v1_normalize_u_lane(out, p, rl(dst, 3))
+                p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
                 p = em_v1_set_last_written(out, p, dst)
             } else {
+                if op == op_esqrt() {
+                    p = em_esqrt(out, p, dst, a, ns_off)
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                    p = em_v1_set_last_written(out, p, dst)
+                } else {
+                if op == op_eload() {
+                    p = em_eload(out, p, dst, a)
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                    p = em_v1_set_last_written(out, p, dst)
+                } else {
+                if op == op_estore() {
+                    p = em_estore(out, p, dst, a)
+                    p = em_v1_normalize_u_lane(out, p, mem_u_off_v1(a))
+                    // EVM: storing a poisoned register re-canonicalises it and
+                    // refreshes last_written_reg = dst. Replicate conditionally.
+                    p = mov_rax_mem(out, p, reg_poison_off_v1(dst))
+                    p = test_rax(out, p)
+                    let jskip_lw = p + 2
+                    p = jcc(out, p, 0x84, 0)
+                    p = em_v1_set_last_written(out, p, dst)
+                    let skip_lw = p
+                    patch32(out, jskip_lw, skip_lw - (jskip_lw + 4))
+                } else {
                 if op == op_emov() {
-                    p = ld(out, p, 0, rl(a, 0))
-                    p = st(out, p, 0, rl(dst, 0))
-                    p = ld(out, p, 0, rl(a, 1))
-                    p = st(out, p, 0, rl(dst, 1))
-                    p = ld(out, p, 0, rl(a, 2))
-                    p = st(out, p, 0, rl(dst, 2))
-                    p = ld(out, p, 0, rl(a, 3))
-                    p = st(out, p, 0, rl(dst, 3))
-                    p = mov_rax_mem(out, p, rp(a))
-                    p = mov_mem_rax(out, p, rp(dst))
-                    p = em_v1_normalize_u_lane(out, p, rl(dst, 3))
+                    p = ld(out, p, 0, reg_val_off_v1(a))
+                    p = st(out, p, 0, reg_val_off_v1(dst))
+                    p = ld(out, p, 0, reg_ehi_off_v1(a))
+                    p = st(out, p, 0, reg_ehi_off_v1(dst))
+                    p = ld(out, p, 0, reg_elo_off_v1(a))
+                    p = st(out, p, 0, reg_elo_off_v1(dst))
+                    p = ld(out, p, 0, reg_u_off_v1(a))
+                    p = st(out, p, 0, reg_u_off_v1(dst))
+                    p = mov_rax_mem(out, p, reg_poison_off_v1(a))
+                    p = mov_mem_rax(out, p, reg_poison_off_v1(dst))
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
                     p = em_v1_set_last_written(out, p, dst)
                 } else {
                     if op == op_egate() {
-                        if dst < 16 {
-                            p = em_normalize(out, p, dst)
-                            p = inc_mem64(out, p, sc(33))
-                            p = em_v1_emit_receipt(out, p, dst, pu_off, dp_off, &s, 0, 0)
-                        } else {
-                            p = inc_mem64(out, p, sc(33))
-                            p = em_v1_emit_receipt_hi(out, p, dst, pu_off, dp_off, &s)
-                        }
+                        p = em_normalize(out, p, dst)
+                        // EVM: gating a poisoned register re-canonicalises it and
+                        // refreshes last_written_reg = dst. em_normalize leaves
+                        // rax = 1 exactly when the register is poisoned/bad.
+                        p = test_rax(out, p)
+                        let jskip_glw = p + 2
+                        p = jcc(out, p, 0x84, 0)
+                        p = em_v1_set_last_written(out, p, dst)
+                        let skip_glw = p
+                        patch32(out, jskip_glw, skip_glw - (jskip_glw + 4))
+                        p = inc_mem64(out, p, sc(33))
+                        p = em_v1_emit_receipt(out, p, dst, pu_off, dp_off, &s, 0, 0)
                     } else {
                         if op == op_ebr() {
                             br_at[br_n as usize] = p + 1
@@ -1909,14 +1795,14 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
                         } else {
                             if op == op_ebrz() || op == op_ebrn() {
                                 p = em_normalize(out, p, a)
-                                p = mov_rax_mem(out, p, rp(a))
+                                p = mov_rax_mem(out, p, reg_poison_off_v1(a))
                                 p = test_rax(out, p)
                                 let jpoison = p + 2
                                 p = jcc(out, p, 0x85, 0)
 
-                                p = em_v1_abs_copy(out, p, rl(a, 1), sc(40))
-                                p = em_v1_abs_copy(out, p, rl(a, 0), sc(41))
-                                p = ld(out, p, 0, rl(a, 3))
+                                p = em_v1_abs_copy(out, p, reg_ehi_off_v1(a), sc(40))
+                                p = em_v1_abs_copy(out, p, reg_val_off_v1(a), sc(41))
+                                p = ld(out, p, 0, reg_u_off_v1(a))
                                 p = ld(out, p, 1, sc(40))
                                 p = sse(out, p, 0x5F, 0, 1)
                                 p = st(out, p, 0, sc(42))
@@ -1933,7 +1819,7 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
                                 patch32(out, jnofrail1, frail_done - (jnofrail1 + 4))
                                 patch32(out, jnofrail2, frail_done - (jnofrail2 + 4))
 
-                                p = ld(out, p, 0, rl(a, 0))
+                                p = ld(out, p, 0, reg_val_off_v1(a))
                                 p = pxor(out, p, 1, 1)
                                 p = ucomi(out, p, 0, 1)
                                 let ccode = if op == op_ebrz() { 0x84 } else { 0x82 }
@@ -1946,6 +1832,9 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
                                 let poison_lbl = p
                                 p = mov_rax_imm64(out, p, 1)
                                 p = mov_mem_rax(out, p, sc(35))
+                                // EVM: normalising a poisoned branch register
+                                // refreshes last_written_reg = a. Replicate.
+                                p = em_v1_set_last_written(out, p, a)
                                 let after_poison = p
                                 patch32(out, jpoison, poison_lbl - (jpoison + 4))
                                 patch32(out, jskip_poison, after_poison - (jskip_poison + 4))
@@ -1961,6 +1850,9 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
                             }
                         }
                     }
+                }
+                }
+                }
                 }
             }
         }
