@@ -40,6 +40,32 @@ This is deliberately more ambitious than the current tactical bug lane. It also
 keeps the tactical lane honest: a compiler is not "fixed" until it can preserve
 the gates below, not merely pass a narrow local witness.
 
+## S-FULL implementation rule
+
+Every `S*` step is implemented as a full stage contract, not as the smallest
+local witness that turns a status line green. A step may be called complete only
+when it has all of the following:
+
+- canonical artifact schema, deterministic hash/receipt, and stable CLI or gate
+  surface;
+- positive fixtures that cover the intended accepted domain, plus negative and
+  blocked fixtures for unsafe, ambiguous, effectful, overflow/trap, or
+  unsupported cases;
+- manifest counts with both lower and upper bounds where accidental extra
+  rewrites would be a bug;
+- fail-closed gate assertions that prove accepted, rejected, and blocked records
+  are disjoint and that selected/extracted IDs exactly match the accepted set;
+- cross-stage input and output contracts for the neighboring `S(n-1)` and
+  `S(n+1)` stage, including ABI/MIR impact when relevant;
+- documentation of what is implemented, what is intentionally blocked, and what
+  remains future work;
+- LLM-offload review when the step touches math semantics, clinical code, or
+  external-facing claims;
+- local validation plus the relevant repo/CI gate before promotion.
+
+If only part of that bundle exists, the status is "slice implemented" or
+"preflight ready", not `S* complete`.
+
 ## SOTA anchors reviewed
 
 These are anchors, not claims of equivalence.
@@ -336,7 +362,8 @@ The blocked status remains available for future ambiguous proposals through
 `operand_provenance_blocked` receipts with `validator = blocked`,
 `rejection_reason_code = operand_provenance_ambiguous`,
 `selected_for_extraction = false`, and `ir_mutation_allowed = false`; the
-current fixture set has zero blocked rewrites.
+current fixture set also includes `producer_evaluation_not_proven` blockers for
+effectful/non-leaf call-result self-comparisons.
 `scripts/dev/madaros_v2_s4_gate.sh` validates both positive and negative
 receipts and proves that extraction-selected IDs exactly equal accepted IDs,
 rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
@@ -371,6 +398,10 @@ MadarosV2EkanRewriteReceipt {
 
 Gate:
 - `scripts/dev/madaros_v2_s4_gate.sh`.
+- S4 is not "complete" unless each admitted rewrite family is implemented as a
+  full receipt slice: accepted fixtures, rejected counterexamples, blocked
+  ambiguity/effect fixtures, extraction selection, S5 preflight compatibility,
+  docs, and validation. A narrow green fixture is only a slice witness.
 - equality-saturation extraction must carry proof obligations or translation
   validation for every selected rewrite; the current boundary gate already
   enforces this for deterministic receipt-only extraction decisions.
@@ -421,6 +452,10 @@ Gate:
   f64/f128, i128/u128, i256/u256, vector/tensor registers.
 - differential native-v2 vs interpreter/lean_single where applicable.
 - f64 print/return/call witnesses must pass before f128 or i256 are promoted.
+- S5 is not "complete" until MIR hashes, ABI/layout receipts, call/return
+  witnesses, numeric-width semantics, diagnostics, and fallbacks are all gated.
+  The current S5 preflight only proves that the accepted S4 extraction subset is
+  safe to consume as input; it is not MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

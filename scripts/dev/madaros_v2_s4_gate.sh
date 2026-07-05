@@ -138,6 +138,23 @@ if receipt.get("s4_extraction_boundary_complete") is not True:
     raise SystemExit("S4 extraction boundary receipt must be complete")
 if receipt["s4_complete"] is not False:
     raise SystemExit("S4 gate must not claim global S4 completion")
+if receipt.get("s4_full_complete") is not False:
+    raise SystemExit("S4 gate must not claim S4 FULL completion")
+if receipt.get("stage_contract_level") != "S4_BOUNDARY_NOT_FULL":
+    raise SystemExit("S4 receipt must classify this as a boundary, not FULL S4")
+if receipt.get("s_full_contract") != "blocked_until_full_s4_obligations_are_gated":
+    raise SystemExit("S4 receipt missing S-FULL blocked contract")
+remaining = receipt.get("s4_remaining", [])
+required_remaining = {
+    "multi-rule equality saturation",
+    "learned or approximate E-KAN proposals with declared domains and fallback expressions",
+    "broad counterexample search over accepted and tempting sibling rewrites",
+    "producer purity and evaluation-preservation beyond the current local leaf subset",
+    "downstream optimizer integration beyond receipt-only extraction",
+    "full-domain translation validation for every selected rewrite family",
+}
+if not required_remaining.issubset(set(remaining)):
+    raise SystemExit("S4 receipt must list missing FULL obligations")
 egraph_for_hash = dict(egraph)
 egraph_for_hash.pop("egraph_sha256", None)
 egraph_canonical = json.dumps(egraph_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -506,6 +523,19 @@ if not receipts:
 summary = {
     "schema": "madaros.v2.s4.gate/0.1",
     "status": "pass",
+    "stage_contract_level": "S4_BOUNDARY_NOT_FULL",
+    "s4_boundary_complete": True,
+    "s4_full_complete": False,
+    "s_full_contract": "blocked_until_full_s4_obligations_are_gated",
+    "missing_full_obligations": [
+        "multi-rule equality saturation",
+        "learned or approximate E-KAN proposals with declared domains and fallback expressions",
+        "broad counterexample search over accepted and tempting sibling rewrites",
+        "producer purity and evaluation-preservation beyond the current local leaf subset",
+        "broader non-constant algebraic identities beyond neutral-element and reflexive-comparison identities",
+        "downstream optimizer integration beyond receipt-only extraction",
+        "full-domain translation validation for every selected rewrite family",
+    ],
     "case_count": len(receipts),
     "accepted_rewrite_count": sum(r["accepted_rewrite_count"] for r in receipts),
     "rejected_rewrite_count": sum(r["rejected_rewrite_count"] for r in receipts),
@@ -543,5 +573,5 @@ print(
 )
 PY
 
-echo "[madaros-v2-s4] PASS: conservative e-graph/E-KAN rewrite and extraction receipts are deterministic and validated"
+echo "[madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)"
 echo "[madaros-v2-s4] receipts=$OUT_DIR"

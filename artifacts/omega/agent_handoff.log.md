@@ -3581,3 +3581,52 @@ status: lock-released
     optimizer integration remain open.
   - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
     implementation remains open.
+
+## 2026-07-05 — Madaros v2 S-FULL stage contract enforcement
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: make the user's rule mechanical: each `S*` step must be a full stage
+  contract, not a minimal passing witness.
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - S4 receipts and the S4 gate summary now emit
+    `stage_contract_level = S4_BOUNDARY_NOT_FULL`,
+    `s4_full_complete = false`, and
+    `s_full_contract = blocked_until_full_s4_obligations_are_gated`.
+  - S4 gate now fails if receipts claim FULL S4 or omit the missing FULL
+    obligations: equality saturation, learned/approximate E-KAN proposals,
+    broad counterexample search, producer purity/evaluation preservation beyond
+    the current local leaf subset, broader algebraic identities, downstream
+    optimizer integration, and full-domain translation validation.
+  - S5 preflight now requires the S4 boundary-not-full classification and emits
+    `stage_contract_level = S5_PREFLIGHT_NOT_FULL`,
+    `s5_full_complete = false`, and
+    `s_full_contract = blocked_until_mir_abi_numeric_and_differential_gates_exist`.
+  - Docs now state the S-FULL rule: a stage is complete only with artifact
+    schema, deterministic receipts, positive/negative/blocked fixtures,
+    fail-closed gates, cross-stage contracts, docs, offload where required, and
+    CI evidence.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s3_receipt.py scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s3_gate.sh scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=26`, `rejected=2`, `blocked=2`, `selected=26`, summary sha
+    `1e097be717e5...`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=10`, selected rewrites `26`, blocked rewrites `2`, `status=pass`,
+    preflight sha `9f030c4b15c3...`.
+  - Docs metadata/consistency/registry passed.
+  - `bin/llm-offload -t math-review -p xai` returned
+    `NO MATHEMATICAL CONTENT TO REVIEW`.
+- Next S4 FULL slice recommendation from subagent audit:
+  - implement `symbolic_sub_self_i64` (`x - x -> 0`) with accepted, rejected,
+    blocked, extraction, S5-preflight, docs, offload, and CI coverage under this
+    new S-FULL discipline.

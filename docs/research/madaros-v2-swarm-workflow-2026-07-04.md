@@ -32,9 +32,16 @@ The coordinator owns:
 - final plan integration;
 - cross-agent conflict checks;
 - commit boundaries.
+- the S-FULL rule: no `S*` step is marked complete until artifact schema,
+  fixtures, negative/blocker coverage, gates, cross-stage contracts, docs,
+  offload where required, and CI evidence all exist.
 
 The coordinator does not delegate the immediate critical path if the next local
 action is blocked on that result.
+
+Subagents may implement or audit slices, but the coordinator must promote only
+full stage slices. A narrow passing witness is recorded as a slice witness, not
+as stage completion.
 
 ## Model and Effort Routing
 
@@ -257,7 +264,8 @@ The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
 implemented: `madaros.v2.s5.preflight/0.1` records `status = pass`,
 `s5_input_contract_ready = true`, `s5_ready = false`, and
-`s5_implemented = false`; latest local preflight consumes 18 selected rewrites.
+`s5_implemented = false`; latest local preflight consumes 26 selected accepted
+rewrites and classifies 2 blocked rewrites as excluded negative evidence.
 Next critical lane: implement S5 MIR/ABI receipt
 surface over the selected accepted S4 rewrites without mutating IR until the MIR
 and ABI hashes are proved.

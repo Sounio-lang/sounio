@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Madaros v2 S5 preflight: prove the current S4 boundary receipts are
 # MIR/ABI-safe inputs. This does not implement S5 and does not claim S5 is
-# globally ready; it only certifies the exact constant-fold subset consumed here.
+# globally ready; it only certifies the exact, extraction-selected S4 subset
+# consumed here.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -32,6 +33,10 @@ if summary.get("schema") != "madaros.v2.s4.gate/0.1":
     raise SystemExit("missing S4 gate summary")
 if summary.get("status") != "pass":
     raise SystemExit("S4 gate did not pass")
+if summary.get("stage_contract_level") != "S4_BOUNDARY_NOT_FULL":
+    raise SystemExit("S5 preflight requires S4 boundary-not-full classification")
+if summary.get("s4_full_complete") is not False:
+    raise SystemExit("S5 preflight requires S4 full-complete=false")
 
 allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64", "symbolic_reflexive_cmp_i64"}
 allowed_basis = {"exact_symbolic"}
@@ -53,6 +58,10 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         raise SystemExit("S4 extraction boundary receipt not complete")
     if receipt.get("s4_complete") is not False:
         raise SystemExit("S4 receipt must not claim global completion")
+    if receipt.get("s4_full_complete") is not False:
+        raise SystemExit("S4 receipt must not claim S4 FULL completion")
+    if receipt.get("stage_contract_level") != "S4_BOUNDARY_NOT_FULL":
+        raise SystemExit("S4 receipt must be classified as boundary-not-full")
     rewrites_path = receipt_file.parent / receipt["rewrites_path"]
     extraction_path = receipt_file.parent / receipt["extraction_path"]
     rewrites = json.loads(rewrites_path.read_text(encoding="utf-8"))
@@ -154,9 +163,12 @@ input_ready = len(all_rewrites) > 0
 preflight = {
     "schema": "madaros.v2.s5.preflight/0.1",
     "status": "pass" if input_ready else "blocked",
+    "stage_contract_level": "S5_PREFLIGHT_NOT_FULL",
     "s5_ready": False,
     "s5_input_contract_ready": input_ready,
     "s5_implemented": False,
+    "s5_full_complete": False,
+    "s_full_contract": "blocked_until_mir_abi_numeric_and_differential_gates_exist",
     "input_contract": "madaros.v2.s4.gate/0.1",
     "input_extraction_contract": "madaros.v2.s4.extraction/0.1",
     "mir_abi_safe_subset": sorted(allowed_rewrites),
@@ -174,7 +186,16 @@ preflight = {
         "MIR hash receipt",
         "ABI layout/call/return receipt",
         "numeric tower width receipts for f128/i256 before promotion",
+        "diagnostics and fallback semantics for ABI/numeric-width failures",
         "differential native-v2 vs interpreter/lean_single gate where available",
+    ],
+    "missing_full_obligations": [
+        "MIR serialization and hash receipts",
+        "ABI layout receipts for scalar, aggregate, SRET, imported call, and return paths",
+        "call/return witnesses for f64 before f128/i256 promotion",
+        "numeric tower width receipts for f128/i256",
+        "diagnostics and fallback semantics for unsupported layouts and numeric widths",
+        "differential native-v2 vs interpreter/lean_single validation where available",
     ],
 }
 payload = json.dumps(preflight, sort_keys=True, indent=2) + "\n"

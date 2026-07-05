@@ -22,8 +22,10 @@ fix and operand-fidelity gate: S4 accepts exact constant-fold candidates, a
 non-constant neutral-element symbolic identity subset, and a param/block-param
 reflexive-comparison subset (`x == x`, `x != x`, `x <= x`, `x >= x`,
 `x < x`, `x > x`) over params/block params and local leaf call results, keeps
-counterexample-backed rejected proposals out of extraction, and has zero blocked
-rewrites in the current fixture set. Global S4 optimization is not complete:
+counterexample-backed rejected proposals out of extraction, and selects no
+blocked rewrites for extraction. The current fixture set has two classified
+producer-evaluation blockers, both excluded from extraction. Global S4
+optimization is not complete:
 equality saturation, approximate learned E-KAN proposals, broad counterexample
 search, and downstream optimizer integration remain future work. S5 has an
 executable preflight from the S4 extraction receipts and now reports
@@ -118,14 +120,46 @@ It can also emit deterministic blocked proposal receipts for:
 - `selected_for_extraction = false`
 - `ir_mutation_allowed = false`
 
-The current gate has no blocked rewrites because S3 now proves operand fidelity
-for the accepted/rejected fixtures.
+It also emits producer-evaluation blockers for same-SSA reflexive comparisons
+whose producer would otherwise be removed without a proven evaluation-preserving
+policy:
+
+- `rewrite_kind = symbolic_reflexive_cmp_i64`
+- `proposal_kind = blocked_symbolic_reflexive_comparison`
+- `ekan_receipt_kind = ekan_blocked_producer_evaluation`
+- `rejection_reason_code = producer_evaluation_not_proven`
+- `producer_evaluation_policy = blocked: producer evaluation is not proven`
+- `selected_for_extraction = false`
+- `ir_mutation_allowed = false`
+
+The current local gate has `blocked=2`: operand-fidelity blockers remain
+available but are not triggered by the current fixtures; the two current blockers
+come from non-leaf/effectful call-result self-comparisons where producer
+evaluation is not yet proven.
 
 This is a real receipt boundary for one exact optimizer subset, not an
 approximation claim and not global S4 completion. It builds a persistent
 e-graph/equality artifact and records accepted, rejected, and blocked rewrites,
 but it does not yet apply approximate learned E-KAN laws, run equality
 saturation, or mutate downstream code.
+
+## S4 Full-Slice Contract
+
+An S4 rewrite family is not accepted just because one fixture turns green. Each
+family must land as a full slice:
+
+- positive fixtures for the whole declared exact domain;
+- rejected counterexample fixtures for tempting but invalid sibling laws;
+- blocked fixtures for ambiguous provenance, unsafe producer evaluation, effects,
+  overflow/trap uncertainty, or unsupported semantics;
+- receipt fields for domain, validator attempts, fallback hashes, original and
+  rewritten e-node hashes, producer policy, error bound, and extraction status;
+- gate assertions that accepted, rejected, and blocked records are disjoint;
+- extraction receipts proving selected IDs exactly equal accepted IDs;
+- S5 preflight compatibility proving the rewrite has no hidden MIR/ABI impact;
+- docs and offload review when semantics are mathematical or externally claimed.
+
+If any part is missing, the result is a partial witness, not an S4 family.
 
 ## Extraction Boundary
 
@@ -183,7 +217,8 @@ reflexive-comparison slice:
 S5 needs MIR hashes and ABI/layout/call/return receipts. The current S4
 boundary now provides a ready input subset for the next S5 work item:
 translation-validated accepted rewrites are selected, rejected rewrites are
-explicitly excluded, and no blocked rewrites remain in the current fixture set.
+explicitly excluded, and blocked rewrites are classified and excluded from
+extraction.
 
 The S5 input-contract preflight is executable through:
 
@@ -201,3 +236,7 @@ Observed local result on 2026-07-05 after the reflexive-comparison slice:
 The preflight receipt uses schema `madaros.v2.s5.preflight/0.1` and records
 `s5_input_contract_ready = true`, `s5_ready = false`, and
 `s5_implemented = false`.
+
+That is deliberately not a claim that S5 is implemented. Under the S-FULL rule,
+S5 completion requires MIR hashes, ABI/layout/call/return receipts, numeric tower
+witnesses, diagnostics, fallback semantics, and cross-stage differential gates.

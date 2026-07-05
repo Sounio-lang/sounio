@@ -1440,11 +1440,18 @@ def emit(args: argparse.Namespace) -> int:
         "s4_complete": False,
         "s4_boundary_complete": True,
         "s4_extraction_boundary_complete": True,
+        "s4_full_complete": False,
+        "stage_contract_level": "S4_BOUNDARY_NOT_FULL",
+        "s_full_contract": "blocked_until_full_s4_obligations_are_gated",
         "s4_claim": "conservative_egraph_ekan_receipt_boundary_with_operand_provenance_guard",
         "s4_remaining": [
             "multi-rule equality saturation",
+            "learned or approximate E-KAN proposals with declared domains and fallback expressions",
+            "broad counterexample search over accepted and tempting sibling rewrites",
+            "producer purity and evaluation-preservation beyond the current local leaf subset",
             "broader non-constant algebraic identities beyond neutral-element and reflexive-comparison identities",
             "downstream optimizer integration beyond receipt-only extraction",
+            "full-domain translation validation for every selected rewrite family",
         ],
     }
     payload = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
