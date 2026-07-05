@@ -164,24 +164,42 @@ build, default engine, output-verified: witness end-to-end exit 0; **6/6
 `test_smt_*` ALL PASS; thin exit 7; zero all-zero records across all 78
 dumped functions.**
 
-Still open in this family: 4/4 `tests/stdlib/math/test_dd64_*.sio` SIGSEGV
-with no output — a distinct defect (first callee of `main`, struct-returning
-`DD64` functions; the uncommitted `is_sret`/`sret_dest_reg`/`emit_call_helper`
-WIP in `self-hosted/ir/lower.sio` targets exactly this). Dispatch as
-`BLK-MADAROS-DD64-STRUCT-RETURN` with the dd64 witnesses as the matrix and
-the gdb evidence preserved in the wt-head-build scratch dir
-(`disasm_dd64_window.txt`). The durable root fix for the whole clobber family
-remains the lean_single two-level indexed load/store codegen repair.
+**dd64 lane RESOLVED (2026-07-05, commit `eb8ca1c36`).** The struct-return
+hypothesis was wrong: gdb showed the dd64 SIGSEGV was the `assert` builtin
+emitted as a **prologue-only 4-byte stub** (no entry in
+`native_v2_builtin_id_for_func_ref`, so the merged module's ic=0 assert stub
+took the generic path, emitting no body and no ret); calls fell through into
+the adjacent print-str builtin, which strlen'd the assert condition as a
+pointer. Fixed by: (1) builtin id 21 + `emit_builtin_assert_into`
+(`test rdi; jz -> exit(1); else ret`) wired into both per-function compilers;
+(2) an empty-body safety net in `compile_ir_function_v2_core_ir_into` — any
+ic=0 non-builtin now emits `ud2`, so unresolved stubs trap loudly instead of
+falling through; (3) unit functions' implicit returns now emit
+`ir_return(-1)` (rax zeroed) — previously `fn main()` ending in println
+returned write()'s byte count as the process exit code (observed 80/93).
+
+Final verified matrix (clean scratch build, provenance-guarded, default
+engine, output-verified): **14/14 green** — 4/4 dd64 ALL PASS exit 0, 6/6
+smt ALL PASS, thin exit 7, witness end-to-end, assert negative/positive
+probes correct. The durable root fix for the clobber family remains the
+lean_single two-level indexed load/store codegen repair.
 
 ## 5. Acceptance state vs the original gate
 
 The recheck doc's acceptance gate — 6/6 `test_smt_*` ALL PASS on the default
-engine — is **MET** on a clean build carrying commit `0ba18481a` (§4).
-`BLK-MADAROS-SEED-BEGIN` (compile-time segfault) is closed as root-caused +
-worked-around; the runtime wrong-code successor is fixed for the smt lane.
-Remaining before the default lane is fully green: the dd64 struct-return
-defect (§4), the prebuilt refresh + output-verified receipt (§3), and the
-durable lean_single codegen repair for the two-level indexed RMW class.
+engine — is **MET**, and the full imported lane (smt + dd64 + thin + witness)
+is **14/14 green** on a clean build carrying `0ba18481a` + `eb8ca1c36` (§4).
+`BLK-MADAROS-SEED-BEGIN` is closed as root-caused + worked-around; both
+runtime wrong-code successors (IrCall zeroing; assert stub fallthrough +
+unit-return leak) are fixed. Remaining: the prebuilt refresh +
+output-verified receipt (§3) — the committed `bin/madaros-linux-x86_64` still
+false-greens multi-module compiles until refreshed from a build carrying both
+fixes — and the durable lean_single codegen repair for the two-level indexed
+RMW class. Coordination note: branch `work/madaros-v2-sota-codex` (S5 SRET
+receipts lane) forked before these fixes — it lacks both, and its default
+lane routes imported compiles to the compact stub backend (empirically:
+thin witness exits 0 instead of 7 on a build of its tip `e27750bbb`); its S5
+work is receipt/shadow-lane and does not collide with these live-lane fixes.
 
 ## 6. Evidence artifacts
 
