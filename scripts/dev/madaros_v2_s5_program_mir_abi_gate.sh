@@ -13,9 +13,11 @@ EFFECT_DIR="$OUT_DIR/mir_effect"
 S5_RECEIPT_DIR="$OUT_DIR/canonical_s5_source_receipts"
 SRET_RECEIPT_DIR="$OUT_DIR/sret_abi_receipt"
 SOURCE_SRET_RECEIPT_DIR="$OUT_DIR/source_sret_receipt"
+STACK_CALL_RECEIPT_DIR="$OUT_DIR/stack_call_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
 SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_sret_abi_receipt.py"
 SOURCE_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_source_sret_receipt.py"
+STACK_CALL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_stack_call_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
 MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
@@ -23,8 +25,9 @@ RECEIPT="$OUT_DIR/madaros_v2_s5_program_mir_abi.receipt.json"
 S5_RECEIPT_RESULTS="$OUT_DIR/madaros_v2_s5_source_receipts.tsv"
 SRET_RECEIPT="$SRET_RECEIPT_DIR/madaros_v2_s5_sret_abi.receipt.json"
 SOURCE_SRET_RECEIPT="$SOURCE_SRET_RECEIPT_DIR/madaros_v2_s5_source_sret.receipt.json"
+STACK_CALL_RECEIPT="$STACK_CALL_RECEIPT_DIR/madaros_v2_s5_stack_call.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -86,7 +89,16 @@ if [[ ! -f "$SOURCE_SRET_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$STACK_CALL_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$STACK_CALL_RECEIPT_DIR"
+
+if [[ ! -f "$STACK_CALL_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing stack-call receipt: $STACK_CALL_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -132,8 +144,9 @@ effect_dir = Path(sys.argv[1])
 source_receipts_path = Path(sys.argv[2])
 sret_receipt_path = Path(sys.argv[3])
 source_sret_receipt_path = Path(sys.argv[4])
-module_path = Path(sys.argv[5])
-receipt_path = Path(sys.argv[6])
+stack_call_receipt_path = Path(sys.argv[5])
+module_path = Path(sys.argv[6])
+receipt_path = Path(sys.argv[7])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -141,6 +154,7 @@ effect_receipt = load_json(effect_receipt_path)
 effect_module = load_json(effect_module_path)
 sret_receipt = load_json(sret_receipt_path)
 source_sret_receipt = load_json(source_sret_receipt_path)
+stack_call_receipt = load_json(stack_call_receipt_path)
 
 if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
     raise SystemExit("bad S5 SRET ABI receipt schema")
@@ -212,6 +226,38 @@ if stack_two_case.get("machine_shape", {}).get("main_stack_arg_push_source_stack
     raise SystemExit("source SRET two-stack-arg receipt must load stack args from explicit slots 6 then 5")
 if stack_two_case.get("machine_shape", {}).get("main_stack_adjust_immediates") != [16]:
     raise SystemExit("source SRET two-stack-arg receipt must record cleanup 16 without padding")
+
+if stack_call_receipt.get("schema") != "madaros.v2.s5.stack_call_receipt/0.1":
+    raise SystemExit("bad S5 normal stack-call receipt schema")
+if stack_call_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing normal stack-call receipt")
+if stack_call_receipt.get("s5_normal_call_stack_args_complete") is not True:
+    raise SystemExit("program MIR/ABI gate requires completed normal stack-call receipt")
+stack_call_cases = {row.get("case_id"): row for row in stack_call_receipt.get("cases", [])}
+normal_stack_one = stack_call_cases.get("normal_call_stack_one_arg_return_28")
+normal_stack_two = stack_call_cases.get("normal_call_stack_two_arg_return_36")
+if not normal_stack_one or not normal_stack_two:
+    raise SystemExit("normal stack-call receipt must contain one-stack and two-stack cases")
+if normal_stack_one.get("actual_exit") != 28:
+    raise SystemExit("normal one-stack-call witness must return 28")
+if normal_stack_one.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
+    raise SystemExit("normal one-stack-call receipt must pass first six args in registers")
+if normal_stack_one.get("machine_shape", {}).get("main_stack_arg_push_indices") != [6]:
+    raise SystemExit("normal one-stack-call receipt must push explicit arg6")
+if normal_stack_one.get("machine_shape", {}).get("main_stack_arg_push_source_stack_slots") != [6]:
+    raise SystemExit("normal one-stack-call receipt must load stack arg from slot6")
+if normal_stack_one.get("machine_shape", {}).get("main_stack_adjust_immediates") != [-8, 16]:
+    raise SystemExit("normal one-stack-call receipt must record padding -8 and cleanup 16")
+if normal_stack_two.get("actual_exit") != 36:
+    raise SystemExit("normal two-stack-call witness must return 36")
+if normal_stack_two.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
+    raise SystemExit("normal two-stack-call receipt must pass first six args in registers")
+if normal_stack_two.get("machine_shape", {}).get("main_stack_arg_push_indices") != [7, 6]:
+    raise SystemExit("normal two-stack-call receipt must push stack args in reverse order")
+if normal_stack_two.get("machine_shape", {}).get("main_stack_arg_push_source_stack_slots") != [7, 6]:
+    raise SystemExit("normal two-stack-call receipt must load stack args from slots 7 then 6")
+if normal_stack_two.get("machine_shape", {}).get("main_stack_adjust_immediates") != [16]:
+    raise SystemExit("normal two-stack-call receipt must record cleanup 16 without padding")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -463,8 +509,8 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
 not_promoted = [
     {
         "surface": "normal_call_stack_args_gt6",
-        "status": "not_promoted_by_this_slice",
-        "reason": "this slice promotes source SRET stack args only; normal scalar stack-arg call receipts remain separate",
+        "status": "promoted_by_normal_stack_call_receipt",
+        "reason": "normal scalar calls with one and two outgoing stack args now have source-to-MachineModule receipts",
     },
     {
         "surface": "aggregate_return",
@@ -577,12 +623,21 @@ module = {
         "stack_two_arg_actual_exit": source_sret_receipt["stack_two_arg_actual_exit"],
         "cases": source_sret_receipt["cases"],
     },
+    "stack_call_receipt": {
+        "schema": stack_call_receipt["schema"],
+        "path": f"{stack_call_receipt_path.parent.name}/{stack_call_receipt_path.name}",
+        "receipt_sha256": stack_call_receipt["receipt_sha256"],
+        "stage_contract_level": stack_call_receipt["stage_contract_level"],
+        "case_id": stack_call_receipt["case_id"],
+        "case_count": stack_call_receipt["case_count"],
+        "cases": stack_call_receipt["cases"],
+    },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
         "target": "x86_64-linux",
         "arg_register_order": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
         "return_register": "rax",
-        "normal_call_stack_args_promoted": False,
+        "normal_call_stack_args_promoted": True,
         "source_sret_stack_args_promoted": True,
         "sret_promoted": True,
         "source_sret_local_one_arg_promoted": True,
@@ -605,6 +660,7 @@ module = {
         "source_sret_local_one_arg_receipt_recorded",
         "source_sret_local_register_multi_arg_receipt_recorded",
         "source_sret_local_stack_arg_receipt_recorded",
+        "normal_call_stack_arg_receipt_recorded",
         "source_sret_imported_f64_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "full_abi_numeric_differential_gates_still_required_before_s5_ready",
@@ -639,12 +695,14 @@ receipt = {
     "s5_source_sret_local_one_arg_complete": True,
     "s5_source_sret_local_register_multi_arg_complete": True,
     "s5_source_sret_local_stack_arg_complete": True,
+    "s5_normal_call_stack_args_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_stack_arg_aggregate_return_to_IrCallSret": True,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "source_sret_receipt_sha256": source_sret_receipt["receipt_sha256"],
+    "stack_call_receipt_sha256": stack_call_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
     "program_mir_abi_module_sha256": module_sha,
     "program_mir_abi_module_with_hash_sha256": module_with_hash_sha,
@@ -660,6 +718,7 @@ receipt = {
     "source_sret_local_one_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_one_arg_promoted"],
     "source_sret_local_register_multi_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_register_multi_arg_promoted"],
     "source_sret_stack_args_promoted": module["scalar_abi_receipts"]["source_sret_stack_args_promoted"],
+    "normal_call_stack_args_promoted": module["scalar_abi_receipts"]["normal_call_stack_args_promoted"],
     "aggregate_layout_promoted": module["scalar_abi_receipts"]["aggregate_layout_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
     "negative_and_blocked_controls": [
