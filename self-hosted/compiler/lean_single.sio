@@ -9493,8 +9493,10 @@ fn stmt_scan_place_assign(p0: i64) -> bool with Panic, Mut {
     if TK[p as usize] == 6 {
         if TK[(p + 1) as usize] != 19 { return false }
         if TK[(p + 2) as usize] != 3 { return false }
-        if TK[(p + 3) as usize] != 7 { return false }
-        p = p + 4
+        p = p + 3
+        while TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 { p = p + 2 }
+        if TK[p as usize] != 7 { return false }
+        p = p + 1
     } else if TK[p as usize] == 3 {
         p = p + 1
     } else {
@@ -9534,7 +9536,7 @@ fn compile_place_assign_general_x86() with IO, Mut, Panic, Div {
         let ptr_tok = EP + 2
         let pns = TS[ptr_tok as usize]
         let pne = TE[ptr_tok as usize]
-        EP = EP + 4
+        EP = EP + 3
         let pvi = var_find_idx(pns, pne)
         if pvi < 0 {
             tc_undefined_var(ptr_tok)
@@ -9547,6 +9549,40 @@ fn compile_place_assign_general_x86() with IO, Mut, Panic, Div {
             cur_ty = ptr_hash_inner_ty(cur_hash)
             cur_hash = ptr_hash_inner_hash(cur_hash)
         }
+        // Deref-of-field-chain roots `(*name.f1.f2)`: walk the inner fields
+        // with the engine's intermediate rules, ALWAYS entering pointer-like
+        // cells (the deref guarantees the chain ends in a pointer). Without
+        // this the shape fell to the wrong path and stores were dropped
+        // (the loop-labels infinite-loop signature, band-aid reversion proof).
+        while TK[EP as usize] == 50 && TK[(EP + 1) as usize] == 3 {
+            EP = EP + 1
+            let df_tok = EP
+            let dfh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+            EP = EP + 1
+            let dsi = st_find(cur_hash)
+            if dsi < 0 {
+                tc_error(df_tok, "field access requires struct base")
+                return
+            }
+            let doff = st_field_offset(dsi, dfh)
+            if doff < 0 {
+                tc_error(df_tok, "unknown field access")
+                return
+            }
+            if doff != 0 { em(0x48); em(0x8d); em(0x80); em32(doff) }
+            cur_ty = st_field_ty(dsi, dfh)
+            cur_hash = st_field_hash(dsi, dfh)
+            if cur_ty == 11 && box_hash_is(cur_hash) {
+                em(0x48); em(0x8b); em(0x00)
+                cur_ty = ptr_hash_inner_ty(cur_hash)
+                cur_hash = ptr_hash_inner_hash(cur_hash)
+            } else if cur_ty == 10 {
+                em(0x48); em(0x8b); em(0x00)
+                cur_ty = ref_hash_inner_ty(cur_hash)
+                cur_hash = ref_hash_inner_hash(cur_hash)
+            }
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
     } else {
         let name_tok = EP
         let ns = TS[EP as usize]
@@ -9733,7 +9769,7 @@ fn compile_place_assign_general_a64() with IO, Mut, Panic, Div {
         let ptr_tok = EP + 2
         let pns = TS[ptr_tok as usize]
         let pne = TE[ptr_tok as usize]
-        EP = EP + 4
+        EP = EP + 3
         let pvi = var_find_idx(pns, pne)
         if pvi < 0 {
             tc_undefined_var(ptr_tok)
@@ -9746,6 +9782,40 @@ fn compile_place_assign_general_a64() with IO, Mut, Panic, Div {
             cur_ty = ptr_hash_inner_ty(cur_hash)
             cur_hash = ptr_hash_inner_hash(cur_hash)
         }
+        // Deref-of-field-chain roots `(*name.f1.f2)` — mirror of the x86
+        // inner-chain walk (always enter pointer-like cells).
+        while TK[EP as usize] == 50 && TK[(EP + 1) as usize] == 3 {
+            EP = EP + 1
+            let df_tok = EP
+            let dfh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+            EP = EP + 1
+            let dsi = st_find(cur_hash)
+            if dsi < 0 {
+                tc_error(df_tok, "field access requires struct base")
+                return
+            }
+            let doff = st_field_offset(dsi, dfh)
+            if doff < 0 {
+                tc_error(df_tok, "unknown field access")
+                return
+            }
+            if doff != 0 {
+                emit_imm64_reg_a64(11, doff)
+                em32(0x8B0B0000)
+            }
+            cur_ty = st_field_ty(dsi, dfh)
+            cur_hash = st_field_hash(dsi, dfh)
+            if cur_ty == 11 && box_hash_is(cur_hash) {
+                em32(0xF9400000)
+                cur_ty = ptr_hash_inner_ty(cur_hash)
+                cur_hash = ptr_hash_inner_hash(cur_hash)
+            } else if cur_ty == 10 {
+                em32(0xF9400000)
+                cur_ty = ref_hash_inner_ty(cur_hash)
+                cur_hash = ref_hash_inner_hash(cur_hash)
+            }
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
     } else {
         let name_tok = EP
         let ns = TS[EP as usize]
