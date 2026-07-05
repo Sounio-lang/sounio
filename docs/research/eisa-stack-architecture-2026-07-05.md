@@ -280,6 +280,13 @@ least one corpus program. Stronger-than-corpus claims are not made.
 | E4 | `.eisax`→x86-64 AOT bridge + bit-exact differential witness vs EVM | E1–E3 |
 | E5 | scientific kernel (PK dose step or Rump) end-to-end: same receipts from EVM and bridge | all |
 
+Naming (2026-07-05, operator-approved): the surface language compiled by
+the E3 backend is **Metron** (μέτρον, "measure") — *computation as
+measurement*. In external-facing text the executor is **Metron VM
+(MVM)**, avoiding the saturated "EVM" acronym. Internal identifiers
+(`eisa::evm`, `eisa::backend`, `.eisax`) are unchanged in v1. Rationale
+and rejected candidates: `eisa-v1-plan-2026-07-05.md` §1.
+
 As built (2026-07-05): the E5 kernel is the reduced-quartic catastrophic
 cancellation ((x-1)^4 at x = 1+1e-6 in monomial form) rather than full
 Rump 1988, which does not fit the E3 v0 budget (16 registers / 32
