@@ -61,12 +61,21 @@ plain `Verdict` enum, which compiles and runs today.)
 - **Exact product runs** — `tests/run-pass/sedenion_zd_exact_smoke.sio`: the canonical pair
   `(e₃+e₁₀)·(e₆−e₁₅)` **annihilates exactly** by decidable i64 equality (`ZD PROVED`); `e₁·e₁ = −1`
   (`SQ PASS`); `e₁·e₂ ≠ 0` (`NONZERO PASS`).
-- **168-census executed** — `tests/run-pass/sedenion_zd_census_168.sio` reproduces the Lean bridge
-  census **from the exact product**: `validPrims = 84 → orderedZDPairs = 336 → unorderedZDPairs = 168`
-  (168 = |PSL(2,7)|, the projective zero-divisor classes). VERIFIED 2026-07-05 — prints
-  `VALIDPRIMS 84 PASS / ORDERED 336 PASS / UNORDERED 168 PASS / CANONICAL-ZD PASS`. The census
-  computes the Lean `primProd` directly; the dense engine product (`cd_mul_exact_i64`) is proven on
-  the canonical pair by the smoke test.
+- **168-census executed AND cross-toolchain-verified** — `tests/run-pass/sedenion_zd_census_168.sio`
+  reproduces the Lean bridge census **from the exact product**:
+  `validPrims = 84 → orderedZDPairs = 336 → unorderedZDPairs = 168` (168 = |PSL(2,7)|). It emits the
+  168 **specific** canonical pairs as data, and `scripts/ci/sedenion_zd168_crosscheck_gate.sh` asserts
+  that set is **element-wise identical** to an INDEPENDENT Python oracle
+  (`scripts/research/verify_zd168_oracle.py`, transcribed directly from `formal/lean4/*.lean`, run on
+  a different toolchain) → `CROSS-VERIFIED: 168/168 identical pairs`.
+
+  **Why this matters (contract, not number):** souc v0.80.0 has a documented false-green mode, so a
+  bare `PASS` is not itself proof of execution — isomorphic to `||ab||<eps` not being `ab==0`. A stub
+  can forge a *count*; it cannot forge 168 *specific* pairs that match an independent computation.
+  Honest scope: Lean is not runnable in this environment, so the element-wise diff is souc-vs-Python
+  (two independent toolchains); Lean's leg is its `native_decide`-proven **counts** (`prim_count_84`,
+  `zd_pair_count_336`, `zd_projective_count_168`). A Lean-runtime third leg can be added by installing
+  `elan`/`lean` and `#eval`-emitting `unorderedZDPairs`.
 - **Boundary enforced** — `tests/run-pass/sedenion_verdict_boundary.sio`: `Proved` accepted,
   `MeasuredF64`/`MeasuredF256` rejected.
 
