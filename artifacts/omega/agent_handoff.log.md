@@ -3672,7 +3672,7 @@ status: lock-released
   - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
   - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
     `accepted=28`, `rejected=3`, `blocked=3`, `selected=28`, summary sha
-    `2b6d6a1dcacf...`.
+    `7f6eeb116689...`.
   - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
     `cases=13`, selected rewrites `28`, blocked rewrites `3`, `status=pass`,
     preflight sha `ea7f1ffc4eeb...`.
@@ -3718,9 +3718,61 @@ status: lock-released
   - `bash -n scripts/dev/madaros_v2_s5_mir_abi_gate.sh` passed.
   - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_MIR_ABI_DIR=/tmp/sounio-s5-mir-abi-final bash scripts/dev/madaros_v2_s5_mir_abi_gate.sh` passed:
     `rewrites=28`, `blocked=3`, `abi_classes=scalar_bool,scalar_i64`,
-    boundary sha `985a4f69c5cd...`.
+    boundary sha `bc24ae6a1bda...`.
 - Remaining boundary:
   - Real S5 still needs MIR serialization/hash receipts, ABI layout receipts,
     scalar/aggregate/SRET/imported-call/return witnesses, f64 call/return
     closure before f128/i256 promotion, diagnostics, fallback semantics, and
+    differential validation.
+
+## 2026-07-05 — Madaros v2 S5 scalar MIR-effect/direct-call-return full slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: advance S5 beyond input classification by landing a complete scalar
+  i64/bool direct-call/return slice with deterministic MIR-effect serialization,
+  native-v2 execution witnesses, and explicit non-promotion of the rest of S5.
+- Files changed:
+  - `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`
+  - `tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv`
+  - `tests/madaros/v2_s5/scalar_i64_literal_return_42.sio`
+  - `tests/madaros/v2_s5/scalar_i64_direct_call_return_42.sio`
+  - `tests/madaros/v2_s5/scalar_bool_direct_call_return_1.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`, which consumes the
+    S5 MIR/ABI input-boundary receipt and emits
+    `madaros.v2.s5.mir_effect_roundtrip/0.1`.
+  - The gate serializes the 28 selected exact S4 rewrites into canonical
+    MIR-effect records: `mir.const.i64`, `mir.const.bool`, and `mir.alias.i64`;
+    the module roundtrips through canonical JSON and records stable hashes.
+  - Added 3 scalar native-v2 witnesses in `tests/madaros/v2_s5/`:
+    i64 literal return (`42`), i64 direct-call return (`42`), and bool
+    direct-call return (`1`).
+  - The scalar manifest is exact-cardinality gated to those 3 cases. Direct-call
+    witnesses record the versioned Machine-IR contract from
+    `self-hosted/native/machine_ir.sio`: `ARG_MOVE,CALL,CAPTURE_RET,STORE_STACK,RET`;
+    arg registers are `rdi,rsi,rdx,rcx,r8,r9`, return register is `rax`. The
+    gate also inspects the executable ELF segment and requires direct-call
+    witnesses to contain an additional internal call beyond the runtime-to-main
+    call.
+  - The receipt sets `s5_mir_effect_roundtrip_complete = true` and
+    `s5_scalar_i64_bool_direct_call_return_slice_complete = true`, while keeping
+    `real_program_mir_emitted = false`, `real_abi_layout_emitted = false`,
+    `s5_ready = false`, `s5_implemented = false`, and
+    `s5_full_complete = false`.
+- Local proof:
+  - `bash -n scripts/dev/madaros_v2_s5_mir_effect_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_MIR_EFFECT_DIR=/tmp/sounio-s5-mir-effect-final3 bash scripts/dev/madaros_v2_s5_mir_effect_gate.sh` passed:
+    `effects=28`, `native_witnesses=3`,
+    `opcodes=mir.alias.i64,mir.const.bool,mir.const.i64`, receipt sha
+    `0c53f7750ec4...`.
+- Remaining boundary:
+  - S5 FULL still needs full-program MIR serialization, ABI layout receipts,
+    aggregate/SRET/imported-call/stack-arg witnesses, f64 call/return closure
+    before f128/i256 promotion, diagnostics, fallback semantics, and
     differential validation.

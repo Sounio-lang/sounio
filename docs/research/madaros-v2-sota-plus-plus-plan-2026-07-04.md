@@ -459,6 +459,22 @@ negative evidence. It records `s5_mir_abi_input_boundary_complete = true`,
 `s5_mir_abi_boundary_complete = false`, `s5_ready = false`,
 `s5_implemented = false`, and `s5_full_complete = false`.
 
+Scalar MIR-effect status (2026-07-05): S5 now has a first scalar
+MIR/ABI full-slice gate, `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`. It
+consumes the input-boundary receipt, serializes the 28 selected exact S4 rewrites
+as deterministic MIR-effect records (`mir.const.i64`, `mir.const.bool`, and
+`mir.alias.i64`), proves canonical JSON roundtrip stability, and runs three real
+native-v2 scalar witnesses from `tests/madaros/v2_s5/`: i64 literal return,
+i64 direct-call return, and bool direct-call return. The gate enforces exact
+manifest cardinality, verifies exit codes, hashes each compiled ELF/log, and
+inspects executable ELF segments so direct-call witnesses must contain an
+additional internal call beyond the runtime-to-main call. The receipt schema is
+`madaros.v2.s5.mir_effect_roundtrip/0.1`; current evidence records
+`s5_mir_effect_roundtrip_complete = true`,
+`s5_scalar_i64_bool_direct_call_return_slice_complete = true`,
+`real_mir_effects_serialized = true`, `real_program_mir_emitted = false`,
+`real_abi_layout_emitted = false`, and `s5_full_complete = false`.
+
 Canonical artifact:
 - MIR hash plus ABI receipt.
 
@@ -469,9 +485,9 @@ Gate:
 - f64 print/return/call witnesses must pass before f128 or i256 are promoted.
 - S5 is not "complete" until MIR hashes, ABI/layout receipts, call/return
   witnesses, numeric-width semantics, diagnostics, and fallbacks are all gated.
-  The current S5 preflight plus MIR/ABI input-boundary receipt only prove that
-  the accepted S4 extraction subset is safe to consume and classify as scalar
-  input; they are not MIR/ABI implementation.
+  The current S5 preflight, input-boundary receipt, and scalar MIR-effect
+  roundtrip close one scalar i64/bool direct-call/return slice only. They are
+  not full-program MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

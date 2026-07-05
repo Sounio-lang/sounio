@@ -235,7 +235,7 @@ reflexive-comparison slice, and sub-self arithmetic slice:
 [madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=496e7ccf7342
 [madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=54e83fe3c2d0
 [madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=a34f4ab3e0b8
-[madaros-v2-s4] summary_sha=2b6d6a1dcacf accepted=28 rejected=3 blocked=3 selected=28
+[madaros-v2-s4] summary_sha=7f6eeb116689 accepted=28 rejected=3 blocked=3 selected=28
 [madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)
 ```
 
@@ -273,7 +273,7 @@ bash scripts/dev/madaros_v2_s5_mir_abi_gate.sh
 Observed local result on 2026-07-05:
 
 ```text
-[madaros-v2-s5-mir-abi] ok rewrites=28 blocked=3 abi_classes=scalar_bool,scalar_i64 sha=985a4f69c5cd
+[madaros-v2-s5-mir-abi] ok rewrites=28 blocked=3 abi_classes=scalar_bool,scalar_i64 sha=bc24ae6a1bda
 [madaros-v2-s5-mir-abi] PASS: S5 MIR/ABI input-boundary receipts classify the current S4 selected subset without claiming real MIR/ABI or S5 FULL
 ```
 
@@ -285,6 +285,33 @@ The input-boundary receipt uses schema
 `s5_implemented = false`, and `s5_full_complete = false`. It classifies the
 current selected S4 subset as scalar input only (`scalar_i64`/`scalar_bool`) and
 records no call-signature, stack, SRET, aggregate-layout, or ABI impact.
+
+The S5 scalar MIR-effect and direct-call/return slice is executable through:
+
+```bash
+bash scripts/dev/madaros_v2_s5_mir_effect_gate.sh
+```
+
+Observed local result on 2026-07-05:
+
+```text
+[madaros-v2-s5-mir-effect] ok effects=28 native_witnesses=3 opcodes=mir.alias.i64,mir.const.bool,mir.const.i64 sha=0c53f7750ec4
+[madaros-v2-s5-mir-effect] PASS: S5 MIR-effect module roundtrips for the current selected subset without claiming full program MIR/ABI or S5 FULL
+```
+
+The MIR-effect receipt uses schema `madaros.v2.s5.mir_effect_roundtrip/0.1` and
+records `s5_mir_effect_roundtrip_complete = true`,
+`s5_scalar_i64_bool_direct_call_return_slice_complete = true`,
+`real_mir_effects_serialized = true`, `real_program_mir_emitted = false`,
+`real_abi_layout_emitted = false`, `s5_ready = false`,
+`s5_implemented = false`, and `s5_full_complete = false`. The manifest is
+exact-cardinality gated to the three scalar native-v2 witnesses in
+`tests/madaros/v2_s5/`: i64 literal return, i64 direct-call return, and bool
+direct-call return. The gate compiles and runs those witnesses, verifies their
+exit codes, hashes their ELFs/logs, and inspects the executable ELF segment for
+the expected internal-call shape before recording the Machine-IR contract
+`ARG_MOVE,CALL,CAPTURE_RET,STORE_STACK,RET`. Aggregate, SRET, imported-call,
+stack-arg, f64, f128, and i256 promotion remain blocked.
 
 That is deliberately not a claim that S5 is implemented. Under the S-FULL rule,
 S5 completion requires MIR hashes, ABI/layout/call/return receipts, numeric tower

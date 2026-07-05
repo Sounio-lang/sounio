@@ -265,6 +265,7 @@ S5 now has an executable input-contract preflight:
 
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
 - `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`
+- `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`
 
 The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
@@ -279,6 +280,12 @@ stack, SRET, aggregate-layout, or ABI impact, while 3 producer-evaluation
 blockers remain excluded. It records `real_mir_emitted = false`,
 `real_abi_layout_emitted = false`, `s5_mir_abi_boundary_complete = false`, and
 `s5_full_complete = false`.
-Next critical lane: real S5 MIR serialization/roundtrip plus ABI
-layout/call/return witnesses for the selected exact subset, still without
-promoting f128/i256 before f64 call/return witnesses are gated.
+The MIR-effect gate then serializes those 28 selected rewrites into canonical
+MIR-effect records (`mir.const.i64`, `mir.const.bool`, `mir.alias.i64`) and runs
+3 scalar native-v2 witnesses: i64 literal return, i64 direct-call return, and
+bool direct-call return. This closes the scalar i64/bool direct-call/return
+slice only; `real_program_mir_emitted = false`, aggregate/SRET/imported-call,
+stack-arg, f64, f128, and i256 remain unpromoted.
+Next critical lane: real full-program MIR serialization plus ABI layout/call
+receipts for aggregate/SRET/imported-call and then f64 call/return before f128
+or i256 promotion.
