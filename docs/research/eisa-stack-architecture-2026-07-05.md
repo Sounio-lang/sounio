@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.eisa-stack-architecture-2026-07-05
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.eisa-stack-architecture-2026-07-05
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # EISA stack architecture — the epistemic executable format (2026-07-05)
 
 Status: operator-approved direction (2026-07-05): EISA is a **self-contained
@@ -150,16 +164,24 @@ mirror of I1's reject-never-clamp.
 
 ### 3.3 Receipts, version 1
 
+As built in E2 (`stdlib/eisa/evm.sio`, normative since 2026-07-05):
+
 ```
-eisa-receipt: v=1 prog=<hash-dec> gate=<0|1|2> roundoff=s<s>e<e>m<m>
-  u=s<s>e<e>m<m> site=#<n> policy=10/100 cov=assumed-zero poisoned=<0|1>
+eisa-receipt: v=1 prog=<hash-dec> gate=<counter> reg=e<r>
+  val=s<s>e<e>m<m> roundoff=s<s>e<e>m<m> u=s<s>e<e>m<m> poisoned=<0|1>
 ```
 
 (one line; wrapped here). Changes from v0: `v=1`, and `prog=` — the
 program hash from the container, closing the provenance finding. Lane
 values stay as sign/exponent/mantissa integer decompositions (bit-exact,
-no decimal floats). `site=#n` is the dynamic gate counter as in v1a;
-static labels return with the assembler's symbol table (E1, optional).
+no decimal floats; NaN canonicalises to `s0e2047m1`, see the lean_single
+NaN-semantics audit). `gate=` is the dynamic gate counter (the v1a
+`site=#n` role); the gated register and its `val` lane are printed so a
+receipt alone pins the observable value. The v0 draft's `gate=<code>`,
+`policy=` and `cov=` fields are deferred: gate outcome is recoverable
+from `poisoned=` plus the lanes under the fixed 10x/100x policy, and a
+per-receipt policy field returns when policies become per-site (post-E5).
+The E4 bridge must reproduce this line byte-identically.
 
 ### 3.4 EISA-hash v0
 
