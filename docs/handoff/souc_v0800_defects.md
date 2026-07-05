@@ -574,3 +574,32 @@ composition.
 | D3 — `<<` infers i64 in i32 context (E004) | Sounio-lang/sounio#638 | filed, repro verified |
 | D4 — data-enum `match` returns wrong arm value | Sounio-lang/sounio#639 | filed, repro verified |
 | D1 — multi-module compact-stub false-green | NOT filed | **negative result** — not reproducible in this build; earlier reports of a 140-byte stub on engine-importing tests were a manifestation of **D2** (aggregate lowering), not an independent multi-module defect |
+
+---
+
+## D5 — while-loop reassigning a loop-carried var via a global-reading/dividing guard fn clobbers it
+
+### Symptom
+A `while` loop that reassigns a loop-carried mutable var based on a guard **function that reads a
+global and does integer division** mis-compiles — the call clobbers the carried var (collapses to 0).
+
+### Minimal repro (CONFIRMED)
+`docs/handoff/repros/d5_loop_clobber_reproduces.sio` — `mul_ovf(p,10)`-guarded `p = p*10`/`p = 0` in a
+`while`. Output: `k=1 p=10  k=2 p=100  k=3 p=0  k=4 p=0` (expected `10,100,1000,10000`).
+
+### Isolation
+`docs/handoff/repros/d5_loop_trivial_guard_ok.sio` — same loop, trivial literal guard (no global, no
+division) → correct `10,100,1000,10000`. Direct (non-loop) reassignment → correct. So the trigger is
+the guard fn's global-read + division interacting with the loop-carried var, NOT "call in loop" alone.
+
+### Impact
+Forced the exact-measure sweep (`sedenion_measure_annihilation_general.sio`) to be **unrolled**;
+`var_at_scale` is correct with literal args but wrong in a loop. Any overflow-checked numeric loop
+(guard fn + accumulator) is at risk.
+
+### Suspected area
+Register allocation / caller-saved handling around a call whose callee issues `div` (clobbers
+rdx:rax on x86) inside a loop with a live carried var — likely `self-hosted/native/codegen_x86_linux.sio`.
+
+### Filed
+Sounio-lang/sounio#641.
