@@ -14,17 +14,18 @@ All spikes are `//@ run-pass` micro-files; both engines exit rc=0 on failure (co
 |---|---|---|---|
 | — | generic struct decl + inline instantiation + field access | ✅ works | `generic_struct_instantiate.sio`, `generic_struct_nested.sio` pass |
 | — | inherent `impl Type {…}` + `Self`-as-type | ✅ works | spikes p2/p3; used throughout stdlib (`Complex`, `HeapVec`) |
-| — | trait *declaration* | ✅ parses | `stdlib/quantum/vqe.sio` `trait Ansatz` |
+| — | empty `trait Name {}` (no methods) | ✅ parses | spike `tr_empty.sio` |
 | **1** | **fn param/return of a generic struct** (`fn cd_mul_exact<F>(a: CDElementExact<F>) -> CDElementExact<F>`) | ❌ **BROKEN** | `turbofish.sio` known-failure; spike → `expected CDExact, found CDExact__T` + lean_single "tail type mismatch"@27281 |
-| **2** | **`impl Trait for Type`** (needed to give `i64`/`Rational` the `ExactRing` methods) | ❌ **BROKEN** | spike p1 → `parse error` at the `impl … for …` line; **zero** occurrences in all of stdlib |
-| **3** | **trait-bounded generic method dispatch** (`fn f<F: ExactRing>(x: F) { x.er_mul(y) }`) | ❌ **BROKEN** | spikes t1b/t8b (multi-line, correctly formatted) still fail; depends on #2 |
+| **2a** | **bodyless trait-method signatures** (`trait ExactRing { fn er_add(self,o:Self)->Self }`) | ❌ **BROKEN** | spike `tr_sig.sio` → `parse error expected=184` at the method-sig line; `stdlib/quantum/vqe.sio`'s `trait Ansatz` extracted standalone fails identically. CORRECTION: an earlier full-file check wrongly reported traits "parse" — full-file error-recovery masked it; isolated files are the only trustworthy signal. |
+| **2b** | **`impl Trait for Type`** (needed to give `i64`/`Rational` the `ExactRing` methods) | ❌ **BROKEN** | spike → `parse error` at the `for` keyword (`expected=184 actual=23`). NB: occurrences DO exist in `vqe.sio`/`pac.sio`/`examples/*` but all are aspirational/non-compiling. |
+| **3** | **trait-bounded generic method dispatch** (`fn f<F: ExactRing>(x: F) { x.er_mul(y) }`) | ❌ **BROKEN** | spikes t1b/t8b (multi-line, correctly formatted) still fail; depends on 2a + 2b |
 
 Rejected alternative — **fn-pointer vtable** (`struct RingOps<F> { mul: fn(F,F)->F, … }`): avoids traits but fails independently with `E016 expected fn#0 found fn#2` **even for a concrete, non-generic `OpsI64`** (spikes t4/t5) — the checker won't unify a named function with a `fn(...)->...` field type. So it needs a *fourth* fix (fn-type-identity unification) **plus** #1. Not cheaper than traits.
 
 ## Who covers what
 
 - **#1 is in flight** — `docs/handoff/compiler_generic_struct_return_fix_prompt.md` (fable5 / Claude #2 lane), PR #631 lands the prompt.
-- **#2 and #3 are NOT yet commissioned.** They are separate, larger features: a parser extension for `impl Trait for Type`, plus trait-method-resolution + monomorphization for `<F: Trait>` bounds. The single fable5 prompt does **not** cover them.
+- **#2 (2a+2b) and #3 are NOW commissioned** — `docs/handoff/compiler_impl_trait_for_type_fix_prompt.md` (covers both parser bugs 2a bodyless-trait-method-sigs + 2b `impl Trait for Type`) and `docs/handoff/compiler_trait_bounded_dispatch_fix_prompt.md` (#3, depends on #2). These are separate, larger features than #1; the fable5 generic-struct-return prompt does **not** cover them. So generic-in-`F` needs **#1 + 2a + 2b + #3** — strictly more than first stated.
 
 **Net:** landing only #1 does **not** unblock `cayley_dickson_exact.sio`. The generic-in-`F` path needs #1 **and** #2 **and** #3.
 
