@@ -77,13 +77,25 @@ currently fails on a pre-existing harness issue (its stage1 step targets the
 `bin/souc` wrapper, now Madaros-routed) — identical failure with the old seed;
 not a regression.
 
-## Downstream state and revertible workarounds
+## Downstream proof — COMPLETE (commit `c30b3af0a`)
 
-Madaros rebuild + hardened full gate + the 14/14 imported matrix from the new
-seed, and the finalize workaround-reversion proof, are tracked as the next
-phase of this campaign. Once proven, the inventory of one-level-idiom
-workarounds becomes incrementally revertible — see
-`MADAROS_SEED_BEGIN_DISPATCH_2026-07-05.md` §4 and the 2026-07-05 handoff
-entries (module_frontend.sio `:1671/:1744/:1792` restructures +
-restore_user_main_calls; lower.sio `:9617` skip_patch and the `:743/:787/:1364/
-:4088/:4475/:4576` single-level idioms).
+Two Madaros builds from the resynced seed (`06409ecb9`), in a clean worktree,
+provenance-guarded:
+
+- **Matrix A** (workarounds in place): 8/8 green — thin exit 7, smt witness
+  end-to-end, 2× smt ALL PASS, 4/4 dd64 ALL PASS.
+- **Matrix B** (reversion proof: `module_frontend.sio` restored to its
+  pre-`0ba18481a` state — the original in-place two-level RMW in
+  `ir_module_finalize_merged_calls` / `ir_module_compact_duplicate_fn_refs`
+  that used to zero every touched IrCall): **8/8 green, identical verdicts.**
+
+The natural two-level indexed RMW shape is proven safe under the fixed seed;
+the reversion is committed (`c30b3af0a`) as the standing witness. Remaining
+one-level-idiom band-aids are now incrementally revertible under the same
+proof protocol (revert in a scratch worktree → rebuild → matrix → commit):
+lower.sio `:9617` skip_patch (re-enable `ir_patch_validated_calls` on the
+imported lane — note its `&!(*module).functions[i]` call sites are a
+*different* miscompile class, `&!`-of-boxed-element, and need their own
+witness before reverting), `:743/:787/:1364/:4088/:4475/:4576` single-level
+idioms, and `restore_user_main_calls` + defensive `ir_function_deep_copy` in
+module_frontend.sio.
