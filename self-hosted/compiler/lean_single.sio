@@ -8309,28 +8309,45 @@ fn emit_heap_realloc_x86() with Mut {
 // reserving big costs ~0 RSS until touched. emit_heap_alloc_x86 (heap_vec/map,
 // explicitly freed) is intentionally NOT routed here.
 // ============================================================================
-fn arena_chunk_bytes() -> i64 { return 8589934592 }  // 8 GiB per chunk
+fn arena_chunk_bytes() -> i64 { return 2147483648 }  // 2 GiB per chunk
+// Sized so image (~3.3 GiB) + a few chunks stay under the bin/madaros
+// wrapper's ulimit -v guards (8 GiB check / 16 GiB run): the adaptive
+// refill keeps TOTAL arena unbounded in 2 GiB steps, and packing (the
+// job-2478 fix) is what defeats per-Box page waste — chunk size is not
+// load-bearing for that.
 
 // Emit (into the produced binary) the one-time arena reservation. Called at main's
 // entry, before any Box::new. Aborts the process (exit 42) if the initial mmap fails.
 fn emit_ast_arena_init_x86() with Mut, Panic {
-    // mmap(NULL, CHUNK, PROT_RW, MAP_PRIVATE|ANON, -1, 0) -> rax = base or MAP_FAILED
-    em(0x48); em(0x31); em(0xff)                    // xor rdi, rdi
+    // mmap with ADAPTIVE size: try CHUNK, halve on MAP_FAILED down to 16 MiB
+    // (a fixed 8 GiB demand-paged reservation aborted under `ulimit -v` —
+    // e.g. the bin/madaros wrapper's 8 GiB guard — even though real RSS is
+    // tiny; the actual reserved size lives in rsi and [limit]-[base]).
     em(0x48); em(0xbe); em64(arena_chunk_bytes())   // movabs rsi, CHUNK
+    let init_retry = CL
+    em(0x48); em(0x31); em(0xff)                    // xor rdi, rdi
     em(0xba); em32(3)                               // mov edx, 3 (PROT_READ|PROT_WRITE)
     em(0x41); em(0xba); em32(0x22)                  // mov r10d, 0x22 (MAP_PRIVATE|MAP_ANON)
     em(0x49); em(0xc7); em(0xc0); em32(0 - 1)       // mov r8, -1 (fd)
     em(0x4d); em(0x31); em(0xc9)                     // xor r9, r9 (offset)
     em(0xb8); em32(9)                               // mov eax, 9 (SYS_mmap)
-    em(0x0f); em(0x05)                              // syscall
+    em(0x0f); em(0x05)                              // syscall (clobbers rcx/r11; rsi survives)
     em(0x48); em(0x3d); em32(0 - 4096)              // cmp rax, -4096
-    em(0x0f); em(0x87)                              // ja abort (MAP_FAILED in [-4095,-1])
+    em(0x0f); em(0x86)                              // jbe success
+    let init_ok = CL
+    em32(0)
+    em(0x48); em(0xd1); em(0xee)                    // shr rsi, 1
+    em(0x48); em(0xb9); em64(16777216)              // movabs rcx, 16 MiB (floor)
+    em(0x48); em(0x39); em(0xce)                    // cmp rsi, rcx
+    em(0x0f); em(0x83)                              // jae retry
+    em32(init_retry - (CL + 4))
+    em(0xe9)                                        // jmp abort
     let init_abort = CL
     em32(0)
+    patch32(init_ok, CL)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax (rax preserved)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = rax
-    em(0x48); em(0xb9); em64(arena_chunk_bytes())   // movabs rcx, CHUNK
-    em(0x48); em(0x01); em(0xc8)                     // add rax, rcx -> rax = base + CHUNK
+    em(0x48); em(0x01); em(0xf0)                     // add rax, rsi -> rax = base + actual
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
     em(0xe9)                                        // jmp done
     let init_done = CL
@@ -8367,10 +8384,15 @@ fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
     em(0xe9)                                        // jmp done
     let fast_done = CL
     em32(0)
-    // SLOW PATH: re-reserve a fresh chunk
+    // SLOW PATH: re-reserve a fresh chunk of the NEGOTIATED size
+    // ([limit]-[base], set adaptively at init), halving further on failure.
     patch32(slow, CL)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)
+    em(0x48); em(0x89); em(0xc6)                     // mov rsi, rax
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)
+    em(0x48); em(0x29); em(0xc6)                     // sub rsi, rax (rsi = chunk size)
+    let slow_retry = CL
     em(0x48); em(0x31); em(0xff)                     // xor rdi, rdi
-    em(0x48); em(0xbe); em64(arena_chunk_bytes())    // movabs rsi, CHUNK
     em(0xba); em32(3)                                // mov edx, 3
     em(0x41); em(0xba); em32(0x22)                   // mov r10d, 0x22
     em(0x49); em(0xc7); em(0xc0); em32(0 - 1)        // mov r8, -1
@@ -8378,13 +8400,21 @@ fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
     em(0xb8); em32(9)                                // mov eax, 9 (SYS_mmap)
     em(0x0f); em(0x05)                               // syscall -> rax = new base or MAP_FAILED
     em(0x48); em(0x3d); em32(0 - 4096)               // cmp rax, -4096
-    em(0x0f); em(0x87)                               // ja abort
+    em(0x0f); em(0x86)                               // jbe ok
+    let slow_ok = CL
+    em32(0)
+    em(0x48); em(0xd1); em(0xee)                    // shr rsi, 1
+    em(0x48); em(0xb9); em64(16777216)              // movabs rcx, 16 MiB floor
+    em(0x48); em(0x39); em(0xce)                    // cmp rsi, rcx
+    em(0x0f); em(0x83)                              // jae retry
+    em32(slow_retry - (CL + 4))
+    em(0xe9)                                        // jmp abort
     let slow_abort = CL
     em32(0)
+    patch32(slow_ok, CL)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax
     em(0x50)                                        // push rax (chunk base)
-    em(0x48); em(0xb9); em64(arena_chunk_bytes())    // movabs rcx, CHUNK
-    em(0x48); em(0x01); em(0xc8)                      // add rax, rcx -> rax = base + CHUNK
+    em(0x48); em(0x01); em(0xf0)                      // add rax, rsi -> rax = base + actual
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
     em(0x58)                                        // pop rax (chunk base)
     em(0x50)                                        // push rax (return base)
@@ -10504,15 +10534,35 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let base = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + rep_count
                     let end_ep = EP
-                    // First element already compiled, RAX = struct ptr
-                    materialize_struct_value_x86(elem_hash)
-                    emit_store_var(base + rep_count - 1)
-                    var ri: i64 = 1
+                    // ONE block for all elements (an mmap per element costs a
+                    // 4 KiB page each — the vmem blowup caught by the wrapper
+                    // ulimit during the prebuilt refresh). Element i lives at
+                    // block + i*stride; each compiled element is copied in.
+                    let lit_v = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(lit_v)
+                    emit_imm64(rep_count * s_nslots * 8)
+                    emit_heap_alloc_x86()
+                    let lit_blk = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(lit_blk)
+                    let lit_dst = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    var ri: i64 = 0
                     while ri < rep_count {
-                        EP = expr_start
-                        compile_or()
-                        materialize_struct_value_x86(elem_hash)
+                        if ri > 0 {
+                            EP = expr_start
+                            compile_or()
+                            emit_store_var(lit_v)
+                        }
+                        emit_load_var(lit_blk)
+                        if ri > 0 { em(0x48); em(0x05); em32(ri * s_nslots * 8) }  // add rax, off
+                        emit_store_var(lit_dst)
                         emit_store_var(base + rep_count - 1 - ri)
+                        emit_load_var(lit_v)
+                        em(0x48); em(0x89); em(0xc2)      // mov rdx, rax (src)
+                        emit_load_var(lit_dst)            // rax = dst
+                        emit_copy_agg_to_ptr_x86(6, elem_hash)
                         ri = ri + 1
                     }
                     EP = end_ep
@@ -19937,6 +19987,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 let rl_base = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var(rl_base)
+                // One BLOCK allocation for all N elements (an mmap per
+                // element cost a 4 KiB page each — >8 GiB vmem at Madaros
+                // scale, caught by the wrapper ulimit during the prebuilt
+                // refresh). Element i lives at block + i*stride.
+                emit_imm64(nslots * d_nsl * 8)
+                emit_heap_alloc_x86()
+                let rl_blk = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(rl_blk)
                 em(0x48); em(0x31); em(0xc0)  // xor rax, rax (i = 0)
                 let rl_i = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
@@ -19947,8 +20006,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em(0x0f); em(0x8d)                // jge done (fwd, patched)
                 let rl_exit = CL
                 em32(0)
-                emit_imm64(d_nsl * 8)
-                emit_heap_alloc_x86()
+                emit_load_var(rl_i)
+                em(0x48); em(0xb9); em64(d_nsl * 8)     // mov rcx, stride
+                em(0x48); em(0x0f); em(0xaf); em(0xc1)  // imul rax, rcx
+                em(0x48); em(0x89); em(0xc2)            // mov rdx, rax (off)
+                emit_load_var(rl_blk)
+                em(0x48); em(0x01); em(0xd0)            // add rax, rdx (elem dst)
                 let rl_new = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var(rl_new)
@@ -31595,6 +31658,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let rl_base = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var_a64(rl_base)
+                // One BLOCK allocation for all N elements (mirror of the
+                // x86 page-granularity fix). Element i at block + i*stride.
+                emit_imm64_a64(nslots * d_nsl * 8)
+                emit_heap_alloc_a64()
+                let rl_blk = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(rl_blk)
                 em32(0xD2800000)  // mov x0, #0 (i)
                 let rl_i = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
@@ -31606,8 +31676,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 em32(0xEB0A013F)  // cmp x9, x10
                 let rl_exit = CL
                 em32(0x5400000A)  // b.ge done (patched)
-                emit_imm64_a64(d_nsl * 8)
-                emit_heap_alloc_a64()
+                emit_load_var_a64(rl_i)
+                emit_imm64_reg_a64(11, d_nsl * 8)
+                em32(0x9B0B7C00)  // mul x0, x0, x11
+                em32(0xAA0003EB)  // mov x11, x0 (off)
+                emit_load_var_a64(rl_blk)
+                em32(0x8B0B0000)  // add x0, x0, x11 (elem dst)
                 let rl_new = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var_a64(rl_new)
