@@ -28,6 +28,7 @@ MACHINE_SLOT_METADATA_RECEIPT_DIR="$OUT_DIR/machine_slot_metadata_receipt"
 F128_ABI_METADATA_RECEIPT_DIR="$OUT_DIR/f128_abi_metadata_receipt"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR="$OUT_DIR/f128_native_opaque_storage_receipt"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR="$OUT_DIR/f128_binary128_native_anchor_receipt"
+F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR="$OUT_DIR/f128_binary128_value_contract_native_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
@@ -48,6 +49,7 @@ MACHINE_SLOT_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_machin
 F128_ABI_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_abi_metadata_receipt.py"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_native_opaque_storage_receipt.py"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_native_anchor_receipt.py"
+F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
@@ -73,10 +75,11 @@ MACHINE_SLOT_METADATA_RECEIPT="$MACHINE_SLOT_METADATA_RECEIPT_DIR/madaros_v2_s5_
 F128_ABI_METADATA_RECEIPT="$F128_ABI_METADATA_RECEIPT_DIR/madaros_v2_s5_f128_abi_metadata.receipt.json"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT="$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR/madaros_v2_s5_f128_native_opaque_storage.receipt.json"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT="$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR/madaros_v2_s5_f128_binary128_native_anchor.receipt.json"
+F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT="$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR/madaros_v2_s5_f128_binary128_value_contract_native.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -299,7 +302,17 @@ if [[ ! -f "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR"
+
+if [[ ! -f "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 binary128 value-contract native receipt: $F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -360,10 +373,11 @@ machine_slot_metadata_receipt_path = Path(sys.argv[16])
 f128_abi_metadata_receipt_path = Path(sys.argv[17])
 f128_native_opaque_storage_receipt_path = Path(sys.argv[18])
 f128_binary128_native_anchor_receipt_path = Path(sys.argv[19])
-diagnostics_receipt_path = Path(sys.argv[20])
-differential_receipt_path = Path(sys.argv[21])
-module_path = Path(sys.argv[22])
-receipt_path = Path(sys.argv[23])
+f128_binary128_value_contract_native_receipt_path = Path(sys.argv[20])
+diagnostics_receipt_path = Path(sys.argv[21])
+differential_receipt_path = Path(sys.argv[22])
+module_path = Path(sys.argv[23])
+receipt_path = Path(sys.argv[24])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -386,6 +400,7 @@ machine_slot_metadata_receipt = load_json(machine_slot_metadata_receipt_path)
 f128_abi_metadata_receipt = load_json(f128_abi_metadata_receipt_path)
 f128_native_opaque_storage_receipt = load_json(f128_native_opaque_storage_receipt_path)
 f128_binary128_native_anchor_receipt = load_json(f128_binary128_native_anchor_receipt_path)
+f128_binary128_value_contract_native_receipt = load_json(f128_binary128_value_contract_native_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
 
@@ -1297,6 +1312,60 @@ for case_id, expected in required_anchor_cases.items():
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
 
+if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.1":
+    raise SystemExit("bad S5 f128 binary128 value-contract native receipt schema")
+if f128_binary128_value_contract_native_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
+if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
+    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 8:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eight cases")
+value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
+for field in [
+    "f128_binary128_value_contract_native_materialization_promoted",
+    "f128_binary128_value_contract_case_set_complete",
+]:
+    if value_native_claims.get(field) is not True:
+        raise SystemExit(f"f128 binary128 value-contract native receipt missing required true claim: {field}")
+for field in [
+    "f128_native_arbitrary_decimal_binary128_materialization_promoted",
+    "f128_native_arithmetic_promoted",
+    "f128_native_call_abi_promoted",
+    "f128_native_return_abi_promoted",
+    "legacy_fallback_used",
+]:
+    if value_native_claims.get(field) is not False:
+        raise SystemExit(f"f128 binary128 value-contract native receipt must not overclaim {field}")
+value_native_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("cases", [])}
+required_value_native_cases = {
+    "positive_zero": {"literal": "0.0", "hex": "00000000000000000000000000000000", "metadata": [1, 0, 0, 2, 1, 0]},
+    "negative_zero": {"literal": "-0.0", "hex": "80000000000000000000000000000000", "metadata": [-1, 0, 0, 2, 1, 0]},
+    "one": {"literal": "1.0", "hex": "3fff0000000000000000000000000000", "metadata": [1, 0, 10, 2, 1, 0]},
+    "half": {"literal": "0.5", "hex": "3ffe0000000000000000000000000000", "metadata": [1, 0, 5, 2, 1, 0]},
+    "two": {"literal": "2.0", "hex": "40000000000000000000000000000000", "metadata": [1, 0, 20, 2, 1, 0]},
+    "smallest_normal": {"literal": "3.36210314311209350626267781732175260259807934484647e-4932", "hex": "00010000000000000000000000000000", "metadata": [1, 626267781732175260, 336210314311209350, 51, 4982, 15]},
+    "one_tenth_rounded": {"literal": "0.1", "hex": "3ffb999999999999999999999999999a", "metadata": [1, 0, 1, 2, 1, 0]},
+    "high_precision_probe": {"literal": "1.2345678901234567890123456789012345", "hex": "3fff3c0ca428c59fb71a7be16b6b6d5b", "metadata": [1, 90123456789012345, 123456789012345678, 35, 34, 0]},
+}
+if set(value_native_cases) != set(required_value_native_cases):
+    raise SystemExit(f"f128 binary128 value-contract native receipt cases mismatch: {sorted(value_native_cases)}")
+for case_id, expected in required_value_native_cases.items():
+    row = value_native_cases[case_id]
+    if row.get("literal") != expected["literal"]:
+        raise SystemExit(f"{case_id} value-contract native literal mismatch")
+    if row.get("expected_binary128_hex") != expected["hex"]:
+        raise SystemExit(f"{case_id} value-contract native expected hex mismatch")
+    if row.get("expected_decimal_metadata") != expected["metadata"]:
+        raise SystemExit(f"{case_id} value-contract native metadata mismatch")
+    if row.get("run_rc") != 0:
+        raise SystemExit(f"{case_id} value-contract native ELF must run rc=0")
+    if row.get("expected_hi_u64") != 0 and row.get("hi_mov_imm64_pattern_found") is not True:
+        raise SystemExit(f"{case_id} value-contract native must prove high-word immediate")
+    if row.get("expected_lo_u64") != 0 and row.get("lo_mov_imm64_pattern_found") is not True:
+        raise SystemExit(f"{case_id} value-contract native must prove nonzero low-word immediate")
+    if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
+        raise SystemExit(f"{case_id} value-contract native missing ELF or MachineModule hash")
+
 if diagnostics_receipt.get("schema") != "madaros.v2.s5.diagnostics_receipt/0.3":
     raise SystemExit("bad S5 diagnostics receipt schema")
 if diagnostics_receipt.get("status") != "pass":
@@ -1767,7 +1836,7 @@ not_promoted = [
     {
         "surface": "f128_numeric_width",
         "status": "opaque_local_storage_copy_promoted_numeric_arithmetic_and_abi_not_promoted",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, S5.2 native-v2 local opaque storage/copy execution, and S5.3 native binary128 materialization for the exact 0.5 and 1.0 anchors only. General decimal binary128 materialization, arithmetic, call ABI, and return ABI remain fail-closed.",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, S5.2 native-v2 local opaque storage/copy execution, S5.3 native binary128 anchor materialization, and S5.4 native materialization for the complete current f128 value-contract case set. Arbitrary decimal binary128 materialization, arithmetic, call ABI, and return ABI remain fail-closed.",
     },
     {
         "surface": "f128_literal_decimal_metadata_and_type",
@@ -1777,12 +1846,17 @@ not_promoted = [
     {
         "surface": "f128_binary128_value_contract",
         "status": "promoted_by_exact_decimal_to_binary128_value_receipt_not_execution",
-        "reason": "finite f128 decimal literals now have a deterministic IEEE-754 binary128 sign/exponent/fraction contract with roundTiesToEven anchors; native-v2 S5.3 materializes exact binary128 bits for the 0.5 and 1.0 anchors, while general decimal literal materialization remains unpromoted",
+        "reason": "finite f128 decimal literals now have a deterministic IEEE-754 binary128 sign/exponent/fraction contract with roundTiesToEven anchors; native-v2 S5.4 materializes binary128 bits for the complete current value-contract case set, while arbitrary decimal literal materialization remains unpromoted",
     },
     {
         "surface": "f128_binary128_native_anchor_materialization",
         "status": "promoted_for_exact_0_5_and_1_0_anchors_only",
         "reason": "native-v2 emits and runs local f128 literal/copy programs for exact 0.5 and 1.0, and the emitted ELF contains the expected IEEE-754 binary128 high-word mov immediates; no general decimal, arithmetic, call ABI, or return ABI promotion is claimed",
+    },
+    {
+        "surface": "f128_binary128_value_contract_native_materialization",
+        "status": "promoted_for_complete_current_value_contract_case_set",
+        "reason": "native-v2 emits and runs every current f128 binary128 value-contract case, including signed zero, 0.1 roundTiesToEven, smallest-normal, and high-precision decimal probes; arbitrary decimal support beyond that finite contract is still not promoted",
     },
     {
         "surface": "unsupported_numeric_diagnostics",
@@ -2063,6 +2137,16 @@ module = {
         "claims": f128_binary128_native_anchor_receipt["claims"],
         "cases": f128_binary128_native_anchor_receipt["cases"],
     },
+    "f128_binary128_value_contract_native_receipt": {
+        "schema": f128_binary128_value_contract_native_receipt["schema"],
+        "path": f"{f128_binary128_value_contract_native_receipt_path.parent.name}/{f128_binary128_value_contract_native_receipt_path.name}",
+        "receipt_sha256": f128_binary128_value_contract_native_receipt["receipt_sha256"],
+        "stage_contract_level": f128_binary128_value_contract_native_receipt["stage_contract_level"],
+        "case_id": f128_binary128_value_contract_native_receipt["case_id"],
+        "case_count": f128_binary128_value_contract_native_receipt["case_count"],
+        "claims": f128_binary128_value_contract_native_receipt["claims"],
+        "cases": f128_binary128_value_contract_native_receipt["cases"],
+    },
     "differential_receipt": {
         "schema": differential_receipt["schema"],
         "path": f"{differential_receipt_path.parent.name}/{differential_receipt_path.name}",
@@ -2106,7 +2190,9 @@ module = {
         "f128_abi_metadata_promoted": True,
         "f128_native_opaque_storage_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
+        "f128_binary128_value_contract_native_materialization_promoted": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
+        "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
         "f128_native_ieee_binary128_materialization_promoted": False,
         "f128_native_arithmetic_promoted": False,
         "f128_native_call_abi_promoted": False,
@@ -2147,11 +2233,13 @@ module = {
         "f128_abi_metadata_receipt_recorded",
         "f128_native_opaque_storage_receipt_recorded",
         "f128_binary128_native_anchor_receipt_recorded",
+        "f128_binary128_value_contract_native_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
         "differential_native_v2_vs_lean_single_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
         "f128_binary128_native_anchor_materialization_promoted_for_exact_0_5_and_1_0_only",
-        "f128_general_decimal_binary128_materialization_not_promoted",
+        "f128_binary128_value_contract_native_materialization_promoted_for_current_case_set",
+        "f128_arbitrary_decimal_binary128_materialization_not_promoted",
         "f128_ieee_arithmetic_and_abi_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "f128_ieee_helpers_and_abi_differentials_still_required_before_s5_ready",
@@ -2203,6 +2291,7 @@ receipt = {
     "s5_f128_abi_metadata_complete": True,
     "s5_f128_native_opaque_storage_complete": True,
     "s5_f128_binary128_native_anchor_materialization_complete": True,
+    "s5_f128_binary128_value_contract_native_materialization_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
@@ -2240,7 +2329,9 @@ receipt = {
     "f128_abi_metadata_promoted": True,
     "f128_native_opaque_storage_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
+    "f128_binary128_value_contract_native_materialization_promoted": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
+    "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
     "f128_native_ieee_binary128_materialization_promoted": False,
     "f128_native_arithmetic_promoted": False,
     "f128_native_call_abi_promoted": False,
@@ -2273,6 +2364,7 @@ receipt = {
     "f128_abi_metadata_receipt_sha256": f128_abi_metadata_receipt["receipt_sha256"],
     "f128_native_opaque_storage_receipt_sha256": f128_native_opaque_storage_receipt["receipt_sha256"],
     "f128_binary128_native_anchor_receipt_sha256": f128_binary128_native_anchor_receipt["receipt_sha256"],
+    "f128_binary128_value_contract_native_receipt_sha256": f128_binary128_value_contract_native_receipt["receipt_sha256"],
     "diagnostics_receipt_sha256": diagnostics_receipt["receipt_sha256"],
     "differential_receipt_sha256": differential_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
@@ -2310,7 +2402,9 @@ receipt = {
     "f128_abi_metadata_promoted": module["scalar_abi_receipts"]["f128_abi_metadata_promoted"],
     "f128_native_opaque_storage_promoted": module["scalar_abi_receipts"]["f128_native_opaque_storage_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
+    "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
+    "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],
     "f128_native_ieee_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_ieee_binary128_materialization_promoted"],
     "f128_native_arithmetic_promoted": module["scalar_abi_receipts"]["f128_native_arithmetic_promoted"],
     "f128_native_call_abi_promoted": module["scalar_abi_receipts"]["f128_native_call_abi_promoted"],
@@ -2328,7 +2422,7 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "f128 general decimal-to-binary128 native materialization beyond exact 0.5 and 1.0 anchors",
+        "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
         "f128 arithmetic, call ABI, return ABI, and differential receipts",
     ],
@@ -2341,7 +2435,7 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 exact-anchor binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
