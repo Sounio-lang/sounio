@@ -90,6 +90,14 @@ plain `Verdict` enum, which compiles and runs today.)
   (`non-Fano triples: 168/168 identical`). The Lean `nonfano_zd_bridge` theorem proves these two
   168s are **equal** — so both faces of the 168-theorem (zero-divisors and non-associativity) are now
   executed exactly by the running language and cross-toolchain-verified, both = |PSL(2,7)|.
+- **The 84↔84 bijection executed as an explicit map** — `tests/run-pass/octonion_dagger_bijection_84.sio`
+  runs the **dagger involution** `(i,j,k) ↦ (k,j,i)`, which negates the associator wave
+  (`DAGGER-REVERSAL 343`) and is **free** on the 168 non-Fano triples (`FREE-INVOLUTION (0 self-dual)`)
+  — hence a concrete bijection carrying the 84 forward-arrows onto the 84 backward-arrows
+  (`FWD->BWD 84 / BWD->FWD 84 / BIJECTION 84<->84`). This is the structural *why* behind 168 = 84+84
+  (`SounioCayleyDickson.lean` `dagger_reversal` / `no_nonfano_self_dual`). The gate diffs the 84
+  emitted forward→backward **arrows** element-wise against the oracle (`84/84 identical arrows`) — the
+  *map itself*, not just its cardinality, is cross-toolchain-verified.
 - **Boundary enforced** — `tests/run-pass/sedenion_verdict_boundary.sio`: `Proved` accepted,
   `MeasuredF64`/`MeasuredF256` rejected.
 

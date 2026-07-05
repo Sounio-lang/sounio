@@ -81,9 +81,18 @@ def betaSign(i, j, k):
 def isFano(i, j, k):
     return alphaSign(i, j, k) == betaSign(i, j, k)
 
+def waveFunc(i, j, k):
+    return alphaSign(i, j, k) - betaSign(i, j, k)
+
 def nonfano_triples():
     return [(i, j, k) for i in range(1, 8) for j in range(1, 8) for k in range(1, 8)
             if not isFano(i, j, k)]
+
+def dagger_arrows():
+    # 84<->84 duality: dag(i,j,k)=(k,j,i) negates the wave. Emit each forward (wave=+2) triple
+    # with its dagger (backward) image: (i,j,k, k,j,i). Free involution on the 168 non-Fano triples.
+    return [(i, j, k, k, j, i) for i in range(1, 8) for j in range(1, 8) for k in range(1, 8)
+            if waveFunc(i, j, k) == 2]
 
 def pair_key(pair):
     (ulo, uhi, uneg), (vlo, vhi, vneg) = pair
@@ -101,8 +110,13 @@ if __name__ == "__main__":
     print(f"COUNT nonfano {len(nf)}")
     for t in sorted(nf):
         print("TRIPLE " + " ".join(str(x) for x in t))
+    # The 84<->84 dagger bijection (explicit map, not just counts).
+    arrows = dagger_arrows()
+    print(f"COUNT arrows {len(arrows)}")
+    for a in sorted(arrows):
+        print("ARROW " + " ".join(str(x) for x in a))
     # self-check against the Lean-proven counts
     ok = (len(validPrims) == 84 and len(ordered) == 336 and len(unordered) == 168
-          and len(nf) == 168)
-    print("ORACLE " + ("OK zd=84/336/168 nonfano=168" if ok else "MISMATCH"))
+          and len(nf) == 168 and len(arrows) == 84)
+    print("ORACLE " + ("OK zd=84/336/168 nonfano=168 arrows=84" if ok else "MISMATCH"))
     sys.exit(0 if ok else 1)
