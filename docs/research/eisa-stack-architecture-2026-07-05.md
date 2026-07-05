@@ -280,6 +280,21 @@ least one corpus program. Stronger-than-corpus claims are not made.
 | E4 | `.eisax`→x86-64 AOT bridge + bit-exact differential witness vs EVM | E1–E3 |
 | E5 | scientific kernel (PK dose step or Rump) end-to-end: same receipts from EVM and bridge | all |
 
+As built (2026-07-05): the E5 kernel is the reduced-quartic catastrophic
+cancellation ((x-1)^4 at x = 1+1e-6 in monomial form) rather than full
+Rump 1988, which does not fit the E3 v0 budget (16 registers / 32
+instructions with move synthesis) honestly. The kernel lives in
+`examples/eisa_cancellation_kernel.sio` (EVM half, witnesses K1–K5 in
+`tests/stdlib/eisa/test_eisa_e5_kernel.sio`) and is program 5 of the
+bridge conformance corpus (`scripts/ci/eisa_bridge_conformance_gate.sh`):
+the AOT-translated ELF reproduces both receipts byte-identically — gate 1
+shows the O(1) operand about to be annihilated, gate 2 shows val
+collapsed to exactly +0.0 with the true ~2^-80 value in the roundoff
+lane. The gate also carries a tamper lane and an anti-vacuity lane
+(receipt value digits must be absent from the ELF bytes), so E5
+conformance is witnessed against both a tampered image and a
+baked-receipt translator.
+
 ## 7. Known risks, stated up front
 
 - **Compiler fragility is the schedule risk**, not the design: today the

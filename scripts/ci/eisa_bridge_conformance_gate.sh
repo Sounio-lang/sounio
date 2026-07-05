@@ -22,6 +22,7 @@ programs=(
   "golden-add"
   "golden-sqrt"
   "golden-poison"
+  "e5-cancellation"
 )
 
 for name in "${programs[@]}"; do
