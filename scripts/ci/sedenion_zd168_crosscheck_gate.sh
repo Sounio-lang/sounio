@@ -22,26 +22,32 @@ export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "[1/3] souc emits its 168 pairs ..."
-./bin/souc run tests/run-pass/sedenion_zd_census_168.sio 2>/dev/null | grep '^PAIR ' | sort -u > "$WORK/souc.txt"
-S=$(wc -l < "$WORK/souc.txt")
+# The Python oracle emits BOTH faces (PAIR = ZD, TRIPLE = non-Fano) in one run.
+python3 scripts/research/verify_zd168_oracle.py > "$WORK/py_all.txt"
 
-echo "[2/3] Python oracle (Lean-spec, non-souc) emits its 168 pairs ..."
-python3 scripts/research/verify_zd168_oracle.py | grep '^PAIR ' | sort -u > "$WORK/py.txt"
-P=$(wc -l < "$WORK/py.txt")
+echo "[face 1/2] zero-divisor census: souc vs oracle ..."
+./bin/souc run tests/run-pass/sedenion_zd_census_168.sio 2>/dev/null | grep '^PAIR ' | sort -u > "$WORK/souc_zd.txt"
+grep '^PAIR ' "$WORK/py_all.txt" | sort -u > "$WORK/py_zd.txt"
+SZD=$(wc -l < "$WORK/souc_zd.txt"); PZD=$(wc -l < "$WORK/py_zd.txt")
 
-echo "[3/3] independent asserter (diff) checks set equality ..."
-if [ "$S" -ne 168 ] || [ "$P" -ne 168 ]; then
-  echo "FAIL: expected 168 unique pairs each; souc=$S python=$P"; exit 1
+echo "[face 2/2] non-Fano census: souc vs oracle ..."
+./bin/souc run tests/run-pass/octonion_nonfano_census_168.sio 2>/dev/null | grep '^TRIPLE ' | sort -u > "$WORK/souc_nf.txt"
+grep '^TRIPLE ' "$WORK/py_all.txt" | sort -u > "$WORK/py_nf.txt"
+SNF=$(wc -l < "$WORK/souc_nf.txt"); PNF=$(wc -l < "$WORK/py_nf.txt")
+
+fail=0
+if [ "$SZD" -ne 168 ] || [ "$PZD" -ne 168 ] || ! diff -q "$WORK/souc_zd.txt" "$WORK/py_zd.txt" >/dev/null; then
+  echo "MISMATCH (ZD): souc=$SZD python=$PZD"; diff "$WORK/souc_zd.txt" "$WORK/py_zd.txt" | head -20; fail=1
 fi
-if diff -q "$WORK/souc.txt" "$WORK/py.txt" >/dev/null; then
-  echo "CROSS-VERIFIED: souc 168-set == Lean-spec Python-oracle 168-set (168/168 identical pairs)."
-  echo "  souc pairs:   $S"
-  echo "  python pairs: $P"
-  echo "  Lean counts (native_decide-proven): validPrims=84, ordered=336, unordered=168."
+if [ "$SNF" -ne 168 ] || [ "$PNF" -ne 168 ] || ! diff -q "$WORK/souc_nf.txt" "$WORK/py_nf.txt" >/dev/null; then
+  echo "MISMATCH (non-Fano): souc=$SNF python=$PNF"; diff "$WORK/souc_nf.txt" "$WORK/py_nf.txt" | head -20; fail=1
+fi
+if [ "$fail" -eq 0 ]; then
+  echo "CROSS-VERIFIED: BOTH faces of the 168-theorem, element-wise, souc == Lean-spec Python oracle."
+  echo "  zero-divisor classes: $SZD/168 identical pairs"
+  echo "  non-Fano triples:     $SNF/168 identical triples"
+  echo "  Lean (native_decide-proven): validPrims=84, ordered=336, unordered=168, nonFanoCount=168,"
+  echo "  and nonfano_zd_bridge proves the two 168s are equal (= |PSL(2,7)|)."
   exit 0
-else
-  echo "MISMATCH: souc and Python disagree on the 168-set. Diff (< souc, > python):"
-  diff "$WORK/souc.txt" "$WORK/py.txt" | head -40
-  exit 1
 fi
+exit 1

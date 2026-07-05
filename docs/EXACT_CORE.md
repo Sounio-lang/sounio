@@ -79,12 +79,21 @@ plain `Verdict` enum, which compiles and runs today.)
   (two independent toolchains); Lean's leg is its `native_decide`-proven **counts** (`prim_count_84`,
   `zd_pair_count_336`, `zd_projective_count_168`). A Lean-runtime third leg can be added by installing
   `elan`/`lean` and `#eval`-emitting `unorderedZDPairs`.
+- **The OTHER 168 executed AND cross-verified** — `tests/run-pass/octonion_nonfano_census_168.sio`
+  computes the **non-Fano (non-associative) octonion census** exactly (associator signs `α≠β` by
+  decidable integer inequality): `TRIPLES 343 / NONFANO 168 / FANO 175` (reproducing
+  `SounioCayleyDickson.lean`'s `non_fano_count_168` / `fano_count_175` / `partition_343`). The gate
+  also checks its 168 **specific triples** are element-wise identical to the oracle
+  (`non-Fano triples: 168/168 identical`). The Lean `nonfano_zd_bridge` theorem proves these two
+  168s are **equal** — so both faces of the 168-theorem (zero-divisors and non-associativity) are now
+  executed exactly by the running language and cross-toolchain-verified, both = |PSL(2,7)|.
 - **Boundary enforced** — `tests/run-pass/sedenion_verdict_boundary.sio`: `Proved` accepted,
   `MeasuredF64`/`MeasuredF256` rejected.
 
-This is the headline: **Sounio executes the Cayley–Dickson product and proves annihilation exactly at
-n=4** — the same 168 the Lean `SounioZeroDivisorBridge.lean` proves by `native_decide`, now computed
-by the running language.
+This is the headline: **Sounio executes the Cayley–Dickson product and proves — on BOTH faces of the
+168-theorem — annihilation (n=4 zero divisors) and non-associativity (n=3 non-Fano triples) exactly**,
+the same two 168s the Lean layer proves by `native_decide` and proves equal, now computed by the
+running language and element-wise cross-verified against an independent toolchain.
 
 ## Honest caveats (souc v0.80.0 environment, not defects of this work)
 

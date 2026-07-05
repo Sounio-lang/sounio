@@ -66,6 +66,25 @@ def compute():
     unordered = [(u, v) for (u, v) in ordered if primLt(u, v)]
     return validPrims, ordered, unordered
 
+# ---- The OTHER 168: non-Fano (non-associative) octonion triples ----
+# SounioCayleyDickson.lean: octSigma = cdSigma(.,.,3); alphaSign = σ(i,j)·σ(i⊕j,k);
+# betaSign = σ(j,k)·σ(i,j⊕k); non-Fano iff alpha != beta over {1..7}^3. Proven = 168.
+def octSigma(a, b):
+    return cdSigma(a, b, 3)
+
+def alphaSign(i, j, k):
+    return octSigma(i, j) * octSigma(i ^ j, k)
+
+def betaSign(i, j, k):
+    return octSigma(j, k) * octSigma(i, j ^ k)
+
+def isFano(i, j, k):
+    return alphaSign(i, j, k) == betaSign(i, j, k)
+
+def nonfano_triples():
+    return [(i, j, k) for i in range(1, 8) for j in range(1, 8) for k in range(1, 8)
+            if not isFano(i, j, k)]
+
 def pair_key(pair):
     (ulo, uhi, uneg), (vlo, vhi, vneg) = pair
     return (ulo, uhi, int(uneg), vlo, vhi, int(vneg))
@@ -77,7 +96,13 @@ if __name__ == "__main__":
     print(f"COUNT unordered {len(unordered)}")
     for p in sorted(pair_key(p) for p in unordered):
         print("PAIR " + " ".join(str(x) for x in p))
+    # The OTHER 168: non-Fano octonion triples (the bridge equates the two 168s).
+    nf = nonfano_triples()
+    print(f"COUNT nonfano {len(nf)}")
+    for t in sorted(nf):
+        print("TRIPLE " + " ".join(str(x) for x in t))
     # self-check against the Lean-proven counts
-    ok = (len(validPrims) == 84 and len(ordered) == 336 and len(unordered) == 168)
-    print("ORACLE " + ("OK 84/336/168" if ok else "MISMATCH"))
+    ok = (len(validPrims) == 84 and len(ordered) == 336 and len(unordered) == 168
+          and len(nf) == 168)
+    print("ORACLE " + ("OK zd=84/336/168 nonfano=168" if ok else "MISMATCH"))
     sys.exit(0 if ok else 1)
