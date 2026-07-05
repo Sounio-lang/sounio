@@ -142,6 +142,17 @@ programs needing input feed it through the C-plane (constants) or
 host-prepared memory as part of the harness; interactive I/O is a
 format-version decision deferred past E5, not an implementation detail.
 
+**Zero-sign caveat (E3 review finding, xai 2026-07-05):** the sign of a
+floating-point zero is *not* part of the v0 observable surface. The
+receipt decomposition maps both `+0.0` and `-0.0` to `s0e0m0`, and the
+E3 backend's move synthesis (`eadd(x, Z)` with an exact-zero register —
+v0 has no move opcode) canonicalises `-0.0` to `+0.0` per IEEE addition.
+A program that routes a computed `-0.0` through a move and then divides
+by it can observe the flip (`1/x` changes infinity sign); such programs
+are outside the v0 conformance corpus, and a dedicated `emov` opcode
+(reserved space 9..15) is the v1 fix if zero-sign ever becomes
+scientifically load-bearing. Recorded rather than silently ignored.
+
 ### 3.2 Validation rules (loader MUST enforce, malformed = refuse to run)
 
 - magic and version match; counts non-negative and consistent with the
