@@ -20,6 +20,7 @@ F64_XMM0_RECEIPT_DIR="$OUT_DIR/f64_xmm0_receipt"
 WIDE_INT_RECEIPT_DIR="$OUT_DIR/wide_int_receipt"
 GENERIC_AGG_RECEIPT_DIR="$OUT_DIR/generic_aggregate_sret_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
+DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
 SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_sret_abi_receipt.py"
 SOURCE_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_source_sret_receipt.py"
@@ -30,7 +31,9 @@ F64_XMM0_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f64_xmm0_receipt.py
 WIDE_INT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_wide_int_receipt.py"
 GENERIC_AGG_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_generic_aggregate_sret_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
+DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
+REFERENCE_SOUC="${SOUNIO_MADAROS_V2_S5_REFERENCE_SOUC:-${ROOT_DIR}/bin/souc}"
 MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
 RECEIPT="$OUT_DIR/madaros_v2_s5_program_mir_abi.receipt.json"
@@ -44,8 +47,9 @@ F64_XMM0_RECEIPT="$F64_XMM0_RECEIPT_DIR/madaros_v2_s5_f64_xmm0.receipt.json"
 WIDE_INT_RECEIPT="$WIDE_INT_RECEIPT_DIR/madaros_v2_s5_wide_int.receipt.json"
 GENERIC_AGG_RECEIPT="$GENERIC_AGG_RECEIPT_DIR/madaros_v2_s5_generic_aggregate_sret.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
+DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -170,7 +174,17 @@ if [[ ! -f "$DIAGNOSTICS_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$DIFFERENTIAL_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --reference-souc "$REFERENCE_SOUC" \
+  --out-dir "$DIFFERENTIAL_RECEIPT_DIR"
+
+if [[ ! -f "$DIFFERENTIAL_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing differential receipt: $DIFFERENTIAL_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -223,8 +237,9 @@ f64_xmm0_receipt_path = Path(sys.argv[8])
 wide_int_receipt_path = Path(sys.argv[9])
 generic_agg_receipt_path = Path(sys.argv[10])
 diagnostics_receipt_path = Path(sys.argv[11])
-module_path = Path(sys.argv[12])
-receipt_path = Path(sys.argv[13])
+differential_receipt_path = Path(sys.argv[12])
+module_path = Path(sys.argv[13])
+receipt_path = Path(sys.argv[14])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -239,6 +254,7 @@ f64_xmm0_receipt = load_json(f64_xmm0_receipt_path)
 wide_int_receipt = load_json(wide_int_receipt_path)
 generic_agg_receipt = load_json(generic_agg_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
+differential_receipt = load_json(differential_receipt_path)
 
 if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
     raise SystemExit("bad S5 SRET ABI receipt schema")
@@ -707,6 +723,112 @@ for case_id, expected in required_diagnostic_positive.items():
     if not row.get("machine_module_json_sha256") or not row.get("elf_sha256"):
         raise SystemExit(f"{case_id} missing MachineModule or ELF hashes")
 
+if differential_receipt.get("schema") != "madaros.v2.s5.differential_receipt/0.1":
+    raise SystemExit("bad S5 differential receipt schema")
+if differential_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing differential receipt")
+if differential_receipt.get("stage_contract_level") != "S5_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_PROMOTED_NOT_F128":
+    raise SystemExit("differential receipt must declare promoted native-v2/lean_single stage contract")
+if differential_receipt.get("case_count") != 33:
+    raise SystemExit("differential receipt must contain exact 33 cases")
+if differential_receipt.get("matched_case_count") != 31:
+    raise SystemExit("differential receipt must contain exact 31 matched comparable cases")
+if differential_receipt.get("reference_unavailable_case_count") != 2:
+    raise SystemExit("differential receipt must contain exact two reference-unavailable cases")
+required_differential_flags = [
+    "native_v2_vs_lean_single_differential_complete",
+    "s5_differential_native_v2_lean_single_complete",
+    "differential_native_v2_vs_lean_single_promoted",
+    "all_reference_available_cases_match_exit_and_stdout",
+    "all_native_v2_cases_compile_without_legacy_fallback",
+    "all_native_v2_cases_return_expected_exit",
+    "all_lean_single_cases_return_expected_exit",
+    "known_reference_unavailable_cases_recorded",
+]
+for field in required_differential_flags:
+    if differential_receipt.get(field) is not True:
+        raise SystemExit(f"differential receipt missing required true flag: {field}")
+for field in ["f128_promoted", "s5_ready", "s5_implemented", "s5_full_complete"]:
+    if differential_receipt.get(field) is not False:
+        raise SystemExit(f"differential receipt must not overclaim {field}")
+required_differential_categories = {
+    "scalar_i64",
+    "scalar_bool",
+    "normal_call_stack_args",
+    "source_sret_local",
+    "imported_sret_module_boundary",
+    "method_sret",
+    "f64_xmm0",
+    "wide_int_source",
+    "generic_aggregate_sret",
+}
+if set(differential_receipt.get("categories_compared", [])) != required_differential_categories:
+    raise SystemExit("differential receipt categories mismatch")
+differential_cases = {row.get("case_id"): row for row in differential_receipt.get("cases", [])}
+required_unavailable = {
+    "f64_println_call_stdout_4_5",
+    "f64_let_bound_println_stdout_4_5",
+}
+if {case_id for case_id, row in differential_cases.items() if row.get("status") == "reference_unavailable"} != required_unavailable:
+    raise SystemExit("differential receipt reference-unavailable cases mismatch")
+required_scalar_differential_cases = {
+    "scalar_i64_literal_return_42",
+    "scalar_i64_direct_call_return_42",
+    "scalar_bool_direct_call_return_1",
+}
+required_wide_source_differential_cases = {
+    "source_i128_mul_gt",
+    "source_i256_mul_gt",
+    "source_u128_mul_add_gt",
+    "source_u256_mul_add_ne",
+    "source_i128_sub_eq_zero",
+    "source_i256_add_eq",
+}
+required_matched_cases = (
+    required_scalar_differential_cases
+    | {"normal_call_stack_one_arg_return_28", "normal_call_stack_two_arg_return_36"}
+    | {
+        "source_sret_local_i64_triple_return_14",
+        "source_sret_local_register_multi_arg_return_43",
+        "source_sret_local_stack_one_arg_return_49",
+        "source_sret_local_stack_two_arg_return_57",
+    }
+    | {
+        "imported_sret_one_arg_return_29",
+        "imported_sret_register_multi_arg_return_43",
+        "imported_sret_stack_two_arg_return_57",
+    }
+    | {
+        "method_sret_receiver_only_return_24",
+        "method_sret_receiver_register_args_return_43",
+        "method_sret_receiver_stack_args_return_57",
+    }
+    | {
+        "f64_cast_literal_to_i64_return_4",
+        "f64_fractional_binop_cast_return_50",
+        "f64_return_compare_exit_45",
+        "f64_mixed_args_return_compare_exit_55",
+        "f64_print_call_stdout_4_5",
+    }
+    | required_wide_source_differential_cases
+    | set(required_generic_cases)
+) - required_unavailable
+if {case_id for case_id, row in differential_cases.items() if row.get("status") == "matched"} != required_matched_cases:
+    raise SystemExit("differential receipt matched case set mismatch")
+for case_id, row in differential_cases.items():
+    if row.get("machine_module_legacy_fallback") is not False:
+        raise SystemExit(f"{case_id} differential case used legacy fallback")
+    if not row.get("machine_module_json_sha256") or not row.get("elf_sha256"):
+        raise SystemExit(f"{case_id} differential case missing MachineModule or ELF hash")
+    if row.get("native_v2_exit") != row.get("expected_exit"):
+        raise SystemExit(f"{case_id} differential native-v2 exit mismatch")
+    if row.get("lean_single_exit") != row.get("expected_exit"):
+        raise SystemExit(f"{case_id} differential lean_single exit mismatch")
+    if row.get("status") == "matched" and row.get("stdout_equal") is not True:
+        raise SystemExit(f"{case_id} matched differential case must have equal stdout")
+    if row.get("status") == "reference_unavailable" and row.get("stdout_equal") is not False:
+        raise SystemExit(f"{case_id} unavailable differential case must record stdout mismatch")
+
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
 if effect_receipt.get("status") != "pass":
@@ -1140,6 +1262,18 @@ module = {
         "positive_guard_case_count": diagnostics_receipt["positive_guard_case_count"],
         "cases": diagnostics_receipt["cases"],
     },
+    "differential_receipt": {
+        "schema": differential_receipt["schema"],
+        "path": f"{differential_receipt_path.parent.name}/{differential_receipt_path.name}",
+        "receipt_sha256": differential_receipt["receipt_sha256"],
+        "stage_contract_level": differential_receipt["stage_contract_level"],
+        "case_id": differential_receipt["case_id"],
+        "case_count": differential_receipt["case_count"],
+        "matched_case_count": differential_receipt["matched_case_count"],
+        "reference_unavailable_case_count": differential_receipt["reference_unavailable_case_count"],
+        "categories_compared": differential_receipt["categories_compared"],
+        "cases": differential_receipt["cases"],
+    },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
         "target": "x86_64-linux",
@@ -1161,6 +1295,7 @@ module = {
         "wide_u128_u256_promoted": True,
         "unsupported_numeric_diagnostics_promoted": True,
         "unsupported_numeric_widths_fail_closed": True,
+        "differential_native_v2_vs_lean_single_promoted": True,
         "f128_promoted": False,
     },
     "not_promoted_surfaces": not_promoted,
@@ -1184,10 +1319,11 @@ module = {
         "wide_int_i128_i256_receipt_recorded",
         "generic_aggregate_sret_layout_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
+        "differential_native_v2_vs_lean_single_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
-        "f128_execution_and_differential_surfaces_not_promoted",
+        "f128_execution_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
-        "full_abi_numeric_differential_gates_still_required_before_s5_ready",
+        "f128_numeric_tower_still_required_before_s5_ready",
     ],
 }
 canonical_module, module_sha = canonical_roundtrip(module)
@@ -1210,7 +1346,7 @@ receipt = {
     "s5_ready": False,
     "s5_implemented": False,
     "s5_full_complete": False,
-    "s_full_contract": "blocked_until_full_abi_numeric_differential_gates_exist",
+    "s_full_contract": "blocked_until_f128_numeric_tower_exists",
     "program_mir_shadow_serialized": True,
     "compiler_machine_module_exported": True,
     "real_program_mir_emitted": True,
@@ -1225,6 +1361,7 @@ receipt = {
     "s5_f64_xmm0_call_return_complete": True,
     "s5_wide_int_i128_i256_complete": True,
     "s5_generic_aggregate_sret_layout_complete": True,
+    "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_stack_arg_aggregate_return_to_IrCallSret": True,
@@ -1251,6 +1388,7 @@ receipt = {
     "wide_type_identity_and_safety_promoted": True,
     "s5_diagnostics_unsupported_numeric_complete": True,
     "unsupported_numeric_widths_fail_closed": True,
+    "differential_native_v2_vs_lean_single_promoted": True,
     "unsupported_widths_do_not_emit_elf": True,
     "unsupported_widths_do_not_emit_machine_module_json": True,
     "unsupported_widths_do_not_segfault": True,
@@ -1268,6 +1406,7 @@ receipt = {
     "wide_int_receipt_sha256": wide_int_receipt["receipt_sha256"],
     "generic_aggregate_sret_receipt_sha256": generic_agg_receipt["receipt_sha256"],
     "diagnostics_receipt_sha256": diagnostics_receipt["receipt_sha256"],
+    "differential_receipt_sha256": differential_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
     "program_mir_abi_module_sha256": module_sha,
     "program_mir_abi_module_with_hash_sha256": module_with_hash_sha,
@@ -1294,6 +1433,10 @@ receipt = {
     "wide_u128_u256_promoted": module["scalar_abi_receipts"]["wide_u128_u256_promoted"],
     "unsupported_numeric_diagnostics_promoted": module["scalar_abi_receipts"]["unsupported_numeric_diagnostics_promoted"],
     "unsupported_numeric_widths_fail_closed": module["scalar_abi_receipts"]["unsupported_numeric_widths_fail_closed"],
+    "differential_compared_case_count": differential_receipt["matched_case_count"],
+    "differential_unavailable_case_count": differential_receipt["reference_unavailable_case_count"],
+    "differential_categories_compared": differential_receipt["categories_compared"],
+    "differential_native_v2_vs_lean_single_promoted": module["scalar_abi_receipts"]["differential_native_v2_vs_lean_single_promoted"],
     "f128_promoted": module["scalar_abi_receipts"]["f128_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
     "negative_and_blocked_controls": [
@@ -1302,7 +1445,6 @@ receipt = {
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
         "f128 numeric tower width receipts",
-        "differential native-v2 vs interpreter/lean_single validation where available",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -1315,5 +1457,6 @@ PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + generic aggregate compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: unsupported f128/i512/u512 native-v2 numeric widths fail closed without ELF, MachineModule JSON, segfault, or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 remains the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"
