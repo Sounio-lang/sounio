@@ -282,6 +282,19 @@ var CALL_ARG_BORROW_VI:   [i64; 32] = [-1; 32]  // var index borrowed in current
 var CALL_ARG_BORROW_EXCL: [i64; 32] = [0; 32]   // 1=exclusive, 0=shared
 var CALL_ARG_BORROW_N:    i64 = 0               // count of borrows recorded this call
 var IN_CALL_ARGS:         i64 = 0               // 1 when compiling a call arg list
+
+// ─── General place (lvalue) resolver state ───
+// Set by compile_place_lvalue_x86: the final projection's category decides how
+// consumers store into / borrow the place.
+var PLACE_TY:       i64 = 0   // type of the final projected element/field
+var PLACE_TY_HASH:  i64 = 0
+var PLACE_KIND:     i64 = 0   // 0 = scalar 8-byte cell addr; 1 = byte cell addr;
+                              // 2 = aggregate ARRAY SLOT cell addr (store: materialize
+                              //     + write ptr; borrow: load cell -> elem ptr);
+                              // 3 = aggregate inline storage addr (store: copy_agg;
+                              //     borrow: the addr itself)
+var PLACE_ARR_HASH: i64 = 0   // for kind 2: the array type hash (materialize key)
+var PLACE_OK:       i64 = 0   // 1 = resolution succeeded
 // Per local variable: use count (for linear/affine checking)
 var VAR_USED: [i64; 2048] = [0; 2048]
 // Compile-time literal tracking for refinement predicate checks
@@ -4533,7 +4546,10 @@ fn stmt_is_deref_field_field_store(p0: i64) -> bool with Panic, Mut {
 }
 
 // (*name).field.field[idx] = expr  — two-level nested ARRAY-field store.
-// Tokens: ( * name ) . field . field [ … ] =  →  6 19 3 7 50 3 50 3 41 …
+// Tokens: ( * name ) . field . field [ … ] =  →  6 19 3 7 50 3 50 3 41 … 42 16
+// Must verify the `=` AFTER the balanced bracket: without that this detector
+// also (wrongly) claimed `(*p).f1.f2[i].g = v`, whose handler then choked on
+// `.g` — the general place-assign fallback handles that shape instead.
 fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }
     if TK[(p0 + 1) as usize] != 19 { return false }
@@ -4543,7 +4559,15 @@ fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 5) as usize] != 3 { return false }
     if TK[(p0 + 6) as usize] != 50 { return false }
     if TK[(p0 + 7) as usize] != 3 { return false }
-    return TK[(p0 + 8) as usize] == 41
+    if TK[(p0 + 8) as usize] != 41 { return false }
+    var p = p0 + 9
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
 }
 
 // (*name).field[idx] = expr  — explicit-deref store into a struct's ARRAY field.
@@ -9463,33 +9487,277 @@ fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
 // copy — callee mutations were silently dropped and reads decoded slot
 // pointers as data (see tests/known_failures/lean_borrow_*.sio and the
 // ir_patch_validated_calls &!(*module).functions[i] crash family).
+// ─── General place (lvalue) projection engine ───
+// Entry: rax = base address of the current storage (struct base / array data
+// base), (cur_ty, cur_hash) its type, EP at the first projection token
+// ('.' = 50 or '[' = 41). Walks an ARBITRARY projection chain, emitting
+// address computation, and finishes with rax = the final place per
+// PLACE_KIND (see the PLACE_* globals). Representation rules (mirroring the
+// battle-tested read path in compile_postfix_tail):
+//   - struct fields are flat 8-byte cells at base+off; nested struct and
+//     fixed-array fields are INLINE (their storage base IS base+off);
+//   - box/ref cells hold a pointer: entering them loads once;
+//   - arrays of aggregates hold one 8-byte heap pointer per slot
+//     (materialize_aggregate_array_element_*); scalar arrays are inline.
+fn compile_place_projections_x86(start_ty: i64, start_hash: i64) with IO, Mut, Panic, Div {
+    PLACE_OK = 0
+    var cur_ty = start_ty
+    var cur_hash = start_hash
+    var kind: i64 = 0 - 1
+    var arrh: i64 = 0
+    while true {
+        if TK[EP as usize] == 50 {
+            EP = EP + 1
+            let f_tok = EP
+            let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+            EP = EP + 1
+            let si = st_find(cur_hash)
+            if si < 0 {
+                tc_error(f_tok, "field access requires struct base")
+                return
+            }
+            if st_private_access_denied(si, f_tok) {
+                tc_error_hard(f_tok, "private struct field access")
+                return
+            }
+            ST_QUERY_NS = TS[f_tok as usize]
+            ST_QUERY_NE = TE[f_tok as usize]
+            let off = st_field_offset(si, fh)
+            let fty = st_field_ty(si, fh)
+            let fhash = st_field_hash(si, fh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if off < 0 {
+                tc_error(f_tok, "unknown field access")
+                return
+            }
+            if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+            cur_ty = fty
+            cur_hash = fhash
+            if TK[EP as usize] == 50 || TK[EP as usize] == 41 {
+                // more projections follow: enter pointer-like cells
+                if cur_ty == 11 && box_hash_is(cur_hash) {
+                    em(0x48); em(0x8b); em(0x00)
+                    cur_ty = ptr_hash_inner_ty(cur_hash)
+                    cur_hash = ptr_hash_inner_hash(cur_hash)
+                } else if cur_ty == 10 {
+                    em(0x48); em(0x8b); em(0x00)
+                    cur_ty = ref_hash_inner_ty(cur_hash)
+                    cur_hash = ref_hash_inner_hash(cur_hash)
+                }
+                continue
+            }
+            // final projection = field
+            if type_is_aggregate(cur_ty, cur_hash) { kind = 3 } else { kind = 0 }
+            break
+        }
+        if TK[EP as usize] == 41 {
+            if cur_ty != 8 {
+                tc_error(EP, "indexing requires a fixed-array place")
+                return
+            }
+            let sp = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(sp)
+            EP = EP + 1
+            compile_or()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            let sidx = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(sidx)
+            let el_ty = arr_hash_elem_ty(cur_hash)
+            let el_hash = arr_hash_elem_hash(cur_hash)
+            let esiz = arr_hash_esiz(cur_hash)
+            let more = if TK[EP as usize] == 50 || TK[EP as usize] == 41 { 1 } else { 0 }
+            emit_load_var(sidx)
+            em(0x48); em(0x89); em(0xc1)
+            let saved_arr_hash = cur_hash
+            emit_load_var(sp)
+            if more == 1 {
+                if type_is_aggregate(el_ty, el_hash) || el_ty == 8 {
+                    em(0x48); em(0x8b); em(0x04); em(0xc8)
+                    cur_ty = el_ty
+                    cur_hash = el_hash
+                    continue
+                }
+                tc_error(EP, "projection through scalar array element")
+                return
+            }
+            // final projection = [idx]
+            if type_is_aggregate(el_ty, el_hash) || el_ty == 8 {
+                em(0x48); em(0x8d); em(0x04); em(0xc8)
+                kind = 2
+                arrh = saved_arr_hash
+            } else if esiz == 8 {
+                em(0x48); em(0x8d); em(0x04); em(0xc8)
+                kind = 0
+            } else {
+                em(0x48); em(0x8d); em(0x04); em(0x08)
+                kind = 1
+            }
+            cur_ty = el_ty
+            cur_hash = el_hash
+            break
+        }
+        tc_error(EP, "unsupported place projection")
+        return
+    }
+    PLACE_TY = cur_ty
+    PLACE_TY_HASH = cur_hash
+    PLACE_KIND = kind
+    PLACE_ARR_HASH = arrh
+    PLACE_OK = 1
+}
+
+// Borrow epilogue over a resolved place: scalar/byte/inline-aggregate places
+// borrow their address; aggregate array slots borrow the LOADED element
+// pointer. Kept as the tail entry the borrow branches call with rax = array
+// base and EP at '[' — now generalized to arbitrary continuations
+// ([i].field, [i].arr2[j], ...) via the shared projection engine.
 fn compile_borrow_array_elem_tail_x86(arr_hash: i64, want_mut: i64) with IO, Mut, Panic, Div {
-    let ab_ps = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + 1
-    emit_store_var(ab_ps)
-    EP = EP + 1
-    compile_or()
-    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
-    if TK[EP as usize] == 42 { EP = EP + 1 }
-    let ab_is = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + 1
-    emit_store_var(ab_is)
-    let el_ty = arr_hash_elem_ty(arr_hash)
-    let el_hash = arr_hash_elem_hash(arr_hash)
-    let esiz = arr_hash_esiz(arr_hash)
-    emit_load_var(ab_is)
-    em(0x48); em(0x89); em(0xc1)
-    emit_load_var(ab_ps)
-    if type_is_aggregate(el_ty, el_hash) {
-        em(0x48); em(0x8b); em(0x04); em(0xc8)
-    } else {
-        if esiz == 8 { em(0x48); em(0x8d); em(0x04); em(0xc8) }
-        else { em(0x48); em(0x8d); em(0x04); em(0x08) }
+    compile_place_projections_x86(8, arr_hash)
+    if PLACE_OK == 0 {
+        EXPR_IS_F64 = 0
+        EXPR_TY = 10
+        EXPR_TY_HASH = ref_hash_make(0, 0, want_mut)
+        return
+    }
+    if PLACE_KIND == 2 {
+        em(0x48); em(0x8b); em(0x00)
     }
     EXPR_IS_F64 = 0
     EXPR_TY = 10
-    if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(el_ty, el_hash, 1) }
-    else { EXPR_TY_HASH = ref_hash_make(el_ty, el_hash, 0) }
+    if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(PLACE_TY, PLACE_TY_HASH, 1) }
+    else { EXPR_TY_HASH = ref_hash_make(PLACE_TY, PLACE_TY_HASH, 0) }
+}
+
+// ─── General place-assign fallback ───
+// Token scanner (no emission): root = name | (*name), then one-or-more
+// projections (.field | [balanced idx]), ending in '='. Catches every lvalue
+// assignment shape the specific stmt_is_* handlers do not — those keep
+// priority; anything reaching this either compiles correctly through the
+// projection engine or fails LOUDLY (tc_error), never silently.
+fn stmt_scan_place_assign(p0: i64) -> bool with Panic, Mut {
+    var p = p0
+    if TK[p as usize] == 6 {
+        if TK[(p + 1) as usize] != 19 { return false }
+        if TK[(p + 2) as usize] != 3 { return false }
+        if TK[(p + 3) as usize] != 7 { return false }
+        p = p + 4
+    } else if TK[p as usize] == 3 {
+        p = p + 1
+    } else {
+        return false
+    }
+    var seen: i64 = 0
+    while true {
+        if TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
+            p = p + 2
+            seen = 1
+            continue
+        }
+        if TK[p as usize] == 41 {
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            seen = 1
+            continue
+        }
+        break
+    }
+    if seen == 0 { return false }
+    return TK[p as usize] == 16
+}
+
+fn compile_place_assign_general_x86() with IO, Mut, Panic, Div {
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    var cur_ty: i64 = 0
+    var cur_hash: i64 = 0
+    if TK[EP as usize] == 6 {
+        let ptr_tok = EP + 2
+        let pns = TS[ptr_tok as usize]
+        let pne = TE[ptr_tok as usize]
+        EP = EP + 4
+        let pvi = var_find_idx(pns, pne)
+        if pvi < 0 {
+            tc_undefined_var(ptr_tok)
+            return
+        }
+        emit_load_var(VAR_SLOT[pvi as usize])
+        cur_ty = VAR_TY[pvi as usize]
+        cur_hash = VAR_TY_HASH[pvi as usize]
+        if type_is_pointer_like(cur_ty, cur_hash) {
+            cur_ty = ptr_hash_inner_ty(cur_hash)
+            cur_hash = ptr_hash_inner_hash(cur_hash)
+        }
+    } else {
+        let name_tok = EP
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 1
+        let vi = var_find_idx(ns, ne)
+        if vi >= 0 {
+            emit_load_var(VAR_SLOT[vi as usize])
+            cur_ty = VAR_TY[vi as usize]
+            cur_hash = VAR_TY_HASH[vi as usize]
+            if type_is_pointer_like(cur_ty, cur_hash) {
+                cur_ty = ptr_hash_inner_ty(cur_hash)
+                cur_hash = ptr_hash_inner_hash(cur_hash)
+            }
+        } else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+                em(0x48); em(0xb8); em64(addr)
+                cur_ty = GL_TY[gi as usize]
+                cur_hash = GL_TY_HASH[gi as usize]
+            } else {
+                tc_undefined_var(name_tok)
+                return
+            }
+        }
+    }
+    compile_place_projections_x86(cur_ty, cur_hash)
+    if PLACE_OK == 0 {
+        return
+    }
+    let pa = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(pa)
+    let want_ty = PLACE_TY
+    let want_hash = PLACE_TY_HASH
+    let kind = PLACE_KIND
+    let arrh = PLACE_ARR_HASH
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    compile_or()
+    if ty_eq(want_ty, want_hash, EXPR_TY, EXPR_TY_HASH) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    if kind == 2 {
+        materialize_aggregate_array_element_x86(arrh)
+        em(0x48); em(0x89); em(0xc2)
+        emit_load_var(pa)
+        em(0x48); em(0x89); em(0x10)
+    } else if kind == 3 {
+        em(0x48); em(0x89); em(0xc2)
+        emit_load_var(pa)
+        emit_copy_agg_to_ptr_x86(want_ty, want_hash)
+    } else if kind == 1 {
+        em(0x48); em(0x89); em(0xc2)
+        emit_load_var(pa)
+        em(0x88); em(0x10)
+    } else {
+        em(0x48); em(0x89); em(0xc2)
+        emit_load_var(pa)
+        em(0x48); em(0x89); em(0x10)
+    }
 }
 
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
@@ -22995,6 +23263,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Matches `Typing.tMatch` conclusion `Sc.union (chsetUnionFin Ss)`.
             EXPR_CH_SET = match_scrut_ch_set | match_arms_ch_union
         }
+        return
+    }
+
+    // General place-assign fallback: any lvalue chain the specific handlers
+    // above did not claim. Compiles correctly through the projection engine
+    // or errors loudly — silent store drops are impossible by construction.
+    if stmt_scan_place_assign(EP) {
+        compile_place_assign_general_x86()
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
         return
     }
 
