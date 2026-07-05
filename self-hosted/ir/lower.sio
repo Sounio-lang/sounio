@@ -804,6 +804,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                     }
                                 }
                                 entry.field_count = fc
+                                lower_extern_struct_layout_record(entry.type_name, fc)
                                 (*sl_box).entries[pre_count as usize] = entry
                                 (*sl_box).count = pre_count + 1
                                 (*lo).struct_layouts = sl_box
@@ -2236,7 +2237,11 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_NAMES: [Name; 8192] = [ir_empty_name(); 8192]
+var LOWER_EXTERN_FN_RET_FIELD_COUNTS: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
+var LOWER_EXTERN_STRUCT_LAYOUT_HASHES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_STRUCT_LAYOUT_COUNT: i64 = 0
 
 fn lower_name_hash(n: Name) -> i64 with Panic, Div {
     var h: i64 = n.len & 1023
@@ -2250,14 +2255,37 @@ fn lower_name_hash(n: Name) -> i64 with Panic, Div {
 
 fn lower_extern_fn_ret_reset() with Mut, Panic {
     LOWER_EXTERN_FN_RET_COUNT = 0
+    LOWER_EXTERN_STRUCT_LAYOUT_COUNT = 0
 }
 
-fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name) with Mut, Panic, Div {
+fn lower_extern_struct_layout_record(type_name: Name, field_count: i64) with Mut, Panic, Div {
+    let idx = LOWER_EXTERN_STRUCT_LAYOUT_COUNT
+    if idx >= 0 && idx < 8192 {
+        LOWER_EXTERN_STRUCT_LAYOUT_HASHES[idx as usize] = lower_name_hash(type_name)
+        LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS[idx as usize] = field_count
+        LOWER_EXTERN_STRUCT_LAYOUT_COUNT = idx + 1
+    }
+}
+
+fn lower_extern_struct_layout_count_lookup(type_name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(type_name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_STRUCT_LAYOUT_COUNT && i < 8192 {
+        if LOWER_EXTERN_STRUCT_LAYOUT_HASHES[i as usize] == h {
+            return LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name, ret_field_count: i64) with Mut, Panic, Div {
     let idx = LOWER_EXTERN_FN_RET_COUNT
     if idx >= 0 && idx < 8192 {
         LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
         LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
         LOWER_EXTERN_FN_RET_NAMES[idx as usize] = ret_name
+        LOWER_EXTERN_FN_RET_FIELD_COUNTS[idx as usize] = ret_field_count
         LOWER_EXTERN_FN_RET_COUNT = idx + 1
     }
 }
@@ -2284,6 +2312,18 @@ fn lower_extern_fn_ret_name_lookup(name: Name) -> Name with Mut, Panic, Div {
         i = i + 1
     }
     ir_empty_name()
+}
+
+fn lower_extern_fn_ret_field_count_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 // Return-type code (1=int, 2=f64, 0=other) for an ExprCall whose callee is an imported function,
@@ -2324,12 +2364,65 @@ fn lower_extern_fn_ret_name_for_call(e: &Expr) -> Name with Mut, Panic, Div {
     }
 }
 
+fn lower_extern_fn_ret_field_count_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_field_count_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
 fn lower_return_name_is_aggregate(n: Name) -> bool with Panic, Div {
     if n.len <= 0 { return false }
     if lower_name_is_int_scalar(n) { return false }
     if n.len == 3 && n.buf[0] as i64 == 102 && n.buf[1] as i64 == 54 && n.buf[2] as i64 == 52 { return false } // f64
     if n.len == 4 && n.buf[0] as i64 == 98 && n.buf[1] as i64 == 111 && n.buf[2] as i64 == 111 && n.buf[3] as i64 == 108 { return false } // bool
     true
+}
+
+fn lower_field_def_count_ref(fields: &Option<Box<FieldDefList>>) -> i64 with Mut, Panic, Div, Alloc {
+    var count: i64 = 0
+    var current = fields
+    while true {
+        match *current {
+            Some(list) => {
+                count = count + 1
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    count
+}
+
+fn lower_struct_field_count_in_items(items: &Option<Box<ItemList>>, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head_owned = (*list).head
+                if head_owned.kind == ItemKind::ItemStruct && ir_name_eq(head_owned.name, type_name) {
+                    match head_owned.struct_def {
+                        Some(sd) => { return lower_field_def_count_ref(&(*sd).fields) }
+                        _ => { return 0 }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => { return 0 }
+        }
+    }
+    0
 }
 
 // Walk a sibling module's items and record each function's return-type code into the side table.
@@ -2350,7 +2443,8 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                                 code = 1
                             }
                             if code != 0 || lower_return_name_is_aggregate(ret_name) {
-                                lower_extern_fn_ret_record(head_owned.name, code, ret_name)
+                                let ret_field_count = if lower_return_name_is_aggregate(ret_name) { lower_struct_field_count_in_items(items, ret_name) } else { 0 }
+                                lower_extern_fn_ret_record(head_owned.name, code, ret_name, ret_field_count)
                             }
                         }
                         _ => {}
@@ -2924,6 +3018,21 @@ impl Lowerer {
     fn aggregate_storage_bytes(self, elem_count: i64) -> i64 {
         let _lo = self
         if elem_count <= 0 { 8 } else { elem_count * 8 }
+    }
+
+    fn aggregate_storage_bytes_for_type(self, type_name: Name) -> i64 {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                return self.aggregate_storage_bytes((*self.struct_layouts).entries[si as usize].field_count)
+            }
+            si = si + 1
+        }
+        let extern_field_count = lower_extern_struct_layout_count_lookup(type_name)
+        if extern_field_count > 0 {
+            return self.aggregate_storage_bytes(extern_field_count)
+        }
+        64
     }
 
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
@@ -7903,7 +8012,9 @@ impl Lowerer {
                 ret_name_sret = lower_extern_fn_ret_name_for_call(e)
             }
             if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
-                var lo_sret = lo4.emit(ir_alloc(dst, 64))
+                let ext_ret_field_count_sret = lower_extern_fn_ret_field_count_for_call(e)
+                let sret_alloc_bytes = if ext_ret_field_count_sret > 0 { lo4.aggregate_storage_bytes(ext_ret_field_count_sret) } else { lo4.aggregate_storage_bytes_for_type(ret_name_sret) }
+                var lo_sret = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
                 lo_sret = lo_sret.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
                 return (lo_sret, dst)
             }
@@ -8275,7 +8386,7 @@ impl Lowerer {
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
             if lower_return_name_is_aggregate(ret_name_m) && final_argc <= 8 {
-                var lo_sret_m = lo5.emit(ir_alloc(dst, 64))
+                var lo_sret_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
                 lo_sret_m = lo_sret_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
                 return (lo_sret_m, dst)
             }
