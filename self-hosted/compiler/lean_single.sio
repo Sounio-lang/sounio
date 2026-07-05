@@ -209,6 +209,20 @@ var TUP_CACHE_FIRST_HASH: [i64; 16384] = [0; 16384]
 var TUP_CACHE_LAST_TY: [i64; 16384] = [0; 16384]
 var TUP_CACHE_LAST_HASH: [i64; 16384] = [0; 16384]
 var TUP_CACHE_COUNT: i64 = 0
+// Full per-element type cache for N-ary (N>2) tuples: row idx holds up to 16
+// elements at [idx*16 .. idx*16+15]; TUP_CACHE_TCOUNT[idx] is the true element
+// count. FIRST/LAST above remain valid (element 0 / element tcount-1) for the
+// legacy 2-element decoders; this extension lets N-ary decoders address any
+// middle element instead of aliasing it onto the LAST bucket.
+var TUP_CACHE_ELEM_TY: [i64; 262144] = [0; 262144]
+var TUP_CACHE_ELEM_HASH: [i64; 262144] = [0; 262144]
+var TUP_CACHE_TCOUNT: [i64; 16384] = [0; 16384]
+// Scratch channel: populate before calling tup_cache_register() to also store
+// the full element array (see tup_cache_store_elems). Left at COUNT=0 by
+// 2-element-only call sites, which keeps their behavior byte-identical.
+var TUP_SCRATCH_ELEM_TY: [i64; 16] = [0; 16]
+var TUP_SCRATCH_ELEM_HASH: [i64; 16] = [0; 16]
+var TUP_SCRATCH_COUNT: i64 = 0
 
 // Generic function second type-param (for fn f<T, U>)
 var GEN_FN_TP2_S: [i64; 64] = [0; 32]
@@ -706,20 +720,39 @@ fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Pani
     return true
 }
 
+fn tup_cache_store_elems(idx: i64) with Panic, Mut {
+    var k: i64 = 0
+    while k < TUP_SCRATCH_COUNT && k < 16 {
+        TUP_CACHE_ELEM_TY[(idx * 16 + k) as usize] = TUP_SCRATCH_ELEM_TY[k as usize]
+        TUP_CACHE_ELEM_HASH[(idx * 16 + k) as usize] = TUP_SCRATCH_ELEM_HASH[k as usize]
+        k = k + 1
+    }
+    TUP_CACHE_TCOUNT[idx as usize] = TUP_SCRATCH_COUNT
+}
+
 fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
-    if tup_hash == 0 { return }
+    if tup_hash == 0 { TUP_SCRATCH_COUNT = 0; return }
     var i: i64 = 0
     while i < TUP_CACHE_COUNT {
-        if TUP_CACHE_KEY[i as usize] == tup_hash { return }
+        if TUP_CACHE_KEY[i as usize] == tup_hash {
+            // Backfill full per-element data if this call has it and the existing
+            // entry doesn't yet (construction and type-annotation scans can each
+            // register the same shape; whichever comes with elements wins).
+            if TUP_SCRATCH_COUNT > TUP_CACHE_TCOUNT[i as usize] { tup_cache_store_elems(i) }
+            TUP_SCRATCH_COUNT = 0
+            return
+        }
         i = i + 1
     }
-    if TUP_CACHE_COUNT >= 16384 { return }
+    if TUP_CACHE_COUNT >= 16384 { TUP_SCRATCH_COUNT = 0; return }
     let idx = TUP_CACHE_COUNT
     TUP_CACHE_KEY[idx as usize] = tup_hash
     TUP_CACHE_FIRST_TY[idx as usize] = first_ty
     TUP_CACHE_FIRST_HASH[idx as usize] = first_hash
     TUP_CACHE_LAST_TY[idx as usize] = last_ty
     TUP_CACHE_LAST_HASH[idx as usize] = last_hash
+    if TUP_SCRATCH_COUNT > 0 { tup_cache_store_elems(idx) } else { TUP_CACHE_TCOUNT[idx as usize] = 2 }
+    TUP_SCRATCH_COUNT = 0
     TUP_CACHE_COUNT = TUP_CACHE_COUNT + 1
 }
 
@@ -765,9 +798,26 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 // two distinct >=1000-slot tuples (e.g. (Checker,i64) vs (Checker,bool)) can
 // collide and yield the wrong element type — which mis-types `.1` and breaks
 // type-checking. So `.1` routing/typing is left exactly on the legacy packed path.
+// Sum every element's slot count from the N-ary cache row (element 0..tcount-1).
+// Only meaningful when TUP_CACHE_TCOUNT[tci] > 0 (a full row was registered).
+fn tup_elem_slots_sum(tci: i64) -> i64 with Panic, Div, Mut {
+    var total: i64 = 0
+    var k: i64 = 0
+    let n = TUP_CACHE_TCOUNT[tci as usize]
+    while k < n && k < 16 {
+        total = total + ty_slot_count(TUP_CACHE_ELEM_TY[(tci * 16 + k) as usize], TUP_CACHE_ELEM_HASH[(tci * 16 + k) as usize])
+        k = k + 1
+    }
+    return total
+}
+
 fn tup_total_slots_true(tup_hash: i64) -> i64 with Panic, Div, Mut {
     let tci = tup_cache_lookup(tup_hash)
     if tci >= 0 {
+        if TUP_CACHE_TCOUNT[tci as usize] > 2 {
+            let es = tup_elem_slots_sum(tci)
+            if es > 0 { return es }
+        }
         let fs = ty_slot_count(TUP_CACHE_FIRST_TY[tci as usize], TUP_CACHE_FIRST_HASH[tci as usize])
         let ls = ty_slot_count(TUP_CACHE_LAST_TY[tci as usize], TUP_CACHE_LAST_HASH[tci as usize])
         if fs > 0 && ls > 0 { return fs + ls }
@@ -2233,17 +2283,31 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
 }
 
 fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64) with Mut, Panic, Div {
+    // dst_start is the struct's HIGH slot number for this field (element 0 /
+    // lowest address, matching the same "highest slot = lowest address =
+    // element 0" convention the struct-literal caller already uses when it
+    // computes dst_start). emit_copy_words_x10_x11_a64 walks upward in
+    // ADDRESS (i.e. DOWNWARD in slot number) for `words` iterations, so
+    // starting at dst_start already visits dst_start, dst_start-1, ...,
+    // dst_start-(words-1) in order — exactly the x86-64 twin's per-element
+    // `dst_start - i` addressing (copy_agg_into_struct_slots_x86). A prior
+    // version of this function pre-subtracted (words-1) from the starting
+    // slot here, which shifted the entire write into the wrong slot range —
+    // e.g. an 8-slot array field's copy landed 7 slots away from where
+    // every reader (field access, `.field[idx]`) expects it, corrupting
+    // whatever unrelated stack data happened to occupy the wrong range and,
+    // for large aggregates, segfaulting outright.
     if field_ty == 8 {
         let nslots = arr_storage_slots(field_hash)
         em32(0xAA0003EA)
-        emit_lea_var_a64(dst_start - (nslots - 1))
+        emit_lea_var_a64(dst_start)
         em32(0xAA0003EB)
         emit_copy_words_x10_x11_a64(nslots)
         return
     }
     if type_is_option_inline(field_ty, field_hash) {
         em32(0xAA0003EA)
-        emit_lea_var_a64(dst_start - 1)
+        emit_lea_var_a64(dst_start)
         em32(0xAA0003EB)
         emit_copy_words_x10_x11_a64(2)
         return
@@ -2252,7 +2316,7 @@ fn copy_agg_into_struct_slots_a64(dst_start: i64, field_ty: i64, field_hash: i64
         let nslots = struct_like_nslots(field_hash)
         if nslots > 0 {
             em32(0xAA0003EA)
-            emit_lea_var_a64(dst_start - (nslots - 1))
+            emit_lea_var_a64(dst_start)
             em32(0xAA0003EB)
             emit_copy_words_x10_x11_a64(nslots)
             return
@@ -5127,50 +5191,65 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p + 2
             return
         }
-        // Scan first element type (starts right after '(').
-        let first_elem_start = p + 1
-        scan_type(first_elem_start)
-        let first_ty = SCAN_TY
-        let first_hash = SCAN_TY_HASH
-        // Element-kind code packed into the (legacy "f64") hash digit: 1=f64, 2=bool,
-        // 0=other. Encoding bool as 2 makes (Big,bool) and (Big,i64) get DISTINCT
-        // tuple-hash keys (scalars both hash 0 otherwise → cache-key collision →
-        // mistyped `.1`). f64 decoders still test `== 1`, so they are unaffected.
-        var first_f64: i64 = 0
-        if first_ty == 2 { first_f64 = 1 } else if first_ty == 4 { first_f64 = 2 }
-        var first_nslots: i64 = ty_slot_count(first_ty, first_hash)
-        // Skip balanced parens, count elements, track last element start.
-        var td: i64 = 1
+        // Find every top-level element's start position first (pure token scan,
+        // no recursive scan_type yet — avoids disturbing TUP_SCRATCH mid-count).
+        var elem_starts: [i64; 16] = [0; 16]
         var tcount: i64 = 1
-        var last_elem_start: i64 = first_elem_start
-        p = p + 1
-        while p < TC && td > 0 {
-            if TK[p as usize] == 6 { td = td + 1 }
-            if TK[p as usize] == 7 { td = td - 1 }
-            if td == 1 && TK[p as usize] == 28 {
+        elem_starts[0] = p + 1
+        var td: i64 = 1
+        var q = p + 1
+        while q < TC && td > 0 {
+            if TK[q as usize] == 6 { td = td + 1 }
+            if TK[q as usize] == 7 { td = td - 1 }
+            if td == 1 && TK[q as usize] == 28 {
+                if tcount < 16 { elem_starts[tcount as usize] = q + 1 }
                 tcount = tcount + 1
-                last_elem_start = p + 1
             }
-            p = p + 1
+            q = q + 1
         }
-        // Scan last element type if distinct from first.
-        var last_f64: i64 = first_f64
-        var last_nslots: i64 = first_nslots
-        var last_ty: i64 = first_ty
-        var last_hash: i64 = first_hash
-        if last_elem_start != first_elem_start {
-            scan_type(last_elem_start)
-            last_ty = SCAN_TY
-            last_hash = SCAN_TY_HASH
-            if last_ty == 2 { last_f64 = 1 } else if last_ty == 4 { last_f64 = 2 } else { last_f64 = 0 }
-            last_nslots = ty_slot_count(last_ty, last_hash)
+        // Scan every element's type (capped at 16 — the widest tuple measured
+        // across the codebase is 8, see docs/audit dispatch for Bug G). first/last
+        // are element 0 / element (scan_count-1), kept for the legacy 2-element
+        // decoders; the full array goes to TUP_CACHE via the scratch channel so
+        // N-ary consumers (destructure, `.1`) can address any middle element.
+        var scan_count: i64 = tcount
+        if scan_count > 16 { scan_count = 16 }
+        var first_ty: i64 = 0
+        var first_hash: i64 = 0
+        var first_f64: i64 = 0
+        var first_nslots: i64 = 0
+        var last_ty: i64 = 0
+        var last_hash: i64 = 0
+        var last_f64: i64 = 0
+        var total_nslots: i64 = 0
+        var i: i64 = 0
+        while i < scan_count {
+            scan_type(elem_starts[i as usize])
+            let ety = SCAN_TY
+            let ehash = SCAN_TY_HASH
+            let eslots = ty_slot_count(ety, ehash)
+            // Element-kind code packed into the (legacy "f64") hash digit: 1=f64,
+            // 2=bool, 0=other. Encoding bool as 2 makes (Big,bool) and (Big,i64)
+            // get DISTINCT tuple-hash keys (scalars both hash 0 otherwise →
+            // cache-key collision → mistyped `.1`). f64 decoders still test
+            // `== 1`, so they are unaffected.
+            var ef64: i64 = 0
+            if ety == 2 { ef64 = 1 } else if ety == 4 { ef64 = 2 }
+            TUP_SCRATCH_ELEM_TY[i as usize] = ety
+            TUP_SCRATCH_ELEM_HASH[i as usize] = ehash
+            total_nslots = total_nslots + eslots
+            if i == 0 { first_ty = ety; first_hash = ehash; first_f64 = ef64; first_nslots = eslots }
+            if i == scan_count - 1 { last_ty = ety; last_hash = ehash; last_f64 = ef64 }
+            i = i + 1
         }
-        let total_nslots = first_nslots + last_nslots
+        TUP_SCRATCH_COUNT = scan_count
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
+        // total_nslots here is now the sum of EVERY element (not just first+last) —
+        // this is the field that sizes SRET buffers/return copies for 3+ tuples.
         SCAN_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
-        SCAN_TY_NEXT = p
+        SCAN_TY_NEXT = q
         return
     }
     if TK[p as usize] == 19 {
@@ -10548,62 +10627,88 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_or()
         if TK[EP as usize] == 28 {
-            // Tuple literal: (expr1, expr2, ...)
-            // First element already compiled (rax = value or pointer).
-            // Layout requirement: .0 at lowest address (highest slot), .1 above.
-            // Problem: we don't know total_slots until all elements are compiled.
-            // Strategy:
-            //   1. Save first element's rax to a temp slot.
-            //   2. Compile remaining elements (last element stays in rax).
-            //   3. Allocate tuple buffer now that total_slots is known.
-            //   4. Store last element to low slots (dst_start = tup_base + last_nslots - 1).
-            //   5. Restore first element rax; store to high slots (dst_start = tup_base + total - 1).
-            //   6. LEA = rbp - (tup_base + total - 1)*8 → pointer to first element.
-            let first_ty = EXPR_TY
-            let first_hash = EXPR_TY_HASH
-            let first_nslots = ty_slot_count(first_ty, first_hash)
-            // Save first element's rax before second-element compilation clobbers it
-            let first_save = NEXT_SLOT
+            // Tuple literal: (expr1, expr2, ..., exprN).
+            // Layout requirement: .0 at lowest address (highest slot), .1 above, etc.
+            // Problem: we don't know each element's slot count relative to the
+            // others (hence total_slots and every offset) until ALL elements are
+            // compiled. Strategy: save EVERY element's rax (a scalar value or an
+            // aggregate pointer — either way just one register-width word) to its
+            // own temp slot immediately after compiling it, so the next element's
+            // compile_or() never clobbers an earlier one. Once all N are known,
+            // allocate one buffer sized to the true sum of every element's slots
+            // and copy each into its correct cumulative offset.
+            // (A prior version only preserved the FIRST and LAST elements — any
+            // middle element's compiled value was silently overwritten by the
+            // next element's compile_or() before ever being stored anywhere, and
+            // the buffer was sized first+last only, dropping every middle
+            // element's slots too. Bug G / issue #601: this both mistyped and,
+            // for tuples of 3+ same-typed elements, silently duplicated values.)
+            var elem_ty: [i64; 16] = [0; 16]
+            var elem_hash: [i64; 16] = [0; 16]
+            var elem_nslots: [i64; 16] = [0; 16]
+            var elem_slot: [i64; 16] = [0; 16]
+            var n: i64 = 0
+            elem_ty[0] = EXPR_TY
+            elem_hash[0] = EXPR_TY_HASH
+            elem_nslots[0] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            elem_slot[0] = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var(first_save)
-            var tup_count: i64 = 1
-            // Compile remaining elements; track the last one's type info
-            var last_ty: i64 = 0
-            var last_hash: i64 = 0
-            var last_nslots: i64 = 0
+            emit_store_var(elem_slot[0])
+            n = 1
             while ep_before_body_close() && TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
                 compile_or()
-                last_ty = EXPR_TY
-                last_hash = EXPR_TY_HASH
-                last_nslots = ty_slot_count(last_ty, last_hash)
-                tup_count = tup_count + 1
+                if n >= 16 {
+                    tc_error_hard(EP, "tuple literal exceeds maximum of 16 elements")
+                    n = n + 1
+                } else {
+                    elem_ty[n as usize] = EXPR_TY
+                    elem_hash[n as usize] = EXPR_TY_HASH
+                    elem_nslots[n as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                    elem_slot[n as usize] = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(elem_slot[n as usize])
+                    n = n + 1
+                }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            // Allocate the tuple buffer (all sizes now known)
-            let total_slots = first_nslots + last_nslots
+            let tup_count = n
+            var real_n = n
+            if real_n > 16 { real_n = 16 }
+            // Allocate the tuple buffer sized to the sum of every element's slots.
+            var total_slots: i64 = 0
+            var i: i64 = 0
+            while i < real_n { total_slots = total_slots + elem_nslots[i as usize]; i = i + 1 }
             let tup_base = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + total_slots
-            // Store last element (rax) to low slots: dst_start = tup_base + last_nslots - 1
-            if last_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + last_nslots - 1, last_ty, last_hash)
-            } else {
-                emit_store_var(tup_base + last_nslots - 1)
+            // Element i sits at slot (tup_base + total_slots - 1 - prefix_sum(i)),
+            // where prefix_sum(i) = sum of elem_nslots[0..i-1] — element 0 at the
+            // highest slot number (lowest address, the pointer this expression
+            // returns), later elements at successively higher addresses.
+            var prefix: i64 = 0
+            i = 0
+            while i < real_n {
+                let dst_start = tup_base + total_slots - 1 - prefix
+                em(0x48); em(0x8b); em(0x85); em32(0 - elem_slot[i as usize] * 8)  // restore rax
+                if elem_nslots[i as usize] > 1 {
+                    copy_agg_into_struct_slots_x86(dst_start, elem_ty[i as usize], elem_hash[i as usize])
+                } else {
+                    emit_store_var(dst_start)
+                }
+                prefix = prefix + elem_nslots[i as usize]
+                i = i + 1
             }
-            // Restore first element's rax from temp slot
-            em(0x48); em(0x8b); em(0x85); em32(0 - first_save * 8)
-            // Store first element to high slots: dst_start = tup_base + total_slots - 1
-            if first_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + total_slots - 1, first_ty, first_hash)
-            } else {
-                emit_store_var(tup_base + total_slots - 1)
-            }
-            // Return pointer to first element (lowest address = highest slot)
+            // Return pointer to element 0 (lowest address).
             em(0x48); em(0x8d); em(0x85)
             em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
+            let first_ty = elem_ty[0]
+            let first_hash = elem_hash[0]
+            let first_nslots = elem_nslots[0]
+            let last_ty = elem_ty[(real_n - 1) as usize]
+            let last_hash = elem_hash[(real_n - 1) as usize]
             // Encode first_nslots, total_slots, and per-element f64-ness.
             // Format: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
@@ -10615,6 +10720,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 } else if last_ty == 4 { last_f64_flag = 2 }
             EXPR_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            i = 0
+            while i < real_n {
+                TUP_SCRATCH_ELEM_TY[i as usize] = elem_ty[i as usize]
+                TUP_SCRATCH_ELEM_HASH[i as usize] = elem_hash[i as usize]
+                i = i + 1
+            }
+            TUP_SCRATCH_COUNT = real_n
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
@@ -11040,6 +11152,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             // Check if this looks like a static method call: Type::method()
             let looks_like_method_call = TK[(EP + 2) as usize] == 6
+            var mcall_fallthrough: i64 = 0
             if disc >= 0 {
                 // It's an enum variant
                 EP = EP + 1  // skip ::
@@ -11110,24 +11223,29 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
-                // Method not found — drain () to prevent EP stranding at (
-                EP = EP + 1  // skip (
-                var drain_d: i64 = 1
-                while EP < TC && drain_d > 0 {
-                    if TK[EP as usize] == 6 { drain_d = drain_d + 1 }
-                    if TK[EP as usize] == 7 { drain_d = drain_d - 1 }
-                    EP = EP + 1
-                }
+                // Method not found: this single-`::` prefix isn't a real
+                // struct/enum with a matching method — before assuming it's a
+                // broken static-method-call and stubbing 0, treat the prefix as
+                // a decorative module qualifier (exactly like the 2+-`::`
+                // flatten above already does) and fall through to ordinary
+                // bare-name call resolution. EP is already positioned at `(`
+                // (right after consuming `::method_name`), matching what the
+                // bare-call path below expects. Real motivating case: `use
+                // pkg::mod as alias; alias::fn()` (issue #632) — module
+                // aliasing has no dedicated alias table, so any unrecognized
+                // single-`::` prefix in call position falls through instead.
+                ns = method_ns
+                ne = method_ne
+                mcall_fallthrough = 1
+            }
+            if mcall_fallthrough == 0 {
+                // disc < 0, not a method call — unregistered enum variant: consume :: + name to prevent cascade
+                EP = EP + 1  // skip ::
+                EP = EP + 1  // skip variant name
                 em(0x48); em(0xb8); em64(0)
                 EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
                 return
             }
-            // disc < 0, not a method call — unregistered enum variant: consume :: + name to prevent cascade
-            EP = EP + 1  // skip ::
-            EP = EP + 1  // skip variant name
-            em(0x48); em(0xb8); em64(0)
-            EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
-            return
         }
         // Generic call/struct: IDENT < TYPE > ( or IDENT < TYPE > {
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -11336,9 +11454,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print(EP); EP = EP + 1
                 } else {
                     compile_or()
+                    // See println's identical unwrap just below (issue #633):
+                    // &str and bare string are ABI-identical, unwrap for
+                    // dispatch only, no codegen change.
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
-                    } else if EXPR_TY == 3 {
+                    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr()
                     } else {
                         emit_print_int()
@@ -11363,9 +11484,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                         tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                     }
+                    // &str and bare string are ABI-identical (both a bare byte
+                    // pointer, per issue #601's Bug E) — unwrap the reference
+                    // for dispatch purposes only; no codegen change, rax
+                    // already holds the same pointer either way. Without this,
+                    // a `&str` parameter fell through to emit_print_int() and
+                    // printed the raw pointer value instead of the string
+                    // (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
-                    } else if EXPR_TY == 3 {
+                    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr()
                         emit_print_nl()
                     } else {
@@ -15317,7 +15445,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let tup_first_slots = tup_first_slots_true(EXPR_TY_HASH)
                 let tup_total_slots = tup_total_slots_true(EXPR_TY_HASH)
                 let tup_last_slots = tup_total_slots - tup_first_slots
-                let elem_slots = if tup_idx == 0 { tup_first_slots } else { tup_last_slots }
+                // For a 3+-element tuple, `.1` is element INDEX 1, not "everything
+                // after element 0" (tup_last_slots) and not the LAST element (Bug G
+                // / issue #601) — recover its own slot count from the full cache
+                // row when present. `.2`+ remain rejected above (unchanged scope).
+                let fa_ci = tup_cache_lookup(EXPR_TY_HASH)
+                var elem1_slots_true: i64 = tup_last_slots
+                if fa_ci >= 0 && TUP_CACHE_TCOUNT[fa_ci as usize] > 2 && tup_idx == 1 {
+                    let e1s = ty_slot_count(TUP_CACHE_ELEM_TY[(fa_ci * 16 + 1) as usize], TUP_CACHE_ELEM_HASH[(fa_ci * 16 + 1) as usize])
+                    if e1s > 0 { elem1_slots_true = e1s }
+                }
+                let elem_slots = if tup_idx == 0 { tup_first_slots } else { elem1_slots_true }
                 if tup_idx == 0 {
                     // rax already points to first element, keep as-is for now
                 } else {
@@ -15342,6 +15480,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if tup_idx == 0 {
                             EXPR_TY = TUP_CACHE_FIRST_TY[sc_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[sc_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[sc_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(sc_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(sc_ci * 16 + 1) as usize]
                         } else {
                             EXPR_TY = TUP_CACHE_LAST_TY[sc_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_LAST_HASH[sc_ci as usize]
@@ -15360,6 +15501,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if tup_idx == 0 {
                             EXPR_TY = TUP_CACHE_FIRST_TY[tup_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(tup_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + 1) as usize]
                         } else {
                             EXPR_TY = TUP_CACHE_LAST_TY[tup_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_LAST_HASH[tup_ci as usize]
@@ -18481,6 +18625,7 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
     var tup_last_ty: i64 = 1
     var tup_last_ty_hash: i64 = 0
     let tup_ci = tup_cache_lookup(tup_hash)
+    var have_full: i64 = 0
     if tup_ci >= 0 {
         tup_first_ty = TUP_CACHE_FIRST_TY[tup_ci as usize]
         tup_first_ty_hash = TUP_CACHE_FIRST_HASH[tup_ci as usize]
@@ -18491,11 +18636,22 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         if fs > 0 { tup_first_slots = fs }
         if tup_first_ty == 2 { tup_first_f64 = 1 } else { tup_first_f64 = 0 }
         if tup_last_ty == 2 { tup_last_f64 = 1 } else { tup_last_f64 = 0 }
-        if fs > 0 && ls > 0 { tup_total_slots = fs + ls }
+        if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+            // N-ary tuple (3+ elements): the first/last-only split below would
+            // alias every middle element onto the LAST element's type/offset and
+            // collide element 2+'s offset with element 1's — Bug G / issue #601.
+            // Address every element from the full per-element cache row instead.
+            have_full = 1
+            let es = tup_elem_slots_sum(tup_ci)
+            if es > 0 { tup_total_slots = es }
+        } else if fs > 0 && ls > 0 {
+            tup_total_slots = fs + ls
+        }
     }
     let tup_last_slots = tup_total_slots - tup_first_slots
     var pp = pat_start + 1
     var elem_idx: i64 = 0
+    var byte_off_acc: i64 = 0
     while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
@@ -18503,11 +18659,24 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         let pne = TE[pp as usize]
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         pp = pp + 1
-        let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
-        let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
-        let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
-        let elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
-        let elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        var elem_is_f64: i64 = 0
+        var elem_slots: i64 = 0
+        var byte_off: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_ty_hash: i64 = 0
+        if have_full == 1 && elem_idx < TUP_CACHE_TCOUNT[tup_ci as usize] {
+            elem_ty = TUP_CACHE_ELEM_TY[(tup_ci * 16 + elem_idx) as usize]
+            elem_ty_hash = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + elem_idx) as usize]
+            elem_slots = ty_slot_count(elem_ty, elem_ty_hash)
+            elem_is_f64 = if elem_ty == 2 { 1 } else { 0 }
+            byte_off = byte_off_acc
+        } else {
+            elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+            elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
+            byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+            elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
+            elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        }
         if is_wild == 0 {
             if elem_slots == 1 {
                 emit_load_var(ptr_slot)
@@ -18532,6 +18701,7 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
                 tuple_bind_leaf_x86(pns, pne)
             }
         }
+        byte_off_acc = byte_off_acc + elem_slots * 8
         elem_idx = elem_idx + 1
     }
 }
@@ -19939,6 +20109,338 @@ fn materialize_aggregate_array_element_a64(array_hash: i64) with Mut, Panic, Div
     em32(0xAA0003EA)
     emit_load_var_a64(dst_slot)
     emit_copy_agg_to_ptr_a64(6, elem_hash)
+}
+
+// name.f1.f2 = expr — AUTO-DEREF two-level scalar store (pointer root). a64
+// mirror of compile_autoderef_field_field_store_x86.
+fn compile_autoderef_field_field_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    EP = EP + 6  // skip name . f1 . f2 =
+    compile_or_a64()  // rhs in x0
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    let lvi = var_find_idx(ns, ne)
+    if lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_a64(lslot, foff1 + foff2, fty2, fhash2)
+}
+
+// name.f1.f2 = expr — VALUE two-level scalar store (value-struct root). a64
+// mirror of compile_value_field_field_store_x86 — see that function's comment
+// for the rationale (a value-struct local's slot holds a pointer to the
+// struct, so emit_store_to_pointer_offset_a64 stores correctly).
+fn compile_value_field_field_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    EP = EP + 6  // skip name . f1 . f2 =
+    compile_or_a64()  // rhs in x0
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let si1 = resolve_field_struct_index(ns, ne, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_a64(lslot, foff1 + foff2, fty2, fhash2)
+}
+
+// name.f1.f2[idx] = expr — AUTO-DEREF two-level array store (pointer root).
+// a64 mirror of compile_autoderef_field_field_array_store_x86.
+fn compile_autoderef_field_field_array_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 6  // skip name . f1 . f2 [
+    compile_or_a64()  // index in x0
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+    emit_push_a64()  // push index
+    compile_or_a64()  // value in x0
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    if lslot < 0 || lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        emit_pop_x1_a64()
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        emit_pop_x1_a64()
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        emit_pop_x1_a64()
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 || fty2 != 8 {
+        tc_error(f2_tok, "indexed field store requires array field")
+        emit_pop_x1_a64()
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash2), arr_hash_elem_hash(fhash2), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_a64(fhash2)
+    em32(0xAA0003EA)  // mov x10, x0 (value)
+    emit_pop_x1_a64()  // x1 = index
+    emit_load_var_a64(lslot)  // x0 = base pointer
+    let total_off = foff1 + foff2
+    if total_off != 0 {
+        emit_imm64_reg_a64(11, total_off)
+        em32(0x8B0B0000)  // add x0, x0, x11
+    }
+    if arr_hash_esiz(fhash2) == 8 { em32(0xF821780A) }  // str x10, [x0, x1, lsl #3]
+    else { em32(0x3821680A) }  // strb w10, [x0, x1]
+}
+
+// name.f1.f2[idx] = expr — VALUE two-level array store (value-struct root).
+// a64 mirror of compile_value_field_field_array_store_x86 — see that
+// function's comment for the rationale. Without this handler (and its
+// autoderef/no-array siblings above), a64 had no dispatch entry at all for
+// any two-level field chain assignment (`o.inner.b = v`, `o.inner.vals[i] =
+// v`) — the statement silently fell through every existing shape check and
+// the store never happened, with no diagnostic.
+fn compile_value_field_field_array_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    let f1ns = TS[f1_tok as usize]
+    let f1ne = TE[f1_tok as usize]
+    let f2ns = TS[f2_tok as usize]
+    let f2ne = TE[f2_tok as usize]
+    let f1h = gl_name_hash(f1ns, f1ne)
+    let f2h = gl_name_hash(f2ns, f2ne)
+
+    EP = EP + 6
+    compile_or_a64()  // index in x0
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    emit_push_a64()  // push index
+    compile_or_a64()  // value in x0
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+
+    ST_QUERY_NS = f1ns
+    ST_QUERY_NE = f1ne
+    let si1 = resolve_field_struct_index(ns, ne, f1h)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    if st_private_access_denied(si1, f1_tok) {
+        tc_error_hard(f1_tok, "private struct field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = f1ns
+    ST_QUERY_NE = f1ne
+    let foff1 = st_field_offset(si1, f1h)
+    let fty1 = st_field_ty(si1, f1h)
+    let fhash1 = st_field_hash(si1, f1h)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        emit_pop_x1_a64()
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f1_tok, "nested field store requires known struct field type")
+        emit_pop_x1_a64()
+        return
+    }
+    if st_private_access_denied(si2, f2_tok) {
+        tc_error_hard(f2_tok, "private struct field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = f2ns
+    ST_QUERY_NE = f2ne
+    let foff2 = st_field_offset(si2, f2h)
+    let fty2 = st_field_ty(si2, f2h)
+    let fhash2 = st_field_hash(si2, f2h)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 || fty2 != 8 {
+        tc_error(f2_tok, "indexed field store requires array field")
+        emit_pop_x1_a64()
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash2), arr_hash_elem_hash(fhash2), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_a64(fhash2)
+    em32(0xAA0003EA)  // mov x10, x0 (value)
+    emit_pop_x1_a64()  // x1 = index
+    let slot = var_find(ns, ne)
+    if slot >= 0 {
+        emit_load_var_a64(slot)
+    } else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
+        } else {
+            tc_undefined_var(name_tok)
+            em32(0xD2800000)
+        }
+    }
+    let total_off = foff1 + foff2
+    if total_off != 0 {
+        emit_imm64_reg_a64(11, total_off)
+        em32(0x8B0B0000)  // add x0, x0, x11
+    }
+    if arr_hash_esiz(fhash2) == 8 { em32(0xF821780A) }  // str x10, [x0, x1, lsl #3]
+    else { em32(0x3821680A) }  // strb w10, [x0, x1]
 }
 
 // ARRAY[idx].field(.field)* = expr — store into a struct element of an array.
@@ -26445,34 +26947,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // PR-6: record return-type token for Pass 1c.5 refinement re-scan
                 FN_RET_TY_TOK[sig_fi as usize] = q
                 scan_type(q)
-                var scan_ret_ty = SCAN_TY
-                var scan_ret_hash = SCAN_TY_HASH
-                let scan_ret_next = SCAN_TY_NEXT
-                // For tuple return types, encode first element's slot count in hash
-                // so that .1 field access computes the correct byte offset.
-                // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
-                if scan_ret_ty == 6 && TK[q as usize] == 6 {
-                    let tcount_enc = scan_ret_hash / 1000000
-                    let first_enc_check = (scan_ret_hash % 1000000) / 1000
-                    if first_enc_check == 0 {
-                        scan_type(q + 1)
-                        let sig_first_ty = SCAN_TY
-                        let sig_first_hash = SCAN_TY_HASH
-                        let first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        var second_q = SCAN_TY_NEXT
-                        if TK[second_q as usize] == 28 { second_q = second_q + 1 }
-                        scan_type(second_q)
-                        let sig_last_ty = SCAN_TY
-                        let sig_last_hash = SCAN_TY_HASH
-                        let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        let total_nslots = first_nslots + last_nslots
-                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
-                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
-                        SCAN_TY = scan_ret_ty
-                        SCAN_TY_HASH = scan_ret_hash
-                        SCAN_TY_NEXT = scan_ret_next
-                    }
-                }
+                // scan_type()'s tuple branch now scans every element itself (not
+                // just first+last) and registers the full per-element array to
+                // TUP_CACHE directly, so no rescan is needed here — a prior
+                // version of this code re-derived a 2-element-only hash from
+                // scratch at this point, which silently truncated any 3+-element
+                // tuple return type's total slot count (Bug G / issue #601).
                 if knowledge_hash_invalid(SCAN_TY_HASH) {
                     tc_epistemic_boundary(q)
                     FN_RET_TY[sig_fi as usize] = 0
@@ -30071,7 +30551,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             ne = TE[EP as usize]
             EP = EP + 1  // skip terminal segment name
         }
-        // Enum::Variant
+        // Enum::Variant (or, when it isn't a real enum and a call follows, a
+        // decorative single-`::` prefix in call position — see the x86-64
+        // twin, compile_primary(), for the full rationale/issue #632. a64 has
+        // no static-method-call support to fall back from in the first place
+        // (a separate, larger, pre-existing a64 gap, not addressed here) —
+        // this only adds the "unrecognized prefix falls through to a bare
+        // call" behavior, mirroring x86's outcome for the same source shape.)
         if TK[EP as usize] == 51 {
             EP = EP + 1
             let vns = TS[EP as usize]
@@ -30080,10 +30566,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let eh = gl_name_hash(ns, ne)
             let vh = gl_name_hash(vns, vne)
             let disc = en_variant_value(eh, vh)
-            if disc >= 0 { emit_imm64_a64(disc) }
-            else { em32(0xD2800000) }
-            EXPR_IS_F64 = 0
-            return
+            if disc >= 0 {
+                emit_imm64_a64(disc)
+                EXPR_IS_F64 = 0
+                return
+            }
+            if TK[EP as usize] != 6 {
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                return
+            }
+            ns = vns
+            ne = vne
         }
         // Generic resolution
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -30117,9 +30611,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 { emit_print_a64(EP); EP = EP + 1 }
                 else {
                     compile_or_a64()
+                    // See print's x86-64 twin for rationale (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
-                    } else if EXPR_TY == 3 {
+                    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr_a64()
                     } else {
                         emit_print_int_a64()
@@ -30144,9 +30639,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                         tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                     }
+                    // See the x86-64 twin (compile_primary()) for the full
+                    // rationale — &str/string are ABI-identical, unwrap the
+                    // reference for dispatch only (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
-                    } else if EXPR_TY == 3 {
+                    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr_a64()
                         emit_print_nl_a64()
                     } else {
@@ -32462,6 +32960,25 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 EXPR_CH_SET = 0
                 EXPR_PARAM_USED = 0
             }
+        }
+        return
+    }
+    // x.f1.f2[idx] = expr — two chained field accesses then an array index.
+    if stmt_is_field_field_array_store_shape(EP) {
+        if token_chain_root_is_pointer(EP) {
+            compile_autoderef_field_field_array_store_a64()
+        } else {
+            compile_value_field_field_array_store_a64()
+        }
+        return
+    }
+    // x.f1.f2 = expr — two chained field accesses, no array, through a
+    // pointer var (auto-deref) OR an inline value struct.
+    if stmt_is_field_field_store_shape(EP) {
+        if token_chain_root_is_pointer(EP) {
+            compile_autoderef_field_field_store_a64()
+        } else {
+            compile_value_field_field_store_a64()
         }
         return
     }
@@ -34806,6 +35323,28 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         is_named_import = 0
                         break
                     }
+                }
+                // `use pkg::mod as alias` — " as " unambiguously ends the module
+                // path (no path segment is ever spelled with embedded spaces in
+                // this codebase; census: zero `use X :: Y` / `use X:: Y` spaced
+                // occurrences). The path-building loop below used to silently
+                // DROP every space instead of treating it as a terminator, so
+                // this built the garbled path `pkg/modasalias.sio` (issue #632).
+                // The alias name itself needs no separate table: the module's
+                // symbols are still resolved by bare name once the file loads
+                // correctly, and a single-`::` call through the alias falls
+                // through to that bare lookup (see the call-site companion fix).
+                if sb(pos) == 32 && pos + 3 < SRC_LEN && sb(pos+1) == 97 && sb(pos+2) == 115 && sb(pos+3) == 32 {
+                    path_end = pos
+                    // Unambiguous: `as alias` always names the whole preceding
+                    // path as a module/file, never "the last segment is really
+                    // an exported symbol" (that ambiguity, is_named_import's
+                    // reason for existing, only applies to a bare trailing
+                    // segment with no `as` at all). Disable the Bug C
+                    // segment-stripping fallback so a genuine load failure here
+                    // reports its real path instead of a further-stripped one.
+                    is_named_import = 0
+                    break
                 }
                 pos = pos + 1
                 path_end = pos
