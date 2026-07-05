@@ -92,6 +92,9 @@ REFLEXIVE_CMP_KINDS = {
     "lt_self_false": ["bool", False],
     "gt_self_false": ["bool", False],
 }
+SUB_SELF_KINDS = {
+    "sub_self_zero": ["int", 0],
+}
 
 def stable_json(payload):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -118,6 +121,26 @@ def const_hash(kind, value):
         },
     }
     return sha256_text(stable_json(payload))
+
+def assert_symbolic_producer_policy(rewrite, family):
+    eval_policy = rewrite.get("producer_evaluation_policy")
+    producer = rewrite.get("symbolic_producer", {})
+    if producer.get("producer_kind") in {"param", "block_param"}:
+        if eval_policy != "producer_is_param_or_block_param_no_effectful_eval":
+            raise SystemExit(f"{family} param/block_param evaluation policy mismatch")
+    elif producer.get("producer_kind") == "call_direct":
+        if eval_policy != "direct_call_leaf_pure_keep_producer_evaluated":
+            raise SystemExit(f"{family} call evaluation policy mismatch")
+        if producer.get("call_leaf_pure") is not True:
+            raise SystemExit(f"{family} accepted call must be local leaf pure")
+        summary = producer.get("call_summary", {})
+        if summary.get("purity_reason") != "local_leaf_no_call_direct":
+            raise SystemExit(f"{family} accepted call must prove local leaf purity")
+    else:
+        raise SystemExit(f"{family} accepted producer must be param/block_param or local leaf call_direct")
+    if not producer.get("producer_label") and not producer.get("label"):
+        raise SystemExit(f"{family} missing stable producer label")
+    return producer
 
 receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, min_blocked, max_accepted, max_rejected, max_blocked, required_accepted, required_rejected, required_blocked = sys.argv[1:14]
 receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
@@ -327,23 +350,7 @@ for rewrite in rewrites:
                 raise SystemExit("reflexive comparison symbolic value must equal original rhs")
             if rewrite.get("same_operand_id") is not True:
                 raise SystemExit("reflexive comparison must assert same_operand_id")
-            eval_policy = rewrite.get("producer_evaluation_policy")
-            producer = rewrite.get("symbolic_producer", {})
-            if producer.get("producer_kind") in {"param", "block_param"}:
-                if eval_policy != "producer_is_param_or_block_param_no_effectful_eval":
-                    raise SystemExit("reflexive comparison param/block_param evaluation policy mismatch")
-            elif producer.get("producer_kind") == "call_direct":
-                if eval_policy != "direct_call_leaf_pure_keep_producer_evaluated":
-                    raise SystemExit("reflexive comparison call evaluation policy mismatch")
-                if producer.get("call_leaf_pure") is not True:
-                    raise SystemExit("reflexive comparison accepted call must be local leaf pure")
-                summary = producer.get("call_summary", {})
-                if summary.get("purity_reason") != "local_leaf_no_call_direct":
-                    raise SystemExit("reflexive comparison accepted call must prove local leaf purity")
-            else:
-                raise SystemExit("reflexive comparison accepted producer must be param/block_param or local leaf call_direct")
-            if not producer.get("producer_label") and not producer.get("label"):
-                raise SystemExit("reflexive comparison missing stable producer label")
+            assert_symbolic_producer_policy(rewrite, "reflexive comparison")
             if rewrite.get("domain") != "all-i64-values-with-reflexive-equality-and-order":
                 raise SystemExit("reflexive comparison domain mismatch")
             bounds = rewrite.get("domain_bounds", {})
@@ -361,6 +368,39 @@ for rewrite in rewrites:
                 raise SystemExit("reflexive comparison proposed enode is not expected bool const")
             if rewrite.get("rewritten_enode_sha256") != expected_hash:
                 raise SystemExit("reflexive comparison rewritten enode is not expected bool const")
+        if rewrite["rewrite_kind"] == "symbolic_sub_self_i64":
+            subtraction_kind = rewrite.get("subtraction_kind")
+            if subtraction_kind not in SUB_SELF_KINDS:
+                raise SystemExit(f"unexpected sub-self kind: {subtraction_kind}")
+            if rewrite.get("proposal_kind") != "exact_symbolic_sub_self":
+                raise SystemExit("sub-self must use exact symbolic proposal")
+            if rewrite.get("ekan_receipt_kind") != "ekan_exact_symbolic_arithmetic":
+                raise SystemExit("sub-self must use exact arithmetic E-KAN receipt")
+            symbolic_value = int(rewrite.get("symbolic_value", -1))
+            if symbolic_value != int(rewrite.get("original_lhs", -2)):
+                raise SystemExit("sub-self symbolic value must equal original lhs")
+            if symbolic_value != int(rewrite.get("original_rhs", -3)):
+                raise SystemExit("sub-self symbolic value must equal original rhs")
+            if rewrite.get("same_operand_id") is not True:
+                raise SystemExit("sub-self must assert same_operand_id")
+            assert_symbolic_producer_policy(rewrite, "sub-self")
+            if rewrite.get("domain") != "all-i64-values-with-same-ssa-subtraction":
+                raise SystemExit("sub-self domain mismatch")
+            bounds = rewrite.get("domain_bounds", {})
+            if bounds.get("kind") != "all-i64-values-with-same-ssa-subtraction":
+                raise SystemExit("sub-self domain bounds mismatch")
+            if "same-ssa-subtraction-proof" not in rewrite.get("validator_attempted", []):
+                raise SystemExit("sub-self missing same-SSA subtraction proof marker")
+            if "producer-evaluation-preservation-proof" not in rewrite.get("validator_attempted", []):
+                raise SystemExit("sub-self missing producer evaluation proof marker")
+            expected_const = SUB_SELF_KINDS[subtraction_kind]
+            if list(rewrite.get("result_const", [])) != expected_const:
+                raise SystemExit("sub-self result const mismatch")
+            expected_hash = const_hash(expected_const[0], expected_const[1])
+            if rewrite.get("proposed_enode_sha256") != expected_hash:
+                raise SystemExit("sub-self proposed enode is not expected int zero")
+            if rewrite.get("rewritten_enode_sha256") != expected_hash:
+                raise SystemExit("sub-self rewritten enode is not expected int zero")
         observed_accepted.add(rewrite["rewrite_kind"])
         observed_accepted.add(rewrite["ekan_receipt_kind"])
     elif rewrite.get("blocked") is True:
@@ -373,8 +413,8 @@ for rewrite in rewrites:
         if rewrite.get("rejection_reason_code") not in {"operand_provenance_ambiguous", "producer_evaluation_not_proven"}:
             raise SystemExit("blocked rewrite missing accepted blocker reason")
         if rewrite.get("rejection_reason_code") == "producer_evaluation_not_proven":
-            if rewrite.get("rewrite_kind") != "symbolic_reflexive_cmp_i64":
-                raise SystemExit("producer evaluation blocker must target reflexive comparison")
+            if rewrite.get("rewrite_kind") not in {"symbolic_reflexive_cmp_i64", "symbolic_sub_self_i64"}:
+                raise SystemExit("producer evaluation blocker must target an evaluation-sensitive symbolic rewrite")
             if rewrite.get("ekan_receipt_kind") != "ekan_blocked_producer_evaluation":
                 raise SystemExit("producer evaluation blocker missing E-KAN blocked receipt kind")
             if rewrite.get("producer_evaluation_policy") != "blocked: producer evaluation is not proven":
@@ -459,6 +499,14 @@ for decision in extraction["decisions"]:
                 raise SystemExit("reflexive comparison extraction has wrong lowering effect")
             if decision.get("abi_impact") != "none":
                 raise SystemExit("reflexive comparison extraction must have no ABI impact")
+        if decision.get("rewrite_kind") == "symbolic_sub_self_i64":
+            if decision.get("lowering_effect") not in {
+                "replace_binary_sub_self_expr_with_const_i64_zero",
+                "replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated",
+            }:
+                raise SystemExit("sub-self extraction has wrong lowering effect")
+            if decision.get("abi_impact") != "none":
+                raise SystemExit("sub-self extraction must have no ABI impact")
     elif rid in rejected_ids:
         if decision["decision"] != "reject" or decision["selected"] is not False:
             raise SystemExit("rejected rewrite must not be selected by extractor")
@@ -532,7 +580,7 @@ summary = {
         "learned or approximate E-KAN proposals with declared domains and fallback expressions",
         "broad counterexample search over accepted and tempting sibling rewrites",
         "producer purity and evaluation-preservation beyond the current local leaf subset",
-        "broader non-constant algebraic identities beyond neutral-element and reflexive-comparison identities",
+        "broader non-constant algebraic identities beyond neutral-element, reflexive-comparison, and same-SSA subtraction identities",
         "downstream optimizer integration beyond receipt-only extraction",
         "full-domain translation validation for every selected rewrite family",
     ],

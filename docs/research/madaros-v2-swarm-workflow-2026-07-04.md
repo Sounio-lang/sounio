@@ -231,8 +231,11 @@ receipts landed on 2026-07-05:
 - `tests/madaros/v2_s4/symbolic_identity_i64.sio`
 - `tests/madaros/v2_s4/symbolic_reflexive_cmp_i64.sio`
 - `tests/madaros/v2_s4/symbolic_reflexive_cmp_pure_call_i64.sio`
+- `tests/madaros/v2_s4/symbolic_sub_self_i64.sio`
 - `tests/madaros/v2_s4/reject_distinct_symbolic_cmp_i64.sio`
 - `tests/madaros/v2_s4/reject_call_result_self_cmp_i64.sio`
+- `tests/madaros/v2_s4/reject_distinct_symbolic_sub_i64.sio`
+- `tests/madaros/v2_s4/reject_call_result_sub_self_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
 - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 
@@ -242,17 +245,19 @@ emits `madaros.v2.ekan.rewrite/0.1` rewrite receipts plus
 completed boundary for one exact accepted/rejected/extraction subset, not global
 S4 completion. The S3 operand-fidelity gate now closes the temporary blocker
 where binary operands could be duplicated by lowering. Current S4 local proof:
-`accepted=26`, `rejected=2`, `blocked=2`, `selected=26`, including
+`accepted=28`, `rejected=3`, `blocked=3`, `selected=28`, including
 `symbolic_identity_i64` neutral-element rewrites over non-constant params/call
 results and `symbolic_reflexive_cmp_i64` same-SSA comparison rewrites to exact
-bool constants over params/block params plus local leaf call results. The
+bool constants over params/block params plus local leaf call results, plus
+`symbolic_sub_self_i64` same-SSA subtraction rewrites to exact int zero. The
 manifest now has min/max rewrite counts, so distinct symbolic comparisons stay
-at exact zero and effectful call-result self-comparisons are exactly blocked
-until producer evaluation/purity is proven. The rejected subset records
-`x_div_x_to_one` with counterexample `x = 0`, `selected_for_extraction = false`,
-and `ir_mutation_allowed = false`. The blocked subset includes
-`producer_evaluation_not_proven` for callees that contain `call_direct`. The
-extraction boundary proves selected IDs exactly equal accepted IDs,
+at exact zero, distinct symbolic subtraction is rejected by counterexample, and
+effectful/non-leaf call-result rewrites are exactly blocked until producer
+evaluation/purity is proven. The rejected subset records `x_div_x_to_one` with
+counterexample `x = 0` and `x - y -> 0` with counterexample `x = 1, y = 2`,
+both `selected_for_extraction = false` and `ir_mutation_allowed = false`. The
+blocked subset includes `producer_evaluation_not_proven` for callees that contain
+`call_direct`. The extraction boundary proves selected IDs exactly equal accepted IDs,
 rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
 mutation is performed.
 
@@ -264,8 +269,8 @@ The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
 implemented: `madaros.v2.s5.preflight/0.1` records `status = pass`,
 `s5_input_contract_ready = true`, `s5_ready = false`, and
-`s5_implemented = false`; latest local preflight consumes 26 selected accepted
-rewrites and classifies 2 blocked rewrites as excluded negative evidence.
+`s5_implemented = false`; latest local preflight consumes 28 selected accepted
+rewrites and classifies 3 blocked rewrites as excluded negative evidence.
 Next critical lane: implement S5 MIR/ABI receipt
 surface over the selected accepted S4 rewrites without mutating IR until the MIR
 and ABI hashes are proved.

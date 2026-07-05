@@ -3630,3 +3630,55 @@ status: lock-released
   - implement `symbolic_sub_self_i64` (`x - x -> 0`) with accepted, rejected,
     blocked, extraction, S5-preflight, docs, offload, and CI coverage under this
     new S-FULL discipline.
+
+## 2026-07-05 — Madaros v2 S4 same-SSA subtraction full slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: advance S4 toward FULL by landing one complete exact arithmetic family,
+  not a minimal witness.
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/symbolic_sub_self_i64.sio`
+  - `tests/madaros/v2_s4/reject_distinct_symbolic_sub_i64.sio`
+  - `tests/madaros/v2_s4/reject_call_result_sub_self_i64.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added accepted `symbolic_sub_self_i64` receipts for same-SSA i64
+    subtraction: `x - x -> 0`.
+  - Accepted sub-self receipts require `same_operand_id = true`,
+    `subtraction_kind = sub_self_zero`,
+    `producer_evaluation_policy`, exact int `result_const = ["int", 0]`,
+    domain `all-i64-values-with-same-ssa-subtraction`, and proof markers
+    `translation-validation`, `same-ssa-subtraction-proof`, and
+    `producer-evaluation-preservation-proof`.
+  - Local leaf call results are accepted only through
+    `replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated`.
+  - Added rejected distinct symbolic subtraction fixture for the tempting but
+    invalid generalization `x - y -> 0`; counterexample is `x = 1, y = 2`.
+  - Added blocked effectful/non-leaf call-result sub-self fixture with
+    `ekan_blocked_producer_evaluation` and `producer_evaluation_not_proven`.
+  - S5 preflight now allows `symbolic_sub_self_i64` only with explicit const-zero
+    lowering effect, `mir_abi_safe = true`, `abi_impact = none`, and keep-producer
+    policy when needed.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=28`, `rejected=3`, `blocked=3`, `selected=28`, summary sha
+    `9da826a771df...`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=13`, selected rewrites `28`, blocked rewrites `3`, `status=pass`,
+    preflight sha `ea7f1ffc4eeb...`.
+- Remaining boundary:
+  - Global S4 remains boundary-not-full: multi-rule equality saturation,
+    learned/approximate E-KAN proposals, broader algebraic families, broad
+    counterexample search, downstream optimizer mutation/application, and
+    full-domain translation validation remain open.
+  - S5 is still input-contract preflight, not MIR/ABI implementation.

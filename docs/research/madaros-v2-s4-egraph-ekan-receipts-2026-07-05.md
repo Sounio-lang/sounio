@@ -21,10 +21,11 @@ operand provenance blocker found on 2026-07-05 is now closed by the S3 lowering
 fix and operand-fidelity gate: S4 accepts exact constant-fold candidates, a
 non-constant neutral-element symbolic identity subset, and a param/block-param
 reflexive-comparison subset (`x == x`, `x != x`, `x <= x`, `x >= x`,
-`x < x`, `x > x`) over params/block params and local leaf call results, keeps
-counterexample-backed rejected proposals out of extraction, and selects no
-blocked rewrites for extraction. The current fixture set has two classified
-producer-evaluation blockers, both excluded from extraction. Global S4
+`x < x`, `x > x`) plus same-SSA symbolic subtraction (`x - x -> 0`) over
+params/block params and local leaf call results, keeps counterexample-backed
+rejected proposals out of extraction, and selects no blocked rewrites for
+extraction. The current fixture set has three classified producer-evaluation
+blockers, all excluded from extraction. Global S4
 optimization is not complete:
 equality saturation, approximate learned E-KAN proposals, broad counterexample
 search, and downstream optimizer integration remain future work. S5 has an
@@ -43,8 +44,11 @@ itself remains future work.
 - `tests/madaros/v2_s4/symbolic_identity_i64.sio`
 - `tests/madaros/v2_s4/symbolic_reflexive_cmp_i64.sio`
 - `tests/madaros/v2_s4/symbolic_reflexive_cmp_pure_call_i64.sio`
+- `tests/madaros/v2_s4/symbolic_sub_self_i64.sio`
 - `tests/madaros/v2_s4/reject_distinct_symbolic_cmp_i64.sio`
 - `tests/madaros/v2_s4/reject_call_result_self_cmp_i64.sio`
+- `tests/madaros/v2_s4/reject_distinct_symbolic_sub_i64.sio`
+- `tests/madaros/v2_s4/reject_call_result_sub_self_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
 - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
@@ -73,6 +77,8 @@ accepted subset is:
   call-result same-SSA comparisons: `x == x -> true`, `x != x -> false`,
   `x <= x -> true`, `x >= x -> true`, `x < x -> false`, and
   `x > x -> false`
+- `symbolic_sub_self_i64` rewrites for param/block-param and local leaf
+  call-result same-SSA subtraction: `x - x -> 0`
 - `basis_family = exact_symbolic`
 - `validator = translation-validation`
 - `error_bound = 0`
@@ -99,14 +105,29 @@ decision carries
 Call-result self-comparisons whose callees contain `call_direct` are blocked
 with `producer_evaluation_not_proven` and excluded from extraction.
 
+For sub-self arithmetic, the proposed/rewrite enode is the exact int const
+`0`. The gate checks `subtraction_kind = sub_self_zero`,
+`same_operand_id = true`, `result_const = ["int", 0]`, producer policy,
+`domain = all-i64-values-with-same-ssa-subtraction`, and
+`validator_attempted` contains `translation-validation`,
+`same-ssa-subtraction-proof`, and `producer-evaluation-preservation-proof`.
+Local leaf call producers use
+`replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated`;
+non-leaf/effectful call-result sub-self rewrites are blocked with
+`producer_evaluation_not_proven` and excluded from extraction.
+
 It also emits deterministic rejected proposal receipts for:
 
 - `x_div_x_to_one`
-- `proposal_kind = algebraic_identity`
+- `distinct_symbolic_sub_to_zero` (`x - y -> 0`)
+- `proposal_kind = algebraic_identity` for division, `rejected_symbolic_sub_self`
+  for distinct symbolic subtraction
 - `validator = rejected`
 - `rejection_reason_code = counterexample_found`
 - counterexample `x = 0`, where the original expression traps on division by
   zero but the proposed rewrite returns `1`
+- counterexample `x = 1, y = 2`, where distinct symbolic subtraction returns
+  `-1` but the proposed rewrite returns `0`
 - `selected_for_extraction = false`
 - `ir_mutation_allowed = false`
 
@@ -121,21 +142,22 @@ It can also emit deterministic blocked proposal receipts for:
 - `ir_mutation_allowed = false`
 
 It also emits producer-evaluation blockers for same-SSA reflexive comparisons
-whose producer would otherwise be removed without a proven evaluation-preserving
-policy:
+and same-SSA subtraction whose producer would otherwise be removed without a
+proven evaluation-preserving policy:
 
-- `rewrite_kind = symbolic_reflexive_cmp_i64`
-- `proposal_kind = blocked_symbolic_reflexive_comparison`
+- `rewrite_kind = symbolic_reflexive_cmp_i64` or `symbolic_sub_self_i64`
+- `proposal_kind = blocked_symbolic_reflexive_comparison` or
+  `blocked_symbolic_sub_self`
 - `ekan_receipt_kind = ekan_blocked_producer_evaluation`
 - `rejection_reason_code = producer_evaluation_not_proven`
 - `producer_evaluation_policy = blocked: producer evaluation is not proven`
 - `selected_for_extraction = false`
 - `ir_mutation_allowed = false`
 
-The current local gate has `blocked=2`: operand-fidelity blockers remain
-available but are not triggered by the current fixtures; the two current blockers
-come from non-leaf/effectful call-result self-comparisons where producer
-evaluation is not yet proven.
+The current local gate has `blocked=3`: operand-fidelity blockers remain
+available but are not triggered by the current fixtures; the current blockers
+come from non-leaf/effectful call-result self-comparisons and sub-self
+arithmetic where producer evaluation is not yet proven.
 
 This is a real receipt boundary for one exact optimizer subset, not an
 approximation claim and not global S4 completion. It builds a persistent
@@ -194,8 +216,8 @@ The gate pins `SOUNIO_STDLIB_PATH` to this checkout's `stdlib/` and, when no
 `MADAROS_RAW_BIN` is supplied, proves `artifacts/self-hosted/madaros` through
 `scripts/ci/madaros_full_gate.sh` before consuming HLIR.
 
-Observed local result on 2026-07-05 after the S3 operand-fidelity fix and the
-reflexive-comparison slice:
+Observed local result on 2026-07-05 after the S3 operand-fidelity fix,
+reflexive-comparison slice, and sub-self arithmetic slice:
 
 ```text
 [madaros-v2-s4] ok receipt=exact_identity.s4.receipt.json accepted=3 rejected=0 blocked=0 selected=3 egraph_sha=1b5c2790c49d extraction_sha=342e8492421f
@@ -203,13 +225,16 @@ reflexive-comparison slice:
 [madaros-v2-s4] ok receipt=symbolic_identity_i64.s4.receipt.json accepted=8 rejected=0 blocked=0 selected=8 egraph_sha=6ed268e74dde extraction_sha=3ec34adcde81
 [madaros-v2-s4] ok receipt=symbolic_reflexive_cmp_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=77655d13e1c3 extraction_sha=e692c0eefd87
 [madaros-v2-s4] ok receipt=symbolic_reflexive_cmp_pure_call_i64.s4.receipt.json accepted=2 rejected=0 blocked=0 selected=2 egraph_sha=8ae383c0b9ff extraction_sha=c632174764cf
+[madaros-v2-s4] ok receipt=symbolic_sub_self_i64.s4.receipt.json accepted=2 rejected=0 blocked=0 selected=2 egraph_sha=e56621dd4c50 extraction_sha=1ca05ce54edf
 [madaros-v2-s4] ok receipt=reject_distinct_symbolic_cmp_i64.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=d600c866af79 extraction_sha=43d73c0a8bec
-[madaros-v2-s4] ok receipt=reject_call_result_self_cmp_i64.s4.receipt.json accepted=0 rejected=0 blocked=2 selected=0 egraph_sha=7239e4bd6b08 extraction_sha=f14643c65891
+[madaros-v2-s4] ok receipt=reject_call_result_self_cmp_i64.s4.receipt.json accepted=0 rejected=0 blocked=2 selected=0 egraph_sha=2064c04e1415 extraction_sha=a366624a9561
+[madaros-v2-s4] ok receipt=reject_distinct_symbolic_sub_i64.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=209d7fe5794e extraction_sha=859286dba635
+[madaros-v2-s4] ok receipt=reject_call_result_sub_self_i64.s4.receipt.json accepted=0 rejected=0 blocked=1 selected=0 egraph_sha=b59dfffefce7 extraction_sha=f3192d747032
 [madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=496e7ccf7342
 [madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=54e83fe3c2d0
 [madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=a34f4ab3e0b8
-[madaros-v2-s4] summary_sha=6706eb85c41f accepted=26 rejected=2 blocked=2 selected=26
-[madaros-v2-s4] PASS: conservative e-graph/E-KAN rewrite and extraction receipts are deterministic and validated
+[madaros-v2-s4] summary_sha=9da826a771df accepted=28 rejected=3 blocked=3 selected=28
+[madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)
 ```
 
 ## S5 Boundary
@@ -226,10 +251,10 @@ The S5 input-contract preflight is executable through:
 bash scripts/dev/madaros_v2_s5_preflight_gate.sh
 ```
 
-Observed local result on 2026-07-05 after the reflexive-comparison slice:
+Observed local result on 2026-07-05 after the sub-self arithmetic slice:
 
 ```text
-[madaros-v2-s5-preflight] ok cases=10 rewrites=26 blocked=2 status=pass sha=c5bd83d821b9
+[madaros-v2-s5-preflight] ok cases=13 rewrites=28 blocked=3 status=pass sha=ea7f1ffc4eeb
 [madaros-v2-s5-preflight] PASS: S5 preflight classified current S4 extraction input without overclaiming readiness
 ```
 

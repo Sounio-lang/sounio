@@ -38,7 +38,7 @@ if summary.get("stage_contract_level") != "S4_BOUNDARY_NOT_FULL":
 if summary.get("s4_full_complete") is not False:
     raise SystemExit("S5 preflight requires S4 full-complete=false")
 
-allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64", "symbolic_reflexive_cmp_i64"}
+allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64", "symbolic_reflexive_cmp_i64", "symbolic_sub_self_i64"}
 allowed_basis = {"exact_symbolic"}
 allowed_validators = {"translation-validation"}
 consumed = []
@@ -144,6 +144,18 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
                 producer = rewrite.get("symbolic_producer", {})
                 if producer.get("producer_kind") != "call_direct" or producer.get("call_leaf_pure") is not True:
                     raise SystemExit("S5 preflight requires local leaf call producer for keep-producer lowering")
+        if rewrite.get("rewrite_kind") == "symbolic_sub_self_i64":
+            if decision.get("lowering_effect") not in {
+                "replace_binary_sub_self_expr_with_const_i64_zero",
+                "replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated",
+            }:
+                raise SystemExit("S5 preflight rejects sub-self without const-zero lowering effect")
+            if decision.get("lowering_effect") == "replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated":
+                if rewrite.get("producer_evaluation_policy") != "direct_call_leaf_pure_keep_producer_evaluated":
+                    raise SystemExit("S5 preflight requires call producer evaluation policy for sub-self keep-producer lowering")
+                producer = rewrite.get("symbolic_producer", {})
+                if producer.get("producer_kind") != "call_direct" or producer.get("call_leaf_pure") is not True:
+                    raise SystemExit("S5 preflight requires local leaf call producer for sub-self keep-producer lowering")
         if decision.get("selected_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
             raise SystemExit("S5 preflight selected enode must match rewrite")
         all_rewrites.append(rewrite)

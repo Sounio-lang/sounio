@@ -451,6 +451,113 @@ def symbolic_reflexive_cmp_receipt(
     }
 
 
+def symbolic_sub_self_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    symbolic_value_id: int,
+    symbolic_producer: dict[str, Any],
+    producer_evaluation_policy: str,
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr["bin_op"]), f"op{instr['bin_op']}")
+    result_const = ("int", 0)
+    proposed = make_const_enode(*result_const)
+    fallback = {
+        "op": op_name,
+        "lhs": ["hlir_value", int(instr["lhs"])],
+        "rhs": ["hlir_value", int(instr["rhs"])],
+        "subtraction_kind": "sub_self_zero",
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "result_const": result_const,
+    }
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["same_ssa_subtraction"],
+        "subtraction_kind": "sub_self_zero",
+        "symbolic_value": symbolic_value_id,
+        "result_const": result_const,
+    }
+    domain_bounds = {
+        "kind": "all-i64-values-with-same-ssa-subtraction",
+        "subtraction_kind": "sub_self_zero",
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "result_const": result_const,
+        "preconditions": [
+            "both operands are the same S3 HLIR SSA value",
+            "symbolic operand is not a constant-fold duplicate",
+            "operand type is exact i64, not f64 or an approximate numeric domain",
+            "subtraction has no side effects",
+            "producer evaluation is preserved according to producer_evaluation_policy",
+        ],
+    }
+    validator_log = {
+        "validator": "translation-validation",
+        "method": "same-ssa-subtraction-symbolic-proof-over-s3-hlir",
+        "accepted": True,
+        "subtraction_kind": "sub_self_zero",
+        "domain_bounds": domain_bounds,
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "subtraction_kind": "sub_self_zero",
+        "symbolic_value": symbolic_value_id,
+        "result_const": result_const,
+    }
+    rid = "s4-sub-self-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_sub_self_i64",
+        "subtraction_kind": "sub_self_zero",
+        "proposal_kind": "exact_symbolic_sub_self",
+        "proposal_origin": "madaros_v2_s4_receipt.sub-self-symbolic-proof",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "symbolic_sub_self_i64", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_exact_symbolic_arithmetic",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "same_operand_id": True,
+        "producer_evaluation_policy": producer_evaluation_policy,
+        "result_const": result_const,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(proposed)),
+        "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "exact-symbolic-sub-self-no-training"})),
+        "domain": "all-i64-values-with-same-ssa-subtraction",
+        "domain_bounds": domain_bounds,
+        "error_bound": "0",
+        "error_bound_method": "exact-same-ssa-subtraction",
+        "gum_covariance_assumptions": "not-applicable: exact i64 symbolic arithmetic",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "translation-validation",
+        "validator_attempted": ["translation-validation", "same-ssa-subtraction-proof", "producer-evaluation-preservation-proof"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "selected_for_extraction": True,
+        "ir_mutation_allowed": False,
+        "accepted": True,
+    }
+
+
 def blocked_producer_evaluation_receipt(
     case_id: str,
     source: str,
@@ -458,20 +565,34 @@ def blocked_producer_evaluation_receipt(
     func_name: str,
     block_label: str,
     instr: dict[str, Any],
-    comparison_kind: str,
+    rewrite_kind: str,
+    blocked_kind: str,
     symbolic_value_id: int,
     symbolic_producer: dict[str, Any],
-    result_const: tuple[str, bool],
+    result_const: tuple[str, int | bool],
 ) -> dict[str, Any]:
     op_name = BIN_OPS.get(int(instr.get("bin_op", -1)), f"op{instr.get('bin_op', -1)}")
     proposed = make_const_enode(*result_const)
+    if rewrite_kind == "symbolic_reflexive_cmp_i64":
+        proposal_kind = "blocked_symbolic_reflexive_comparison"
+        config_pass = "symbolic_reflexive_cmp_i64_eval_guard"
+        reason_noun = "predicate"
+        receipt_family = "reflexive_comparison"
+    elif rewrite_kind == "symbolic_sub_self_i64":
+        proposal_kind = "blocked_symbolic_sub_self"
+        config_pass = "symbolic_sub_self_i64_eval_guard"
+        reason_noun = "arithmetic rewrite"
+        receipt_family = "same_ssa_subtraction"
+    else:
+        raise SystemExit(f"unsupported producer-evaluation blocker rewrite kind: {rewrite_kind}")
     reason_detail = {
         "kind": "producer_evaluation_not_proven",
-        "comparison_kind": comparison_kind,
+        "blocked_kind": blocked_kind,
+        "receipt_family": receipt_family,
         "symbolic_value": symbolic_value_id,
         "symbolic_producer": symbolic_producer,
         "result_const": result_const,
-        "impact": "rewriting the predicate before S5/DCE proves producer evaluation could erase an effectful producer",
+        "impact": f"rewriting the {reason_noun} before S5/DCE proves producer evaluation could erase an effectful producer",
     }
     fallback = {
         "op": op_name,
@@ -504,11 +625,10 @@ def blocked_producer_evaluation_receipt(
         "input_ir_sha256": hlir_sha,
         "eclass_id": eclass_id,
         "proposed_rewrite_id": rid,
-        "rewrite_kind": "symbolic_reflexive_cmp_i64",
-        "comparison_kind": comparison_kind,
-        "proposal_kind": "blocked_symbolic_reflexive_comparison",
+        "rewrite_kind": rewrite_kind,
+        "proposal_kind": proposal_kind,
         "proposal_origin": "madaros_v2_s4_receipt.producer-evaluation-preservation-guard",
-        "proposal_config_sha256": sha256_text(stable_json({"pass": "symbolic_reflexive_cmp_i64_eval_guard", "schema": REWRITE_SCHEMA})),
+        "proposal_config_sha256": sha256_text(stable_json({"pass": config_pass, "schema": REWRITE_SCHEMA})),
         "ekan_receipt_kind": "ekan_blocked_producer_evaluation",
         "function": func_name,
         "block": block_label,
@@ -518,13 +638,14 @@ def blocked_producer_evaluation_receipt(
         "symbolic_value": symbolic_value_id,
         "symbolic_producer": symbolic_producer,
         "same_operand_id": True,
+        "blocked_kind": blocked_kind,
         "producer_evaluation_policy": "blocked: producer evaluation is not proven",
         "result_const": result_const,
         "original_enode_sha256": sha256_text(stable_json(instr)),
         "proposed_enode_sha256": sha256_text(stable_json(proposed)),
         "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
         "basis_family": "exact_symbolic",
-        "coefficient_sha256": sha256_text(stable_json({"basis_family": "exact_symbolic", "blocked": True, "comparison_kind": comparison_kind})),
+        "coefficient_sha256": sha256_text(stable_json({"basis_family": "exact_symbolic", "blocked": True, "rewrite_kind": rewrite_kind, "blocked_kind": blocked_kind})),
         "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "blocked-no-training", "reason": reason_detail})),
         "domain": "blocked: producer evaluation is not proven",
         "domain_bounds": {
@@ -540,7 +661,7 @@ def blocked_producer_evaluation_receipt(
         "validator_log_sha256": sha256_text(stable_json(validator_log)),
         "blocked": True,
         "rejection_reason_code": "producer_evaluation_not_proven",
-        "rejection_reason": "producer evaluation must be preserved before replacing the predicate",
+        "rejection_reason": f"producer evaluation must be preserved before replacing the {reason_noun}",
         "selected_for_extraction": False,
         "ir_mutation_allowed": False,
         "accepted": False,
@@ -627,6 +748,108 @@ def rejected_div_self_receipt(
         "validator_log_sha256": sha256_text(stable_json(validator_log)),
         "rejection_reason_code": "counterexample_found",
         "rejection_reason": "counterexample_division_by_zero",
+        "counterexample_sha256": sha256_text(stable_json(counterexample)),
+        "counterexample_set_sha256": sha256_text(stable_json([counterexample])),
+        "counterexample_count": 1,
+        "counterexamples": [counterexample],
+        "selected_for_extraction": False,
+        "ir_mutation_allowed": False,
+        "accepted": False,
+    }
+
+
+def rejected_distinct_sub_self_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any],
+    rhs_info: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = {
+        "op": "sub",
+        "lhs": ["symbolic_value", int(instr["lhs"])],
+        "rhs": ["symbolic_value", int(instr["rhs"])],
+        "proposal": "distinct_symbolic_sub_to_zero",
+    }
+    rewritten = make_const_enode("int", 0)
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["constant"],
+        "constant": 0,
+        "proposal": "distinct_symbolic_sub_to_zero",
+    }
+    counterexample = {
+        "lhs_symbolic_value": int(instr["lhs"]),
+        "rhs_symbolic_value": int(instr["rhs"]),
+        "lhs_value": 1,
+        "rhs_value": 2,
+        "original_behavior": "returns_-1",
+        "rewritten_behavior": "returns_0",
+    }
+    validator_log = {
+        "validator": "rejected",
+        "method": "counterexample-guided-translation-validation",
+        "accepted": False,
+        "rejection_reason": "counterexample_distinct_symbolic_subtraction",
+        "counterexamples": [counterexample],
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "proposal": "distinct_symbolic_sub_to_zero",
+        "counterexample": counterexample,
+    }
+    rid = "s4-reject-sub-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_sub_self_i64",
+        "subtraction_kind": "distinct_symbolic_sub_not_zero",
+        "proposal_kind": "rejected_symbolic_sub_self",
+        "proposal_origin": "madaros_v2_s4_receipt.counterexample-guided-sub-self-negative-lane",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "reject_symbolic_sub_self_distinct_operands", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_rejected_counterexample",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "lhs_symbolic_producer": lhs_info,
+        "rhs_symbolic_producer": rhs_info,
+        "same_operand_id": False,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(rewritten)),
+        "rewritten_enode_sha256": sha256_text(stable_json(rewritten)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "hand-authored-symbolic-sub-negative-proposal"})),
+        "domain": "all-i64-values-with-distinct-ssa-subtraction",
+        "domain_bounds": {
+            "kind": "all-i64-values-with-distinct-ssa-subtraction",
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "preconditions": ["operands are distinct S3 HLIR SSA values"],
+        },
+        "error_bound": "unbounded: proposal rejected",
+        "error_bound_method": "counterexample",
+        "gum_covariance_assumptions": "not-applicable: rejected exact symbolic proposal",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "rejected",
+        "validator_attempted": ["translation-validation", "counterexample"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "rejection_reason_code": "counterexample_found",
+        "rejection_reason": "counterexample_distinct_symbolic_subtraction",
         "counterexample_sha256": sha256_text(stable_json(counterexample)),
         "counterexample_set_sha256": sha256_text(stable_json([counterexample])),
         "counterexample_count": 1,
@@ -818,8 +1041,14 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                 "lowering_effect": (
                     "replace_binary_identity_expr_with_existing_value"
                     if rewrite["rewrite_kind"] == "symbolic_identity_i64"
+                    else "replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated"
+                    if rewrite["rewrite_kind"] == "symbolic_sub_self_i64"
+                    and rewrite.get("producer_evaluation_policy") == "direct_call_leaf_pure_keep_producer_evaluated"
+                    else "replace_binary_sub_self_expr_with_const_i64_zero"
+                    if rewrite["rewrite_kind"] == "symbolic_sub_self_i64"
                     else "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated"
-                    if rewrite.get("producer_evaluation_policy") == "direct_call_leaf_pure_keep_producer_evaluated"
+                    if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64"
+                    and rewrite.get("producer_evaluation_policy") == "direct_call_leaf_pure_keep_producer_evaluated"
                     else "replace_binary_predicate_expr_with_const_bool"
                     if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64"
                     else "replace_binary_constant_expr_with_const"
@@ -1141,6 +1370,65 @@ def blocked_reflexive_cmp_candidate(
     return (comparison_kind, int(instr.get("lhs", -1)), lhs_info, result_const)
 
 
+def sub_self_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[int, dict[str, Any], str] | None:
+    if int(instr.get("bin_op", -1)) != 1:
+        return None
+    if int(instr.get("lhs", -1)) != int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not rhs_info:
+        return None
+    if lhs_info.get("value_id") != rhs_info.get("value_id"):
+        return None
+    if instr.get("ty", {}).get("kind") != "i64":
+        return None
+    policy = producer_evaluation_policy(lhs_info)
+    if policy is None:
+        return None
+    return (int(instr.get("lhs", -1)), lhs_info, policy)
+
+
+def blocked_sub_self_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[int, dict[str, Any]] | None:
+    if int(instr.get("bin_op", -1)) != 1:
+        return None
+    if int(instr.get("lhs", -1)) != int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not rhs_info:
+        return None
+    if lhs_info.get("value_id") != rhs_info.get("value_id"):
+        return None
+    if instr.get("ty", {}).get("kind") != "i64":
+        return None
+    if producer_evaluation_policy(lhs_info) is not None:
+        return None
+    return (int(instr.get("lhs", -1)), lhs_info)
+
+
+def rejected_distinct_sub_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if int(instr.get("bin_op", -1)) != 1:
+        return None
+    if int(instr.get("lhs", -1)) == int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not is_symbolic_value(rhs_info):
+        return None
+    if lhs_info.get("value_id") == rhs_info.get("value_id"):
+        return None
+    if instr.get("ty", {}).get("kind") != "i64":
+        return None
+    return (lhs_info, rhs_info)
+
+
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = json.loads(hlir_text)
     module = data["module"]
@@ -1257,6 +1545,88 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     block["label"],
                                 )
                     else:
+                        sub_self = sub_self_candidate(instr, lhs_info, rhs_info)
+                        if sub_self is not None:
+                            symbolic_value_id, symbolic_producer, eval_policy = sub_self
+                            result_const = ("int", 0)
+                            receipt = symbolic_sub_self_receipt(
+                                case_id,
+                                source,
+                                hlir_sha,
+                                func["name"],
+                                block["label"],
+                                instr,
+                                symbolic_value_id,
+                                symbolic_producer,
+                                eval_policy,
+                            )
+                            rewrites.append(receipt)
+                            enodes.append({
+                                "kind": "s4-rewrite",
+                                "rewrite_id": receipt["proposed_rewrite_id"],
+                                "sha256": receipt["rewritten_enode_sha256"],
+                                "op": "const",
+                            })
+                            value_info[result] = const_info(
+                                {
+                                    "result": result,
+                                    "constant": {
+                                        "kind": result_const[0],
+                                        "int_val": int(result_const[1]),
+                                        "bool_val": False,
+                                    },
+                                },
+                                result_const,
+                                func["name"],
+                                block["label"],
+                            )
+                        else:
+                            blocked_sub = blocked_sub_self_candidate(instr, lhs_info, rhs_info)
+                            if blocked_sub is not None:
+                                symbolic_value_id, symbolic_producer = blocked_sub
+                                receipt = blocked_producer_evaluation_receipt(
+                                    case_id,
+                                    source,
+                                    hlir_sha,
+                                    func["name"],
+                                    block["label"],
+                                    instr,
+                                    "symbolic_sub_self_i64",
+                                    "sub_self_zero",
+                                    symbolic_value_id,
+                                    symbolic_producer,
+                                    ("int", 0),
+                                )
+                                rewrites.append(receipt)
+                                enodes.append({
+                                    "kind": "s4-blocked-rewrite",
+                                    "rewrite_id": receipt["proposed_rewrite_id"],
+                                    "sha256": receipt["rewritten_enode_sha256"],
+                                    "op": "const",
+                                    "rejection_reason": receipt["rejection_reason"],
+                                })
+                            else:
+                                rejected_sub = rejected_distinct_sub_candidate(instr, lhs_info, rhs_info)
+                                if rejected_sub is not None:
+                                    distinct_lhs_info, distinct_rhs_info = rejected_sub
+                                    receipt = rejected_distinct_sub_self_receipt(
+                                        case_id,
+                                        source,
+                                        hlir_sha,
+                                        func["name"],
+                                        block["label"],
+                                        instr,
+                                        distinct_lhs_info,
+                                        distinct_rhs_info,
+                                    )
+                                    rewrites.append(receipt)
+                                    enodes.append({
+                                        "kind": "s4-rejected-rewrite",
+                                        "rewrite_id": receipt["proposed_rewrite_id"],
+                                        "sha256": receipt["rewritten_enode_sha256"],
+                                        "op": "const",
+                                        "rejection_reason": receipt["rejection_reason"],
+                                    })
                         reflexive_cmp = reflexive_cmp_candidate(instr, lhs_info, rhs_info)
                         if reflexive_cmp is not None:
                             comparison_kind, symbolic_value_id, symbolic_producer, result_const, eval_policy = reflexive_cmp
@@ -1304,6 +1674,7 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     func["name"],
                                     block["label"],
                                     instr,
+                                    "symbolic_reflexive_cmp_i64",
                                     comparison_kind,
                                     symbolic_value_id,
                                     symbolic_producer,
@@ -1449,7 +1820,7 @@ def emit(args: argparse.Namespace) -> int:
             "learned or approximate E-KAN proposals with declared domains and fallback expressions",
             "broad counterexample search over accepted and tempting sibling rewrites",
             "producer purity and evaluation-preservation beyond the current local leaf subset",
-            "broader non-constant algebraic identities beyond neutral-element and reflexive-comparison identities",
+            "broader non-constant algebraic identities beyond neutral-element, reflexive-comparison, and same-SSA subtraction identities",
             "downstream optimizer integration beyond receipt-only extraction",
             "full-domain translation validation for every selected rewrite family",
         ],

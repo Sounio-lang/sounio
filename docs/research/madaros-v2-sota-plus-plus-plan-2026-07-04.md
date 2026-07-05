@@ -344,19 +344,22 @@ cost-model extraction decisions. The S3 operand-provenance blocker found on
 subset is deliberately narrow: exact i64 constant folds, neutral-element
 symbolic identities (`x + 0`, `0 + x`, `x * 1`, `1 * x`, `x - 0`), and
 same-SSA reflexive comparisons (`x == x`, `x != x`, `x <= x`, `x >= x`,
-`x < x`, `x > x`) over params/block params and local leaf call results with
+`x < x`, `x > x`), plus same-SSA symbolic subtraction (`x - x -> 0`) over
+params/block params and local leaf call results with
 `basis_family = exact_symbolic`, `validator = translation-validation`,
 `error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
-The current local S4 gate reports `accepted=26`, `rejected=2`, `blocked=2`,
-and `selected=26`. The manifest now carries min/max rewrite counts so negative
-rows such as distinct symbolic comparisons and effectful call-result
-self-comparisons fail if they accidentally start rewriting without a
-producer-evaluation proof. Local leaf call results are accepted only with
-`replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated`; callees
-that contain `call_direct` are blocked with `producer_evaluation_not_proven`.
+The current local S4 gate reports `accepted=28`, `rejected=3`, `blocked=3`,
+and `selected=28`. The manifest now carries min/max rewrite counts so negative
+rows such as distinct symbolic comparisons, distinct symbolic subtraction, and
+effectful call-result self-comparisons fail if they accidentally start rewriting
+without a producer-evaluation proof. Local leaf call results are accepted only
+with keep-producer extraction effects (`*_keep_producer_evaluated`); callees that
+contain `call_direct` are blocked with `producer_evaluation_not_proven`.
 The current rejected subset includes the algebraic proposal `x_div_x_to_one`,
 rejected by counterexample-guided translation validation (`x = 0`,
-original division-by-zero trap vs rewritten constant `1`) with
+original division-by-zero trap vs rewritten constant `1`), and the tempting
+distinct-symbolic subtraction generalization `x - y -> 0` rejected with
+counterexample `x = 1, y = 2`. Both carry
 `selected_for_extraction = false` and `ir_mutation_allowed = false`.
 The blocked status remains available for future ambiguous proposals through
 `operand_provenance_blocked` receipts with `validator = blocked`,
@@ -368,9 +371,9 @@ effectful/non-leaf call-result self-comparisons.
 receipts and proves that extraction-selected IDs exactly equal accepted IDs,
 rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
 mutation is allowed. Learned or approximate E-KAN rewrites, equality saturation,
-broader algebraic identities beyond the current neutral/reflexive exact subset,
-broad counterexample search, producer purity/evaluation-preservation, and
-downstream applying optimizer integration remain future S4 work.
+broader algebraic identities beyond the current neutral/reflexive/sub-self exact
+subset, broad counterexample search, producer purity/evaluation-preservation,
+and downstream applying optimizer integration remain future S4 work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
