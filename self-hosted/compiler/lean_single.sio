@@ -34743,11 +34743,20 @@ fn resolve_imports() with IO, Mut, Panic, Div {
             // Extract module path until newline, semicolon, or ::*
             var path_start: i64 = pos
             var path_end: i64 = pos
+            // Bug C: a glob (`::*`) or braced (`::{...}`) import unambiguously
+            // marks where the file path ends. A bare named import
+            // (`use pkg::mod::symbol`) has no such marker — `symbol` is
+            // syntactically indistinguishable from another path segment here.
+            // Track that ambiguity so the fallback below (after the naive
+            // whole-path read fails) can retry with the last segment treated
+            // as an imported symbol name rather than part of the file path.
+            var is_named_import: i64 = 1
             while pos < SRC_LEN && sb(pos) != 10 && sb(pos) != 59 && sb(pos) != 13 {
                 if sb(pos) == 58 && pos + 1 < SRC_LEN && sb(pos+1) == 58 {
                     if pos + 2 < SRC_LEN && sb(pos+2) == 42 {
                         path_end = pos
                         pos = pos + 3  // skip ::*
+                        is_named_import = 0
                         break
                     }
                     if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
@@ -34755,6 +34764,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         // Skip ::{...} until }
                         while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
                         if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
+                        is_named_import = 0
                         break
                     }
                 }
@@ -35131,6 +35141,75 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                             fp_len = mfp
                             IMP_PATH[fp_len as usize] = 0
                         }
+                    }
+                }
+            }
+            // Bug C fallback: every attempt above treated the whole `use`
+            // path as a file path. For a bare named import with no glob/brace
+            // marker, the last segment may instead be the specific symbol
+            // being imported (e.g. `use pkg::mod::item` means "load
+            // pkg/mod.sio, bring `item` into scope", not "load
+            // pkg/mod/item.sio") — retry once with that last `/`-segment
+            // dropped, across the same path roots the primary attempts used.
+            if copy_len <= 0 && is_named_import == 1 {
+                var bc_strip: i64 = raw_len - 4  // drop ".sio"
+                var bc_slash: i64 = -1
+                var bc_si: i64 = bc_strip - 1
+                while bc_si >= 0 {
+                    if IMP_RAW_PATH[bc_si as usize] == 47 { bc_slash = bc_si; bc_si = -1 } else { bc_si = bc_si - 1 }
+                }
+                if bc_slash > 0 {
+                    var bc_len: i64 = bc_slash
+                    IMP_RAW_PATH[bc_len as usize] = 46; bc_len = bc_len + 1   // .
+                    IMP_RAW_PATH[bc_len as usize] = 115; bc_len = bc_len + 1  // s
+                    IMP_RAW_PATH[bc_len as usize] = 105; bc_len = bc_len + 1  // i
+                    IMP_RAW_PATH[bc_len as usize] = 111; bc_len = bc_len + 1  // o
+                    IMP_RAW_PATH[bc_len as usize] = 0
+                    if needs_base_dir == 1 && BASE_DIR_LEN > 0 {
+                        var bc_bj: i64 = 0
+                        while bc_bj < BASE_DIR_LEN { IMP_PATH[bc_bj as usize] = BASE_DIR[bc_bj as usize]; bc_bj = bc_bj + 1 }
+                        IMP_PATH[BASE_DIR_LEN as usize] = 47
+                        var bc_rj: i64 = 0
+                        while bc_rj < bc_len { IMP_PATH[(BASE_DIR_LEN + 1 + bc_rj) as usize] = IMP_RAW_PATH[bc_rj as usize]; bc_rj = bc_rj + 1 }
+                        fp_len = BASE_DIR_LEN + 1 + bc_len
+                        IMP_PATH[fp_len as usize] = 0
+                        raw = read_file(IMP_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(IMP_PATH)
+                    }
+                    if copy_len <= 0 {
+                        IMP_PATH[0 as usize] = 115; IMP_PATH[1 as usize] = 116; IMP_PATH[2 as usize] = 100
+                        IMP_PATH[3 as usize] = 108; IMP_PATH[4 as usize] = 105; IMP_PATH[5 as usize] = 98
+                        IMP_PATH[6 as usize] = 47
+                        var bc_rj2: i64 = 0
+                        while bc_rj2 < bc_len { IMP_PATH[(7 + bc_rj2) as usize] = IMP_RAW_PATH[bc_rj2 as usize]; bc_rj2 = bc_rj2 + 1 }
+                        fp_len = 7 + bc_len
+                        IMP_PATH[fp_len as usize] = 0
+                        raw = read_file(IMP_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(IMP_PATH)
+                    }
+                    if copy_len <= 0 {
+                        IMP_PATH[0 as usize] = 115; IMP_PATH[1 as usize] = 101; IMP_PATH[2 as usize] = 108
+                        IMP_PATH[3 as usize] = 102; IMP_PATH[4 as usize] = 45; IMP_PATH[5 as usize] = 104
+                        IMP_PATH[6 as usize] = 111; IMP_PATH[7 as usize] = 115; IMP_PATH[8 as usize] = 116
+                        IMP_PATH[9 as usize] = 101; IMP_PATH[10 as usize] = 100; IMP_PATH[11 as usize] = 47
+                        var bc_rj3: i64 = 0
+                        while bc_rj3 < bc_len { IMP_PATH[(12 + bc_rj3) as usize] = IMP_RAW_PATH[bc_rj3 as usize]; bc_rj3 = bc_rj3 + 1 }
+                        fp_len = 12 + bc_len
+                        IMP_PATH[fp_len as usize] = 0
+                        raw = read_file(IMP_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(IMP_PATH)
+                    }
+                    if copy_len <= 0 {
+                        var bc_rj4: i64 = 0
+                        while bc_rj4 < bc_len { IMP_PATH[bc_rj4 as usize] = IMP_RAW_PATH[bc_rj4 as usize]; bc_rj4 = bc_rj4 + 1 }
+                        fp_len = bc_len
+                        IMP_PATH[fp_len as usize] = 0
+                        raw = read_file(IMP_PATH)
+                        copy_len = str_len(raw)
+                        fsz = file_size(IMP_PATH)
                     }
                 }
             }
