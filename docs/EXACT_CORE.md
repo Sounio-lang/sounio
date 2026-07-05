@@ -138,11 +138,21 @@ confirms this is **exactly** where the unbounded Python `fractions` oracle needs
 *locates* the substrate ceiling precisely (exact ℚ on i64 holds to ε=10⁻⁹) and proves souc censors
 correctly rather than corrupting — the Firewall applied to arithmetic itself.
 
-**STILL NOT executed (the fully general theorem)**: arbitrary probability measures / general locus
-parameterizations / **unbounded** ℚ past the i64 wall. That needs bigint (or overflow-checked
-`rational.sio`) rationals — and, for a general engine, the souc codegen defects surfaced here
-(a `while` loop calling a function with a loop-carried/array-indexed arg mis-compiles; see
-`docs/handoff/souc_v0800_defects.md`). The general statement remains proven at the statement level.
+**UNBOUNDED — the i64 wall REMOVED via a from-scratch bigint**
+(`tests/run-pass/sedenion_measure_annihilation_bigint.sio`): a minimal arbitrary-precision `BigNat`
+(base-10⁹ limbs; `mul_small`/`div_small`/`pow10`/decimal-print, all built in Sounio) computes the exact
+`Var = 2/(3·10^(2k))` for **k=1..20** — up to denominator `1.5×10⁴⁰`, far past the i64 wall (k=9). The
+6th gate face diffs all 20 values element-wise against the unbounded Python `fractions` oracle → exact
+match. So exact ℚ in Sounio is **no longer bounded by i64**; the boundary at k=9 is *located* (i64
+engine) and *removed* (bigint engine). The honest reduction uses only `mul_small`+`div_small` (gcd(2,
+3·10^(2k))=2 exactly), no full bigint division.
+
+**STILL NOT executed (the fully general theorem)**: **arbitrary** probability measures and **general
+locus parameterizations** (this executes the canonical channel's off-locus family across scales, not
+every measure on every locus). A fully general engine also wants a complete bigint (mul/div/gcd) and
+must route around the souc codegen defects surfaced here (`docs/handoff/souc_v0800_defects.md`,
+incl. D5 #641). The general statement remains proven at the statement level; the *precision* barrier
+is gone, the *generality* barrier (arbitrary μ, arbitrary locus) remains.
 
 Reconciliation (why this is the same contract-vs-number theme, one layer up): the float artifact
 `sedenion_zero_divisor.sio` shows `E[a·b]=0` but `Var>0` — the "confidence collapse". That is what a

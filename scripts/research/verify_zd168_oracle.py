@@ -139,6 +139,10 @@ if __name__ == "__main__":
         V = F(2, 3 * 10 ** (2 * k))
         fits = "FITS" if V.denominator <= I64_MAX else "BIGINT"
         print(f"SWEEP {k} {V.numerator} {V.denominator} {fits}")
+    # Unbounded exact reference for the souc BIGINT sweep (k=1..20, well past the i64 wall).
+    for k in range(1, 21):
+        V = F(2, 3 * 10 ** (2 * k))
+        print(f"BIG {k} {V.numerator} {V.denominator}")
     # self-check against the Lean-proven counts + the exact measure values
     E0, V0 = measure_case(onloc)
     E1, V1 = measure_case(offloc)

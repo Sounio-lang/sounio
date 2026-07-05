@@ -22,30 +22,30 @@ export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# The Python oracle emits all five faces (PAIR=ZD, TRIPLE=non-Fano, ARROW=dagger, MEASURE=E/Var, SWEEP=i64 boundary).
+# The Python oracle emits all six faces (PAIR/TRIPLE/ARROW/MEASURE/SWEEP/BIG).
 python3 scripts/research/verify_zd168_oracle.py > "$WORK/py_all.txt"
 
-echo "[face 1/5] zero-divisor census: souc vs oracle ..."
+echo "[face 1/6] zero-divisor census: souc vs oracle ..."
 ./bin/souc run tests/run-pass/sedenion_zd_census_168.sio 2>/dev/null | grep '^PAIR ' | sort -u > "$WORK/souc_zd.txt"
 grep '^PAIR ' "$WORK/py_all.txt" | sort -u > "$WORK/py_zd.txt"
 SZD=$(wc -l < "$WORK/souc_zd.txt"); PZD=$(wc -l < "$WORK/py_zd.txt")
 
-echo "[face 2/5] non-Fano census: souc vs oracle ..."
+echo "[face 2/6] non-Fano census: souc vs oracle ..."
 ./bin/souc run tests/run-pass/octonion_nonfano_census_168.sio 2>/dev/null | grep '^TRIPLE ' | sort -u > "$WORK/souc_nf.txt"
 grep '^TRIPLE ' "$WORK/py_all.txt" | sort -u > "$WORK/py_nf.txt"
 SNF=$(wc -l < "$WORK/souc_nf.txt"); PNF=$(wc -l < "$WORK/py_nf.txt")
 
-echo "[face 3/5] 84<->84 dagger bijection map: souc vs oracle ..."
+echo "[face 3/6] 84<->84 dagger bijection map: souc vs oracle ..."
 ./bin/souc run tests/run-pass/octonion_dagger_bijection_84.sio 2>/dev/null | grep '^ARROW ' | sort -u > "$WORK/souc_ar.txt"
 grep '^ARROW ' "$WORK/py_all.txt" | sort -u > "$WORK/py_ar.txt"
 SAR=$(wc -l < "$WORK/souc_ar.txt"); PAR=$(wc -l < "$WORK/py_ar.txt")
 
-echo "[face 4/5] measure-layer exact E/Var over Q: souc vs Python fractions ..."
+echo "[face 4/6] measure-layer exact E/Var over Q: souc vs Python fractions ..."
 ./bin/souc run tests/run-pass/sedenion_measure_annihilation_exact.sio 2>/dev/null | grep '^MEASURE ' | sort > "$WORK/souc_me.txt"
 grep '^MEASURE ' "$WORK/py_all.txt" | sort > "$WORK/py_me.txt"
 SME=$(wc -l < "$WORK/souc_me.txt"); PME=$(wc -l < "$WORK/py_me.txt")
 
-echo "[face 5/5] generalized sweep + i64 boundary: souc (overflow-censored) vs unbounded oracle ..."
+echo "[face 5/6] generalized sweep + i64 boundary: souc (overflow-censored) vs unbounded oracle ..."
 ./bin/souc run tests/run-pass/sedenion_measure_annihilation_general.sio 2>/dev/null | grep '^SCALE ' > "$WORK/souc_sw.txt"
 grep '^SWEEP ' "$WORK/py_all.txt" > "$WORK/py_sw.txt"
 sweep_fail=0
@@ -63,6 +63,11 @@ for k in $(seq 1 12); do
   fi
 done
 
+echo "[face 6/6] UNBOUNDED bigint sweep (past the i64 wall): souc BigNat vs unbounded oracle ..."
+./bin/souc run tests/run-pass/sedenion_measure_annihilation_bigint.sio 2>/dev/null | grep '^BIG ' | sort -n -k2 > "$WORK/souc_big.txt"
+grep '^BIG ' "$WORK/py_all.txt" | sort -n -k2 > "$WORK/py_big.txt"
+SBIG=$(wc -l < "$WORK/souc_big.txt"); PBIG=$(wc -l < "$WORK/py_big.txt")
+
 fail=0
 if [ "$SZD" -ne 168 ] || [ "$PZD" -ne 168 ] || ! diff -q "$WORK/souc_zd.txt" "$WORK/py_zd.txt" >/dev/null; then
   echo "MISMATCH (ZD): souc=$SZD python=$PZD"; diff "$WORK/souc_zd.txt" "$WORK/py_zd.txt" | head -20; fail=1
@@ -77,16 +82,18 @@ if [ "$SME" -ne 2 ] || [ "$PME" -ne 2 ] || ! diff -q "$WORK/souc_me.txt" "$WORK/
   echo "MISMATCH (measure E/Var): souc=$SME python=$PME"; diff "$WORK/souc_me.txt" "$WORK/py_me.txt" | head -20; fail=1
 fi
 [ "$sweep_fail" -eq 0 ] || fail=1
+if [ "$SBIG" -ne 20 ] || [ "$PBIG" -ne 20 ] || ! diff -q "$WORK/souc_big.txt" "$WORK/py_big.txt" >/dev/null; then
+  echo "MISMATCH (bigint sweep): souc=$SBIG python=$PBIG"; diff "$WORK/souc_big.txt" "$WORK/py_big.txt" | head -20; fail=1
+fi
 if [ "$fail" -eq 0 ]; then
-  echo "CROSS-VERIFIED: the 168-theorem (structure) + the measure layer (exact + generalized), souc == independent oracle."
+  echo "CROSS-VERIFIED: the 168-theorem (structure) + the measure layer (exact, generalized, UNBOUNDED), souc == oracle."
   echo "  zero-divisor classes:      $SZD/168 identical pairs"
   echo "  non-Fano triples:          $SNF/168 identical triples"
   echo "  84<->84 dagger bijection:  $SAR/84 identical forward->backward arrows"
   echo "  measure E/Var over Q:      $SME/2 exact rational values identical (on-locus 0/1,0/1; off-locus 0/1,1/150)"
-  echo "  generalized sweep:         souc exact for k=1..$boundary; overflow-censored k>$boundary, EXACTLY where"
-  echo "                             the unbounded oracle needs BIGINT (i64 exactness boundary located at k=$boundary)."
-  echo "  Structure: Lean native_decide-proven (84/336/168, nonFanoCount=168, arrows 84, bridge, dagger)."
-  echo "  Measure:   Frente A -- exact Q; E=Var=0 on locus; Var=1/150 off; general sweep 2/(3*10^2k) to the i64 wall."
+  echo "  generalized sweep:         souc i64 exact k=1..$boundary; censored k>$boundary where oracle needs BIGINT."
+  echo "  UNBOUNDED bigint sweep:    $SBIG/20 exact rational values identical PAST the i64 wall (to 1.5e40)."
+  echo "  Structure: Lean native_decide-proven. Measure: Frente A -- exact Q, i64 boundary located AND removed via BigNat."
   exit 0
 fi
 exit 1
