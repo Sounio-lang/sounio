@@ -18,8 +18,8 @@ receipt_ok() {
   local want
   want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
   [[ -n "$want" ]] || return 1
-  grep -Fq "$want" "$receipt" || return 1
-  grep -Fxq "smt_skip=0" "$receipt"
+  grep -Fq "$want" "$receipt" 2>/dev/null || return 1
+  grep -Fxq "smt_skip=0" "$receipt" 2>/dev/null
 }
 
 ensure_s3_raw_artifact() {

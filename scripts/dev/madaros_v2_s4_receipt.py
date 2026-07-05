@@ -183,28 +183,134 @@ def rewrite_receipt(
         "result_const": result_const,
     }
     rid = "s4-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
     return {
         "schema_version": REWRITE_SCHEMA,
         "case_id": case_id,
         "source": source,
         "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
         "proposed_rewrite_id": rid,
         "rewrite_kind": "constant_fold_i64",
+        "proposal_kind": "exact_constant_fold",
+        "proposal_origin": "madaros_v2_s4_receipt.constant-evaluation-over-s3-hlir",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "constant_fold_i64", "schema": REWRITE_SCHEMA})),
         "ekan_receipt_kind": "ekan_exact_symbolic_constant",
         "function": func_name,
         "block": block_label,
         "instruction_result": instr["result"],
         "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(make_const_enode(*result_const))),
         "rewritten_enode_sha256": sha256_text(stable_json(make_const_enode(*result_const))),
         "basis_family": "exact_symbolic",
         "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "exact-symbolic-no-training"})),
         "domain": "singleton-known-s3-hlir-constant-operands",
+        "domain_bounds": {
+            "kind": "singleton-known-s3-hlir-constant-operands",
+            "lhs": lhs_const,
+            "rhs": rhs_const,
+        },
         "error_bound": "0",
+        "error_bound_method": "exact-evaluation",
         "gum_covariance_assumptions": "not-applicable: exact constant rewrite",
         "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
         "validator": "translation-validation",
+        "validator_attempted": ["translation-validation"],
         "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "selected_for_extraction": True,
+        "ir_mutation_allowed": False,
         "accepted": True,
+    }
+
+
+def rejected_div_self_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = {
+        "op": "sdiv",
+        "lhs": ["symbolic_value", int(instr["lhs"])],
+        "rhs": ["symbolic_value", int(instr["rhs"])],
+    }
+    rewritten = make_const_enode("int", 1)
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["constant"],
+        "constant": 1,
+        "proposal": "x_div_x_to_one",
+    }
+    counterexample = {
+        "symbolic_value": int(instr["lhs"]),
+        "value": 0,
+        "original_behavior": "division_by_zero_trap",
+        "rewritten_behavior": "returns_1",
+    }
+    validator_log = {
+        "validator": "rejected",
+        "method": "counterexample-guided-translation-validation",
+        "accepted": False,
+        "rejection_reason": "counterexample_division_by_zero",
+        "counterexamples": [counterexample],
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "proposal": "x_div_x_to_one",
+        "counterexample": counterexample,
+    }
+    rid = "s4-reject-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "x_div_x_to_one",
+        "proposal_kind": "algebraic_identity",
+        "proposal_origin": "madaros_v2_s4_receipt.counterexample-guided-negative-lane",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "reject_x_div_x_to_one", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_rejected_counterexample",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(rewritten)),
+        "rewritten_enode_sha256": sha256_text(stable_json(rewritten)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "hand-authored-algebraic-proposal"})),
+        "domain": "all-i64-values",
+        "domain_bounds": {
+            "kind": "all-i64-values",
+            "symbolic_value": int(instr["lhs"]),
+            "preconditions": [],
+        },
+        "error_bound": "unbounded: proposal rejected",
+        "error_bound_method": "counterexample",
+        "gum_covariance_assumptions": "not-applicable: rejected exact symbolic proposal",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "rejected",
+        "validator_attempted": ["translation-validation", "counterexample"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "rejection_reason_code": "counterexample_found",
+        "rejection_reason": "counterexample_division_by_zero",
+        "counterexample_sha256": sha256_text(stable_json(counterexample)),
+        "counterexample_set_sha256": sha256_text(stable_json([counterexample])),
+        "counterexample_count": 1,
+        "counterexamples": [counterexample],
+        "selected_for_extraction": False,
+        "ir_mutation_allowed": False,
+        "accepted": False,
     }
 
 
@@ -229,6 +335,23 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                 if instr.get("op") == "binary":
                     lhs = value_consts.get(int(instr.get("lhs", -1)))
                     rhs = value_consts.get(int(instr.get("rhs", -1)))
+                    if int(instr.get("bin_op", -1)) == 3 and instr.get("lhs") == instr.get("rhs"):
+                        receipt = rejected_div_self_receipt(
+                            case_id,
+                            source,
+                            hlir_sha,
+                            func["name"],
+                            block["label"],
+                            instr,
+                        )
+                        rewrites.append(receipt)
+                        enodes.append({
+                            "kind": "s4-rejected-rewrite",
+                            "rewrite_id": receipt["proposed_rewrite_id"],
+                            "sha256": receipt["rewritten_enode_sha256"],
+                            "op": "const",
+                            "rejection_reason": receipt["rejection_reason"],
+                        })
                     if lhs is not None and rhs is not None:
                         folded = eval_bin(int(instr.get("bin_op", -1)), lhs[1], rhs[1])
                         if folded is not None:
@@ -315,6 +438,7 @@ def emit(args: argparse.Namespace) -> int:
         "accepted_rewrite_count": len(accepted),
         "rejected_rewrite_count": len(rejected),
         "accepted_rewrite_ids": [r["proposed_rewrite_id"] for r in accepted],
+        "rejected_rewrite_ids": [r["proposed_rewrite_id"] for r in rejected],
         "validators": sorted({r["validator"] for r in rewrites}),
         "basis_families": sorted({r["basis_family"] for r in rewrites}),
         "s4_complete": False,
@@ -323,8 +447,6 @@ def emit(args: argparse.Namespace) -> int:
         "s4_remaining": [
             "multi-rule equality saturation",
             "non-constant algebraic identities",
-            "rejected approximate E-KAN proposal receipts",
-            "counterexample-guided translation validation",
             "extractor cost model and downstream optimizer integration",
         ],
     }

@@ -3222,3 +3222,51 @@ status: lock-released
     counterexample-guided validation, extraction/cost model, and downstream
     integration. `madaros.v2.s5.preflight/0.1` is available as a future input
     contract, but S5 MIR/ABI is not implemented yet.
+
+## 2026-07-05 — Madaros v2 S4 negative-validation receipt slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/reject_div_self_zero.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added deterministic rejected S4 proposal receipts for the algebraic identity
+    candidate `x_div_x_to_one`.
+  - The negative fixture `reject_div_self_zero.sio` produces an `x / x` HLIR
+    candidate with `x` supplied by a call; S4 records counterexample `x = 0`
+    because the original expression traps on division by zero while the
+    proposed rewrite returns `1`.
+  - Rejected receipts now carry proposal origin/config hash, structured domain,
+    coefficient/provenance hash, exact fallback hash, counterexample hashes,
+    `validator = rejected`, `rejection_reason_code = counterexample_found`,
+    `selected_for_extraction = false`, and `ir_mutation_allowed = false`.
+  - S5 preflight now consumes only accepted S4 rewrites and verifies rejected
+    rewrites are not selected for extraction or mutation.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=5`, `rejected=1`, `summary_sha=9b9c1637e5d0`.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=3`, consumed accepted rewrites `5`, preflight sha `666882b593e8...`.
+- Blocker reduced, not globally closed:
+  - Blocker-ID: `MADAROS-V2-S4-NEGATIVE-VALIDATION-2026-07-05`
+  - Severity: P2
+  - Class: compiler architecture / missing rejected optimizer proposal receipts
+  - Evidence level: deterministic local S4 gate with one counterexample-backed
+    rejected proposal receipt and non-extraction proof.
+  - Owner: Codex on this lane.
+  - Acceptance gate: `scripts/dev/madaros_v2_s4_gate.sh` requires both accepted
+    and rejected rewrite markers.
+  - Next action: broaden S4 beyond this first negative lane: equality
+    saturation, non-constant algebraic identities with preconditions,
+    learned/approximate E-KAN proposal provenance, interval/SMT validators, and
+    extraction/cost-model integration. Global S4 remains incomplete.

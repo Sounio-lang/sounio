@@ -57,7 +57,11 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         raise SystemExit("S4 rewrites count mismatch")
     for rewrite in rewrites:
         if rewrite.get("accepted") is not True:
-            raise SystemExit("S5 preflight rejects unaccepted S4 rewrites")
+            if rewrite.get("selected_for_extraction") is not False:
+                raise SystemExit("S5 preflight rejects extracted rejected S4 rewrites")
+            if rewrite.get("ir_mutation_allowed") is not False:
+                raise SystemExit("S5 preflight rejects mutating rejected S4 rewrites")
+            continue
         if rewrite.get("rewrite_kind") not in allowed_rewrites:
             raise SystemExit(f"S5 preflight rejects ABI-risk rewrite: {rewrite.get('rewrite_kind')}")
         if rewrite.get("basis_family") not in allowed_basis:

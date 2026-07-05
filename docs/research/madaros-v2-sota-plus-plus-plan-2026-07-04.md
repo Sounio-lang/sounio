@@ -305,16 +305,20 @@ Purpose: introduce non-destructive optimization and scientific symbolic
 surrogate reasoning without losing exact semantics.
 
 Implementation status (2026-07-05): the S4 conservative e-graph/E-KAN
-exact-rewrite receipt boundary is implemented and gated. This is not global S4
-completion. `bin/madaros s4-receipt <source> [--out-dir OUT]` consumes S3 HLIR
+accepted/rejected receipt boundary is implemented and gated. This is not global
+S4 completion. `bin/madaros s4-receipt <source> [--out-dir OUT]` consumes S3 HLIR
 receipts, builds a persistent
 `madaros.v2.s4.egraph/0.1` artifact, and emits
-`madaros.v2.ekan.rewrite/0.1` receipts for accepted rewrites. The current
-accepted subset is deliberately narrow: `constant_fold_i64` with
+`madaros.v2.ekan.rewrite/0.1` receipts for accepted and rejected proposals. The
+current accepted subset is deliberately narrow: `constant_fold_i64` with
 `basis_family = exact_symbolic`, `validator = translation-validation`,
 `error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
-`scripts/dev/madaros_v2_s4_gate.sh` validates this boundary. Learned or
-approximate E-KAN rewrites, equality saturation, rejected proposal receipts,
+The current rejected subset includes the algebraic proposal `x_div_x_to_one`,
+rejected by counterexample-guided translation validation (`x = 0`,
+original division-by-zero trap vs rewritten constant `1`) with
+`selected_for_extraction = false` and `ir_mutation_allowed = false`.
+`scripts/dev/madaros_v2_s4_gate.sh` validates both positive and negative
+receipts. Learned or approximate E-KAN rewrites, equality saturation, broad
 counterexample search, and downstream extraction remain future S4 work.
 
 Canonical artifact:

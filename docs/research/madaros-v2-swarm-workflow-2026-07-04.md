@@ -212,20 +212,23 @@ receipts remain future work. The S4-ready boundary is executable through
 
 ## Wave D S4/S5 Status
 
-S4 exact-rewrite receipts landed on 2026-07-05:
+S4 exact accepted/rejected receipts landed on 2026-07-05:
 
 - `bin/madaros s4-receipt`
 - `scripts/dev/madaros_v2_s4_receipt.py`
 - `scripts/dev/madaros_v2_s4_gate.sh`
 - `tests/madaros/v2_s4/manifest.tsv`
 - `tests/madaros/v2_s4/exact_identity.sio`
+- `tests/madaros/v2_s4/reject_div_self_zero.sio`
 
 The S4 gate consumes S3 HLIR receipts, builds persistent e-graph artifacts, and
 emits `madaros.v2.ekan.rewrite/0.1` receipts. This is a completed boundary for
-one exact subset, not global S4 completion. The accepted subset is exact and
-conservative: `constant_fold_i64`, `basis_family = exact_symbolic`,
-`validator = translation-validation`, `error_bound = 0`, exact fallback hash,
-and original/rewritten e-node hashes.
+one exact positive/negative subset, not global S4 completion. The accepted
+subset is exact and conservative: `constant_fold_i64`,
+`basis_family = exact_symbolic`, `validator = translation-validation`,
+`error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
+The rejected subset records `x_div_x_to_one` with counterexample `x = 0`,
+`selected_for_extraction = false`, and `ir_mutation_allowed = false`.
 
 S5 now has an executable input-contract preflight:
 
