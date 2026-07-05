@@ -743,6 +743,9 @@ def emit(args: argparse.Namespace) -> int:
     s3_receipt = json.loads(s3_receipt_path.read_text(encoding="utf-8"))
     if s3_receipt.get("schema") != S3_SCHEMA:
         raise SystemExit(f"bad S3 receipt schema: {s3_receipt.get('schema')}")
+    s3_facts = s3_receipt.get("facts", {})
+    if s3_facts.get("binary_operand_integrity") is not True:
+        raise SystemExit("S4 requires S3 binary_operand_integrity=true before consuming HLIR")
     hlir_text = hlir_path.read_text(encoding="utf-8")
     hlir_sha = sha256_text(hlir_text)
     if hlir_sha != s3_receipt.get("hlir_byte_sha256"):

@@ -131,7 +131,33 @@ ops = set()
 terms = set()
 calls = set()
 const_kinds = set()
+operand_witnesses = []
 instr_total = 0
+
+def producer_label(producer):
+    if producer["kind"] == "param":
+        return f"param:{producer['name']}"
+    if producer["kind"] == "block_param":
+        return "block_param"
+    if producer["kind"] == "const":
+        return f"const:{producer['const_kind']}:{producer['value']}"
+    if producer["kind"] == "call_direct":
+        return f"call:{producer['name']}"
+    return producer["kind"]
+
+def find_single_binary(functions_by_name, fn_name, bin_op):
+    func = functions_by_name.get(fn_name)
+    if not func:
+        raise SystemExit(f"missing operand-fidelity function: {fn_name}")
+    matches = []
+    for block in func["blocks"]:
+        for instr in block["instrs"]:
+            if instr.get("op") == "binary" and instr.get("bin_op") == bin_op:
+                matches.append(instr)
+    if len(matches) != 1:
+        raise SystemExit(f"{fn_name} expected exactly one bin_op={bin_op}; got {len(matches)}")
+    return matches[0]
+
 for func in functions:
     if func["param_count"] != len(func["params"]):
         raise SystemExit(f"param_count mismatch in {func['name']}")
@@ -141,11 +167,24 @@ for func in functions:
         raise SystemExit(f"block_count mismatch in {func['name']}")
     if "return_type" not in func or "compile_strategy" not in func:
         raise SystemExit(f"function missing S4-consumable metadata: {func['name']}")
+    producers = {}
+    for param in func["params"]:
+        producers[int(param["value_id"])] = {
+            "kind": "param",
+            "name": param["name"],
+            "function": func["name"],
+        }
     for block in func["blocks"]:
         if block["param_count"] != len(block["params"]):
             raise SystemExit(f"block param_count mismatch in {func['name']}")
         if block["instr_count"] != len(block["instrs"]):
             raise SystemExit(f"instr_count mismatch in {func['name']}/{block['label']}")
+        for param in block["params"]:
+            producers[int(param["value_id"])] = {
+                "kind": "block_param",
+                "function": func["name"],
+                "block": block["label"],
+            }
         instr_total += block["instr_count"]
         term = block.get("terminator")
         if not isinstance(term, dict):
@@ -158,6 +197,49 @@ for func in functions:
             const_kinds.add(const.get("kind"))
             if "ty" not in instr or "result" not in instr:
                 raise SystemExit("instruction missing result/type fields")
+            if instr.get("op") == "binary":
+                lhs = int(instr.get("lhs", -1))
+                rhs = int(instr.get("rhs", -1))
+                if lhs not in producers:
+                    raise SystemExit(f"binary lhs does not resolve to prior producer in {func['name']}: {lhs}")
+                if rhs not in producers:
+                    raise SystemExit(f"binary rhs does not resolve to prior producer in {func['name']}: {rhs}")
+                operand_witnesses.append({
+                    "function": func["name"],
+                    "result": int(instr["result"]),
+                    "bin_op": int(instr["bin_op"]),
+                    "lhs": lhs,
+                    "rhs": rhs,
+                    "lhs_producer": producer_label(producers[lhs]),
+                    "rhs_producer": producer_label(producers[rhs]),
+                })
+            result = int(instr.get("result", -1))
+            if result >= 0:
+                if instr.get("op") == "const":
+                    value = const.get("int_val")
+                    if const.get("kind") == "bool":
+                        value = const.get("bool_val")
+                    elif const.get("kind") == "float":
+                        value = const.get("float_val")
+                    elif const.get("kind") == "string":
+                        value = const.get("string_val")
+                    producers[result] = {
+                        "kind": "const",
+                        "const_kind": const.get("kind"),
+                        "value": value,
+                        "function": func["name"],
+                    }
+                elif instr.get("op") == "call_direct":
+                    producers[result] = {
+                        "kind": "call_direct",
+                        "name": instr.get("call_name", ""),
+                        "function": func["name"],
+                    }
+                else:
+                    producers[result] = {
+                        "kind": instr.get("op"),
+                        "function": func["name"],
+                    }
 
 if instr_total < int(min_instrs):
     raise SystemExit(f"too few instructions: {instr_total} < {min_instrs}")
@@ -172,6 +254,33 @@ require_all("ops", ops, required_ops)
 require_all("terminators", terms, required_terms)
 require_all("calls", calls, required_calls)
 require_all("constant kinds", const_kinds, required_const_kinds)
+
+if case_id == "operand_fidelity":
+    functions_by_name = {func["name"]: func for func in functions}
+    witness_by_function = {w["function"]: w for w in operand_witnesses}
+    expected = {
+        "f_param_plus_zero": (0, "param:x", "const:int:0", False),
+        "f_zero_plus_param": (0, "const:int:0", "param:x", False),
+        "f_param_minus_zero": (1, "param:x", "const:int:0", False),
+        "f_param_minus_self": (1, "param:x", "param:x", True),
+        "f_call_plus_zero": (0, "call:seed", "const:int:0", False),
+        "f_zero_plus_call": (0, "const:int:0", "call:seed", False),
+    }
+    for fn_name, (bin_op, lhs_label, rhs_label, allow_same_operands) in expected.items():
+        instr = find_single_binary(functions_by_name, fn_name, bin_op)
+        witness = witness_by_function.get(fn_name)
+        if not witness:
+            raise SystemExit(f"missing operand witness for {fn_name}")
+        if witness["lhs_producer"] != lhs_label or witness["rhs_producer"] != rhs_label:
+            raise SystemExit(
+                f"{fn_name} operand provenance mismatch: "
+                f"{witness['lhs_producer']} / {witness['rhs_producer']} "
+                f"!= {lhs_label} / {rhs_label}"
+            )
+        if not allow_same_operands and witness["lhs"] == witness["rhs"]:
+            raise SystemExit(f"{fn_name} unexpectedly duplicated binary operands: {instr}")
+        if allow_same_operands and witness["lhs"] != witness["rhs"]:
+            raise SystemExit(f"{fn_name} expected intentional x-x same operand witness: {instr}")
 
 canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
 receipt = {
@@ -188,6 +297,8 @@ receipt = {
     "terminators": sorted(term for term in terms if term),
     "calls": sorted(call for call in calls if call),
     "const_kinds": sorted(kind for kind in const_kinds if kind),
+    "binary_operand_integrity": True,
+    "operand_witnesses": operand_witnesses,
     "hlir_byte_sha256": hashlib.sha256(text.encode()).hexdigest(),
     "hlir_canonical_roundtrip_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
 }

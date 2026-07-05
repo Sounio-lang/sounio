@@ -212,7 +212,7 @@ receipts remain future work. The S4-ready boundary is executable through
 
 ## Wave D S4/S5 Status
 
-S4 rejected/blocked receipts and receipt-only extraction/cost-model
+S4 accepted/rejected/blocked receipts and receipt-only extraction/cost-model
 receipts landed on 2026-07-05:
 
 - `bin/madaros s4-receipt`
@@ -227,24 +227,25 @@ receipts landed on 2026-07-05:
 The S4 gate consumes S3 HLIR receipts, builds persistent e-graph artifacts, and
 emits `madaros.v2.ekan.rewrite/0.1` rewrite receipts plus
 `madaros.v2.s4.extraction/0.1` deterministic extraction receipts. This is a
-completed boundary for one rejected/blocked/extraction subset, not global S4
-completion. The operand-provenance guard currently blocks former constant-fold
-candidates because S3 HLIR duplicates binary operand IDs and cannot prove source
-operand fidelity. The rejected subset records `x_div_x_to_one` with
-counterexample `x = 0`, `selected_for_extraction = false`, and
-`ir_mutation_allowed = false`. The blocked subset records
-`operand_provenance_blocked` with `validator = blocked` and
-`rejection_reason_code = operand_provenance_ambiguous`. The extraction boundary
-proves selected IDs exactly equal accepted IDs, rejected/blocked IDs are
-excluded, cost-model hashes are present, and no IR mutation is performed.
+completed boundary for one exact accepted/rejected/extraction subset, not global
+S4 completion. The S3 operand-fidelity gate now closes the temporary blocker
+where binary operands could be duplicated by lowering. Current S4 local proof:
+`accepted=10`, `rejected=2`, `blocked=0`, `selected=10`. The rejected subset
+records `x_div_x_to_one` with counterexample `x = 0`,
+`selected_for_extraction = false`, and `ir_mutation_allowed = false`. The blocked
+status remains available for future ambiguous proposals, but the current fixture
+set has no blocked rewrites. The extraction boundary proves selected IDs exactly
+equal accepted IDs, rejected/blocked IDs are excluded, cost-model hashes are
+present, and no IR mutation is performed.
 
 S5 now has an executable input-contract preflight:
 
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
 
 The preflight consumes current S4 extraction receipts and rejects rewrites that
-could change MIR or ABI semantics. Current status is blocked, not ready:
-`madaros.v2.s5.preflight/0.1` records `status = blocked`,
-`s5_input_contract_ready = false`, `s5_ready = false`, and
-`s5_implemented = false`. Next critical lane: repair/prove S3 HLIR binary
-operand provenance before accepting S4 constant folds or symbolic identities.
+could change MIR or ABI semantics. Current status is input-contract ready, not
+implemented: `madaros.v2.s5.preflight/0.1` records `status = pass`,
+`s5_input_contract_ready = true`, `s5_ready = false`, and
+`s5_implemented = false`. Next critical lane: implement S5 MIR/ABI receipt
+surface over the selected accepted S4 rewrites without mutating IR until the MIR
+and ABI hashes are proved.

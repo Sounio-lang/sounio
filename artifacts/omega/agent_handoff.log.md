@@ -3382,3 +3382,54 @@ status: lock-released
     (`lhs`/`rhs` source fidelity) before continuing S4 algebraic identities,
     equality saturation, or S5 MIR/ABI promotion. Global S4 and S5 readiness
     remain incomplete.
+
+## 2026-07-05 — Madaros v2 S3 operand-fidelity repair, S4 accepted receipts restored, S5 preflight ready
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `self-hosted/hlir/lower.sio`
+  - `scripts/dev/madaros_v2_s3_gate.sh`
+  - `scripts/dev/madaros_v2_s3_receipt.py`
+  - `tests/madaros/v2_s3/manifest.tsv`
+  - `tests/madaros/v2_s3/operand_fidelity.sio`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Fixed S3 HLIR binary lowering by capturing `lhs_val` before lowering the RHS
+    expression, and `rhs_val` before emitting the binary. The same fix applies to
+    `ExprRange`.
+  - Added `tests/madaros/v2_s3/operand_fidelity.sio`, proving param/const,
+    const/param, param/self, call/const, and const/call binary operands.
+  - Strengthened S3 receipts/gate with producer maps and
+    `binary_operand_integrity = true`; every binary operand must resolve to a
+    prior producer or param/block-param, and the operand-fidelity fixture checks
+    exact producer labels.
+  - Updated S4 manifest expectations after the S3 fix: accepted constant folds
+    are restored, rejected counterexample-backed proposals remain excluded, and
+    current blocked count is zero.
+- Local proof:
+  - Rebuilt `artifacts/self-hosted/madaros` from source with
+    `scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros`.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s3_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s3_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s3_gate.sh` passed:
+    4 cases, including `operand_fidelity`; fixture `operand_fidelity` emitted
+    `fns=8`, `instrs=24`, `hlir_sha=4cee863091eb`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=10`, `rejected=2`, `blocked=0`, `selected=10`,
+    `summary_sha=c3b54ec856e0`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=5`, selected rewrites `10`, blocked rewrites `0`, `status=pass`,
+    preflight sha `f51459bb13af...`, `s5_input_contract_ready = true`.
+- Blocker closed:
+  - Blocker-ID: `MADAROS-V2-S3-HLIR-OPERAND-PROVENANCE-2026-07-05`
+  - Closure evidence: S3 operand-fidelity fixture/gate plus S4 accepted selected
+    rewrites and S5 preflight `s5_input_contract_ready = true`.
+- Remaining boundary:
+  - Global S4 is still not complete: equality saturation, approximate learned
+    E-KAN proposals, broad counterexample search, and downstream optimizer
+    integration remain open.
+  - S5 input contract is ready, but S5 MIR/ABI implementation is still open.

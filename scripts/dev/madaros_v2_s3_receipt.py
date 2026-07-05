@@ -92,7 +92,20 @@ def validate_hlir(text: str, source_rel: str) -> tuple[dict, dict]:
     terminators: set[str] = set()
     calls: set[str] = set()
     const_kinds: set[str] = set()
+    operand_witnesses: list[dict] = []
     instr_total = 0
+
+    def producer_label(producer: dict) -> str:
+        if producer["kind"] == "param":
+            return f"param:{producer['name']}"
+        if producer["kind"] == "block_param":
+            return "block_param"
+        if producer["kind"] == "const":
+            return f"const:{producer['const_kind']}:{producer['value']}"
+        if producer["kind"] == "call_direct":
+            return f"call:{producer['name']}"
+        return str(producer["kind"])
+
     for func in functions:
         if func["param_count"] != len(func["params"]):
             raise SystemExit(f"param_count mismatch in {func['name']}")
@@ -100,11 +113,24 @@ def validate_hlir(text: str, source_rel: str) -> tuple[dict, dict]:
             raise SystemExit(f"effect_count mismatch in {func['name']}")
         if func["block_count"] != len(func["blocks"]):
             raise SystemExit(f"block_count mismatch in {func['name']}")
+        producers: dict[int, dict] = {}
+        for param in func["params"]:
+            producers[int(param["value_id"])] = {
+                "kind": "param",
+                "name": param["name"],
+                "function": func["name"],
+            }
         for block in func["blocks"]:
             if block["param_count"] != len(block["params"]):
                 raise SystemExit(f"block param_count mismatch in {func['name']}")
             if block["instr_count"] != len(block["instrs"]):
                 raise SystemExit(f"instr_count mismatch in {func['name']}/{block['label']}")
+            for param in block["params"]:
+                producers[int(param["value_id"])] = {
+                    "kind": "block_param",
+                    "function": func["name"],
+                    "block": block["label"],
+                }
             instr_total += block["instr_count"]
             terminators.add(block["terminator"]["kind"])
             for instr in block["instrs"]:
@@ -112,7 +138,53 @@ def validate_hlir(text: str, source_rel: str) -> tuple[dict, dict]:
                 call = instr.get("call_name", "")
                 if call:
                     calls.add(call)
-                const_kinds.add(instr.get("constant", {}).get("kind", ""))
+                const = instr.get("constant", {})
+                const_kinds.add(const.get("kind", ""))
+                if instr.get("op") == "binary":
+                    lhs = int(instr.get("lhs", -1))
+                    rhs = int(instr.get("rhs", -1))
+                    if lhs not in producers:
+                        raise SystemExit(f"binary lhs does not resolve to prior producer in {func['name']}: {lhs}")
+                    if rhs not in producers:
+                        raise SystemExit(f"binary rhs does not resolve to prior producer in {func['name']}: {rhs}")
+                    operand_witnesses.append(
+                        {
+                            "function": func["name"],
+                            "result": int(instr["result"]),
+                            "bin_op": int(instr["bin_op"]),
+                            "lhs": lhs,
+                            "rhs": rhs,
+                            "lhs_producer": producer_label(producers[lhs]),
+                            "rhs_producer": producer_label(producers[rhs]),
+                        }
+                    )
+                result = int(instr.get("result", -1))
+                if result >= 0:
+                    if instr.get("op") == "const":
+                        value = const.get("int_val")
+                        if const.get("kind") == "bool":
+                            value = const.get("bool_val")
+                        elif const.get("kind") == "float":
+                            value = const.get("float_val")
+                        elif const.get("kind") == "string":
+                            value = const.get("string_val")
+                        producers[result] = {
+                            "kind": "const",
+                            "const_kind": const.get("kind"),
+                            "value": value,
+                            "function": func["name"],
+                        }
+                    elif instr.get("op") == "call_direct":
+                        producers[result] = {
+                            "kind": "call_direct",
+                            "name": instr.get("call_name", ""),
+                            "function": func["name"],
+                        }
+                    else:
+                        producers[result] = {
+                            "kind": instr.get("op"),
+                            "function": func["name"],
+                        }
     if instr_total <= 0:
         raise SystemExit("S3 HLIR must contain real instructions")
 
@@ -125,6 +197,8 @@ def validate_hlir(text: str, source_rel: str) -> tuple[dict, dict]:
         "terminators": sorted(term for term in terminators if term),
         "calls": sorted(calls),
         "const_kinds": sorted(kind for kind in const_kinds if kind),
+        "binary_operand_integrity": True,
+        "operand_witnesses": operand_witnesses,
     }
     return data, facts
 
