@@ -603,3 +603,28 @@ rdx:rax on x86) inside a loop with a live carried var — likely `self-hosted/na
 
 ### Filed
 Sounio-lang/sounio#641.
+
+---
+
+## D6 — copy-then-mutate a struct aliases the caller's value (broken value semantics) [MOST SEVERE]
+
+### Symptom
+`var r = a; r.field = x` where `a` is a struct **parameter** mutates the caller's ORIGINAL in place —
+struct value/copy semantics are broken; `var r = a` aliases. **Silent data corruption, clean compile.**
+
+### Minimal repro (CONFIRMED)
+`docs/handoff/repros/d6_struct_copy_aliases.sio`: `flip(a:P)->P { var r=a; r.flag=!a.flag; r }` →
+`p.flag=true q.flag=true` (expected `false/true` — the caller's `p` was mutated).
+Control `d6_struct_fresh_literal_ok.sio`: fresh literal `P { x:a.x, flag:!a.flag }` → correct.
+
+### Impact
+Silently corrupted an exact bigint: `big_neg` used `var r = a; r.neg = !a.neg`, so `delta = -s`
+flipped `s` itself — mathematically wrong yet cleanly compiling. Caught ONLY by the oracle diff.
+Fixed in `stdlib/math/bignat.sio` (fresh literal). Any copy-then-mutate on a struct param is at risk.
+
+### Suspected area
+Local init from an aggregate value emits a pointer/alias instead of a value copy (missing memcpy) —
+`self-hosted/ir/lower.sio` (aggregate local init) or codegen for `var x = <aggregate>`.
+
+### Filed
+Sounio-lang/sounio#643.
