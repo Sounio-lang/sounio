@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+mkdir -p artifacts/eisa
+TMP_DIR="artifacts/eisa/.gate_tmp"
+mkdir -p "$TMP_DIR"
+
+A_OUT="$TMP_DIR/evm_stdout.txt"
+B_OUT="$TMP_DIR/bridge_stdout.txt"
+EMIT_LOG="$TMP_DIR/emit_driver.log"
+
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tools/eisa/eisa_evm_run.sio > "$A_OUT"
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tools/eisa/eisa_bridge_emit.sio > "$EMIT_LOG"
+
+>"$B_OUT"
+
+programs=(
+  "golden-mul"
+  "golden-add"
+  "golden-sqrt"
+  "golden-poison"
+)
+
+for name in "${programs[@]}"; do
+  elf="artifacts/eisa/${name}.eisax.elf"
+  if [[ ! -x "$elf" ]]; then
+    echo "FAIL ${name}: missing executable ${elf}"
+    exit 1
+  fi
+
+  per_prog_out="$TMP_DIR/${name}.stdout"
+  set +e
+  "$elf" > "$per_prog_out"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL ${name}: ELF exit code ${rc}"
+    exit 1
+  fi
+  cat "$per_prog_out" >> "$B_OUT"
+  echo "PASS ${name}"
+done
+
+if ! diff -u "$A_OUT" "$B_OUT"; then
+  echo "FAIL eisa_bridge_conformance: stdout mismatch"
+  exit 1
+fi
+
+# ── Tamper-sensitivity lane ──────────────────────────────────────────────────
+# The tampered image flips golden-mul's first constant 0.5 -> 0.6 (re-encoded so
+# hash + validation still pass). Its ELF must compute a DIFFERENT receipt from
+# the untouched golden-mul EVM run — proving the ELF derives its output from the
+# embedded constants at runtime, not from a baked receipt string.
+TAMP_ELF="artifacts/eisa/golden-mul-tampered.eisax.elf"
+if [[ ! -x "$TAMP_ELF" ]]; then
+  echo "FAIL tamper-sensitivity: missing executable ${TAMP_ELF}"
+  exit 1
+fi
+
+TAMP_OUT="$TMP_DIR/golden-mul-tampered.stdout"
+set +e
+"$TAMP_ELF" > "$TAMP_OUT"
+trc=$?
+set -e
+if [[ $trc -ne 0 ]]; then
+  echo "FAIL tamper-sensitivity: tampered ELF exit code ${trc}"
+  exit 1
+fi
+
+# Original golden-mul EVM receipt is the first line of the EVM reference output.
+GOLDEN_MUL_REF="$TMP_DIR/golden-mul-ref.stdout"
+head -n 1 "$A_OUT" > "$GOLDEN_MUL_REF"
+
+if diff -q "$GOLDEN_MUL_REF" "$TAMP_OUT" >/dev/null; then
+  echo "FAIL tamper-sensitivity: tampered ELF stdout is identical to original EVM stdout"
+  exit 1
+fi
+echo "PASS tamper-sensitivity"
+
+# ── Anti-vacuity lane ────────────────────────────────────────────────────────
+# Tamper sensitivity alone only proves translator determinism: a vacuous
+# translator that bakes the receipt text at translation time would recompute
+# the baked text for the tampered image too (math-review finding, 2026-07-05).
+# The load-bearing witness that the ELF COMPUTES its receipts is that the
+# receipt's value digits are absent from the binary's bytes, while the static
+# label prefix is present (proving the strings extraction itself works).
+for name in "${programs[@]}"; do
+  elf="artifacts/eisa/${name}.eisax.elf"
+  per_prog_out="$TMP_DIR/${name}.stdout"
+  if ! strings -a "$elf" | grep -q "eisa-receipt: v=1"; then
+    echo "FAIL anti-vacuity ${name}: label prefix not found in ELF (strings check broken)"
+    exit 1
+  fi
+  # Mantissa digit runs (>= 8 digits) from val/roundoff/u fields must not
+  # appear as literal bytes in the ELF.
+  mapfile -t digit_runs < <(grep -o 'm[0-9]\{8,\}' "$per_prog_out" | sed 's/^m//' | sort -u)
+  for run in "${digit_runs[@]}"; do
+    if strings -a "$elf" | grep -q "$run"; then
+      echo "FAIL anti-vacuity ${name}: receipt digits '${run}' baked into ELF bytes"
+      exit 1
+    fi
+  done
+done
+echo "PASS anti-vacuity"
+
+echo "PASS eisa_bridge_conformance"
