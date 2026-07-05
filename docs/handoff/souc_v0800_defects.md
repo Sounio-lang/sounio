@@ -637,3 +637,31 @@ Local init from an aggregate value emits a pointer/alias instead of a value copy
 
 ### Filed
 Sounio-lang/sounio#643.
+
+---
+
+## D7 — data-carrying enum variants rejected (E200 "undefined variable" on the field) [REGRESSION]
+
+### Symptom
+`enum V { M { eps: f64 } }` with construction `V::M { eps: e }` fails on the current self-hosted
+souc (the stage2 binary the CI Full-Test-Suite builds): **`E200 \`eps\`` — "undefined variable"** at
+the construction site → typecheck fails → no ELF → the runner reports `run exited 1`.
+
+### Regression
+The **committed prebuilt `bin/souc` (older) compiles and runs it fine**; the current source's stage2
+does not. So a change between the prebuilt and current `self-hosted/compiler/lean_single.sio` dropped
+data-carrying-enum-variant support. `stdlib/genomics/io/fasta.sio` (`FastaError { message: str }`)
+and any data-carrying enum are affected.
+
+### Minimal repro
+`docs/handoff/repros/d7_data_carrying_enum.sio` — verified with the CI `souc-stage2` artifact:
+`E200 \`eps\` at line 4`, no ELF. The payload-free form (`enum V { P, M }`) compiles + runs.
+
+### Impact
+`sedenion_verdict.sio` / `sedenion_verdict_boundary.sio` used `Verdict::MeasuredF64 { eps: f64 }`;
+rewritten **payload-free** so they compile under the CI compiler. The boundary guarantee (proof vs
+measurement, via `requires_proof`) is unchanged; the `eps` payload returns when this is fixed.
+
+### Suspected area
+Enum-variant struct-literal construction / field-name resolution in the checker
+(`self-hosted/compiler/lean_single.sio`, the E200 emit at ~14486 — the name-resolution fallthrough).
