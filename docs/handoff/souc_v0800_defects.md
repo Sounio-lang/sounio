@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.souc-v0800-defects
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.souc-v0800-defects
+-->
+
 # souc v0.80.0 compiler defects — minimal repros + exact stdout evidence
 
 Compiler: `Madares v0.80.0 -- the Sounio self-hosted compiler` (self-hosted Madaros

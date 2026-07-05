@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.compiler-trait-bounded-dispatch-fix-prompt
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.compiler-trait-bounded-dispatch-fix-prompt
+-->
+
 # Prompt — Trait-bounded generic method dispatch (unblocks exact-algebra `<F: Trait>`, prerequisite #3 of 3)
 
 **For:** a fresh compiler-lane agent (fable-style), the follow-on to the agent that lands prerequisite #2

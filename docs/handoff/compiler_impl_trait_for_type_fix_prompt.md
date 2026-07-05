@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.compiler-impl-trait-for-type-fix-prompt
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.compiler-impl-trait-for-type-fix-prompt
+-->
+
 # Prompt — Parse `impl Trait for Type` (unblocks exact-algebra `<F: Trait>`, prerequisite #2 of 3)
 
 **For:** a fresh compiler-lane agent (fable-style), analogous to the fable5 agent on prerequisite #1

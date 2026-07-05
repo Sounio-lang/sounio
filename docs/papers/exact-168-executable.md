@@ -1,7 +1,10 @@
 <!-- docs:meta
-topic_id: papers.exact-168-executable
+topic_id: repo.docs.papers.exact-168-executable
 authority: repo_only
-audience: publication
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.exact-168-executable
 -->
 
 # Paper 1: Exact Execution of the 168-Theorem in the Sounio Runtime
