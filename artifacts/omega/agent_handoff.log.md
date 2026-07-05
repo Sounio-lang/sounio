@@ -3433,3 +3433,50 @@ status: lock-released
     E-KAN proposals, broad counterexample search, and downstream optimizer
     integration remain open.
   - S5 input contract is ready, but S5 MIR/ABI implementation is still open.
+
+## 2026-07-05 — Madaros v2 S4 neutral-element symbolic identity receipts
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Commit target: S4 expansion toward full compiler optimizer, not global S4 completion.
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/symbolic_identity_i64.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added accepted `symbolic_identity_i64` receipts for the first non-constant
+    neutral-element identity subset: `x + 0`, `0 + x`, `x * 1`, `1 * x`, and
+    `x - 0`.
+  - Proposed/rewrite enodes are `value_ref(existing SSA value)` records, not
+    copied expressions and not constants. This preserves params/call results as
+    existing producers and remains receipt-only/non-mutating.
+  - Added fixture `tests/madaros/v2_s4/symbolic_identity_i64.sio` with param and
+    call-result identities plus a chained call identity case.
+  - S4 gate now verifies identity-specific fields: allowed `identity_kind`,
+    neutral side/constant, non-constant symbolic producer, `value_ref` hash,
+    domain `all-i64-values-with-neutral-element`, and `neutral-element-proof` in
+    `validator_attempted`.
+  - S5 preflight now allows `symbolic_identity_i64` only when the extraction
+    decision remains `mir_abi_safe = true`, `abi_impact = none`, and
+    `lowering_effect = replace_binary_identity_expr_with_existing_value`.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=18`, `rejected=2`, `blocked=0`, `selected=18`, summary sha
+    `1cd303c7daa1...`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=6`, selected rewrites `18`, blocked rewrites `0`, `status=pass`,
+    preflight sha `e1fae4b6d3e8...`.
+- Remaining boundary:
+  - Global S4 is still not complete: equality saturation, broader algebraic
+    identities, approximate/learned E-KAN proposals, broad counterexample search,
+    and downstream optimizer integration remain open.
+  - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
+    implementation remains open.

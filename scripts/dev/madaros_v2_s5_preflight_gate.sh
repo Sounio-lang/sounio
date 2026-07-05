@@ -33,7 +33,7 @@ if summary.get("schema") != "madaros.v2.s4.gate/0.1":
 if summary.get("status") != "pass":
     raise SystemExit("S4 gate did not pass")
 
-allowed_rewrites = {"constant_fold_i64"}
+allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64"}
 allowed_basis = {"exact_symbolic"}
 allowed_validators = {"translation-validation"}
 consumed = []
@@ -120,6 +120,9 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             raise SystemExit("S5 preflight requires extraction MIR/ABI safe decision")
         if decision.get("abi_impact") != "none":
             raise SystemExit("S5 preflight rejects S4 extraction with ABI impact")
+        if rewrite.get("rewrite_kind") == "symbolic_identity_i64":
+            if decision.get("lowering_effect") != "replace_binary_identity_expr_with_existing_value":
+                raise SystemExit("S5 preflight rejects symbolic identity without value-ref lowering effect")
         if decision.get("selected_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
             raise SystemExit("S5 preflight selected enode must match rewrite")
         all_rewrites.append(rewrite)

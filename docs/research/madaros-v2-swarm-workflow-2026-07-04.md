@@ -221,6 +221,7 @@ receipts landed on 2026-07-05:
 - `tests/madaros/v2_s4/manifest.tsv`
 - `tests/madaros/v2_s4/exact_identity.sio`
 - `tests/madaros/v2_s4/extract_cost_chain_i64.sio`
+- `tests/madaros/v2_s4/symbolic_identity_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
 - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 
@@ -230,8 +231,9 @@ emits `madaros.v2.ekan.rewrite/0.1` rewrite receipts plus
 completed boundary for one exact accepted/rejected/extraction subset, not global
 S4 completion. The S3 operand-fidelity gate now closes the temporary blocker
 where binary operands could be duplicated by lowering. Current S4 local proof:
-`accepted=10`, `rejected=2`, `blocked=0`, `selected=10`. The rejected subset
-records `x_div_x_to_one` with counterexample `x = 0`,
+`accepted=18`, `rejected=2`, `blocked=0`, `selected=18`, including
+`symbolic_identity_i64` neutral-element rewrites over non-constant params/call
+results. The rejected subset records `x_div_x_to_one` with counterexample `x = 0`,
 `selected_for_extraction = false`, and `ir_mutation_allowed = false`. The blocked
 status remains available for future ambiguous proposals, but the current fixture
 set has no blocked rewrites. The extraction boundary proves selected IDs exactly
@@ -246,6 +248,7 @@ The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
 implemented: `madaros.v2.s5.preflight/0.1` records `status = pass`,
 `s5_input_contract_ready = true`, `s5_ready = false`, and
-`s5_implemented = false`. Next critical lane: implement S5 MIR/ABI receipt
+`s5_implemented = false`; latest local preflight consumes 18 selected rewrites.
+Next critical lane: implement S5 MIR/ABI receipt
 surface over the selected accepted S4 rewrites without mutating IR until the MIR
 and ABI hashes are proved.

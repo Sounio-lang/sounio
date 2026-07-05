@@ -18,12 +18,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.madar
 Status: the S4 conservative e-graph/E-KAN receipt boundary plus receipt-only
 extraction/cost-model boundary is implemented and gated. The S3 HLIR binary
 operand provenance blocker found on 2026-07-05 is now closed by the S3 lowering
-fix and operand-fidelity gate: S4 again accepts exact constant-fold candidates,
-keeps counterexample-backed rejected proposals out of extraction, and has zero
-blocked rewrites in the current fixture set. Global S4 optimization is not
-complete: equality saturation, approximate learned E-KAN proposals, broad
-counterexample search, and downstream optimizer integration remain future work.
-S5 has an executable preflight from the S4 extraction receipts and now reports
+fix and operand-fidelity gate: S4 accepts exact constant-fold candidates and a
+first non-constant neutral-element symbolic identity subset, keeps
+counterexample-backed rejected proposals out of extraction, and has zero blocked
+rewrites in the current fixture set. Global S4 optimization is not complete:
+equality saturation, approximate learned E-KAN proposals, broad counterexample
+search, and downstream optimizer integration remain future work. S5 has an
+executable preflight from the S4 extraction receipts and now reports
 `status = pass` with `s5_input_contract_ready = true`; S5 MIR/ABI implementation
 itself remains future work.
 
@@ -35,6 +36,7 @@ itself remains future work.
 - `tests/madaros/v2_s4/manifest.tsv`
 - `tests/madaros/v2_s4/exact_identity.sio`
 - `tests/madaros/v2_s4/extract_cost_chain_i64.sio`
+- `tests/madaros/v2_s4/symbolic_identity_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
 - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
@@ -57,11 +59,19 @@ that survive both operand-provenance guards and semantic validation. The current
 accepted subset is:
 
 - `constant_fold_i64` rewrites
+- `symbolic_identity_i64` rewrites for `x + 0`, `0 + x`, `x * 1`, `1 * x`,
+  and `x - 0`
 - `basis_family = exact_symbolic`
 - `validator = translation-validation`
 - `error_bound = 0`
 - non-empty exact fallback expression hashes
 - original and rewritten e-node hashes
+
+For symbolic identities, the proposed/rewrite enode is a `value_ref` to the
+existing S3 SSA producer, not a copied expression or a constant. The gate checks
+`identity_kind`, neutral side/constant, non-constant symbolic producer,
+`domain = all-i64-values-with-neutral-element`, and `validator_attempted`
+contains both `translation-validation` and `neutral-element-proof`.
 
 It also emits deterministic rejected proposal receipts for:
 
@@ -129,12 +139,13 @@ The gate pins `SOUNIO_STDLIB_PATH` to this checkout's `stdlib/` and, when no
 Observed local result on 2026-07-05 after the S3 operand-fidelity fix:
 
 ```text
-[madaros-v2-s4] ok receipt=exact_identity.s4.receipt.json accepted=3 rejected=0 blocked=0 selected=3 egraph_sha=1b5c2790c49d extraction_sha=ff975fcf9643
-[madaros-v2-s4] ok receipt=extract_cost_chain_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=667d12c57234 extraction_sha=921fd33bd2e1
-[madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=d95510d90738
-[madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=94ec87029881
-[madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=403bd4410bb3
-[madaros-v2-s4] summary_sha=c3b54ec856e0 accepted=10 rejected=2 blocked=0 selected=10
+[madaros-v2-s4] ok receipt=exact_identity.s4.receipt.json accepted=3 rejected=0 blocked=0 selected=3 egraph_sha=1b5c2790c49d extraction_sha=342e8492421f
+[madaros-v2-s4] ok receipt=extract_cost_chain_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=667d12c57234 extraction_sha=a85cc30506a4
+[madaros-v2-s4] ok receipt=symbolic_identity_i64.s4.receipt.json accepted=8 rejected=0 blocked=0 selected=8 egraph_sha=6ed268e74dde extraction_sha=d1fc653d3999
+[madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=496e7ccf7342
+[madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=54e83fe3c2d0
+[madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=a34f4ab3e0b8
+[madaros-v2-s4] summary_sha=1cd303c7daa1 accepted=18 rejected=2 blocked=0 selected=18
 [madaros-v2-s4] PASS: conservative e-graph/E-KAN rewrite and extraction receipts are deterministic and validated
 ```
 
@@ -154,7 +165,7 @@ bash scripts/dev/madaros_v2_s5_preflight_gate.sh
 Observed local result on 2026-07-05 after the S3 operand-fidelity fix:
 
 ```text
-[madaros-v2-s5-preflight] ok cases=5 rewrites=10 blocked=0 status=pass sha=f51459bb13af
+[madaros-v2-s5-preflight] ok cases=6 rewrites=18 blocked=0 status=pass sha=e1fae4b6d3e8
 [madaros-v2-s5-preflight] PASS: S5 preflight classified current S4 extraction input without overclaiming readiness
 ```
 

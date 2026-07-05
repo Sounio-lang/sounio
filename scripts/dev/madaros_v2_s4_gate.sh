@@ -74,6 +74,29 @@ import json
 import sys
 from pathlib import Path
 
+IDENTITY_KINDS = {
+    "add_zero_rhs": {"neutral_side": "rhs", "neutral_const": ["int", 0]},
+    "add_zero_lhs": {"neutral_side": "lhs", "neutral_const": ["int", 0]},
+    "mul_one_rhs": {"neutral_side": "rhs", "neutral_const": ["int", 1]},
+    "mul_one_lhs": {"neutral_side": "lhs", "neutral_const": ["int", 1]},
+    "sub_zero_rhs": {"neutral_side": "rhs", "neutral_const": ["int", 0]},
+}
+
+def stable_json(payload):
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def sha256_text(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+def value_ref_hash(value_id, producer):
+    payload = {
+        "op": "value_ref",
+        "value_id": int(value_id),
+        "producer_kind": producer.get("producer_kind", "unknown"),
+        "producer_label": producer.get("producer_label", producer.get("label", "")),
+    }
+    return sha256_text(stable_json(payload))
+
 receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, min_blocked, required_accepted, required_rejected, required_blocked = sys.argv[1:11]
 receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
 egraph = json.loads(Path(egraph_path).read_text(encoding="utf-8"))
@@ -209,6 +232,41 @@ for rewrite in rewrites:
             raise SystemExit("accepted rewrite must be selected for extraction")
         if rewrite.get("ir_mutation_allowed") is not False:
             raise SystemExit("S4 receipt lane must remain non-mutating")
+        if rewrite["rewrite_kind"] == "symbolic_identity_i64":
+            identity_kind = rewrite.get("identity_kind")
+            if identity_kind not in IDENTITY_KINDS:
+                raise SystemExit(f"unexpected symbolic identity kind: {identity_kind}")
+            expected = IDENTITY_KINDS[identity_kind]
+            if rewrite.get("proposal_kind") != "exact_symbolic_identity":
+                raise SystemExit("symbolic identity must use exact_symbolic_identity proposal")
+            if rewrite.get("ekan_receipt_kind") != "ekan_exact_symbolic_identity":
+                raise SystemExit("symbolic identity must use E-KAN exact identity receipt")
+            if rewrite.get("neutral_side") != expected["neutral_side"]:
+                raise SystemExit("symbolic identity neutral side mismatch")
+            if list(rewrite.get("neutral_const", [])) != expected["neutral_const"]:
+                raise SystemExit("symbolic identity neutral const mismatch")
+            symbolic_value = int(rewrite.get("symbolic_value", -1))
+            if rewrite["neutral_side"] == "rhs" and symbolic_value != int(rewrite.get("original_lhs", -2)):
+                raise SystemExit("symbolic identity rhs-neutral value must be original lhs")
+            if rewrite["neutral_side"] == "lhs" and symbolic_value != int(rewrite.get("original_rhs", -2)):
+                raise SystemExit("symbolic identity lhs-neutral value must be original rhs")
+            producer = rewrite.get("symbolic_producer", {})
+            if producer.get("producer_kind") == "const":
+                raise SystemExit("symbolic identity must not duplicate constant-fold path")
+            if not producer.get("producer_label") and not producer.get("label"):
+                raise SystemExit("symbolic identity missing stable producer label")
+            if rewrite.get("domain") != "all-i64-values-with-neutral-element":
+                raise SystemExit("symbolic identity domain mismatch")
+            bounds = rewrite.get("domain_bounds", {})
+            if bounds.get("kind") != "all-i64-values-with-neutral-element":
+                raise SystemExit("symbolic identity domain bounds mismatch")
+            if "neutral-element-proof" not in rewrite.get("validator_attempted", []):
+                raise SystemExit("symbolic identity missing neutral-element proof marker")
+            expected_hash = value_ref_hash(symbolic_value, producer)
+            if rewrite.get("proposed_enode_sha256") != expected_hash:
+                raise SystemExit("symbolic identity proposed enode is not value_ref(symbolic_value)")
+            if rewrite.get("rewritten_enode_sha256") != expected_hash:
+                raise SystemExit("symbolic identity rewritten enode is not value_ref(symbolic_value)")
         observed_accepted.add(rewrite["rewrite_kind"])
         observed_accepted.add(rewrite["ekan_receipt_kind"])
     elif rewrite.get("blocked") is True:
@@ -285,6 +343,11 @@ for decision in extraction["decisions"]:
             raise SystemExit("accepted extraction must carry zero error bound")
         if decision.get("mir_abi_safe") is not True:
             raise SystemExit("accepted extraction must be MIR/ABI safe")
+        if decision.get("rewrite_kind") == "symbolic_identity_i64":
+            if decision.get("lowering_effect") != "replace_binary_identity_expr_with_existing_value":
+                raise SystemExit("symbolic identity extraction has wrong lowering effect")
+            if decision.get("abi_impact") != "none":
+                raise SystemExit("symbolic identity extraction must have no ABI impact")
     elif rid in rejected_ids:
         if decision["decision"] != "reject" or decision["selected"] is not False:
             raise SystemExit("rejected rewrite must not be selected by extractor")

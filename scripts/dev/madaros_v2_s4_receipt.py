@@ -144,6 +144,15 @@ def make_const_enode(kind: str, value: int | bool) -> dict[str, Any]:
     }
 
 
+def make_value_ref_enode(value_id: int, producer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "op": "value_ref",
+        "value_id": int(value_id),
+        "producer_kind": producer.get("producer_kind", "unknown"),
+        "producer_label": producer.get("producer_label", producer.get("label", "")),
+    }
+
+
 def rewrite_receipt(
     case_id: str,
     source: str,
@@ -218,6 +227,115 @@ def rewrite_receipt(
         "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
         "validator": "translation-validation",
         "validator_attempted": ["translation-validation"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "selected_for_extraction": True,
+        "ir_mutation_allowed": False,
+        "accepted": True,
+    }
+
+
+def symbolic_identity_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    identity_kind: str,
+    symbolic_value_id: int,
+    symbolic_producer: dict[str, Any],
+    neutral_side: str,
+    neutral_const: tuple[str, int | bool],
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr["bin_op"]), f"op{instr['bin_op']}")
+    proposed = make_value_ref_enode(symbolic_value_id, symbolic_producer)
+    fallback = {
+        "op": op_name,
+        "lhs": ["hlir_value", int(instr["lhs"])],
+        "rhs": ["hlir_value", int(instr["rhs"])],
+        "identity_kind": identity_kind,
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "neutral_side": neutral_side,
+        "neutral_const": neutral_const,
+    }
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["identity"],
+        "identity_kind": identity_kind,
+        "symbolic_value": symbolic_value_id,
+        "neutral_side": neutral_side,
+        "neutral_const": neutral_const,
+    }
+    domain_bounds = {
+        "kind": "all-i64-values-with-neutral-element",
+        "identity_kind": identity_kind,
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "neutral_side": neutral_side,
+        "neutral_const": neutral_const,
+        "preconditions": [
+            "symbolic operand is already evaluated as an S3 HLIR SSA value",
+            "neutral operand is an exact i64 constant",
+            "rewrite selects the existing symbolic value and does not remove its producer",
+        ],
+    }
+    validator_log = {
+        "validator": "translation-validation",
+        "method": "neutral-element-symbolic-identity-over-s3-hlir",
+        "accepted": True,
+        "identity_kind": identity_kind,
+        "domain_bounds": domain_bounds,
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "identity_kind": identity_kind,
+        "symbolic_value": symbolic_value_id,
+        "neutral_side": neutral_side,
+        "neutral_const": neutral_const,
+    }
+    rid = "s4-ident-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_identity_i64",
+        "identity_kind": identity_kind,
+        "proposal_kind": "exact_symbolic_identity",
+        "proposal_origin": "madaros_v2_s4_receipt.neutral-element-symbolic-identity",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "symbolic_identity_i64", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_exact_symbolic_identity",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "neutral_side": neutral_side,
+        "neutral_const": neutral_const,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(proposed)),
+        "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "exact-symbolic-identity-no-training"})),
+        "domain": "all-i64-values-with-neutral-element",
+        "domain_bounds": domain_bounds,
+        "error_bound": "0",
+        "error_bound_method": "exact-neutral-element-identity",
+        "gum_covariance_assumptions": "not-applicable: exact symbolic identity",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "translation-validation",
+        "validator_attempted": ["translation-validation", "neutral-element-proof"],
         "validator_log_sha256": sha256_text(stable_json(validator_log)),
         "selected_for_extraction": True,
         "ir_mutation_allowed": False,
@@ -405,6 +523,7 @@ def s4_cost_model_payload() -> dict[str, Any]:
         ],
         "weights": {
             "const": 1,
+            "value_ref": 1,
             "binary": 3,
             "call": 5,
             "unknown": 10,
@@ -424,6 +543,8 @@ def enode_cost_from_hash(egraph: dict[str, Any], eclass_id: str, enode_hash: str
             op = enode.get("op")
             if op == "const":
                 return int(model["const"])
+            if op == "value_ref":
+                return int(model["value_ref"])
             if op == "binary":
                 return int(model["binary"])
             if op == "call":
@@ -486,7 +607,9 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                 "error_bound": rewrite["error_bound"],
                 "domain": rewrite["domain"],
                 "domain_bounds": rewrite["domain_bounds"],
-                "lowering_effect": "replace_binary_constant_expr_with_const",
+                "lowering_effect": "replace_binary_constant_expr_with_const"
+                if rewrite["rewrite_kind"] == "constant_fold_i64"
+                else "replace_binary_identity_expr_with_existing_value",
                 "abi_impact": "none",
                 "mir_abi_safe": True,
             }
@@ -625,14 +748,109 @@ def operand_provenance_ambiguous(instr: dict[str, Any], lhs: tuple[str, int | bo
     return None
 
 
+def const_from_info(info: dict[str, Any] | None) -> tuple[str, int | bool] | None:
+    if not info or info.get("producer_kind") != "const":
+        return None
+    return (str(info.get("const_kind")), info.get("value", 0))
+
+
+def is_i64_const(info: dict[str, Any] | None, value: int) -> bool:
+    cv = const_from_info(info)
+    return cv == ("int", value)
+
+
+def is_symbolic_value(info: dict[str, Any] | None) -> bool:
+    return bool(info) and info.get("producer_kind") != "const"
+
+
+def param_info(param: dict[str, Any], func_name: str) -> dict[str, Any]:
+    label = f"param:{param['name']}"
+    return {
+        "producer_kind": "param",
+        "label": label,
+        "producer_label": label,
+        "function": func_name,
+        "name": param["name"],
+        "value_id": int(param["value_id"]),
+    }
+
+
+def block_param_info(param: dict[str, Any], func_name: str, block_label: str) -> dict[str, Any]:
+    label = f"block_param:{block_label}:{param['value_id']}"
+    return {
+        "producer_kind": "block_param",
+        "label": label,
+        "producer_label": label,
+        "function": func_name,
+        "block": block_label,
+        "value_id": int(param["value_id"]),
+    }
+
+
+def const_info(instr: dict[str, Any], cv: tuple[str, int | bool], func_name: str, block_label: str) -> dict[str, Any]:
+    label = f"const:{cv[0]}:{cv[1]}"
+    return {
+        "producer_kind": "const",
+        "label": label,
+        "producer_label": label,
+        "function": func_name,
+        "block": block_label,
+        "value_id": int(instr["result"]),
+        "const_kind": cv[0],
+        "value": cv[1],
+    }
+
+
+def instr_value_info(instr: dict[str, Any], func_name: str, block_label: str) -> dict[str, Any]:
+    op = instr.get("op")
+    if op == "call_direct":
+        label = f"call:{instr.get('call_name', '')}"
+    else:
+        label = f"{op}:{instr.get('result')}"
+    return {
+        "producer_kind": op,
+        "label": label,
+        "producer_label": label,
+        "function": func_name,
+        "block": block_label,
+        "value_id": int(instr["result"]),
+        "call_name": instr.get("call_name", ""),
+    }
+
+
+def identity_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[str, int, dict[str, Any], str, tuple[str, int | bool]] | None:
+    op = int(instr.get("bin_op", -1))
+    lhs_id = int(instr.get("lhs", -1))
+    rhs_id = int(instr.get("rhs", -1))
+    if op == 0 and is_symbolic_value(lhs_info) and is_i64_const(rhs_info, 0):
+        return ("add_zero_rhs", lhs_id, lhs_info or {}, "rhs", ("int", 0))
+    if op == 0 and is_i64_const(lhs_info, 0) and is_symbolic_value(rhs_info):
+        return ("add_zero_lhs", rhs_id, rhs_info or {}, "lhs", ("int", 0))
+    if op == 2 and is_symbolic_value(lhs_info) and is_i64_const(rhs_info, 1):
+        return ("mul_one_rhs", lhs_id, lhs_info or {}, "rhs", ("int", 1))
+    if op == 2 and is_i64_const(lhs_info, 1) and is_symbolic_value(rhs_info):
+        return ("mul_one_lhs", rhs_id, rhs_info or {}, "lhs", ("int", 1))
+    if op == 1 and is_symbolic_value(lhs_info) and is_i64_const(rhs_info, 0):
+        return ("sub_zero_rhs", lhs_id, lhs_info or {}, "rhs", ("int", 0))
+    return None
+
+
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = json.loads(hlir_text)
     module = data["module"]
     eclasses: list[dict[str, Any]] = []
     rewrites: list[dict[str, Any]] = []
     for func in module["functions"]:
-        value_consts: dict[int, tuple[str, int | bool]] = {}
+        value_info: dict[int, dict[str, Any]] = {}
+        for param in func.get("params", []):
+            value_info[int(param["value_id"])] = param_info(param, func["name"])
         for block in func["blocks"]:
+            for param in block.get("params", []):
+                value_info[int(param["value_id"])] = block_param_info(param, func["name"], block["label"])
             for instr in block["instrs"]:
                 result = int(instr["result"])
                 enodes = [{
@@ -642,10 +860,12 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                 }]
                 cv = const_value(instr)
                 if cv is not None:
-                    value_consts[result] = cv
+                    value_info[result] = const_info(instr, cv, func["name"], block["label"])
                 if instr.get("op") == "binary":
-                    lhs = value_consts.get(int(instr.get("lhs", -1)))
-                    rhs = value_consts.get(int(instr.get("rhs", -1)))
+                    lhs_info = value_info.get(int(instr.get("lhs", -1)))
+                    rhs_info = value_info.get(int(instr.get("rhs", -1)))
+                    lhs = const_from_info(lhs_info)
+                    rhs = const_from_info(rhs_info)
                     if int(instr.get("bin_op", -1)) == 3 and instr.get("lhs") == instr.get("rhs"):
                         receipt = rejected_div_self_receipt(
                             case_id,
@@ -662,7 +882,7 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                             "sha256": receipt["rewritten_enode_sha256"],
                             "op": "const",
                             "rejection_reason": receipt["rejection_reason"],
-                        })
+                            })
                     if lhs is not None and rhs is not None:
                         folded = eval_bin(int(instr.get("bin_op", -1)), lhs[1], rhs[1])
                         if folded is not None:
@@ -688,7 +908,6 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     "rejection_reason": receipt["rejection_reason"],
                                 })
                             else:
-                                value_consts[result] = folded
                                 receipt = rewrite_receipt(
                                     case_id,
                                     source,
@@ -707,6 +926,54 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     "sha256": receipt["rewritten_enode_sha256"],
                                     "op": "const",
                                 })
+                                value_info[result] = const_info(
+                                    {
+                                        "result": result,
+                                        "constant": {
+                                            "kind": folded[0],
+                                            "int_val": int(folded[1]) if folded[0] == "int" else 0,
+                                            "bool_val": bool(folded[1]) if folded[0] == "bool" else False,
+                                        },
+                                    },
+                                    folded,
+                                    func["name"],
+                                    block["label"],
+                                )
+                    else:
+                        identity = identity_candidate(instr, lhs_info, rhs_info)
+                        if identity is not None:
+                            identity_kind, symbolic_value_id, symbolic_producer, neutral_side, neutral_const = identity
+                            receipt = symbolic_identity_receipt(
+                                case_id,
+                                source,
+                                hlir_sha,
+                                func["name"],
+                                block["label"],
+                                instr,
+                                identity_kind,
+                                symbolic_value_id,
+                                symbolic_producer,
+                                neutral_side,
+                                neutral_const,
+                            )
+                            rewrites.append(receipt)
+                            enodes.append({
+                                "kind": "s4-rewrite",
+                                "rewrite_id": receipt["proposed_rewrite_id"],
+                                "sha256": receipt["rewritten_enode_sha256"],
+                                "op": "value_ref",
+                                "value_id": symbolic_value_id,
+                            })
+                            value_info[result] = {
+                                **symbolic_producer,
+                                "label": f"identity:{identity_kind}->{symbolic_producer.get('label', symbolic_value_id)}",
+                                "producer_label": f"identity:{identity_kind}->{symbolic_producer.get('producer_label', symbolic_value_id)}",
+                                "identity_source_result": result,
+                            }
+                        else:
+                            value_info[result] = instr_value_info(instr, func["name"], block["label"])
+                elif cv is None and result >= 0:
+                    value_info[result] = instr_value_info(instr, func["name"], block["label"])
                 eclasses.append({
                     "eclass_id": f"{func['name']}:{block['label']}:{result}",
                     "function": func["name"],
@@ -798,9 +1065,8 @@ def emit(args: argparse.Namespace) -> int:
         "s4_extraction_boundary_complete": True,
         "s4_claim": "conservative_egraph_ekan_receipt_boundary_with_operand_provenance_guard",
         "s4_remaining": [
-            "S3 HLIR operand provenance repair/proof",
             "multi-rule equality saturation",
-            "non-constant algebraic identities",
+            "broader non-constant algebraic identities beyond neutral-element identities",
             "downstream optimizer integration beyond receipt-only extraction",
         ],
     }
