@@ -3044,6 +3044,10 @@ fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64
                 return true
             }
         }
+        // A `string` value (string literal or otherwise) is already a bare
+        // pointer at the ABI level — identical to &str's runtime rep. Accept
+        // it directly where a &str parameter is declared (issue #601 Bug E).
+        if exp_inner_ty == 3 && actual_ty == 3 { return true }
     }
     return false
 }
@@ -3067,6 +3071,10 @@ fn ty_is_unobserved(ty: i64) -> bool {
 
 fn comparison_visible_ty(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty_is_unobserved(ty) { return unobserved_hash_inner_ty(ty_hash) }
+    // &str and string are ABI-identical (both a bare byte pointer) — unwrap
+    // &str to string so a `&str`-typed value compares against a bare string
+    // literal via the existing string-equality codegen (issue #601 Bug E).
+    if ty == 10 && ref_hash_inner_ty(ty_hash) == 3 { return 3 }
     return ty
 }
 
@@ -3100,6 +3108,7 @@ fn al_reassoc_mode(ty_hash: i64) -> i64 with Panic, Mut {
 
 fn comparison_visible_hash(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty_is_unobserved(ty) { return unobserved_hash_inner_hash(ty_hash) }
+    if ty == 10 && ref_hash_inner_ty(ty_hash) == 3 { return ref_hash_inner_hash(ty_hash) }
     return ty_hash
 }
 
@@ -9539,6 +9548,23 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         EXPR_TY = 10
         if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
         else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
+        return
+    }
+    if TK[EP as usize] != 3 {
+        // Bug E: &<literal> (array literal, string literal, ...) — everything
+        // below this point assumes the token after &/&! is a variable
+        // identifier. A literal's own primary-expression codegen already
+        // produces the right runtime value for a reference (an array literal
+        // materializes to a stack slot and returns its address via `lea`; a
+        // string literal returns its own address via `lea rax, [rip+disp]`),
+        // so borrowing one is just: compile it, then tag the result as a
+        // reference to whatever type it produced.
+        compile_primary()
+        let lit_inner_ty = EXPR_TY
+        let lit_inner_hash = EXPR_TY_HASH
+        EXPR_IS_F64 = 0
+        EXPR_TY = 10
+        EXPR_TY_HASH = ref_hash_make(lit_inner_ty, lit_inner_hash, want_mut)
         return
     }
     let rns = TS[EP as usize]
@@ -29623,6 +29649,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
         }
         let borrow_tok = EP - 1
+        if TK[EP as usize] != 3 {
+            // Bug E: &<literal> (array literal, string literal, ...) — see the
+            // x86-64 twin (compile_borrow_primary_x86()) for the full
+            // rationale. A literal's own primary-expression codegen already
+            // produces the right runtime value for a reference.
+            compile_primary_a64()
+            let lit_inner_ty = EXPR_TY
+            let lit_inner_hash = EXPR_TY_HASH
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            EXPR_TY_HASH = ref_hash_make(lit_inner_ty, lit_inner_hash, want_mut)
+            return
+        }
         let rns = TS[EP as usize]
         let rne = TE[EP as usize]
         EP = EP + 1
