@@ -132,6 +132,13 @@ if __name__ == "__main__":
     for tag, samples in ((0, onloc), (1, offloc)):
         E, Var = measure_case(samples)
         print(f"MEASURE {tag} E {E.numerator} {E.denominator} VAR {Var.numerator} {Var.denominator}")
+    # Generalized sweep (unbounded exact): Var at scale k = 2/(3*10^(2k)). Python fractions computes
+    # every k, INCLUDING past the i64 wall (k>=10) where a bounded engine must censor -> locates the boundary.
+    I64_MAX = 9223372036854775807
+    for k in range(1, 13):
+        V = F(2, 3 * 10 ** (2 * k))
+        fits = "FITS" if V.denominator <= I64_MAX else "BIGINT"
+        print(f"SWEEP {k} {V.numerator} {V.denominator} {fits}")
     # self-check against the Lean-proven counts + the exact measure values
     E0, V0 = measure_case(onloc)
     E1, V1 = measure_case(offloc)

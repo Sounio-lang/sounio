@@ -128,10 +128,21 @@ By **decidable rational equality**, cross-verified against Python `fractions` (u
 > the exact ℚ statement, grounded in the float witness `sedenion_zero_divisor.sio`. It is a first
 > exact instance, not the general theorem.
 
-**STILL NOT executed (the general measure theorem)**: arbitrary probability measures / general locus
-parameterizations / unbounded ℚ. This instance uses finite empirical measures with small rationals;
-souc's `rational.sio` is **i64-bounded** (no bigint), so general measures need overflow-checked or
-bigint rationals. The general statement remains proven at the statement level and pending.
+**GENERALIZED — the i64 exactness boundary located and cross-verified**
+(`tests/run-pass/sedenion_measure_annihilation_general.sio`): sweeping the off-locus measure across
+scales `ε=1/10^k`, `Var = 2/(3·10^(2k))` is computed by **overflow-checked** rationals that return an
+in-band **INVALID (censored)** the instant an i64 product would overflow — never a silently-wrapped
+false "exact" value. souc is exact for **k=1..9** and censors `OVERFLOW` for **k≥10**, and the gate
+confirms this is **exactly** where the unbounded Python `fractions` oracle needs BIGINT
+(`i64 exactness boundary located at k=9`). This is the daring generalization's honest yield: it
+*locates* the substrate ceiling precisely (exact ℚ on i64 holds to ε=10⁻⁹) and proves souc censors
+correctly rather than corrupting — the Firewall applied to arithmetic itself.
+
+**STILL NOT executed (the fully general theorem)**: arbitrary probability measures / general locus
+parameterizations / **unbounded** ℚ past the i64 wall. That needs bigint (or overflow-checked
+`rational.sio`) rationals — and, for a general engine, the souc codegen defects surfaced here
+(a `while` loop calling a function with a loop-carried/array-indexed arg mis-compiles; see
+`docs/handoff/souc_v0800_defects.md`). The general statement remains proven at the statement level.
 
 Reconciliation (why this is the same contract-vs-number theme, one layer up): the float artifact
 `sedenion_zero_divisor.sio` shows `E[a·b]=0` but `Var>0` — the "confidence collapse". That is what a
