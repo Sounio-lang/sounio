@@ -1629,19 +1629,14 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
-            // Same lean_single hazard as ir_module_finalize_merged_calls: the
-            // two-level read-modify-write (`var ins = out.functions[fi].instrs[ii];
-            // ...; out.functions[fi].instrs[ii] = ins`) zeroes the stored record.
-            // Copy the function out, patch via one-level stores, store it back.
-            var func = out.functions[fi as usize]
-            var touched: i64 = 0
             var ii: i64 = 0
-            while ii < func.instr_count {
-                if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
-                    let old_id = func.instrs[ii as usize].fn_id
+            while ii < out.functions[fi as usize].instr_count {
+                if ir_merge_is_direct_fn_ref_opcode(out.functions[fi as usize].instrs[ii as usize].op) {
+                    var ins = out.functions[fi as usize].instrs[ii as usize]
+                    let old_id = ins.fn_id
                     var canon: i64 = old_id
-                    if func.instrs[ii as usize].name.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, func.instrs[ii as usize].name)
+                    if ins.name.len > 0 {
+                        let by_name = ir_merge_find_function_name_index(&out, ins.name)
                         if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
                             canon = by_name
                         }
@@ -1652,14 +1647,11 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
                         && canon < out.fn_count
                         && out.functions[canon as usize].instr_count > 0
                         && canon != old_id {
-                        func.instrs[ii as usize].fn_id = canon
-                        touched = 1
+                        ins.fn_id = canon
+                        out.functions[fi as usize].instrs[ii as usize] = ins
                     }
                 }
                 ii = ii + 1
-            }
-            if touched == 1 {
-                out.functions[fi as usize] = func
             }
             fi = fi + 1
         }
@@ -1716,29 +1708,15 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
-            // Copy the whole function out, patch call targets via one-level
-            // indexed field stores, and store the function back. The previous
-            // in-place two-level read-modify-write
-            // (`var ins = out.functions[fi].instrs[ii]; ...;
-            //   out.functions[fi].instrs[ii] = ins`) is miscompiled by
-            // lean_single (reads/writes zeroed IrInstr records), which zeroed
-            // every IrCall in dep-module functions — the same clobber class the
-            // restore_user_main_calls band-aid below papers over for fn=0.
-            // This copy-out/patch/copy-back shape is the one proven safe in
-            // ir_merge_prepare_function_with_remap_from_func.
-            var func = out.functions[fi as usize]
-            var touched: i64 = 0
             var ii: i64 = 0
-            while ii < func.instr_count {
-                let op = func.instrs[ii as usize].op
+            while ii < out.functions[fi as usize].instr_count {
+                let op = out.functions[fi as usize].instrs[ii as usize].op
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    func.instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(&out, func.instrs[ii as usize])
-                    touched = 1
+                    var ins = out.functions[fi as usize].instrs[ii as usize]
+                    ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
+                    out.functions[fi as usize].instrs[ii as usize] = ins
                 }
                 ii = ii + 1
-            }
-            if touched == 1 {
-                out.functions[fi as usize] = func
             }
             fi = fi + 1
         }
