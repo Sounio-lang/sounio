@@ -72,6 +72,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.archived.roadmap-v0.5.0-part3 | archived | docs/archived/ROADMAP_v0.5.0_PART3.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.strategic-growth-plan | archived | docs/archived/STRATEGIC_GROWTH_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.todo-next | archived | docs/archived/TODO_NEXT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.a64-aggregate-substrate-2026-07-05 | repo_only | docs/audit/A64_AGGREGATE_SUBSTRATE_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.coordination-2026-06-29-pbox-lanes | repo_only | docs/audit/COORDINATION_2026-06-29_PBOX_LANES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -124,6 +125,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-archive-triage-2026-06-21 | repo_only | docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-boxnew-sigsegv-2026-06-19 | repo_only | docs/audit/MADAROS_BOXNEW_SIGSEGV_2026-06-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-builtin-emission-2026-06-24 | repo_only | docs/audit/MADAROS_BUILTIN_EMISSION_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-check-hang-strlib-2026-07-05 | repo_only | docs/audit/MADAROS_CHECK_HANG_STRLIB_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step1-fix-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP1_FIX_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step2-capture-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP2_CAPTURE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -539,6 +541,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.eisa-precision-track-2026-07-05 | historical | docs/research/eisa-precision-track-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-stack-architecture-2026-07-05 | historical | docs/research/eisa-stack-architecture-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.eisa-v0-spec-2026-07-05 | historical | docs/research/eisa-v0-spec-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ekan-native-bridge-status-2026-07-04 | historical | docs/research/ekan_native_bridge_status_2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
