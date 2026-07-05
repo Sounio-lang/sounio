@@ -106,6 +106,28 @@ This is the headline: **Sounio executes the Cayley–Dickson product and proves 
 the same two 168s the Lean layer proves by `native_decide` and proves equal, now computed by the
 running language and element-wise cross-verified against an independent toolchain.
 
+## Scope — what this certifies, and what it does NOT (read before citing)
+
+**CERTIFIED** (exact over ℤ, decidable integer equality, element-wise cross-verified against a
+non-`souc` oracle): the **combinatorial-structural** object — the ZD census 84/336/168, the non-Fano
+partition 168/175/343, the Binary Norm Theorem (wave ∈ {−2,0,+2}), the 84↔84 dagger bijection, and
+the two-face `nonfano_zd_bridge` collapse onto |PSL(2,7)|. This certifies the *annihilation locus*:
+which pairs annihilate, how many, under which group, with which projective geometry.
+
+**NOT executed by this work**: the **measure-theoretic** half of the Structural Annihilation Theorem
+— the claim about probability *measures* whose support lies in the zero-divisor locus Z_k(M),
+yielding `E[F_N]=0` and `Var[F_N]=0`. That is an object over **ℚ** (measures), not ℤ (structure). The
+census proves the locus *exists* with the 168-structure; it proves nothing yet about *random
+variables supported on it*. That half remains proven at the statement level and **pending exact
+execution over ℚ**.
+
+Reconciliation (why this is the same contract-vs-number theme, one layer up): the float artifact
+`sedenion_zero_divisor.sio` shows `E[a·b]=0` but `Var>0` — the "confidence collapse". That is what a
+measure supported *near* the locus (perturbed float coefficients) looks like. The exact claim
+`Var[F_N]=0` is what a measure supported *exactly on* the locus (exact ℚ coefficients) looks like.
+`Var>0` is the number; `Var=0` is the contract. The exact ℚ execution is the measure-layer analogue
+of what this ℤ census did for the structure.
+
 ## Honest caveats (souc v0.80.0 environment, not defects of this work)
 
 - The **f64 layer does not type-check under this build** (`cayley_dickson.sio` → `error[E004]` on
