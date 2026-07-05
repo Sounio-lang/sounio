@@ -87,7 +87,15 @@ and the finalize/compact passes in their natural two-level RMW form.
   deref/two-level assign family (incl. a duplicated dispatch pair) + the two
   a64 entries now route through the general engine — the handler family
   behind every silent-store eruption is unreachable. Detector/handler bodies
-  remain as dead code for one soak cycle; deletion is round 2. Validated by:
+  were deleted in round 2 (`abe0eb9ba`+`9440fb277`: 21 dead definitions,
+  −1344 lines) after a STATIC a64 soak — 80/80 shape witnesses compile to
+  Mach-O arm64 through the a64 engine, signature instructions verified
+  byte-exact (slot load `ldr x0,[x0,x1,lsl3]`, elem addr `add x0,x0,x1,lsl3`,
+  scalar store `str x10,[x0]`); runtime a64 soak deferred to
+  `scripts/apple/apple_native_v2_ssh_gate.sh` (no darwin-arm64 reachable from
+  this pod). Round-2 validation: bounce s2==s3, canonical PASS
+  (md5 `71bd45917c7896683c928e2ff26e4c92`), shape 80/80, downstream 12/12.
+  Round 1 was validated by:
   shape matrix 80/80 end-to-end through the engine, self-compile bounce
   convergence (the compiler compiles itself through the retired shapes),
   canonical PASS (md5 `f45b0296fd6c157776c8c4d3336e49fb`), downstream 12/12.
