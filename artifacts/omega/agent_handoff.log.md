@@ -3481,6 +3481,53 @@ status: lock-released
   - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
     implementation remains open.
 
+## 2026-07-05 — Madaros v2 S4 producer-evaluation proof for call-result self-comparisons
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Commit target: S4 expansion toward S5-ready optimizer receipts; still not
+  global S4 completion.
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/symbolic_reflexive_cmp_pure_call_i64.sio`
+  - `tests/madaros/v2_s4/reject_call_result_self_cmp_i64.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Extended `symbolic_reflexive_cmp_i64` beyond params/block params to direct
+    call results only when the callee is local leaf pure in the current HLIR
+    (`call_summary.purity_reason = local_leaf_no_call_direct`).
+  - Accepted pure-call self-comparisons carry
+    `producer_evaluation_policy = direct_call_leaf_pure_keep_producer_evaluated`
+    and the extraction lowering effect
+    `replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated`.
+  - Call-result self-comparisons whose callees contain `call_direct` now emit
+    blocked receipts with `ekan_blocked_producer_evaluation` and
+    `producer_evaluation_not_proven`, and remain excluded from extraction.
+  - S5 preflight now treats excluded blocked proposals as classified negative
+    evidence while keeping `status = pass` when accepted selected rewrites exist.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=26`, `rejected=2`, `blocked=2`, `selected=26`, summary sha
+    `6706eb85c41f...`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=10`, selected rewrites `26`, blocked rewrites `2`, `status=pass`,
+    preflight sha `c5bd83d821b9...`.
+- Remaining boundary:
+  - Global S4 is still not complete: multi-rule equality saturation,
+    approximate/learned E-KAN proposals, non-leaf purity/effect analysis,
+    broader algebraic identities, broad counterexample search, and downstream
+    optimizer integration remain open.
+  - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
+    implementation remains open.
+
 ## 2026-07-05 — Madaros v2 S4 reflexive comparison receipts
 
 - Lane: `work/madaros-v2-sota-codex`

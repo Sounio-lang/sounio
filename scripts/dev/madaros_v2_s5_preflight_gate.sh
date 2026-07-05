@@ -92,8 +92,8 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             if rewrite.get("blocked") is True:
                 if rid not in blocked_ids or decision.get("selected") is not False:
                     raise SystemExit("S5 preflight requires blocked rewrites to be excluded by extraction")
-                if decision.get("rejection_reason_code") != "operand_provenance_ambiguous":
-                    raise SystemExit("S5 preflight requires operand provenance blocker evidence")
+                if decision.get("rejection_reason_code") not in {"operand_provenance_ambiguous", "producer_evaluation_not_proven"}:
+                    raise SystemExit("S5 preflight requires accepted blocker evidence")
                 blocked_rewrites.append(rewrite)
             else:
                 if rid not in rejected_ids or decision.get("selected") is not False:
@@ -124,8 +124,17 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             if decision.get("lowering_effect") != "replace_binary_identity_expr_with_existing_value":
                 raise SystemExit("S5 preflight rejects symbolic identity without value-ref lowering effect")
         if rewrite.get("rewrite_kind") == "symbolic_reflexive_cmp_i64":
-            if decision.get("lowering_effect") != "replace_binary_predicate_expr_with_const_bool":
+            if decision.get("lowering_effect") not in {
+                "replace_binary_predicate_expr_with_const_bool",
+                "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated",
+            }:
                 raise SystemExit("S5 preflight rejects reflexive comparison without bool-const lowering effect")
+            if decision.get("lowering_effect") == "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated":
+                if rewrite.get("producer_evaluation_policy") != "direct_call_leaf_pure_keep_producer_evaluated":
+                    raise SystemExit("S5 preflight requires call producer evaluation policy for keep-producer lowering")
+                producer = rewrite.get("symbolic_producer", {})
+                if producer.get("producer_kind") != "call_direct" or producer.get("call_leaf_pure") is not True:
+                    raise SystemExit("S5 preflight requires local leaf call producer for keep-producer lowering")
         if decision.get("selected_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
             raise SystemExit("S5 preflight selected enode must match rewrite")
         all_rewrites.append(rewrite)
@@ -141,7 +150,7 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         "blocked_from_extraction_count": extraction.get("blocked_rewrite_count", 0),
     })
 
-input_ready = len(all_rewrites) > 0 and len(blocked_rewrites) == 0
+input_ready = len(all_rewrites) > 0
 preflight = {
     "schema": "madaros.v2.s5.preflight/0.1",
     "status": "pass" if input_ready else "blocked",
@@ -158,7 +167,7 @@ preflight = {
     "selected_rewrite_count": len(all_rewrites),
     "semantic_rejected_rewrite_count": len(semantic_rejections),
     "blocked_rewrite_count": len(blocked_rewrites),
-    "blocking_reason": "" if input_ready else "S4 has no accepted extraction-selected rewrites after operand-provenance guard",
+    "blocking_reason": "" if input_ready else "S4 has no accepted extraction-selected rewrites after safety guards",
     "required_next_lane": [
         "repair/prove S3 HLIR binary operand provenance before symbolic/algebraic S4 extraction",
         "full S4 equality saturation and E-KAN rejection/proposal receipts",

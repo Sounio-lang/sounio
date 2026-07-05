@@ -354,6 +354,7 @@ def symbolic_reflexive_cmp_receipt(
     symbolic_value_id: int,
     symbolic_producer: dict[str, Any],
     result_const: tuple[str, bool],
+    producer_evaluation_policy: str,
 ) -> dict[str, Any]:
     op_name = BIN_OPS.get(int(instr["bin_op"]), f"op{instr['bin_op']}")
     proposed = make_const_enode(*result_const)
@@ -383,7 +384,8 @@ def symbolic_reflexive_cmp_receipt(
             "both operands are the same S3 HLIR SSA value",
             "symbolic operand is not a constant-fold duplicate",
             "operand type is exact i64, not f64 or an approximate numeric domain",
-            "comparison has no side effects and evaluates the existing SSA value once",
+            "comparison has no side effects",
+            "producer evaluation is preserved according to producer_evaluation_policy",
         ],
     }
     validator_log = {
@@ -426,7 +428,7 @@ def symbolic_reflexive_cmp_receipt(
         "symbolic_value": symbolic_value_id,
         "symbolic_producer": symbolic_producer,
         "same_operand_id": True,
-        "producer_evaluation_policy": "producer_is_param_or_block_param_no_effectful_eval",
+        "producer_evaluation_policy": producer_evaluation_policy,
         "result_const": result_const,
         "original_enode_sha256": sha256_text(stable_json(instr)),
         "proposed_enode_sha256": sha256_text(stable_json(proposed)),
@@ -441,11 +443,107 @@ def symbolic_reflexive_cmp_receipt(
         "gum_covariance_assumptions": "not-applicable: exact i64 symbolic predicate",
         "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
         "validator": "translation-validation",
-        "validator_attempted": ["translation-validation", "reflexive-comparison-proof"],
+        "validator_attempted": ["translation-validation", "reflexive-comparison-proof", "producer-evaluation-preservation-proof"],
         "validator_log_sha256": sha256_text(stable_json(validator_log)),
         "selected_for_extraction": True,
         "ir_mutation_allowed": False,
         "accepted": True,
+    }
+
+
+def blocked_producer_evaluation_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    comparison_kind: str,
+    symbolic_value_id: int,
+    symbolic_producer: dict[str, Any],
+    result_const: tuple[str, bool],
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr.get("bin_op", -1)), f"op{instr.get('bin_op', -1)}")
+    proposed = make_const_enode(*result_const)
+    reason_detail = {
+        "kind": "producer_evaluation_not_proven",
+        "comparison_kind": comparison_kind,
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "result_const": result_const,
+        "impact": "rewriting the predicate before S5/DCE proves producer evaluation could erase an effectful producer",
+    }
+    fallback = {
+        "op": op_name,
+        "lhs": ["hlir_value", int(instr.get("lhs", -1))],
+        "rhs": ["hlir_value", int(instr.get("rhs", -1))],
+        "blocked_reason": reason_detail,
+    }
+    validator_log = {
+        "validator": "blocked",
+        "method": "producer-evaluation-preservation-guard",
+        "accepted": False,
+        "blocked": True,
+        "rejection_reason": "producer_evaluation_not_proven",
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "proposal": "blocked_producer_evaluation",
+        "reason": reason_detail,
+    }
+    rid = "s4-blocked-eval-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_reflexive_cmp_i64",
+        "comparison_kind": comparison_kind,
+        "proposal_kind": "blocked_symbolic_reflexive_comparison",
+        "proposal_origin": "madaros_v2_s4_receipt.producer-evaluation-preservation-guard",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "symbolic_reflexive_cmp_i64_eval_guard", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_blocked_producer_evaluation",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "same_operand_id": True,
+        "producer_evaluation_policy": "blocked: producer evaluation is not proven",
+        "result_const": result_const,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(proposed)),
+        "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json({"basis_family": "exact_symbolic", "blocked": True, "comparison_kind": comparison_kind})),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "blocked-no-training", "reason": reason_detail})),
+        "domain": "blocked: producer evaluation is not proven",
+        "domain_bounds": {
+            "kind": "blocked_producer_evaluation",
+            "reason": reason_detail,
+        },
+        "error_bound": "unproven: producer evaluation not proven",
+        "error_bound_method": "blocked-before-validation",
+        "gum_covariance_assumptions": "not-applicable: blocked before optimization",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "blocked",
+        "validator_attempted": ["producer-evaluation-preservation-guard"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "blocked": True,
+        "rejection_reason_code": "producer_evaluation_not_proven",
+        "rejection_reason": "producer evaluation must be preserved before replacing the predicate",
+        "selected_for_extraction": False,
+        "ir_mutation_allowed": False,
+        "accepted": False,
     }
 
 
@@ -706,7 +804,11 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                     "selected": {"base": proposed_cost, "children": 0, "total": proposed_cost},
                 },
                 "selection_reason": "accepted_translation_validated_exact_lower_cost",
-                "proof_obligation": "translation-validation already accepted with zero error bound",
+                "proof_obligation": (
+                    "translation-validation already accepted with zero error bound; S5 must keep the local leaf call producer evaluated"
+                    if rewrite.get("producer_evaluation_policy") == "direct_call_leaf_pure_keep_producer_evaluated"
+                    else "translation-validation already accepted with zero error bound"
+                ),
                 "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
                 "coefficient_sha256": rewrite["coefficient_sha256"],
                 "basis_family": rewrite["basis_family"],
@@ -716,6 +818,8 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                 "lowering_effect": (
                     "replace_binary_identity_expr_with_existing_value"
                     if rewrite["rewrite_kind"] == "symbolic_identity_i64"
+                    else "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated"
+                    if rewrite.get("producer_evaluation_policy") == "direct_call_leaf_pure_keep_producer_evaluated"
                     else "replace_binary_predicate_expr_with_const_bool"
                     if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64"
                     else "replace_binary_constant_expr_with_const"
@@ -747,9 +851,17 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                         "total": original_cost + int(cost_model["weights"]["unvalidated_penalty"]),
                     },
                 },
-                "selection_reason": "blocked_by_operand_provenance_guard",
+                "selection_reason": (
+                    "blocked_by_producer_evaluation_guard"
+                    if rewrite.get("rejection_reason_code") == "producer_evaluation_not_proven"
+                    else "blocked_by_operand_provenance_guard"
+                ),
                 "rejection_reason_code": rewrite["rejection_reason_code"],
-                "proof_obligation": "prove S3 HLIR operand provenance before extraction",
+                "proof_obligation": (
+                    "prove producer evaluation preservation before extraction"
+                    if rewrite.get("rejection_reason_code") == "producer_evaluation_not_proven"
+                    else "prove S3 HLIR operand provenance before extraction"
+                ),
                 "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
                 "coefficient_sha256": rewrite["coefficient_sha256"],
                 "basis_family": rewrite["basis_family"],
@@ -911,10 +1023,14 @@ def const_info(instr: dict[str, Any], cv: tuple[str, int | bool], func_name: str
     }
 
 
-def instr_value_info(instr: dict[str, Any], func_name: str, block_label: str) -> dict[str, Any]:
+def instr_value_info(instr: dict[str, Any], func_name: str, block_label: str, function_summaries: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     op = instr.get("op")
+    function_summaries = function_summaries or {}
+    call_summary: dict[str, Any] = {}
     if op == "call_direct":
-        label = f"call:{instr.get('call_name', '')}"
+        call_name = instr.get("call_name", "")
+        call_summary = dict(function_summaries.get(call_name, {}))
+        label = f"call:{call_name}"
     else:
         label = f"{op}:{instr.get('result')}"
     return {
@@ -925,6 +1041,9 @@ def instr_value_info(instr: dict[str, Any], func_name: str, block_label: str) ->
         "block": block_label,
         "value_id": int(instr["result"]),
         "call_name": instr.get("call_name", ""),
+        "call_summary": call_summary,
+        "call_leaf_pure": bool(call_summary.get("leaf_pure", False)),
+        "call_purity_reason": call_summary.get("purity_reason", "not-a-call"),
     }
 
 
@@ -949,7 +1068,58 @@ def identity_candidate(
     return None
 
 
+def reflexive_cmp_result(
+    op: int,
+) -> tuple[str, tuple[str, bool]] | None:
+    if op == 18:
+        return ("eq_self_true", ("bool", True))
+    if op == 19:
+        return ("ne_self_false", ("bool", False))
+    if op == 21:
+        return ("le_self_true", ("bool", True))
+    if op == 23:
+        return ("ge_self_true", ("bool", True))
+    if op == 20:
+        return ("lt_self_false", ("bool", False))
+    if op == 22:
+        return ("gt_self_false", ("bool", False))
+    return None
+
+
+def producer_evaluation_policy(info: dict[str, Any]) -> str | None:
+    if info.get("producer_kind") in {"param", "block_param"}:
+        return "producer_is_param_or_block_param_no_effectful_eval"
+    if info.get("producer_kind") == "call_direct" and info.get("call_leaf_pure") is True:
+        return "direct_call_leaf_pure_keep_producer_evaluated"
+    return None
+
+
 def reflexive_cmp_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[str, int, dict[str, Any], tuple[str, bool], str] | None:
+    if int(instr.get("lhs", -1)) != int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not rhs_info:
+        return None
+    if lhs_info.get("value_id") != rhs_info.get("value_id"):
+        return None
+    if instr.get("ty", {}).get("kind") != "bool":
+        return None
+    op = int(instr.get("bin_op", -1))
+    result = reflexive_cmp_result(op)
+    if result is None:
+        return None
+    policy = producer_evaluation_policy(lhs_info)
+    if policy is None:
+        return None
+    lhs_id = int(instr.get("lhs", -1))
+    comparison_kind, result_const = result
+    return (comparison_kind, lhs_id, lhs_info, result_const, policy)
+
+
+def blocked_reflexive_cmp_candidate(
     instr: dict[str, Any],
     lhs_info: dict[str, Any] | None,
     rhs_info: dict[str, Any] | None,
@@ -960,25 +1130,15 @@ def reflexive_cmp_candidate(
         return None
     if lhs_info.get("value_id") != rhs_info.get("value_id"):
         return None
-    if lhs_info.get("producer_kind") not in {"param", "block_param"}:
-        return None
     if instr.get("ty", {}).get("kind") != "bool":
         return None
-    op = int(instr.get("bin_op", -1))
-    lhs_id = int(instr.get("lhs", -1))
-    if op == 18:
-        return ("eq_self_true", lhs_id, lhs_info, ("bool", True))
-    if op == 19:
-        return ("ne_self_false", lhs_id, lhs_info, ("bool", False))
-    if op == 21:
-        return ("le_self_true", lhs_id, lhs_info, ("bool", True))
-    if op == 23:
-        return ("ge_self_true", lhs_id, lhs_info, ("bool", True))
-    if op == 20:
-        return ("lt_self_false", lhs_id, lhs_info, ("bool", False))
-    if op == 22:
-        return ("gt_self_false", lhs_id, lhs_info, ("bool", False))
-    return None
+    result = reflexive_cmp_result(int(instr.get("bin_op", -1)))
+    if result is None:
+        return None
+    if producer_evaluation_policy(lhs_info) is not None:
+        return None
+    comparison_kind, result_const = result
+    return (comparison_kind, int(instr.get("lhs", -1)), lhs_info, result_const)
 
 
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -986,6 +1146,21 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
     module = data["module"]
     eclasses: list[dict[str, Any]] = []
     rewrites: list[dict[str, Any]] = []
+    function_summaries: dict[str, dict[str, Any]] = {}
+    for summary_func in module["functions"]:
+        call_count = 0
+        op_kinds: set[str] = set()
+        for block in summary_func.get("blocks", []):
+            for instr in block.get("instrs", []):
+                op_kinds.add(str(instr.get("op", "")))
+                if instr.get("op") == "call_direct":
+                    call_count += 1
+        function_summaries[summary_func["name"]] = {
+            "leaf_pure": call_count == 0,
+            "purity_reason": "local_leaf_no_call_direct" if call_count == 0 else "contains_call_direct",
+            "call_direct_count": call_count,
+            "op_kinds": sorted(op_kinds),
+        }
     for func in module["functions"]:
         value_info: dict[int, dict[str, Any]] = {}
         for param in func.get("params", []):
@@ -1084,7 +1259,7 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                     else:
                         reflexive_cmp = reflexive_cmp_candidate(instr, lhs_info, rhs_info)
                         if reflexive_cmp is not None:
-                            comparison_kind, symbolic_value_id, symbolic_producer, result_const = reflexive_cmp
+                            comparison_kind, symbolic_value_id, symbolic_producer, result_const, eval_policy = reflexive_cmp
                             receipt = symbolic_reflexive_cmp_receipt(
                                 case_id,
                                 source,
@@ -1096,6 +1271,7 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                 symbolic_value_id,
                                 symbolic_producer,
                                 result_const,
+                                eval_policy,
                             )
                             rewrites.append(receipt)
                             enodes.append({
@@ -1117,6 +1293,30 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                 func["name"],
                                 block["label"],
                             )
+                        else:
+                            blocked_reflexive = blocked_reflexive_cmp_candidate(instr, lhs_info, rhs_info)
+                            if blocked_reflexive is not None:
+                                comparison_kind, symbolic_value_id, symbolic_producer, result_const = blocked_reflexive
+                                receipt = blocked_producer_evaluation_receipt(
+                                    case_id,
+                                    source,
+                                    hlir_sha,
+                                    func["name"],
+                                    block["label"],
+                                    instr,
+                                    comparison_kind,
+                                    symbolic_value_id,
+                                    symbolic_producer,
+                                    result_const,
+                                )
+                                rewrites.append(receipt)
+                                enodes.append({
+                                    "kind": "s4-blocked-rewrite",
+                                    "rewrite_id": receipt["proposed_rewrite_id"],
+                                    "sha256": receipt["rewritten_enode_sha256"],
+                                    "op": "const",
+                                    "rejection_reason": receipt["rejection_reason"],
+                                })
                         identity = identity_candidate(instr, lhs_info, rhs_info)
                         if identity is not None:
                             identity_kind, symbolic_value_id, symbolic_producer, neutral_side, neutral_const = identity
@@ -1147,10 +1347,10 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                 "producer_label": f"identity:{identity_kind}->{symbolic_producer.get('producer_label', symbolic_value_id)}",
                                 "identity_source_result": result,
                             }
-                        else:
-                            value_info[result] = instr_value_info(instr, func["name"], block["label"])
+                        if result not in value_info:
+                            value_info[result] = instr_value_info(instr, func["name"], block["label"], function_summaries)
                 elif cv is None and result >= 0:
-                    value_info[result] = instr_value_info(instr, func["name"], block["label"])
+                    value_info[result] = instr_value_info(instr, func["name"], block["label"], function_summaries)
                 eclasses.append({
                     "eclass_id": f"{func['name']}:{block['label']}:{result}",
                     "function": func["name"],

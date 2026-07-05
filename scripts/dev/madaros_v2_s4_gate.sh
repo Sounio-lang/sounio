@@ -310,11 +310,21 @@ for rewrite in rewrites:
                 raise SystemExit("reflexive comparison symbolic value must equal original rhs")
             if rewrite.get("same_operand_id") is not True:
                 raise SystemExit("reflexive comparison must assert same_operand_id")
-            if rewrite.get("producer_evaluation_policy") != "producer_is_param_or_block_param_no_effectful_eval":
-                raise SystemExit("reflexive comparison producer evaluation policy mismatch")
+            eval_policy = rewrite.get("producer_evaluation_policy")
             producer = rewrite.get("symbolic_producer", {})
-            if producer.get("producer_kind") not in {"param", "block_param"}:
-                raise SystemExit("reflexive comparison first tranche accepts only param/block_param producers")
+            if producer.get("producer_kind") in {"param", "block_param"}:
+                if eval_policy != "producer_is_param_or_block_param_no_effectful_eval":
+                    raise SystemExit("reflexive comparison param/block_param evaluation policy mismatch")
+            elif producer.get("producer_kind") == "call_direct":
+                if eval_policy != "direct_call_leaf_pure_keep_producer_evaluated":
+                    raise SystemExit("reflexive comparison call evaluation policy mismatch")
+                if producer.get("call_leaf_pure") is not True:
+                    raise SystemExit("reflexive comparison accepted call must be local leaf pure")
+                summary = producer.get("call_summary", {})
+                if summary.get("purity_reason") != "local_leaf_no_call_direct":
+                    raise SystemExit("reflexive comparison accepted call must prove local leaf purity")
+            else:
+                raise SystemExit("reflexive comparison accepted producer must be param/block_param or local leaf call_direct")
             if not producer.get("producer_label") and not producer.get("label"):
                 raise SystemExit("reflexive comparison missing stable producer label")
             if rewrite.get("domain") != "all-i64-values-with-reflexive-equality-and-order":
@@ -324,6 +334,8 @@ for rewrite in rewrites:
                 raise SystemExit("reflexive comparison domain bounds mismatch")
             if "reflexive-comparison-proof" not in rewrite.get("validator_attempted", []):
                 raise SystemExit("reflexive comparison missing proof marker")
+            if "producer-evaluation-preservation-proof" not in rewrite.get("validator_attempted", []):
+                raise SystemExit("reflexive comparison missing producer evaluation proof marker")
             expected_const = REFLEXIVE_CMP_KINDS[comparison_kind]
             if list(rewrite.get("result_const", [])) != expected_const:
                 raise SystemExit("reflexive comparison result const mismatch")
@@ -341,8 +353,17 @@ for rewrite in rewrites:
             raise SystemExit("blocked rewrite must not be selected for extraction")
         if rewrite.get("ir_mutation_allowed") is not False:
             raise SystemExit("blocked rewrite must not allow IR mutation")
-        if rewrite.get("rejection_reason_code") != "operand_provenance_ambiguous":
-            raise SystemExit("blocked rewrite missing operand provenance reason")
+        if rewrite.get("rejection_reason_code") not in {"operand_provenance_ambiguous", "producer_evaluation_not_proven"}:
+            raise SystemExit("blocked rewrite missing accepted blocker reason")
+        if rewrite.get("rejection_reason_code") == "producer_evaluation_not_proven":
+            if rewrite.get("rewrite_kind") != "symbolic_reflexive_cmp_i64":
+                raise SystemExit("producer evaluation blocker must target reflexive comparison")
+            if rewrite.get("ekan_receipt_kind") != "ekan_blocked_producer_evaluation":
+                raise SystemExit("producer evaluation blocker missing E-KAN blocked receipt kind")
+            if rewrite.get("producer_evaluation_policy") != "blocked: producer evaluation is not proven":
+                raise SystemExit("producer evaluation blocker policy mismatch")
+            if rewrite.get("same_operand_id") is not True:
+                raise SystemExit("producer evaluation blocker must assert same_operand_id")
         observed_blocked.add(rewrite["rewrite_kind"])
         observed_blocked.add(rewrite["ekan_receipt_kind"])
         observed_blocked.add(rewrite["rejection_reason_code"])
@@ -414,7 +435,10 @@ for decision in extraction["decisions"]:
             if decision.get("abi_impact") != "none":
                 raise SystemExit("symbolic identity extraction must have no ABI impact")
         if decision.get("rewrite_kind") == "symbolic_reflexive_cmp_i64":
-            if decision.get("lowering_effect") != "replace_binary_predicate_expr_with_const_bool":
+            if decision.get("lowering_effect") not in {
+                "replace_binary_predicate_expr_with_const_bool",
+                "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated",
+            }:
                 raise SystemExit("reflexive comparison extraction has wrong lowering effect")
             if decision.get("abi_impact") != "none":
                 raise SystemExit("reflexive comparison extraction must have no ABI impact")
@@ -432,10 +456,12 @@ for decision in extraction["decisions"]:
             raise SystemExit("blocked rewrite must not be selected by extractor")
         if decision["selected_enode_sha256"] != decision["original_enode_sha256"]:
             raise SystemExit("blocked extraction must keep original enode")
-        if decision.get("rejection_reason_code") != "operand_provenance_ambiguous":
-            raise SystemExit("blocked extraction missing operand provenance reason code")
-        if "operand provenance" not in decision.get("proof_obligation", ""):
+        if decision.get("rejection_reason_code") not in {"operand_provenance_ambiguous", "producer_evaluation_not_proven"}:
+            raise SystemExit("blocked extraction missing accepted reason code")
+        if decision.get("rejection_reason_code") == "operand_provenance_ambiguous" and "operand provenance" not in decision.get("proof_obligation", ""):
             raise SystemExit("blocked extraction missing provenance proof obligation")
+        if decision.get("rejection_reason_code") == "producer_evaluation_not_proven" and "producer evaluation" not in decision.get("proof_obligation", ""):
+            raise SystemExit("blocked extraction missing producer evaluation proof obligation")
     else:
         raise SystemExit(f"extraction decision references unknown rewrite id: {rid}")
 if decision_ids != accepted_ids | rejected_ids | blocked_ids:
