@@ -1069,6 +1069,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     // Merge src functions into dst, adjusting fn_ids in call instructions
     var merged = dst
     let fn_offset = dst.fn_count  // src function IDs shift by this amount
+    let string_offset = dst.string_count  // src string indices shift by this amount
     let contest_offset = dst.epistemic.contest_count
     let robust_offset = dst.epistemic.robust_proof_count
     let decision_offset = dst.epistemic.decision_certificate_count
@@ -1091,6 +1092,11 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
             if func.instrs[ii].op == IrOpcode::IrCall {
                 if func.instrs[ii].fn_id >= 0 {
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+                }
+            }
+            if func.instrs[ii].op == IrOpcode::IrLoadString {
+                if func.instrs[ii].imm_i64 >= 0 {
+                    func.instrs[ii].imm_i64 = func.instrs[ii].imm_i64 + string_offset
                 }
             }
             func.instrs[ii] = ir_merge_adjust_epistemic_instr(
@@ -1150,6 +1156,7 @@ fn ir_merge_prepare_function_with_remap_from_func(
     dst: &IrModule,
     dep_fn_count: i64,
     fn_remap: &[i64; 2048],
+    string_offset: i64,
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -1166,18 +1173,45 @@ fn ir_merge_prepare_function_with_remap_from_func(
     var ii: i64 = 0
     while ii < func.instr_count {
         if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
+            // old_id is always a dep(src)-local fn_id here: func_in must be the
+            // PRISTINE dependency function (do not pre-mutate fn_id via a separate
+            // by-name pass before calling this — see root-cause note below).
+            //
+            // Root cause (fixed here): a prior version of this merge ran a
+            // separate by-name "existing call target" pass BEFORE this one, which
+            // left fn_id unchanged (still dep-local) whenever no cross-module reuse
+            // candidate existed yet in dst. This function then tried to sanity-check
+            // that dep-local id by reading `dst.functions[old_id]` — but old_id lives
+            // in src's index space, not dst's, so that probe silently read an
+            // unrelated (or empty) dst slot, the name compare failed, and the correct
+            // fn_remap shift was skipped — leaving a raw dep-local fn_id embedded in
+            // the merged binary that happened to alias a *different* function's final
+            // slot in dst (e.g. an imported `str::lib` call to the builtin
+            // `str_char_at`, appended late in str::lib's own module after all
+            // declared functions, silently called `str_to_i64` post-merge instead).
+            //
+            // Fix: resolve directly from the pristine src-local name, in one step:
+            // prefer an already-merged real body in dst (name-based, cross-dep
+            // reuse), else fall back to this dep's own fn_remap placement. Both
+            // candidates are computed from old_id while it is still guaranteed to
+            // be a valid src-local index (bounds-checked just above).
             let old_id = func.instrs[ii as usize].fn_id
             if old_id >= 0 && old_id < dep_fn_count {
-                let mapped_id = fn_remap[old_id as usize]
-                if mapped_id >= 0 {
-                    let dep_name = (*src).functions[old_id as usize].name
-                    let current_name = ir_merge_function_name_at(dst, old_id)
-                    // Cross-module calls are name-resolved into dst index space first;
-                    // skip fn_remap when old_id no longer denotes the same symbol.
-                    if ir_name_eq(dep_name, current_name) {
+                let target_name = (*src).functions[old_id as usize].name
+                let existing = ir_merge_find_function_name_index(dst, target_name)
+                if existing >= 0 && (*dst).functions[existing as usize].instr_count > 0 {
+                    func.instrs[ii as usize].fn_id = existing
+                } else {
+                    let mapped_id = fn_remap[old_id as usize]
+                    if mapped_id >= 0 {
                         func.instrs[ii as usize].fn_id = mapped_id
                     }
                 }
+            }
+        }
+        if func.instrs[ii as usize].op == IrOpcode::IrLoadString {
+            if func.instrs[ii as usize].imm_i64 >= 0 {
+                func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + string_offset
             }
         }
         func.instrs[ii as usize] = ir_merge_adjust_epistemic_instr(
@@ -1204,6 +1238,7 @@ fn ir_merge_prepare_function_with_remap(
     src_fi: i64,
     dep_fn_count: i64,
     fn_remap: &[i64; 2048],
+    string_offset: i64,
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -1222,6 +1257,7 @@ fn ir_merge_prepare_function_with_remap(
         src,
         dep_fn_count,
         fn_remap,
+        string_offset,
         contest_offset,
         robust_offset,
         decision_offset,
@@ -1284,6 +1320,7 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
         return
     }
     let fn_offset = (*dst).fn_count
+    let string_offset = (*dst).string_count
     let contest_offset = (*dst).epistemic.contest_count
     let robust_offset = (*dst).epistemic.robust_proof_count
     let decision_offset = (*dst).epistemic.decision_certificate_count
@@ -1302,6 +1339,11 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
         if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
             if func.instrs[ii as usize].fn_id >= 0 {
                 func.instrs[ii as usize].fn_id = func.instrs[ii as usize].fn_id + fn_offset
+            }
+        }
+        if func.instrs[ii as usize].op == IrOpcode::IrLoadString {
+            if func.instrs[ii as usize].imm_i64 >= 0 {
+                func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + string_offset
             }
         }
         func.instrs[ii as usize] = ir_merge_adjust_epistemic_instr(
@@ -4196,6 +4238,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         print_int(i)
                         print("\n")
                         let dep_fn_count = (*dep_box).fn_count
+                        let string_offset = (*acc_box).string_count
                         let contest_offset = (*acc_box).epistemic.contest_count
                         let robust_offset = (*acc_box).epistemic.robust_proof_count
                         let decision_offset = (*acc_box).epistemic.decision_certificate_count
@@ -4246,16 +4289,21 @@ fn module_frontend_lower_programs_array_direct_box(
                         while mfi < dep_fn_count {
                             let dst_fi = fn_remap[mfi as usize]
                             if dst_fi >= 0 {
-                                // Remap cross-module call targets by symbol name while fn_id
-                                // values are still in the dependency module index space.
+                                // ir_merge_prepare_function_with_remap_from_func resolves
+                                // cross-module call targets by symbol name (preferring an
+                                // already-merged real body in acc_box) and falls back to
+                                // this dep's own fn_remap placement — all from the pristine,
+                                // unmutated dep function, so fn_id stays valid dep-local
+                                // throughout (no separate pre-pass; see that function for
+                                // why a two-pass mutate-then-guess approach was unsound).
                                 var dep_func = (*dep_box).functions[mfi as usize]
-                                dep_func = ir_merge_remap_existing_call_targets(dep_func, &(*dep_box), &(*acc_box))
                                 var func = ir_merge_prepare_function_with_remap_from_func(
                                     dep_func,
                                     &(*dep_box),
                                     &(*acc_box),
                                     dep_fn_count,
                                     &fn_remap,
+                                    string_offset,
                                     contest_offset,
                                     robust_offset,
                                     decision_offset,
