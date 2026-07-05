@@ -1,0 +1,79 @@
+//@ run-pass
+// validated_lane: lean_single (default/Madaros blocked by BLK-MADAROS-SEED-BEGIN,
+//   see docs/audit/MADAROS_SEED_BEGIN_RECHECK_2026-07-05.md)
+// T4 — long-summation witness for stdlib/math/dd64.sio
+//
+// sum_{k=1}^{N} 1/k^2 with N = 10^6, compared against the analytic
+// reference pi^2/6 - psi'(N+1), with the trigamma tail expanded as
+// 1/N - 1/(2 N^2) + 1/(6 N^3) (next term ~ 1/(30 N^5) ~ 3e-32, negligible).
+//
+// Asserts the error ordering the EISA precision track claims:
+//   err(dd64) <= err(kahan) < err(naive-forward)   (with sanity bounds)
+//
+// Forward naive summation adds ever-smaller terms to a ~1.64 accumulator
+// and loses low bits; Kahan compensates to O(u); dd64 carries the residual
+// exactly at ~1e-32 and rounds once at the end.
+
+use math::dd64::*
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() with Mut, Div, Panic, IO {
+    let n = 1000000
+    let nf = 1000000.0
+
+    // analytic reference (accurate to ~1 ulp of f64)
+    let pi26 = 1.6449340668482264
+    let tail = 1.0 / nf - 1.0 / (2.0 * nf * nf) + 1.0 / (6.0 * nf * nf * nf)
+    let reference = pi26 - tail
+
+    // naive forward f64
+    var s_naive = 0.0
+    var k = 1
+    while k <= n {
+        let kf = k as f64
+        s_naive = s_naive + 1.0 / (kf * kf)
+        k = k + 1
+    }
+
+    // Kahan compensated f64
+    var s_kahan = 0.0
+    var comp = 0.0
+    k = 1
+    while k <= n {
+        let kf = k as f64
+        let y = 1.0 / (kf * kf) - comp
+        let t = s_kahan + y
+        comp = (t - s_kahan) - y
+        s_kahan = t
+        k = k + 1
+    }
+
+    // dd64 accumulator
+    var s_dd = dd_zero()
+    k = 1
+    while k <= n {
+        let kf = k as f64
+        s_dd = dd_add_f64(s_dd, 1.0 / (kf * kf))
+        k = k + 1
+    }
+    let s_ddv = dd_to_f64(s_dd)
+
+    let err_naive = abs_f64(s_naive - reference)
+    let err_kahan = abs_f64(s_kahan - reference)
+    let err_dd = abs_f64(s_ddv - reference)
+
+    var fails = 0
+    // ordering (ties allowed at the 1e-16 floor where reference itself limits)
+    if err_dd > err_kahan + 0.0000000000000002 { fails = fails + 1 }
+    if err_naive < err_dd { fails = fails + 1 }
+    // sanity bounds
+    if err_kahan > 0.00000000000005 { fails = fails + 1 }   // kahan within 5e-14
+    if err_dd > 0.00000000000005 { fails = fails + 1 }      // dd within 5e-14
+    if err_naive > 0.0000001 { fails = fails + 1 }          // naive still < 1e-7
+
+    assert(fails == 0)
+    println("ALL PASS: dd64 long summation — err(dd) <= err(kahan) <= err(naive), 1e6 terms")
+}

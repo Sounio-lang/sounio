@@ -1,0 +1,72 @@
+//@ run-pass
+// validated_lane: lean_single (default/Madaros blocked by BLK-MADAROS-SEED-BEGIN,
+//   see docs/audit/MADAROS_SEED_BEGIN_RECHECK_2026-07-05.md)
+// T5 — algebraic round-trip witnesses for stdlib/math/dd64.sio
+//
+// Checks the double-word bounds hold in composition (JMP2017):
+//   (x + y) - y ~ x         to ~2^-104 relative
+//   (x * y) / y ~ x         to ~2^-100 relative
+//   sqrt(x)^2   ~ x         to ~2^-100 relative
+//   sqrt(2)^2 - 2 in dd64 beats f64 by >= 10^10
+// plus comparison/utility semantics (dd_cmp, dd_abs, dd_eq on lo digits).
+
+use math::dd64::*
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// relative distance between dd value and dd value, evaluated in dd
+fn dd_rel_err(a: Dd64, b: Dd64) -> f64 with Mut, Div {
+    let d = dd_sub(a, b)
+    let q = dd_div(d, b)
+    abs_f64(dd_to_f64(q))
+}
+
+fn main() with Mut, Div, Panic, IO {
+    var fails = 0
+    let tol = 0.0000000000000000000000000000005   // 5e-31 ~ 2^-100.7
+
+    // representative values with non-trivial lo parts
+    let x = dd_div(dd_from_f64(1.0), dd_from_f64(3.0))          // 1/3
+    let y = dd_div(dd_from_f64(355.0), dd_from_f64(113.0))      // pi approx
+
+    // add/sub round trip
+    let rt1 = dd_sub(dd_add(x, y), y)
+    if dd_rel_err(rt1, x) > tol { fails = fails + 1 }
+
+    // mul/div round trip
+    let rt2 = dd_div(dd_mul(x, y), y)
+    if dd_rel_err(rt2, x) > tol { fails = fails + 1 }
+
+    // sqrt round trip: sqrt(x)^2 ~ x
+    let s = dd_sqrt(x)
+    let rt3 = dd_mul(s, s)
+    if dd_rel_err(rt3, x) > tol { fails = fails + 1 }
+
+    // sqrt(2)^2 - 2: dd64 must beat f64 by at least 10 orders of magnitude
+    let two = dd_from_f64(2.0)
+    let sd = dd_sqrt(two)
+    let dd_resid = abs_f64(dd_to_f64(dd_sub(dd_mul(sd, sd), two)))
+    let sf = 1.4142135623730951                                  // fl(sqrt 2)
+    let f64_resid = abs_f64(sf * sf - 2.0)
+    if f64_resid == 0.0 { fails = fails + 1 }                    // sanity: f64 residual nonzero
+    if dd_resid * 10000000000.0 > f64_resid { fails = fails + 1 }
+
+    // 1/3 in dd has a nonzero lo digit chain: dd(1/3) != f64(1/3) as dd
+    if dd_eq(x, dd_from_f64(1.0 / 3.0)) { fails = fails + 1 }
+
+    // comparison semantics resolve on lo when hi ties
+    let a = Dd64 { hi: 1.0, lo: 0.0000000000000000001 }
+    let b = Dd64 { hi: 1.0, lo: 0.0 }
+    if dd_cmp(a, b) != 1 { fails = fails + 1 }
+    if dd_cmp(b, a) != 0 - 1 { fails = fails + 1 }
+    if !dd_lt(b, a) { fails = fails + 1 }
+
+    // dd_abs handles hi == 0 with negative lo
+    let c = Dd64 { hi: 0.0, lo: 0.0 - 0.0000000000000000001 }
+    if dd_abs(c).lo < 0.0 { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: dd64 algebra — add/mul/sqrt round trips at 2^-100, cmp/abs semantics")
+}
