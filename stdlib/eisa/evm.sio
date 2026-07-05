@@ -1,18 +1,30 @@
 module eisa::evm
 
 use math::dd64::*
+use math::qd128::*
 use eisa::core::*
+use eisa::core_v2::*
 use eisa::format::*
 
+// Err-lane storage note (v2 widening, arch doc 2026-07-05 §4): on v0/v1
+// images only reg_ehi/reg_elo carry the dd64 err lane (hi/lo) and
+// reg_e2/reg_e3 stay 0. On v2 images the four arrays reg_ehi/reg_elo/
+// reg_e2/reg_e3 are the Qd128 err components x0/x1/x2/x3 respectively
+// (names kept so the v0/v1 code paths are byte-untouched). Same convention
+// for mem_ehi/mem_elo/mem_e2/mem_e3.
 pub struct EvmMachine {
     pub reg_val: [f64; 64],
     pub reg_ehi: [f64; 64],
     pub reg_elo: [f64; 64],
+    pub reg_e2: [f64; 64],
+    pub reg_e3: [f64; 64],
     pub reg_u: [f64; 64],
     pub reg_poison: [i64; 64],
     pub mem_val: [f64; 32],
     pub mem_ehi: [f64; 32],
     pub mem_elo: [f64; 32],
+    pub mem_e2: [f64; 32],
+    pub mem_e3: [f64; 32],
     pub mem_u: [f64; 32],
     pub mem_poison: [i64; 32],
     pub gate_count: i64,
@@ -56,12 +68,22 @@ fn evm_is_v1(m: &EvmMachine) -> bool {
     m.version == eisax_version_v1()
 }
 
+fn evm_is_v2(m: &EvmMachine) -> bool {
+    m.version == eisax_version_v2()
+}
+
+// v1-or-v2: v2 shares every v1 structural/control-flow rule (caps, fuel,
+// branches, ehalt); only the err-lane depth and receipt version differ.
+fn evm_is_v1plus(m: &EvmMachine) -> bool {
+    evm_is_v1(m) || evm_is_v2(m)
+}
+
 fn evm_reg_cap(m: &EvmMachine) -> i64 {
-    if evm_is_v1(m) { 64 } else { 16 }
+    if evm_is_v1plus(m) { 64 } else { 16 }
 }
 
 fn evm_mem_cap(m: &EvmMachine) -> i64 {
-    if evm_is_v1(m) { 32 } else { 8 }
+    if evm_is_v1plus(m) { 32 } else { 8 }
 }
 
 fn evm_idx_reg_ok(m: &EvmMachine, i: i64) -> bool {
@@ -82,7 +104,7 @@ fn abs_f64_local(x: f64) -> f64 {
 }
 
 fn normalize_u_write(version: i64, u: f64) -> f64 with Div {
-    if version != eisax_version_v1() { return u }
+    if version != eisax_version_v1() && version != eisax_version_v2() { return u }
     if u == 0.0 {
         let inv = 1.0 / u
         if inv < 0.0 {
@@ -104,6 +126,12 @@ fn write_reg_raw(
     m.reg_val[r as usize] = val
     m.reg_ehi[r as usize] = ehi
     m.reg_elo[r as usize] = elo
+    // v2: the two-word write clears the deep components; v2-aware writers
+    // (evm_write_reg_clean2, eload/emov copies) set them explicitly after.
+    if m.version == eisax_version_v2() {
+        m.reg_e2[r as usize] = 0.0
+        m.reg_e3[r as usize] = 0.0
+    }
     m.reg_u[r as usize] = normalize_u_write(m.version, u)
     m.reg_poison[r as usize] = poisoned
     m.last_written_reg = r
@@ -121,6 +149,10 @@ fn write_mem_raw(
     m.mem_val[s as usize] = val
     m.mem_ehi[s as usize] = ehi
     m.mem_elo[s as usize] = elo
+    if m.version == eisax_version_v2() {
+        m.mem_e2[s as usize] = 0.0
+        m.mem_e3[s as usize] = 0.0
+    }
     m.mem_u[s as usize] = normalize_u_write(m.version, u)
     m.mem_poison[s as usize] = poisoned
 }
@@ -145,6 +177,26 @@ fn evm_write_reg_clean(m: &!EvmMachine, r: i64, z: EReg) with Mut, Div, Panic {
     write_reg_raw(m, r, z.val, z.err.hi, z.err.lo, z.u, 0)
 }
 
+// v2 path: reg_ehi/reg_elo/reg_e2/reg_e3 hold the Qd128 components x0..x3.
+fn evm_reg_to_ereg2(m: &EvmMachine, r: i64) -> EReg2 with Panic {
+    EReg2 {
+        val: m.reg_val[r as usize],
+        err: Qd128 {
+            x0: m.reg_ehi[r as usize],
+            x1: m.reg_elo[r as usize],
+            x2: m.reg_e2[r as usize],
+            x3: m.reg_e3[r as usize],
+        },
+        u: m.reg_u[r as usize],
+    }
+}
+
+fn evm_write_reg_clean2(m: &!EvmMachine, r: i64, z: EReg2) with Mut, Div, Panic {
+    write_reg_raw(m, r, z.val, z.err.x0, z.err.x1, z.u, 0)
+    m.reg_e2[r as usize] = z.err.x2
+    m.reg_e3[r as usize] = z.err.x3
+}
+
 fn normalize_reg_lane(m: &!EvmMachine, r: i64) -> bool with Mut, Div, Panic {
     if m.reg_poison[r as usize] == 1 {
         evm_set_reg_poison(m, r)
@@ -159,6 +211,14 @@ fn normalize_reg_lane(m: &!EvmMachine, r: i64) -> bool with Mut, Div, Panic {
     ) {
         evm_set_reg_poison(m, r)
         return false
+    }
+    // I3 on v2 (arch doc §1): poison iff ANY of the four stored err
+    // components is non-finite (dual-semantics detector from eisa::format).
+    if m.version == eisax_version_v2() {
+        if !is_finite_f64(m.reg_e2[r as usize]) || !is_finite_f64(m.reg_e3[r as usize]) {
+            evm_set_reg_poison(m, r)
+            return false
+        }
     }
     true
 }
@@ -177,6 +237,12 @@ fn normalize_mem_lane(m: &!EvmMachine, s: i64) -> bool with Mut, Div, Panic {
     ) {
         evm_set_mem_poison(m, s)
         return false
+    }
+    if m.version == eisax_version_v2() {
+        if !is_finite_f64(m.mem_e2[s as usize]) || !is_finite_f64(m.mem_e3[s as usize]) {
+            evm_set_mem_poison(m, s)
+            return false
+        }
     }
     true
 }
@@ -282,12 +348,61 @@ fn emit_receipt_v2(
     println("")
 }
 
+// Receipt v3 (arch doc §3): emitted ONLY by version-2 images. All four err
+// components in f64_parts decomposition; roundoff0 is field-compatible with
+// v2's roundoff for leading-term readers.
+fn emit_receipt_v3(
+    m: &EvmMachine,
+    r: i64,
+    poisoned: i64,
+    emit_stop_fuel: i64
+) with IO, Mut, Div, Panic {
+    let vb = f64_parts(m.reg_val[r as usize])
+    let r0 = f64_parts(m.reg_ehi[r as usize])
+    let r1 = f64_parts(m.reg_elo[r as usize])
+    let r2 = f64_parts(m.reg_e2[r as usize])
+    let r3 = f64_parts(m.reg_e3[r as usize])
+    let ub = f64_parts(m.reg_u[r as usize])
+
+    print("eisa-receipt: v=3 prog=")
+    print_i64_dec(m.prog_hash)
+    print(" gate=")
+    print_i64_dec(m.gate_count)
+    print(" reg=e")
+    print_i64_dec(r)
+    print(" val=")
+    print_f64_parts_field(vb)
+    print(" roundoff0=")
+    print_f64_parts_field(r0)
+    print(" roundoff1=")
+    print_f64_parts_field(r1)
+    print(" roundoff2=")
+    print_f64_parts_field(r2)
+    print(" roundoff3=")
+    print_f64_parts_field(r3)
+    print(" u=")
+    print_f64_parts_field(ub)
+    print(" poisoned=")
+    print_i64_dec(poisoned)
+    print(" frail=")
+    print_i64_dec(m.frail_branches)
+    if emit_stop_fuel == 1 {
+        print(" stop=fuel")
+    }
+    println("")
+}
+
 fn emit_gate_receipt(m: &EvmMachine, r: i64) with IO, Mut, Div, Panic {
-    if evm_is_v1(m) {
+    if evm_is_v2(m) {
         let poisoned = if m.reg_poison[r as usize] == 1 || m.br_poisoned == 1 { 1 } else { 0 }
-        emit_receipt_v2(m, r, poisoned, 0)
+        emit_receipt_v3(m, r, poisoned, 0)
     } else {
-        emit_receipt_v1(m, r)
+        if evm_is_v1(m) {
+            let poisoned = if m.reg_poison[r as usize] == 1 || m.br_poisoned == 1 { 1 } else { 0 }
+            emit_receipt_v2(m, r, poisoned, 0)
+        } else {
+            emit_receipt_v1(m, r)
+        }
     }
 }
 
@@ -296,7 +411,11 @@ fn emit_fuel_stop_receipt(m: &!EvmMachine) with IO, Mut, Div, Panic {
     if !evm_idx_reg_ok(m, r) {
         r = 0
     }
-    emit_receipt_v2(m, r, 1, 1)
+    if evm_is_v2(m) {
+        emit_receipt_v3(m, r, 1, 1)
+    } else {
+        emit_receipt_v2(m, r, 1, 1)
+    }
 }
 
 fn branch_frail_predicate(val: f64, ehi: f64, u: f64) -> bool {
@@ -310,11 +429,15 @@ pub fn evm_new() -> EvmMachine {
         reg_val: [0.0; 64],
         reg_ehi: [0.0; 64],
         reg_elo: [0.0; 64],
+        reg_e2: [0.0; 64],
+        reg_e3: [0.0; 64],
         reg_u: [0.0; 64],
         reg_poison: [0; 64],
         mem_val: [0.0; 32],
         mem_ehi: [0.0; 32],
         mem_elo: [0.0; 32],
+        mem_e2: [0.0; 32],
+        mem_e3: [0.0; 32],
         mem_u: [0.0; 32],
         mem_poison: [0; 32],
         gate_count: 0,
@@ -357,7 +480,7 @@ pub fn evm_load(img: EisaxImage) -> EvmMachine with Mut, Div, Panic {
     m.n_const = img.c_len
     m.prog_hash = eisax_prog_hash(img)
     m.version = img.w[1]
-    if m.version == eisax_version_v1() {
+    if m.version == eisax_version_v1() || m.version == eisax_version_v2() {
         m.fuel_left = eisax_fuel(img)
         m.initial_fuel = m.fuel_left
     } else {
@@ -401,14 +524,14 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
         return 0
     }
 
-    if evm_is_v1(m) && m.fuel_left <= 0 {
+    if evm_is_v1plus(m) && m.fuel_left <= 0 {
         m.stop_kind = 1
         m.halted = 1
         emit_fuel_stop_receipt(m)
         return 0
     }
 
-    if evm_is_v1(m) {
+    if evm_is_v1plus(m) {
         m.fuel_left = m.fuel_left - 1
     }
 
@@ -457,6 +580,10 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
                 m.mem_u[a as usize],
                 m.mem_poison[a as usize]
             )
+            if evm_is_v2(m) {
+                m.reg_e2[dst as usize] = m.mem_e2[a as usize]
+                m.reg_e3[dst as usize] = m.mem_e3[a as usize]
+            }
             let _norm = normalize_reg_lane(m, dst)
         }
         m.pc = m.pc + 1
@@ -482,6 +609,10 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
                 m.reg_u[dst as usize],
                 m.reg_poison[dst as usize]
             )
+            if evm_is_v2(m) {
+                m.mem_e2[a as usize] = m.reg_e2[dst as usize]
+                m.mem_e3[a as usize] = m.reg_e3[dst as usize]
+            }
             let _norm = normalize_mem_lane(m, a)
         }
         m.pc = m.pc + 1
@@ -498,6 +629,10 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
         if !src_ok {
             evm_set_reg_poison(m, dst)
         } else {
+            // Read the deep components BEFORE write_reg_raw clears them
+            // (dst may alias a on emov).
+            let src_e2 = m.reg_e2[a as usize]
+            let src_e3 = m.reg_e3[a as usize]
             write_reg_raw(
                 m,
                 dst,
@@ -507,6 +642,10 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
                 m.reg_u[a as usize],
                 m.reg_poison[a as usize]
             )
+            if evm_is_v2(m) {
+                m.reg_e2[dst as usize] = src_e2
+                m.reg_e3[dst as usize] = src_e3
+            }
             let _dst_ok = normalize_reg_lane(m, dst)
         }
         m.pc = m.pc + 1
@@ -514,7 +653,7 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
     }
 
     if op == op_ebr() {
-        if !evm_is_v1(m) {
+        if !evm_is_v1plus(m) {
             m.error = 1
             m.halted = 1
             return 1
@@ -530,7 +669,7 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
     }
 
     if op == op_ebrz() || op == op_ebrn() {
-        if !evm_is_v1(m) {
+        if !evm_is_v1plus(m) {
             m.error = 1
             m.halted = 1
             return 1
@@ -589,6 +728,44 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
             return 0
         }
 
+        // v2 path: closure contract over qd128 via eisa::core_v2 (the EVM
+        // calls the reference module so EVM and reference cannot drift).
+        if evm_is_v2(m) {
+            let ra2 = evm_reg_to_ereg2(m, a)
+            let rb2 = evm_reg_to_ereg2(m, b)
+            if op == op_ediv() && rb2.val == 0.0 {
+                evm_set_reg_poison(m, dst)
+                m.pc = m.pc + 1
+                return 0
+            }
+
+            let rz2 = if op == op_eadd() {
+                eadd2(ra2, rb2)
+            } else {
+                if op == op_esub() {
+                    esub2(ra2, rb2)
+                } else {
+                    if op == op_emul() {
+                        emul2(ra2, rb2)
+                    } else {
+                        ediv2(ra2, rb2)
+                    }
+                }
+            }
+
+            // I3 on v2: poison iff val, u or ANY of the four err components
+            // is non-finite.
+            if !lane_tuple_ok(rz2.val, rz2.err.x0, rz2.err.x1, rz2.u) ||
+               !is_finite_f64(rz2.err.x2) || !is_finite_f64(rz2.err.x3) {
+                evm_set_reg_poison(m, dst)
+            } else {
+                evm_write_reg_clean2(m, dst, rz2)
+            }
+
+            m.pc = m.pc + 1
+            return 0
+        }
+
         let ra = evm_reg_to_ereg(m, a)
         let rb = evm_reg_to_ereg(m, b)
         if op == op_ediv() && rb.val == 0.0 {
@@ -634,6 +811,19 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
             return 0
         }
 
+        if evm_is_v2(m) {
+            let ra2 = evm_reg_to_ereg2(m, a)
+            let rz2 = esqrt2(ra2)
+            if !lane_tuple_ok(rz2.val, rz2.err.x0, rz2.err.x1, rz2.u) ||
+               !is_finite_f64(rz2.err.x2) || !is_finite_f64(rz2.err.x3) {
+                evm_set_reg_poison(m, dst)
+            } else {
+                evm_write_reg_clean2(m, dst, rz2)
+            }
+            m.pc = m.pc + 1
+            return 0
+        }
+
         let ra = evm_reg_to_ereg(m, a)
         let rz = esqrt(ra)
         if !lane_tuple_ok(rz.val, rz.err.hi, rz.err.lo, rz.u) {
@@ -653,7 +843,7 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
         }
         let _dst_ok = normalize_reg_lane(m, dst)
         m.gate_count = m.gate_count + 1
-        let receipt_poisoned = if evm_is_v1(m) && m.br_poisoned == 1 {
+        let receipt_poisoned = if evm_is_v1plus(m) && m.br_poisoned == 1 {
             1
         } else {
             m.reg_poison[dst as usize]
@@ -661,8 +851,13 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
         let _code = if receipt_poisoned == 1 {
             2
         } else {
-            let r = evm_reg_to_ereg(m, dst)
-            egate(r, 2)
+            if evm_is_v2(m) {
+                let r2 = evm_reg_to_ereg2(m, dst)
+                egate2(r2, 2)
+            } else {
+                let r = evm_reg_to_ereg(m, dst)
+                egate(r, 2)
+            }
         }
         emit_gate_receipt(m, dst)
         m.pc = m.pc + 1
@@ -670,7 +865,7 @@ pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
     }
 
     if op == op_ehalt() {
-        if !evm_is_v1(m) {
+        if !evm_is_v1plus(m) {
             m.error = 1
             m.halted = 1
             return 1
@@ -711,6 +906,14 @@ pub fn evm_reg_ehi(m: &EvmMachine, r: i64) -> f64 with Panic {
 
 pub fn evm_reg_elo(m: &EvmMachine, r: i64) -> f64 with Panic {
     m.reg_elo[r as usize]
+}
+
+pub fn evm_reg_e2(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_e2[r as usize]
+}
+
+pub fn evm_reg_e3(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_e3[r as usize]
 }
 
 pub fn evm_reg_u(m: &EvmMachine, r: i64) -> f64 with Panic {

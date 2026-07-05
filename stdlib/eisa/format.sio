@@ -36,6 +36,9 @@ pub fn eisax_magic() -> i64 { 1162626369 }
 
 pub fn eisax_version() -> i64 { 0 }
 pub fn eisax_version_v1() -> i64 { 1 }
+// v2 (arch doc 2026-07-05 §2): same layout, opcodes, fuel word and caps as
+// v1; the version word alone selects the qd128 err-lane semantics.
+pub fn eisax_version_v2() -> i64 { 2 }
 
 pub fn op_econst() -> i64 { 0 }
 pub fn op_eload() -> i64 { 1 }
@@ -68,7 +71,7 @@ fn eisax_version_err() -> i64 { 13 }
 fn eisax_fuel_err() -> i64 { 14 }
 
 fn eisax_code_start(version: i64) -> i64 {
-    if version == eisax_version_v1() { 7 } else { 6 }
+    if version == eisax_version_v1() || version == eisax_version_v2() { 7 } else { 6 }
 }
 
 fn eisax_expected_w_len(version: i64, n_code: i64, n_prov: i64) -> i64 {
@@ -408,7 +411,10 @@ fn eisax_hash_parts(
     c: &[f64; 64],
     c_len: i64
 ) -> i64 with Mut, Div, Panic {
-    if version == eisax_version_v1() {
+    // v2 reuses the v1 mixing unchanged: the version word (w[1]) is already
+    // mixed in the header pass, so a v1 image and its v2 twin hash
+    // differently without any algorithm change.
+    if version == eisax_version_v1() || version == eisax_version_v2() {
         eisax_hash_parts_v1(w, n_code, n_prov, c, c_len)
     } else {
         eisax_hash_parts_v0(w, n_code, n_prov, c, c_len)
@@ -425,7 +431,7 @@ pub fn eisax_encode(b: EisaxBuild) -> EisaxImage with Mut, Div, Panic {
     img.w[3] = b.n_const
     img.w[4] = 2
     img.w[5] = 0
-    if version == eisax_version_v1() {
+    if version == eisax_version_v1() || version == eisax_version_v2() {
         img.w[6] = b.fuel
     }
 
@@ -556,9 +562,11 @@ fn v1_branch_target_ok(t: i64, n_code: i64) -> bool {
     t >= 0 && t <= n_code
 }
 
-fn eisax_validate_v1(img: EisaxImage) -> i64 with Mut, Div, Panic {
+// Shared v1/v2 structural validator: v2 adds NO opcodes and keeps every v1
+// structural rule, cap and fuel bound; only the expected version word differs.
+fn eisax_validate_v1v2(img: EisaxImage, want_version: i64) -> i64 with Mut, Div, Panic {
     if img.w[0] != eisax_magic() { return 1 }
-    if img.w[1] != eisax_version_v1() { return 2 }
+    if img.w[1] != want_version { return 2 }
 
     let n_code = img.w[2]
     let n_const = img.w[3]
@@ -570,7 +578,7 @@ fn eisax_validate_v1(img: EisaxImage) -> i64 with Mut, Div, Panic {
     if img.c_len != n_const { return 3 }
     if img.w_len > eisax_w_cap() { return 3 }
 
-    let expected_w_len = eisax_expected_w_len(eisax_version_v1(), n_code, n_prov)
+    let expected_w_len = eisax_expected_w_len(want_version, n_code, n_prov)
     if img.w_len != expected_w_len { return 4 }
 
     if n_prov != 2 { return 12 }
@@ -656,6 +664,14 @@ fn eisax_validate_v1(img: EisaxImage) -> i64 with Mut, Div, Panic {
     0
 }
 
+fn eisax_validate_v1(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    eisax_validate_v1v2(img, eisax_version_v1())
+}
+
+fn eisax_validate_v2(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    eisax_validate_v1v2(img, eisax_version_v2())
+}
+
 pub fn eisax_validate(img: EisaxImage) -> i64 with Mut, Div, Panic {
     if img.w[0] != eisax_magic() { return 1 }
 
@@ -663,8 +679,8 @@ pub fn eisax_validate(img: EisaxImage) -> i64 with Mut, Div, Panic {
     if version == eisax_version() {
         return eisax_validate_v0(img)
     }
-    if version == eisax_version_v1() {
-        // Preserve v0 witness behavior: v0-shaped payload tagged as v1 is a version mismatch.
+    if version == eisax_version_v1() || version == eisax_version_v2() {
+        // Preserve v0 witness behavior: v0-shaped payload tagged as v1/v2 is a version mismatch.
         let n_code = img.w[2]
         let n_const = img.w[3]
         let n_prov = img.w[4]
@@ -672,7 +688,10 @@ pub fn eisax_validate(img: EisaxImage) -> i64 with Mut, Div, Panic {
             let v0_len = eisax_expected_w_len(eisax_version(), n_code, n_prov)
             if img.w_len == v0_len { return 2 }
         }
-        return eisax_validate_v1(img)
+        if version == eisax_version_v1() {
+            return eisax_validate_v1(img)
+        }
+        return eisax_validate_v2(img)
     }
     eisax_version_err()
 }
@@ -710,7 +729,11 @@ pub fn eisax_prog_hash(img: EisaxImage) -> i64 {
 }
 
 pub fn eisax_fuel(img: EisaxImage) -> i64 {
-    if img.w[1] == eisax_version_v1() { img.w[6] } else { 0 }
+    if img.w[1] == eisax_version_v1() || img.w[1] == eisax_version_v2() {
+        img.w[6]
+    } else {
+        0
+    }
 }
 
 pub fn eisax_prov_source(img: EisaxImage) -> i64 {
