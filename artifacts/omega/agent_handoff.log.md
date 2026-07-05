@@ -3327,3 +3327,58 @@ status: lock-released
     algebraic identities with preconditions, learned/approximate E-KAN proposal
     provenance, interval/SMT validators, and eventually an applying optimizer
     lane with MIR/ABI receipts. Global S4 remains incomplete.
+
+## 2026-07-05 — Madaros v2 S4 operand-provenance guard and S5 blocked preflight
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Probed symbolic identity candidates (`x + 0`, `x * 1`, `x - 0`) and found
+    that current S3 HLIR binary instructions duplicate operand IDs (for example
+    source-level `x + 0` can appear as `lhs == rhs` pointing at the literal
+    operand). Accepting constant folds or symbolic identities over that evidence
+    would overclaim.
+  - Added a third S4 rewrite status: `blocked`. Semantic falsehoods remain
+    `rejected` with counterexamples; insufficient operand-provenance evidence is
+    now `blocked` with `validator = blocked`,
+    `rejection_reason_code = operand_provenance_ambiguous`,
+    `selected_for_extraction = false`, and `ir_mutation_allowed = false`.
+  - The S4 gate now checks accepted/rejected/blocked buckets separately and
+    proves blocked rewrites stay out of extraction.
+  - The S5 preflight now emits a blocked receipt instead of claiming input
+    readiness when S4 has no accepted extraction-selected rewrites.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `git diff --check` passed.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=0`, `rejected=2`, `blocked=12`, `selected=0`,
+    `summary_sha=3190e03cd733`.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=5`, selected rewrites `0`, blocked rewrites `12`,
+    `status=blocked`, preflight sha `1e0fe617fc87...`.
+- Blocker opened:
+  - Blocker-ID: `MADAROS-V2-S3-HLIR-OPERAND-PROVENANCE-2026-07-05`
+  - Severity: P1
+  - Class: compiler architecture / S3 HLIR operand provenance
+  - Evidence level: deterministic local S4 gate with 12 blocked optimizer
+    candidates and S5 preflight `status=blocked`.
+  - Owner: Codex on this lane.
+  - Acceptance gate: S4 may accept constant folds or symbolic identities only
+    after S3 HLIR binary operands prove source operand fidelity; then
+    `scripts/dev/madaros_v2_s4_gate.sh` must show accepted selected rewrites and
+    `scripts/dev/madaros_v2_s5_preflight_gate.sh` must return
+    `s5_input_contract_ready = true` again.
+  - Next action: repair or formally prove S3 HLIR binary operand provenance
+    (`lhs`/`rhs` source fidelity) before continuing S4 algebraic identities,
+    equality saturation, or S5 MIR/ABI promotion. Global S4 and S5 readiness
+    remain incomplete.

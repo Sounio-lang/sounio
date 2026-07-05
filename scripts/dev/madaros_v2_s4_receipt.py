@@ -315,6 +315,83 @@ def rejected_div_self_receipt(
     }
 
 
+def blocked_operand_provenance_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    proposed: dict[str, Any],
+    reason_detail: dict[str, Any],
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr.get("bin_op", -1)), f"op{instr.get('bin_op', -1)}")
+    fallback = {
+        "op": op_name,
+        "lhs": ["hlir_value", int(instr.get("lhs", -1))],
+        "rhs": ["hlir_value", int(instr.get("rhs", -1))],
+        "blocked_reason": reason_detail,
+    }
+    validator_log = {
+        "validator": "blocked",
+        "method": "operand-provenance-fidelity-guard",
+        "accepted": False,
+        "blocked": True,
+        "rejection_reason": "operand_provenance_ambiguous",
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "proposal": "blocked_operand_provenance",
+        "reason": reason_detail,
+    }
+    rid = "s4-blocked-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "operand_provenance_blocked",
+        "proposal_kind": "blocked_optimization_candidate",
+        "proposal_origin": "madaros_v2_s4_receipt.operand-provenance-fidelity-guard",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "operand_provenance_guard", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_blocked_operand_provenance",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(proposed)),
+        "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json({"basis_family": "exact_symbolic", "blocked": True})),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "blocked-no-training", "reason": reason_detail})),
+        "domain": "blocked: operand provenance is ambiguous in S3 HLIR",
+        "domain_bounds": {
+            "kind": "blocked_operand_provenance",
+            "reason": reason_detail,
+        },
+        "error_bound": "unproven: operand provenance ambiguous",
+        "error_bound_method": "blocked-before-validation",
+        "gum_covariance_assumptions": "not-applicable: blocked before optimization",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "blocked",
+        "validator_attempted": ["operand-provenance-fidelity-guard"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "blocked": True,
+        "rejection_reason_code": "operand_provenance_ambiguous",
+        "rejection_reason": "s3_hlir_binary_operands_do_not_prove_source_operands",
+        "selected_for_extraction": False,
+        "ir_mutation_allowed": False,
+        "accepted": False,
+    }
+
+
 def s4_cost_model_payload() -> dict[str, Any]:
     return {
         "schema": "madaros.v2.s4.cost_model/0.1",
@@ -362,6 +439,7 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
     decisions: list[dict[str, Any]] = []
     selected_ids: list[str] = []
     rejected_ids: list[str] = []
+    blocked_ids: list[str] = []
     for rewrite in rewrites:
         rid = rewrite["proposed_rewrite_id"]
         common = {
@@ -415,6 +493,41 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
             if decision["cost_after"] > decision["cost_before"]:
                 raise SystemExit(f"accepted rewrite increases extraction cost: {rid}")
             selected_ids.append(rid)
+        elif rewrite.get("blocked") is True:
+            if rewrite.get("selected_for_extraction") is not False:
+                raise SystemExit(f"blocked rewrite marked selectable: {rid}")
+            decision = {
+                **common,
+                "decision": "block",
+                "selected": False,
+                "selected_enode_sha256": rewrite["original_enode_sha256"],
+                "replacement_enode_sha256": "",
+                "cost_before": original_cost,
+                "cost_after": original_cost + int(cost_model["weights"]["unvalidated_penalty"]),
+                "cost_delta": -int(cost_model["weights"]["unvalidated_penalty"]),
+                "cost_components": {
+                    "original": {"base": original_cost, "children": 0, "total": original_cost},
+                    "blocked_candidate": {
+                        "base": proposed_cost,
+                        "children": 0,
+                        "penalty": int(cost_model["weights"]["unvalidated_penalty"]),
+                        "total": original_cost + int(cost_model["weights"]["unvalidated_penalty"]),
+                    },
+                },
+                "selection_reason": "blocked_by_operand_provenance_guard",
+                "rejection_reason_code": rewrite["rejection_reason_code"],
+                "proof_obligation": "prove S3 HLIR operand provenance before extraction",
+                "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
+                "coefficient_sha256": rewrite["coefficient_sha256"],
+                "basis_family": rewrite["basis_family"],
+                "error_bound": rewrite["error_bound"],
+                "domain": rewrite["domain"],
+                "domain_bounds": rewrite["domain_bounds"],
+                "lowering_effect": "none: blocked candidate",
+                "abi_impact": "none: blocked candidate",
+                "mir_abi_safe": False,
+            }
+            blocked_ids.append(rid)
         else:
             if rewrite.get("selected_for_extraction") is not False:
                 raise SystemExit(f"rejected rewrite marked selectable: {rid}")
@@ -476,9 +589,10 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
         "selected_eclass_count": len({r["eclass_id"] for r in rewrites if r["accepted"] is True}),
         "selected_rewrite_ids": selected_ids,
         "rejected_rewrite_ids": rejected_ids,
+        "blocked_rewrite_ids": blocked_ids,
         "selected_rewrite_count": len(selected_ids),
         "rejected_rewrite_count": len(rejected_ids),
-        "blocked_rewrite_count": len(rejected_ids),
+        "blocked_rewrite_count": len(blocked_ids),
         "gate_invariants": [
             "deterministic_double_emit",
             "selected_ids_equal_accepted_ids",
@@ -493,6 +607,22 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
     }
     extraction["extraction_sha256"] = sha256_text(stable_json(extraction))
     return extraction
+
+
+def operand_provenance_ambiguous(instr: dict[str, Any], lhs: tuple[str, int | bool] | None, rhs: tuple[str, int | bool] | None) -> dict[str, Any] | None:
+    if lhs is None or rhs is None:
+        return None
+    if instr.get("lhs") == instr.get("rhs"):
+        return {
+            "kind": "duplicate_hlir_operand_id",
+            "lhs": int(instr.get("lhs", -1)),
+            "rhs": int(instr.get("rhs", -1)),
+            "bin_op": int(instr.get("bin_op", -1)),
+            "observed_lhs_const": lhs,
+            "observed_rhs_const": rhs,
+            "impact": "constant fold would be a proof about duplicated HLIR IDs, not source operands",
+        }
+    return None
 
 
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -536,25 +666,47 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                     if lhs is not None and rhs is not None:
                         folded = eval_bin(int(instr.get("bin_op", -1)), lhs[1], rhs[1])
                         if folded is not None:
-                            value_consts[result] = folded
-                            receipt = rewrite_receipt(
-                                case_id,
-                                source,
-                                hlir_sha,
-                                func["name"],
-                                block["label"],
-                                instr,
-                                lhs,
-                                rhs,
-                                folded,
-                            )
-                            rewrites.append(receipt)
-                            enodes.append({
-                                "kind": "s4-rewrite",
-                                "rewrite_id": receipt["proposed_rewrite_id"],
-                                "sha256": receipt["rewritten_enode_sha256"],
-                                "op": "const",
-                            })
+                            ambiguity = operand_provenance_ambiguous(instr, lhs, rhs)
+                            if ambiguity is not None:
+                                proposed = make_const_enode(*folded)
+                                receipt = blocked_operand_provenance_receipt(
+                                    case_id,
+                                    source,
+                                    hlir_sha,
+                                    func["name"],
+                                    block["label"],
+                                    instr,
+                                    proposed,
+                                    ambiguity,
+                                )
+                                rewrites.append(receipt)
+                                enodes.append({
+                                    "kind": "s4-blocked-rewrite",
+                                    "rewrite_id": receipt["proposed_rewrite_id"],
+                                    "sha256": receipt["rewritten_enode_sha256"],
+                                    "op": "const",
+                                    "rejection_reason": receipt["rejection_reason"],
+                                })
+                            else:
+                                value_consts[result] = folded
+                                receipt = rewrite_receipt(
+                                    case_id,
+                                    source,
+                                    hlir_sha,
+                                    func["name"],
+                                    block["label"],
+                                    instr,
+                                    lhs,
+                                    rhs,
+                                    folded,
+                                )
+                                rewrites.append(receipt)
+                                enodes.append({
+                                    "kind": "s4-rewrite",
+                                    "rewrite_id": receipt["proposed_rewrite_id"],
+                                    "sha256": receipt["rewritten_enode_sha256"],
+                                    "op": "const",
+                                })
                 eclasses.append({
                     "eclass_id": f"{func['name']}:{block['label']}:{result}",
                     "function": func["name"],
@@ -598,7 +750,8 @@ def emit(args: argparse.Namespace) -> int:
 
     egraph, rewrites = analyze_hlir(case_id, source_rel, hlir_text, hlir_sha)
     accepted = [r for r in rewrites if r["accepted"]]
-    rejected = [r for r in rewrites if not r["accepted"]]
+    blocked = [r for r in rewrites if r.get("blocked") is True]
+    rejected = [r for r in rewrites if not r["accepted"] and r.get("blocked") is not True]
     extraction = build_extraction(case_id, source_rel, hlir_sha, egraph, rewrites)
     egraph_path = out_dir / f"{case_id}.s4.egraph.json"
     rewrites_path = out_dir / f"{case_id}.s4.rewrites.json"
@@ -621,8 +774,10 @@ def emit(args: argparse.Namespace) -> int:
         "rewrite_count": len(rewrites),
         "accepted_rewrite_count": len(accepted),
         "rejected_rewrite_count": len(rejected),
+        "blocked_rewrite_count": len(blocked),
         "accepted_rewrite_ids": [r["proposed_rewrite_id"] for r in accepted],
         "rejected_rewrite_ids": [r["proposed_rewrite_id"] for r in rejected],
+        "blocked_rewrite_ids": [r["proposed_rewrite_id"] for r in blocked],
         "extraction_schema": EXTRACTION_SCHEMA,
         "extraction_path": extraction_path.name,
         "extraction_sha256": extraction["extraction_sha256"],
@@ -632,13 +787,15 @@ def emit(args: argparse.Namespace) -> int:
         "selected_rewrite_count": extraction["selected_rewrite_count"],
         "selected_rewrite_ids": extraction["selected_rewrite_ids"],
         "rejected_from_extraction_count": extraction["rejected_rewrite_count"],
+        "blocked_from_extraction_count": extraction["blocked_rewrite_count"],
         "validators": sorted({r["validator"] for r in rewrites}),
         "basis_families": sorted({r["basis_family"] for r in rewrites}),
         "s4_complete": False,
         "s4_boundary_complete": True,
         "s4_extraction_boundary_complete": True,
-        "s4_claim": "conservative_egraph_ekan_exact_constant_fold_i64_receipt_boundary",
+        "s4_claim": "conservative_egraph_ekan_receipt_boundary_with_operand_provenance_guard",
         "s4_remaining": [
+            "S3 HLIR operand provenance repair/proof",
             "multi-rule equality saturation",
             "non-constant algebraic identities",
             "downstream optimizer integration beyond receipt-only extraction",
@@ -649,7 +806,7 @@ def emit(args: argparse.Namespace) -> int:
     payload = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
     receipt_path.write_text(payload, encoding="utf-8")
     print(
-        f"madaros-v2-s4: case={case_id} accepted={len(accepted)} "
+        f"madaros-v2-s4: case={case_id} accepted={len(accepted)} blocked={len(blocked)} "
         f"egraph_sha={egraph['egraph_sha256'][:12]} receipt={receipt_path}"
     )
     return 0

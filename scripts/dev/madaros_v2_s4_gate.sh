@@ -51,8 +51,10 @@ run_case() {
   local source="$2"
   local min_accepted="$3"
   local min_rejected="$4"
-  local required_accepted="$5"
-  local required_rejected="$6"
+  local min_blocked="$5"
+  local required_accepted="$6"
+  local required_rejected="$7"
+  local required_blocked="$8"
   local a_dir="$OUT_DIR/$case_id/a"
   local b_dir="$OUT_DIR/$case_id/b"
   mkdir -p "$a_dir" "$b_dir"
@@ -66,13 +68,13 @@ run_case() {
   cmp "$a_dir/$case_id.s4.rewrites.json" "$b_dir/$case_id.s4.rewrites.json" >/dev/null
   cmp "$a_dir/$case_id.s4.extraction.json" "$b_dir/$case_id.s4.extraction.json" >/dev/null
 
-  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$a_dir/$case_id.s4.extraction.json" "$min_accepted" "$min_rejected" "$required_accepted" "$required_rejected" <<'PY'
+  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$a_dir/$case_id.s4.extraction.json" "$min_accepted" "$min_rejected" "$min_blocked" "$required_accepted" "$required_rejected" "$required_blocked" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, required_accepted, required_rejected = sys.argv[1:9]
+receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, min_blocked, required_accepted, required_rejected, required_blocked = sys.argv[1:11]
 receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
 egraph = json.loads(Path(egraph_path).read_text(encoding="utf-8"))
 rewrites = json.loads(Path(rewrites_path).read_text(encoding="utf-8"))
@@ -140,31 +142,42 @@ for invariant in [
 if receipt["rewrite_count"] != len(rewrites):
     raise SystemExit("rewrite count mismatch")
 accepted = [rewrite for rewrite in rewrites if rewrite.get("accepted") is True]
-rejected = [rewrite for rewrite in rewrites if rewrite.get("accepted") is False]
+blocked = [rewrite for rewrite in rewrites if rewrite.get("blocked") is True]
+rejected = [rewrite for rewrite in rewrites if rewrite.get("accepted") is False and rewrite.get("blocked") is not True]
 if receipt["accepted_rewrite_count"] != len(accepted):
     raise SystemExit("accepted rewrite count mismatch")
 if receipt["rejected_rewrite_count"] != len(rejected):
     raise SystemExit("rejected rewrite count mismatch")
-if receipt["rewrite_count"] != receipt["accepted_rewrite_count"] + receipt["rejected_rewrite_count"]:
-    raise SystemExit("rewrite total must equal accepted + rejected")
+if receipt["blocked_rewrite_count"] != len(blocked):
+    raise SystemExit("blocked rewrite count mismatch")
+if receipt["rewrite_count"] != receipt["accepted_rewrite_count"] + receipt["rejected_rewrite_count"] + receipt["blocked_rewrite_count"]:
+    raise SystemExit("rewrite total must equal accepted + rejected + blocked")
 if receipt["accepted_rewrite_count"] < int(min_accepted):
     raise SystemExit(f"too few accepted rewrites: {receipt['accepted_rewrite_count']} < {min_accepted}")
 if receipt["rejected_rewrite_count"] < int(min_rejected):
     raise SystemExit(f"too few rejected rewrites: {receipt['rejected_rewrite_count']} < {min_rejected}")
+if receipt["blocked_rewrite_count"] < int(min_blocked):
+    raise SystemExit(f"too few blocked rewrites: {receipt['blocked_rewrite_count']} < {min_blocked}")
 accepted_ids = set(receipt.get("accepted_rewrite_ids", []))
 rejected_ids = set(receipt.get("rejected_rewrite_ids", []))
-if accepted_ids & rejected_ids:
-    raise SystemExit("rewrite ids cannot be both accepted and rejected")
+blocked_ids = set(receipt.get("blocked_rewrite_ids", []))
+if accepted_ids & rejected_ids or accepted_ids & blocked_ids or rejected_ids & blocked_ids:
+    raise SystemExit("rewrite ids cannot appear in multiple status buckets")
 if set(extraction["selected_rewrite_ids"]) != accepted_ids:
     raise SystemExit("extraction selected ids must equal accepted rewrite ids")
 if set(extraction["rejected_rewrite_ids"]) != rejected_ids:
     raise SystemExit("extraction rejected ids must equal rejected rewrite ids")
+if set(extraction.get("blocked_rewrite_ids", [])) != blocked_ids:
+    raise SystemExit("extraction blocked ids must equal blocked rewrite ids")
 if receipt["selected_rewrite_count"] != len(accepted_ids):
     raise SystemExit("receipt selected rewrite count mismatch")
 if receipt["rejected_from_extraction_count"] != len(rejected_ids):
     raise SystemExit("receipt rejected-from-extraction count mismatch")
+if receipt["blocked_from_extraction_count"] != len(blocked_ids):
+    raise SystemExit("receipt blocked-from-extraction count mismatch")
 observed_accepted = set()
 observed_rejected = set()
+observed_blocked = set()
 for rewrite in rewrites:
     if rewrite["schema_version"] != "madaros.v2.ekan.rewrite/0.1":
         raise SystemExit("bad rewrite receipt schema")
@@ -198,6 +211,18 @@ for rewrite in rewrites:
             raise SystemExit("S4 receipt lane must remain non-mutating")
         observed_accepted.add(rewrite["rewrite_kind"])
         observed_accepted.add(rewrite["ekan_receipt_kind"])
+    elif rewrite.get("blocked") is True:
+        if rewrite["validator"] != "blocked":
+            raise SystemExit("blocked rewrite must use validator=blocked")
+        if rewrite.get("selected_for_extraction") is not False:
+            raise SystemExit("blocked rewrite must not be selected for extraction")
+        if rewrite.get("ir_mutation_allowed") is not False:
+            raise SystemExit("blocked rewrite must not allow IR mutation")
+        if rewrite.get("rejection_reason_code") != "operand_provenance_ambiguous":
+            raise SystemExit("blocked rewrite missing operand provenance reason")
+        observed_blocked.add(rewrite["rewrite_kind"])
+        observed_blocked.add(rewrite["ekan_receipt_kind"])
+        observed_blocked.add(rewrite["rejection_reason_code"])
     else:
         if rewrite["validator"] != "rejected":
             raise SystemExit("rejected rewrite must use validator=rejected")
@@ -269,9 +294,18 @@ for decision in extraction["decisions"]:
             raise SystemExit("rejected extraction missing counterexample set hash")
         if decision.get("rejection_reason_code") != "counterexample_found":
             raise SystemExit("rejected extraction missing counterexample reason code")
+    elif rid in blocked_ids:
+        if decision["decision"] != "block" or decision["selected"] is not False:
+            raise SystemExit("blocked rewrite must not be selected by extractor")
+        if decision["selected_enode_sha256"] != decision["original_enode_sha256"]:
+            raise SystemExit("blocked extraction must keep original enode")
+        if decision.get("rejection_reason_code") != "operand_provenance_ambiguous":
+            raise SystemExit("blocked extraction missing operand provenance reason code")
+        if "operand provenance" not in decision.get("proof_obligation", ""):
+            raise SystemExit("blocked extraction missing provenance proof obligation")
     else:
         raise SystemExit(f"extraction decision references unknown rewrite id: {rid}")
-if decision_ids != accepted_ids | rejected_ids:
+if decision_ids != accepted_ids | rejected_ids | blocked_ids:
     raise SystemExit("extraction decisions must cover every rewrite exactly once")
 
 missing_accepted = [item for item in required_accepted.split(",") if item and item != "-" and item not in observed_accepted]
@@ -280,17 +314,20 @@ if missing_accepted:
 missing_rejected = [item for item in required_rejected.split(",") if item and item != "-" and item not in observed_rejected]
 if missing_rejected:
     raise SystemExit(f"missing required rejected markers: {missing_rejected}; observed={sorted(observed_rejected)}")
+missing_blocked = [item for item in required_blocked.split(",") if item and item != "-" and item not in observed_blocked]
+if missing_blocked:
+    raise SystemExit(f"missing required blocked markers: {missing_blocked}; observed={sorted(observed_blocked)}")
 print(
     f"[madaros-v2-s4] ok receipt={Path(receipt_path).name} "
-    f"accepted={receipt['accepted_rewrite_count']} rejected={receipt['rejected_rewrite_count']} "
+    f"accepted={receipt['accepted_rewrite_count']} rejected={receipt['rejected_rewrite_count']} blocked={receipt['blocked_rewrite_count']} "
     f"selected={receipt['selected_rewrite_count']} egraph_sha={receipt['egraph_sha256'][:12]} "
     f"extraction_sha={receipt['extraction_sha256'][:12]}"
 )
 PY
 }
 
-tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r case_id source min_accepted min_rejected required_accepted required_rejected; do
-  run_case "$case_id" "$source" "$min_accepted" "$min_rejected" "$required_accepted" "$required_rejected"
+tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r case_id source min_accepted min_rejected min_blocked required_accepted required_rejected required_blocked; do
+  run_case "$case_id" "$source" "$min_accepted" "$min_rejected" "$min_blocked" "$required_accepted" "$required_rejected" "$required_blocked"
 done
 
 python3 - "$OUT_DIR" <<'PY'
@@ -313,8 +350,10 @@ summary = {
     "case_count": len(receipts),
     "accepted_rewrite_count": sum(r["accepted_rewrite_count"] for r in receipts),
     "rejected_rewrite_count": sum(r["rejected_rewrite_count"] for r in receipts),
+    "blocked_rewrite_count": sum(r["blocked_rewrite_count"] for r in receipts),
     "selected_rewrite_count": sum(r["selected_rewrite_count"] for r in receipts),
     "rejected_from_extraction_count": sum(r["rejected_from_extraction_count"] for r in receipts),
+    "blocked_from_extraction_count": sum(r["blocked_from_extraction_count"] for r in receipts),
     "input_hlir_sha256": [r["input_hlir_sha256"] for r in receipts],
     "receipt_sha256": [r["receipt_sha256"] for r in receipts],
     "extraction_sha256": [r["extraction_sha256"] for r in receipts],
@@ -327,7 +366,10 @@ for receipt in receipts:
         if not rewrites_path.is_file() or case_dir.name == "b":
             continue
         for rewrite in json.loads(rewrites_path.read_text(encoding="utf-8")):
-            if rewrite.get("accepted") is False:
+            if rewrite.get("blocked") is True:
+                reason = rewrite.get("rejection_reason_code", "unknown")
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            elif rewrite.get("accepted") is False:
                 reason = rewrite.get("rejection_reason_code", "unknown")
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
 summary["validator_rejection_reason_counts"] = dict(sorted(reason_counts.items()))
@@ -337,7 +379,7 @@ payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
 (out / "madaros_v2_s4_gate.receipt.json").write_text(payload, encoding="utf-8")
 print(
     f"[madaros-v2-s4] summary_sha={summary['gate_sha256'][:12]} "
-    f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']} "
+    f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']} blocked={summary['blocked_rewrite_count']} "
     f"selected={summary['selected_rewrite_count']}"
 )
 PY

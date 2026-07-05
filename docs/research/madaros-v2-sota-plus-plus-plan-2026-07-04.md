@@ -305,26 +305,33 @@ Purpose: introduce non-destructive optimization and scientific symbolic
 surrogate reasoning without losing exact semantics.
 
 Implementation status (2026-07-05): the S4 conservative e-graph/E-KAN
-accepted/rejected receipt boundary plus receipt-only extraction/cost-model
+rejected/blocked receipt boundary plus receipt-only extraction/cost-model
 boundary is implemented and gated. This is not global S4 completion.
 `bin/madaros s4-receipt <source> [--out-dir OUT]` consumes S3 HLIR receipts,
 builds a persistent
 `madaros.v2.s4.egraph/0.1` artifact, and emits
-`madaros.v2.ekan.rewrite/0.1` receipts for accepted and rejected proposals plus
-`madaros.v2.s4.extraction/0.1` receipts for deterministic cost-model extraction
-decisions. The current accepted subset is deliberately narrow: `constant_fold_i64` with
-`basis_family = exact_symbolic`, `validator = translation-validation`,
-`error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
+`madaros.v2.ekan.rewrite/0.1` receipts for accepted, rejected, and blocked
+proposals plus `madaros.v2.s4.extraction/0.1` receipts for deterministic
+cost-model extraction decisions. The current accepted subset is temporarily
+empty because the operand-provenance guard blocks former constant-fold
+candidates when S3 HLIR duplicates binary operand IDs and cannot prove source
+operand fidelity. The intended accepted subset remains deliberately narrow:
+exact i64 rewrites with `basis_family = exact_symbolic`,
+`validator = translation-validation`, `error_bound = 0`, exact fallback hash,
+and original/rewritten e-node hashes.
 The current rejected subset includes the algebraic proposal `x_div_x_to_one`,
 rejected by counterexample-guided translation validation (`x = 0`,
 original division-by-zero trap vs rewritten constant `1`) with
 `selected_for_extraction = false` and `ir_mutation_allowed = false`.
+The current blocked subset includes `operand_provenance_blocked` receipts with
+`validator = blocked`, `rejection_reason_code = operand_provenance_ambiguous`,
+`selected_for_extraction = false`, and `ir_mutation_allowed = false`.
 `scripts/dev/madaros_v2_s4_gate.sh` validates both positive and negative
 receipts and proves that extraction-selected IDs exactly equal accepted IDs,
-rejected IDs are blocked, cost-model hashes are present, and no IR mutation is
-allowed. Learned or approximate E-KAN rewrites, equality saturation, broad
-counterexample search, and downstream applying optimizer integration remain
-future S4 work.
+rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
+mutation is allowed. S3 HLIR operand provenance repair/proof, learned or
+approximate E-KAN rewrites, equality saturation, broad counterexample search,
+and downstream applying optimizer integration remain future S4 work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
@@ -362,6 +369,9 @@ Gate:
   validation succeeds for the declared domain.
 - the S4 gate consumes `MadarosV2EkanRewriteReceipt` records; an optimizer pass
   may emit proposals without receipts, but extraction must reject them.
+- S4 must not accept constant-fold or algebraic-identity candidates when S3
+  HLIR operand provenance is ambiguous; those candidates must be `blocked`, not
+  `accepted`.
 
 Novelty center:
 - compiler-native, receipt-carrying E-KAN/e-graph optimizer for epistemic
@@ -382,14 +392,14 @@ Implementation sketch:
 Purpose: commit to low-level program semantics: calls, layouts, returns,
 register classes, stack, aggregate passing, and exact numeric widths.
 
-Preflight status (2026-07-05): S5 has a ready input-contract preflight, but S5
-itself is not ready or implemented. `scripts/dev/madaros_v2_s5_preflight_gate.sh`
-consumes the current S4 extraction boundary output and proves that the
-extraction-selected accepted subset is MIR/ABI-safe input: exact i64 constant
-folds only, no approximate basis, translation validation required, zero error
-bound, exact fallback hash, rejected rewrites blocked, and no
-call/control/signature rewrite. The preflight receipt records
-`s5_input_contract_ready = true`, `s5_ready = false`, and
+Preflight status (2026-07-05): S5 has an executable input-contract preflight,
+but the current S4 output is classified as blocked, not ready. S5 itself is not
+ready or implemented. `scripts/dev/madaros_v2_s5_preflight_gate.sh` consumes the
+current S4 extraction boundary output and verifies that only
+extraction-selected accepted rewrites can be consumed. Because the operand
+provenance guard currently leaves zero accepted rewrites and twelve blocked
+rewrites, the preflight receipt records `status = blocked`,
+`s5_input_contract_ready = false`, `s5_ready = false`, and
 `s5_implemented = false`.
 
 Canonical artifact:

@@ -32,14 +32,14 @@ if summary.get("schema") != "madaros.v2.s4.gate/0.1":
     raise SystemExit("missing S4 gate summary")
 if summary.get("status") != "pass":
     raise SystemExit("S4 gate did not pass")
-if summary.get("accepted_rewrite_count", 0) <= 0:
-    raise SystemExit("S5 preflight needs at least one accepted S4 rewrite")
 
 allowed_rewrites = {"constant_fold_i64"}
 allowed_basis = {"exact_symbolic"}
 allowed_validators = {"translation-validation"}
 consumed = []
 all_rewrites = []
+blocked_rewrites = []
+semantic_rejections = []
 
 for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
     if "/b/" in receipt_file.as_posix():
@@ -73,6 +73,7 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         raise SystemExit("S4 extraction hash mismatch")
     selected_ids = set(extraction.get("selected_rewrite_ids", []))
     rejected_ids = set(extraction.get("rejected_rewrite_ids", []))
+    blocked_ids = set(extraction.get("blocked_rewrite_ids", []))
     decisions = {decision["rewrite_id"]: decision for decision in extraction.get("decisions", [])}
     if len(decisions) != extraction.get("input_rewrite_count"):
         raise SystemExit("S4 extraction decision coverage mismatch")
@@ -85,13 +86,21 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             raise SystemExit("S5 preflight rejects already-mutating S4 extraction")
         if rewrite.get("accepted") is not True:
             if rewrite.get("selected_for_extraction") is not False:
-                raise SystemExit("S5 preflight rejects extracted rejected S4 rewrites")
+                raise SystemExit("S5 preflight rejects extracted non-accepted S4 rewrites")
             if rewrite.get("ir_mutation_allowed") is not False:
-                raise SystemExit("S5 preflight rejects mutating rejected S4 rewrites")
-            if rid not in rejected_ids or decision.get("selected") is not False:
-                raise SystemExit("S5 preflight requires rejected rewrites to be blocked by extraction")
-            if not decision.get("counterexample_set_sha256"):
-                raise SystemExit("S5 preflight requires rejected extraction counterexample evidence")
+                raise SystemExit("S5 preflight rejects mutating non-accepted S4 rewrites")
+            if rewrite.get("blocked") is True:
+                if rid not in blocked_ids or decision.get("selected") is not False:
+                    raise SystemExit("S5 preflight requires blocked rewrites to be excluded by extraction")
+                if decision.get("rejection_reason_code") != "operand_provenance_ambiguous":
+                    raise SystemExit("S5 preflight requires operand provenance blocker evidence")
+                blocked_rewrites.append(rewrite)
+            else:
+                if rid not in rejected_ids or decision.get("selected") is not False:
+                    raise SystemExit("S5 preflight requires rejected rewrites to be blocked by extraction")
+                if not decision.get("counterexample_set_sha256"):
+                    raise SystemExit("S5 preflight requires rejected extraction counterexample evidence")
+                semantic_rejections.append(rewrite)
             continue
         if rid not in selected_ids or decision.get("selected") is not True:
             raise SystemExit("S5 preflight consumes only extraction-selected accepted rewrites")
@@ -123,23 +132,29 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         "accepted_rewrite_count": receipt["accepted_rewrite_count"],
         "selected_rewrite_count": extraction["selected_rewrite_count"],
         "rejected_from_extraction_count": extraction["rejected_rewrite_count"],
+        "blocked_from_extraction_count": extraction.get("blocked_rewrite_count", 0),
     })
 
+input_ready = len(all_rewrites) > 0 and len(blocked_rewrites) == 0
 preflight = {
     "schema": "madaros.v2.s5.preflight/0.1",
-    "status": "pass",
+    "status": "pass" if input_ready else "blocked",
     "s5_ready": False,
-    "s5_input_contract_ready": True,
+    "s5_input_contract_ready": input_ready,
     "s5_implemented": False,
     "input_contract": "madaros.v2.s4.gate/0.1",
     "input_extraction_contract": "madaros.v2.s4.extraction/0.1",
     "mir_abi_safe_subset": sorted(allowed_rewrites),
-    "abi_impact": "none: accepted rewrites replace binary constant expressions with exact constants only",
-    "numeric_semantics": "i64 constant-folding with zero-error translation-validation receipts",
+    "abi_impact": "none: S5 consumes only extraction-selected accepted rewrites",
+    "numeric_semantics": "i64 exact rewrites only when zero-error translation-validation receipts survive operand-provenance guards",
     "consumed_s4_cases": consumed,
     "accepted_rewrite_count": len(all_rewrites),
     "selected_rewrite_count": len(all_rewrites),
+    "semantic_rejected_rewrite_count": len(semantic_rejections),
+    "blocked_rewrite_count": len(blocked_rewrites),
+    "blocking_reason": "" if input_ready else "S4 has no accepted extraction-selected rewrites after operand-provenance guard",
     "required_next_lane": [
+        "repair/prove S3 HLIR binary operand provenance before symbolic/algebraic S4 extraction",
         "full S4 equality saturation and E-KAN rejection/proposal receipts",
         "MIR hash receipt",
         "ABI layout/call/return receipt",
@@ -153,9 +168,10 @@ payload = json.dumps(preflight, sort_keys=True, indent=2) + "\n"
 receipt_path.write_text(payload, encoding="utf-8")
 print(
     f"[madaros-v2-s5-preflight] ok cases={len(consumed)} "
-    f"rewrites={len(all_rewrites)} sha={preflight['preflight_sha256'][:12]}"
+    f"rewrites={len(all_rewrites)} blocked={len(blocked_rewrites)} status={preflight['status']} "
+    f"sha={preflight['preflight_sha256'][:12]}"
 )
 PY
 
-echo "[madaros-v2-s5-preflight] PASS: current S4 boundary receipts are MIR/ABI-safe S5 inputs; S4 global completion and S5 remain future work"
+echo "[madaros-v2-s5-preflight] PASS: S5 preflight classified current S4 extraction input without overclaiming readiness"
 echo "[madaros-v2-s5-preflight] receipt=$OUT_DIR/madaros_v2_s5_preflight.receipt.json"
