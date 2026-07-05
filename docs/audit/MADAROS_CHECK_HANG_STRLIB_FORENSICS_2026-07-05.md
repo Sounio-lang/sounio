@@ -191,6 +191,41 @@ LLM-Offload: not-required (no math claim, no clinical code, no external artifact
 Next-Action: rebuild Madaros with the current post-campaign seed under the build lock (scripts/dev/souc-build-lock.sh + make build-madaros) and re-run the 4-line reproducer; if it still hangs, bisect b8eb99ea9's TPLET drain loop (self-hosted/parser/stmts.sio:194-203) and the LAST_ASSIGN_TARGET in-flight interplay (stmts.sio:13-30,359) as a source defect; if it passes, refresh the prebuilt + receipt and close as seed-wrong-code fixed upstream
 ```
 
+## 7a. Addendum (2026-07-05 18:25 UTC): rebuild executed — seed hypothesis REFUTED
+
+The Next-Action rebuild was run (`scripts/ci/build_modular_madaros.sh`, which
+takes the build lock internally; an initial attempt deadlocked by wrapping it
+in an outer `souc-build-lock.sh` — do not double-wrap). Result:
+
+- New binary: `artifacts/self-hosted/madaros`, md5 `d80375330e61d358591e606edb45c9d8`,
+  built 18:25 UTC from the **post-campaign** seed (`bin/souc-lean-single-x86_64`
+  17:24 UTC, md5 `40ffdbecdb7cde6baddeba95cddbb691`, includes today's full
+  lvalue/place-store fix series through `2dc581185`).
+- 4-line reproducer: still **exit 124** (banner, then spin).
+- `--check stdlib/str/lib.sio`: still **exit 124**.
+- Control: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc check` on the reproducer
+  → exit 0 in <1 s.
+- Shape probe: the `TPLET_PENDING`-style drain loop (global
+  `Option<Box<List>>`, `while true { match ... Some => advance, None => break }`)
+  compiled by the current seed terminates correctly with the right sum
+  (`/tmp/probe_tplet_shape.sio`, PROBE OK). The loop *shape* is not what the
+  seed miscompiles — if the defect is in codegen at all.
+
+Consequence: the primary hypothesis (pre-campaign seed wrong-code, fixed
+upstream) is **refuted** — a post-campaign-seed rebuild reproduces the hang.
+The secondary hypothesis is now primary: a source defect introduced by
+`b8eb99ea9` (2026-06-25), which is fully consistent with the 2026-06-24
+prebuilt (`81cbecf62`) passing. Given the drain-loop shape probe passes, the
+sharpest remaining suspects are the `LAST_ASSIGN_TARGET` in-flight interplay
+with the *nested* `parse_block` reached through
+`parse_expr_or_assign_stmt` → `parse_expr_entry` → `parse_block_expr`
+(stmts.sio:359 stores the target, then the RHS parse re-enters block parsing
+before `stmt_take_assign_target` at :363), and non-advancing statement
+consumption inside the nested block loop. Next dispatch: source bisect of
+`b8eb99ea9` under lean_single-built Madaros probes; owner remains the parser
+campaign owner. Blocker stays open, class updated to
+**compiler-semantics (parser source)**, evidence level E2.
+
 ## 8. Session hygiene
 
 Every hang probe ran under `timeout` (25–60 s); after each timed-out check the
