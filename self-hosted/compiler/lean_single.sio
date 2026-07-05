@@ -209,6 +209,20 @@ var TUP_CACHE_FIRST_HASH: [i64; 16384] = [0; 16384]
 var TUP_CACHE_LAST_TY: [i64; 16384] = [0; 16384]
 var TUP_CACHE_LAST_HASH: [i64; 16384] = [0; 16384]
 var TUP_CACHE_COUNT: i64 = 0
+// Full per-element type cache for N-ary (N>2) tuples: row idx holds up to 16
+// elements at [idx*16 .. idx*16+15]; TUP_CACHE_TCOUNT[idx] is the true element
+// count. FIRST/LAST above remain valid (element 0 / element tcount-1) for the
+// legacy 2-element decoders; this extension lets N-ary decoders address any
+// middle element instead of aliasing it onto the LAST bucket.
+var TUP_CACHE_ELEM_TY: [i64; 262144] = [0; 262144]
+var TUP_CACHE_ELEM_HASH: [i64; 262144] = [0; 262144]
+var TUP_CACHE_TCOUNT: [i64; 16384] = [0; 16384]
+// Scratch channel: populate before calling tup_cache_register() to also store
+// the full element array (see tup_cache_store_elems). Left at COUNT=0 by
+// 2-element-only call sites, which keeps their behavior byte-identical.
+var TUP_SCRATCH_ELEM_TY: [i64; 16] = [0; 16]
+var TUP_SCRATCH_ELEM_HASH: [i64; 16] = [0; 16]
+var TUP_SCRATCH_COUNT: i64 = 0
 
 // Generic function second type-param (for fn f<T, U>)
 var GEN_FN_TP2_S: [i64; 64] = [0; 32]
@@ -706,20 +720,39 @@ fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Pani
     return true
 }
 
+fn tup_cache_store_elems(idx: i64) with Panic, Mut {
+    var k: i64 = 0
+    while k < TUP_SCRATCH_COUNT && k < 16 {
+        TUP_CACHE_ELEM_TY[(idx * 16 + k) as usize] = TUP_SCRATCH_ELEM_TY[k as usize]
+        TUP_CACHE_ELEM_HASH[(idx * 16 + k) as usize] = TUP_SCRATCH_ELEM_HASH[k as usize]
+        k = k + 1
+    }
+    TUP_CACHE_TCOUNT[idx as usize] = TUP_SCRATCH_COUNT
+}
+
 fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
-    if tup_hash == 0 { return }
+    if tup_hash == 0 { TUP_SCRATCH_COUNT = 0; return }
     var i: i64 = 0
     while i < TUP_CACHE_COUNT {
-        if TUP_CACHE_KEY[i as usize] == tup_hash { return }
+        if TUP_CACHE_KEY[i as usize] == tup_hash {
+            // Backfill full per-element data if this call has it and the existing
+            // entry doesn't yet (construction and type-annotation scans can each
+            // register the same shape; whichever comes with elements wins).
+            if TUP_SCRATCH_COUNT > TUP_CACHE_TCOUNT[i as usize] { tup_cache_store_elems(i) }
+            TUP_SCRATCH_COUNT = 0
+            return
+        }
         i = i + 1
     }
-    if TUP_CACHE_COUNT >= 16384 { return }
+    if TUP_CACHE_COUNT >= 16384 { TUP_SCRATCH_COUNT = 0; return }
     let idx = TUP_CACHE_COUNT
     TUP_CACHE_KEY[idx as usize] = tup_hash
     TUP_CACHE_FIRST_TY[idx as usize] = first_ty
     TUP_CACHE_FIRST_HASH[idx as usize] = first_hash
     TUP_CACHE_LAST_TY[idx as usize] = last_ty
     TUP_CACHE_LAST_HASH[idx as usize] = last_hash
+    if TUP_SCRATCH_COUNT > 0 { tup_cache_store_elems(idx) } else { TUP_CACHE_TCOUNT[idx as usize] = 2 }
+    TUP_SCRATCH_COUNT = 0
     TUP_CACHE_COUNT = TUP_CACHE_COUNT + 1
 }
 
@@ -765,9 +798,26 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 // two distinct >=1000-slot tuples (e.g. (Checker,i64) vs (Checker,bool)) can
 // collide and yield the wrong element type — which mis-types `.1` and breaks
 // type-checking. So `.1` routing/typing is left exactly on the legacy packed path.
+// Sum every element's slot count from the N-ary cache row (element 0..tcount-1).
+// Only meaningful when TUP_CACHE_TCOUNT[tci] > 0 (a full row was registered).
+fn tup_elem_slots_sum(tci: i64) -> i64 with Panic, Div, Mut {
+    var total: i64 = 0
+    var k: i64 = 0
+    let n = TUP_CACHE_TCOUNT[tci as usize]
+    while k < n && k < 16 {
+        total = total + ty_slot_count(TUP_CACHE_ELEM_TY[(tci * 16 + k) as usize], TUP_CACHE_ELEM_HASH[(tci * 16 + k) as usize])
+        k = k + 1
+    }
+    return total
+}
+
 fn tup_total_slots_true(tup_hash: i64) -> i64 with Panic, Div, Mut {
     let tci = tup_cache_lookup(tup_hash)
     if tci >= 0 {
+        if TUP_CACHE_TCOUNT[tci as usize] > 2 {
+            let es = tup_elem_slots_sum(tci)
+            if es > 0 { return es }
+        }
         let fs = ty_slot_count(TUP_CACHE_FIRST_TY[tci as usize], TUP_CACHE_FIRST_HASH[tci as usize])
         let ls = ty_slot_count(TUP_CACHE_LAST_TY[tci as usize], TUP_CACHE_LAST_HASH[tci as usize])
         if fs > 0 && ls > 0 { return fs + ls }
@@ -5127,50 +5177,65 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p + 2
             return
         }
-        // Scan first element type (starts right after '(').
-        let first_elem_start = p + 1
-        scan_type(first_elem_start)
-        let first_ty = SCAN_TY
-        let first_hash = SCAN_TY_HASH
-        // Element-kind code packed into the (legacy "f64") hash digit: 1=f64, 2=bool,
-        // 0=other. Encoding bool as 2 makes (Big,bool) and (Big,i64) get DISTINCT
-        // tuple-hash keys (scalars both hash 0 otherwise → cache-key collision →
-        // mistyped `.1`). f64 decoders still test `== 1`, so they are unaffected.
-        var first_f64: i64 = 0
-        if first_ty == 2 { first_f64 = 1 } else if first_ty == 4 { first_f64 = 2 }
-        var first_nslots: i64 = ty_slot_count(first_ty, first_hash)
-        // Skip balanced parens, count elements, track last element start.
-        var td: i64 = 1
+        // Find every top-level element's start position first (pure token scan,
+        // no recursive scan_type yet — avoids disturbing TUP_SCRATCH mid-count).
+        var elem_starts: [i64; 16] = [0; 16]
         var tcount: i64 = 1
-        var last_elem_start: i64 = first_elem_start
-        p = p + 1
-        while p < TC && td > 0 {
-            if TK[p as usize] == 6 { td = td + 1 }
-            if TK[p as usize] == 7 { td = td - 1 }
-            if td == 1 && TK[p as usize] == 28 {
+        elem_starts[0] = p + 1
+        var td: i64 = 1
+        var q = p + 1
+        while q < TC && td > 0 {
+            if TK[q as usize] == 6 { td = td + 1 }
+            if TK[q as usize] == 7 { td = td - 1 }
+            if td == 1 && TK[q as usize] == 28 {
+                if tcount < 16 { elem_starts[tcount as usize] = q + 1 }
                 tcount = tcount + 1
-                last_elem_start = p + 1
             }
-            p = p + 1
+            q = q + 1
         }
-        // Scan last element type if distinct from first.
-        var last_f64: i64 = first_f64
-        var last_nslots: i64 = first_nslots
-        var last_ty: i64 = first_ty
-        var last_hash: i64 = first_hash
-        if last_elem_start != first_elem_start {
-            scan_type(last_elem_start)
-            last_ty = SCAN_TY
-            last_hash = SCAN_TY_HASH
-            if last_ty == 2 { last_f64 = 1 } else if last_ty == 4 { last_f64 = 2 } else { last_f64 = 0 }
-            last_nslots = ty_slot_count(last_ty, last_hash)
+        // Scan every element's type (capped at 16 — the widest tuple measured
+        // across the codebase is 8, see docs/audit dispatch for Bug G). first/last
+        // are element 0 / element (scan_count-1), kept for the legacy 2-element
+        // decoders; the full array goes to TUP_CACHE via the scratch channel so
+        // N-ary consumers (destructure, `.1`) can address any middle element.
+        var scan_count: i64 = tcount
+        if scan_count > 16 { scan_count = 16 }
+        var first_ty: i64 = 0
+        var first_hash: i64 = 0
+        var first_f64: i64 = 0
+        var first_nslots: i64 = 0
+        var last_ty: i64 = 0
+        var last_hash: i64 = 0
+        var last_f64: i64 = 0
+        var total_nslots: i64 = 0
+        var i: i64 = 0
+        while i < scan_count {
+            scan_type(elem_starts[i as usize])
+            let ety = SCAN_TY
+            let ehash = SCAN_TY_HASH
+            let eslots = ty_slot_count(ety, ehash)
+            // Element-kind code packed into the (legacy "f64") hash digit: 1=f64,
+            // 2=bool, 0=other. Encoding bool as 2 makes (Big,bool) and (Big,i64)
+            // get DISTINCT tuple-hash keys (scalars both hash 0 otherwise →
+            // cache-key collision → mistyped `.1`). f64 decoders still test
+            // `== 1`, so they are unaffected.
+            var ef64: i64 = 0
+            if ety == 2 { ef64 = 1 } else if ety == 4 { ef64 = 2 }
+            TUP_SCRATCH_ELEM_TY[i as usize] = ety
+            TUP_SCRATCH_ELEM_HASH[i as usize] = ehash
+            total_nslots = total_nslots + eslots
+            if i == 0 { first_ty = ety; first_hash = ehash; first_f64 = ef64; first_nslots = eslots }
+            if i == scan_count - 1 { last_ty = ety; last_hash = ehash; last_f64 = ef64 }
+            i = i + 1
         }
-        let total_nslots = first_nslots + last_nslots
+        TUP_SCRATCH_COUNT = scan_count
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
+        // total_nslots here is now the sum of EVERY element (not just first+last) —
+        // this is the field that sizes SRET buffers/return copies for 3+ tuples.
         SCAN_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
-        SCAN_TY_NEXT = p
+        SCAN_TY_NEXT = q
         return
     }
     if TK[p as usize] == 19 {
@@ -10548,62 +10613,88 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_or()
         if TK[EP as usize] == 28 {
-            // Tuple literal: (expr1, expr2, ...)
-            // First element already compiled (rax = value or pointer).
-            // Layout requirement: .0 at lowest address (highest slot), .1 above.
-            // Problem: we don't know total_slots until all elements are compiled.
-            // Strategy:
-            //   1. Save first element's rax to a temp slot.
-            //   2. Compile remaining elements (last element stays in rax).
-            //   3. Allocate tuple buffer now that total_slots is known.
-            //   4. Store last element to low slots (dst_start = tup_base + last_nslots - 1).
-            //   5. Restore first element rax; store to high slots (dst_start = tup_base + total - 1).
-            //   6. LEA = rbp - (tup_base + total - 1)*8 → pointer to first element.
-            let first_ty = EXPR_TY
-            let first_hash = EXPR_TY_HASH
-            let first_nslots = ty_slot_count(first_ty, first_hash)
-            // Save first element's rax before second-element compilation clobbers it
-            let first_save = NEXT_SLOT
+            // Tuple literal: (expr1, expr2, ..., exprN).
+            // Layout requirement: .0 at lowest address (highest slot), .1 above, etc.
+            // Problem: we don't know each element's slot count relative to the
+            // others (hence total_slots and every offset) until ALL elements are
+            // compiled. Strategy: save EVERY element's rax (a scalar value or an
+            // aggregate pointer — either way just one register-width word) to its
+            // own temp slot immediately after compiling it, so the next element's
+            // compile_or() never clobbers an earlier one. Once all N are known,
+            // allocate one buffer sized to the true sum of every element's slots
+            // and copy each into its correct cumulative offset.
+            // (A prior version only preserved the FIRST and LAST elements — any
+            // middle element's compiled value was silently overwritten by the
+            // next element's compile_or() before ever being stored anywhere, and
+            // the buffer was sized first+last only, dropping every middle
+            // element's slots too. Bug G / issue #601: this both mistyped and,
+            // for tuples of 3+ same-typed elements, silently duplicated values.)
+            var elem_ty: [i64; 16] = [0; 16]
+            var elem_hash: [i64; 16] = [0; 16]
+            var elem_nslots: [i64; 16] = [0; 16]
+            var elem_slot: [i64; 16] = [0; 16]
+            var n: i64 = 0
+            elem_ty[0] = EXPR_TY
+            elem_hash[0] = EXPR_TY_HASH
+            elem_nslots[0] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            elem_slot[0] = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var(first_save)
-            var tup_count: i64 = 1
-            // Compile remaining elements; track the last one's type info
-            var last_ty: i64 = 0
-            var last_hash: i64 = 0
-            var last_nslots: i64 = 0
+            emit_store_var(elem_slot[0])
+            n = 1
             while ep_before_body_close() && TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
                 compile_or()
-                last_ty = EXPR_TY
-                last_hash = EXPR_TY_HASH
-                last_nslots = ty_slot_count(last_ty, last_hash)
-                tup_count = tup_count + 1
+                if n >= 16 {
+                    tc_error_hard(EP, "tuple literal exceeds maximum of 16 elements")
+                    n = n + 1
+                } else {
+                    elem_ty[n as usize] = EXPR_TY
+                    elem_hash[n as usize] = EXPR_TY_HASH
+                    elem_nslots[n as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                    elem_slot[n as usize] = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(elem_slot[n as usize])
+                    n = n + 1
+                }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            // Allocate the tuple buffer (all sizes now known)
-            let total_slots = first_nslots + last_nslots
+            let tup_count = n
+            var real_n = n
+            if real_n > 16 { real_n = 16 }
+            // Allocate the tuple buffer sized to the sum of every element's slots.
+            var total_slots: i64 = 0
+            var i: i64 = 0
+            while i < real_n { total_slots = total_slots + elem_nslots[i as usize]; i = i + 1 }
             let tup_base = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + total_slots
-            // Store last element (rax) to low slots: dst_start = tup_base + last_nslots - 1
-            if last_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + last_nslots - 1, last_ty, last_hash)
-            } else {
-                emit_store_var(tup_base + last_nslots - 1)
+            // Element i sits at slot (tup_base + total_slots - 1 - prefix_sum(i)),
+            // where prefix_sum(i) = sum of elem_nslots[0..i-1] — element 0 at the
+            // highest slot number (lowest address, the pointer this expression
+            // returns), later elements at successively higher addresses.
+            var prefix: i64 = 0
+            i = 0
+            while i < real_n {
+                let dst_start = tup_base + total_slots - 1 - prefix
+                em(0x48); em(0x8b); em(0x85); em32(0 - elem_slot[i as usize] * 8)  // restore rax
+                if elem_nslots[i as usize] > 1 {
+                    copy_agg_into_struct_slots_x86(dst_start, elem_ty[i as usize], elem_hash[i as usize])
+                } else {
+                    emit_store_var(dst_start)
+                }
+                prefix = prefix + elem_nslots[i as usize]
+                i = i + 1
             }
-            // Restore first element's rax from temp slot
-            em(0x48); em(0x8b); em(0x85); em32(0 - first_save * 8)
-            // Store first element to high slots: dst_start = tup_base + total_slots - 1
-            if first_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + total_slots - 1, first_ty, first_hash)
-            } else {
-                emit_store_var(tup_base + total_slots - 1)
-            }
-            // Return pointer to first element (lowest address = highest slot)
+            // Return pointer to element 0 (lowest address).
             em(0x48); em(0x8d); em(0x85)
             em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
+            let first_ty = elem_ty[0]
+            let first_hash = elem_hash[0]
+            let first_nslots = elem_nslots[0]
+            let last_ty = elem_ty[(real_n - 1) as usize]
+            let last_hash = elem_hash[(real_n - 1) as usize]
             // Encode first_nslots, total_slots, and per-element f64-ness.
             // Format: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
@@ -10615,6 +10706,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 } else if last_ty == 4 { last_f64_flag = 2 }
             EXPR_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            i = 0
+            while i < real_n {
+                TUP_SCRATCH_ELEM_TY[i as usize] = elem_ty[i as usize]
+                TUP_SCRATCH_ELEM_HASH[i as usize] = elem_hash[i as usize]
+                i = i + 1
+            }
+            TUP_SCRATCH_COUNT = real_n
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
@@ -15317,7 +15415,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let tup_first_slots = tup_first_slots_true(EXPR_TY_HASH)
                 let tup_total_slots = tup_total_slots_true(EXPR_TY_HASH)
                 let tup_last_slots = tup_total_slots - tup_first_slots
-                let elem_slots = if tup_idx == 0 { tup_first_slots } else { tup_last_slots }
+                // For a 3+-element tuple, `.1` is element INDEX 1, not "everything
+                // after element 0" (tup_last_slots) and not the LAST element (Bug G
+                // / issue #601) — recover its own slot count from the full cache
+                // row when present. `.2`+ remain rejected above (unchanged scope).
+                let fa_ci = tup_cache_lookup(EXPR_TY_HASH)
+                var elem1_slots_true: i64 = tup_last_slots
+                if fa_ci >= 0 && TUP_CACHE_TCOUNT[fa_ci as usize] > 2 && tup_idx == 1 {
+                    let e1s = ty_slot_count(TUP_CACHE_ELEM_TY[(fa_ci * 16 + 1) as usize], TUP_CACHE_ELEM_HASH[(fa_ci * 16 + 1) as usize])
+                    if e1s > 0 { elem1_slots_true = e1s }
+                }
+                let elem_slots = if tup_idx == 0 { tup_first_slots } else { elem1_slots_true }
                 if tup_idx == 0 {
                     // rax already points to first element, keep as-is for now
                 } else {
@@ -15342,6 +15450,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if tup_idx == 0 {
                             EXPR_TY = TUP_CACHE_FIRST_TY[sc_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[sc_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[sc_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(sc_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(sc_ci * 16 + 1) as usize]
                         } else {
                             EXPR_TY = TUP_CACHE_LAST_TY[sc_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_LAST_HASH[sc_ci as usize]
@@ -15360,6 +15471,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if tup_idx == 0 {
                             EXPR_TY = TUP_CACHE_FIRST_TY[tup_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(tup_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + 1) as usize]
                         } else {
                             EXPR_TY = TUP_CACHE_LAST_TY[tup_ci as usize]
                             EXPR_TY_HASH = TUP_CACHE_LAST_HASH[tup_ci as usize]
@@ -18481,6 +18595,7 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
     var tup_last_ty: i64 = 1
     var tup_last_ty_hash: i64 = 0
     let tup_ci = tup_cache_lookup(tup_hash)
+    var have_full: i64 = 0
     if tup_ci >= 0 {
         tup_first_ty = TUP_CACHE_FIRST_TY[tup_ci as usize]
         tup_first_ty_hash = TUP_CACHE_FIRST_HASH[tup_ci as usize]
@@ -18491,11 +18606,22 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         if fs > 0 { tup_first_slots = fs }
         if tup_first_ty == 2 { tup_first_f64 = 1 } else { tup_first_f64 = 0 }
         if tup_last_ty == 2 { tup_last_f64 = 1 } else { tup_last_f64 = 0 }
-        if fs > 0 && ls > 0 { tup_total_slots = fs + ls }
+        if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+            // N-ary tuple (3+ elements): the first/last-only split below would
+            // alias every middle element onto the LAST element's type/offset and
+            // collide element 2+'s offset with element 1's — Bug G / issue #601.
+            // Address every element from the full per-element cache row instead.
+            have_full = 1
+            let es = tup_elem_slots_sum(tup_ci)
+            if es > 0 { tup_total_slots = es }
+        } else if fs > 0 && ls > 0 {
+            tup_total_slots = fs + ls
+        }
     }
     let tup_last_slots = tup_total_slots - tup_first_slots
     var pp = pat_start + 1
     var elem_idx: i64 = 0
+    var byte_off_acc: i64 = 0
     while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
@@ -18503,11 +18629,24 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         let pne = TE[pp as usize]
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         pp = pp + 1
-        let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
-        let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
-        let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
-        let elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
-        let elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        var elem_is_f64: i64 = 0
+        var elem_slots: i64 = 0
+        var byte_off: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_ty_hash: i64 = 0
+        if have_full == 1 && elem_idx < TUP_CACHE_TCOUNT[tup_ci as usize] {
+            elem_ty = TUP_CACHE_ELEM_TY[(tup_ci * 16 + elem_idx) as usize]
+            elem_ty_hash = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + elem_idx) as usize]
+            elem_slots = ty_slot_count(elem_ty, elem_ty_hash)
+            elem_is_f64 = if elem_ty == 2 { 1 } else { 0 }
+            byte_off = byte_off_acc
+        } else {
+            elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+            elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
+            byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+            elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
+            elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        }
         if is_wild == 0 {
             if elem_slots == 1 {
                 emit_load_var(ptr_slot)
@@ -18532,6 +18671,7 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
                 tuple_bind_leaf_x86(pns, pne)
             }
         }
+        byte_off_acc = byte_off_acc + elem_slots * 8
         elem_idx = elem_idx + 1
     }
 }
@@ -26445,34 +26585,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // PR-6: record return-type token for Pass 1c.5 refinement re-scan
                 FN_RET_TY_TOK[sig_fi as usize] = q
                 scan_type(q)
-                var scan_ret_ty = SCAN_TY
-                var scan_ret_hash = SCAN_TY_HASH
-                let scan_ret_next = SCAN_TY_NEXT
-                // For tuple return types, encode first element's slot count in hash
-                // so that .1 field access computes the correct byte offset.
-                // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
-                if scan_ret_ty == 6 && TK[q as usize] == 6 {
-                    let tcount_enc = scan_ret_hash / 1000000
-                    let first_enc_check = (scan_ret_hash % 1000000) / 1000
-                    if first_enc_check == 0 {
-                        scan_type(q + 1)
-                        let sig_first_ty = SCAN_TY
-                        let sig_first_hash = SCAN_TY_HASH
-                        let first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        var second_q = SCAN_TY_NEXT
-                        if TK[second_q as usize] == 28 { second_q = second_q + 1 }
-                        scan_type(second_q)
-                        let sig_last_ty = SCAN_TY
-                        let sig_last_hash = SCAN_TY_HASH
-                        let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        let total_nslots = first_nslots + last_nslots
-                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
-                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
-                        SCAN_TY = scan_ret_ty
-                        SCAN_TY_HASH = scan_ret_hash
-                        SCAN_TY_NEXT = scan_ret_next
-                    }
-                }
+                // scan_type()'s tuple branch now scans every element itself (not
+                // just first+last) and registers the full per-element array to
+                // TUP_CACHE directly, so no rescan is needed here — a prior
+                // version of this code re-derived a 2-element-only hash from
+                // scratch at this point, which silently truncated any 3+-element
+                // tuple return type's total slot count (Bug G / issue #601).
                 if knowledge_hash_invalid(SCAN_TY_HASH) {
                     tc_epistemic_boundary(q)
                     FN_RET_TY[sig_fi as usize] = 0
