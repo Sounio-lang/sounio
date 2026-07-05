@@ -81,8 +81,11 @@ plain `Verdict` enum, which compiles and runs today.)
   `elan`/`lean` and `#eval`-emitting `unorderedZDPairs`.
 - **The OTHER 168 executed AND cross-verified** — `tests/run-pass/octonion_nonfano_census_168.sio`
   computes the **non-Fano (non-associative) octonion census** exactly (associator signs `α≠β` by
-  decidable integer inequality): `TRIPLES 343 / NONFANO 168 / FANO 175` (reproducing
-  `SounioCayleyDickson.lean`'s `non_fano_count_168` / `fano_count_175` / `partition_343`). The gate
+  decidable integer inequality): `TRIPLES 343 / NONFANO 168 / FANO 175`, plus the **Binary Norm
+  Theorem** (`BINARY-NORM {-2,0,+2}` — the associator wave `α−β` is always −2, 0, or +2) and the
+  **arrow symmetry** (`FORWARD 84 / BACKWARD 84 / ARROW-SYMMETRY` — exactly 84 triples at wave +2 and
+  84 at −2). This reproduces `SounioCayleyDickson.lean`'s `non_fano_count_168` / `fano_count_175` /
+  `partition_343` / `arrow_forward_84` / `arrow_backward_84` / `arrow_symmetry`. The gate
   also checks its 168 **specific triples** are element-wise identical to the oracle
   (`non-Fano triples: 168/168 identical`). The Lean `nonfano_zd_bridge` theorem proves these two
   168s are **equal** — so both faces of the 168-theorem (zero-divisors and non-associativity) are now
