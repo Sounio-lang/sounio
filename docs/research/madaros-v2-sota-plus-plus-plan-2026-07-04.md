@@ -370,10 +370,17 @@ effectful/non-leaf call-result self-comparisons.
 `scripts/dev/madaros_v2_s4_gate.sh` validates both positive and negative
 receipts and proves that extraction-selected IDs exactly equal accepted IDs,
 rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
-mutation is allowed. Learned or approximate E-KAN rewrites, equality saturation,
-broader algebraic identities beyond the current neutral/reflexive/sub-self exact
-subset, broad counterexample search, producer purity/evaluation-preservation,
-and downstream applying optimizer integration remain future S4 work.
+mutation is allowed. It now also emits
+`madaros.v2.s4.to_s5_application_plan/0.1`, a deterministic non-mutating
+S4->S5 application plan for the selected exact rewrites. The plan records 28
+S5-consumable actions, 3 semantic rejections, and 3 blocked actions, including
+the lowering effect, fallback hash, MIR/ABI safety flag, ABI impact, and
+producer-evaluation preservation requirement for each selected rewrite.
+Learned or approximate E-KAN rewrites, equality saturation, broader algebraic
+identities beyond the current neutral/reflexive/sub-self exact subset, broad
+counterexample search, producer purity/evaluation-preservation beyond the local
+leaf subset, and an actual mutating downstream optimizer pass remain future S4
+work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
@@ -408,6 +415,12 @@ Gate:
 - equality-saturation extraction must carry proof obligations or translation
   validation for every selected rewrite; the current boundary gate already
   enforces this for deterministic receipt-only extraction decisions.
+- S4->S5 application plans must be explicit artifacts, not implicit preflight
+  inference: selected actions must equal accepted+selected rewrite IDs,
+  rejected/blocked actions must never be selected, every selected action must
+  carry exact fallback/validator hashes, `mir_abi_safe = true`,
+  `abi_impact = none`, and keep-producer actions must carry a producer
+  evaluation preservation policy.
 - E-KAN proposals must include domain bounds, basis family, coefficients,
   training/provenance hashes, approximation error bound, GUM/covariance
   assumptions, and exact fallback expression.
@@ -441,11 +454,14 @@ register classes, stack, aggregate passing, and exact numeric widths.
 Preflight status (2026-07-05): S5 has an executable input-contract preflight,
 and the current S4 output is classified as input-contract ready. S5 itself is
 not ready or implemented. `scripts/dev/madaros_v2_s5_preflight_gate.sh`
-consumes the current S4 extraction boundary output and verifies that only
-extraction-selected accepted rewrites can be consumed. With the S3 operand
-fidelity blocker closed, the preflight receipt records `status = pass`,
-`s5_input_contract_ready = true`, `s5_ready = false`, and
-`s5_implemented = false`.
+consumes the current S4 extraction boundary output and now requires the explicit
+`madaros.v2.s4.to_s5_application_plan/0.1` artifact from the S4 gate. It
+verifies that only extraction-selected accepted rewrites can be consumed and
+that the S4 plan's selected/rejected/blocked IDs match the underlying receipts.
+With the S3 operand fidelity blocker closed and the S4->S5 application-plan
+contract present, the preflight receipt records `status = pass`,
+`s5_input_contract_ready = true`, `s4_to_s5_application_plan_consumed = true`,
+`s5_ready = false`, and `s5_implemented = false`.
 
 Input-boundary status (2026-07-05): S5 also has a deterministic MIR/ABI
 input-boundary gate, `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`, which consumes
@@ -454,7 +470,9 @@ the S5 preflight plus S4 extraction receipts and emits
 selected S4 rewrites as input-safe scalar values (`scalar_i64` or
 `scalar_bool`) with no call-signature, stack, SRET, aggregate-layout, or ABI
 impact, while preserving the 3 blocked producer-evaluation rewrites as excluded
-negative evidence. It records `s5_mir_abi_input_boundary_complete = true`,
+negative evidence. The boundary is now backed by the S4->S5 application-plan
+hash rather than only by re-derived preflight facts. It records
+`s5_mir_abi_input_boundary_complete = true`,
 `real_mir_emitted = false`, `real_abi_layout_emitted = false`,
 `s5_mir_abi_boundary_complete = false`, `s5_ready = false`,
 `s5_implemented = false`, and `s5_full_complete = false`.

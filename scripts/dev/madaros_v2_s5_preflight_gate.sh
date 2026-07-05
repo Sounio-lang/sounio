@@ -37,6 +37,57 @@ if summary.get("stage_contract_level") != "S4_BOUNDARY_NOT_FULL":
     raise SystemExit("S5 preflight requires S4 boundary-not-full classification")
 if summary.get("s4_full_complete") is not False:
     raise SystemExit("S5 preflight requires S4 full-complete=false")
+if summary.get("s4_to_s5_application_plan_complete") is not True:
+    raise SystemExit("S5 preflight requires explicit S4->S5 application plan")
+plan_path = s4_dir / summary.get("s4_to_s5_application_plan_path", "")
+if not plan_path.is_file():
+    raise SystemExit("missing S4->S5 application plan")
+application_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+if application_plan.get("schema") != "madaros.v2.s4.to_s5_application_plan/0.1":
+    raise SystemExit("bad S4->S5 application plan schema")
+if application_plan.get("status") != "pass":
+    raise SystemExit("S4->S5 application plan did not pass")
+if application_plan.get("stage_contract_level") != "S4_TO_S5_EXACT_APPLICATION_PLAN_NOT_MUTATING":
+    raise SystemExit("S4->S5 application plan must be non-mutating exact boundary")
+if application_plan.get("s4_to_s5_application_plan_complete") is not True:
+    raise SystemExit("S4->S5 application plan not complete")
+if application_plan.get("ir_mutation_allowed") is not False or application_plan.get("application_applied_to_ir") is not False:
+    raise SystemExit("S5 preflight rejects mutating S4->S5 application plans")
+plan_hash = application_plan.get("application_plan_sha256")
+if not plan_hash or plan_hash != summary.get("s4_to_s5_application_plan_sha256"):
+    raise SystemExit("S4->S5 application plan hash mismatch with S4 summary")
+plan_for_hash = dict(application_plan)
+plan_for_hash.pop("application_plan_sha256", None)
+computed_plan_hash = hashlib.sha256(
+    json.dumps(plan_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+if computed_plan_hash != plan_hash:
+    raise SystemExit("S4->S5 application plan canonical hash mismatch")
+plan_selected_ids = set(application_plan.get("selected_rewrite_ids", []))
+plan_rejected_ids = set(application_plan.get("rejected_rewrite_ids", []))
+plan_blocked_ids = set(application_plan.get("blocked_rewrite_ids", []))
+if plan_selected_ids & plan_rejected_ids or plan_selected_ids & plan_blocked_ids or plan_rejected_ids & plan_blocked_ids:
+    raise SystemExit("S4->S5 application plan action buckets overlap")
+plan_actions = {}
+for case in application_plan.get("cases", []):
+    for key, expected_action in (
+        ("selected_actions", "apply_to_s5_input"),
+        ("rejected_actions", "reject_before_s5_input"),
+        ("blocked_actions", "block_before_s5_input"),
+    ):
+        rows = case.get(key, [])
+        count_key = key.replace("actions", "action_count")
+        if len(rows) != case.get(count_key):
+            raise SystemExit(f"S4->S5 application plan count mismatch for {case.get('case_id')} {key}")
+        for row in rows:
+            rid = row.get("rewrite_id")
+            if rid in plan_actions:
+                raise SystemExit(f"duplicate rewrite id in S4->S5 application plan: {rid}")
+            if row.get("action") != expected_action:
+                raise SystemExit(f"bad S4->S5 application action for {rid}")
+            if row.get("extraction_applied_to_ir") is not False or row.get("ir_mutation_allowed") is not False:
+                raise SystemExit(f"S4->S5 application action must be non-mutating: {rid}")
+            plan_actions[rid] = row
 
 allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64", "symbolic_reflexive_cmp_i64", "symbolic_sub_self_i64"}
 allowed_basis = {"exact_symbolic"}
@@ -88,6 +139,9 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         raise SystemExit("S4 extraction decision coverage mismatch")
     for rewrite in rewrites:
         rid = rewrite["proposed_rewrite_id"]
+        plan_action = plan_actions.get(rid)
+        if plan_action is None:
+            raise SystemExit(f"S5 preflight missing S4->S5 application action for rewrite {rid}")
         if rid not in decisions:
             raise SystemExit("missing extraction decision for S4 rewrite")
         decision = decisions[rid]
@@ -99,18 +153,24 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             if rewrite.get("ir_mutation_allowed") is not False:
                 raise SystemExit("S5 preflight rejects mutating non-accepted S4 rewrites")
             if rewrite.get("blocked") is True:
+                if rid not in plan_blocked_ids or plan_action.get("action") != "block_before_s5_input":
+                    raise SystemExit("blocked S4 rewrite must be blocked by the S4->S5 plan")
                 if rid not in blocked_ids or decision.get("selected") is not False:
                     raise SystemExit("S5 preflight requires blocked rewrites to be excluded by extraction")
                 if decision.get("rejection_reason_code") not in {"operand_provenance_ambiguous", "producer_evaluation_not_proven"}:
                     raise SystemExit("S5 preflight requires accepted blocker evidence")
                 blocked_rewrites.append(rewrite)
             else:
+                if rid not in plan_rejected_ids or plan_action.get("action") != "reject_before_s5_input":
+                    raise SystemExit("rejected S4 rewrite must be rejected by the S4->S5 plan")
                 if rid not in rejected_ids or decision.get("selected") is not False:
                     raise SystemExit("S5 preflight requires rejected rewrites to be blocked by extraction")
                 if not decision.get("counterexample_set_sha256"):
                     raise SystemExit("S5 preflight requires rejected extraction counterexample evidence")
                 semantic_rejections.append(rewrite)
             continue
+        if rid not in plan_selected_ids or plan_action.get("action") != "apply_to_s5_input":
+            raise SystemExit("accepted S4 rewrite must be selected by the S4->S5 plan")
         if rid not in selected_ids or decision.get("selected") is not True:
             raise SystemExit("S5 preflight consumes only extraction-selected accepted rewrites")
         if rewrite.get("rewrite_kind") not in allowed_rewrites:
@@ -129,6 +189,17 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             raise SystemExit("S5 preflight requires extraction MIR/ABI safe decision")
         if decision.get("abi_impact") != "none":
             raise SystemExit("S5 preflight rejects S4 extraction with ABI impact")
+        for field in (
+            "lowering_effect",
+            "exact_fallback_expr_sha256",
+            "rewritten_enode_sha256",
+            "validator_log_sha256",
+            "mir_abi_safe",
+            "abi_impact",
+        ):
+            source_value = decision.get(field, rewrite.get(field))
+            if plan_action.get(field) != source_value:
+                raise SystemExit(f"S4->S5 application action {field} mismatch for {rid}")
         if rewrite.get("rewrite_kind") == "symbolic_identity_i64":
             if decision.get("lowering_effect") != "replace_binary_identity_expr_with_existing_value":
                 raise SystemExit("S5 preflight rejects symbolic identity without value-ref lowering effect")
@@ -172,6 +243,12 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
     })
 
 input_ready = len(all_rewrites) > 0
+if {rewrite["proposed_rewrite_id"] for rewrite in all_rewrites} != plan_selected_ids:
+    raise SystemExit("S5 preflight selected rewrites do not match S4->S5 application plan")
+if {rewrite["proposed_rewrite_id"] for rewrite in semantic_rejections} != plan_rejected_ids:
+    raise SystemExit("S5 preflight semantic rejections do not match S4->S5 application plan")
+if {rewrite["proposed_rewrite_id"] for rewrite in blocked_rewrites} != plan_blocked_ids:
+    raise SystemExit("S5 preflight blocked rewrites do not match S4->S5 application plan")
 preflight = {
     "schema": "madaros.v2.s5.preflight/0.1",
     "status": "pass" if input_ready else "blocked",
@@ -183,6 +260,9 @@ preflight = {
     "s_full_contract": "blocked_until_mir_abi_numeric_and_differential_gates_exist",
     "input_contract": "madaros.v2.s4.gate/0.1",
     "input_extraction_contract": "madaros.v2.s4.extraction/0.1",
+    "input_application_plan_contract": application_plan["schema"],
+    "input_application_plan_sha256": application_plan["application_plan_sha256"],
+    "s4_to_s5_application_plan_consumed": True,
     "mir_abi_safe_subset": sorted(allowed_rewrites),
     "abi_impact": "none: S5 consumes only extraction-selected accepted rewrites",
     "numeric_semantics": "i64 exact rewrites only when zero-error translation-validation receipts survive operand-provenance guards",

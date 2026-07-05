@@ -568,11 +568,199 @@ for path in sorted(out.glob("*/*/*.s4.receipt.json")):
     receipts.append(json.loads(path.read_text(encoding="utf-8")))
 if not receipts:
     raise SystemExit("no S4 receipts")
+
+allowed_to_s5_rewrites = {
+    "constant_fold_i64",
+    "symbolic_identity_i64",
+    "symbolic_reflexive_cmp_i64",
+    "symbolic_sub_self_i64",
+}
+allowed_lowering_effects = {
+    "replace_binary_constant_expr_with_const",
+    "replace_binary_identity_expr_with_existing_value",
+    "replace_binary_predicate_expr_with_const_bool",
+    "replace_binary_predicate_expr_with_const_bool_keep_producer_evaluated",
+    "replace_binary_sub_self_expr_with_const_i64_zero",
+    "replace_binary_sub_self_expr_with_const_i64_zero_keep_producer_evaluated",
+}
+application_cases = []
+selected_application_ids = []
+rejected_application_ids = []
+blocked_application_ids = []
+for receipt in receipts:
+    case_dir = out / receipt["case_id"] / "a"
+    rewrites_path = case_dir / receipt["rewrites_path"]
+    extraction_path = case_dir / receipt["extraction_path"]
+    if not rewrites_path.is_file() or not extraction_path.is_file():
+        raise SystemExit(f"missing S4 case artifacts for application plan: {receipt['case_id']}")
+    rewrites = json.loads(rewrites_path.read_text(encoding="utf-8"))
+    extraction = json.loads(extraction_path.read_text(encoding="utf-8"))
+    decisions = {decision["rewrite_id"]: decision for decision in extraction.get("decisions", [])}
+    selected_actions = []
+    rejected_actions = []
+    blocked_actions = []
+    for rewrite in rewrites:
+        rid = rewrite["proposed_rewrite_id"]
+        decision = decisions.get(rid)
+        if decision is None:
+            raise SystemExit(f"missing extraction decision in application plan for {rid}")
+        common = {
+            "rewrite_id": rid,
+            "rewrite_kind": rewrite["rewrite_kind"],
+            "proposal_kind": rewrite["proposal_kind"],
+            "eclass_id": rewrite["eclass_id"],
+            "function": rewrite["function"],
+            "block": rewrite["block"],
+            "instruction_result": rewrite["instruction_result"],
+            "original_enode_sha256": rewrite["original_enode_sha256"],
+            "proposed_enode_sha256": rewrite["proposed_enode_sha256"],
+            "rewritten_enode_sha256": rewrite["rewritten_enode_sha256"],
+            "validator": rewrite["validator"],
+            "validator_log_sha256": rewrite["validator_log_sha256"],
+            "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
+            "coefficient_sha256": rewrite["coefficient_sha256"],
+            "basis_family": rewrite["basis_family"],
+            "domain": rewrite["domain"],
+            "domain_bounds": rewrite["domain_bounds"],
+            "error_bound": rewrite["error_bound"],
+            "decision": decision["decision"],
+            "selection_reason": decision["selection_reason"],
+            "cost_before": decision["cost_before"],
+            "cost_after": decision["cost_after"],
+            "cost_delta": decision["cost_delta"],
+            "cost_model_sha256": decision["cost_model_sha256"],
+            "proof_obligation": decision["proof_obligation"],
+            "extraction_applied_to_ir": decision["extraction_applied_to_ir"],
+            "ir_mutation_allowed": decision["ir_mutation_allowed"],
+        }
+        if rewrite.get("accepted") is True:
+            if rewrite["rewrite_kind"] not in allowed_to_s5_rewrites:
+                raise SystemExit(f"application plan rejects unsupported selected rewrite kind: {rewrite['rewrite_kind']}")
+            if decision.get("selected") is not True or decision.get("decision") != "select":
+                raise SystemExit(f"accepted rewrite must be selected in S4 application plan: {rid}")
+            if decision.get("lowering_effect") not in allowed_lowering_effects:
+                raise SystemExit(f"bad S4->S5 lowering effect for {rid}: {decision.get('lowering_effect')}")
+            if decision.get("mir_abi_safe") is not True:
+                raise SystemExit(f"S4->S5 application plan requires mir_abi_safe for {rid}")
+            if decision.get("abi_impact") != "none":
+                raise SystemExit(f"S4->S5 application plan rejects ABI impact for {rid}")
+            if rewrite.get("validator") != "translation-validation" or rewrite.get("error_bound") != "0":
+                raise SystemExit(f"S4->S5 application plan requires exact translation validation for {rid}")
+            if rewrite.get("basis_family") != "exact_symbolic":
+                raise SystemExit(f"S4->S5 application plan only accepts exact symbolic basis for {rid}")
+            keep_producer = str(decision.get("lowering_effect", "")).endswith("_keep_producer_evaluated")
+            producer_policy = rewrite.get("producer_evaluation_policy", "not-required-for-this-rewrite")
+            if keep_producer and producer_policy != "direct_call_leaf_pure_keep_producer_evaluated":
+                raise SystemExit(f"keep-producer selected rewrite lacks policy for {rid}")
+            action = {
+                **common,
+                "action": "apply_to_s5_input",
+                "lowering_effect": decision["lowering_effect"],
+                "lowering_effect_schema": "madaros.v2.s4.to_s5.lowering_effect/0.1",
+                "selected_enode_sha256": decision["selected_enode_sha256"],
+                "replacement_enode_sha256": decision["replacement_enode_sha256"],
+                "mir_abi_safe": True,
+                "abi_impact": "none",
+                "call_signature_effect": "none",
+                "stack_effect": "none",
+                "sret_effect": "none",
+                "aggregate_layout_effect": "none",
+                "producer_evaluation_preservation": (
+                    "required_keep_original_producer_evaluated" if keep_producer else "not-required-for-this-rewrite"
+                ),
+                "producer_evaluation_policy": producer_policy,
+                "selected_for_s5": True,
+            }
+            selected_actions.append(action)
+            selected_application_ids.append(rid)
+        elif rewrite.get("blocked") is True:
+            action = {
+                **common,
+                "action": "block_before_s5_input",
+                "selected_for_s5": False,
+                "rejection_reason_code": rewrite["rejection_reason_code"],
+                "rejection_reason": rewrite["rejection_reason"],
+                "mir_abi_safe": False,
+            }
+            blocked_actions.append(action)
+            blocked_application_ids.append(rid)
+        else:
+            action = {
+                **common,
+                "action": "reject_before_s5_input",
+                "selected_for_s5": False,
+                "rejection_reason_code": rewrite["rejection_reason_code"],
+                "rejection_reason": rewrite["rejection_reason"],
+                "counterexample_set_sha256": rewrite["counterexample_set_sha256"],
+                "mir_abi_safe": False,
+            }
+            rejected_actions.append(action)
+            rejected_application_ids.append(rid)
+    if len(selected_actions) != receipt["selected_rewrite_count"]:
+        raise SystemExit(f"S4->S5 selected action count mismatch for {receipt['case_id']}")
+    if len(rejected_actions) != receipt["rejected_from_extraction_count"]:
+        raise SystemExit(f"S4->S5 rejected action count mismatch for {receipt['case_id']}")
+    if len(blocked_actions) != receipt["blocked_from_extraction_count"]:
+        raise SystemExit(f"S4->S5 blocked action count mismatch for {receipt['case_id']}")
+    application_cases.append({
+        "case_id": receipt["case_id"],
+        "source": receipt["source"],
+        "input_hlir_sha256": receipt["input_hlir_sha256"],
+        "egraph_sha256": receipt["egraph_sha256"],
+        "extraction_sha256": receipt["extraction_sha256"],
+        "selected_action_count": len(selected_actions),
+        "rejected_action_count": len(rejected_actions),
+        "blocked_action_count": len(blocked_actions),
+        "selected_actions": selected_actions,
+        "rejected_actions": rejected_actions,
+        "blocked_actions": blocked_actions,
+    })
+
+application_plan = {
+    "schema": "madaros.v2.s4.to_s5_application_plan/0.1",
+    "status": "pass",
+    "stage_contract_level": "S4_TO_S5_EXACT_APPLICATION_PLAN_NOT_MUTATING",
+    "s4_to_s5_application_plan_complete": True,
+    "s4_full_complete": False,
+    "s5_input_contract_ready": bool(selected_application_ids),
+    "input_contract": "madaros.v2.s4.extraction/0.1",
+    "output_contract": "madaros.v2.s5.preflight/0.1",
+    "mutation_plan": "none: S4 emits a deterministic application plan for S5 consumers",
+    "ir_mutation_allowed": False,
+    "application_applied_to_ir": False,
+    "accepted_application_count": len(selected_application_ids),
+    "rejected_application_count": len(rejected_application_ids),
+    "blocked_application_count": len(blocked_application_ids),
+    "selected_rewrite_ids": selected_application_ids,
+    "rejected_rewrite_ids": rejected_application_ids,
+    "blocked_rewrite_ids": blocked_application_ids,
+    "allowed_rewrite_kinds": sorted(allowed_to_s5_rewrites),
+    "allowed_lowering_effects": sorted(allowed_lowering_effects),
+    "cross_stage_invariants": [
+        "selected_actions_equal_s4_accepted_selected_ids",
+        "rejected_and_blocked_actions_are_never_selected_for_s5",
+        "every_selected_action_has_exact_fallback_hash",
+        "every_selected_action_has_translation_validation_zero_error",
+        "every_selected_action_has_mir_abi_safe_true_and_abi_impact_none",
+        "keep_producer_actions_carry_producer_evaluation_policy",
+        "application_plan_is_non_mutating",
+    ],
+    "cases": application_cases,
+}
+application_plan["application_plan_sha256"] = hashlib.sha256(
+    json.dumps(application_plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+application_plan_path = out / "madaros_v2_s4_to_s5_application_plan.json"
+application_plan_path.write_text(json.dumps(application_plan, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
 summary = {
     "schema": "madaros.v2.s4.gate/0.1",
     "status": "pass",
     "stage_contract_level": "S4_BOUNDARY_NOT_FULL",
     "s4_boundary_complete": True,
+    "s4_to_s5_application_plan_complete": True,
+    "s4_to_s5_application_plan_path": application_plan_path.name,
+    "s4_to_s5_application_plan_sha256": application_plan["application_plan_sha256"],
     "s4_full_complete": False,
     "s_full_contract": "blocked_until_full_s4_obligations_are_gated",
     "missing_full_obligations": [
@@ -591,6 +779,9 @@ summary = {
     "selected_rewrite_count": sum(r["selected_rewrite_count"] for r in receipts),
     "rejected_from_extraction_count": sum(r["rejected_from_extraction_count"] for r in receipts),
     "blocked_from_extraction_count": sum(r["blocked_from_extraction_count"] for r in receipts),
+    "s4_to_s5_accepted_application_count": application_plan["accepted_application_count"],
+    "s4_to_s5_rejected_application_count": application_plan["rejected_application_count"],
+    "s4_to_s5_blocked_application_count": application_plan["blocked_application_count"],
     "input_hlir_sha256": [r["input_hlir_sha256"] for r in receipts],
     "receipt_sha256": [r["receipt_sha256"] for r in receipts],
     "extraction_sha256": [r["extraction_sha256"] for r in receipts],
@@ -617,9 +808,10 @@ payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
 print(
     f"[madaros-v2-s4] summary_sha={summary['gate_sha256'][:12]} "
     f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']} blocked={summary['blocked_rewrite_count']} "
-    f"selected={summary['selected_rewrite_count']}"
+    f"selected={summary['selected_rewrite_count']} app_plan={application_plan['application_plan_sha256'][:12]}"
 )
 PY
 
 echo "[madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)"
+echo "[madaros-v2-s4] PASS: S4->S5 application plan emitted for selected exact rewrites without mutating IR"
 echo "[madaros-v2-s4] receipts=$OUT_DIR"
