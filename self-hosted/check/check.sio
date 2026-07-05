@@ -4197,7 +4197,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
             || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        if is_arith || is_cmp {
+        if (is_arith || is_cmp) && !bin_int_lit_narrow(e, left_ty, right_ty) {
             checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
     }
@@ -4395,6 +4395,27 @@ fn array_int_lit_narrow(ann_ty: TypeEntry, init_ty: TypeEntry) -> bool with Pani
     match init_ty.inner { Some(e) => { init_k = (*e).kind }, None => {} }
     if init_k != TypeKind::TyI64 { return false }
     ann_k == TypeKind::TyI8 || ann_k == TypeKind::TyI32
+}
+
+// Binary-op integer-literal narrowing (strictness round 3, E004): an int
+// LITERAL operand adapts to the other side's small-int width, mirroring
+// the binding (round 1) and call-arg (round 2) rules.
+fn bin_int_lit_narrow(e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Panic, Div {
+    let small_l = left_ty.kind == TypeKind::TyI32 || left_ty.kind == TypeKind::TyI8
+    let small_r = right_ty.kind == TypeKind::TyI32 || right_ty.kind == TypeKind::TyI8
+    var lit_l = false
+    match e.left { Some(b) => { lit_l = (*b).kind == ExprKind::ExprIntLit }, None => {} }
+    var lit_r = false
+    match e.right { Some(b) => { lit_r = (*b).kind == ExprKind::ExprIntLit }, None => {} }
+    if (left_ty.kind == TypeKind::TyI64 && lit_l && small_r) || (right_ty.kind == TypeKind::TyI64 && lit_r && small_l) {
+        return true
+    }
+    // Int-width mixing (var-vs-var): implicit WIDENING is sound and the
+    // canonical lean lane accepts it (i32 op i64 -> i64). The E004 census
+    // on EISA v1 is entirely this shape ("expected i64, found i32").
+    let int_l = left_ty.kind == TypeKind::TyI64 || small_l
+    let int_r = right_ty.kind == TypeKind::TyI64 || small_r
+    int_l && int_r
 }
 
 fn checker_check_block_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
