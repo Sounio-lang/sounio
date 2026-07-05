@@ -528,7 +528,7 @@ def emit(args: argparse.Namespace) -> int:
         ],
         "missing_full_obligations": [
             "imported aggregate/SRET receipt",
-            "method/generic/module-boundary aggregate return coverage",
+            "generic/module-boundary aggregate return coverage",
             "f64 XMM0 call/return receipt before f128 promotion",
             "numeric tower width receipts for f128/i256",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",

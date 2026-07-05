@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5 normal-call stack-argument receipt."""
+"""Emit a Madaros v2 S5 method aggregate-return SRET receipt."""
 
 from __future__ import annotations
 
@@ -11,57 +11,82 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.stack_call_receipt/0.1"
+SCHEMA_VERSION = "madaros.v2.s5.method_sret_receipt/0.1"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_NORMAL_CALL_STACK_ARGS_NOT_FULL"
+STAGE_CONTRACT_LEVEL = "S5_METHOD_SRET_STACK_ARGS_NOT_FULL"
 
 MIR_OP_LOAD_STACK = 100
 MIR_OP_ARG_MOVE = 112
 MIR_OP_CALL = 113
 MIR_OP_CAPTURE_RET = 114
 MIR_OP_RET = 115
+MIR_OP_ALLOC = 116
+MIR_OP_FIELD_LOAD = 117
 MIR_OP_STACK_ADJUST = 129
 MIR_OP_STACK_ARG_PUSH = 130
 
-SUM7_SOURCE = """fn sum7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
-    a + b + c + d + e + f + g
-}
+PROGRAM_TEMPLATE = """struct Big {{
+    f0: i64,
+    f1: i64,
+    f2: i64,
+}}
 
-fn main() -> i64 {
-    sum7(1, 2, 3, 4, 5, 6, 7)
-}
-"""
+struct Maker {{
+    seed: i64,
+}}
 
-SUM8_SOURCE = """fn sum8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
-    a + b + c + d + e + f + g + h
-}
+impl Maker {{
+    fn make(self{params}) -> Big {{
+        {body}
+    }}
+}}
 
-fn main() -> i64 {
-    sum8(1, 2, 3, 4, 5, 6, 7, 8)
-}
+fn main() -> i64 {{
+    let m = Maker {{ seed: {seed} }}
+    let x = m.make({call_args})
+    x.f0 + x.f1 + x.f2
+}}
 """
 
 CASES = [
     {
-        "case_id": "normal_call_stack_one_arg_return_28",
-        "source": SUM7_SOURCE,
-        "callee": "sum7",
-        "expected_exit": 28,
-        "explicit_arg_count": 7,
-        "expected_arg_indices": [0, 1, 2, 3, 4, 5],
-        "expected_arg_source_slots": [0, 1, 2, 3, 4, 5],
-        "expected_stack_arg_indices": [6],
-        "expected_stack_arg_source_slots": [6],
-        "expected_stack_adjusts": [-8, 16],
+        "case_id": "method_sret_receiver_only_return_24",
+        "params": "",
+        "body": "Big { f0: self.seed, f1: self.seed + 1, f2: self.seed + 2 }",
+        "seed": 7,
+        "call_args": "",
+        "expected_exit": 24,
+        "method_source_param_count": 1,
+        "expected_arg_indices": [0, 1],
+        "expected_arg_source_slots": [2, 0],
+        "expected_stack_arg_indices": [],
+        "expected_stack_arg_source_slots": [],
+        "expected_stack_adjusts": [],
     },
     {
-        "case_id": "normal_call_stack_two_arg_return_36",
-        "source": SUM8_SOURCE,
-        "callee": "sum8",
-        "expected_exit": 36,
-        "explicit_arg_count": 8,
+        "case_id": "method_sret_receiver_register_args_return_43",
+        "params": ", a: i64, b: i64, c: i64, d: i64",
+        "body": "Big { f0: self.seed + a + c, f1: b * 2, f2: d + 1 }",
+        "seed": 3,
+        "call_args": "4, 7, 5, 16",
+        "expected_exit": 43,
+        "method_source_param_count": 5,
         "expected_arg_indices": [0, 1, 2, 3, 4, 5],
-        "expected_arg_source_slots": [0, 1, 2, 3, 4, 5],
+        "expected_arg_source_slots": [6, 0, 2, 3, 4, 5],
+        "expected_stack_arg_indices": [],
+        "expected_stack_arg_source_slots": [],
+        "expected_stack_adjusts": [],
+    },
+    {
+        "case_id": "method_sret_receiver_stack_args_return_57",
+        "params": ", a: i64, b: i64, c: i64, d: i64, e: i64, f: i64",
+        "body": "Big { f0: self.seed + a + c + e, f1: b * 2, f2: d + f }",
+        "seed": 3,
+        "call_args": "4, 7, 5, 16, 6, 9",
+        "expected_exit": 57,
+        "method_source_param_count": 7,
+        "expected_arg_indices": [0, 1, 2, 3, 4, 5],
+        "expected_arg_source_slots": [8, 0, 2, 3, 4, 5],
         "expected_stack_arg_indices": [7, 6],
         "expected_stack_arg_source_slots": [7, 6],
         "expected_stack_adjusts": [16],
@@ -121,7 +146,7 @@ def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
     first = stable_json(payload)
     second = stable_json(json.loads(first))
     if first != second:
-        raise SystemExit("normal stack-call receipt canonical JSON roundtrip changed bytes")
+        raise SystemExit("method SRET receipt canonical JSON roundtrip changed bytes")
     return first, sha256_text(first)
 
 
@@ -141,8 +166,14 @@ def load_machine_module(path: Path) -> dict[str, Any]:
         raise SystemExit(f"MachineModule unsupported: {payload.get('unsupported_detail')!r}")
     if payload.get("legacy_fallback") is not False:
         raise SystemExit("MachineModule must not use legacy fallback")
+    if int(payload.get("fn_count", -1)) != 2:
+        raise SystemExit("method SRET MachineModule must contain Maker_make + main")
     payload["machine_module_json_sha256"] = sha256_text(stable_json(payload))
     return payload
+
+
+def opcodes(function: dict[str, Any]) -> list[int]:
+    return [int(instr[0]) for instr in function["instrs"]]
 
 
 def functions_by_name(module: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -152,10 +183,6 @@ def functions_by_name(module: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if name:
             result[name] = fn
     return result
-
-
-def opcodes(function: dict[str, Any]) -> list[int]:
-    return [int(instr[0]) for instr in function["instrs"]]
 
 
 def indices(function: dict[str, Any], opcode: int) -> list[int]:
@@ -169,7 +196,7 @@ def source_slots_for(function: dict[str, Any], opcode: int) -> list[int]:
         if int(instr[0]) != opcode:
             continue
         if idx == 0 or int(instrs[idx - 1][0]) != MIR_OP_LOAD_STACK:
-            raise SystemExit("normal stack-call move/push must be fed by immediate LOAD_STACK")
+            raise SystemExit("method SRET move/push must be fed by immediate LOAD_STACK")
         slots.append(int(instrs[idx - 1][4]))
     return slots
 
@@ -178,57 +205,78 @@ def stack_adjusts(function: dict[str, Any]) -> list[int]:
     return [int(instr[4]) for instr in function["instrs"] if int(instr[0]) == MIR_OP_STACK_ADJUST]
 
 
+def field_load_indices(function: dict[str, Any]) -> list[int]:
+    return [int(instr[8]) for instr in function["instrs"] if int(instr[0]) == MIR_OP_FIELD_LOAD]
+
+
 def validate_machine_shape(module: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
     by_name = functions_by_name(module)
-    if "main" not in by_name or case["callee"] not in by_name:
-        raise SystemExit(f"normal stack-call functions missing: got {sorted(by_name)}")
+    if "main" not in by_name or "Maker_make" not in by_name:
+        raise SystemExit(f"method SRET functions missing: got {sorted(by_name)}")
     main_fn = by_name["main"]
-    callee_fn = by_name[str(case["callee"])]
+    method_fn = by_name["Maker_make"]
+    if int(method_fn.get("source_is_sret", 0)) != 1:
+        raise SystemExit("method SRET callee must preserve source_is_sret=1")
+    if int(method_fn.get("source_param_count", -1)) != int(case["method_source_param_count"]):
+        raise SystemExit("method SRET callee source_param_count mismatch")
     main_ops = opcodes(main_fn)
-    required_main = {MIR_OP_ARG_MOVE, MIR_OP_STACK_ARG_PUSH, MIR_OP_CALL, MIR_OP_CAPTURE_RET, MIR_OP_RET}
+    method_ops = opcodes(method_fn)
+    required_main = {MIR_OP_ALLOC, MIR_OP_ARG_MOVE, MIR_OP_CALL, MIR_OP_CAPTURE_RET, MIR_OP_FIELD_LOAD, MIR_OP_RET}
     missing = sorted(required_main - set(main_ops))
     if missing:
-        raise SystemExit(f"normal stack-call main MachineModule missing opcodes: {missing}")
+        raise SystemExit(f"method SRET main MachineModule missing opcodes: {missing}")
+    if MIR_OP_ARG_MOVE in method_ops or MIR_OP_STACK_ARG_PUSH in method_ops:
+        raise SystemExit("method SRET callee body must not contain caller-side arg setup")
     arg_indices = indices(main_fn, MIR_OP_ARG_MOVE)
     if arg_indices != case["expected_arg_indices"]:
-        raise SystemExit(f"normal call register arg indices mismatch: expected {case['expected_arg_indices']}, got {arg_indices}")
+        raise SystemExit(f"method SRET register arg indices mismatch: expected {case['expected_arg_indices']}, got {arg_indices}")
     arg_slots = source_slots_for(main_fn, MIR_OP_ARG_MOVE)
     if arg_slots != case["expected_arg_source_slots"]:
-        raise SystemExit(f"normal call register source slots mismatch: expected {case['expected_arg_source_slots']}, got {arg_slots}")
+        raise SystemExit(f"method SRET register source slots mismatch: expected {case['expected_arg_source_slots']}, got {arg_slots}")
     stack_indices = indices(main_fn, MIR_OP_STACK_ARG_PUSH)
     if stack_indices != case["expected_stack_arg_indices"]:
-        raise SystemExit(f"normal call stack arg indices mismatch: expected {case['expected_stack_arg_indices']}, got {stack_indices}")
+        raise SystemExit(f"method SRET stack arg indices mismatch: expected {case['expected_stack_arg_indices']}, got {stack_indices}")
     stack_slots = source_slots_for(main_fn, MIR_OP_STACK_ARG_PUSH)
     if stack_slots != case["expected_stack_arg_source_slots"]:
-        raise SystemExit(f"normal call stack source slots mismatch: expected {case['expected_stack_arg_source_slots']}, got {stack_slots}")
+        raise SystemExit(f"method SRET stack source slots mismatch: expected {case['expected_stack_arg_source_slots']}, got {stack_slots}")
     adjusts = stack_adjusts(main_fn)
     if adjusts != case["expected_stack_adjusts"]:
-        raise SystemExit(f"normal call stack adjusts mismatch: expected {case['expected_stack_adjusts']}, got {adjusts}")
-    if MIR_OP_STACK_ARG_PUSH in opcodes(callee_fn):
-        raise SystemExit("normal stack-call callee must not contain caller-side STACK_ARG_PUSH")
+        raise SystemExit(f"method SRET stack adjusts mismatch: expected {case['expected_stack_adjusts']}, got {adjusts}")
+    field_indices = field_load_indices(main_fn)
+    if field_indices != [0, 1, 2]:
+        raise SystemExit(f"method SRET aggregate field indices mismatch: expected [0, 1, 2], got {field_indices}")
     return {
         "main_opcodes": main_ops,
-        "callee_opcodes": opcodes(callee_fn),
+        "method_opcodes": method_ops,
         "main_arg_move_indices": arg_indices,
         "main_arg_move_source_stack_slots": arg_slots,
         "main_stack_arg_push_indices": stack_indices,
         "main_stack_arg_push_source_stack_slots": stack_slots,
         "main_stack_adjust_immediates": adjusts,
+        "main_field_load_indices": field_indices,
         "main_instr_count": int(main_fn["instr_count"]),
-        "callee_instr_count": int(callee_fn["instr_count"]),
+        "method_instr_count": int(method_fn["instr_count"]),
+        "method_source_is_sret": int(method_fn.get("source_is_sret", 0)),
+        "method_source_param_count": int(method_fn.get("source_param_count", -1)),
+        "method_source_sret_dest_reg": int(method_fn.get("source_sret_dest_reg", -1)),
     }
 
 
 def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], timeout_s: int) -> dict[str, Any]:
     case_id = str(case["case_id"])
-    source_text = str(case["source"])
+    program_text = PROGRAM_TEMPLATE.format(
+        params=case["params"],
+        body=case["body"],
+        seed=case["seed"],
+        call_args=case["call_args"],
+    )
     source_path = out_dir / f"{case_id}.sio"
     elf_path = out_dir / f"{case_id}.native_v2"
     mm_path = out_dir / f"{case_id}.machine_module.json"
     compile_log_path = out_dir / f"{case_id}.compile.log"
     stdout_path = out_dir / f"{case_id}.stdout"
     stderr_path = out_dir / f"{case_id}.stderr"
-    source_path.write_text(source_text, encoding="utf-8")
+    source_path.write_text(program_text, encoding="utf-8")
     rc, compile_stdout, compile_stderr = run_command(
         [
             str(compiler),
@@ -245,13 +293,13 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
     if rc != 0:
-        raise SystemExit(f"normal stack-call compile failed for {case_id} rc={rc}; log={compile_log_path}")
+        raise SystemExit(f"method SRET compile failed for {case_id} rc={rc}; log={compile_log_path}")
     elf_path.chmod(elf_path.stat().st_mode | 0o111)
     actual_exit, stdout, stderr = run_binary(elf_path, timeout_s)
     stdout_path.write_bytes(stdout)
     stderr_path.write_bytes(stderr)
     if actual_exit != int(case["expected_exit"]):
-        raise SystemExit(f"normal stack-call {case_id} expected exit {case['expected_exit']}, got {actual_exit}")
+        raise SystemExit(f"method SRET {case_id} expected exit {case['expected_exit']}, got {actual_exit}")
     module = load_machine_module(mm_path)
     machine_shape = validate_machine_shape(module, case)
     return {
@@ -259,8 +307,8 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "source": source_path.name,
         "expected_exit": int(case["expected_exit"]),
         "actual_exit": actual_exit,
-        "explicit_arg_count": int(case["explicit_arg_count"]),
-        "source_sha256": sha256_text(source_text),
+        "method_source_param_count": int(case["method_source_param_count"]),
+        "source_sha256": sha256_text(program_text),
         "elf_sha256": sha256_bytes(elf_path.read_bytes()),
         "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
         "stdout_sha256": sha256_bytes(stdout),
@@ -276,32 +324,39 @@ def emit(args: argparse.Namespace) -> int:
     compiler = Path(args.compiler).resolve()
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    receipt_path = out_dir / "madaros_v2_s5_stack_call.receipt.json"
+    receipt_path = out_dir / "madaros_v2_s5_method_sret.receipt.json"
     case_results = [emit_case(root, compiler, out_dir, case, args.timeout) for case in CASES]
     receipt = {
         "schema": SCHEMA_VERSION,
         "status": "pass",
         "stage_contract_level": STAGE_CONTRACT_LEVEL,
         "target": "x86_64-linux",
-        "case_id": "normal_call_stack_args",
+        "case_id": "method_aggregate_sret",
         "case_count": len(case_results),
         "cases": case_results,
-        "s5_normal_call_stack_args_complete": True,
-        "compiler_machine_module_exported": True,
+        "s5_method_sret_receiver_only_complete": True,
+        "s5_method_sret_receiver_register_args_complete": True,
+        "s5_method_sret_receiver_stack_args_complete": True,
+        "source_frontend_lowers_method_aggregate_return_to_IrCallSret": True,
+        "compiler_machine_module_exported_for_method_path": True,
         "real_program_mir_emitted": True,
         "real_abi_layout_emitted": True,
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "normal_call_one_stack_arg_records_padding_and_cleanup",
-            "normal_call_two_stack_args_records_cleanup_without_padding",
-            "stack_args_use_STACK_ARG_PUSH_not_ARG_MOVE_6",
-            "native_elves_return_expected_discriminators",
+            "method_receiver_only_sret_executes_expected_exit",
+            "method_register_arg_sret_executes_expected_exit",
+            "method_stack_arg_sret_executes_expected_exit",
+            "method_path_exports_machine_module_json",
+            "method_sret_hidden_dest_is_arg0",
+            "method_receiver_shifts_after_hidden_dest",
+            "method_explicit_args_shift_after_receiver",
+            "method_stack_args_use_STACK_ARG_PUSH",
+            "method_callee_source_is_sret_recorded",
         ],
         "missing_full_obligations": [
-            "imported aggregate/SRET receipt",
-            "generic/module-boundary aggregate return coverage",
+            "generic aggregate return coverage",
             "f64 XMM0 call/return receipt before f128 promotion",
             "numeric tower width receipts for f128/i256",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",
@@ -313,8 +368,8 @@ def emit(args: argparse.Namespace) -> int:
     receipt["canonical_roundtrip_sha256"] = canonical_sha
     receipt_path.write_text(pretty_json(receipt), encoding="utf-8")
     print(
-        f"madaros-v2-s5-stack-call: case={receipt['case_id']} "
-        f"cases={receipt['case_count']} sha={receipt['receipt_sha256'][:12]} receipt={receipt_path}"
+        f"madaros-v2-s5-method-sret: case={receipt['case_id']} "
+        f"cases={receipt['case_count']} sha={receipt['receipt_sha256'][:12]}"
     )
     return 0
 
@@ -323,13 +378,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     emit_p = sub.add_parser("emit")
-    emit_p.add_argument("--out-dir", required=True)
-    emit_p.add_argument("--compiler", default=str(repo_root_from_script() / "bin" / "madaros"))
     emit_p.add_argument("--root", default=str(repo_root_from_script()))
-    emit_p.add_argument("--timeout", type=int, default=120)
-    emit_p.set_defaults(func=emit)
+    emit_p.add_argument("--compiler", default=str(repo_root_from_script() / "bin/madaros"))
+    emit_p.add_argument("--out-dir", required=True)
+    emit_p.add_argument("--timeout", type=int, default=60)
     args = parser.parse_args()
-    return args.func(args)
+    if args.cmd == "emit":
+        return emit(args)
+    raise SystemExit(f"unknown command: {args.cmd}")
 
 
 if __name__ == "__main__":

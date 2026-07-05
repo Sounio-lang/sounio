@@ -345,7 +345,7 @@ def emit(args: argparse.Namespace) -> int:
             "imported_sret_stack_args_use_STACK_ARG_PUSH",
         ],
         "missing_full_obligations": [
-            "method/generic aggregate return coverage",
+            "generic aggregate return coverage",
             "f64 XMM0 call/return receipt before f128 promotion",
             "numeric tower width receipts for f128/i256",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",
