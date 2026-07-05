@@ -1,0 +1,507 @@
+module eisa::evm
+
+use math::dd64::*
+use eisa::core::*
+use eisa::format::*
+
+pub struct EvmMachine {
+    pub reg_val: [f64; 16],
+    pub reg_ehi: [f64; 16],
+    pub reg_elo: [f64; 16],
+    pub reg_u: [f64; 16],
+    pub reg_poison: [i64; 16],
+    pub mem_val: [f64; 8],
+    pub mem_ehi: [f64; 8],
+    pub mem_elo: [f64; 8],
+    pub mem_u: [f64; 8],
+    pub mem_poison: [i64; 8],
+    pub gate_count: i64,
+    pub halted: i64,
+    pub error: i64,
+    pub loaded: i64,
+    pub pc: i64,
+    pub n_code: i64,
+    pub n_const: i64,
+    pub prog_hash: i64,
+    pub code_op: [i64; 32],
+    pub code_dst: [i64; 32],
+    pub code_a: [i64; 32],
+    pub code_b: [i64; 32],
+    pub const_pool: [f64; 16],
+}
+
+fn make_inf_runtime() -> f64 with Mut {
+    var buf: [f64; 3] = [0.0; 3]
+    buf[0] = 0.0
+    buf[1] = 1.0e308
+    buf[2] = 10.0
+    buf[1] * buf[2]
+}
+
+fn make_nan_runtime() -> f64 with Div, Panic {
+    var buf: [f64; 1] = [0.0; 1]
+    buf[0] = 0.0
+    let z = buf[0]
+    z / z
+}
+
+fn evm_idx_reg_ok(i: i64) -> bool {
+    i >= 0 && i < 16
+}
+
+fn evm_idx_mem_ok(i: i64) -> bool {
+    i >= 0 && i < 8
+}
+
+fn lane_tuple_ok(v: f64, ehi: f64, elo: f64, u: f64) -> bool {
+    if u < 0.0 { return false }
+    is_finite_f64(v) && is_finite_f64(ehi) && is_finite_f64(elo) && is_finite_f64(u)
+}
+
+fn evm_set_reg_poison(m: &!EvmMachine, r: i64) with Mut, Div, Panic {
+    m.reg_val[r as usize] = make_nan_runtime()
+    m.reg_ehi[r as usize] = 0.0
+    m.reg_elo[r as usize] = 0.0
+    m.reg_u[r as usize] = make_inf_runtime()
+    m.reg_poison[r as usize] = 1
+}
+
+fn evm_set_mem_poison(m: &!EvmMachine, s: i64) with Mut, Div, Panic {
+    m.mem_val[s as usize] = make_nan_runtime()
+    m.mem_ehi[s as usize] = 0.0
+    m.mem_elo[s as usize] = 0.0
+    m.mem_u[s as usize] = make_inf_runtime()
+    m.mem_poison[s as usize] = 1
+}
+
+fn evm_reg_to_ereg(m: &EvmMachine, r: i64) -> EReg with Panic {
+    EReg {
+        val: m.reg_val[r as usize],
+        err: Dd64 { hi: m.reg_ehi[r as usize], lo: m.reg_elo[r as usize] },
+        u: m.reg_u[r as usize],
+    }
+}
+
+fn evm_write_reg_clean(m: &!EvmMachine, r: i64, z: EReg) with Mut, Panic {
+    m.reg_val[r as usize] = z.val
+    m.reg_ehi[r as usize] = z.err.hi
+    m.reg_elo[r as usize] = z.err.lo
+    m.reg_u[r as usize] = z.u
+    m.reg_poison[r as usize] = 0
+}
+
+fn normalize_reg_lane(m: &!EvmMachine, r: i64) -> bool with Mut, Div, Panic {
+    if m.reg_poison[r as usize] == 1 {
+        evm_set_reg_poison(m, r)
+        return false
+    }
+    if !lane_tuple_ok(
+        m.reg_val[r as usize],
+        m.reg_ehi[r as usize],
+        m.reg_elo[r as usize],
+        m.reg_u[r as usize]
+    ) {
+        evm_set_reg_poison(m, r)
+        return false
+    }
+    true
+}
+
+fn normalize_mem_lane(m: &!EvmMachine, s: i64) -> bool with Mut, Div, Panic {
+    if m.mem_poison[s as usize] == 1 {
+        evm_set_mem_poison(m, s)
+        return false
+    }
+    if !lane_tuple_ok(
+        m.mem_val[s as usize],
+        m.mem_ehi[s as usize],
+        m.mem_elo[s as usize],
+        m.mem_u[s as usize]
+    ) {
+        evm_set_mem_poison(m, s)
+        return false
+    }
+    true
+}
+
+fn print_i64_dec(n: i64) with IO, Mut, Div {
+    if n == 0 {
+        print("0")
+        return
+    }
+
+    var v = n
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+
+    var buf: [i64; 20] = [0; 20]
+    var len = 0
+    while v > 0 {
+        buf[len as usize] = v - (v / 10) * 10
+        v = v / 10
+        len = len + 1
+    }
+
+    var i = len - 1
+    while i >= 0 {
+        let d = buf[i as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        i = i - 1
+    }
+}
+
+fn print_f64_parts_field(p: F64Parts) with IO, Mut, Div {
+    print("s")
+    print_i64_dec(p.sign)
+    print("e")
+    print_i64_dec(p.exp)
+    print("m")
+    print_i64_dec(p.mant)
+}
+
+fn emit_receipt_v1(m: &EvmMachine, r: i64) with IO, Mut, Div, Panic {
+    let vb = f64_parts(m.reg_val[r as usize])
+    let rb = f64_parts(m.reg_ehi[r as usize])
+    let ub = f64_parts(m.reg_u[r as usize])
+    let poisoned = m.reg_poison[r as usize]
+
+    print("eisa-receipt: v=1 prog=")
+    print_i64_dec(m.prog_hash)
+    print(" gate=")
+    print_i64_dec(m.gate_count)
+    print(" reg=e")
+    print_i64_dec(r)
+    print(" val=")
+    print_f64_parts_field(vb)
+    print(" roundoff=")
+    print_f64_parts_field(rb)
+    print(" u=")
+    print_f64_parts_field(ub)
+    print(" poisoned=")
+    print_i64_dec(poisoned)
+    println("")
+}
+
+pub fn evm_new() -> EvmMachine {
+    EvmMachine {
+        reg_val: [0.0; 16],
+        reg_ehi: [0.0; 16],
+        reg_elo: [0.0; 16],
+        reg_u: [0.0; 16],
+        reg_poison: [0; 16],
+        mem_val: [0.0; 8],
+        mem_ehi: [0.0; 8],
+        mem_elo: [0.0; 8],
+        mem_u: [0.0; 8],
+        mem_poison: [0; 8],
+        gate_count: 0,
+        halted: 0,
+        error: 0,
+        loaded: 0,
+        pc: 0,
+        n_code: 0,
+        n_const: 0,
+        prog_hash: 0,
+        code_op: [0; 32],
+        code_dst: [0; 32],
+        code_a: [0; 32],
+        code_b: [0; 32],
+        const_pool: [0.0; 16],
+    }
+}
+
+pub fn evm_load(img: EisaxImage) -> EvmMachine with Mut, Div, Panic {
+    var m = evm_new()
+    let rc = eisax_validate(img)
+    if rc != 0 {
+        m.error = 1
+        m.halted = 1
+        return m
+    }
+
+    m.loaded = 1
+    m.halted = 0
+    m.error = 0
+    m.pc = 0
+    m.n_code = eisax_n_code(img)
+    m.n_const = img.c_len
+    m.prog_hash = eisax_prog_hash(img)
+
+    var i = 0
+    while i < m.n_code {
+        m.code_op[i as usize] = eisax_code_op(img, i)
+        m.code_dst[i as usize] = eisax_code_dst(img, i)
+        m.code_a[i as usize] = eisax_code_a(img, i)
+        m.code_b[i as usize] = eisax_code_b(img, i)
+        i = i + 1
+    }
+
+    i = 0
+    while i < m.n_const {
+        m.const_pool[i as usize] = eisax_const(img, i)
+        i = i + 1
+    }
+
+    m
+}
+
+pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
+    if m.error != 0 { return 1 }
+    if m.halted != 0 { return 0 }
+    if m.loaded == 0 {
+        m.error = 1
+        m.halted = 1
+        return 1
+    }
+    if m.pc >= m.n_code {
+        m.halted = 1
+        return 0
+    }
+
+    let op = m.code_op[m.pc as usize]
+    let dst = m.code_dst[m.pc as usize]
+    let a = m.code_a[m.pc as usize]
+    let b = m.code_b[m.pc as usize]
+
+    if op == op_econst() {
+        if !evm_idx_reg_ok(dst) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        if a < 0 || a >= m.n_const {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let c = m.const_pool[a as usize]
+        if !is_finite_f64(c) {
+            evm_set_reg_poison(m, dst)
+        } else {
+            m.reg_val[dst as usize] = c
+            m.reg_ehi[dst as usize] = 0.0
+            m.reg_elo[dst as usize] = 0.0
+            m.reg_u[dst as usize] = 0.0
+            m.reg_poison[dst as usize] = 0
+        }
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    if op == op_eload() {
+        if !evm_idx_reg_ok(dst) || !evm_idx_mem_ok(a) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let mem_ok = normalize_mem_lane(m, a)
+        if !mem_ok {
+            evm_set_reg_poison(m, dst)
+        } else {
+            m.reg_val[dst as usize] = m.mem_val[a as usize]
+            m.reg_ehi[dst as usize] = m.mem_ehi[a as usize]
+            m.reg_elo[dst as usize] = m.mem_elo[a as usize]
+            m.reg_u[dst as usize] = m.mem_u[a as usize]
+            m.reg_poison[dst as usize] = m.mem_poison[a as usize]
+            let _norm = normalize_reg_lane(m, dst)
+        }
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    if op == op_estore() {
+        if !evm_idx_reg_ok(dst) || !evm_idx_mem_ok(a) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let reg_ok = normalize_reg_lane(m, dst)
+        if !reg_ok {
+            evm_set_mem_poison(m, a)
+        } else {
+            m.mem_val[a as usize] = m.reg_val[dst as usize]
+            m.mem_ehi[a as usize] = m.reg_ehi[dst as usize]
+            m.mem_elo[a as usize] = m.reg_elo[dst as usize]
+            m.mem_u[a as usize] = m.reg_u[dst as usize]
+            m.mem_poison[a as usize] = m.reg_poison[dst as usize]
+            let _norm = normalize_mem_lane(m, a)
+        }
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    if op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv() {
+        if !evm_idx_reg_ok(dst) || !evm_idx_reg_ok(a) || !evm_idx_reg_ok(b) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let a_ok = normalize_reg_lane(m, a)
+        let b_ok = normalize_reg_lane(m, b)
+        if !a_ok || !b_ok {
+            evm_set_reg_poison(m, dst)
+            m.pc = m.pc + 1
+            return 0
+        }
+
+        let ra = evm_reg_to_ereg(m, a)
+        let rb = evm_reg_to_ereg(m, b)
+        if op == op_ediv() && rb.val == 0.0 {
+            evm_set_reg_poison(m, dst)
+            m.pc = m.pc + 1
+            return 0
+        }
+
+        let rz = if op == op_eadd() {
+            eadd(ra, rb)
+        } else {
+            if op == op_esub() {
+                esub(ra, rb)
+            } else {
+                if op == op_emul() {
+                    emul(ra, rb)
+                } else {
+                    ediv(ra, rb)
+                }
+            }
+        }
+
+        if !lane_tuple_ok(rz.val, rz.err.hi, rz.err.lo, rz.u) {
+            evm_set_reg_poison(m, dst)
+        } else {
+            evm_write_reg_clean(m, dst, rz)
+        }
+
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    if op == op_esqrt() {
+        if !evm_idx_reg_ok(dst) || !evm_idx_reg_ok(a) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let a_ok = normalize_reg_lane(m, a)
+        if !a_ok {
+            evm_set_reg_poison(m, dst)
+            m.pc = m.pc + 1
+            return 0
+        }
+
+        let ra = evm_reg_to_ereg(m, a)
+        let rz = esqrt(ra)
+        if !lane_tuple_ok(rz.val, rz.err.hi, rz.err.lo, rz.u) {
+            evm_set_reg_poison(m, dst)
+        } else {
+            evm_write_reg_clean(m, dst, rz)
+        }
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    if op == op_egate() {
+        if !evm_idx_reg_ok(dst) {
+            m.error = 1
+            m.halted = 1
+            return 1
+        }
+        let _dst_ok = normalize_reg_lane(m, dst)
+        m.gate_count = m.gate_count + 1
+        let _code = if m.reg_poison[dst as usize] == 1 {
+            2
+        } else {
+            let r = evm_reg_to_ereg(m, dst)
+            egate(r, 2)
+        }
+        emit_receipt_v1(m, dst)
+        m.pc = m.pc + 1
+        return 0
+    }
+
+    m.error = 1
+    m.halted = 1
+    1
+}
+
+pub fn evm_run(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {
+    if m.loaded == 0 {
+        m.error = 1
+        m.halted = 1
+        return 1
+    }
+    if m.error != 0 { return 1 }
+
+    while m.halted == 0 {
+        let rc = evm_step(m)
+        if rc != 0 { return 1 }
+    }
+    m.error
+}
+
+pub fn evm_reg_val(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_val[r as usize]
+}
+
+pub fn evm_reg_ehi(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_ehi[r as usize]
+}
+
+pub fn evm_reg_elo(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_elo[r as usize]
+}
+
+pub fn evm_reg_u(m: &EvmMachine, r: i64) -> f64 with Panic {
+    m.reg_u[r as usize]
+}
+
+pub fn evm_reg_poison(m: &EvmMachine, r: i64) -> i64 with Panic {
+    m.reg_poison[r as usize]
+}
+
+pub fn evm_mem_val(m: &EvmMachine, s: i64) -> f64 with Panic {
+    m.mem_val[s as usize]
+}
+
+pub fn evm_mem_ehi(m: &EvmMachine, s: i64) -> f64 with Panic {
+    m.mem_ehi[s as usize]
+}
+
+pub fn evm_mem_elo(m: &EvmMachine, s: i64) -> f64 with Panic {
+    m.mem_elo[s as usize]
+}
+
+pub fn evm_mem_u(m: &EvmMachine, s: i64) -> f64 with Panic {
+    m.mem_u[s as usize]
+}
+
+pub fn evm_mem_poison(m: &EvmMachine, s: i64) -> i64 with Panic {
+    m.mem_poison[s as usize]
+}
+
+pub fn evm_gate_count(m: &EvmMachine) -> i64 {
+    m.gate_count
+}
+
+pub fn evm_error(m: &EvmMachine) -> i64 {
+    m.error
+}
+
+pub fn evm_loaded(m: &EvmMachine) -> i64 {
+    m.loaded
+}
+
+pub fn evm_prog_hash(m: &EvmMachine) -> i64 {
+    m.prog_hash
+}
