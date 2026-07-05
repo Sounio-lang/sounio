@@ -656,6 +656,9 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.src1 = machine_operand_call_target(instr.fn_id)
         mi.call_arg_values = pair.0
         mi.call_arg_count = pair.1
+        if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+            mi.cond = 1
+        }
         return mi
     }
     if instr.op == IrOpcode::IrCallSret {
@@ -799,6 +802,18 @@ pub fn native_v2_alloc_descriptor_from_tag(tag: i64) -> i64 with Mut, Panic, Div
 }
 
 
+fn native_v2_ir_reg_is_f128(func: &IrFunction, reg: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrNop && instr.imm_flags == IR_F128_REG_MARKER_FLAG && instr.dst == reg {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
 // By-value instruction append (avoids JIT &! bug)
 pub fn _emit_legal_byval(func: MachineFunction, instr: MachineInstr) -> MachineFunction with Mut, Panic, Div {
     var f = func
@@ -845,7 +860,11 @@ pub fn native_v2_lower_function_to_machine(func: IrFunction) -> MachineFunction 
             out.unsupported_detail = native_v2_ir_opcode_name(instr.op)
             return out
         }
-        out = _add_instr_byval(out, native_v2_pseudo_from_ir(instr))
+        var mi = native_v2_pseudo_from_ir(instr)
+        if instr.op == IrOpcode::IrCall && native_v2_ir_reg_is_f128(&func, instr.dst) {
+            mi.cond = 1
+        }
+        out = _add_instr_byval(out, mi)
         i = i + 1
     }
 
@@ -1962,13 +1981,17 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 return out
             }
             var f128_ai: i64 = 0
+            var f128_count: i64 = 0
             while f128_ai < machine_instr_call_arg_count(instr) {
                 if native_v2_slot_is_f128_byval(out, machine_instr_call_arg_value(instr, f128_ai)) {
-                    out.supported = false
-                    out.unsupported_detail = "f128_call_arg_pending"
-                    return out
+                    f128_count = f128_count + 1
                 }
                 f128_ai = f128_ai + 1
+            }
+            if f128_count > 0 && !(f128_count == 1 && machine_instr_call_arg_count(instr) == 1) {
+                out.supported = false
+                out.unsupported_detail = "f128_call_shape_pending"
+                return out
             }
             let stack_count = if machine_instr_call_arg_count(instr) > 6 { machine_instr_call_arg_count(instr) - 6 } else { 0 }
             if (stack_count % 2) != 0 {
@@ -2007,7 +2030,12 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out.temp_count = temp + 1
                 out = _emit_legal_byval(out, native_v2_make_capture_ret(temp))
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
-                out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                if instr.cond == 1 {
+                    out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, temp))
+                    out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+                } else {
+                    out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                }
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
             if machine_instr_call_arg_count(instr) > MIR_MAX_CALL_ARGS {
@@ -2069,11 +2097,6 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             }
         } else if instr.opcode == MIR_OP_PSEUDO_RET {
             if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
-                if native_v2_slot_is_f128_byval(out, machine_instr_src1_value(instr)) {
-                    out.supported = false
-                    out.unsupported_detail = "f128_return_pending"
-                    return out
-                }
                 let temp = out.temp_count
                 out.temp_count = temp + 1
                 out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_src1_value(instr)))

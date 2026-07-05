@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5.2 f128 native opaque-storage receipt.
 
-S5.2 promotes exactly one executable f128 capability: local opaque storage and
-copy of f128 values as two 64-bit stack words in native-v2 x86 ELF output. It
-does not claim IEEE binary128 arithmetic, binary128 literal bit materialization,
-SysV f128 call ABI, or f128 returns.
+S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
+words in native-v2 x86 ELF output. Later S5 receipts may promote narrow direct
+f128 call/return shapes; this receipt still guards that arithmetic and
+multi-argument f128 call shapes fail closed.
 """
 
 from __future__ import annotations
@@ -52,30 +52,16 @@ CASES: list[dict[str, Any]] = [
 """,
     },
     {
-        "case_id": "f128_call_arg_stays_blocked",
+        "case_id": "f128_multi_arg_shape_stays_blocked",
         "kind": "block",
-        "expected_detail": "f128_call_arg_pending",
-        "source": """fn sink(x: f128) -> i64 {
-    0
+        "expected_detail": "f128_call_shape_pending",
+        "source": """fn mix(x: f128, y: i64) -> i64 {
+    y
 }
 
 fn main() -> i64 {
     let x: f128 = 1.0 as f128
-    sink(x)
-}
-""",
-    },
-    {
-        "case_id": "f128_return_stays_blocked",
-        "kind": "block",
-        "expected_detail": "f128_return_pending",
-        "source": """fn make() -> f128 {
-    1.0 as f128
-}
-
-fn main() -> i64 {
-    let x: f128 = make()
-    0
+    mix(x, 3)
 }
 """,
     },
@@ -103,9 +89,14 @@ def pretty_json(payload: object) -> str:
 
 
 def run_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, str, str]:
+    env = os.environ.copy()
+    raw = cwd / "artifacts" / "self-hosted" / "madaros"
+    if raw.exists():
+        env["MADAROS_RAW_BIN"] = str(raw)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -273,8 +264,10 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_payload_words": ["decimal_sig_hi", "decimal_sig_lo"],
             "f128_native_ieee_binary128_materialization_promoted": False,
             "f128_native_arithmetic_promoted": False,
-            "f128_native_call_abi_promoted": False,
-            "f128_native_return_abi_promoted": False,
+            "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
+            "f128_external_sysv_abi_promoted": False,
+            "f128_sret_abi_promoted": False,
+            "f128_multi_arg_call_shape_promoted": False,
             "legacy_fallback_used": False,
         },
         "cases": case_results,
