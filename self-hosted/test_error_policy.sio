@@ -1,0 +1,75 @@
+// Witness test for self-hosted::native::error_policy
+// validated_lane: lean_single
+
+module test_error_policy
+
+use native::error_policy::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    let k = 2
+
+    // W1: chain of 3 fadd plus 1 fmul.
+    var w1 = error_chain(err_fadd(), err_fadd())
+    w1 = error_chain(w1, err_fadd())
+    w1 = error_chain(w1, err_fmul())
+    if w1.mean != 0 { fails = fails + 1 }
+    if w1.variance != 10000 { fails = fails + 1 }
+    if error_gate(w1, 1000, k) != 1 { fails = fails + 1 }
+
+    // Exact chain arithmetic witness: means and variances are additive.
+    let c1 = error_from_sigma(7, 3)
+    let c2 = error_from_sigma(11, 4)
+    let c = error_chain(c1, c2)
+    if c.mean != 18 { fails = fails + 1 }
+    if c.variance != 25 { fails = fails + 1 }
+
+    // W2: naive sum at n=1,000,000 should reject for u=100000 centi-ulp.
+    // Probabilistic model (Higham-Mary 2019): sigma = sqrt(n) * 0.5 ulp
+    // = 1000 * 50 = 50000 centi-ulp; upper_q(k=2) = 100000, which meets the
+    // reject threshold (upper >= u) exactly at u = 100000.
+    let naive = err_sum_naive(1000000)
+    let q_naive = error_upper_q(naive, k)
+    if q_naive != 100000 { fails = fails + 1 }
+    if error_gate(naive, 100000, k) != 2 { fails = fails + 1 }
+
+    let kahan = err_sum_kahan(1000000)
+    let q_kahan = error_upper_q(kahan, k)
+    if q_kahan != 400 { fails = fails + 1 }
+    if error_gate(kahan, 100000, k) != 0 { fails = fails + 1 }
+
+    // W3: dd should be tightest, then kahan, then naive.
+    let dd = err_sum_dd(1000000)
+    let q_dd = error_upper_q(dd, k)
+    if q_dd != 200 { fails = fails + 1 }
+    if !(q_dd <= q_kahan) { fails = fails + 1 }
+    if !(q_kahan < q_naive) { fails = fails + 1 }
+
+    // W4: EFT chains remain exact zero error and must pass tiny budget.
+    let eft = error_chain(err_two_sum(), err_two_sum())
+    if eft.mean != 0 { fails = fails + 1 }
+    if eft.variance != 0 { fails = fails + 1 }
+    if error_upper_q(eft, k) != 0 { fails = fails + 1 }
+    if error_gate(eft, 1, k) != 0 { fails = fails + 1 }
+
+    // W5: boundary conditions.
+    if error_gate(error_certain(0), 0, k) != 2 { fails = fails + 1 }
+
+    let eq_case = error_from_sigma(0, 10)
+    let eq_u = error_upper_q(eq_case, k)
+    if eq_u != 20 { fails = fails + 1 }
+    if error_gate(eq_case, eq_u, k) != 2 { fails = fails + 1 }
+
+    let marginal_case = error_from_sigma(0, 10)
+    if error_upper_q(marginal_case, k) != 20 { fails = fails + 1 }
+    if error_gate(marginal_case, 200, k) != 1 { fails = fails + 1 }
+
+    if error_gate_names(0) != "ok" { fails = fails + 1 }
+    if error_gate_names(1) != "marginal" { fails = fails + 1 }
+    if error_gate_names(2) != "reject" { fails = fails + 1 }
+    if error_gate_names(9) != "unknown" { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: error_policy W1 W2 W3 W4 W5")
+    0
+}

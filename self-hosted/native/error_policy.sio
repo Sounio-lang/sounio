@@ -1,0 +1,114 @@
+// self-hosted::native::error_policy — Epistemic roundoff policy contract
+//
+// This mirrors the epistemic latency model in native::target_policy.
+// Each floating-point operation contributes a distribution of roundoff error.
+// Independent variances add along an operation chain.
+//
+// Fixed-point convention:
+// - Error mean is stored in centi-ulp of the result format.
+// - 1 ulp is represented as 100 units.
+// - Variance is stored in centi-ulp squared.
+//   The square-root helper recovers sigma in centi-ulp.
+
+module native::error_policy
+
+pub struct ErrorDist {
+    pub mean: i64,        // centi-ulp
+    pub variance: i64,    // centi-ulp squared
+}
+
+pub fn error_certain(c: i64) -> ErrorDist {
+    ErrorDist { mean: c, variance: 0 }
+}
+
+pub fn error_from_sigma(mean: i64, sigma: i64) -> ErrorDist {
+    ErrorDist { mean: mean, variance: sigma * sigma }
+}
+
+fn err_isqrt(x: i64) -> i64 with Mut, Div {
+    if x <= 0 { return 0 }
+    var g = x
+    if g > 1 { g = (x / 2) + 1 }
+    var i = 0
+    while i < 80 {
+        let next = (g + (x / g)) / 2
+        if next >= g {
+            while (g + 1) * (g + 1) <= x { g = g + 1 }
+            while g * g > x { g = g - 1 }
+            return g
+        }
+        g = next
+        i = i + 1
+    }
+    while (g + 1) * (g + 1) <= x { g = g + 1 }
+    while g * g > x { g = g - 1 }
+    g
+}
+
+pub fn error_chain(a: ErrorDist, b: ErrorDist) -> ErrorDist {
+    ErrorDist {
+        mean: a.mean + b.mean,
+        variance: a.variance + b.variance,
+    }
+}
+
+// IEEE binary64 round-to-nearest model: each primitive op has sigma 0.5 ulp.
+// Higham, Accuracy and Stability of Numerical Algorithms, section 2.2.
+pub fn err_fadd() -> ErrorDist { error_from_sigma(0, 50) }
+pub fn err_fsub() -> ErrorDist { error_from_sigma(0, 50) }
+pub fn err_fmul() -> ErrorDist { error_from_sigma(0, 50) }
+pub fn err_fdiv() -> ErrorDist { error_from_sigma(0, 50) }
+pub fn err_fsqrt() -> ErrorDist { error_from_sigma(0, 50) }
+
+// Error-free transformations are exact in this model.
+// Dekker 1971 and Knuth TAOCP section 4.2.2.
+pub fn err_two_sum() -> ErrorDist { error_certain(0) }
+pub fn err_two_prod() -> ErrorDist { error_certain(0) }
+
+// Naive forward summation model.
+// Probabilistic rounding analysis (Higham and Mary 2019, "A New Approach to
+// Probabilistic Rounding Error Analysis", SIAM SISC 41(5)): with roundoffs
+// modelled as independent zero-mean random variables, the accumulated error
+// deviation grows like sqrt(n) times u, not n times u.  The linear-in-n
+// quantity (n-1) times u is the deterministic worst-case BOUND, which is not
+// a standard deviation and must not be stored in the variance field.
+// xai math-review 2026-07-05 caught the earlier sigma-proportional-to-n
+// version of this function as WRONG; this is the corrected model.
+pub fn err_sum_naive(n: i64) -> ErrorDist with Mut, Div {
+    if n <= 0 { return error_certain(0) }
+    error_from_sigma(0, err_isqrt(n) * 50)
+}
+
+// Kahan compensated summation: first-order bound 2u plus higher-order term.
+pub fn err_sum_kahan(n: i64) -> ErrorDist {
+    if n <= 0 { return error_certain(0) }
+    error_from_sigma(0, 200)
+}
+
+// Double-double accumulator then one final rounding to binary64.
+pub fn err_sum_dd(n: i64) -> ErrorDist {
+    if n <= 0 { return error_certain(0) }
+    error_from_sigma(0, 100)
+}
+
+pub fn error_upper_q(e: ErrorDist, k: i64) -> i64 with Mut, Div {
+    e.mean + (k * err_isqrt(e.variance))
+}
+
+pub fn error_gate(e: ErrorDist, u_centiulp: i64, k: i64) -> i64 with Mut, Div {
+    if u_centiulp <= 0 { return 2 }
+    let upper = error_upper_q(e, k)
+    if upper >= u_centiulp { return 2 }
+    if upper * 10 >= u_centiulp { return 1 }
+    0
+}
+
+pub fn error_gate_names(code: i64) -> string {
+    if code == 0 { "ok" }
+    else {
+        if code == 1 { "marginal" }
+        else {
+            if code == 2 { "reject" } else { "unknown" }
+        }
+    }
+}
