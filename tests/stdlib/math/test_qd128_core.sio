@@ -1,0 +1,195 @@
+//@ run-pass
+// validated_lane: lean_single
+// Core witnesses for stdlib/math/qd128.sio (EISA v2 phase W1).
+//
+// Bound derivations use eps_qd = 2^-211 ~ 3.11e-64 (HLB 2001: both the
+// accurate addition and the 13-term multiplication satisfy the IEEE-style
+// bound fl(a op b) = (1 + delta)(a op b), |delta| <= 2*eps_qd; division's
+// measured constant is slightly worse, ~2.5-3*eps_qd per HLB — bounds
+// below budget 3*eps_qd per division; math-review 2026-07-05).
+// Tolerances below are derived from operation counts FIRST, then checked
+// against measurement — never the other way around.
+
+use math::dd64::*
+use math::qd128::*
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qd_abs_err(a: Qd128, b: Qd128) -> f64 with Mut, Panic {
+    abs_f64(qd_to_f64(qd_sub(a, b)))
+}
+
+fn qd_rel_err(a: Qd128, b: Qd128) -> f64 with Mut, Div, Panic {
+    let d = qd_sub(a, b)
+    let q = qd_div(d, b)
+    abs_f64(qd_to_f64(q))
+}
+
+fn pow2i(e: i64) -> f64 with Mut, Div {
+    if e == 0 { return 1.0 }
+    var k = 0
+    var r = 1.0
+    if e > 0 {
+        while k < e {
+            r = r * 2.0
+            k = k + 1
+        }
+        return r
+    }
+    let n = 0 - e
+    while k < n {
+        r = r * 0.5
+        k = k + 1
+    }
+    r
+}
+
+// ulp(x) = 2^(exp(x) - 52) for normal x, via arithmetic exponent extraction
+// (stdlib/math tests do not import eisa::format's f64_parts by design).
+fn ulp_est(x: f64) -> f64 with Mut, Div {
+    let ax = abs_f64(x)
+    if ax == 0.0 { return 0.0 }
+    var y = ax
+    var e = 0
+    while y >= 2.0 {
+        y = y * 0.5
+        e = e + 1
+    }
+    while y < 1.0 {
+        y = y * 2.0
+        e = e - 1
+    }
+    pow2i(e - 52)
+}
+
+// Mixed op chain used twice by the Q8 determinism witness.
+fn chain_det() -> Qd128 with Mut, Div, Panic {
+    let a = qd_div(qd_from_f64(355.0), qd_from_f64(113.0))
+    let b = qd_div(qd_from_f64(1.0), qd_from_f64(7.0))
+    let c = qd_sqrt(qd_from_f64(2.0))
+    qd_sub(qd_mul(qd_add(a, b), c), qd_mul_f64(b, 5.5))
+}
+
+fn main() with Mut, Div, Panic, IO {
+    var fails = 0
+
+    // Q1: EFT exactness of the dd64 primitives qd128 builds on
+    // (same hard pairs as test_dd64_eft_exact.sio).
+    let s1 = two_sum(10000000000000000.0, 1.0)
+    if s1.hi != 10000000000000000.0 { fails = fails + 1 }
+    if s1.lo != 1.0 { fails = fails + 1 }
+    let p1 = two_prod(134217729.0, 134217729.0)
+    if p1.hi != 18014398777917440.0 { fails = fails + 1 }
+    if p1.lo != 1.0 { fails = fails + 1 }
+
+    // Q2: renormalisation on overlapping 5-term expansion; canonical spacing.
+    // Inputs: 1, 2^-53, 2^-54, 2^-56, 2^-58 (overlapping tail terms),
+    // constructed arithmetically (exact powers of two — long decimal
+    // literals are not guaranteed bit-exact through the lexer).
+    // The exact sum spans 59 significand bits, so a dd64 accumulation of the
+    // same terms is EXACT (dd carries ~106 bits) and is a sound reference:
+    // the renormalised qd must collapse to the same dd value bit-for-bit.
+    // A plain f64 sum is NOT a sound reference here — it rounds the whole
+    // tail away (1 + 2^-53 ties to even = 1.0) while the true rounded value
+    // is 1 + 2^-52.
+    let e53 = pow2i(0 - 53)
+    let e54 = pow2i(0 - 54)
+    let e56 = pow2i(0 - 56)
+    let e58 = pow2i(0 - 58)
+    let rn = qd_renorm5(1.0, e53, e54, e56, e58)
+    let dd_ref = dd_add_f64(dd_add_f64(dd_add_f64(dd_add_f64(dd_from_f64(1.0), e53), e54), e56), e58)
+    if !dd_eq(qd_to_dd(rn), dd_ref) { fails = fails + 1 }
+    if qd_to_f64(rn) != dd_to_f64(dd_ref) { fails = fails + 1 }
+    // Canonical spacing |x_{i+1}| <= ulp(x_i), checked via ulp_est.
+    // (For zero components ulp_est returns 0 and the |0| <= 0 case passes.)
+    if abs_f64(rn.x1) > ulp_est(rn.x0) { fails = fails + 1 }
+    if abs_f64(rn.x2) > ulp_est(rn.x1) { fails = fails + 1 }
+    if abs_f64(rn.x3) > ulp_est(rn.x2) { fails = fails + 1 }
+
+    // Q3: associativity stress on magnitude-spread inputs (1/3, 1/7, 1e-30).
+    // Derivation: each qd_add satisfies |fl(u+v) - (u+v)| <= 2*eps_qd*|u+v|.
+    // Each association path performs 2 adds => path relative error
+    // <= 4*eps_qd + O(eps_qd^2); the two paths differ by <= 8*eps_qd
+    // ~ 2.5e-63 relative. qd_rel_err's own division adds <= 3*eps_qd.
+    // Bound used: 11*eps_qd ~ 3.4e-63, rounded up to 5e-63. (Measured: 0.0.)
+    let a = qd_div(qd_from_f64(1.0), qd_from_f64(3.0))
+    let b = qd_div(qd_from_f64(1.0), qd_from_f64(7.0))
+    let c = qd_from_f64(0.000000000000000000000000000001)
+    let left = qd_add(qd_add(a, b), c)
+    let right = qd_add(a, qd_add(b, c))
+    if qd_rel_err(left, right) > 0.000000000000000000000000000000000000000000000000000000000000005 { fails = fails + 1 }
+
+    // Q4: multiplicative identity and an EXACT small-integer multiplicand.
+    // Derivation (identity): x = fl(7/3) [<= 3*eps_qd], inv = fl(1/x)
+    // [<= 3*eps_qd], product [<= 2*eps_qd] => |x*inv - 1| <= 8*eps_qd
+    // + O(eps_qd^2) ~ 2.5e-63. Bound used: 1e-62 (4x headroom for the
+    // measurement subtraction). (Measured: ~1.4e-66.)
+    let x = qd_div(qd_from_f64(7.0), qd_from_f64(3.0))
+    let inv = qd_div(qd_from_f64(1.0), x)
+    let one_hat = qd_mul(x, inv)
+    if qd_abs_err(one_hat, qd_from_f64(1.0)) > 0.00000000000000000000000000000000000000000000000000000000000001 { fails = fails + 1 }
+    // 7 * 0.125 is exact in binary; repeated qd_add of 0.125 is exact too
+    // (every partial sum is a dyadic rational within one f64 component),
+    // so mul and the add chain must agree bit-for-bit.
+    let z = qd_from_f64(0.125)
+    let mz = qd_mul(z, qd_from_f64(7.0))
+    var rz = qd_zero()
+    var i = 0
+    while i < 7 {
+        rz = qd_add(rz, z)
+        i = i + 1
+    }
+    if !qd_eq(mz, rz) { fails = fails + 1 }
+
+    // Q5: division round-trip (aa*bb)/bb vs aa.
+    // Derivation: one mul [2*eps_qd] + one div [3*eps_qd] + qd_rel_err's
+    // div [3*eps_qd] => <= 8*eps_qd ~ 2.5e-63 relative.
+    // Bound used: 1e-62. (Measured: ~9.1e-66 relative.)
+    let aa = qd_div(qd_from_f64(355.0), qd_from_f64(113.0))
+    let bb = qd_div(qd_from_f64(22.0), qd_from_f64(7.0))
+    let rt = qd_div(qd_mul(aa, bb), bb)
+    if qd_rel_err(rt, aa) > 0.00000000000000000000000000000000000000000000000000000000000001 { fails = fails + 1 }
+
+    // Q6: sqrt(2)^2 - 2.
+    // Derivation: the f64 seed of 1/sqrt(2) has relative error ~1e-16;
+    // Newton on f(x) = 1/x^2 - a converges quadratically (e_{k+1} ~ 3e_k^2):
+    // 2^-53 -> 3*2^-106 -> 3*2^-212 < eps_qd at the 3rd iteration, so the
+    // final error is rounding-dominated: relerr(qs) <= ~8*eps_qd (last
+    // iteration ops + final a*x mul). |qs^2 - 2| ~ 2*sqrt(2)*|qs - sqrt(2)|
+    // <= 32*eps_qd ~ 1.0e-62 at linear order EXACTLY — asserting 1e-62
+    // would leave zero headroom over the derived constant, so per the
+    // derived > asserted discipline (math-review 2026-07-05) the bound
+    // used is 4e-62 (~128*eps_qd, 4x headroom). (Measured: ~1.2e-66.)
+    let two = qd_from_f64(2.0)
+    let qs = qd_sqrt(two)
+    let sq = qd_mul(qs, qs)
+    if qd_abs_err(sq, two) > 0.00000000000000000000000000000000000000000000000000000000000004 { fails = fails + 1 }
+    // Leading components must agree with dd64's sqrt(2): x0 to <= 1 ulp
+    // (both are within 1 ulp of the true sqrt(2)), x1 to dd64's own
+    // accuracy floor ~2^-102 ~ 2e-31.
+    let d2 = dd_sqrt(dd_from_f64(2.0))
+    if abs_f64(qs.x0 - d2.hi) > ulp_est(d2.hi) { fails = fails + 1 }
+    if abs_f64(qs.x1 - d2.lo) > 0.0000000000000000000000000000001 { fails = fails + 1 }
+
+    // Q7: dd64 interop round-trip is exact for a normalised dd input
+    // (both components survive qd_from_dd/qd_to_dd unchanged).
+    let d = dd_div(dd_from_f64(355.0), dd_from_f64(113.0))
+    let q = qd_from_dd(d)
+    let dback = qd_to_dd(q)
+    if !dd_eq(d, dback) { fails = fails + 1 }
+
+    // Q8: determinism — two runs of the same mixed chain must be
+    // bit-identical componentwise. Plain f64 == is sound here: all values
+    // are finite (finite-domain module) and lean_single compares f64 by
+    // value bits for finite operands, so == is exactly bit-equality
+    // (modulo -0.0/+0.0, which cannot arise from these strictly positive
+    // chains).
+    let r1 = chain_det()
+    let r2 = chain_det()
+    if !qd_eq(r1, r2) { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: qd128 core — EFT reuse, renorm, add/mul/div/sqrt, interop, determinism")
+}
