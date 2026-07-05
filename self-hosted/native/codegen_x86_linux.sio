@@ -5631,6 +5631,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     var rst_j = 0
     while rst_j < 512 {
         c.is_float_reg[rst_j as usize] = 0
+        c.is_f128_reg[rst_j as usize] = 0
         rst_j = rst_j + 1
     }
     c.current_strategy = 0
@@ -5827,12 +5828,50 @@ fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, 
 fn nc_core_mark_float_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
     if reg >= 0 && reg < 512 {
         (*nc).is_float_reg[reg as usize] = 1
+        (*nc).is_f128_reg[reg as usize] = 0
     }
 }
 
 fn nc_core_mark_int_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
     if reg >= 0 && reg < 512 {
         (*nc).is_float_reg[reg as usize] = 0
+        (*nc).is_f128_reg[reg as usize] = 0
+    }
+}
+
+fn nc_core_mark_f128_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
+    if reg >= 0 && reg < 511 {
+        (*nc).is_float_reg[reg as usize] = 0
+        (*nc).is_float_reg[(reg + 1) as usize] = 0
+        (*nc).is_f128_reg[reg as usize] = 1
+        (*nc).is_f128_reg[(reg + 1) as usize] = 1
+    }
+}
+
+fn nc_core_reg_is_f128(nc: &! NativeCompiler, reg: i64) -> bool with Mut, Panic, Div {
+    if reg >= 0 && reg < 512 {
+        return (*nc).is_f128_reg[reg as usize] == 1
+    }
+    false
+}
+
+fn nc_core_store_f128_opaque_words(nc: &! NativeCompiler, dst: i64, hi: i64, lo: i64) with Mut, Panic, Div {
+    if dst >= 0 && dst < 511 {
+        nc_emit_mov_rax_imm(nc, hi)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_emit_mov_rax_imm(nc, lo)
+        nc_core_store_rax_to_temp(nc, dst + 1)
+        nc_core_mark_f128_reg(nc, dst)
+    }
+}
+
+fn nc_core_copy_f128_words(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    if dst >= 0 && dst < 511 && src >= 0 && src < 511 {
+        nc_core_load_temp_to_rax(nc, src)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_load_temp_to_rax(nc, src + 1)
+        nc_core_store_rax_to_temp(nc, dst + 1)
+        nc_core_mark_f128_reg(nc, dst)
     }
 }
 
@@ -6543,7 +6582,16 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG {
-            return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_execution_pending")
+            if (*func).instrs[i as usize].name.len > 0 {
+                nc_core_store_f128_opaque_words(
+                    nc,
+                    (*func).instrs[i as usize].dst,
+                    (*func).instrs[i as usize].src2,
+                    (*func).instrs[i as usize].imm_i64,
+                )
+            } else {
+                nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+            }
         } else if instr_op == IrOpcode::IrLoadImm {
             let imm_value = (*func).instrs[i as usize].imm_i64
             if imm_value == (0 - 4242) {
@@ -6690,14 +6738,23 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 )
             }
         } else if instr_op == IrOpcode::IrBinOp {
+            if nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src1) || nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src2) {
+                return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_arithmetic_pending")
+            }
             if !nc_emit_core_binop(nc, func, i) {
                 return native_v2_core_ir_trace_fail(func, fn_index, i, "binop_unsupported")
             }
         } else if instr_op == IrOpcode::IrCopy {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            if nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src1) {
+                nc_core_copy_f128_words(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].src1)
+            } else {
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
             if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 {
-                if (*nc).is_float_reg[(*func).instrs[i as usize].src1 as usize] == 1 {
+                if (*nc).is_f128_reg[(*func).instrs[i as usize].src1 as usize] == 1 {
+                    nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+                } else if (*nc).is_float_reg[(*func).instrs[i as usize].src1 as usize] == 1 {
                     nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
                 } else {
                     nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
@@ -6802,6 +6859,14 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
+            var f128_arg_i: i64 = 0
+            while f128_arg_i < argc && f128_arg_i < 8 {
+                let f128_arg = nc_core_call_arg_at((*func).instrs[i as usize].call_args, f128_arg_i)
+                if nc_core_reg_is_f128(nc, f128_arg) {
+                    return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_call_arg_pending")
+                }
+                f128_arg_i = f128_arg_i + 1
+            }
             if !nc_core_push_call_stack_args(nc, func, i, argc) { return native_v2_core_ir_trace_fail(func, fn_index, i, "call_stack_args_failed") }
             if argc > 0 {
                 if !nc_core_load_call_arg_into(nc, func, i, 0, 7) { return native_v2_core_ir_trace_fail(func, fn_index, i, "call_arg0_failed") }
@@ -6837,6 +6902,9 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     (*nc).fn_returns_float[(*func).instrs[i as usize].fn_id as usize] == 1
                 } else {
                     false
+                }
+                if (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG {
+                    return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_return_pending")
                 }
                 let call_returns_float = (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG || callee_returns_float
                 if call_returns_float {
@@ -6882,6 +6950,9 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             }
         } else if instr_op == IrOpcode::IrReturn {
+            if nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src1) {
+                return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_return_pending")
+            }
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             if (*func).returns_float == 1 || ((*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 && (*nc).is_float_reg[(*func).instrs[i as usize].src1 as usize] == 1) {
                 nc_emit_movq_xmm0_rax(nc)

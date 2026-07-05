@@ -3,9 +3,9 @@
 
 This receipt promotes the decimal f128 literal bridge from parser/checker facts
 into IR, MachineIR slot metadata, and supported MachineModule JSON. It
-deliberately does not promote native f128 execution: x86 emission must still
-fail closed without producing an ELF until the software-helper/runtime slice is
-implemented.
+also records the S5.2 boundary: native-v2 may emit and execute local opaque
+storage/copy cases, but this receipt still does not promote IEEE binary128
+materialization, arithmetic, call ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -13,20 +13,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.f128_literal_value_bridge_receipt/0.2"
+SCHEMA_VERSION = "madaros.v2.s5.f128_literal_value_bridge_receipt/0.3"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
 F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_1_F128_LITERAL_VALUE_BRIDGED_TO_SUPPORTED_MACHINEIR_NOT_NATIVE_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_2_F128_LITERAL_VALUE_BRIDGED_WITH_NATIVE_OPAQUE_LOCAL_STORAGE"
 
 F128_SLOT_KIND = 3
 F128_WIDTH_WORDS = 2
-F128_NATIVE_EXECUTION_PENDING_DETAIL = "f128_execution_pending"
 
 
 CASES: list[dict[str, Any]] = [
@@ -198,14 +198,17 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     )
     log = stdout + stderr
     log_path.write_text(log, encoding="utf-8")
-    if rc == 0 and "native_v2_compile: emitted" in log:
-        raise SystemExit(f"{case_id} unexpectedly emitted an ELF before f128 execution promotion")
-    if "native_v2_compile: FAIL" not in log:
-        raise SystemExit(f"{case_id} did not fail closed through native-v2 compile; log={log_path}")
     if "Segmentation fault" in log or "SIGSEGV" in log or "legacy fallback" in log:
         raise SystemExit(f"{case_id} crashed or used fallback; log={log_path}")
-    if elf_path.exists() and elf_path.stat().st_size > 0:
-        raise SystemExit(f"{case_id} emitted an ELF despite pending native f128 execution")
+    if rc != 0 or "native_v2_compile: emitted" not in log:
+        raise SystemExit(f"{case_id} did not emit local opaque f128 ELF; log={log_path}")
+    if not elf_path.exists() or elf_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id} missing emitted local opaque f128 ELF")
+    os.chmod(elf_path, 0o755)
+    run_rc, run_stdout, run_stderr = run_command([str(elf_path)], root, timeout_s)
+    run_log = run_stdout + run_stderr
+    if run_rc != 0:
+        raise SystemExit(f"{case_id} emitted ELF did not run rc=0; rc={run_rc} log={run_log!r}")
     if not mm_path.exists() or mm_path.stat().st_size <= 0:
         raise SystemExit(f"{case_id} did not emit MachineModule JSON")
 
@@ -241,10 +244,14 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "machine_module_json_sha256": module["machine_module_json_sha256"],
         "machine_module_supported": module.get("supported"),
         "machine_module_unsupported_detail": module.get("unsupported_detail"),
+        "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+        "run_rc": run_rc,
+        "run_log_sha256": sha256_text(run_log),
         "f128_slot_rows": slots,
         "f128_literal_metadata_rows": literal_rows,
         "expected_decimal_metadata": expected,
-        "f128_execution_promoted": False,
+        "f128_native_opaque_local_storage_promoted": True,
+        "f128_ieee_binary128_execution_promoted": False,
     }
 
 
@@ -265,13 +272,16 @@ def emit(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str,
         "f128_literal_decimal_metadata_machine_module_supported": True,
         "f128_binary128_slot_metadata_emitted": True,
         "f128_machine_ir_opaque_literal_promoted": True,
-        "f128_execution_promoted": False,
-        "f128_native_v2_execution_pending_detail": F128_NATIVE_EXECUTION_PENDING_DETAIL,
-        "f128_native_v2_execution_promoted": False,
+        "f128_native_opaque_local_storage_promoted": True,
+        "f128_native_v2_local_opaque_execution_promoted": True,
+        "f128_native_ieee_binary128_materialization_promoted": False,
+        "f128_native_arithmetic_promoted": False,
+        "f128_native_call_abi_promoted": False,
+        "f128_native_return_abi_promoted": False,
         "s5_ready": False,
         "remaining_missing_obligations": [
             "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
-            "f128 native-v2 execution and differential receipts",
+            "f128 arithmetic, call ABI, return ABI, and differential receipts",
         ],
     }
     canonical, digest = canonical_roundtrip(payload)

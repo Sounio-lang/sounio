@@ -2,8 +2,9 @@
 """Emit a Madaros v2 S5 MachineIR slot metadata receipt.
 
 This receipt promotes the MachineModule slot-kind/width metadata contract used
-by the future f128 binary128 ABI path. It deliberately does not promote f128
-execution.
+by the future f128 binary128 ABI path. S5.2 additionally promotes local opaque
+native storage/copy for f128 values; IEEE binary128 materialization,
+arithmetic, and ABI remain unpromoted.
 """
 
 from __future__ import annotations
@@ -16,10 +17,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.3"
+SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.4"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_1_MACHINEIR_OPAQUE_F128_SLOT_METADATA_AND_LOCAL_COPY_PROMOTED_NOT_NATIVE_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_2_MACHINEIR_F128_SLOT_METADATA_AND_NATIVE_OPAQUE_LOCAL_STORAGE"
 
 MIR_SLOT_KIND_I64 = 1
 MIR_SLOT_KIND_F64 = 2
@@ -59,11 +60,11 @@ CASES: list[dict[str, Any]] = [
     0
 }
 """,
-        "expected_exit": None,
+        "expected_exit": 0,
         "required_kinds": [MIR_SLOT_KIND_F128_BINARY128],
         "forbidden_kinds": [],
         "expect_supported": True,
-        "expect_elf": False,
+        "expect_elf": True,
     },
 ]
 
@@ -312,8 +313,12 @@ def emit(args: argparse.Namespace) -> int:
         "f128_binary128_slot_metadata_emitted": True,
         "f128_machine_ir_opaque_slot_promoted": True,
         "f128_machine_ir_local_metadata_copy_promoted": True,
-        "f128_execution_slot_emitted": False,
-        "f128_native_v2_execution_pending_detail": "f128_execution_pending",
+        "f128_native_opaque_local_storage_promoted": True,
+        "f128_execution_slot_emitted": True,
+        "f128_native_ieee_binary128_materialization_promoted": False,
+        "f128_native_arithmetic_promoted": False,
+        "f128_native_call_abi_promoted": False,
+        "f128_native_return_abi_promoted": False,
         "f128_promoted": False,
         "s5_ready": False,
         "s5_implemented": False,
@@ -321,7 +326,7 @@ def emit(args: argparse.Namespace) -> int:
         "missing_full_obligations": [
             "f128 SysV ABI classification and call-return signature metadata",
             "f128 software-helper lowering with IEEE rounding and NaN/Inf receipts",
-            "native-v2 f128 execution differential receipts",
+            "native-v2 f128 arithmetic/ABI differential receipts",
         ],
     }
     _, receipt_sha = canonical_roundtrip(receipt)
