@@ -25,27 +25,27 @@ trap 'rm -rf "$WORK"' EXIT
 # The Python oracle emits all six faces (PAIR/TRIPLE/ARROW/MEASURE/SWEEP/BIG).
 python3 scripts/research/verify_zd168_oracle.py > "$WORK/py_all.txt"
 
-echo "[face 1/8] zero-divisor census: souc vs oracle ..."
+echo "[face 1/9] zero-divisor census: souc vs oracle ..."
 ./bin/souc run tests/run-pass/sedenion_zd_census_168.sio 2>/dev/null | grep '^PAIR ' | sort -u > "$WORK/souc_zd.txt"
 grep '^PAIR ' "$WORK/py_all.txt" | sort -u > "$WORK/py_zd.txt"
 SZD=$(wc -l < "$WORK/souc_zd.txt"); PZD=$(wc -l < "$WORK/py_zd.txt")
 
-echo "[face 2/8] non-Fano census: souc vs oracle ..."
+echo "[face 2/9] non-Fano census: souc vs oracle ..."
 ./bin/souc run tests/run-pass/octonion_nonfano_census_168.sio 2>/dev/null | grep '^TRIPLE ' | sort -u > "$WORK/souc_nf.txt"
 grep '^TRIPLE ' "$WORK/py_all.txt" | sort -u > "$WORK/py_nf.txt"
 SNF=$(wc -l < "$WORK/souc_nf.txt"); PNF=$(wc -l < "$WORK/py_nf.txt")
 
-echo "[face 3/8] 84<->84 dagger bijection map: souc vs oracle ..."
+echo "[face 3/9] 84<->84 dagger bijection map: souc vs oracle ..."
 ./bin/souc run tests/run-pass/octonion_dagger_bijection_84.sio 2>/dev/null | grep '^ARROW ' | sort -u > "$WORK/souc_ar.txt"
 grep '^ARROW ' "$WORK/py_all.txt" | sort -u > "$WORK/py_ar.txt"
 SAR=$(wc -l < "$WORK/souc_ar.txt"); PAR=$(wc -l < "$WORK/py_ar.txt")
 
-echo "[face 4/8] measure-layer exact E/Var over Q: souc vs Python fractions ..."
+echo "[face 4/9] measure-layer exact E/Var over Q: souc vs Python fractions ..."
 ./bin/souc run tests/run-pass/sedenion_measure_annihilation_exact.sio 2>/dev/null | grep '^MEASURE ' | sort > "$WORK/souc_me.txt"
 grep '^MEASURE ' "$WORK/py_all.txt" | sort > "$WORK/py_me.txt"
 SME=$(wc -l < "$WORK/souc_me.txt"); PME=$(wc -l < "$WORK/py_me.txt")
 
-echo "[face 5/8] generalized sweep + i64 boundary: souc (overflow-censored) vs unbounded oracle ..."
+echo "[face 5/9] generalized sweep + i64 boundary: souc (overflow-censored) vs unbounded oracle ..."
 ./bin/souc run tests/run-pass/sedenion_measure_annihilation_general.sio 2>/dev/null | grep '^SCALE ' > "$WORK/souc_sw.txt"
 grep '^SWEEP ' "$WORK/py_all.txt" > "$WORK/py_sw.txt"
 sweep_fail=0
@@ -63,12 +63,12 @@ for k in $(seq 1 12); do
   fi
 done
 
-echo "[face 6/8] UNBOUNDED bigint sweep (past the i64 wall): souc BigNat vs unbounded oracle ..."
+echo "[face 6/9] UNBOUNDED bigint sweep (past the i64 wall): souc BigNat vs unbounded oracle ..."
 ./bin/souc run tests/run-pass/sedenion_measure_annihilation_bigint.sio 2>/dev/null | grep '^BIG ' | sort -n -k2 > "$WORK/souc_big.txt"
 grep '^BIG ' "$WORK/py_all.txt" | sort -n -k2 > "$WORK/py_big.txt"
 SBIG=$(wc -l < "$WORK/souc_big.txt"); PBIG=$(wc -l < "$WORK/py_big.txt")
 
-echo "[face 7/8] full bigint (add/sub/mul/divmod/gcd/cmp/eq/is_zero): souc vs Python big-int oracle ..."
+echo "[face 7/9] full bigint (add/sub/mul/divmod/gcd/cmp/eq/is_zero): souc vs Python big-int oracle ..."
 : > "$WORK/souc_bn.txt"
 for f in bignat_selftest bignat_selftest_divmod_rem bignat_selftest_signed bignat_selftest_eq_true bignat_selftest_eq_false bignat_selftest_iszero_true bignat_selftest_iszero_false; do
   ./bin/souc run "tests/run-pass/$f.sio" 2>/dev/null | grep '^OP ' >> "$WORK/souc_bn.txt"
@@ -77,7 +77,7 @@ sort -o "$WORK/souc_bn.txt" "$WORK/souc_bn.txt"
 python3 scripts/research/bignat_oracle.py 2>/dev/null | grep '^OP ' | sort > "$WORK/py_bn.txt"
 SBN=$(wc -l < "$WORK/souc_bn.txt"); PBN=$(wc -l < "$WORK/py_bn.txt")
 
-echo "[face 8/8] rational-CD channel over unbounded Q: souc vs Python fractions oracle ..."
+echo "[face 8/9] rational-CD channel over unbounded Q: souc vs Python fractions oracle ..."
 : > "$WORK/souc_rb.txt"
 for f in sedenion_ratbig_channel_case1 sedenion_ratbig_channel_case2 sedenion_ratbig_channel_case3; do
   ./bin/souc run "tests/run-pass/$f.sio" 2>/dev/null | grep -E '^(CASE|R5|R12) ' >> "$WORK/souc_rb.txt"
@@ -85,6 +85,11 @@ done
 sort -o "$WORK/souc_rb.txt" "$WORK/souc_rb.txt"
 python3 scripts/research/ratbig_oracle.py 2>/dev/null | grep -E '^(CASE|R5|R12) ' | sort > "$WORK/py_rb.txt"
 SRB=$(wc -l < "$WORK/souc_rb.txt"); PRB=$(wc -l < "$WORK/py_rb.txt")
+
+echo "[face 9/9] GENERAL 16-component CD product over Q (all 16 comps, arbitrary rational pair): souc vs oracle ..."
+./bin/souc run tests/run-pass/sedenion_cd_full16_q.sio 2>/dev/null | grep -E '^(COMP|DEN) ' | sort > "$WORK/souc_16.txt"
+python3 scripts/research/cd16_oracle.py 2>/dev/null | grep -E '^(COMP|DEN) ' | sort > "$WORK/py_16.txt"
+S16=$(wc -l < "$WORK/souc_16.txt"); P16=$(wc -l < "$WORK/py_16.txt")
 
 fail=0
 if [ "$SZD" -ne 168 ] || [ "$PZD" -ne 168 ] || ! diff -q "$WORK/souc_zd.txt" "$WORK/py_zd.txt" >/dev/null; then
@@ -109,8 +114,11 @@ fi
 if [ "$SRB" -ne 9 ] || [ "$PRB" -ne 9 ] || ! diff -q "$WORK/souc_rb.txt" "$WORK/py_rb.txt" >/dev/null; then
   echo "MISMATCH (rational-CD channel): souc=$SRB python=$PRB"; diff "$WORK/souc_rb.txt" "$WORK/py_rb.txt" | head -20; fail=1
 fi
+if [ "$S16" -ne 34 ] || [ "$P16" -ne 34 ] || ! diff -q "$WORK/souc_16.txt" "$WORK/py_16.txt" >/dev/null; then
+  echo "MISMATCH (full-16 CD over Q): souc=$S16 python=$P16"; diff "$WORK/souc_16.txt" "$WORK/py_16.txt" | head -20; fail=1
+fi
 if [ "$fail" -eq 0 ]; then
-  echo "CROSS-VERIFIED (8 faces): 168-theorem structure + measure layer (exact->generalized->UNBOUNDED bigint) + full bigint + rational-CD, souc == independent oracle."
+  echo "CROSS-VERIFIED (9 faces): 168-theorem structure + measure layer (exact->generalized->UNBOUNDED bigint) + full bigint + rational-CD channel + GENERAL 16-comp CD over Q, souc == independent oracle."
   echo "  zero-divisor classes:      $SZD/168 identical pairs"
   echo "  non-Fano triples:          $SNF/168 identical triples"
   echo "  84<->84 dagger bijection:  $SAR/84 identical forward->backward arrows"
@@ -119,6 +127,7 @@ if [ "$fail" -eq 0 ]; then
   echo "  UNBOUNDED bigint sweep:    $SBIG/20 exact rational values identical PAST the i64 wall (to 1.5e40)."
   echo "  full bigint ops:           $SBN/17 exact (add/sub/mul/divmod/gcd/cmp/eq/is_zero, to ~10^60)."
   echo "  rational-CD channel:       $SRB/9 exact reduced rationals (locus annihilation over unbounded Q + off-locus)."
+  echo "  GENERAL 16-comp CD over Q: $S16/34 exact (all 16 comps, arbitrary rational pair; common-denom circumvents the [Rational;16] wall)."
   echo "  Structure: Lean native_decide-proven. Measure: exact Q, i64 boundary located AND removed via a from-scratch BigInt."
   exit 0
 fi
