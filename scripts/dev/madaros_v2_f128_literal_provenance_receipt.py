@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.f128_literal_provenance_receipt/0.2"
-STAGE_CONTRACT_LEVEL = "S4_S5_F128_LITERAL_DECIMAL_METADATA_PROMOTED_NOT_F128_EXECUTION"
+SCHEMA = "madaros.v2.f128_literal_provenance_receipt/0.3"
+STAGE_CONTRACT_LEVEL = "S4_S5_F128_LITERAL_DECIMAL_METADATA_AND_TYPE_PROMOTED_NOT_F128_EXECUTION"
 
 SOURCE = "fn main() -> i64 { let x: f128 = 1.2345678901234567890123456789012345 as f128; 0 }\n"
 LITERAL_DIGITS = "1.2345678901234567890123456789012345"
@@ -39,6 +39,46 @@ REQUIRED_AST_SNIPPETS = [
     "float_decimal_truncated_digits: i64",
     "pub fn expr_apply_float_literal_decimal_metadata(e: &! Expr, raw: Name)",
 ]
+REQUIRED_CHECKER_SNIPPETS = {
+    "self-hosted/check/types.sio": [
+        "TyF128",
+        "fn ty_f128() -> TypeEntry",
+        "kind: TypeKind::TyF128",
+        "clifford_p: 128",
+    ],
+    "self-hosted/check/compat.sio": [
+        "if a.kind == TypeKind::TyF128 && b.kind == TypeKind::TyF128",
+        "ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64 || ty.kind == TypeKind::TyF128",
+        "pub fn name_is_f128(n: Name) -> bool",
+        "name_matches_str4(n, 102, 49, 50, 56)",
+    ],
+    "self-hosted/check/check.sio": [
+        "mangle_append_literal(result, 102, 49, 50, 56, 4)",
+        "} else if name_is_f128(name) {",
+        "ty_f128()",
+        "TypeKind::TyF128 => print(\"f128\")",
+        "(self, ty_f128())",
+        "if ty.kind == TypeKind::TyF128",
+        "|| arg_ty.kind == TypeKind::TyF128",
+    ],
+    "self-hosted/test_check.sio": [
+        "fn tc_f128_type() -> TypeExpr",
+        "tc_named_type4(102, 49, 50, 56)",
+        "fn tc_test_07b() -> bool",
+        "T07b OK: f128 param + return type",
+    ],
+    "self-hosted/main.sio": [
+        "if ty.kind == TypeKind::TyF128 { print(\"f128\"); return }",
+    ],
+    "self-hosted/compiler/main.sio": [
+        "if ty.kind == TypeKind::TyF128 { print(\"f128\"); return }",
+    ],
+    "self-hosted/ir/serialize.sio": [
+        "let SOIR_TYPE_F128: i8 = 26",
+        "if ty.kind == TypeKind::TyF128",
+        "if tag == SOIR_TYPE_F128 { return (ty_f128(), p) }",
+    ],
+}
 
 
 def repo_root_from_script() -> Path:
@@ -103,6 +143,9 @@ def emit(args: argparse.Namespace) -> int:
     ast_path = root / "self-hosted" / "parser" / "ast.sio"
     parser_source = parser_path.read_text(encoding="utf-8")
     ast_source = ast_path.read_text(encoding="utf-8")
+    checker_sources: dict[str, str] = {
+        relpath: (root / relpath).read_text(encoding="utf-8") for relpath in REQUIRED_CHECKER_SNIPPETS
+    }
     block = parser_float_literal_block(parser_source)
     missing = [snippet for snippet in REQUIRED_PARSER_SNIPPETS if snippet not in block]
     if missing:
@@ -110,6 +153,13 @@ def emit(args: argparse.Namespace) -> int:
     missing_ast = [snippet for snippet in REQUIRED_AST_SNIPPETS if snippet not in ast_source]
     if missing_ast:
         raise SystemExit(f"AST missing required f128 decimal metadata snippets: {missing_ast}")
+    missing_checker: dict[str, list[str]] = {}
+    for relpath, snippets in REQUIRED_CHECKER_SNIPPETS.items():
+        missing_for_file = [snippet for snippet in snippets if snippet not in checker_sources[relpath]]
+        if missing_for_file:
+            missing_checker[relpath] = missing_for_file
+    if missing_checker:
+        raise SystemExit(f"checker missing required f128 type-awareness snippets: {missing_checker}")
     if block.find("let raw = self.current_name()") > block.find("let p = self.advance()"):
         raise SystemExit("parse_float_literal must capture raw token text before advance")
     if block.find("e.name = raw") < block.find("var e = mk_expr(ExprKind::ExprFloatLit, span)"):
@@ -138,12 +188,23 @@ def emit(args: argparse.Namespace) -> int:
         "parse_float_literal_block_sha256": sha256_text(block),
         "required_parser_snippets": REQUIRED_PARSER_SNIPPETS,
         "required_ast_snippets": REQUIRED_AST_SNIPPETS,
+        "required_checker_snippets": REQUIRED_CHECKER_SNIPPETS,
+        "checker_source_sha256": {relpath: sha256_text(text) for relpath, text in checker_sources.items()},
         "raw_literal_capture_before_advance": True,
         "float_literal_ast_name_preserved": True,
         "float_literal_f64_value_still_preserved": True,
         "float_literal_decimal_metadata_fields_present": True,
         "float_literal_decimal_metadata_helper_present": True,
         "float_literal_decimal_metadata_attached_in_parser": True,
+        "f128_type_kind_present": True,
+        "f128_type_constructor_present": True,
+        "f128_type_name_recognized_by_checker": True,
+        "f128_type_mangle_and_print_present": True,
+        "f128_type_positive_checker_test_present": True,
+        "f128_type_manifest_printers_present": True,
+        "f128_type_soir_serialization_present": True,
+        "f128_type_byte_width_recorded": True,
+        "f128_type_system_awareness_promoted": True,
         "probe_source": SOURCE,
         "probe_source_sha256": sha256_text(SOURCE),
         "probe_check_rc": check_rc,
@@ -161,6 +222,9 @@ def emit(args: argparse.Namespace) -> int:
         "roundtrip_contract": [
             "ExprFloatLit preserves source spelling in Expr.name",
             "ExprFloatLit carries bounded decimal sign/significand/scale metadata independent of Expr.float_val",
+            "Checker recognizes f128 as TypeKind::TyF128 instead of leaving it as a generic named type",
+            "Checker test suite includes a positive f128 parameter/return recognition case",
+            "Type printers and SOIR type serialization carry f128 explicitly without falling back to i64",
             "ExprFloatLit still carries the historical f64 parsed value for f64 compatibility",
             "f128 frontend check accepts high-precision decimal source before native-v2 execution",
             "receipt does not claim f128 IR/MIR/ABI/codegen execution",
