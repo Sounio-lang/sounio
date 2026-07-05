@@ -78,13 +78,20 @@ ALL PASS — and the **shape gate 80/80 green (exit 0)** against the deployed
 seed. Every gate passes with `ir_patch_validated_calls` live (no skip_patch)
 and the finalize/compact passes in their natural two-level RMW form.
 
-## 5. Follow-ups
+## 5. Follow-ups — first two DELIVERED (`be3e63b52` + `be72afbe9`)
 
-- a64: the projection engine is x86-only (the borrow path has no a64 twin; the
-  general-assign a64 mirror can reuse the same design when the a64 lane needs it).
-- Migrate specific handlers into the general engine incrementally (byte-diff
-  audits per handler) until the zoo is retired.
-- Remaining band-aids inventory (restore_user_main_calls, one-level idioms in
-  lower.sio) — revertible under the proof protocol.
-- Wire `lean_lvalue_shape_matrix.sh` into the standard gate set alongside
-  `canonical_compiler_gate.sh`.
+- ~~a64 mirror~~ **DONE**: `compile_place_projections_a64` +
+  `compile_place_assign_general_a64` (same `PLACE_*` contract; encodings
+  mirrored from the proven a64 store handlers) wired into `compile_stmt_a64`.
+- ~~Zoo retirement~~ **ROUND 1 DONE**: nine x86 dispatch entries of the
+  deref/two-level assign family (incl. a duplicated dispatch pair) + the two
+  a64 entries now route through the general engine — the handler family
+  behind every silent-store eruption is unreachable. Detector/handler bodies
+  remain as dead code for one soak cycle; deletion is round 2. Validated by:
+  shape matrix 80/80 end-to-end through the engine, self-compile bounce
+  convergence (the compiler compiles itself through the retired shapes),
+  canonical PASS (md5 `f45b0296fd6c157776c8c4d3336e49fb`), downstream 12/12.
+- Remaining: band-aids inventory (restore_user_main_calls, one-level idioms
+  in lower.sio) revertible under the proof protocol; wire
+  `lean_lvalue_shape_matrix.sh` into the standard CI gate set; metal-lane
+  runtime soak for the a64 engine; zoo round 2 (delete dead handler bodies).
