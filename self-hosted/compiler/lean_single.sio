@@ -11138,6 +11138,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             // Check if this looks like a static method call: Type::method()
             let looks_like_method_call = TK[(EP + 2) as usize] == 6
+            var mcall_fallthrough: i64 = 0
             if disc >= 0 {
                 // It's an enum variant
                 EP = EP + 1  // skip ::
@@ -11208,24 +11209,29 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
-                // Method not found — drain () to prevent EP stranding at (
-                EP = EP + 1  // skip (
-                var drain_d: i64 = 1
-                while EP < TC && drain_d > 0 {
-                    if TK[EP as usize] == 6 { drain_d = drain_d + 1 }
-                    if TK[EP as usize] == 7 { drain_d = drain_d - 1 }
-                    EP = EP + 1
-                }
+                // Method not found: this single-`::` prefix isn't a real
+                // struct/enum with a matching method — before assuming it's a
+                // broken static-method-call and stubbing 0, treat the prefix as
+                // a decorative module qualifier (exactly like the 2+-`::`
+                // flatten above already does) and fall through to ordinary
+                // bare-name call resolution. EP is already positioned at `(`
+                // (right after consuming `::method_name`), matching what the
+                // bare-call path below expects. Real motivating case: `use
+                // pkg::mod as alias; alias::fn()` (issue #632) — module
+                // aliasing has no dedicated alias table, so any unrecognized
+                // single-`::` prefix in call position falls through instead.
+                ns = method_ns
+                ne = method_ne
+                mcall_fallthrough = 1
+            }
+            if mcall_fallthrough == 0 {
+                // disc < 0, not a method call — unregistered enum variant: consume :: + name to prevent cascade
+                EP = EP + 1  // skip ::
+                EP = EP + 1  // skip variant name
                 em(0x48); em(0xb8); em64(0)
                 EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
                 return
             }
-            // disc < 0, not a method call — unregistered enum variant: consume :: + name to prevent cascade
-            EP = EP + 1  // skip ::
-            EP = EP + 1  // skip variant name
-            em(0x48); em(0xb8); em64(0)
-            EXPR_IS_F64 = 0; EXPR_TY = 0; EXPR_TY_HASH = 0
-            return
         }
         // Generic call/struct: IDENT < TYPE > ( or IDENT < TYPE > {
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -30189,7 +30195,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             ne = TE[EP as usize]
             EP = EP + 1  // skip terminal segment name
         }
-        // Enum::Variant
+        // Enum::Variant (or, when it isn't a real enum and a call follows, a
+        // decorative single-`::` prefix in call position — see the x86-64
+        // twin, compile_primary(), for the full rationale/issue #632. a64 has
+        // no static-method-call support to fall back from in the first place
+        // (a separate, larger, pre-existing a64 gap, not addressed here) —
+        // this only adds the "unrecognized prefix falls through to a bare
+        // call" behavior, mirroring x86's outcome for the same source shape.)
         if TK[EP as usize] == 51 {
             EP = EP + 1
             let vns = TS[EP as usize]
@@ -30198,10 +30210,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let eh = gl_name_hash(ns, ne)
             let vh = gl_name_hash(vns, vne)
             let disc = en_variant_value(eh, vh)
-            if disc >= 0 { emit_imm64_a64(disc) }
-            else { em32(0xD2800000) }
-            EXPR_IS_F64 = 0
-            return
+            if disc >= 0 {
+                emit_imm64_a64(disc)
+                EXPR_IS_F64 = 0
+                return
+            }
+            if TK[EP as usize] != 6 {
+                em32(0xD2800000)
+                EXPR_IS_F64 = 0
+                return
+            }
+            ns = vns
+            ne = vne
         }
         // Generic resolution
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -34924,6 +34944,28 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         is_named_import = 0
                         break
                     }
+                }
+                // `use pkg::mod as alias` — " as " unambiguously ends the module
+                // path (no path segment is ever spelled with embedded spaces in
+                // this codebase; census: zero `use X :: Y` / `use X:: Y` spaced
+                // occurrences). The path-building loop below used to silently
+                // DROP every space instead of treating it as a terminator, so
+                // this built the garbled path `pkg/modasalias.sio` (issue #632).
+                // The alias name itself needs no separate table: the module's
+                // symbols are still resolved by bare name once the file loads
+                // correctly, and a single-`::` call through the alias falls
+                // through to that bare lookup (see the call-site companion fix).
+                if sb(pos) == 32 && pos + 3 < SRC_LEN && sb(pos+1) == 97 && sb(pos+2) == 115 && sb(pos+3) == 32 {
+                    path_end = pos
+                    // Unambiguous: `as alias` always names the whole preceding
+                    // path as a module/file, never "the last segment is really
+                    // an exported symbol" (that ambiguity, is_named_import's
+                    // reason for existing, only applies to a bare trailing
+                    // segment with no `as` at all). Disable the Bug C
+                    // segment-stripping fallback so a genuine load failure here
+                    // reports its real path instead of a further-stripped one.
+                    is_named_import = 0
+                    break
                 }
                 pos = pos + 1
                 path_end = pos
