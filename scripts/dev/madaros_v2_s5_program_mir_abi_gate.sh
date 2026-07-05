@@ -14,10 +14,12 @@ S5_RECEIPT_DIR="$OUT_DIR/canonical_s5_source_receipts"
 SRET_RECEIPT_DIR="$OUT_DIR/sret_abi_receipt"
 SOURCE_SRET_RECEIPT_DIR="$OUT_DIR/source_sret_receipt"
 STACK_CALL_RECEIPT_DIR="$OUT_DIR/stack_call_receipt"
+IMPORTED_SRET_RECEIPT_DIR="$OUT_DIR/imported_sret_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
 SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_sret_abi_receipt.py"
 SOURCE_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_source_sret_receipt.py"
 STACK_CALL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_stack_call_receipt.py"
+IMPORTED_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_imported_sret_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
 MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
@@ -26,8 +28,9 @@ S5_RECEIPT_RESULTS="$OUT_DIR/madaros_v2_s5_source_receipts.tsv"
 SRET_RECEIPT="$SRET_RECEIPT_DIR/madaros_v2_s5_sret_abi.receipt.json"
 SOURCE_SRET_RECEIPT="$SOURCE_SRET_RECEIPT_DIR/madaros_v2_s5_source_sret.receipt.json"
 STACK_CALL_RECEIPT="$STACK_CALL_RECEIPT_DIR/madaros_v2_s5_stack_call.receipt.json"
+IMPORTED_SRET_RECEIPT="$IMPORTED_SRET_RECEIPT_DIR/madaros_v2_s5_imported_sret.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -98,7 +101,16 @@ if [[ ! -f "$STACK_CALL_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$IMPORTED_SRET_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$IMPORTED_SRET_RECEIPT_DIR"
+
+if [[ ! -f "$IMPORTED_SRET_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing imported SRET receipt: $IMPORTED_SRET_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -145,8 +157,9 @@ source_receipts_path = Path(sys.argv[2])
 sret_receipt_path = Path(sys.argv[3])
 source_sret_receipt_path = Path(sys.argv[4])
 stack_call_receipt_path = Path(sys.argv[5])
-module_path = Path(sys.argv[6])
-receipt_path = Path(sys.argv[7])
+imported_sret_receipt_path = Path(sys.argv[6])
+module_path = Path(sys.argv[7])
+receipt_path = Path(sys.argv[8])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -155,6 +168,7 @@ effect_module = load_json(effect_module_path)
 sret_receipt = load_json(sret_receipt_path)
 source_sret_receipt = load_json(source_sret_receipt_path)
 stack_call_receipt = load_json(stack_call_receipt_path)
+imported_sret_receipt = load_json(imported_sret_receipt_path)
 
 if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
     raise SystemExit("bad S5 SRET ABI receipt schema")
@@ -258,6 +272,51 @@ if normal_stack_two.get("machine_shape", {}).get("main_stack_arg_push_source_sta
     raise SystemExit("normal two-stack-call receipt must load stack args from slots 7 then 6")
 if normal_stack_two.get("machine_shape", {}).get("main_stack_adjust_immediates") != [16]:
     raise SystemExit("normal two-stack-call receipt must record cleanup 16 without padding")
+
+if imported_sret_receipt.get("schema") != "madaros.v2.s5.imported_sret_receipt/0.1":
+    raise SystemExit("bad S5 imported SRET receipt schema")
+if imported_sret_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing imported SRET receipt")
+if imported_sret_receipt.get("s5_imported_sret_module_boundary_complete") is not True:
+    raise SystemExit("program MIR/ABI gate requires completed imported SRET module-boundary receipt")
+if imported_sret_receipt.get("compiler_machine_module_exported_for_imported_path") is not True:
+    raise SystemExit("program MIR/ABI gate requires MachineModule JSON on imported native-v2 path")
+imported_sret_cases = {row.get("case_id"): row for row in imported_sret_receipt.get("cases", [])}
+imported_one = imported_sret_cases.get("imported_sret_one_arg_return_29")
+imported_reg = imported_sret_cases.get("imported_sret_register_multi_arg_return_43")
+imported_stack = imported_sret_cases.get("imported_sret_stack_two_arg_return_57")
+if not imported_one or not imported_reg or not imported_stack:
+    raise SystemExit("imported SRET receipt must contain one-arg, register multi-arg, and stack-arg cases")
+if imported_one.get("actual_exit") != 29:
+    raise SystemExit("imported SRET one-arg witness must return 29")
+if imported_one.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1]:
+    raise SystemExit("imported SRET one-arg receipt must pass hidden dest then explicit arg")
+if imported_one.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [1, 0]:
+    raise SystemExit("imported SRET one-arg receipt must prove hidden dest from slot1 and explicit arg from slot0")
+if imported_one.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
+    raise SystemExit("imported SRET one-arg receipt must prove imported aggregate field indices 0,1,2")
+if imported_reg.get("actual_exit") != 43:
+    raise SystemExit("imported SRET register multi-arg witness must return 43")
+if imported_reg.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
+    raise SystemExit("imported SRET register multi-arg receipt must pass hidden dest plus five register args")
+if imported_reg.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [5, 0, 1, 2, 3, 4]:
+    raise SystemExit("imported SRET register multi-arg receipt must prove hidden dest slot5 then explicit arg slots 0..4")
+if imported_reg.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
+    raise SystemExit("imported SRET register multi-arg receipt must prove imported aggregate field indices 0,1,2")
+if imported_stack.get("actual_exit") != 57:
+    raise SystemExit("imported SRET stack-arg witness must return 57")
+if imported_stack.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
+    raise SystemExit("imported SRET stack receipt must pass hidden dest plus five register args")
+if imported_stack.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [7, 0, 1, 2, 3, 4]:
+    raise SystemExit("imported SRET stack receipt must prove hidden dest slot7 then explicit arg slots 0..4")
+if imported_stack.get("machine_shape", {}).get("main_stack_arg_push_indices") != [7, 6]:
+    raise SystemExit("imported SRET stack receipt must push explicit stack args in reverse order")
+if imported_stack.get("machine_shape", {}).get("main_stack_arg_push_source_stack_slots") != [6, 5]:
+    raise SystemExit("imported SRET stack receipt must load stack args from explicit slots 6 then 5")
+if imported_stack.get("machine_shape", {}).get("main_stack_adjust_immediates") != [16]:
+    raise SystemExit("imported SRET stack receipt must record cleanup 16 without padding")
+if imported_stack.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
+    raise SystemExit("imported SRET stack receipt must prove imported aggregate field indices 0,1,2")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -514,13 +573,13 @@ not_promoted = [
     },
     {
         "surface": "aggregate_return",
-        "status": "partially_promoted_by_source_sret_local_register_and_stack_args_receipt",
-        "reason": "local one-arg, five-register-arg, one-stack-arg, and two-stack-arg source aggregate returns now have source-to-IrCallSret receipts; imported and generic/module-boundary surfaces remain",
+        "status": "partially_promoted_by_source_sret_local_and_imported_receipts",
+        "reason": "local and imported source aggregate returns now have source-to-IrCallSret receipts across one-arg, register multi-arg, and stack-arg call shapes; method/generic aggregate surfaces remain",
     },
     {
         "surface": "imported_call",
-        "status": "not_promoted_by_this_slice",
-        "reason": "requires imported-body/target resolution receipt and cross-module witness",
+        "status": "promoted_for_imported_aggregate_sret_module_boundary",
+        "reason": "imported aggregate-return calls now export MachineModule JSON and execute one-arg, register multi-arg, and stack-arg SRET witnesses",
     },
     {
         "surface": "f64_call_return",
@@ -632,6 +691,15 @@ module = {
         "case_count": stack_call_receipt["case_count"],
         "cases": stack_call_receipt["cases"],
     },
+    "imported_sret_receipt": {
+        "schema": imported_sret_receipt["schema"],
+        "path": f"{imported_sret_receipt_path.parent.name}/{imported_sret_receipt_path.name}",
+        "receipt_sha256": imported_sret_receipt["receipt_sha256"],
+        "stage_contract_level": imported_sret_receipt["stage_contract_level"],
+        "case_id": imported_sret_receipt["case_id"],
+        "case_count": imported_sret_receipt["case_count"],
+        "cases": imported_sret_receipt["cases"],
+    },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
         "target": "x86_64-linux",
@@ -639,6 +707,7 @@ module = {
         "return_register": "rax",
         "normal_call_stack_args_promoted": True,
         "source_sret_stack_args_promoted": True,
+        "imported_sret_module_boundary_promoted": True,
         "sret_promoted": True,
         "source_sret_local_one_arg_promoted": True,
         "source_sret_local_register_multi_arg_promoted": True,
@@ -660,8 +729,9 @@ module = {
         "source_sret_local_one_arg_receipt_recorded",
         "source_sret_local_register_multi_arg_receipt_recorded",
         "source_sret_local_stack_arg_receipt_recorded",
+        "imported_sret_module_boundary_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
-        "source_sret_imported_f64_surfaces_not_promoted",
+        "method_generic_and_f64_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "full_abi_numeric_differential_gates_still_required_before_s5_ready",
     ],
@@ -695,14 +765,17 @@ receipt = {
     "s5_source_sret_local_one_arg_complete": True,
     "s5_source_sret_local_register_multi_arg_complete": True,
     "s5_source_sret_local_stack_arg_complete": True,
+    "s5_imported_sret_module_boundary_complete": True,
     "s5_normal_call_stack_args_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_stack_arg_aggregate_return_to_IrCallSret": True,
+    "source_frontend_lowers_imported_aggregate_return_to_IrCallSret": True,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "source_sret_receipt_sha256": source_sret_receipt["receipt_sha256"],
     "stack_call_receipt_sha256": stack_call_receipt["receipt_sha256"],
+    "imported_sret_receipt_sha256": imported_sret_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
     "program_mir_abi_module_sha256": module_sha,
     "program_mir_abi_module_with_hash_sha256": module_with_hash_sha,
@@ -718,6 +791,7 @@ receipt = {
     "source_sret_local_one_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_one_arg_promoted"],
     "source_sret_local_register_multi_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_register_multi_arg_promoted"],
     "source_sret_stack_args_promoted": module["scalar_abi_receipts"]["source_sret_stack_args_promoted"],
+    "imported_sret_module_boundary_promoted": module["scalar_abi_receipts"]["imported_sret_module_boundary_promoted"],
     "normal_call_stack_args_promoted": module["scalar_abi_receipts"]["normal_call_stack_args_promoted"],
     "aggregate_layout_promoted": module["scalar_abi_receipts"]["aggregate_layout_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
@@ -726,7 +800,6 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "imported aggregate/SRET receipt",
         "method/generic/module-boundary aggregate return coverage",
         "f64 XMM0 call/return witnesses before f128 promotion",
         "numeric tower width receipts for f128/i256",

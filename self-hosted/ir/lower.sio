@@ -2226,14 +2226,16 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 // (strlen+write, which derefs the integer as char* and SIGSEGVs). Wide ints
 // (i128/i256) are intentionally rejected: they use a separate wide-limb print
 // path, and mis-routing them to print_int would print only the low limb.
-// EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its return-type code
-// (1=int scalar, 2=f64). Populated per-module from the OTHER programs' AST in the externs preseed
-// (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a fallback by
-// expr_result_is_int_ref / the let-binding when module.functions has no return type for an
-// imported callee. i64-only (no Name aggregate in globals); hash collisions degrade safely
-// (a number is printed instead of crashing). Mirrors the NV2_RELOC_* global-table pattern.
+// EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its
+// return-type code (1=int scalar, 2=f64) and aggregate return Name. Populated
+// per-module from the OTHER programs' AST in the externs preseed
+// (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a
+// fallback when module.functions has no return type for an imported callee.
+// Hash collisions degrade safely (a number is printed instead of crashing).
+// Mirrors the NV2_RELOC_* global-table pattern.
 var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_NAMES: [Name; 8192] = [ir_empty_name(); 8192]
 var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
 
 fn lower_name_hash(n: Name) -> i64 with Panic, Div {
@@ -2250,11 +2252,12 @@ fn lower_extern_fn_ret_reset() with Mut, Panic {
     LOWER_EXTERN_FN_RET_COUNT = 0
 }
 
-fn lower_extern_fn_ret_record(name: Name, code: i64) with Mut, Panic, Div {
+fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name) with Mut, Panic, Div {
     let idx = LOWER_EXTERN_FN_RET_COUNT
     if idx >= 0 && idx < 8192 {
         LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
         LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
+        LOWER_EXTERN_FN_RET_NAMES[idx as usize] = ret_name
         LOWER_EXTERN_FN_RET_COUNT = idx + 1
     }
 }
@@ -2269,6 +2272,18 @@ fn lower_extern_fn_ret_lookup(name: Name) -> i64 with Mut, Panic, Div {
         i = i + 1
     }
     0
+}
+
+fn lower_extern_fn_ret_name_lookup(name: Name) -> Name with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_NAMES[i as usize]
+        }
+        i = i + 1
+    }
+    ir_empty_name()
 }
 
 // Return-type code (1=int, 2=f64, 0=other) for an ExprCall whose callee is an imported function,
@@ -2291,6 +2306,24 @@ fn lower_extern_fn_ret_code_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
     }
 }
 
+fn lower_extern_fn_ret_name_for_call(e: &Expr) -> Name with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return ir_empty_name() }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return ir_empty_name()
+            }
+            lower_extern_fn_ret_name_lookup(nm)
+        }
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_return_name_is_aggregate(n: Name) -> bool with Panic, Div {
     if n.len <= 0 { return false }
     if lower_name_is_int_scalar(n) { return false }
@@ -2310,13 +2343,14 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                     match head_owned.fn_def {
                         Some(fd) => {
                             var code: i64 = 0
+                            let ret_name = lower_opt_type_named_name(&(*fd).return_type)
                             if lower_opt_type_is_f64(&(*fd).return_type) {
                                 code = 2
                             } else if lower_opt_type_is_int_scalar(&(*fd).return_type) {
                                 code = 1
                             }
-                            if code != 0 {
-                                lower_extern_fn_ret_record(head_owned.name, code)
+                            if code != 0 || lower_return_name_is_aggregate(ret_name) {
+                                lower_extern_fn_ret_record(head_owned.name, code, ret_name)
                             }
                         }
                         _ => {}
@@ -3734,7 +3768,14 @@ impl Lowerer {
                     return ir_empty_name()
                 }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
-                self.return_struct_name_for_fn_id(fn_id)
+                if lower_extern_fn_ret_lookup(callee_name) != 0 {
+                    return ir_empty_name()
+                }
+                let local_ret = self.return_struct_name_for_fn_id(fn_id)
+                if local_ret.len > 0 {
+                    return local_ret
+                }
+                lower_extern_fn_ret_name_lookup(callee_name)
             }
             None => ir_empty_name(),
         }
@@ -4024,7 +4065,22 @@ impl Lowerer {
             }
             si = si + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        // Struct not in layout table. Cross-module imported-call results can
+        // lose the nominal base type while still carrying a correctly preseeded
+        // layout table, so search every layout by field name before the legacy
+        // hash fallback.
+        var sk: i64 = 0
+        while sk < (*self.struct_layouts).count {
+            var fk: i64 = 0
+            while fk < (*self.struct_layouts).entries[sk as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[sk as usize].fields[fk as usize].name, field_name) {
+                    return (*self.struct_layouts).entries[sk as usize].fields[fk as usize].index
+                }
+                fk = fk + 1
+            }
+            sk = sk + 1
+        }
+        // Fallback: use first byte hash (legacy compat)
         if field_name.len <= 0 {
             0
         } else {
@@ -7793,7 +7849,13 @@ impl Lowerer {
         let final_args = pair_call.args
         let final_argc = pair_call.argc
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
-            let ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
+            let ext_ret_code_sret = lower_extern_fn_ret_code_for_call(e)
+            var ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
+            if ext_ret_code_sret != 0 {
+                ret_name_sret = ir_empty_name()
+            } else if ret_name_sret.len <= 0 {
+                ret_name_sret = lower_extern_fn_ret_name_for_call(e)
+            }
             if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
                 var lo_sret = lo4.emit(ir_alloc(dst, 64))
                 lo_sret = lo_sret.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))

@@ -48,7 +48,7 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_file_maybe_has_use}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_file_maybe_has_use, module_frontend_lower_imported_to_module_box}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
@@ -1994,6 +1994,12 @@ fn cmm_append_function(buf: [i8; 65536], pos: i64, module: &IrModule, machine: M
     out = f.0; p = f.1
     let g = cmm_append_named_i64(out, p, "instr_count", instr_count, true)
     out = g.0; p = g.1
+    let m0 = cmm_append_named_i64(out, p, "source_param_count", ir_func.param_count, true)
+    out = m0.0; p = m0.1
+    let m1 = cmm_append_named_i64(out, p, "source_is_sret", ir_func.is_sret, true)
+    out = m1.0; p = m1.1
+    let m2 = cmm_append_named_i64(out, p, "source_sret_dest_reg", ir_func.sret_dest_reg, true)
+    out = m2.0; p = m2.1
     let h = cmm_append_named_string(out, p, "instr_encoding", "numeric_tuple_v1", true)
     out = h.0; p = h.1
     let j = lobl_append(out, p, "\"instrs\":[")
@@ -3129,17 +3135,42 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         panic("native-v2-compile failed: source not readable")
     }
     if module_frontend_file_maybe_has_use(source_path) {
-        let imported_rc = module_frontend_compile_imported_to_file(source_path, out_path)
-        if imported_rc != 0 {
-            print("native_v2_compile: imported front-half/backend failed rc=")
-            print_int(imported_rc as i64)
+        let imported_lower = module_frontend_lower_imported_to_module_box(source_path)
+        if !imported_lower.ok {
+            print("native_v2_compile: imported front-half failed: ")
+            print(imported_lower.error_msg)
             print("\n")
             panic("native-v2-compile failed: imported path")
         }
-        print("native_v2_compile: emitted path=")
-        print(out_path)
-        print("\n")
-        return
+        match imported_lower.module {
+            Some(module_box) => {
+                if (*module_box).fn_count <= 0 {
+                    panic("native-v2-compile failed: imported module empty")
+                }
+                let spec = native_resolve_target("x86_64-linux", "auto", true)
+                let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+                if str_len(machine_module_json_path) > 0 {
+                    if !compiler_main_write_machine_module_json(machine_module_json_path, &(*module_box), spec) {
+                        print("native_v2_compile: failed to write imported MachineModule JSON\n")
+                        return
+                    }
+                }
+                let rc = compile_native_v2_preview_to_file(&(*module_box), spec, out_path)
+                if rc != 0 {
+                    print("native_v2_compile: imported FAIL to_file rc=")
+                    print_int(rc as i64)
+                    print("\n")
+                    return
+                }
+                print("native_v2_compile: emitted path=")
+                print(out_path)
+                print("\n")
+                return
+            }
+            None => {
+                panic("native-v2-compile failed: imported module missing")
+            }
+        }
     }
     var trace = empty_load_multimodule_ir_trace()
     let ir_result = load_multimodule_ir_traced(source_path, &! trace)
