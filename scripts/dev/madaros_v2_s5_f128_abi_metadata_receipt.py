@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5 f128 ABI metadata receipt.
 
-This promotes the binary128 ABI signature metadata slice only: local/imported
-f128 parameters and returns must be classified in the MachineModule export, and
-native-v2 must still fail closed without emitting an executable until f128
-software helpers and execution differentials are promoted.
+This promotes the binary128 ABI signature metadata slice: local/imported f128
+parameters and returns must be classified in the MachineModule export. Narrow
+opaque direct call/return execution is covered by the S5.5 receipt; this receipt
+does not claim external SysV ABI, SRET, arithmetic, software helpers, or full
+f128 execution semantics.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -20,11 +22,10 @@ from typing import Any
 SCHEMA_VERSION = "madaros.v2.s5.f128_abi_metadata_receipt/0.2"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_1_F128_ABI_METADATA_PROMOTED_WITH_SPECIFIC_BLOCKERS_NOT_NATIVE_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_1_F128_ABI_METADATA_PROMOTED"
 
 F128_SLOT_KIND = 3
 F128_WIDTH_WORDS = 2
-F128_UNSUPPORTED_DETAILS = {"f128_call_arg_pending", "f128_return_pending"}
 F128_SYSV_CLASSES = "SSE,SSEUP"
 
 
@@ -120,9 +121,14 @@ def normalize_log(text: str, out_dir: Path) -> str:
 
 
 def run_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, str, str]:
+    env = os.environ.copy()
+    raw = cwd / "artifacts" / "self-hosted" / "madaros"
+    if raw.exists():
+        env["MADAROS_RAW_BIN"] = str(raw)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -182,9 +188,9 @@ def load_machine_module(path: Path, expected_fn_count: int) -> dict[str, Any]:
         raise SystemExit("MachineModule export flag missing")
     if payload.get("target") != "x86_64-linux":
         raise SystemExit(f"unexpected MachineModule target: {payload.get('target')!r}")
-    if payload.get("supported") is not False:
-        raise SystemExit("f128 ABI metadata cases must remain unsupported")
-    if payload.get("unsupported_detail") not in F128_UNSUPPORTED_DETAILS:
+    if payload.get("supported") is not True:
+        raise SystemExit("f128 ABI metadata promoted cases must be MachineModule supported")
+    if payload.get("unsupported_detail") not in ("", None):
         raise SystemExit(f"unexpected unsupported_detail: {payload.get('unsupported_detail')!r}")
     if payload.get("legacy_fallback") is not False:
         raise SystemExit("MachineModule must not use legacy fallback")
@@ -225,6 +231,8 @@ def machine_shape(module: dict[str, Any], callee: str, case: dict[str, Any]) -> 
         raise SystemExit(f"{case['case_id']} callee f128 SysV classes mismatch")
     if callee_fn.get("source_f128_execution_pending") is not True:
         raise SystemExit(f"{case['case_id']} callee must keep f128 execution pending")
+    if callee_fn.get("source_f128_opaque_direct_call_return_promoted") is not True:
+        raise SystemExit(f"{case['case_id']} callee must record opaque direct call/return promotion")
     if int(case["expected_callee_f128_param_count"]) > 0 and not callee_f128_rows:
         raise SystemExit(f"{case['case_id']} callee has no f128 parameter slot rows")
     if not main_f128_rows:
@@ -237,6 +245,10 @@ def machine_shape(module: dict[str, Any], callee: str, case: dict[str, Any]) -> 
         "callee_source_return_slot_kind": int(callee_fn.get("source_return_slot_kind", -1)),
         "callee_source_return_width_words": int(callee_fn.get("source_return_width_words", -1)),
         "callee_source_f128_sysv_classes": str(callee_fn.get("source_f128_sysv_classes", "")),
+        "callee_source_f128_execution_pending": bool(callee_fn.get("source_f128_execution_pending", False)),
+        "callee_source_f128_opaque_direct_call_return_promoted": bool(
+            callee_fn.get("source_f128_opaque_direct_call_return_promoted", False)
+        ),
         "callee_f128_slot_row_count": len(callee_f128_rows),
         "main_f128_slot_row_count": len(main_f128_rows),
         "f128_slot_kind_seen": sorted({row[1] for row in callee_f128_rows + main_f128_rows}),
@@ -281,10 +293,10 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     compile_log_path.write_text(compile_log, encoding="utf-8")
     if not mm_path.exists():
         raise SystemExit(f"{case_id} did not emit MachineModule JSON")
-    if "native_v2_compile:" not in compile_log or "FAIL" not in compile_log:
-        raise SystemExit(f"{case_id} must fail closed in native-v2 compile; log={compile_log_path}")
-    if elf_path.exists():
-        raise SystemExit(f"{case_id} unexpectedly emitted an executable before f128 execution promotion")
+    if compile_rc != 0 or "native_v2_compile: emitted" not in compile_log:
+        raise SystemExit(f"{case_id} expected native-v2 emitted metadata witness; log={compile_log_path}")
+    if not elf_path.exists() or elf_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id} did not emit an executable for promoted opaque direct call/return metadata")
 
     module = load_machine_module(mm_path, int(case["expected_fn_count"]))
     shape = machine_shape(module, str(case["callee"]), case)
@@ -337,7 +349,8 @@ def emit(args: argparse.Namespace) -> int:
         "f128_imported_return_metadata_promoted": True,
         "f128_call_result_slot_metadata_promoted": True,
         "f128_abi_metadata_promoted": True,
-        "f128_execution_promoted": False,
+        "f128_opaque_direct_call_return_abi_promoted": True,
+        "f128_full_execution_promoted": False,
         "f128_promoted": False,
         "s5_ready": False,
         "s5_implemented": False,
@@ -349,8 +362,8 @@ def emit(args: argparse.Namespace) -> int:
             "local_f128_call_result_is_marked_in_caller_slot_metadata",
             "imported_f128_parameter_is_marked_as_slot_kind_3_width_words_2",
             "imported_f128_return_signature_exports_kind_3_width_words_2",
-            "MachineModule_fails_closed_with_specific_f128_call_or_return_blocker",
-            "no_f128_native_executable_is_emitted_before_helper_and_differential_receipts",
+            "MachineModule_supports_promoted_opaque_direct_f128_call_return_shapes",
+            "full_f128_execution_remains_pending_for_arithmetic_helpers_and_differentials",
         ],
         "missing_full_obligations": [
             "f128 software-helper lowering with IEEE rounding and NaN/Inf contract",

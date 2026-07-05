@@ -2,9 +2,9 @@
 """Emit a Madaros v2 S5 diagnostics/fallback receipt.
 
 This receipt closes the S5 unsupported-width and f128 blocker diagnostic slice.
-It deliberately does not promote native f128 execution. Instead it proves that
+It deliberately does not promote full f128 execution. Instead it proves that
 numeric widths outside the promoted native-v2 S5 set fail closed, and that f128
-operations beyond the S5.1 opaque MachineIR contract fail with specific
+operations beyond the S5 opaque/direct-call contract fail with specific
 MachineModule details instead of silently emitting an ELF or falling through
 legacy code.
 """
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -35,22 +36,12 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "expected_machine_module_supported": False,
     },
     {
-        "case_id": "reject_f128_call_arg_native_v2",
+        "case_id": "reject_f128_multi_arg_shape_native_v2",
         "class": "unsupported_f128_operation",
-        "source": "fn sink(x: f128) -> i64 { 0 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; sink(x) }\n",
+        "source": "fn mix(x: f128, y: i64) -> i64 { y }\nfn main() -> i64 { let x: f128 = 1.0 as f128; mix(x, 3) }\n",
         "unsupported_width": "f128",
-        "expected_detail": "f128_call_arg_pending",
-        "expected_fragment": "f128_call_arg_pending",
-        "expect_machine_module_json": True,
-        "expected_machine_module_supported": False,
-    },
-    {
-        "case_id": "reject_f128_return_native_v2",
-        "class": "unsupported_f128_operation",
-        "source": "fn make() -> f128 { 1.0 as f128 }\nfn main() -> i64 { 0 }\n",
-        "unsupported_width": "f128",
-        "expected_detail": "f128_return_pending",
-        "expected_fragment": "f128_return_pending",
+        "expected_detail": "f128_call_shape_pending",
+        "expected_fragment": "f128_call_shape_pending",
         "expect_machine_module_json": True,
         "expected_machine_module_supported": False,
     },
@@ -106,9 +97,14 @@ def normalize_log(text: str, out_dir: Path) -> str:
 
 
 def run_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, str, str]:
+    env = os.environ.copy()
+    raw = cwd / "artifacts" / "self-hosted" / "madaros"
+    if raw.exists():
+        env["MADAROS_RAW_BIN"] = str(raw)
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -144,7 +140,8 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     check_rc, check_stdout, check_stderr = run_command([str(compiler), "check", str(source_path)], root, timeout_s)
     check_log = check_stdout + check_stderr
     check_log_path.write_text(check_log, encoding="utf-8")
-    if check_rc != 0 or "check: OK" not in check_log:
+    expect_machine_module_json = bool(case.get("expect_machine_module_json", False))
+    if not expect_machine_module_json and (check_rc != 0 or "check: OK" not in check_log):
         raise SystemExit(f"{case_id} expected syntax/typecheck acceptance before S5 native-v2 guard; log={check_log_path}")
 
     compile_rc, compile_stdout, compile_stderr = run_command(
@@ -163,7 +160,6 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
     expected_fragment = str(case.get("expected_fragment", DIAGNOSTIC_FRAGMENT))
-    expect_machine_module_json = bool(case.get("expect_machine_module_json", False))
     if expect_machine_module_json:
         if "native_v2_compile: emitted" in compile_log:
             raise SystemExit(f"{case_id} unexpectedly emitted f128 execution-pending ELF; log={compile_log_path}")
@@ -319,12 +315,12 @@ def emit(args: argparse.Namespace) -> int:
         "f128_machine_module_supported": False,
         "f128_machine_module_unsupported_details": [
             "f128_arithmetic_pending",
-            "f128_call_arg_pending",
-            "f128_return_pending",
+            "f128_call_shape_pending",
         ],
         "unsupported_widths_do_not_segfault": True,
         "legacy_fallback_for_unsupported_widths": False,
-        "f128_native_execution_not_promoted": True,
+        "f128_full_execution_not_promoted": True,
+        "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
         "i512_u512_rejected_not_promoted": True,
         "promoted_i256_width_preserved": True,
         "f128_promoted": False,
@@ -333,8 +329,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_full_complete": False,
         "roundtrip_contract": [
             "f128_native_v2_arithmetic_fails_closed_after_MachineModule_metadata_export",
-            "f128_native_v2_call_arg_fails_closed_after_MachineModule_metadata_export",
-            "f128_native_v2_return_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_multi_arg_shape_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",
             "unsupported_numeric_widths_emit_no_elf",
@@ -342,7 +337,7 @@ def emit(args: argparse.Namespace) -> int:
             "f128_blocker_cases_emit_unsupported_machine_module_json",
             "unsupported_numeric_widths_do_not_segfault_or_use_legacy_fallback",
             "promoted_i256_native_v2_path_still_executes",
-            "f128_native_execution_is_not_promoted_by_this_receipt",
+            "full_f128_execution_is_not_promoted_by_this_receipt",
         ],
         "missing_full_obligations": [
             "f128 IR/MIR/ABI/software-helper receipts",
