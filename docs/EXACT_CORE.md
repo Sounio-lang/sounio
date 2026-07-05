@@ -161,6 +161,25 @@ measure supported *near* the locus (perturbed float coefficients) looks like. Th
 `Var>0` is the number; `Var=0` is the contract. The exact ℚ execution is the measure-layer analogue
 of what this ℤ census did for the structure.
 
+## General 16-component CD product over ℚ (the aggregate wall, circumvented)
+
+`tests/run-pass/sedenion_cd_full16_q.sio` computes the **full 16-component** Cayley-Dickson product for
+an **arbitrary rational pair** (not the ±1 canonical channel) exactly over ℚ. Key move: the
+**common-denominator representation** — a rational sedenion is 16 integer numerators over one common
+denominator, so the rational product reduces to an *integer* 16-component product of numerators
+(denominator `da·db`). There is no `[Rational;16]` by-value struct, so the #637 aggregate wall is
+**circumvented, not hit**. Canonical pair → all 16 components exactly 0 (the whole product annihilates,
+generalizing beyond the hand-derived r5/r12); a general rational pair → exact reduced components. 9th
+gate face: 34/34 DEN+COMP lines identical souc == independent oracle (`scripts/research/cd16_oracle.py`).
+
+**Scope / residual:** the executed version uses i64 numerators (rational coefficients with num/den up
+to ~10⁸; output fits i64). Extending to **bigint** coefficients (unbounded) is capability-proven
+*separately* (the bigint sweep to 10⁴⁰; the ratbig channel with `t=123456789/7`) but does not *compose*
+into the full-16 under souc v0.80.0: the module-import path SIGSEGVs on `[BigInt;16]` (aggregate #637),
+and an inline signed-multi-limb + 16-accumulator engine would exceed the ~24-function whole-program
+codegen capacity wall. So: the general 16-component product over ℚ is executed and cross-verified for
+i64-range coefficients; the unbounded-width integration is a compiler-capacity residual, not a math gap.
+
 ## Honest caveats (souc v0.80.0 environment, not defects of this work)
 
 - The **f64 layer does not type-check under this build** (`cayley_dickson.sio` → `error[E004]` on
