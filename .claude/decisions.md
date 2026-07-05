@@ -205,3 +205,32 @@ measurement* — that anchors in the project's metrological identity
 text says **Metron VM (MVM)**, never bare "EVM" (saturated by
 Ethereum).  Internal identifiers unchanged in v1.  Recorded in
 `docs/research/eisa-v1-plan-2026-07-05.md` §1 and the architecture doc.
+
+### 15. EISA v1 closes with V1e partial; Rump moves to v2/qd128 (2026-07-05)
+
+**Context.**  The v1 plan's V1e row promised the full Rump 1988 kernel
+under v1 budgets with dd64 honest-boundary framing.  The drafted bridge
+lane segfaulted into the unfinished high-register arithmetic templates
+and was rolled back rather than shipped fragile.
+
+**Decision.**  V1e ships S1–S3 (fixed-point loop with pinned fuel and
+derivable frail=1; frail-cancellation; emov −0.0 via division witness);
+the Rump showcase moves to EISA v2 on the qd128 err lane, where the
+receipt can pin the exact −54767/66192.  Math-review corollary
+(Grok, 2026-07-05): the v2 corpus must keep a **dd64-failure lane
+alongside the qd128 success lane** — the receipt showing dd64 visibly
+failing at the ~122-bit cancellation is standalone boundary evidence,
+not superseded by the qd success.  Bridge v1 residuals (full-arithmetic
+e16..e63 templates, fuel-stop high-reg receipt) are prerequisites for
+the v2 Rump lane and land with the W4 template refactor.
+
+### 16. EISA work moved to dedicated worktree (2026-07-05)
+
+**Context.**  A concurrent agent switched `/workspace/sounio` to
+`coord/lane-8c-dossier` mid-audit, stashing the uncommitted V1e files
+(recovered from `stash@{0}` without touching the shared checkout).
+
+**Decision.**  The EISA track now operates from the dedicated worktree
+`/workspace/sounio-eisa` on `gpu/epistemic-tensor-core-next`, per the
+one-worktree-per-agent rule in CLAUDE.md §4.  Shared-checkout EISA
+edits are over.

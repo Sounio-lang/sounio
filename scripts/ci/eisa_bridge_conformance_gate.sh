@@ -28,6 +28,9 @@ programs=(
   "v1-i6"
   "v1-fuel"
   "v1-highreg"
+  "v1e-fixedpoint"
+  "v1e-frail"
+  "v1e-emov-negzero"
 )
 
 for name in "${programs[@]}"; do
@@ -96,9 +99,9 @@ echo "PASS tamper-sensitivity"
 for name in "${programs[@]}"; do
   elf="artifacts/eisa/${name}.eisax.elf"
   per_prog_out="$TMP_DIR/${name}.stdout"
-  expected_prefix="eisa-receipt: v=1"
+  expected_prefix="v=1 prog="
   case "$name" in
-    v1-*) expected_prefix="eisa-receipt: v=2" ;;
+    v1-*|v1e-*) expected_prefix="v=2 prog=" ;;
   esac
   if ! strings -a "$elf" | grep -q "$expected_prefix"; then
     echo "FAIL anti-vacuity ${name}: label prefix not found in ELF (strings check broken)"
