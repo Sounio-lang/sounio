@@ -2341,6 +2341,29 @@ fn fill_repeat_struct_array_slots_a64(dst_start: i64, field_hash: i64) with Mut,
             }
             return
         }
+        // Nested array element ([[T;N];M] field): mirror the x86 branch —
+        // one fresh heap copy of the inner array per outer slot. Without
+        // this the tail splat stored the SAME row pointer in every slot
+        // (aliased rows: the a64 W_C mismatch signature).
+        let inner_nslots = arr_storage_slots(elem_hash)
+        if inner_nslots > 0 {
+            let asrc_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(asrc_slot)
+            var aj: i64 = 0
+            while aj < nslots {
+                emit_imm64_a64(inner_nslots * 8)
+                emit_heap_alloc_a64()
+                em32(0xAA0003EB)  // mov x11, x0 (dest)
+                emit_load_var_a64(asrc_slot)
+                em32(0xAA0003EA)  // mov x10, x0 (source)
+                em32(0xAA0B03E0)  // mov x0, x11 (dest)
+                emit_copy_agg_to_ptr_a64(8, elem_hash)
+                emit_store_var_a64(dst_start - aj)
+                aj = aj + 1
+            }
+            return
+        }
     }
     var i: i64 = 0
     while i < nslots {
@@ -28286,6 +28309,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     if k == 41 {
         if array_init_is_repeat(EP) {
             EP = EP + 1
+            let rep_expr_start = EP
             compile_or_a64()
             let elem_ty = EXPR_TY
             let elem_hash = EXPR_TY_HASH
@@ -28295,7 +28319,41 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 42 { EP = EP + 1 }
             let arr_hash = arr_ty_hash_for_elem_type(rep_count, 8, elem_ty, elem_hash)
             let nslots = arr_storage_slots(arr_hash)
-            if nslots > 0 {
+            if elem_ty == 6 && rep_count > 0 && struct_like_nslots(elem_hash) > 0 {
+                // Aggregate element: the splat below would store the SAME
+                // element pointer into every slot (aliased rows — the a64
+                // W_C mismatch signature). Mirror the x86 expression literal:
+                // re-compile the element per slot and heap-copy it so
+                // elements are unaliased and frame-independent.
+                let s_nslots = struct_like_nslots(elem_hash)
+                let base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + rep_count
+                let end_ep = EP
+                var ri: i64 = 0
+                while ri < rep_count {
+                    if ri > 0 {
+                        EP = rep_expr_start
+                        compile_or_a64()
+                    }
+                    let msrc = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(msrc)
+                    emit_imm64_a64(s_nslots * 8)
+                    emit_heap_alloc_a64()
+                    let mdst = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(mdst)
+                    emit_load_var_a64(msrc)
+                    em32(0xAA0003EA)
+                    emit_load_var_a64(mdst)
+                    emit_copy_agg_to_ptr_a64(6, elem_hash)
+                    emit_load_var_a64(mdst)
+                    emit_store_var_a64(base + rep_count - 1 - ri)
+                    ri = ri + 1
+                }
+                EP = end_ep
+                emit_lea_var_a64(base + rep_count - 1)
+            } else if nslots > 0 {
                 let base = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + nslots
                 em32(0xAA0003ED)  // mov x13, x0
