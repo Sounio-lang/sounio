@@ -249,8 +249,8 @@ receipt = {
     "missing_full_obligations": [
         "real MIR serialization and hash receipts",
         "ABI layout receipts for scalar, aggregate, SRET, imported call, and return paths",
-        "call/return witnesses for f64 before f128/i256 promotion",
-        "numeric tower width receipts for f128/i256",
+        "f128 IR/MIR/ABI/software-helper receipts before f128 promotion",
+        "f128 IR/MIR/ABI/software-helper receipts",
         "diagnostics and fallback semantics for unsupported layouts and numeric widths",
         "differential native-v2 vs interpreter/lean_single validation where available",
     ],

@@ -230,7 +230,6 @@ def emit(args: argparse.Namespace) -> int:
             "receipt does not claim f128 IR/MIR/ABI/codegen execution",
         ],
         "missing_full_obligations": [
-            "binary128 decimal-to-binary128 rounded value from preserved source spelling and decimal metadata",
             "f128 IR opcodes and constructors",
             "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
             "f128 SysV ABI classification and call-return signature metadata",

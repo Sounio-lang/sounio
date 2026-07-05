@@ -415,7 +415,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,
-        "missing_full_obligations": ["f128 numeric tower width receipts"],
+        "missing_full_obligations": ["f128 IR/MIR/ABI/software-helper receipts"],
     }
     canonical, payload_sha = canonical_roundtrip(payload)
     payload["receipt_sha256"] = payload_sha

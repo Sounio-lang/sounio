@@ -81,6 +81,7 @@ pub let MIR_OP_PSEUDO_LOAD_GLOBAL: i64 = 20
 pub let MIR_OP_PSEUDO_STORE_GLOBAL: i64 = 21
 pub let MIR_OP_PSEUDO_CALL_SRET: i64 = 22
 pub let MIR_OP_PSEUDO_RET_SRET: i64 = 23
+pub let MIR_OP_PSEUDO_WIDE_META: i64 = 24
 
 pub let MIR_OP_PSEUDO_LOAD_FLOAT: i64 = 17
 pub let MIR_OP_PSEUDO_INT_TO_FLOAT: i64 = 18
@@ -314,6 +315,42 @@ fn native_v2_copy_slot_byval(out: MachineFunction, dst_slot: i64, src_slot: i64)
     next
 }
 
+fn native_v2_mark_wide_limb_range_byval(out: MachineFunction, base_slot: i64, limb_count: i64) -> MachineFunction with Mut, Panic, Div {
+    var next = out
+    var i: i64 = 0
+    while i < limb_count && i < 64 {
+        next = native_v2_mark_slot_byval(next, base_slot + i, MIR_SLOT_KIND_WIDE_INT_LIMB, limb_count)
+        i = i + 1
+    }
+    next
+}
+
+fn native_v2_mark_wide_limb_range_ref(out: &! MachineFunction, base_slot: i64, limb_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < limb_count && i < 64 {
+        native_v2_mark_slot_ref(out, base_slot + i, MIR_SLOT_KIND_WIDE_INT_LIMB, limb_count)
+        i = i + 1
+    }
+}
+
+fn native_v2_ir_opcode_is_wide_meta(op: IrOpcode) -> bool with Mut, Panic, Div {
+    if op == IrOpcode::IrWideAdd { return true }
+    if op == IrOpcode::IrWideSub { return true }
+    if op == IrOpcode::IrWideMul { return true }
+    if op == IrOpcode::IrWideShrLimb { return true }
+    if op == IrOpcode::IrWideDiv { return true }
+    if op == IrOpcode::IrWideMod { return true }
+    if op == IrOpcode::IrWideCmp { return true }
+    if op == IrOpcode::IrWideShr { return true }
+    if op == IrOpcode::IrWideDivFull { return true }
+    if op == IrOpcode::IrWideModFull { return true }
+    false
+}
+
+fn native_v2_ir_opcode_is_wide_cmp(op: IrOpcode) -> bool with Mut, Panic, Div {
+    op == IrOpcode::IrWideCmp
+}
+
 pub fn native_v2_legalize_summary_new() -> NativeV2LegalizeSummary with Mut, Panic, Div {
     NativeV2LegalizeSummary {
         supported: true,
@@ -395,6 +432,7 @@ pub fn native_v2_supported_ir_opcode(op: IrOpcode) -> bool with Mut, Panic, Div 
     if op == IrOpcode::IrFloatToInt { return true }
     if op == IrOpcode::IrLoadGlobal { return true }
     if op == IrOpcode::IrStoreGlobal { return true }
+    if native_v2_ir_opcode_is_wide_meta(op) { return true }
     false
 }
 
@@ -468,6 +506,17 @@ pub fn native_v2_ir_opcode_name(op: IrOpcode) -> string with Mut, Panic, Div {
     if op == IrOpcode::IrHandleEnd { return "handle_end" }
     if op == IrOpcode::IrDebugGuard { return "debug_guard" }
     if op == IrOpcode::IrProfCounter { return "prof_counter" }
+    if op == IrOpcode::IrWideAdd { return "wide_add" }
+    if op == IrOpcode::IrWideSub { return "wide_sub" }
+    if op == IrOpcode::IrWideMul { return "wide_mul" }
+    if op == IrOpcode::IrWideShrLimb { return "wide_shr_limb" }
+    if op == IrOpcode::IrWideDiv { return "wide_div" }
+    if op == IrOpcode::IrWideMod { return "wide_mod" }
+    if op == IrOpcode::IrWideCmp { return "wide_cmp" }
+    if op == IrOpcode::IrWideReject { return "wide_reject" }
+    if op == IrOpcode::IrWideShr { return "wide_shr" }
+    if op == IrOpcode::IrWideDivFull { return "wide_div_full" }
+    if op == IrOpcode::IrWideModFull { return "wide_mod_full" }
     "unknown"
 }
 
@@ -488,6 +537,16 @@ pub fn native_v2_collect_call_args(args: Option<Box<IrRegList>>, out: [i64; 8], 
 
 pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut, Panic, Div {
     var mi = machine_empty_instr()
+    if native_v2_ir_opcode_is_wide_meta(instr.op) {
+        mi.opcode = MIR_OP_PSEUDO_WIDE_META
+        mi.dst = machine_operand_stack_slot(instr.dst)
+        mi.src1 = machine_operand_stack_slot(instr.src1)
+        mi.src2 = machine_operand_stack_slot(instr.src2)
+        mi.aux = machine_operand_imm64(instr.imm_i64)
+        mi.cond = if native_v2_ir_opcode_is_wide_cmp(instr.op) { 1 } else { 0 }
+        mi.arg_index = if instr.op == IrOpcode::IrWideShr || instr.op == IrOpcode::IrWideShrLimb { 1 } else { 2 }
+        return mi
+    }
     if instr.op == IrOpcode::IrLoadImm || instr.op == IrOpcode::IrLoadBool {
         mi.opcode = MIR_OP_PSEUDO_LOAD_IMM
         mi.dst = machine_operand_stack_slot(instr.dst)
@@ -963,7 +1022,14 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
 
-        if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
+        if instr.opcode == MIR_OP_PSEUDO_WIDE_META {
+            let limbs = machine_instr_aux_value(instr)
+            if limbs <= 1 || limbs > 64 {
+                out.supported = false
+                out.unsupported_detail = "wide_meta_bad_limb_count"
+                return out
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             out.legal_instr_count = out.legal_instr_count + 2
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_STRING {
             out.legal_instr_count = out.legal_instr_count + 2
@@ -1274,7 +1340,23 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
         }
         let instr = native_v2_pseudo_from_ir(ir_instr)
 
-        if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
+        if instr.opcode == MIR_OP_PSEUDO_WIDE_META {
+            let limbs = machine_instr_aux_value(instr)
+            if limbs <= 1 || limbs > 64 {
+                (*out).supported = false
+                (*out).unsupported_detail = "wide_meta_bad_limb_count"
+                return
+            }
+            native_v2_mark_wide_limb_range_ref(out, machine_instr_src1_value(instr), limbs)
+            if instr.arg_index >= 2 {
+                native_v2_mark_wide_limb_range_ref(out, machine_instr_src2_value(instr), limbs)
+            }
+            if instr.cond == 1 {
+                native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            } else {
+                native_v2_mark_wide_limb_range_ref(out, machine_instr_dst_value(instr), limbs)
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             let temp = (*out).temp_count
             (*out).temp_count = temp + 1
             native_v2_emit_legal_instr_mut(out, native_v2_make_mov_imm(temp, machine_instr_src1_value(instr)))
@@ -1548,7 +1630,23 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
 
-        if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
+        if instr.opcode == MIR_OP_PSEUDO_WIDE_META {
+            let limbs = machine_instr_aux_value(instr)
+            if limbs <= 1 || limbs > 64 {
+                out.supported = false
+                out.unsupported_detail = "wide_meta_bad_limb_count"
+                return out
+            }
+            out = native_v2_mark_wide_limb_range_byval(out, machine_instr_src1_value(instr), limbs)
+            if instr.arg_index >= 2 {
+                out = native_v2_mark_wide_limb_range_byval(out, machine_instr_src2_value(instr), limbs)
+            }
+            if instr.cond == 1 {
+                out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            } else {
+                out = native_v2_mark_wide_limb_range_byval(out, machine_instr_dst_value(instr), limbs)
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             let temp = out.temp_count
             out.temp_count = temp + 1
             out = _emit_legal_byval(out, native_v2_make_mov_imm(temp, machine_instr_src1_value(instr)))

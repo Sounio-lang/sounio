@@ -18,8 +18,10 @@ IMPORTED_SRET_RECEIPT_DIR="$OUT_DIR/imported_sret_receipt"
 METHOD_SRET_RECEIPT_DIR="$OUT_DIR/method_sret_receipt"
 F64_XMM0_RECEIPT_DIR="$OUT_DIR/f64_xmm0_receipt"
 WIDE_INT_RECEIPT_DIR="$OUT_DIR/wide_int_receipt"
+WIDE_MACHINE_SLOT_RECEIPT_DIR="$OUT_DIR/wide_machine_slot_metadata_receipt"
 GENERIC_AGG_RECEIPT_DIR="$OUT_DIR/generic_aggregate_sret_receipt"
 F128_LITERAL_PROVENANCE_RECEIPT_DIR="$OUT_DIR/f128_literal_provenance_receipt"
+F128_BINARY128_VALUE_RECEIPT_DIR="$OUT_DIR/f128_binary128_value_receipt"
 MACHINE_SLOT_METADATA_RECEIPT_DIR="$OUT_DIR/machine_slot_metadata_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
@@ -31,8 +33,10 @@ IMPORTED_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_imported_sret_
 METHOD_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_method_sret_receipt.py"
 F64_XMM0_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f64_xmm0_receipt.py"
 WIDE_INT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_wide_int_receipt.py"
+WIDE_MACHINE_SLOT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_wide_machine_slot_metadata_receipt.py"
 GENERIC_AGG_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_generic_aggregate_sret_receipt.py"
 F128_LITERAL_PROVENANCE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_f128_literal_provenance_receipt.py"
+F128_BINARY128_VALUE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_value_receipt.py"
 MACHINE_SLOT_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_machine_slot_metadata_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
@@ -49,13 +53,15 @@ IMPORTED_SRET_RECEIPT="$IMPORTED_SRET_RECEIPT_DIR/madaros_v2_s5_imported_sret.re
 METHOD_SRET_RECEIPT="$METHOD_SRET_RECEIPT_DIR/madaros_v2_s5_method_sret.receipt.json"
 F64_XMM0_RECEIPT="$F64_XMM0_RECEIPT_DIR/madaros_v2_s5_f64_xmm0.receipt.json"
 WIDE_INT_RECEIPT="$WIDE_INT_RECEIPT_DIR/madaros_v2_s5_wide_int.receipt.json"
+WIDE_MACHINE_SLOT_RECEIPT="$WIDE_MACHINE_SLOT_RECEIPT_DIR/madaros_v2_s5_wide_machine_slot_metadata.receipt.json"
 GENERIC_AGG_RECEIPT="$GENERIC_AGG_RECEIPT_DIR/madaros_v2_s5_generic_aggregate_sret.receipt.json"
 F128_LITERAL_PROVENANCE_RECEIPT="$F128_LITERAL_PROVENANCE_RECEIPT_DIR/madaros_v2_f128_literal_provenance.receipt.json"
+F128_BINARY128_VALUE_RECEIPT="$F128_BINARY128_VALUE_RECEIPT_DIR/madaros_v2_s5_f128_binary128_value.receipt.json"
 MACHINE_SLOT_METADATA_RECEIPT="$MACHINE_SLOT_METADATA_RECEIPT_DIR/madaros_v2_s5_machine_slot_metadata.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -162,6 +168,16 @@ if [[ ! -f "$WIDE_INT_RECEIPT" ]]; then
   exit 1
 fi
 
+python3 "$WIDE_MACHINE_SLOT_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$WIDE_MACHINE_SLOT_RECEIPT_DIR"
+
+if [[ ! -f "$WIDE_MACHINE_SLOT_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing wide MachineIR slot receipt: $WIDE_MACHINE_SLOT_RECEIPT" >&2
+  exit 1
+fi
+
 python3 "$GENERIC_AGG_RECEIPT_TOOL" emit \
   --compiler "$COMPILER" \
   --out-dir "$GENERIC_AGG_RECEIPT_DIR"
@@ -178,6 +194,16 @@ python3 "$F128_LITERAL_PROVENANCE_RECEIPT_TOOL" emit \
 
 if [[ ! -f "$F128_LITERAL_PROVENANCE_RECEIPT" ]]; then
   echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 literal provenance receipt: $F128_LITERAL_PROVENANCE_RECEIPT" >&2
+  exit 1
+fi
+
+python3 "$F128_BINARY128_VALUE_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$F128_BINARY128_VALUE_RECEIPT_DIR"
+
+if [[ ! -f "$F128_BINARY128_VALUE_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 binary128 value receipt: $F128_BINARY128_VALUE_RECEIPT" >&2
   exit 1
 fi
 
@@ -209,7 +235,7 @@ if [[ ! -f "$DIFFERENTIAL_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -260,13 +286,15 @@ imported_sret_receipt_path = Path(sys.argv[6])
 method_sret_receipt_path = Path(sys.argv[7])
 f64_xmm0_receipt_path = Path(sys.argv[8])
 wide_int_receipt_path = Path(sys.argv[9])
-generic_agg_receipt_path = Path(sys.argv[10])
-f128_literal_provenance_receipt_path = Path(sys.argv[11])
-machine_slot_metadata_receipt_path = Path(sys.argv[12])
-diagnostics_receipt_path = Path(sys.argv[13])
-differential_receipt_path = Path(sys.argv[14])
-module_path = Path(sys.argv[15])
-receipt_path = Path(sys.argv[16])
+wide_machine_slot_receipt_path = Path(sys.argv[10])
+generic_agg_receipt_path = Path(sys.argv[11])
+f128_literal_provenance_receipt_path = Path(sys.argv[12])
+f128_binary128_value_receipt_path = Path(sys.argv[13])
+machine_slot_metadata_receipt_path = Path(sys.argv[14])
+diagnostics_receipt_path = Path(sys.argv[15])
+differential_receipt_path = Path(sys.argv[16])
+module_path = Path(sys.argv[17])
+receipt_path = Path(sys.argv[18])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -279,8 +307,10 @@ imported_sret_receipt = load_json(imported_sret_receipt_path)
 method_sret_receipt = load_json(method_sret_receipt_path)
 f64_xmm0_receipt = load_json(f64_xmm0_receipt_path)
 wide_int_receipt = load_json(wide_int_receipt_path)
+wide_machine_slot_receipt = load_json(wide_machine_slot_receipt_path)
 generic_agg_receipt = load_json(generic_agg_receipt_path)
 f128_literal_provenance_receipt = load_json(f128_literal_provenance_receipt_path)
+f128_binary128_value_receipt = load_json(f128_binary128_value_receipt_path)
 machine_slot_metadata_receipt = load_json(machine_slot_metadata_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
@@ -618,6 +648,53 @@ for case_id in required_wide_checks:
     if not row.get("check_log_sha256"):
         raise SystemExit(f"{case_id} missing checker log sha256")
 
+if wide_machine_slot_receipt.get("schema") != "madaros.v2.s5.wide_machine_slot_metadata_receipt/0.1":
+    raise SystemExit("bad S5 wide MachineIR slot metadata receipt schema")
+if wide_machine_slot_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing wide MachineIR slot metadata receipt")
+if wide_machine_slot_receipt.get("stage_contract_level") != "S5_WIDE_INT_MACHINE_SLOT_METADATA_PROMOTED_NOT_F128":
+    raise SystemExit("wide MachineIR slot receipt must declare promoted wide slots but not f128")
+if wide_machine_slot_receipt.get("case_count") != 2:
+    raise SystemExit("wide MachineIR slot receipt must contain exact two cases")
+for field in [
+    "wide_machine_slot_metadata_complete",
+    "wide_i256_u256_machine_slots_promoted",
+    "wide_slot_width_words_exported",
+    "machine_module_supported_for_wide_ints",
+]:
+    if wide_machine_slot_receipt.get(field) is not True:
+        raise SystemExit(f"wide MachineIR slot receipt missing required true flag: {field}")
+for field in [
+    "f128_execution_slot_emitted",
+    "f128_promoted",
+    "s5_ready",
+    "s5_implemented",
+    "s5_full_complete",
+]:
+    if wide_machine_slot_receipt.get(field) is not False:
+        raise SystemExit(f"wide MachineIR slot receipt must not overclaim {field}")
+wide_slot_cases = {row.get("case_id"): row for row in wide_machine_slot_receipt.get("cases", [])}
+required_wide_slot_cases = {
+    "i256_add_eq_machine_slots": 7,
+    "u256_mul_add_ne_machine_slots": 42,
+}
+if set(wide_slot_cases) != set(required_wide_slot_cases):
+    raise SystemExit(f"wide MachineIR slot receipt cases mismatch: {sorted(wide_slot_cases)}")
+for case_id, expected_exit in required_wide_slot_cases.items():
+    row = wide_slot_cases[case_id]
+    if row.get("actual_exit") != expected_exit:
+        raise SystemExit(f"{case_id} expected exit {expected_exit}, got {row.get('actual_exit')}")
+    if row.get("machine_module_supported") is not True:
+        raise SystemExit(f"{case_id} MachineModule must be supported")
+    if row.get("wide_slot_kind") != 4:
+        raise SystemExit(f"{case_id} must use wide slot kind 4")
+    if row.get("wide_slot_width_words") != 4:
+        raise SystemExit(f"{case_id} must use width_words=4")
+    if row.get("wide_slot_row_count", 0) < 4:
+        raise SystemExit(f"{case_id} must record at least four wide limb rows")
+    if 3 in row.get("slot_kinds_seen", []):
+        raise SystemExit(f"{case_id} must not emit f128 slot kind 3")
+
 if generic_agg_receipt.get("schema") != "madaros.v2.s5.generic_aggregate_sret_receipt/0.1":
     raise SystemExit("bad S5 generic aggregate SRET receipt schema")
 if generic_agg_receipt.get("status") != "pass":
@@ -707,6 +784,53 @@ for field in [
 ]:
     if f128_literal_provenance_receipt.get(field) is not False:
         raise SystemExit(f"f128 literal provenance receipt must not overclaim {field}")
+
+if f128_binary128_value_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_receipt/0.1":
+    raise SystemExit("bad f128 binary128 value receipt schema")
+if f128_binary128_value_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
+if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
+    raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
+if f128_binary128_value_receipt.get("case_count") != 8:
+    raise SystemExit("f128 binary128 value receipt must contain exact eight cases")
+for field in [
+    "f128_binary128_value_contract_complete",
+    "f128_binary128_round_ties_to_even_recorded",
+    "f128_binary128_sign_exponent_fraction_recorded",
+    "f128_binary128_anchor_cases_verified",
+    "f128_binary128_decimal_metadata_bridge_recorded",
+]:
+    if f128_binary128_value_receipt.get(field) is not True:
+        raise SystemExit(f"f128 binary128 value receipt missing required true flag: {field}")
+for field in [
+    "f128_promoted",
+    "s5_ready",
+    "s5_implemented",
+    "s5_full_complete",
+]:
+    if f128_binary128_value_receipt.get(field) is not False:
+        raise SystemExit(f"f128 binary128 value receipt must not overclaim {field}")
+f128_value_cases = {row.get("case_id"): row for row in f128_binary128_value_receipt.get("cases", [])}
+required_f128_value_hex = {
+    "positive_zero": "00000000000000000000000000000000",
+    "negative_zero": "80000000000000000000000000000000",
+    "one": "3fff0000000000000000000000000000",
+    "half": "3ffe0000000000000000000000000000",
+    "two": "40000000000000000000000000000000",
+    "one_tenth_rounded": "3ffb999999999999999999999999999a",
+}
+if not set(required_f128_value_hex).issubset(set(f128_value_cases)):
+    raise SystemExit(f"f128 binary128 value receipt missing required cases: {sorted(set(required_f128_value_hex) - set(f128_value_cases))}")
+for case_id, expected_hex in required_f128_value_hex.items():
+    row = f128_value_cases[case_id]
+    if row.get("hex") != expected_hex:
+        raise SystemExit(f"{case_id} expected binary128 hex {expected_hex}, got {row.get('hex')}")
+    if "fraction_hi" not in row or "fraction_lo" not in row or "exponent_field" not in row:
+        raise SystemExit(f"{case_id} must record sign/exponent/fraction limbs")
+if f128_value_cases.get("high_precision_probe", {}).get("decimal_digit_count") != 35:
+    raise SystemExit("high_precision_probe must preserve 35 decimal digits in the binary128 value receipt")
+if f128_value_cases.get("high_precision_probe", {}).get("decimal_scale10") != 34:
+    raise SystemExit("high_precision_probe must preserve decimal scale10=34 in the binary128 value receipt")
 
 if machine_slot_metadata_receipt.get("schema") != "madaros.v2.s5.machine_slot_metadata_receipt/0.1":
     raise SystemExit("bad MachineIR slot metadata receipt schema")
@@ -1208,12 +1332,17 @@ not_promoted = [
     {
         "surface": "f128_numeric_width",
         "status": "not_promoted_by_this_slice",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata independent from f64 and checker TypeKind::TyF128 awareness, while native-v2 f128 execution still fails closed until binary128 rounding, IR/MIR/ABI/software-helper receipts exist",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, and an exact binary128 value contract, while native-v2 f128 execution still fails closed until IR/MIR/ABI/software-helper receipts exist",
     },
     {
         "surface": "f128_literal_decimal_metadata_and_type",
         "status": "promoted_by_parser_decimal_metadata_and_checker_type_receipt_not_execution",
         "reason": "ExprFloatLit now preserves original source spelling and bounded decimal sign/significand/scale metadata, and the checker recognizes f128 as TypeKind::TyF128 instead of a generic named type; native-v2 f128 execution remains unpromoted",
+    },
+    {
+        "surface": "f128_binary128_value_contract",
+        "status": "promoted_by_exact_decimal_to_binary128_value_receipt_not_execution",
+        "reason": "finite f128 decimal literals now have a deterministic IEEE-754 binary128 sign/exponent/fraction contract with roundTiesToEven anchors; native-v2 f128 execution remains unpromoted",
     },
     {
         "surface": "unsupported_numeric_diagnostics",
@@ -1360,6 +1489,17 @@ module = {
         "native_emit_case_count": wide_int_receipt["native_emit_case_count"],
         "cases": wide_int_receipt["cases"],
     },
+    "wide_machine_slot_metadata_receipt": {
+        "schema": wide_machine_slot_receipt["schema"],
+        "path": f"{wide_machine_slot_receipt_path.parent.name}/{wide_machine_slot_receipt_path.name}",
+        "receipt_sha256": wide_machine_slot_receipt["receipt_sha256"],
+        "stage_contract_level": wide_machine_slot_receipt["stage_contract_level"],
+        "case_id": wide_machine_slot_receipt["case_id"],
+        "case_count": wide_machine_slot_receipt["case_count"],
+        "cases": wide_machine_slot_receipt["cases"],
+        "wide_machine_slot_metadata_complete": wide_machine_slot_receipt["wide_machine_slot_metadata_complete"],
+        "wide_i256_u256_machine_slots_promoted": wide_machine_slot_receipt["wide_i256_u256_machine_slots_promoted"],
+    },
     "generic_aggregate_sret_receipt": {
         "schema": generic_agg_receipt["schema"],
         "path": f"{generic_agg_receipt_path.parent.name}/{generic_agg_receipt_path.name}",
@@ -1396,6 +1536,18 @@ module = {
         "f128_literal_decimal_scale10": f128_literal_provenance_receipt["f128_literal_decimal_scale10"],
         "f128_literal_decimal_metadata_independent_from_f64": f128_literal_provenance_receipt["f128_literal_decimal_metadata_independent_from_f64"],
         "f128_type_system_awareness_promoted": f128_literal_provenance_receipt["f128_type_system_awareness_promoted"],
+    },
+    "f128_binary128_value_receipt": {
+        "schema": f128_binary128_value_receipt["schema"],
+        "path": f"{f128_binary128_value_receipt_path.parent.name}/{f128_binary128_value_receipt_path.name}",
+        "receipt_sha256": f128_binary128_value_receipt["receipt_sha256"],
+        "stage_contract_level": f128_binary128_value_receipt["stage_contract_level"],
+        "case_id": f128_binary128_value_receipt["case_id"],
+        "case_count": f128_binary128_value_receipt["case_count"],
+        "rounding_mode": f128_binary128_value_receipt["rounding_mode"],
+        "target_format": f128_binary128_value_receipt["target_format"],
+        "cases": f128_binary128_value_receipt["cases"],
+        "f128_binary128_value_contract_complete": f128_binary128_value_receipt["f128_binary128_value_contract_complete"],
     },
     "machine_slot_metadata_receipt": {
         "schema": machine_slot_metadata_receipt["schema"],
@@ -1441,8 +1593,10 @@ module = {
         "f64_xmm0_promoted": True,
         "wide_i128_i256_promoted": True,
         "wide_u128_u256_promoted": True,
+        "wide_i256_u256_machine_slots_promoted": True,
         "f128_literal_decimal_metadata_promoted": True,
         "f128_type_system_awareness_promoted": True,
+        "f128_binary128_value_contract_promoted": True,
         "machine_slot_metadata_promoted": True,
         "unsupported_numeric_diagnostics_promoted": True,
         "unsupported_numeric_widths_fail_closed": True,
@@ -1468,16 +1622,18 @@ module = {
         "method_sret_receipt_recorded",
         "f64_xmm0_call_return_receipt_recorded",
         "wide_int_i128_i256_receipt_recorded",
+        "wide_int_machine_slot_metadata_receipt_recorded",
         "generic_aggregate_sret_layout_receipt_recorded",
         "f128_literal_decimal_metadata_receipt_recorded",
         "f128_type_system_awareness_receipt_recorded",
+        "f128_binary128_value_receipt_recorded",
         "machine_slot_kind_width_metadata_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
         "differential_native_v2_vs_lean_single_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
         "f128_execution_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
-        "f128_numeric_tower_still_required_before_s5_ready",
+        "f128_ir_mir_abi_helpers_still_required_before_s5_ready",
     ],
 }
 canonical_module, module_sha = canonical_roundtrip(module)
@@ -1500,7 +1656,7 @@ receipt = {
     "s5_ready": False,
     "s5_implemented": False,
     "s5_full_complete": False,
-    "s_full_contract": "blocked_until_f128_numeric_tower_exists",
+    "s_full_contract": "blocked_until_f128_ir_mir_abi_and_software_helpers_exist",
     "program_mir_shadow_serialized": True,
     "compiler_machine_module_exported": True,
     "real_program_mir_emitted": True,
@@ -1514,9 +1670,11 @@ receipt = {
     "s5_normal_call_stack_args_complete": True,
     "s5_f64_xmm0_call_return_complete": True,
     "s5_wide_int_i128_i256_complete": True,
+    "s5_wide_int_machine_slot_metadata_complete": True,
     "s5_generic_aggregate_sret_layout_complete": True,
     "s4_s5_f128_literal_decimal_metadata_complete": True,
     "s4_s5_f128_type_system_awareness_complete": True,
+    "s5_f128_binary128_value_contract_complete": True,
     "s5_machine_slot_kind_width_metadata_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
@@ -1534,6 +1692,7 @@ receipt = {
     "native_v2_bridges_print_f64_arg0_to_xmm0": True,
     "wide_i128_i256_promoted": True,
     "wide_u128_u256_promoted": True,
+    "wide_i256_u256_machine_slots_promoted": True,
     "generic_aggregate_return_promoted": True,
     "generic_aggregate_local_layout_promoted": True,
     "generic_aggregate_imported_layout_promoted": True,
@@ -1543,6 +1702,7 @@ receipt = {
     "source_level_wide_arithmetic_promoted": True,
     "native_v2_wide_limb_backend_promoted": True,
     "wide_type_identity_and_safety_promoted": True,
+    "f128_binary128_value_contract_promoted": True,
     "s5_diagnostics_unsupported_numeric_complete": True,
     "unsupported_numeric_widths_fail_closed": True,
     "differential_native_v2_vs_lean_single_promoted": True,
@@ -1561,7 +1721,9 @@ receipt = {
     "method_sret_receipt_sha256": method_sret_receipt["receipt_sha256"],
     "f64_xmm0_receipt_sha256": f64_xmm0_receipt["receipt_sha256"],
     "wide_int_receipt_sha256": wide_int_receipt["receipt_sha256"],
+    "wide_machine_slot_metadata_receipt_sha256": wide_machine_slot_receipt["receipt_sha256"],
     "generic_aggregate_sret_receipt_sha256": generic_agg_receipt["receipt_sha256"],
+    "f128_binary128_value_receipt_sha256": f128_binary128_value_receipt["receipt_sha256"],
     "machine_slot_metadata_receipt_sha256": machine_slot_metadata_receipt["receipt_sha256"],
     "diagnostics_receipt_sha256": diagnostics_receipt["receipt_sha256"],
     "differential_receipt_sha256": differential_receipt["receipt_sha256"],
@@ -1589,6 +1751,8 @@ receipt = {
     "layout_derived_sret_alloc_promoted": module["scalar_abi_receipts"]["layout_derived_sret_alloc_promoted"],
     "wide_i128_i256_promoted": module["scalar_abi_receipts"]["wide_i128_i256_promoted"],
     "wide_u128_u256_promoted": module["scalar_abi_receipts"]["wide_u128_u256_promoted"],
+    "wide_i256_u256_machine_slots_promoted": module["scalar_abi_receipts"]["wide_i256_u256_machine_slots_promoted"],
+    "f128_binary128_value_contract_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_promoted"],
     "machine_slot_metadata_promoted": module["scalar_abi_receipts"]["machine_slot_metadata_promoted"],
     "unsupported_numeric_diagnostics_promoted": module["scalar_abi_receipts"]["unsupported_numeric_diagnostics_promoted"],
     "unsupported_numeric_widths_fail_closed": module["scalar_abi_receipts"]["unsupported_numeric_widths_fail_closed"],
@@ -1603,7 +1767,11 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "f128 numeric tower width receipts",
+        "f128 IR opcodes and constructors",
+        "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
+        "f128 SysV ABI classification and call-return signature metadata",
+        "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
+        "f128 native-v2 execution and differential receipts",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))

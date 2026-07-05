@@ -371,7 +371,7 @@ def emit(args: argparse.Namespace) -> int:
         ],
         "missing_full_obligations": [
             "generic aggregate return coverage",
-            "numeric tower width receipts for f128/i256",
+            "f128 IR/MIR/ABI/software-helper receipts",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",
             "differential native-v2 vs interpreter/lean_single validation where available",
         ],

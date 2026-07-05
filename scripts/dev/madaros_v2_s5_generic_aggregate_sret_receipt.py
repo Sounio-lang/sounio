@@ -396,7 +396,7 @@ def emit(args: argparse.Namespace) -> int:
             "native_elves_return_expected_discriminators",
         ],
         "missing_full_obligations": [
-            "f128 numeric tower width receipts",
+            "f128 IR/MIR/ABI/software-helper receipts",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",
             "differential native-v2 vs interpreter/lean_single validation where available",
         ],

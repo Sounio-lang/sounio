@@ -399,8 +399,8 @@ def emit(args: argparse.Namespace) -> int:
         ],
         "missing_full_obligations": [
             "ABI layout receipts for aggregate, SRET, imported call, stack-arg, and return paths",
-            "f64 XMM0 call/return witnesses before f128 promotion",
-            "numeric tower width receipts for f128/i256",
+            "f128 IR/MIR/ABI/software-helper receipts before f128 promotion",
+            "f128 IR/MIR/ABI/software-helper receipts",
             "diagnostics and fallback semantics for unsupported layouts and numeric widths",
             "differential native-v2 vs interpreter/lean_single validation where available",
         ],

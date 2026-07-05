@@ -290,7 +290,7 @@ def emit(args: argparse.Namespace) -> int:
             "f128_is_not_promoted_by_this_receipt",
         ],
         "missing_full_obligations": [
-            "f128 numeric tower width receipts",
+            "f128 IR/MIR/ABI/software-helper receipts",
             "differential native-v2 vs interpreter/lean_single validation where available",
         ],
     }
