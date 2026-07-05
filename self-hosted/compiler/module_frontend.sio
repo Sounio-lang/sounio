@@ -1725,41 +1725,6 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
     out
 }
 
-// Reinstall seed user main after finalize: owned-module finalize passes can clobber
-// fn=0 under the lean_single JIT. Stub slots are already promoted; keep seed fn_ids.
-fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) -> IrModule with Mut, Div, Panic {
-    var out = module
-    if out.fn_count <= 0 {
-        return out
-    }
-    var slot = out.functions[0 as usize]
-    slot.name = user_main.name
-    slot.instr_count = user_main.instr_count
-    slot.reg_count = user_main.reg_count
-    slot.label_count = user_main.label_count
-    slot.param_count = user_main.param_count
-    slot.compile_strategy = user_main.compile_strategy
-    slot.returns_float = user_main.returns_float
-    slot.return_struct_name = user_main.return_struct_name
-    slot.prof_counter_id = user_main.prof_counter_id
-    slot.hyper_algebra_kind = user_main.hyper_algebra_kind
-    slot.is_sret = user_main.is_sret
-    slot.sret_dest_reg = user_main.sret_dest_reg
-    slot.bss_size = user_main.bss_size
-    slot.had_overflow = user_main.had_overflow
-    var pi: i64 = 0
-    while pi < user_main.param_count && pi < IR_MAX_PARAMS {
-        slot.param_regs[pi as usize] = user_main.param_regs[pi as usize]
-        pi = pi + 1
-    }
-    var ii: i64 = 0
-    while ii < user_main.instr_count && ii < IR_MAX_INSTRS {
-        slot.instrs[ii as usize] = user_main.instrs[ii as usize]
-        ii = ii + 1
-    }
-    out.functions[0 as usize] = slot
-    out
-}
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
 // to their position in the merged module. Operates through &! to avoid large-local JIT writes.
@@ -4493,9 +4458,10 @@ fn module_frontend_merge_imported_into(
         print("IR lowering produced empty module\n")
         return false
     }
-    let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    var finalized = ir_module_finalize_merged_calls(*module_box)
-    (*out_module) = ir_module_restore_user_main_calls(finalized, user_main_snapshot)
+    // Natural form — the fn=0 snapshot/restore band-aid guarded against the
+    // (since root-fixed) two-level RMW clobber in the finalize passes;
+    // removed under the proof protocol.
+    (*out_module) = ir_module_finalize_merged_calls(*module_box)
     true
 }
 
@@ -4602,9 +4568,8 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         print("MERGE_DUMP: pre_finalize\n")
         ir_module_dump_merge_calls(&(*module_box))
     }
-    let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+    // Natural form — fn=0 snapshot/restore band-aid removed (see above).
     var merged_module = ir_module_finalize_merged_calls(*module_box)
-    merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
     let fn_count = merged_module.fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
