@@ -1,0 +1,69 @@
+//@ run-pass
+// Witness: single two-level indexed aggregate store (no reuse of the local
+// across further iterations). The transient RHS local `ins` is still alive
+// at the point of verification, so even under the suspected pointer-aliasing
+// bug this may PASS "by luck" -- it documents that the hazard requires the
+// local's storage to be *overwritten* by a subsequent iteration to manifest
+// as corruption (see lean_two_level_indexed_rmw_aggregate.sio for the
+// multi-iteration case that is expected to fail).
+
+struct Inner {
+    a: i64,
+    b: i64,
+    c: i64,
+}
+
+struct Mid {
+    arr2: [Inner; 4],
+    pad: i64,
+}
+
+struct Outer {
+    arr1: [Mid; 4],
+    count: i64,
+}
+
+fn zero_inner() -> Inner {
+    Inner { a: 0, b: 0, c: 0 }
+}
+
+fn zero_mid() -> Mid {
+    Mid { arr2: [zero_inner(); 4], pad: 0 }
+}
+
+fn zero_outer() -> Outer {
+    Outer { arr1: [zero_mid(); 4], count: 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var o = zero_outer()
+
+    var ins = o.arr1[1 as usize].arr2[2 as usize]
+    ins.a = 42
+    ins.b = 7
+    ins.c = 9
+    o.arr1[1 as usize].arr2[2 as usize] = ins
+
+    var mismatches: i64 = 0
+
+    // Immediate verify: local still alive.
+    if ins.a != 42 { mismatches = mismatches + 1 }
+    if ins.b != 7 { mismatches = mismatches + 1 }
+    if ins.c != 9 { mismatches = mismatches + 1 }
+
+    // End verify: read back through the struct path.
+    let got = o.arr1[1 as usize].arr2[2 as usize]
+    if got.a != 42 { mismatches = mismatches + 1 }
+    if got.b != 7 { mismatches = mismatches + 1 }
+    if got.c != 9 { mismatches = mismatches + 1 }
+
+    if mismatches == 0 {
+        print("W_D PASS\n")
+        0
+    } else {
+        print("W_D FAIL mismatches=")
+        print_int(mismatches)
+        print("\n")
+        1
+    }
+}

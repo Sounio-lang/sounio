@@ -1,0 +1,83 @@
+//@ run-pass
+// Witness: lean_single suspected codegen bug — two-level indexed store
+// `outer.arr1[i].arr2[j] = v` where the leaf element type is an AGGREGATE
+// (multi-field struct). Hypothesis: the handler omits heap-materialization
+// and instead stores the pointer of the transient RHS local directly into
+// the slot, so when the local is reused on the next loop iteration, all
+// previously stored elements alias the same (now overwritten) storage and
+// read back corrupted.
+
+struct Inner {
+    a: i64,
+    b: i64,
+    c: i64,
+}
+
+struct Mid {
+    arr2: [Inner; 4],
+    pad: i64,
+}
+
+struct Outer {
+    arr1: [Mid; 4],
+    count: i64,
+}
+
+fn zero_inner() -> Inner {
+    Inner { a: 0, b: 0, c: 0 }
+}
+
+fn zero_mid() -> Mid {
+    Mid { arr2: [zero_inner(); 4], pad: 0 }
+}
+
+fn zero_outer() -> Outer {
+    Outer { arr1: [zero_mid(); 4], count: 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var o = zero_outer()
+
+    var fi: i64 = 0
+    while fi < 4 {
+        var ii: i64 = 0
+        while ii < 4 {
+            // Local reused every inner iteration -- this is the aliasing
+            // hazard site under test.
+            var ins = o.arr1[fi as usize].arr2[ii as usize]
+            ins.a = fi * 10 + ii
+            ins.b = 100 + fi
+            ins.c = 200 + ii
+            o.arr1[fi as usize].arr2[ii as usize] = ins
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+
+    var mismatches: i64 = 0
+    fi = 0
+    while fi < 4 {
+        var ii: i64 = 0
+        while ii < 4 {
+            let got = o.arr1[fi as usize].arr2[ii as usize]
+            let exp_a = fi * 10 + ii
+            let exp_b = 100 + fi
+            let exp_c = 200 + ii
+            if got.a != exp_a { mismatches = mismatches + 1 }
+            if got.b != exp_b { mismatches = mismatches + 1 }
+            if got.c != exp_c { mismatches = mismatches + 1 }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+
+    if mismatches == 0 {
+        print("W_A PASS\n")
+        0
+    } else {
+        print("W_A FAIL mismatches=")
+        print_int(mismatches)
+        print("\n")
+        1
+    }
+}

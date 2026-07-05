@@ -193,6 +193,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis | repo_only | docs/audit/r3_1_tup_cache_collision_fix/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-general-lvalue-deref-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_GENERAL_LVALUE_DEREF_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.seed-fix-two-level-indexed-aggregate-store-2026-07-05 | repo_only | docs/audit/SEED_FIX_TWO_LEVEL_INDEXED_AGGREGATE_STORE_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-value-nested-field-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_VALUE_NESTED_FIELD_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
