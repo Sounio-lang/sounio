@@ -9454,6 +9454,44 @@ fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
+// &obj.field[i] / &(*p).field[i] on a fixed ARRAY field: on entry rax = the
+// array field cell address and EP sits on '['. Scalar elements live inline,
+// so the borrow is the slot address (lea). Aggregate elements are
+// heap-materialized (the slot holds the element pointer), so the borrow is
+// the LOADED slot value. Without this tail the borrow used to return the
+// field base and leave "[i]" to the postfix parser, which indexed a TEMP
+// copy — callee mutations were silently dropped and reads decoded slot
+// pointers as data (see tests/known_failures/lean_borrow_*.sio and the
+// ir_patch_validated_calls &!(*module).functions[i] crash family).
+fn compile_borrow_array_elem_tail_x86(arr_hash: i64, want_mut: i64) with IO, Mut, Panic, Div {
+    let ab_ps = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(ab_ps)
+    EP = EP + 1
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    let ab_is = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(ab_is)
+    let el_ty = arr_hash_elem_ty(arr_hash)
+    let el_hash = arr_hash_elem_hash(arr_hash)
+    let esiz = arr_hash_esiz(arr_hash)
+    emit_load_var(ab_is)
+    em(0x48); em(0x89); em(0xc1)
+    emit_load_var(ab_ps)
+    if type_is_aggregate(el_ty, el_hash) {
+        em(0x48); em(0x8b); em(0x04); em(0xc8)
+    } else {
+        if esiz == 8 { em(0x48); em(0x8d); em(0x04); em(0xc8) }
+        else { em(0x48); em(0x8d); em(0x04); em(0x08) }
+    }
+    EXPR_IS_F64 = 0
+    EXPR_TY = 10
+    if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(el_ty, el_hash, 1) }
+    else { EXPR_TY_HASH = ref_hash_make(el_ty, el_hash, 0) }
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -9513,6 +9551,10 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 em(0x48); em(0x8b); em(0x00)
                 inner_ty = ptr_hash_inner_ty(inner_hash)
                 inner_hash = ptr_hash_inner_hash(inner_hash)
+            }
+            if inner_ty == 8 && TK[EP as usize] == 41 {
+                compile_borrow_array_elem_tail_x86(inner_hash, want_mut)
+                return
             }
             EXPR_IS_F64 = 0
             EXPR_TY = 10
@@ -9833,6 +9875,10 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             inner_ty = ptr_hash_inner_ty(inner_hash)
             inner_hash = ptr_hash_inner_hash(inner_hash)
         }
+        if inner_ty == 8 && TK[EP as usize] == 41 {
+            compile_borrow_array_elem_tail_x86(inner_hash, want_mut)
+            return
+        }
         EXPR_IS_F64 = 0
         EXPR_TY = 10
         if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
@@ -9875,6 +9921,10 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 em(0x48); em(0x8b); em(0x00)
                 inner_ty2 = ptr_hash_inner_ty(inner_hash2)
                 inner_hash2 = ptr_hash_inner_hash(inner_hash2)
+            }
+            if inner_ty2 == 8 && TK[EP as usize] == 41 {
+                compile_borrow_array_elem_tail_x86(inner_hash2, want_mut)
+                return
             }
             EXPR_IS_F64 = 0
             EXPR_TY = 10
@@ -21429,6 +21479,20 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 emit_store_to_pointer_offset_x86(lslot, 0, inner_ty, inner_hash)
+            } else if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
+                // `*e = expr` through a reference binding (`&! T` param/local).
+                // Previously only *mut raw pointers were accepted; refs fell to
+                // the non-fatal tc_error below and the store was silently
+                // DROPPED (see tests/known_failures/lean_borrow_scalar_array_elem.sio).
+                if ref_hash_mut(VAR_TY_HASH[lvi as usize]) == 0 {
+                    tc_error(name_tok, "dereference assignment requires exclusive (&!) reference")
+                }
+                let rinner_ty = ref_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let rinner_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if ty_eq(rinner_ty, rinner_hash, rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                emit_store_to_pointer_offset_x86(lslot, 0, rinner_ty, rinner_hash)
             } else {
                 tc_error(name_tok, "dereference assignment requires raw pointer binding")
             }
@@ -32639,6 +32703,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 emit_store_to_pointer_offset_a64(lslot, 0, inner_ty, inner_hash)
+            } else if lvi >= 0 && VAR_TY[lvi as usize] == 10 {
+                // Mirror of the x86 ref-binding deref-store fix above.
+                if ref_hash_mut(VAR_TY_HASH[lvi as usize]) == 0 {
+                    tc_error(name_tok, "dereference assignment requires exclusive (&!) reference")
+                }
+                let rinner_ty = ref_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+                let rinner_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+                if ty_eq(rinner_ty, rinner_hash, rhs_ty, rhs_ty_hash) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                emit_store_to_pointer_offset_a64(lslot, 0, rinner_ty, rinner_hash)
             } else {
                 tc_error(name_tok, "dereference assignment requires raw pointer binding")
             }

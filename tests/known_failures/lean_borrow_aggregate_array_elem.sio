@@ -1,0 +1,63 @@
+//@ run-pass
+// Witness: lean_single suspected codegen bug — &! borrow of an AGGREGATE
+// array element.
+//
+// Hypothesis: arrays-of-aggregate elements are represented as arrays of
+// 8-byte pointers to heap-materialized copies. `&! container.arr[i]` should
+// LOAD the slot's heap pointer and hand that pointer to the callee. Instead
+// it is suspected to emit the SLOT ADDRESS itself (as if the element were
+// stored inline), so the callee dereferences the pointer-to-pointer as if it
+// were the struct, mutating/reading garbage instead of the element.
+//
+// Control: lean_borrow_scalar_array_elem.sio (scalar elements, slot address
+// == element address, expected PASS).
+
+struct Inner { a: i64, b: i64, c: i64 }
+struct Holder { arr: [Inner; 4], n: i64 }
+
+fn bump(e: &! Inner) with Mut {
+    e.a = e.a + 100
+    e.b = e.b + 200
+}
+
+fn zero_inner() -> Inner {
+    Inner { a: 0, b: 0, c: 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var h = Holder { arr: [zero_inner(); 4], n: 0 }
+
+    var i: i64 = 0
+    while i < 4 {
+        h.arr[i as usize].a = i
+        h.arr[i as usize].b = 10 * i
+        h.arr[i as usize].c = 99
+        i = i + 1
+    }
+
+    i = 0
+    while i < 4 {
+        bump(&! h.arr[i as usize])
+        i = i + 1
+    }
+
+    var mismatches: i64 = 0
+    i = 0
+    while i < 4 {
+        let got = h.arr[i as usize]
+        if got.a != i + 100 { mismatches = mismatches + 1 }
+        if got.b != 10 * i + 200 { mismatches = mismatches + 1 }
+        if got.c != 99 { mismatches = mismatches + 1 }
+        i = i + 1
+    }
+
+    if mismatches == 0 {
+        print("W1 PASS\n")
+        0
+    } else {
+        print("W1 FAIL mismatches=")
+        print_int(mismatches)
+        print("\n")
+        1
+    }
+}
