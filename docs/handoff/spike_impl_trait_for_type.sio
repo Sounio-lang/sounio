@@ -1,0 +1,59 @@
+//@ run-pass
+// SPIKE: minimal repro for compiler prerequisite #2 (impl Trait for Type does not parse).
+//
+// IMPORTANT: this single file actually straddles TWO distinct, independently-verified
+// parser bugs, both blocking on souc v0.80.0 (worktree coord/exact-algebra-core, 2026-07-05):
+//
+//   Bug A — a trait declaration with a BODYLESS method signature (no `{ ... }` body,
+//   the only useful form for an interface like ExactRing) fails to parse, even alone
+//   with no impl in sight. Isolated repro (no impl, no struct):
+//     trait Tr { fn g(self) -> i64 }     // note: NO body on `g`
+//     fn main() with IO { println("t") }
+//   -> parse error: expected token at line 4:1, expected=184 actual=177 (the trait's
+//      own closing `}` is unexpected -- the parser evidently wants a `{ ... }` body
+//      after the `fn g(self) -> i64` signature and gets confused when one isn't there).
+//   Control: `trait Empty { }` (zero methods) DOES parse ("Compilation successful!").
+//   So the bug is specifically about METHOD SIGNATURES inside a trait body, not traits
+//   in general.
+//
+//   Bug B — `impl Trait for Type { ... }` itself: once Bug A is worked around (give the
+//   trait method a throwaway default body, as below, purely to isolate Bug B), the `for`
+//   keyword on the impl line is rejected on its own:
+//     trait Tr { fn g(self) -> i64 { 0 } }
+//     struct Q { v: i64 }
+//     impl Tr for Q { fn g(self) -> i64 { self.v } }
+//   -> parse error: expected token at line 6:9, expected=184 actual=23 (right at `for`;
+//      the main parser's impl-grammar expects `{` immediately after the type name and
+//      chokes on `for`).
+//
+// This file is written in the FINAL desired form (bodyless trait method, exactly like
+// `ExactRing` needs) so both bugs are visible together, matching what actually blocks
+// the real consumer. Run: `./bin/souc run docs/handoff/spike_impl_trait_for_type.sio`
+// (rc is not meaningful here -- the parser stage fails outright before any backend
+// stub could produce a false green; read stdout).
+//
+// Corrected note on an earlier survey: `exact_engine_prereqs.md` claimed "zero
+// occurrences [of impl Trait for Type] in the entire stdlib" and "trait DECLARATION
+// parses". Both need qualification: the *syntax* `impl X for Y` does appear in
+// `stdlib/quantum/vqe.sio`, `stdlib/ml/pac.sio`, and `examples/*.sio` (aspirational,
+// forward-declared), and a trait declaration only parses today if it has ZERO methods
+// or if every method has a body -- `trait Empty {}` works, `trait Ansatz { fn ... }`
+// (bodyless methods, as written in vqe.sio) does NOT parse standalone. Fixing #2
+// (below) must therefore cover both Bug A and Bug B for its own acceptance spike to
+// even compile -- see the task prompt for the full acceptance criteria.
+
+trait Tr {
+    fn g(self) -> i64
+}
+
+struct Q { v: i64 }
+
+impl Tr for Q {
+    fn g(self) -> i64 { self.v }
+}
+
+fn main() with IO {
+    let q = Q { v: 3 }
+    println(q.g())   // expect 3
+    println("spike PASS")
+}
