@@ -119,6 +119,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-bugd-already-fixed-by-buga-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_BUGD_ALREADY_FIXED_BY_BUGA_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.lean-single-literal-ref-arg-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_LITERAL_REF_ARG_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-multiplicative-line-boundary-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_MULTIPLICATIVE_LINE_BOUNDARY_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-multisegment-qualified-call-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_MULTISEGMENT_QUALIFIED_CALL_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-named-use-import-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_NAMED_USE_IMPORT_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
