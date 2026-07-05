@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.compiler-generic-struct-return-fix-prompt
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.compiler-generic-struct-return-fix-prompt
+-->
+
 # Prompt — Fix souc generic-struct-return monomorphisation (unblocks exact-algebra `<F>`)
 
 **For:** fable5 agent on the **Claude #2 lane**
