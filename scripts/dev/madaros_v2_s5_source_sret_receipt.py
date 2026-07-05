@@ -3,7 +3,7 @@
 
 This receipt proves real source programs returning aggregates from local
 functions are lowered to the native-v2 SRET ABI path. It is deliberately
-narrower than S5 FULL: it covers local register-argument aggregate returns only.
+narrower than S5 FULL: it covers local aggregate returns through register and stack integer arguments only.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 
 SCHEMA_VERSION = "madaros.v2.s5.source_sret_receipt/0.1"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_SOURCE_SRET_LOCAL_REGISTER_ARGS_NOT_FULL"
+STAGE_CONTRACT_LEVEL = "S5_SOURCE_SRET_LOCAL_STACK_ARGS_NOT_FULL"
 
 MIR_OP_LOAD_STACK = 100
 MIR_OP_ARG_MOVE = 112
@@ -28,6 +28,8 @@ MIR_OP_RET = 115
 MIR_OP_ALLOC = 116
 MIR_OP_FIELD_LOAD = 117
 MIR_OP_FIELD_STORE = 118
+MIR_OP_STACK_ADJUST = 129
+MIR_OP_STACK_ARG_PUSH = 130
 
 ONE_ARG_SOURCE = """struct Big {
     f0: i64,
@@ -61,6 +63,38 @@ fn main() -> i64 {
 }
 """
 
+STACK_ONE_ARG_SOURCE = """struct Big {
+    f0: i64,
+    f1: i64,
+    f2: i64,
+}
+
+fn make(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> Big {
+    Big { f0: a + c + f, f1: b * 2, f2: d + e }
+}
+
+fn main() -> i64 {
+    let x = make(3, 7, 4, 20, 2, 6)
+    x.f0 + x.f1 + x.f2
+}
+"""
+
+STACK_TWO_ARG_SOURCE = """struct Big {
+    f0: i64,
+    f1: i64,
+    f2: i64,
+}
+
+fn make(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> Big {
+    Big { f0: a + c + f, f1: b * 2, f2: d + e + g }
+}
+
+fn main() -> i64 {
+    let x = make(3, 7, 4, 20, 2, 6, 8)
+    x.f0 + x.f1 + x.f2
+}
+"""
+
 CASES = [
     {
         "case_id": "source_sret_local_i64_triple_return_14",
@@ -69,6 +103,9 @@ CASES = [
         "program_kind": "source_local_one_arg_aggregate_sret_return",
         "expected_arg_indices": [0, 1],
         "expected_arg_source_slots": [1, 0],
+        "expected_stack_arg_indices": [],
+        "expected_stack_arg_source_slots": [],
+        "expected_stack_adjusts": [],
         "explicit_arg_count": 1,
     },
     {
@@ -79,6 +116,33 @@ CASES = [
         "expected_arg_indices": [0, 1, 2, 3, 4, 5],
         "expected_arg_source_slots": [5, 0, 1, 2, 3, 4],
         "explicit_arg_count": 5,
+        "expected_stack_arg_indices": [],
+        "expected_stack_arg_source_slots": [],
+        "expected_stack_adjusts": [],
+    },
+    {
+        "case_id": "source_sret_local_stack_one_arg_return_49",
+        "source": STACK_ONE_ARG_SOURCE,
+        "expected_exit": 49,
+        "program_kind": "source_local_stack_one_arg_aggregate_sret_return",
+        "expected_arg_indices": [0, 1, 2, 3, 4, 5],
+        "expected_arg_source_slots": [6, 0, 1, 2, 3, 4],
+        "expected_stack_arg_indices": [6],
+        "expected_stack_arg_source_slots": [5],
+        "expected_stack_adjusts": [-8, 16],
+        "explicit_arg_count": 6,
+    },
+    {
+        "case_id": "source_sret_local_stack_two_arg_return_57",
+        "source": STACK_TWO_ARG_SOURCE,
+        "expected_exit": 57,
+        "program_kind": "source_local_stack_two_arg_aggregate_sret_return",
+        "expected_arg_indices": [0, 1, 2, 3, 4, 5],
+        "expected_arg_source_slots": [7, 0, 1, 2, 3, 4],
+        "expected_stack_arg_indices": [7, 6],
+        "expected_stack_arg_source_slots": [6, 5],
+        "expected_stack_adjusts": [16],
+        "explicit_arg_count": 7,
     },
 ]
 
@@ -203,10 +267,33 @@ def arg_move_source_stack_slots(function: dict[str, Any]) -> list[int]:
     return slots
 
 
+def stack_arg_push_indices(function: dict[str, Any]) -> list[int]:
+    return [int(instr[10]) for instr in function["instrs"] if int(instr[0]) == MIR_OP_STACK_ARG_PUSH]
+
+
+def stack_arg_push_source_stack_slots(function: dict[str, Any]) -> list[int]:
+    instrs = function["instrs"]
+    slots: list[int] = []
+    for idx, instr in enumerate(instrs):
+        if int(instr[0]) != MIR_OP_STACK_ARG_PUSH:
+            continue
+        if idx == 0 or int(instrs[idx - 1][0]) != MIR_OP_LOAD_STACK:
+            raise SystemExit("source SRET STACK_ARG_PUSH must be fed by immediate LOAD_STACK")
+        slots.append(int(instrs[idx - 1][4]))
+    return slots
+
+
+def stack_adjust_immediates(function: dict[str, Any]) -> list[int]:
+    return [int(instr[4]) for instr in function["instrs"] if int(instr[0]) == MIR_OP_STACK_ADJUST]
+
+
 def validate_source_sret_machine_module(
     module: dict[str, Any],
     expected_arg_indices: list[int],
     expected_arg_source_slots: list[int],
+    expected_stack_arg_indices: list[int],
+    expected_stack_arg_source_slots: list[int],
+    expected_stack_adjusts: list[int],
 ) -> dict[str, Any]:
     by_name = functions_by_name(module)
     if set(by_name) != {"make", "main"}:
@@ -239,6 +326,28 @@ def validate_source_sret_machine_module(
             "source SRET call source stack slots mismatch: "
             f"expected {expected_arg_source_slots}, got {stack_slots}"
         )
+    stack_indices = stack_arg_push_indices(main_fn)
+    if stack_indices != expected_stack_arg_indices:
+        raise SystemExit(
+            "source SRET stack arg indices mismatch: "
+            f"expected {expected_stack_arg_indices}, got {stack_indices}"
+        )
+    stack_arg_slots = stack_arg_push_source_stack_slots(main_fn)
+    if stack_arg_slots != expected_stack_arg_source_slots:
+        raise SystemExit(
+            "source SRET stack arg source slots mismatch: "
+            f"expected {expected_stack_arg_source_slots}, got {stack_arg_slots}"
+        )
+    stack_adjusts = stack_adjust_immediates(main_fn)
+    if stack_adjusts != expected_stack_adjusts:
+        raise SystemExit(
+            "source SRET stack adjust mismatch: "
+            f"expected {expected_stack_adjusts}, got {stack_adjusts}"
+        )
+    if expected_stack_arg_indices and MIR_OP_STACK_ARG_PUSH not in main_ops:
+        raise SystemExit("source SRET stack case must contain STACK_ARG_PUSH")
+    if not expected_stack_arg_indices and MIR_OP_STACK_ARG_PUSH in main_ops:
+        raise SystemExit("source SRET register-only case must not contain STACK_ARG_PUSH")
     if make_ops.count(MIR_OP_FIELD_STORE) < 6:
         raise SystemExit("source SRET make must store three local fields and copy three SRET fields")
     if make_ops.count(MIR_OP_FIELD_LOAD) < 3:
@@ -252,6 +361,9 @@ def validate_source_sret_machine_module(
         "main_opcodes": main_ops,
         "main_arg_move_indices": indices,
         "main_arg_move_source_stack_slots": stack_slots,
+        "main_stack_arg_push_indices": stack_indices,
+        "main_stack_arg_push_source_stack_slots": stack_arg_slots,
+        "main_stack_adjust_immediates": stack_adjusts,
         "make_field_store_count": make_ops.count(MIR_OP_FIELD_STORE),
         "make_field_load_count": make_ops.count(MIR_OP_FIELD_LOAD),
         "main_field_load_count": main_ops.count(MIR_OP_FIELD_LOAD),
@@ -303,7 +415,12 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         module,
         list(case["expected_arg_indices"]),
         list(case["expected_arg_source_slots"]),
+        list(case["expected_stack_arg_indices"]),
+        list(case["expected_stack_arg_source_slots"]),
+        list(case["expected_stack_adjusts"]),
     )
+    register_param_count = min(explicit_arg_count, 5)
+    stack_arg_count = max(explicit_arg_count - 5, 0)
     return {
         "case_id": case_id,
         "program_kind": case["program_kind"],
@@ -335,12 +452,21 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
                     "machine_arg_index": idx + 1,
                     "caller_source_stack_slot": idx,
                 }
-                for idx, reg in enumerate(["rsi", "rdx", "rcx", "r8", "r9"][:explicit_arg_count])
+                for idx, reg in enumerate(["rsi", "rdx", "rcx", "r8", "r9"][:register_param_count])
+            ],
+            "stack_params": [
+                {
+                    "type": "i64",
+                    "class": "scalar_i64",
+                    "machine_arg_index": idx + 6,
+                    "caller_source_stack_slot": idx + 5,
+                }
+                for idx in range(stack_arg_count)
             ],
             "return": {"type": "aggregate_pointer", "class": "sret_hidden_dest", "register": "rax"},
             "sret": True,
             "aggregate_layout": True,
-            "stack_arg_count": 0,
+            "stack_arg_count": stack_arg_count,
         },
     }
 
@@ -355,12 +481,14 @@ def emit(args: argparse.Namespace) -> int:
     case_results = [emit_case(root, compiler, out_dir, case, args.timeout) for case in CASES]
     one_arg = case_results[0]
     multi_arg = case_results[1]
+    stack_one_arg = case_results[2]
+    stack_two_arg = case_results[3]
     receipt = {
         "schema": SCHEMA_VERSION,
         "status": "pass",
         "stage_contract_level": STAGE_CONTRACT_LEVEL,
         "target": "x86_64-linux",
-        "case_id": "source_sret_local_register_args",
+        "case_id": "source_sret_local_register_and_stack_args",
         "case_count": len(case_results),
         "cases": case_results,
         "abi_kind": "aggregate_sret_hidden_dest_call_return",
@@ -368,10 +496,16 @@ def emit(args: argparse.Namespace) -> int:
         "one_arg_actual_exit": one_arg["actual_exit"],
         "register_multi_arg_case_id": multi_arg["case_id"],
         "register_multi_arg_actual_exit": multi_arg["actual_exit"],
+        "stack_one_arg_case_id": stack_one_arg["case_id"],
+        "stack_one_arg_actual_exit": stack_one_arg["actual_exit"],
+        "stack_two_arg_case_id": stack_two_arg["case_id"],
+        "stack_two_arg_actual_exit": stack_two_arg["actual_exit"],
         "s5_source_sret_local_one_arg_complete": True,
         "s5_source_sret_local_register_multi_arg_complete": True,
+        "s5_source_sret_local_stack_arg_complete": True,
         "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
         "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
+        "source_frontend_lowers_local_stack_arg_aggregate_return_to_IrCallSret": True,
         "compiler_machine_module_exported": True,
         "real_program_mir_emitted": True,
         "real_abi_layout_emitted": True,
@@ -384,13 +518,15 @@ def emit(args: argparse.Namespace) -> int:
             "MachineModule_contains_make_and_main_without_legacy_fallback",
             "one_arg_caller_uses_IrCallSret_shape_with_two_ARG_MOVE_ops",
             "register_multi_arg_caller_uses_IrCallSret_shape_with_six_ARG_MOVE_ops",
+            "stack_arg_callers_use_STACK_ARG_PUSH_not_ARG_MOVE_6",
+            "one_stack_arg_case_records_alignment_padding_and_cleanup",
+            "two_stack_arg_case_records_cleanup_without_padding",
             "hidden_dest_loaded_to_machine_arg_0",
             "explicit_register_args_loaded_to_machine_args_1_through_5",
             "callee_copies_three_fields_to_hidden_dest",
             "native_elves_return_expected_discriminators",
         ],
         "missing_full_obligations": [
-            "source SRET stack-arg aggregate return coverage",
             "imported aggregate/SRET receipt",
             "method/generic/module-boundary aggregate return coverage",
             "f64 XMM0 call/return receipt before f128 promotion",

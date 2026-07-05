@@ -68,6 +68,8 @@ pub let MIR_OP_FLOAT_MOVE: i64 = 126         // float stack slot copy via xmm0
 
 pub let MIR_OP_LOAD_ABS: i64 = 127           // mov rax,[rax] — load from absolute addr in temp
 pub let MIR_OP_STORE_ABS: i64 = 128          // mov [rbx],rax — store to absolute addr
+pub let MIR_OP_STACK_ADJUST: i64 = 129       // signed rsp adjustment around stack-arg calls
+pub let MIR_OP_STACK_ARG_PUSH: i64 = 130     // push one already-loaded stack argument
 
 pub let MIR_OP_PSEUDO_LOAD_GLOBAL: i64 = 20
 pub let MIR_OP_PSEUDO_STORE_GLOBAL: i64 = 21
@@ -783,6 +785,21 @@ pub fn native_v2_make_capture_ret(temp: i64) -> MachineInstr with Mut, Panic, Di
     mi
 }
 
+pub fn native_v2_make_stack_adjust(bytes: i64) -> MachineInstr with Mut, Panic, Div {
+    var mi = machine_empty_instr()
+    mi.opcode = MIR_OP_STACK_ADJUST
+    mi.src1 = machine_operand_imm64(bytes)
+    mi
+}
+
+pub fn native_v2_make_stack_arg_push(arg_index: i64, temp: i64) -> MachineInstr with Mut, Panic, Div {
+    var mi = machine_empty_instr()
+    mi.opcode = MIR_OP_STACK_ARG_PUSH
+    mi.arg_index = arg_index
+    mi.src1 = machine_operand_gpr64(temp)
+    mi
+}
+
 pub fn native_v2_make_ret(temp: i64) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_RET
@@ -945,12 +962,20 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
                 out.legal_instr_count = out.legal_instr_count + 2
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
-            if machine_instr_call_arg_count(instr) > 5 {
+            if machine_instr_call_arg_count(instr) > MIR_MAX_CALL_ARGS {
                 out.supported = false
-                out.unsupported_detail = "sret_call_arity_gt_5"
+                out.unsupported_detail = "sret_call_arity_gt_8"
                 return out
             }
             out.legal_instr_count = out.legal_instr_count + 3 + (machine_instr_call_arg_count(instr) * 2)
+            if machine_instr_call_arg_count(instr) > 5 {
+                let stack_count = machine_instr_call_arg_count(instr) - 5
+                out.legal_instr_count = out.legal_instr_count + stack_count
+                if (stack_count % 2) != 0 {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                }
+                out.legal_instr_count = out.legal_instr_count + 1
+            }
             if machine_instr_dst_value(instr) >= 0 {
                 out.legal_instr_count = out.legal_instr_count + 2
             }
@@ -1073,6 +1098,24 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                 return out
             }
             out.legal_instr_count = out.legal_instr_count + 1 + (instr.arg_count * 2)
+            if instr.dst >= 0 {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
+        } else if instr.op == IrOpcode::IrCallSret {
+            if instr.arg_count > MIR_MAX_CALL_ARGS {
+                out.supported = false
+                out.unsupported_detail = "sret_call_arity_gt_8"
+                return out
+            }
+            out.legal_instr_count = out.legal_instr_count + 3 + (instr.arg_count * 2)
+            if instr.arg_count > 5 {
+                let stack_count = instr.arg_count - 5
+                out.legal_instr_count = out.legal_instr_count + stack_count
+                if (stack_count % 2) != 0 {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                }
+                out.legal_instr_count = out.legal_instr_count + 1
+            }
             if instr.dst >= 0 {
                 out.legal_instr_count = out.legal_instr_count + 2
             }
@@ -1244,17 +1287,33 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
-            if machine_instr_call_arg_count(instr) > 5 {
+            if machine_instr_call_arg_count(instr) > MIR_MAX_CALL_ARGS {
                 (*out).supported = false
-                (*out).unsupported_detail = "sret_call_arity_gt_5"
+                (*out).unsupported_detail = "sret_call_arity_gt_8"
                 return
             }
             let dest_temp = (*out).temp_count
             (*out).temp_count = dest_temp + 1
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(0, dest_temp))
+            let sret_stack_count = if machine_instr_call_arg_count(instr) > 5 { machine_instr_call_arg_count(instr) - 5 } else { 0 }
+            if (sret_stack_count % 2) != 0 {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_stack_adjust(-8))
+            }
+            var sret_si = machine_instr_call_arg_count(instr) - 1
+            while sret_si >= 5 {
+                let temp = (*out).temp_count
+                (*out).temp_count = temp + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
+                sret_si = sret_si - 1
+            }
             var sret_ai: i64 = 0
+            let sret_reg_argc = if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
             while sret_ai < machine_instr_call_arg_count(instr) {
+                if sret_ai >= sret_reg_argc {
+                    break
+                }
                 let temp = (*out).temp_count
                 (*out).temp_count = temp + 1
                 native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_ai)))
@@ -1262,6 +1321,13 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 sret_ai = sret_ai + 1
             }
             native_v2_emit_legal_instr_mut(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if sret_stack_count > 0 {
+                var cleanup = sret_stack_count * 8
+                if (sret_stack_count % 2) != 0 {
+                    cleanup = cleanup + 8
+                }
+                native_v2_emit_legal_instr_mut(out, native_v2_make_stack_adjust(cleanup))
+            }
             if machine_instr_dst_value(instr) >= 0 {
                 let ret_temp = (*out).temp_count
                 (*out).temp_count = ret_temp + 1
@@ -1467,17 +1533,33 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
-            if machine_instr_call_arg_count(instr) > 5 {
+            if machine_instr_call_arg_count(instr) > MIR_MAX_CALL_ARGS {
                 out.supported = false
-                out.unsupported_detail = "sret_call_arity_gt_5"
+                out.unsupported_detail = "sret_call_arity_gt_8"
                 return out
             }
             let dest_temp = out.temp_count
             out.temp_count = dest_temp + 1
             out = _emit_legal_byval(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
             out = _emit_legal_byval(out, native_v2_make_arg_move(0, dest_temp))
+            let sret_stack_count = if machine_instr_call_arg_count(instr) > 5 { machine_instr_call_arg_count(instr) - 5 } else { 0 }
+            if (sret_stack_count % 2) != 0 {
+                out = _emit_legal_byval(out, native_v2_make_stack_adjust(-8))
+            }
+            var sret_si = machine_instr_call_arg_count(instr) - 1
+            while sret_si >= 5 {
+                let temp = out.temp_count
+                out.temp_count = temp + 1
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
+                out = _emit_legal_byval(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
+                sret_si = sret_si - 1
+            }
             var sret_ai: i64 = 0
+            let sret_reg_argc = if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
             while sret_ai < machine_instr_call_arg_count(instr) {
+                if sret_ai >= sret_reg_argc {
+                    break
+                }
                 let temp = out.temp_count
                 out.temp_count = temp + 1
                 out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_ai)))
@@ -1485,6 +1567,13 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 sret_ai = sret_ai + 1
             }
             out = _emit_legal_byval(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if sret_stack_count > 0 {
+                var cleanup = sret_stack_count * 8
+                if (sret_stack_count % 2) != 0 {
+                    cleanup = cleanup + 8
+                }
+                out = _emit_legal_byval(out, native_v2_make_stack_adjust(cleanup))
+            }
             if machine_instr_dst_value(instr) >= 0 {
                 let ret_temp = out.temp_count
                 out.temp_count = ret_temp + 1
@@ -1656,6 +1745,12 @@ pub fn native_v2_machine_instr_is_legal(instr: MachineInstr) -> bool with Mut, P
     }
     if instr.opcode == MIR_OP_ARG_MOVE {
         return instr.src1.kind == MIR_OPERAND_GPR64 && instr.arg_index >= 0 && instr.arg_index < 6
+    }
+    if instr.opcode == MIR_OP_STACK_ADJUST {
+        return instr.src1.kind == MIR_OPERAND_IMM64
+    }
+    if instr.opcode == MIR_OP_STACK_ARG_PUSH {
+        return instr.src1.kind == MIR_OPERAND_GPR64 && instr.arg_index >= 6 && instr.arg_index <= MIR_MAX_CALL_ARGS
     }
     if instr.opcode == MIR_OP_CALL {
         return instr.src1.kind == MIR_OPERAND_CALL_TARGET
