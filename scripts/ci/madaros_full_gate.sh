@@ -125,14 +125,44 @@ run_imported_smt_gate() {
       tail -n 40 "$log" >&2 || true
       fail "imported-SMT solver gate failed"
     fi
+    # Output verification is mandatory: a stub/false-green ELF exits 0 while
+    # printing nothing (observed 2026-07-05: 590-byte compact-backend stubs
+    # passed exit-code-only gates). Every SMT witness prints ALL PASS.
+    if ! grep -q "ALL PASS" "$log"; then
+      echo "[madaros-full] imported-SMT false-green: $(basename "$test_path") exit 0 without ALL PASS" >&2
+      tail -n 40 "$log" >&2 || true
+      fail "imported-SMT solver gate failed (missing ALL PASS output)"
+    fi
     pass_count=$((pass_count + 1))
   done
 
   if [[ "$pass_count" -ne 6 ]]; then
     fail "imported-SMT solver gate incomplete: $pass_count/6"
   fi
+
+  # dd64 imported witnesses (math::dd64 EISA precision track): same contract —
+  # exit 0 AND ALL PASS output.
+  mapfile -t dd_tests < <(find "$ROOT_DIR/tests/stdlib/math" -maxdepth 1 -name 'test_dd64_*.sio' -print | sort)
+  local dd_pass=0 dd_path
+  for dd_path in "${dd_tests[@]}"; do
+    log="$WORK/dd64_$(basename "$dd_path").log"
+    set +e
+    env MADAROS_RAW_BIN="$RAW_MADAROS" timeout 120 "$MADAROS" run "$dd_path" >"$log" 2>&1
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]] || ! grep -q "ALL PASS" "$log"; then
+      echo "[madaros-full] imported-dd64 failure: $(basename "$dd_path") rc=$rc" >&2
+      tail -n 40 "$log" >&2 || true
+      fail "imported-dd64 gate failed"
+    fi
+    dd_pass=$((dd_pass + 1))
+  done
+  if [[ "${#dd_tests[@]}" -gt 0 && "$dd_pass" -ne "${#dd_tests[@]}" ]]; then
+    fail "imported-dd64 gate incomplete: $dd_pass/${#dd_tests[@]}"
+  fi
+
   SMT_GATE_PASS=1
-  pass "imported-SMT solver gate (6/6)"
+  pass "imported-SMT solver gate (6/6, output-verified) + dd64 ($dd_pass/${#dd_tests[@]})"
 }
 
 write_gate_receipt() {
