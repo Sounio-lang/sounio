@@ -21,6 +21,7 @@ from typing import Any
 SCHEMA = "madaros.v2.s4.receipt/0.1"
 EGRAPH_SCHEMA = "madaros.v2.s4.egraph/0.1"
 REWRITE_SCHEMA = "madaros.v2.ekan.rewrite/0.1"
+EXTRACTION_SCHEMA = "madaros.v2.s4.extraction/0.1"
 S3_SCHEMA = "madaros.v2.s3.receipt/0.1"
 
 BIN_OPS = {
@@ -314,6 +315,186 @@ def rejected_div_self_receipt(
     }
 
 
+def s4_cost_model_payload() -> dict[str, Any]:
+    return {
+        "schema": "madaros.v2.s4.cost_model/0.1",
+        "name": "madaros-v2-s4-exact-boundary-cost-model",
+        "version": "0.1",
+        "objective": [
+            "preserve exact semantics",
+            "prefer translation-validated exact constants over original binary operations",
+            "reject every counterexample-backed or unvalidated proposal",
+            "do not mutate downstream IR in this boundary lane",
+        ],
+        "weights": {
+            "const": 1,
+            "binary": 3,
+            "call": 5,
+            "unknown": 10,
+            "unvalidated_penalty": 1000000,
+        },
+    }
+
+
+def enode_cost_from_hash(egraph: dict[str, Any], eclass_id: str, enode_hash: str) -> int:
+    model = s4_cost_model_payload()["weights"]
+    for eclass in egraph["eclasses"]:
+        if eclass["eclass_id"] != eclass_id:
+            continue
+        for enode in eclass["enodes"]:
+            if enode.get("sha256") != enode_hash:
+                continue
+            op = enode.get("op")
+            if op == "const":
+                return int(model["const"])
+            if op == "binary":
+                return int(model["binary"])
+            if op == "call":
+                return int(model["call"])
+            return int(model["unknown"])
+    raise SystemExit(f"missing enode hash in egraph extraction: {eclass_id} {enode_hash}")
+
+
+def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str, Any], rewrites: list[dict[str, Any]]) -> dict[str, Any]:
+    cost_model = s4_cost_model_payload()
+    cost_model_sha = sha256_text(stable_json(cost_model))
+    rewrites_sha = sha256_text(stable_json(rewrites))
+    decisions: list[dict[str, Any]] = []
+    selected_ids: list[str] = []
+    rejected_ids: list[str] = []
+    for rewrite in rewrites:
+        rid = rewrite["proposed_rewrite_id"]
+        common = {
+            "rewrite_id": rid,
+            "eclass_id": rewrite["eclass_id"],
+            "rewrite_kind": rewrite["rewrite_kind"],
+            "proposal_kind": rewrite["proposal_kind"],
+            "function": rewrite["function"],
+            "block": rewrite["block"],
+            "instruction_result": rewrite["instruction_result"],
+            "original_enode_sha256": rewrite["original_enode_sha256"],
+            "proposed_enode_sha256": rewrite["proposed_enode_sha256"],
+            "validator": rewrite["validator"],
+            "validator_log_sha256": rewrite["validator_log_sha256"],
+            "cost_model": cost_model["name"],
+            "cost_model_sha256": cost_model_sha,
+            "cost_model_config_sha256": cost_model_sha,
+            "ir_mutation_allowed": False,
+            "extraction_applied_to_ir": False,
+        }
+        original_cost = enode_cost_from_hash(egraph, rewrite["eclass_id"], rewrite["original_enode_sha256"])
+        proposed_cost = enode_cost_from_hash(egraph, rewrite["eclass_id"], rewrite["proposed_enode_sha256"])
+        if rewrite["accepted"] is True:
+            if rewrite.get("selected_for_extraction") is not True:
+                raise SystemExit(f"accepted rewrite not marked selectable: {rid}")
+            decision = {
+                **common,
+                "decision": "select",
+                "selected": True,
+                "selected_enode_sha256": rewrite["proposed_enode_sha256"],
+                "replacement_enode_sha256": rewrite["rewritten_enode_sha256"],
+                "cost_before": original_cost,
+                "cost_after": proposed_cost,
+                "cost_delta": original_cost - proposed_cost,
+                "cost_components": {
+                    "original": {"base": original_cost, "children": 0, "total": original_cost},
+                    "selected": {"base": proposed_cost, "children": 0, "total": proposed_cost},
+                },
+                "selection_reason": "accepted_translation_validated_exact_lower_cost",
+                "proof_obligation": "translation-validation already accepted with zero error bound",
+                "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
+                "coefficient_sha256": rewrite["coefficient_sha256"],
+                "basis_family": rewrite["basis_family"],
+                "error_bound": rewrite["error_bound"],
+                "domain": rewrite["domain"],
+                "domain_bounds": rewrite["domain_bounds"],
+                "lowering_effect": "replace_binary_constant_expr_with_const",
+                "abi_impact": "none",
+                "mir_abi_safe": True,
+            }
+            if decision["cost_after"] > decision["cost_before"]:
+                raise SystemExit(f"accepted rewrite increases extraction cost: {rid}")
+            selected_ids.append(rid)
+        else:
+            if rewrite.get("selected_for_extraction") is not False:
+                raise SystemExit(f"rejected rewrite marked selectable: {rid}")
+            decision = {
+                **common,
+                "decision": "reject",
+                "selected": False,
+                "selected_enode_sha256": rewrite["original_enode_sha256"],
+                "replacement_enode_sha256": "",
+                "cost_before": original_cost,
+                "cost_after": original_cost + int(cost_model["weights"]["unvalidated_penalty"]),
+                "cost_delta": -int(cost_model["weights"]["unvalidated_penalty"]),
+                "cost_components": {
+                    "original": {"base": original_cost, "children": 0, "total": original_cost},
+                    "blocked_candidate": {
+                        "base": proposed_cost,
+                        "children": 0,
+                        "penalty": int(cost_model["weights"]["unvalidated_penalty"]),
+                        "total": original_cost + int(cost_model["weights"]["unvalidated_penalty"]),
+                    },
+                },
+                "selection_reason": "rejected_by_validator_counterexample",
+                "rejection_reason_code": rewrite["rejection_reason_code"],
+                "counterexample_set_sha256": rewrite["counterexample_set_sha256"],
+                "proof_obligation": "counterexample blocks extraction",
+                "exact_fallback_expr_sha256": rewrite["exact_fallback_expr_sha256"],
+                "coefficient_sha256": rewrite["coefficient_sha256"],
+                "basis_family": rewrite["basis_family"],
+                "error_bound": rewrite["error_bound"],
+                "domain": rewrite["domain"],
+                "domain_bounds": rewrite["domain_bounds"],
+                "lowering_effect": "none: rejected proposal",
+                "abi_impact": "none: rejected proposal",
+                "mir_abi_safe": False,
+            }
+            rejected_ids.append(rid)
+        decisions.append(decision)
+
+    extraction = {
+        "schema": EXTRACTION_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_hlir_sha256": hlir_sha,
+        "input_egraph_sha256": egraph["egraph_sha256"],
+        "input_rewrites_sha256": rewrites_sha,
+        "input_rewrite_count": len(rewrites),
+        "cost_model_schema": cost_model["schema"],
+        "cost_model_name": cost_model["name"],
+        "cost_model": cost_model,
+        "cost_model_sha256": cost_model_sha,
+        "cost_model_config_sha256": cost_model_sha,
+        "extraction_policy": "accepted_translation_validated_cheapest_enode",
+        "deterministic_extraction": True,
+        "extractor": "madaros-v2-s4-receipt-only-extractor",
+        "extractor_version": "0.1",
+        "mutation_plan": "none: receipt-only extractor",
+        "ir_mutation_allowed": False,
+        "candidate_eclass_count": len({r["eclass_id"] for r in rewrites}),
+        "selected_eclass_count": len({r["eclass_id"] for r in rewrites if r["accepted"] is True}),
+        "selected_rewrite_ids": selected_ids,
+        "rejected_rewrite_ids": rejected_ids,
+        "selected_rewrite_count": len(selected_ids),
+        "rejected_rewrite_count": len(rejected_ids),
+        "blocked_rewrite_count": len(rejected_ids),
+        "gate_invariants": [
+            "deterministic_double_emit",
+            "selected_ids_equal_accepted_ids",
+            "rejected_ids_blocked_from_extraction",
+            "cost_model_hash_present",
+            "accepted_translation_validation_zero_error",
+            "receipt_only_no_ir_mutation",
+        ],
+        "s4_extraction_complete": False,
+        "s4_extraction_boundary_complete": True,
+        "decisions": decisions,
+    }
+    extraction["extraction_sha256"] = sha256_text(stable_json(extraction))
+    return extraction
+
+
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = json.loads(hlir_text)
     module = data["module"]
@@ -418,11 +599,14 @@ def emit(args: argparse.Namespace) -> int:
     egraph, rewrites = analyze_hlir(case_id, source_rel, hlir_text, hlir_sha)
     accepted = [r for r in rewrites if r["accepted"]]
     rejected = [r for r in rewrites if not r["accepted"]]
+    extraction = build_extraction(case_id, source_rel, hlir_sha, egraph, rewrites)
     egraph_path = out_dir / f"{case_id}.s4.egraph.json"
     rewrites_path = out_dir / f"{case_id}.s4.rewrites.json"
+    extraction_path = out_dir / f"{case_id}.s4.extraction.json"
     receipt_path = out_dir / f"{case_id}.s4.receipt.json"
     egraph_path.write_text(json.dumps(egraph, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     rewrites_path.write_text(json.dumps(rewrites, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    extraction_path.write_text(json.dumps(extraction, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     receipt = {
         "schema": SCHEMA,
         "case_id": case_id,
@@ -439,15 +623,25 @@ def emit(args: argparse.Namespace) -> int:
         "rejected_rewrite_count": len(rejected),
         "accepted_rewrite_ids": [r["proposed_rewrite_id"] for r in accepted],
         "rejected_rewrite_ids": [r["proposed_rewrite_id"] for r in rejected],
+        "extraction_schema": EXTRACTION_SCHEMA,
+        "extraction_path": extraction_path.name,
+        "extraction_sha256": extraction["extraction_sha256"],
+        "input_rewrites_sha256": extraction["input_rewrites_sha256"],
+        "cost_model_sha256": extraction["cost_model_sha256"],
+        "cost_model_config_sha256": extraction["cost_model_config_sha256"],
+        "selected_rewrite_count": extraction["selected_rewrite_count"],
+        "selected_rewrite_ids": extraction["selected_rewrite_ids"],
+        "rejected_from_extraction_count": extraction["rejected_rewrite_count"],
         "validators": sorted({r["validator"] for r in rewrites}),
         "basis_families": sorted({r["basis_family"] for r in rewrites}),
         "s4_complete": False,
         "s4_boundary_complete": True,
+        "s4_extraction_boundary_complete": True,
         "s4_claim": "conservative_egraph_ekan_exact_constant_fold_i64_receipt_boundary",
         "s4_remaining": [
             "multi-rule equality saturation",
             "non-constant algebraic identities",
-            "extractor cost model and downstream optimizer integration",
+            "downstream optimizer integration beyond receipt-only extraction",
         ],
     }
     payload = json.dumps(receipt, sort_keys=True, indent=2) + "\n"

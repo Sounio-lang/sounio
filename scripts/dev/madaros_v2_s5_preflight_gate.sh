@@ -49,19 +49,52 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
         raise SystemExit(f"bad S4 receipt schema: {receipt_file}")
     if receipt.get("s4_boundary_complete") is not True:
         raise SystemExit("S4 boundary receipt not complete")
+    if receipt.get("s4_extraction_boundary_complete") is not True:
+        raise SystemExit("S4 extraction boundary receipt not complete")
     if receipt.get("s4_complete") is not False:
         raise SystemExit("S4 receipt must not claim global completion")
     rewrites_path = receipt_file.parent / receipt["rewrites_path"]
+    extraction_path = receipt_file.parent / receipt["extraction_path"]
     rewrites = json.loads(rewrites_path.read_text(encoding="utf-8"))
+    extraction = json.loads(extraction_path.read_text(encoding="utf-8"))
     if len(rewrites) != receipt["rewrite_count"]:
         raise SystemExit("S4 rewrites count mismatch")
+    if extraction.get("schema") != "madaros.v2.s4.extraction/0.1":
+        raise SystemExit("bad S4 extraction schema")
+    if extraction.get("s4_extraction_boundary_complete") is not True:
+        raise SystemExit("S4 extraction boundary is not complete")
+    if extraction.get("s4_extraction_complete") is not False:
+        raise SystemExit("S4 extraction must not claim global completion")
+    if extraction.get("mutation_plan") != "none: receipt-only extractor":
+        raise SystemExit("S5 preflight only accepts receipt-only S4 extraction")
+    if extraction.get("ir_mutation_allowed") is not False:
+        raise SystemExit("S5 preflight rejects mutating S4 extraction")
+    if extraction.get("extraction_sha256") != receipt.get("extraction_sha256"):
+        raise SystemExit("S4 extraction hash mismatch")
+    selected_ids = set(extraction.get("selected_rewrite_ids", []))
+    rejected_ids = set(extraction.get("rejected_rewrite_ids", []))
+    decisions = {decision["rewrite_id"]: decision for decision in extraction.get("decisions", [])}
+    if len(decisions) != extraction.get("input_rewrite_count"):
+        raise SystemExit("S4 extraction decision coverage mismatch")
     for rewrite in rewrites:
+        rid = rewrite["proposed_rewrite_id"]
+        if rid not in decisions:
+            raise SystemExit("missing extraction decision for S4 rewrite")
+        decision = decisions[rid]
+        if decision.get("extraction_applied_to_ir") is not False:
+            raise SystemExit("S5 preflight rejects already-mutating S4 extraction")
         if rewrite.get("accepted") is not True:
             if rewrite.get("selected_for_extraction") is not False:
                 raise SystemExit("S5 preflight rejects extracted rejected S4 rewrites")
             if rewrite.get("ir_mutation_allowed") is not False:
                 raise SystemExit("S5 preflight rejects mutating rejected S4 rewrites")
+            if rid not in rejected_ids or decision.get("selected") is not False:
+                raise SystemExit("S5 preflight requires rejected rewrites to be blocked by extraction")
+            if not decision.get("counterexample_set_sha256"):
+                raise SystemExit("S5 preflight requires rejected extraction counterexample evidence")
             continue
+        if rid not in selected_ids or decision.get("selected") is not True:
+            raise SystemExit("S5 preflight consumes only extraction-selected accepted rewrites")
         if rewrite.get("rewrite_kind") not in allowed_rewrites:
             raise SystemExit(f"S5 preflight rejects ABI-risk rewrite: {rewrite.get('rewrite_kind')}")
         if rewrite.get("basis_family") not in allowed_basis:
@@ -74,13 +107,22 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             raise SystemExit("S5 preflight requires exact fallback hash")
         if not rewrite.get("original_enode_sha256") or not rewrite.get("rewritten_enode_sha256"):
             raise SystemExit("S5 preflight requires enode hashes")
+        if decision.get("mir_abi_safe") is not True:
+            raise SystemExit("S5 preflight requires extraction MIR/ABI safe decision")
+        if decision.get("abi_impact") != "none":
+            raise SystemExit("S5 preflight rejects S4 extraction with ABI impact")
+        if decision.get("selected_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
+            raise SystemExit("S5 preflight selected enode must match rewrite")
         all_rewrites.append(rewrite)
     consumed.append({
         "case_id": receipt["case_id"],
         "source": receipt["source"],
         "input_hlir_sha256": receipt["input_hlir_sha256"],
         "egraph_sha256": receipt["egraph_sha256"],
+        "extraction_sha256": receipt["extraction_sha256"],
         "accepted_rewrite_count": receipt["accepted_rewrite_count"],
+        "selected_rewrite_count": extraction["selected_rewrite_count"],
+        "rejected_from_extraction_count": extraction["rejected_rewrite_count"],
     })
 
 preflight = {
@@ -90,11 +132,13 @@ preflight = {
     "s5_input_contract_ready": True,
     "s5_implemented": False,
     "input_contract": "madaros.v2.s4.gate/0.1",
+    "input_extraction_contract": "madaros.v2.s4.extraction/0.1",
     "mir_abi_safe_subset": sorted(allowed_rewrites),
     "abi_impact": "none: accepted rewrites replace binary constant expressions with exact constants only",
     "numeric_semantics": "i64 constant-folding with zero-error translation-validation receipts",
     "consumed_s4_cases": consumed,
     "accepted_rewrite_count": len(all_rewrites),
+    "selected_rewrite_count": len(all_rewrites),
     "required_next_lane": [
         "full S4 equality saturation and E-KAN rejection/proposal receipts",
         "MIR hash receipt",

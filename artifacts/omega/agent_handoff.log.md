@@ -3270,3 +3270,60 @@ status: lock-released
     saturation, non-constant algebraic identities with preconditions,
     learned/approximate E-KAN proposal provenance, interval/SMT validators, and
     extraction/cost-model integration. Global S4 remains incomplete.
+
+## 2026-07-05 — Madaros v2 S4 extraction/cost-model boundary receipt slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/extract_cost_chain_i64.sio`
+  - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added `madaros.v2.s4.extraction/0.1` receipt emission next to each S4
+    egraph/rewrite receipt.
+  - The extraction receipt records input HLIR/egraph/rewrite hashes,
+    deterministic policy, cost-model/config hashes, one decision per rewrite,
+    selected accepted IDs, blocked rejected IDs, cost before/after/delta, proof
+    obligations, exact fallback/coefficient/domain evidence, and
+    `extraction_applied_to_ir = false`.
+  - The S4 gate now proves extraction byte-determinism, selected IDs exactly
+    equal accepted IDs, rejected IDs are blocked, cost-model hashes match, every
+    decision is non-mutating, accepted decisions are exact
+    translation-validated zero-error MIR/ABI-safe decisions, and rejected
+    decisions keep the original e-node with counterexample evidence.
+  - The S5 preflight now consumes S4 extraction receipts rather than only raw
+    rewrite arrays.
+  - Added an arithmetic cost-chain fixture (`6/0`) and a mixed accepted/rejected
+    fixture (`1/1`) so the same artifact must both select safe rewrites and
+    exclude unsafe proposals.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `git diff --check` passed.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `cases=5`, `accepted=12`, `rejected=2`, `selected=12`,
+    `summary_sha=305f730a5ab9`.
+  - `env -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN -u MADAROS_BIN -u SOUNIO_STDLIB_PATH bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=5`, consumed selected accepted rewrites `12`, preflight sha
+    `40ca97219b50...`.
+- Blocker reduced, not globally closed:
+  - Blocker-ID: `MADAROS-V2-S4-EXTRACTION-COST-MODEL-2026-07-05`
+  - Severity: P2
+  - Class: compiler architecture / receipt-only extraction boundary
+  - Evidence level: deterministic local S4 gate with extraction/cost-model
+    receipts and S5 preflight consuming selected accepted rewrites.
+  - Owner: Codex on this lane.
+  - Acceptance gate: `scripts/dev/madaros_v2_s4_gate.sh` plus
+    `scripts/dev/madaros_v2_s5_preflight_gate.sh`.
+  - Next action: continue global S4: equality saturation, non-constant
+    algebraic identities with preconditions, learned/approximate E-KAN proposal
+    provenance, interval/SMT validators, and eventually an applying optimizer
+    lane with MIR/ABI receipts. Global S4 remains incomplete.

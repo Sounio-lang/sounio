@@ -64,25 +64,31 @@ run_case() {
   cmp "$a_dir/$case_id.s4.receipt.json" "$b_dir/$case_id.s4.receipt.json" >/dev/null
   cmp "$a_dir/$case_id.s4.egraph.json" "$b_dir/$case_id.s4.egraph.json" >/dev/null
   cmp "$a_dir/$case_id.s4.rewrites.json" "$b_dir/$case_id.s4.rewrites.json" >/dev/null
+  cmp "$a_dir/$case_id.s4.extraction.json" "$b_dir/$case_id.s4.extraction.json" >/dev/null
 
-  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$min_accepted" "$min_rejected" "$required_accepted" "$required_rejected" <<'PY'
+  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$a_dir/$case_id.s4.extraction.json" "$min_accepted" "$min_rejected" "$required_accepted" "$required_rejected" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-receipt_path, egraph_path, rewrites_path, min_accepted, min_rejected, required_accepted, required_rejected = sys.argv[1:8]
+receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, required_accepted, required_rejected = sys.argv[1:9]
 receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
 egraph = json.loads(Path(egraph_path).read_text(encoding="utf-8"))
 rewrites = json.loads(Path(rewrites_path).read_text(encoding="utf-8"))
+extraction = json.loads(Path(extraction_path).read_text(encoding="utf-8"))
 if receipt["schema"] != "madaros.v2.s4.receipt/0.1":
     raise SystemExit("bad S4 receipt schema")
 if receipt["egraph_schema"] != "madaros.v2.s4.egraph/0.1":
     raise SystemExit("bad egraph schema")
 if receipt["rewrite_schema"] != "madaros.v2.ekan.rewrite/0.1":
     raise SystemExit("bad rewrite schema")
+if receipt["extraction_schema"] != "madaros.v2.s4.extraction/0.1":
+    raise SystemExit("bad extraction schema in S4 receipt")
 if receipt["s4_boundary_complete"] is not True:
     raise SystemExit("S4 boundary receipt must be complete")
+if receipt.get("s4_extraction_boundary_complete") is not True:
+    raise SystemExit("S4 extraction boundary receipt must be complete")
 if receipt["s4_complete"] is not False:
     raise SystemExit("S4 gate must not claim global S4 completion")
 egraph_for_hash = dict(egraph)
@@ -90,6 +96,47 @@ egraph_for_hash.pop("egraph_sha256", None)
 egraph_canonical = json.dumps(egraph_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 if hashlib.sha256(egraph_canonical.encode()).hexdigest() != receipt["egraph_sha256"]:
     raise SystemExit("egraph hash mismatch")
+extraction_for_hash = dict(extraction)
+extraction_for_hash.pop("extraction_sha256", None)
+extraction_canonical = json.dumps(extraction_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+if hashlib.sha256(extraction_canonical.encode()).hexdigest() != receipt["extraction_sha256"]:
+    raise SystemExit("extraction hash mismatch")
+if extraction["schema"] != "madaros.v2.s4.extraction/0.1":
+    raise SystemExit("bad extraction schema")
+if extraction["input_egraph_sha256"] != receipt["egraph_sha256"]:
+    raise SystemExit("extraction/egraph hash mismatch")
+if extraction["input_rewrites_sha256"] != receipt["input_rewrites_sha256"]:
+    raise SystemExit("extraction/rewrites hash mismatch")
+if extraction["input_rewrite_count"] != len(rewrites):
+    raise SystemExit("extraction rewrite input count mismatch")
+rewrites_canonical = json.dumps(rewrites, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+if hashlib.sha256(rewrites_canonical.encode()).hexdigest() != extraction["input_rewrites_sha256"]:
+    raise SystemExit("rewrites canonical hash mismatch")
+if extraction["ir_mutation_allowed"] is not False:
+    raise SystemExit("S4 extraction boundary must be non-mutating")
+if extraction["mutation_plan"] != "none: receipt-only extractor":
+    raise SystemExit("unexpected S4 mutation plan")
+if extraction.get("deterministic_extraction") is not True:
+    raise SystemExit("extraction must be deterministic")
+if extraction.get("s4_extraction_boundary_complete") is not True:
+    raise SystemExit("extraction boundary must be complete")
+if extraction.get("s4_extraction_complete") is not False:
+    raise SystemExit("extraction must not claim global S4 completion")
+if not extraction.get("cost_model_sha256") or not extraction.get("cost_model_config_sha256"):
+    raise SystemExit("missing extraction cost model hash")
+if extraction["cost_model_sha256"] != extraction["cost_model_config_sha256"]:
+    raise SystemExit("cost model/config hash mismatch")
+if receipt["cost_model_sha256"] != extraction["cost_model_sha256"]:
+    raise SystemExit("receipt/extraction cost model hash mismatch")
+for invariant in [
+    "deterministic_double_emit",
+    "selected_ids_equal_accepted_ids",
+    "rejected_ids_blocked_from_extraction",
+    "accepted_translation_validation_zero_error",
+    "receipt_only_no_ir_mutation",
+]:
+    if invariant not in extraction.get("gate_invariants", []):
+        raise SystemExit(f"missing extraction invariant: {invariant}")
 if receipt["rewrite_count"] != len(rewrites):
     raise SystemExit("rewrite count mismatch")
 accepted = [rewrite for rewrite in rewrites if rewrite.get("accepted") is True]
@@ -108,6 +155,14 @@ accepted_ids = set(receipt.get("accepted_rewrite_ids", []))
 rejected_ids = set(receipt.get("rejected_rewrite_ids", []))
 if accepted_ids & rejected_ids:
     raise SystemExit("rewrite ids cannot be both accepted and rejected")
+if set(extraction["selected_rewrite_ids"]) != accepted_ids:
+    raise SystemExit("extraction selected ids must equal accepted rewrite ids")
+if set(extraction["rejected_rewrite_ids"]) != rejected_ids:
+    raise SystemExit("extraction rejected ids must equal rejected rewrite ids")
+if receipt["selected_rewrite_count"] != len(accepted_ids):
+    raise SystemExit("receipt selected rewrite count mismatch")
+if receipt["rejected_from_extraction_count"] != len(rejected_ids):
+    raise SystemExit("receipt rejected-from-extraction count mismatch")
 observed_accepted = set()
 observed_rejected = set()
 for rewrite in rewrites:
@@ -160,6 +215,65 @@ for rewrite in rewrites:
         observed_rejected.add(rewrite["ekan_receipt_kind"])
         observed_rejected.add(rewrite["rejection_reason_code"])
 
+decision_ids = set()
+for decision in extraction["decisions"]:
+    rid = decision["rewrite_id"]
+    decision_ids.add(rid)
+    for required in [
+        "eclass_id",
+        "original_enode_sha256",
+        "proposed_enode_sha256",
+        "selected_enode_sha256",
+        "validator_log_sha256",
+        "cost_model_sha256",
+        "cost_model_config_sha256",
+        "cost_before",
+        "cost_after",
+        "cost_delta",
+        "cost_components",
+        "proof_obligation",
+        "selection_reason",
+        "extraction_applied_to_ir",
+    ]:
+        if required not in decision:
+            raise SystemExit(f"extraction decision missing {required}")
+    if decision["cost_model_sha256"] != extraction["cost_model_sha256"]:
+        raise SystemExit("decision cost model hash mismatch")
+    if decision["cost_model_config_sha256"] != extraction["cost_model_config_sha256"]:
+        raise SystemExit("decision cost model config hash mismatch")
+    if decision.get("ir_mutation_allowed") is not False:
+        raise SystemExit("extraction decision must be non-mutating")
+    if decision.get("extraction_applied_to_ir") is not False:
+        raise SystemExit("S4 boundary extraction must not apply to IR")
+    if rid in accepted_ids:
+        if decision["decision"] != "select" or decision["selected"] is not True:
+            raise SystemExit("accepted rewrite must be selected by extractor")
+        if decision["selected_enode_sha256"] != decision["proposed_enode_sha256"]:
+            raise SystemExit("accepted extraction must select proposed enode")
+        if decision["cost_after"] > decision["cost_before"]:
+            raise SystemExit("accepted extraction cannot increase cost")
+        if "translation-validation" not in decision["proof_obligation"]:
+            raise SystemExit("accepted extraction missing validation proof obligation")
+        if decision.get("basis_family") != "exact_symbolic":
+            raise SystemExit("accepted extraction must use exact symbolic basis")
+        if decision.get("error_bound") != "0":
+            raise SystemExit("accepted extraction must carry zero error bound")
+        if decision.get("mir_abi_safe") is not True:
+            raise SystemExit("accepted extraction must be MIR/ABI safe")
+    elif rid in rejected_ids:
+        if decision["decision"] != "reject" or decision["selected"] is not False:
+            raise SystemExit("rejected rewrite must not be selected by extractor")
+        if decision["selected_enode_sha256"] != decision["original_enode_sha256"]:
+            raise SystemExit("rejected extraction must keep original enode")
+        if not decision.get("counterexample_set_sha256"):
+            raise SystemExit("rejected extraction missing counterexample set hash")
+        if decision.get("rejection_reason_code") != "counterexample_found":
+            raise SystemExit("rejected extraction missing counterexample reason code")
+    else:
+        raise SystemExit(f"extraction decision references unknown rewrite id: {rid}")
+if decision_ids != accepted_ids | rejected_ids:
+    raise SystemExit("extraction decisions must cover every rewrite exactly once")
+
 missing_accepted = [item for item in required_accepted.split(",") if item and item != "-" and item not in observed_accepted]
 if missing_accepted:
     raise SystemExit(f"missing required accepted markers: {missing_accepted}; observed={sorted(observed_accepted)}")
@@ -169,7 +283,8 @@ if missing_rejected:
 print(
     f"[madaros-v2-s4] ok receipt={Path(receipt_path).name} "
     f"accepted={receipt['accepted_rewrite_count']} rejected={receipt['rejected_rewrite_count']} "
-    f"egraph_sha={receipt['egraph_sha256'][:12]}"
+    f"selected={receipt['selected_rewrite_count']} egraph_sha={receipt['egraph_sha256'][:12]} "
+    f"extraction_sha={receipt['extraction_sha256'][:12]}"
 )
 PY
 }
@@ -198,8 +313,11 @@ summary = {
     "case_count": len(receipts),
     "accepted_rewrite_count": sum(r["accepted_rewrite_count"] for r in receipts),
     "rejected_rewrite_count": sum(r["rejected_rewrite_count"] for r in receipts),
+    "selected_rewrite_count": sum(r["selected_rewrite_count"] for r in receipts),
+    "rejected_from_extraction_count": sum(r["rejected_from_extraction_count"] for r in receipts),
     "input_hlir_sha256": [r["input_hlir_sha256"] for r in receipts],
     "receipt_sha256": [r["receipt_sha256"] for r in receipts],
+    "extraction_sha256": [r["extraction_sha256"] for r in receipts],
     "cases": receipts,
 }
 reason_counts = {}
@@ -219,9 +337,10 @@ payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
 (out / "madaros_v2_s4_gate.receipt.json").write_text(payload, encoding="utf-8")
 print(
     f"[madaros-v2-s4] summary_sha={summary['gate_sha256'][:12]} "
-    f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']}"
+    f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']} "
+    f"selected={summary['selected_rewrite_count']}"
 )
 PY
 
-echo "[madaros-v2-s4] PASS: conservative e-graph/E-KAN accepted and rejected rewrite receipts are deterministic and validated"
+echo "[madaros-v2-s4] PASS: conservative e-graph/E-KAN rewrite and extraction receipts are deterministic and validated"
 echo "[madaros-v2-s4] receipts=$OUT_DIR"

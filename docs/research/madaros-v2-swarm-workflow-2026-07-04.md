@@ -212,29 +212,35 @@ receipts remain future work. The S4-ready boundary is executable through
 
 ## Wave D S4/S5 Status
 
-S4 exact accepted/rejected receipts landed on 2026-07-05:
+S4 exact accepted/rejected receipts and receipt-only extraction/cost-model
+receipts landed on 2026-07-05:
 
 - `bin/madaros s4-receipt`
 - `scripts/dev/madaros_v2_s4_receipt.py`
 - `scripts/dev/madaros_v2_s4_gate.sh`
 - `tests/madaros/v2_s4/manifest.tsv`
 - `tests/madaros/v2_s4/exact_identity.sio`
+- `tests/madaros/v2_s4/extract_cost_chain_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
+- `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 
 The S4 gate consumes S3 HLIR receipts, builds persistent e-graph artifacts, and
-emits `madaros.v2.ekan.rewrite/0.1` receipts. This is a completed boundary for
-one exact positive/negative subset, not global S4 completion. The accepted
-subset is exact and conservative: `constant_fold_i64`,
+emits `madaros.v2.ekan.rewrite/0.1` rewrite receipts plus
+`madaros.v2.s4.extraction/0.1` deterministic extraction receipts. This is a
+completed boundary for one exact positive/negative/extraction subset, not global
+S4 completion. The accepted subset is exact and conservative: `constant_fold_i64`,
 `basis_family = exact_symbolic`, `validator = translation-validation`,
 `error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
 The rejected subset records `x_div_x_to_one` with counterexample `x = 0`,
 `selected_for_extraction = false`, and `ir_mutation_allowed = false`.
+The extraction boundary proves selected IDs exactly equal accepted IDs, rejected
+IDs are blocked, cost-model hashes are present, and no IR mutation is performed.
 
 S5 now has an executable input-contract preflight:
 
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
 
-The preflight consumes current S4 boundary receipts and rejects rewrites that
+The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. It emits `madaros.v2.s5.preflight/0.1` with
 `s5_input_contract_ready = true`, `s5_ready = false`, and
 `s5_implemented = false`.
