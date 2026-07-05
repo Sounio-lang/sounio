@@ -69,9 +69,12 @@ plain `Verdict` enum, which compiles and runs today.)
   (`scripts/research/verify_zd168_oracle.py`, transcribed directly from `formal/lean4/*.lean`, run on
   a different toolchain) → `CROSS-VERIFIED: 168/168 identical pairs`.
 
-  **Why this matters (contract, not number):** souc v0.80.0 has a documented false-green mode, so a
-  bare `PASS` is not itself proof of execution — isomorphic to `||ab||<eps` not being `ab==0`. A stub
-  can forge a *count*; it cannot forge 168 *specific* pairs that match an independent computation.
+  **Why this matters (contract, not number):** souc v0.80.0 has **confirmed codegen defects that
+  return wrong results** — e.g. a `match` over a data-carrying enum returns the wrong arm's value
+  (issue #639), and a cross-module aggregate call SIGSEGVs (issue #637). Under such a toolchain a bare
+  `PASS` is not itself proof of correct execution — isomorphic to `||ab||<eps` not being `ab==0`. A
+  miscompile or stub can forge a *count*; it cannot forge 168 *specific* pairs that match an
+  independent computation.
   Honest scope: Lean is not runnable in this environment, so the element-wise diff is souc-vs-Python
   (two independent toolchains); Lean's leg is its `native_decide`-proven **counts** (`prim_count_84`,
   `zd_pair_count_336`, `zd_projective_count_168`). A Lean-runtime third leg can be added by installing
@@ -91,11 +94,19 @@ by the running language.
   "run both f64 and exact assertions side by side" cannot execute here — the exact assertions stand
   alone. When the f64 layer is repaired, the exact assertions should be added *alongside* the existing
   tolerance gates (never replacing them, never relabeling an eps-gated pass as "exact").
-- **Multi-module compact-stub false-green**: a test importing 2+ modules compiles to a do-nothing
-  stub. All exact tests here import **one** module (the engine) to genuinely execute; the reusable
-  `sedenion_verdict.sio` module is import-ready once multi-module is fixed.
-- A data-carrying-enum `match` codegen flake was observed (a redundant `is_measurement` returned a
-  wrong value while `requires_proof` was fully correct); the flaky redundant helper was dropped.
+- **Cross-module aggregate-lowering SIGSEGV (issue #637)**: importing a module with the `[i64;2048]`
+  `CDElementExactI64` engine and delegating across an aggregate-param-arity mismatch crashes the
+  compiler. This — not a generic "multi-module false-green" — is why the 168-census is self-contained
+  (inlines the scalar sign function, no engine import). CORRECTION: an earlier note attributed the
+  self-contained design to a "multi-module compact-stub false-green"; that mode was **not
+  reproducible** in this build (a clean 2-module case compiles and runs correctly), so the real
+  driver is #637. See `docs/handoff/souc_v0800_defects.md` (D1 = honest negative).
+- **Data-enum `match` returns wrong value (issue #639)**: a redundant `is_measurement` returned the
+  wrong arm value while `requires_proof` was fully correct; the flaky redundant helper was dropped and
+  the bug filed. `requires_proof` (the load-bearing boundary) is verified correct across all variants.
+- All four souc v0.80.0 findings (incl. the not-reproduced multi-module one) are documented with
+  minimal repros in `docs/handoff/souc_v0800_defects.md`; issues #637 (segfault), #638 (`<<`→i64),
+  #639 (`match`).
 
 ## The `<F>` migration target
 
