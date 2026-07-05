@@ -2256,6 +2256,8 @@ var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_NAMES: [Name; 8192] = [ir_empty_name(); 8192]
 var LOWER_EXTERN_FN_RET_FIELD_COUNTS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_WIDE_BITS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_WIDE_SIGNED: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
 var LOWER_EXTERN_STRUCT_LAYOUT_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS: [i64; 8192] = [0; 8192]
@@ -2297,13 +2299,15 @@ fn lower_extern_struct_layout_count_lookup(type_name: Name) -> i64 with Mut, Pan
     0
 }
 
-fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name, ret_field_count: i64) with Mut, Panic, Div {
+fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name, ret_field_count: i64, ret_wide_bits: i64, ret_wide_signed: i64) with Mut, Panic, Div {
     let idx = LOWER_EXTERN_FN_RET_COUNT
     if idx >= 0 && idx < 8192 {
         LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
         LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
         LOWER_EXTERN_FN_RET_NAMES[idx as usize] = ret_name
         LOWER_EXTERN_FN_RET_FIELD_COUNTS[idx as usize] = ret_field_count
+        LOWER_EXTERN_FN_RET_WIDE_BITS[idx as usize] = ret_wide_bits
+        LOWER_EXTERN_FN_RET_WIDE_SIGNED[idx as usize] = ret_wide_signed
         LOWER_EXTERN_FN_RET_COUNT = idx + 1
     }
 }
@@ -2338,6 +2342,30 @@ fn lower_extern_fn_ret_field_count_lookup(name: Name) -> i64 with Mut, Panic, Di
     while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
         if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
             return LOWER_EXTERN_FN_RET_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_wide_bits_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_WIDE_BITS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_wide_signed_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_WIDE_SIGNED[i as usize]
         }
         i = i + 1
     }
@@ -2395,6 +2423,42 @@ fn lower_extern_fn_ret_field_count_for_call(e: &Expr) -> i64 with Mut, Panic, Di
                 return 0
             }
             lower_extern_fn_ret_field_count_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+fn lower_extern_fn_ret_wide_bits_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_wide_bits_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+fn lower_extern_fn_ret_wide_signed_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_wide_signed_lookup(nm)
         }
         None => 0,
     }
@@ -2460,9 +2524,11 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                             } else if lower_opt_type_is_int_scalar(&(*fd).return_type) {
                                 code = 1
                             }
-                            if code != 0 || lower_return_name_is_aggregate(ret_name) {
+                            let ret_wide_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                            let ret_wide_signed = if ret_wide_bits > 64 { lower_opt_type_wide_signed(&(*fd).return_type) } else { 0 }
+                            if code != 0 || lower_return_name_is_aggregate(ret_name) || ret_wide_bits > 64 {
                                 let ret_field_count = if lower_return_name_is_aggregate(ret_name) { lower_struct_field_count_in_items(items, ret_name) } else { 0 }
-                                lower_extern_fn_ret_record(head_owned.name, code, ret_name, ret_field_count)
+                                lower_extern_fn_ret_record(head_owned.name, code, ret_name, ret_field_count, ret_wide_bits, ret_wide_signed)
                             }
                         }
                         _ => {}
@@ -3945,6 +4011,10 @@ impl Lowerer {
                 } else {
                     return ir_empty_name()
                 }
+                let imported_ret = lower_extern_fn_ret_name_lookup(callee_name)
+                if lower_name_wide_int_bits(imported_ret) > 64 {
+                    return imported_ret
+                }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 if lower_extern_fn_ret_lookup(callee_name) != 0 {
                     return ir_empty_name()
@@ -4002,6 +4072,8 @@ impl Lowerer {
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprCall {
+            let ext_bits = lower_extern_fn_ret_wide_bits_for_call(expr)
+            if ext_bits > 64 { return ext_bits }
             let ret_name = self.expr_call_return_struct_name_ref(expr)
             let bits = lower_name_wide_int_bits(ret_name)
             if bits > 64 { return bits }
@@ -4033,6 +4105,9 @@ impl Lowerer {
             return self.expr_wide_signed_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprCall {
+            if lower_extern_fn_ret_wide_bits_for_call(expr) > 64 {
+                return lower_extern_fn_ret_wide_signed_for_call(expr)
+            }
             let ret_name = self.expr_call_return_struct_name_ref(expr)
             if lower_name_wide_int_bits(ret_name) > 64 {
                 if ret_name.len > 0 && ret_name.buf[0] as i64 == 105 { return 1 }
@@ -8129,11 +8204,32 @@ impl Lowerer {
         let final_argc = pair_call.argc
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             let ext_ret_code_sret = lower_extern_fn_ret_code_for_call(e)
+            let ext_ret_name_sret = lower_extern_fn_ret_name_for_call(e)
+            let ext_ret_wide_bits_sret = lower_extern_fn_ret_wide_bits_for_call(e)
             var ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
-            if ext_ret_code_sret != 0 {
+            if ext_ret_wide_bits_sret > 64 {
+                ret_name_sret = ir_empty_name()
+            } else if lower_name_wide_int_bits(ext_ret_name_sret) > 64 {
+                ret_name_sret = ext_ret_name_sret
+            } else if ext_ret_code_sret != 0 {
                 ret_name_sret = ir_empty_name()
             } else if ret_name_sret.len <= 0 {
-                ret_name_sret = lower_extern_fn_ret_name_for_call(e)
+                ret_name_sret = ext_ret_name_sret
+            }
+            if ext_ret_wide_bits_sret > 64 && final_argc <= 8 {
+                let ret_wide_limbs_ext = lower_wide_limb_count(ext_ret_wide_bits_sret)
+                let sret_alloc_bytes_ext = lo4.aggregate_storage_bytes(ret_wide_limbs_ext)
+                var lo_sret_wide_ext = lo4.emit(ir_alloc(dst, sret_alloc_bytes_ext))
+                lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                let pair_wide_dst_ext = lo_sret_wide_ext.fresh_wide_reg(ret_wide_limbs_ext)
+                lo_sret_wide_ext = pair_wide_dst_ext.0
+                let wide_dst_ext = pair_wide_dst_ext.1
+                var wi_ext: i64 = 0
+                while wi_ext < ret_wide_limbs_ext {
+                    lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_field_get(wide_dst_ext + wi_ext, dst, wi_ext, ir_empty_name()))
+                    wi_ext = wi_ext + 1
+                }
+                return (lo_sret_wide_ext, wide_dst_ext)
             }
             if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
                 let ext_ret_field_count_sret = lower_extern_fn_ret_field_count_for_call(e)
@@ -9886,6 +9982,37 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(&prog.items, summary, epistemic)
+}
+
+fn lower_program_bodies_from_summary_with_externs_boxed_ref(
+    prog: &Program,
+    summary: &IrProgramSummary,
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_program_items_bodies_from_summary_with_externs_boxed_ref(&prog.items, summary, programs, program_count, self_index, epistemic)
+}
+
+fn lower_program_items_bodies_from_summary_with_externs_boxed_ref(
+    items: &Option<Box<ItemList>>,
+    summary: &IrProgramSummary,
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_extern_fn_ret_reset()
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let ext_items = (*programs)[i as usize].items
+            lower_preseed_external_fn_rets(&ext_items)
+        }
+        i = i + 1
+    }
+    lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(items, summary, epistemic)
 }
 
 fn lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(

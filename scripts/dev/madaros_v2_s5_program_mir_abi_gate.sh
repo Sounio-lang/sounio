@@ -714,19 +714,24 @@ if wide_abi_call_return_receipt.get("schema") != "madaros.v2.s5.wide_abi_call_re
     raise SystemExit("bad S5 wide ABI call-return receipt schema")
 if wide_abi_call_return_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing wide ABI call-return receipt")
-if wide_abi_call_return_receipt.get("stage_contract_level") != "S5_WIDE_I256_U256_LOCAL_ABI_CALL_RETURN_PROMOTED_NOT_F128":
-    raise SystemExit("wide ABI call-return receipt must declare local i256/u256 promotion but not f128")
-if wide_abi_call_return_receipt.get("case_count") != 5:
-    raise SystemExit("wide ABI call-return receipt must contain exact five cases")
-if wide_abi_call_return_receipt.get("i256_case_count") != 2:
-    raise SystemExit("wide ABI call-return receipt must contain two i256 cases")
-if wide_abi_call_return_receipt.get("u256_case_count") != 3:
-    raise SystemExit("wide ABI call-return receipt must contain three u256 cases")
-if wide_abi_call_return_receipt.get("two_wide_arg_case_count") != 3:
-    raise SystemExit("wide ABI call-return receipt must contain three two-wide-arg cases")
+if wide_abi_call_return_receipt.get("stage_contract_level") != "S5_WIDE_I256_U256_LOCAL_AND_IMPORTED_ABI_CALL_RETURN_PROMOTED_NOT_F128":
+    raise SystemExit("wide ABI call-return receipt must declare local+imported i256/u256 promotion but not f128")
+if wide_abi_call_return_receipt.get("case_count") != 9:
+    raise SystemExit("wide ABI call-return receipt must contain exact nine cases")
+if wide_abi_call_return_receipt.get("i256_case_count") != 5:
+    raise SystemExit("wide ABI call-return receipt must contain five i256 cases")
+if wide_abi_call_return_receipt.get("u256_case_count") != 4:
+    raise SystemExit("wide ABI call-return receipt must contain four u256 cases")
+if wide_abi_call_return_receipt.get("two_wide_arg_case_count") != 4:
+    raise SystemExit("wide ABI call-return receipt must contain four two-wide-arg cases")
+if wide_abi_call_return_receipt.get("imported_module_case_count") != 4:
+    raise SystemExit("wide ABI call-return receipt must contain four imported module cases")
 for field in [
     "s5_wide_i256_u256_local_abi_call_return_complete",
+    "s5_wide_i256_u256_imported_abi_call_return_complete",
     "wide_i256_u256_local_abi_call_return_promoted",
+    "wide_i256_u256_imported_abi_call_return_promoted",
+    "imported_module_wide_abi_promoted",
     "wide_return_uses_sret",
     "wide_arg_limb_expansion_promoted",
     "wide_two_arg_order_preserved",
@@ -740,7 +745,6 @@ for field in [
         raise SystemExit(f"wide ABI call-return receipt missing required true flag: {field}")
 for field in [
     "legacy_fallback_for_wide_abi",
-    "imported_module_wide_abi_promoted",
     "f128_promoted",
     "s5_ready",
     "s5_implemented",
@@ -759,6 +763,10 @@ required_wide_abi_cases = {
     "u256_first_of_two_wide_args_return_43": 43,
     "u256_second_of_two_wide_args_return_47": 47,
     "u256_two_arg_add_return_37": 37,
+    "imported_i256_return_only_sret_return_52": 52,
+    "imported_i256_arg_return_sret_return_54": 54,
+    "imported_u256_second_of_two_wide_args_return_53": 53,
+    "imported_i256_mixed_param_order_return_55": 55,
 }
 if set(wide_abi_cases) != set(required_wide_abi_cases):
     raise SystemExit(f"wide ABI call-return receipt cases mismatch: {sorted(wide_abi_cases)}")
@@ -784,6 +792,14 @@ if second_case.get("machine_shape", {}).get("callee_source_param_count") != 8:
     raise SystemExit("u256 second-arg receipt must prove two wide args expand to eight callee params")
 if second_case.get("trace_matched") is not True:
     raise SystemExit("u256 second-arg receipt must include matched lowerer trace for param_count=8")
+imported_second_case = wide_abi_cases["imported_u256_second_of_two_wide_args_return_53"]
+if imported_second_case.get("machine_shape", {}).get("callee_source_param_count") != 8:
+    raise SystemExit("imported u256 second-arg receipt must prove two wide args expand to eight callee params")
+imported_mixed_case = wide_abi_cases["imported_i256_mixed_param_order_return_55"]
+if imported_mixed_case.get("machine_shape", {}).get("callee_source_param_count") != 5:
+    raise SystemExit("imported mixed-left receipt must prove i256+i64 expands to five callee params")
+if imported_mixed_case.get("extra_callee_param_counts", {}).get("mixed_right") != 5:
+    raise SystemExit("imported mixed-right receipt must prove i64+i256 expands to five callee params")
 
 if generic_agg_receipt.get("schema") != "madaros.v2.s5.generic_aggregate_sret_receipt/0.1":
     raise SystemExit("bad S5 generic aggregate SRET receipt schema")
@@ -1600,9 +1616,12 @@ module = {
         "i256_case_count": wide_abi_call_return_receipt["i256_case_count"],
         "u256_case_count": wide_abi_call_return_receipt["u256_case_count"],
         "two_wide_arg_case_count": wide_abi_call_return_receipt["two_wide_arg_case_count"],
+        "imported_module_case_count": wide_abi_call_return_receipt["imported_module_case_count"],
         "cases": wide_abi_call_return_receipt["cases"],
         "s5_wide_i256_u256_local_abi_call_return_complete": wide_abi_call_return_receipt["s5_wide_i256_u256_local_abi_call_return_complete"],
+        "s5_wide_i256_u256_imported_abi_call_return_complete": wide_abi_call_return_receipt["s5_wide_i256_u256_imported_abi_call_return_complete"],
         "wide_i256_u256_local_abi_call_return_promoted": wide_abi_call_return_receipt["wide_i256_u256_local_abi_call_return_promoted"],
+        "wide_i256_u256_imported_abi_call_return_promoted": wide_abi_call_return_receipt["wide_i256_u256_imported_abi_call_return_promoted"],
         "imported_module_wide_abi_promoted": wide_abi_call_return_receipt["imported_module_wide_abi_promoted"],
     },
     "generic_aggregate_sret_receipt": {
@@ -1700,7 +1719,8 @@ module = {
         "wide_u128_u256_promoted": True,
         "wide_i256_u256_machine_slots_promoted": True,
         "wide_i256_u256_local_abi_call_return_promoted": True,
-        "imported_module_wide_abi_promoted": False,
+        "wide_i256_u256_imported_abi_call_return_promoted": True,
+        "imported_module_wide_abi_promoted": True,
         "f128_literal_decimal_metadata_promoted": True,
         "f128_type_system_awareness_promoted": True,
         "f128_binary128_value_contract_promoted": True,
@@ -1731,6 +1751,7 @@ module = {
         "wide_int_i128_i256_receipt_recorded",
         "wide_int_machine_slot_metadata_receipt_recorded",
         "wide_i256_u256_local_abi_call_return_receipt_recorded",
+        "wide_i256_u256_imported_abi_call_return_receipt_recorded",
         "generic_aggregate_sret_layout_receipt_recorded",
         "f128_literal_decimal_metadata_receipt_recorded",
         "f128_type_system_awareness_receipt_recorded",
@@ -1780,6 +1801,7 @@ receipt = {
     "s5_wide_int_i128_i256_complete": True,
     "s5_wide_int_machine_slot_metadata_complete": True,
     "s5_wide_i256_u256_local_abi_call_return_complete": True,
+    "s5_wide_i256_u256_imported_abi_call_return_complete": True,
     "s5_generic_aggregate_sret_layout_complete": True,
     "s4_s5_f128_literal_decimal_metadata_complete": True,
     "s4_s5_f128_type_system_awareness_complete": True,
@@ -1803,7 +1825,8 @@ receipt = {
     "wide_u128_u256_promoted": True,
     "wide_i256_u256_machine_slots_promoted": True,
     "wide_i256_u256_local_abi_call_return_promoted": True,
-    "imported_module_wide_abi_promoted": False,
+    "wide_i256_u256_imported_abi_call_return_promoted": True,
+    "imported_module_wide_abi_promoted": True,
     "generic_aggregate_return_promoted": True,
     "generic_aggregate_local_layout_promoted": True,
     "generic_aggregate_imported_layout_promoted": True,
@@ -1898,7 +1921,7 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local i256/u256 wide ABI call-return + generic aggregate compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: unsupported f128/i512/u512 native-v2 numeric widths fail closed without ELF, MachineModule JSON, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 remains the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"

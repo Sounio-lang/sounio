@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5 wide-integer local ABI call/return receipt.
+"""Emit a Madaros v2 S5 wide-integer ABI call/return receipt.
 
-This receipt closes the local function-boundary i256/u256 call-return slice:
-wide values must cross a native-v2 call boundary as four 64-bit limbs, return
-through the compiler's SRET path, and be consumed by the caller through real
-wide comparisons/arithmetic. It deliberately does not claim imported module
-wide ABI or f128.
+This receipt closes the local and imported module-boundary i256/u256
+call-return slice: wide values must cross a native-v2 call boundary as four
+64-bit limbs, return through the compiler's SRET path, and be consumed by the
+caller through real wide comparisons/arithmetic. It deliberately does not claim
+f128.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any
 
 SCHEMA_VERSION = "madaros.v2.s5.wide_abi_call_return_receipt/0.1"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_WIDE_I256_U256_LOCAL_ABI_CALL_RETURN_PROMOTED_NOT_F128"
+STAGE_CONTRACT_LEVEL = "S5_WIDE_I256_U256_LOCAL_AND_IMPORTED_ABI_CALL_RETURN_PROMOTED_NOT_F128"
 WIDE_SLOT_KIND = 4
 WIDE_WIDTH_WORDS = 4
 
@@ -133,6 +133,108 @@ fn main() -> i64 {
         "wide_arg_count": 2,
         "proves": ["callee_wide_arithmetic_result_returns_through_wide_sret"],
     },
+    {
+        "case_id": "imported_i256_return_only_sret_return_52",
+        "class": "imported_wide_i256_return_only",
+        "support_files": {
+            "wide_lib.sio": """pub fn ret_i256() -> i256 { 7 as i256 }
+""",
+        },
+        "source": """import "wide_lib.sio"
+fn main() -> i64 {
+  let r: i256 = ret_i256()
+  if r == (7 as i256) { return 52 }
+  1
+}
+""",
+        "expected_exit": 52,
+        "fake_scalar_exit": 1,
+        "callee": "ret_i256",
+        "expected_fn_count": 3,
+        "expected_callee_source_param_count": 0,
+        "wide_type": "i256",
+        "wide_arg_count": 0,
+        "imported_module": True,
+        "proves": ["imported_wide_i256_return_consumed_by_caller"],
+    },
+    {
+        "case_id": "imported_i256_arg_return_sret_return_54",
+        "class": "imported_wide_i256_one_arg_return",
+        "support_files": {
+            "wide_lib.sio": """pub fn id_i256(x: i256) -> i256 { x }
+""",
+        },
+        "source": """import "wide_lib.sio"
+fn main() -> i64 {
+  let r: i256 = id_i256(54 as i256)
+  if r == (54 as i256) { return 54 }
+  1
+}
+""",
+        "expected_exit": 54,
+        "fake_scalar_exit": 1,
+        "callee": "id_i256",
+        "expected_fn_count": 3,
+        "expected_callee_source_param_count": 4,
+        "wide_type": "i256",
+        "wide_arg_count": 1,
+        "imported_module": True,
+        "proves": ["imported_wide_i256_arg_expands_to_four_limb_params"],
+    },
+    {
+        "case_id": "imported_u256_second_of_two_wide_args_return_53",
+        "class": "imported_wide_u256_two_arg_second_return",
+        "support_files": {
+            "wide_lib.sio": """pub fn second_u256(x: u256, y: u256) -> u256 { y }
+""",
+        },
+        "source": """import "wide_lib.sio"
+fn main() -> i64 {
+  let a: u256 = 11 as u256
+  let b: u256 = 53 as u256
+  let r: u256 = second_u256(a, b)
+  if r == b { return 53 }
+  if r == a { return 62 }
+  61
+}
+""",
+        "expected_exit": 53,
+        "fake_scalar_exit": 61,
+        "callee": "second_u256",
+        "expected_fn_count": 3,
+        "expected_callee_source_param_count": 8,
+        "wide_type": "u256",
+        "wide_arg_count": 2,
+        "imported_module": True,
+        "proves": ["imported_second_wide_arg_preserved", "imported_two_wide_args_expand_to_eight_limb_params"],
+    },
+    {
+        "case_id": "imported_i256_mixed_param_order_return_55",
+        "class": "imported_wide_i256_mixed_param_order",
+        "support_files": {
+            "wide_lib.sio": """pub fn mixed_left(x: i256, y: i64) -> i256 { x + (y as i256) }
+pub fn mixed_right(x: i64, y: i256) -> i256 { y + (x as i256) }
+""",
+        },
+        "source": """import "wide_lib.sio"
+fn main() -> i64 {
+  let a: i256 = mixed_left(50 as i256, 5)
+  let b: i256 = mixed_right(5, 50 as i256)
+  if a == (55 as i256) && b == (55 as i256) { return 55 }
+  1
+}
+""",
+        "expected_exit": 55,
+        "fake_scalar_exit": 1,
+        "callee": "mixed_left",
+        "extra_callee_param_counts": {"mixed_right": 5},
+        "expected_fn_count": 5,
+        "expected_callee_source_param_count": 5,
+        "wide_type": "i256",
+        "wide_arg_count": 1,
+        "imported_module": True,
+        "proves": ["imported_mixed_i256_i64_param_order_preserved", "imported_mixed_i64_i256_param_order_preserved"],
+    },
 ]
 
 
@@ -229,6 +331,16 @@ def functions_by_name(module: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def require_callee_param_counts(module: dict[str, Any], expected: dict[str, int], case_id: str) -> None:
+    fns = functions_by_name(module)
+    for name, expected_count in expected.items():
+        if name not in fns:
+            raise SystemExit(f"{case_id} MachineModule must contain extra callee {name}")
+        actual = int(fns[name].get("source_param_count", -1))
+        if actual != expected_count:
+            raise SystemExit(f"{case_id} expected {name} source_param_count {expected_count}, got {actual}")
+
+
 def wide_slot_rows(module: dict[str, Any]) -> list[list[int]]:
     rows: list[list[int]] = []
     slot_meta = module.get("slot_metadata", {})
@@ -276,6 +388,10 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     compile_log_path = out_dir / f"{case_id}.native_v2.log"
     stdout_path = out_dir / f"{case_id}.stdout"
     stderr_path = out_dir / f"{case_id}.stderr"
+    for rel_name, text in dict(case.get("support_files", {})).items():
+        support_path = out_dir / rel_name
+        support_path.parent.mkdir(parents=True, exist_ok=True)
+        support_path.write_text(str(text), encoding="utf-8")
     source_path.write_text(source_text, encoding="utf-8")
 
     check_rc, check_stdout, check_stderr = run_command([str(compiler), "check", str(source_path)], root, timeout_s)
@@ -324,6 +440,11 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
             f"{case_id} expected callee source_param_count "
             f"{case['expected_callee_source_param_count']}, got {shape['callee_source_param_count']}"
         )
+    require_callee_param_counts(
+        module,
+        {str(k): int(v) for k, v in dict(case.get("extra_callee_param_counts", {})).items()},
+        case_id,
+    )
 
     trace_sha = ""
     trace_matched = False
@@ -354,7 +475,9 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "source": source_path.name,
         "wide_type": case["wide_type"],
         "wide_arg_count": int(case["wide_arg_count"]),
+        "imported_module": bool(case.get("imported_module", False)),
         "callee": case["callee"],
+        "extra_callee_param_counts": {str(k): int(v) for k, v in dict(case.get("extra_callee_param_counts", {})).items()},
         "expected_exit": expected_exit,
         "actual_exit": actual_exit,
         "fake_scalar_exit": int(case["fake_scalar_exit"]),
@@ -387,6 +510,7 @@ def emit(args: argparse.Namespace) -> int:
     i256_cases = [case for case in cases if case["wide_type"] == "i256"]
     u256_cases = [case for case in cases if case["wide_type"] == "u256"]
     two_wide_arg_cases = [case for case in cases if int(case["wide_arg_count"]) == 2]
+    imported_cases = [case for case in cases if case["imported_module"]]
     trace_cases = [case for case in cases if case["trace_required"]]
 
     receipt: dict[str, Any] = {
@@ -399,10 +523,13 @@ def emit(args: argparse.Namespace) -> int:
         "i256_case_count": len(i256_cases),
         "u256_case_count": len(u256_cases),
         "two_wide_arg_case_count": len(two_wide_arg_cases),
+        "imported_module_case_count": len(imported_cases),
         "trace_assertion_case_count": len(trace_cases),
         "cases": cases,
         "s5_wide_i256_u256_local_abi_call_return_complete": True,
+        "s5_wide_i256_u256_imported_abi_call_return_complete": True,
         "wide_i256_u256_local_abi_call_return_promoted": True,
+        "wide_i256_u256_imported_abi_call_return_promoted": True,
         "wide_return_uses_sret": True,
         "wide_arg_limb_expansion_promoted": True,
         "wide_two_arg_order_preserved": True,
@@ -414,7 +541,7 @@ def emit(args: argparse.Namespace) -> int:
         "real_program_mir_emitted": True,
         "real_abi_layout_emitted": True,
         "legacy_fallback_for_wide_abi": False,
-        "imported_module_wide_abi_promoted": False,
+        "imported_module_wide_abi_promoted": True,
         "f128_promoted": False,
         "s5_ready": False,
         "s5_implemented": False,
@@ -429,10 +556,13 @@ def emit(args: argparse.Namespace) -> int:
             "two_wide_arguments_expand_to_eight_limb_params",
             "MachineModule_exports_wide_slot_kind_4_width_words_4",
             "trace_asserts_mut_param_lowering_expands_second_wide_argument_to_param_count_8",
-            "f128_and_imported_module_wide_abi_are_not_promoted_by_this_receipt",
+            "imported_i256_return_only_crosses_module_boundary_and_is_compared_by_caller",
+            "imported_i256_argument_crosses_module_boundary_and_returns_through_wide_sret",
+            "imported_u256_second_of_two_wide_arguments_is_preserved",
+            "imported_mixed_i256_i64_and_i64_i256_argument_order_is_preserved",
+            "f128_is_not_promoted_by_this_receipt",
         ],
         "missing_full_obligations": [
-            "imported module-boundary i256/u256 ABI call-return receipt",
             "wide ABI stack-pressure cases beyond two register-level wide args",
             "f128 IR/MIR/ABI/software-helper receipts",
         ],
@@ -444,7 +574,8 @@ def emit(args: argparse.Namespace) -> int:
     print(
         "madaros-v2-s5-wide-abi-call-return: "
         f"cases={receipt['case_count']} i256={receipt['i256_case_count']} "
-        f"u256={receipt['u256_case_count']} sha={receipt['receipt_sha256'][:12]} "
+        f"u256={receipt['u256_case_count']} imported={receipt['imported_module_case_count']} "
+        f"sha={receipt['receipt_sha256'][:12]} "
         f"receipt={receipt_path}"
     )
     return 0
