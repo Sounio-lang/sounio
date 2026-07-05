@@ -267,6 +267,7 @@ S5 now has an executable input-contract preflight:
 - `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`
 - `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`
 - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+- `bin/madaros s5-receipt <source.sio> [--expected-exit N] [--case-id ID]`
 
 The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
@@ -293,6 +294,10 @@ aggregate, SRET, imported-call, f64, f128, and i256 surfaces. It still records
 S4 semantic negatives and producer-evaluation blockers as not-promoted controls,
 and still records `compiler_machine_module_exported = false`,
 `real_program_mir_emitted = false`, and `s5_full_complete = false`.
+The program-MIR/ABI shadow gate must consume the public `madaros s5-receipt`
+path for each scalar witness and require matching
+`madaros.v2.s5.receipt/0.1` per-source receipts before accepting the aggregate
+shadow receipt.
 Next critical lane: compiler-exported full-program MachineModule serialization
 plus ABI layout/call receipts for aggregate/SRET/imported-call and then f64
 call/return before f128 or i256 promotion.

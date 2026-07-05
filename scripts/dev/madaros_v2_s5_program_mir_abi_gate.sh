@@ -10,18 +10,59 @@ cd "$ROOT_DIR"
 
 OUT_DIR="${SOUNIO_MADAROS_V2_S5_PROGRAM_MIR_ABI_DIR:-$(mktemp -d /tmp/sounio-madaros-v2-s5-program-mir-abi.XXXXXX)}"
 EFFECT_DIR="$OUT_DIR/mir_effect"
+S5_RECEIPT_DIR="$OUT_DIR/canonical_s5_source_receipts"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
+COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
+MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
 RECEIPT="$OUT_DIR/madaros_v2_s5_program_mir_abi.receipt.json"
+S5_RECEIPT_RESULTS="$OUT_DIR/madaros_v2_s5_source_receipts.tsv"
 
-mkdir -p "$EFFECT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
 
 SOUNIO_MADAROS_V2_S5_MIR_EFFECT_DIR="$EFFECT_DIR" "$EFFECT_GATE"
 
-python3 - "$EFFECT_DIR" "$MODULE" "$RECEIPT" <<'PY'
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing scalar ABI manifest: $MANIFEST" >&2
+  exit 1
+fi
+
+portable_sha256() {
+  sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'
+}
+
+printf 'case_id\tprogram\texpected_exit\ts5_receipt_sha256\ts5_receipt_path\tstatus\n' >"$S5_RECEIPT_RESULTS"
+while IFS=$'\t' read -r case_id program expected_exit _abi_kind _required_machine_ops; do
+  if [[ -z "${case_id:-}" || "$case_id" == \#* ]]; then
+    continue
+  fi
+  if [[ ! -f "$program" ]]; then
+    echo "[madaros-v2-s5-program-mir-abi] FAIL: missing scalar witness program for $case_id: $program" >&2
+    exit 1
+  fi
+  log_path="$S5_RECEIPT_DIR/$case_id.s5-receipt.log"
+  if ! "$COMPILER" s5-receipt "$program" \
+    --out-dir "$S5_RECEIPT_DIR" \
+    --expected-exit "$expected_exit" \
+    --case-id "$case_id" >"$log_path" 2>&1; then
+    echo "[madaros-v2-s5-program-mir-abi] FAIL: canonical s5-receipt failed for $case_id" >&2
+    tail -n 80 "$log_path" >&2 || true
+    exit 1
+  fi
+  receipt_path="$S5_RECEIPT_DIR/$case_id.s5.receipt.json"
+  if [[ ! -f "$receipt_path" ]]; then
+    echo "[madaros-v2-s5-program-mir-abi] FAIL: missing canonical s5 receipt for $case_id" >&2
+    exit 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\tok\n' \
+    "$case_id" "$program" "$expected_exit" "$(portable_sha256 "$receipt_path")" "$receipt_path" \
+    >>"$S5_RECEIPT_RESULTS"
+done <"$MANIFEST"
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -64,8 +105,9 @@ def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 effect_dir = Path(sys.argv[1])
-module_path = Path(sys.argv[2])
-receipt_path = Path(sys.argv[3])
+source_receipts_path = Path(sys.argv[2])
+module_path = Path(sys.argv[3])
+receipt_path = Path(sys.argv[4])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -170,26 +212,105 @@ specs: dict[str, dict[str, Any]] = {
     },
 }
 
+source_receipt_rows: dict[str, dict[str, Any]] = {}
+receipt_lines = source_receipts_path.read_text(encoding="utf-8").splitlines()
+if not receipt_lines:
+    raise SystemExit("missing canonical S5 source receipt results")
+receipt_header = receipt_lines[0].split("\t")
+required_receipt_header = [
+    "case_id",
+    "program",
+    "expected_exit",
+    "s5_receipt_sha256",
+    "s5_receipt_path",
+    "status",
+]
+if receipt_header != required_receipt_header:
+    raise SystemExit(f"bad canonical S5 receipt TSV header: {receipt_header}")
+for line in receipt_lines[1:]:
+    cols = line.split("\t")
+    if len(cols) != len(receipt_header):
+        raise SystemExit(f"bad canonical S5 receipt TSV row: {line!r}")
+    row = dict(zip(receipt_header, cols, strict=True))
+    case_id = row["case_id"]
+    if case_id in source_receipt_rows:
+        raise SystemExit(f"duplicate canonical S5 receipt case: {case_id}")
+    if row["status"] != "ok":
+        raise SystemExit(f"canonical S5 receipt row did not pass: {case_id}")
+    receipt_json_path = Path(row["s5_receipt_path"])
+    if not receipt_json_path.is_file():
+        raise SystemExit(f"canonical S5 receipt path missing for {case_id}: {receipt_json_path}")
+    digest = hashlib.sha256(receipt_json_path.read_bytes()).hexdigest()
+    if digest != row["s5_receipt_sha256"]:
+        raise SystemExit(f"canonical S5 receipt file hash mismatch for {case_id}")
+    payload = load_json(receipt_json_path)
+    if payload.get("schema") != "madaros.v2.s5.receipt/0.1":
+        raise SystemExit(f"bad canonical S5 receipt schema for {case_id}")
+    if payload.get("status") != "pass":
+        raise SystemExit(f"canonical S5 receipt not passing for {case_id}")
+    if payload.get("case_id") != case_id:
+        raise SystemExit(f"canonical S5 receipt case_id mismatch for {case_id}")
+    if payload.get("source") != row["program"]:
+        raise SystemExit(f"canonical S5 receipt source mismatch for {case_id}")
+    if int(payload.get("expected_exit")) != int(row["expected_exit"]):
+        raise SystemExit(f"canonical S5 receipt expected_exit mismatch for {case_id}")
+    if payload.get("actual_exit") != payload.get("expected_exit"):
+        raise SystemExit(f"canonical S5 receipt actual_exit mismatch for {case_id}")
+    for false_field in [
+        "s5_mir_abi_boundary_complete",
+        "s5_ready",
+        "s5_implemented",
+        "s5_full_complete",
+        "compiler_machine_module_exported",
+        "real_program_mir_emitted",
+        "real_abi_layout_emitted",
+    ]:
+        if payload.get(false_field) is not False:
+            raise SystemExit(f"canonical S5 receipt must not overclaim {false_field} for {case_id}")
+    source_receipt_rows[case_id] = {
+        "row": row,
+        "payload": payload,
+        "path": receipt_json_path,
+        "stable_path": f"{receipt_json_path.parent.name}/{receipt_json_path.name}",
+    }
+
+if set(source_receipt_rows) != required_cases:
+    raise SystemExit(
+        "canonical S5 source receipts must cover exact scalar cases: "
+        f"{sorted(required_cases)}, got {sorted(source_receipt_rows)}"
+    )
+
 programs: list[dict[str, Any]] = []
 for row in sorted(native_rows, key=lambda item: item["case_id"]):
     case_id = row["case_id"]
     spec = specs[case_id]
+    source_receipt = source_receipt_rows[case_id]["payload"]
     if row["abi_kind"] != spec["abi_kind"]:
         raise SystemExit(f"ABI kind mismatch for {case_id}: {row['abi_kind']} != {spec['abi_kind']}")
     if row["actual_exit"] != row["expected_exit"]:
         raise SystemExit(f"native exit mismatch for {case_id}")
+    if source_receipt["program_kind"] != spec["program_kind"]:
+        raise SystemExit(f"canonical S5 receipt program kind mismatch for {case_id}")
+    if source_receipt["abi_kind"] != spec["abi_kind"]:
+        raise SystemExit(f"canonical S5 receipt ABI kind mismatch for {case_id}")
+    if source_receipt["actual_exit"] != int(row["actual_exit"]):
+        raise SystemExit(f"canonical S5 receipt native exit mismatch for {case_id}")
     internal_calls = int(row["elf_internal_call_count"])
     if internal_calls != spec["expected_internal_call_count"]:
         raise SystemExit(
             f"internal call count mismatch for {case_id}: "
             f"{internal_calls} != {spec['expected_internal_call_count']}"
         )
+    if int(source_receipt["native_v2_compile"]["elf_internal_call_count"]) != internal_calls:
+        raise SystemExit(f"canonical S5 receipt internal-call evidence mismatch for {case_id}")
     if int(row["elf_ret_count"]) < 1 or int(row["elf_syscall_count"]) < 1:
         raise SystemExit(f"ELF ret/syscall evidence missing for {case_id}")
     compile_log = effect_dir / "native_scalar_witnesses" / f"{case_id}.compile.log"
     function_count = parse_function_count(compile_log)
     if function_count != spec["expected_function_count"]:
         raise SystemExit(f"Merged IR function count mismatch for {case_id}: {function_count}")
+    if int(source_receipt["merged_ir_function_count"]) != function_count:
+        raise SystemExit(f"canonical S5 receipt merged-IR function count mismatch for {case_id}")
     declared_ops = list(filter(None, row["required_machine_ops"].split(",")))
     if sorted(declared_ops) != sorted(spec["call_boundary_ops"]):
         raise SystemExit(f"machine op contract mismatch for {case_id}")
@@ -219,6 +340,13 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
             "elf_internal_call_count": internal_calls,
             "elf_ret_count": int(row["elf_ret_count"]),
             "elf_syscall_count": int(row["elf_syscall_count"]),
+        },
+        "canonical_s5_source_receipt": {
+            "schema": source_receipt["schema"],
+            "path": source_receipt_rows[case_id]["stable_path"],
+            "file_sha256": source_receipt_rows[case_id]["row"]["s5_receipt_sha256"],
+            "receipt_sha256": source_receipt["receipt_sha256"],
+            "stage_contract_level": source_receipt["stage_contract_level"],
         },
     }
     program["program_shadow_sha256"] = sha256_text(stable_json(program))
@@ -302,6 +430,19 @@ module = {
     "programs": programs,
     "program_kinds": sorted({program["program_kind"] for program in programs}),
     "abi_kinds": sorted({program["abi_signature"]["return"]["class"] for program in programs}),
+    "canonical_s5_source_receipt_count": len(source_receipt_rows),
+    "canonical_s5_source_receipts_present": True,
+    "canonical_s5_source_receipts": [
+        {
+            "case_id": case_id,
+            "source": source_receipt_rows[case_id]["row"]["program"],
+            "path": source_receipt_rows[case_id]["stable_path"],
+            "file_sha256": source_receipt_rows[case_id]["row"]["s5_receipt_sha256"],
+            "receipt_sha256": source_receipt_rows[case_id]["payload"]["receipt_sha256"],
+            "stage_contract_level": source_receipt_rows[case_id]["payload"]["stage_contract_level"],
+        }
+        for case_id in sorted(source_receipt_rows)
+    ],
     "program_mir_shadow_serialized": True,
     "compiler_machine_module_exported": False,
     "real_program_mir_emitted": False,
@@ -322,6 +463,7 @@ module = {
         "canonical_json_stable_after_parse_dump",
         "exact_three_scalar_program_witnesses",
         "program_shadow_hash_per_witness",
+        "canonical_madaros_s5_receipt_per_witness",
         "merged_ir_function_count_matches_program_shape",
         "elf_internal_call_count_matches_program_shape",
         "scalar_abi_register_contract_recorded",
@@ -362,6 +504,8 @@ receipt = {
     "canonical_roundtrip_sha256": sha256_text(canonical_module_with_hash),
     "program_count": len(programs),
     "program_kinds": module["program_kinds"],
+    "canonical_s5_source_receipt_count": module["canonical_s5_source_receipt_count"],
+    "canonical_s5_source_receipts_present": module["canonical_s5_source_receipts_present"],
     "target": module["scalar_abi_receipts"]["target"],
     "arg_register_order": module["scalar_abi_receipts"]["arg_register_order"],
     "return_register": module["scalar_abi_receipts"]["return_register"],

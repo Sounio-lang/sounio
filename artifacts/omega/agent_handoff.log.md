@@ -3822,3 +3822,53 @@ status: lock-released
     serialization, ABI layout receipts for aggregate/SRET/imported/stack-arg
     paths, f64 XMM0 call/return closure before f128/i256 promotion, diagnostics,
     fallback semantics, and differential validation.
+
+## 2026-07-05 — Madaros v2 S5 canonical scalar receipt CLI
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: move the S5 scalar witness evidence from a dev-script-only surface
+  into the compiler-facing receipt chain, without claiming S5 FULL.
+- Files changed:
+  - `bin/madaros`
+  - `scripts/dev/madaros_v2_s5_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added `madaros s5-receipt <source.sio> [--out-dir OUT] [--expected-exit N] [--case-id ID]`.
+  - Added `scripts/dev/madaros_v2_s5_receipt.py`, which compiles a scalar
+    native-v2 witness through `bin/madaros`, runs the ELF, verifies the expected
+    exit code, parses merged-IR function count evidence, inspects ELF
+    call/ret/syscall evidence, and emits `madaros.v2.s5.receipt/0.1`.
+  - Updated `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` so the aggregate
+    S5 program-MIR/ABI shadow receipt must consume three canonical per-source
+    `madaros s5-receipt` outputs and reject any mismatch in schema, source,
+    exit code, program kind, ABI kind, function count, call evidence, or
+    non-FULL flags.
+  - The aggregate receipt now records `canonical_s5_source_receipt_count = 3`
+    and `canonical_s5_source_receipts_present = true`.
+  - The receipt still sets `compiler_machine_module_exported = false`,
+    `real_program_mir_emitted = false`, `real_abi_layout_emitted = false`,
+    `s5_ready = false`, `s5_implemented = false`, and
+    `s5_full_complete = false`.
+- Local proof:
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    passed.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_receipt.py` passed.
+  - Unit CLI receipt passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros ./bin/madaros s5-receipt tests/madaros/v2_s5/scalar_i64_direct_call_return_42.sio --out-dir /tmp/s5-one --expected-exit 42 --case-id scalar_i64_direct_call_return_42`
+    produced `madaros.v2.s5.receipt/0.1`.
+  - Aggregate gate passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_PROGRAM_MIR_ABI_DIR=/tmp/s5-program-canonical bash scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    with receipt sha
+    `680abb620b2ffc3ac2c0abc3654fe5fa0352743d7adcde2dfd3696a5a51cfab0`.
+- Remaining boundary:
+  - Next S5 step is not another wrapper-only receipt. To satisfy S-FULL
+    direction, implement compiler-exported full-program MachineModule
+    serialization/hash receipts, then ABI layout/call receipts for
+    aggregate/SRET/imported/stack-arg paths and f64 XMM0 call/return before
+    f128/i256 promotion.

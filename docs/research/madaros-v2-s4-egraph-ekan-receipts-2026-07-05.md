@@ -319,10 +319,18 @@ The scalar program-MIR/ABI shadow gate is executable through:
 bash scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh
 ```
 
+Each scalar source also has a canonical compiler-facing receipt path:
+
+```bash
+./bin/madaros s5-receipt tests/madaros/v2_s5/scalar_i64_direct_call_return_42.sio \
+  --expected-exit 42 \
+  --case-id scalar_i64_direct_call_return_42
+```
+
 Observed deterministic local result on 2026-07-05:
 
 ```text
-[madaros-v2-s5-program-mir-abi] ok programs=3 target=x86_64-linux sha=bb9618c4a231
+[madaros-v2-s5-program-mir-abi] ok programs=3 target=x86_64-linux sha=680abb620b2f
 [madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool program-MIR/ABI shadow receipt is deterministic without claiming S5 FULL
 ```
 
@@ -335,6 +343,10 @@ and the legal MIR call-return contract anchored to
 It also records S4 semantic negatives and producer-evaluation blockers as
 not-selected/not-promoted controls, so rejected or blocked rewrites cannot leak
 into the scalar S5 slice.
+The gate now also calls `madaros s5-receipt` for each scalar witness and
+requires three `madaros.v2.s5.receipt/0.1` per-source receipts to match the
+aggregate witness shape (`canonical_s5_source_receipt_count = 3`,
+`canonical_s5_source_receipts_present = true`).
 It deliberately records `compiler_machine_module_exported = false`,
 `real_program_mir_emitted = false`, `real_abi_layout_emitted = false`,
 `s5_ready = false`, and `s5_full_complete = false`.

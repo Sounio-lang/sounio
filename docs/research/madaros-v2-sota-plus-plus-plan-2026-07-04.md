@@ -487,8 +487,16 @@ non-promotion of stack-arg, aggregate, SRET, imported-call, f64 call/return,
 f128, and i256 surfaces. It also records S4 negative/blocker controls that must
 remain unpromoted: distinct symbolic comparison/subtraction, `x_div_x` at zero,
 and the producer-evaluation blockers for call-result self comparison/subtraction.
-Observed deterministic receipt prefix: `bb9618c4a231`. This is a stronger
-scalar S5 slice, but still records
+Canonical S5 receipt status (2026-07-05): `bin/madaros` now exposes
+`madaros s5-receipt <source.sio> [--out-dir OUT] [--expected-exit N] [--case-id ID]`.
+The program-MIR/ABI shadow gate consumes that public compiler-facing receipt for
+each of the three scalar witnesses and rejects divergence between the canonical
+per-source S5 receipt and the aggregate shadow module. The per-source receipt
+schema is `madaros.v2.s5.receipt/0.1`; the aggregate gate now records
+`canonical_s5_source_receipt_count = 3` and
+`canonical_s5_source_receipts_present = true`.
+Observed deterministic aggregate receipt prefix after canonical receipt wiring:
+`680abb620b2f`. This is a stronger scalar S5 slice, but still records
 `compiler_machine_module_exported = false`, `real_program_mir_emitted = false`,
 `real_abi_layout_emitted = false`, `s5_ready = false`, and
 `s5_full_complete = false`.
@@ -504,9 +512,10 @@ Gate:
 - S5 is not "complete" until compiler-exported MIR hashes, ABI/layout receipts,
   call/return witnesses, numeric-width semantics, diagnostics, and fallbacks are
   all gated. The current S5 preflight, input-boundary receipt, scalar
-  MIR-effect roundtrip, and scalar program-MIR/ABI shadow receipt close one
-  scalar i64/bool direct-call/return slice only. They are not the full compiler
-  `MachineModule` export and not global MIR/ABI implementation.
+  MIR-effect roundtrip, canonical `madaros s5-receipt` path, and scalar
+  program-MIR/ABI shadow receipt close one scalar i64/bool direct-call/return
+  slice only. They are not the full compiler `MachineModule` export and not
+  global MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only
