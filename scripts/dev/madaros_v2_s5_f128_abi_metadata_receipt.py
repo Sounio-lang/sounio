@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.f128_abi_metadata_receipt/0.1"
+SCHEMA_VERSION = "madaros.v2.s5.f128_abi_metadata_receipt/0.2"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_F128_ABI_METADATA_PROMOTED_NOT_F128_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_1_F128_ABI_METADATA_PROMOTED_WITH_SPECIFIC_BLOCKERS_NOT_NATIVE_EXECUTION"
 
 F128_SLOT_KIND = 3
 F128_WIDTH_WORDS = 2
-F128_UNSUPPORTED_DETAIL = "f128_execution_pending"
+F128_UNSUPPORTED_DETAILS = {"f128_call_arg_pending", "f128_return_pending"}
 F128_SYSV_CLASSES = "SSE,SSEUP"
 
 
@@ -184,7 +184,7 @@ def load_machine_module(path: Path, expected_fn_count: int) -> dict[str, Any]:
         raise SystemExit(f"unexpected MachineModule target: {payload.get('target')!r}")
     if payload.get("supported") is not False:
         raise SystemExit("f128 ABI metadata cases must remain unsupported")
-    if payload.get("unsupported_detail") != F128_UNSUPPORTED_DETAIL:
+    if payload.get("unsupported_detail") not in F128_UNSUPPORTED_DETAILS:
         raise SystemExit(f"unexpected unsupported_detail: {payload.get('unsupported_detail')!r}")
     if payload.get("legacy_fallback") is not False:
         raise SystemExit("MachineModule must not use legacy fallback")
@@ -349,7 +349,7 @@ def emit(args: argparse.Namespace) -> int:
             "local_f128_call_result_is_marked_in_caller_slot_metadata",
             "imported_f128_parameter_is_marked_as_slot_kind_3_width_words_2",
             "imported_f128_return_signature_exports_kind_3_width_words_2",
-            "MachineModule_fails_closed_with_f128_execution_pending",
+            "MachineModule_fails_closed_with_specific_f128_call_or_return_blocker",
             "no_f128_native_executable_is_emitted_before_helper_and_differential_receipts",
         ],
         "missing_full_obligations": [

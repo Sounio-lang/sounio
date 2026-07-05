@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5 diagnostics/fallback receipt.
 
-This receipt closes the S5 unsupported-width diagnostic slice. It deliberately
-does not promote f128 execution. Instead it proves that numeric widths outside
-the promoted native-v2 S5 set fail closed without silently emitting an ELF or
-falling through legacy code, while the already-promoted wide integer path still
-works.
+This receipt closes the S5 unsupported-width and f128 blocker diagnostic slice.
+It deliberately does not promote native f128 execution. Instead it proves that
+numeric widths outside the promoted native-v2 S5 set fail closed, and that f128
+operations beyond the S5.1 opaque MachineIR contract fail with specific
+MachineModule details instead of silently emitting an ELF or falling through
+legacy code.
 """
 
 from __future__ import annotations
@@ -18,29 +19,38 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.diagnostics_receipt/0.2"
-STAGE_CONTRACT_LEVEL = "S5_UNSUPPORTED_NUMERIC_DIAGNOSTICS_AND_F128_EXECUTION_PENDING_PROMOTED"
+SCHEMA_VERSION = "madaros.v2.s5.diagnostics_receipt/0.3"
+STAGE_CONTRACT_LEVEL = "S5_1_UNSUPPORTED_NUMERIC_AND_F128_BLOCKER_DIAGNOSTICS_PROMOTED"
 DIAGNOSTIC_FRAGMENT = "native-v2 S5 unsupported numeric width"
-F128_EXECUTION_PENDING_FRAGMENT = "f128_execution_pending"
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
     {
-        "case_id": "reject_f128_let_annotation_native_v2",
-        "class": "unsupported_float_width",
-        "source": "fn main() -> i64 { let x: f128 = 1.0 as f128; 0 }\n",
+        "case_id": "reject_f128_arithmetic_native_v2",
+        "class": "unsupported_f128_operation",
+        "source": "fn main() -> i64 { let x: f128 = 1.0 as f128; let y: f128 = 2.0 as f128; let z = x + y; 0 }\n",
         "unsupported_width": "f128",
-        "expected_detail": F128_EXECUTION_PENDING_FRAGMENT,
-        "expected_fragment": F128_EXECUTION_PENDING_FRAGMENT,
+        "expected_detail": "f128_arithmetic_pending",
+        "expected_fragment": "f128_arithmetic_pending",
         "expect_machine_module_json": True,
         "expected_machine_module_supported": False,
     },
     {
-        "case_id": "reject_f128_cast_native_v2",
-        "class": "unsupported_float_width",
-        "source": "fn main() -> i64 { let x = 1.0 as f128; 0 }\n",
+        "case_id": "reject_f128_call_arg_native_v2",
+        "class": "unsupported_f128_operation",
+        "source": "fn sink(x: f128) -> i64 { 0 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; sink(x) }\n",
         "unsupported_width": "f128",
-        "expected_detail": F128_EXECUTION_PENDING_FRAGMENT,
-        "expected_fragment": F128_EXECUTION_PENDING_FRAGMENT,
+        "expected_detail": "f128_call_arg_pending",
+        "expected_fragment": "f128_call_arg_pending",
+        "expect_machine_module_json": True,
+        "expected_machine_module_supported": False,
+    },
+    {
+        "case_id": "reject_f128_return_native_v2",
+        "class": "unsupported_f128_operation",
+        "source": "fn make() -> f128 { 1.0 as f128 }\nfn main() -> i64 { 0 }\n",
+        "unsupported_width": "f128",
+        "expected_detail": "f128_return_pending",
+        "expected_fragment": "f128_return_pending",
         "expect_machine_module_json": True,
         "expected_machine_module_supported": False,
     },
@@ -305,12 +315,16 @@ def emit(args: argparse.Namespace) -> int:
         "unsupported_numeric_widths_fail_closed": True,
         "unsupported_widths_do_not_emit_elf": True,
         "front_half_unsupported_widths_do_not_emit_machine_module_json": True,
-        "f128_execution_pending_emits_machine_module_json": True,
+        "f128_blockers_emit_machine_module_json": True,
         "f128_machine_module_supported": False,
-        "f128_machine_module_unsupported_detail": F128_EXECUTION_PENDING_FRAGMENT,
+        "f128_machine_module_unsupported_details": [
+            "f128_arithmetic_pending",
+            "f128_call_arg_pending",
+            "f128_return_pending",
+        ],
         "unsupported_widths_do_not_segfault": True,
         "legacy_fallback_for_unsupported_widths": False,
-        "f128_execution_pending_not_promoted": True,
+        "f128_native_execution_not_promoted": True,
         "i512_u512_rejected_not_promoted": True,
         "promoted_i256_width_preserved": True,
         "f128_promoted": False,
@@ -318,16 +332,17 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_let_annotation_fails_closed_after_MachineModule_metadata_export",
-            "f128_native_v2_cast_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_arithmetic_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_call_arg_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_return_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",
             "unsupported_numeric_widths_emit_no_elf",
             "i512_u512_front_half_rejections_emit_no_machine_module_json",
-            "f128_execution_pending_cases_emit_unsupported_machine_module_json",
+            "f128_blocker_cases_emit_unsupported_machine_module_json",
             "unsupported_numeric_widths_do_not_segfault_or_use_legacy_fallback",
             "promoted_i256_native_v2_path_still_executes",
-            "f128_is_not_promoted_by_this_receipt",
+            "f128_native_execution_is_not_promoted_by_this_receipt",
         ],
         "missing_full_obligations": [
             "f128 IR/MIR/ABI/software-helper receipts",

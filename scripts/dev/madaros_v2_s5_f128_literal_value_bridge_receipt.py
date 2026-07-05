@@ -2,9 +2,10 @@
 """Emit a Madaros v2 S5 f128 literal value bridge receipt.
 
 This receipt promotes the decimal f128 literal bridge from parser/checker facts
-into IR, MachineIR slot metadata, and MachineModule JSON. It deliberately does
-not promote f128 execution: native-v2 must still fail closed without producing
-an ELF until the software-helper/runtime slice is implemented.
+into IR, MachineIR slot metadata, and supported MachineModule JSON. It
+deliberately does not promote native f128 execution: x86 emission must still
+fail closed without producing an ELF until the software-helper/runtime slice is
+implemented.
 """
 
 from __future__ import annotations
@@ -17,15 +18,15 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.f128_literal_value_bridge_receipt/0.1"
+SCHEMA_VERSION = "madaros.v2.s5.f128_literal_value_bridge_receipt/0.2"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
 F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_F128_LITERAL_VALUE_BRIDGED_TO_IR_MIR_JSON_NOT_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_1_F128_LITERAL_VALUE_BRIDGED_TO_SUPPORTED_MACHINEIR_NOT_NATIVE_EXECUTION"
 
 F128_SLOT_KIND = 3
 F128_WIDTH_WORDS = 2
-F128_UNSUPPORTED_DETAIL = "f128_execution_pending"
+F128_NATIVE_EXECUTION_PENDING_DETAIL = "f128_execution_pending"
 
 
 CASES: list[dict[str, Any]] = [
@@ -158,10 +159,10 @@ def load_machine_module(path: Path) -> dict[str, Any]:
         raise SystemExit("MachineModule export flag missing")
     if payload.get("target") != "x86_64-linux":
         raise SystemExit(f"unexpected target: {payload.get('target')!r}")
-    if payload.get("supported") is not False:
-        raise SystemExit("f128 value bridge cases must remain unsupported")
-    if payload.get("unsupported_detail") != F128_UNSUPPORTED_DETAIL:
-        raise SystemExit(f"unexpected unsupported detail: {payload.get('unsupported_detail')!r}")
+    if payload.get("supported") is not True:
+        raise SystemExit("f128 value bridge cases must now be supported at MachineIR level")
+    if payload.get("unsupported_detail") not in ("", None):
+        raise SystemExit(f"unexpected MachineModule unsupported detail: {payload.get('unsupported_detail')!r}")
     if payload.get("legacy_fallback") is not False:
         raise SystemExit("MachineModule must not use legacy fallback")
     payload["machine_module_json_sha256"] = sha256_text(stable_json(payload))
@@ -204,7 +205,7 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     if "Segmentation fault" in log or "SIGSEGV" in log or "legacy fallback" in log:
         raise SystemExit(f"{case_id} crashed or used fallback; log={log_path}")
     if elf_path.exists() and elf_path.stat().st_size > 0:
-        raise SystemExit(f"{case_id} emitted an ELF despite f128_execution_pending")
+        raise SystemExit(f"{case_id} emitted an ELF despite pending native f128 execution")
     if not mm_path.exists() or mm_path.stat().st_size <= 0:
         raise SystemExit(f"{case_id} did not emit MachineModule JSON")
 
@@ -261,9 +262,11 @@ def emit(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str,
         "f128_literal_decimal_metadata_bridged_to_ir": True,
         "f128_literal_decimal_metadata_bridged_to_machine_ir": True,
         "f128_literal_decimal_metadata_bridged_to_machine_module": True,
+        "f128_literal_decimal_metadata_machine_module_supported": True,
         "f128_binary128_slot_metadata_emitted": True,
+        "f128_machine_ir_opaque_literal_promoted": True,
         "f128_execution_promoted": False,
-        "f128_execution_pending_detail": F128_UNSUPPORTED_DETAIL,
+        "f128_native_v2_execution_pending_detail": F128_NATIVE_EXECUTION_PENDING_DETAIL,
         "f128_native_v2_execution_promoted": False,
         "s5_ready": False,
         "remaining_missing_obligations": [

@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.2"
+SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.3"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_MACHINE_SLOT_KIND_WIDTH_METADATA_AND_F128_SLOT_PROMOTED_NOT_F128_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_1_MACHINEIR_OPAQUE_F128_SLOT_METADATA_AND_LOCAL_COPY_PROMOTED_NOT_NATIVE_EXECUTION"
 
 MIR_SLOT_KIND_I64 = 1
 MIR_SLOT_KIND_F64 = 2
@@ -62,8 +62,7 @@ CASES: list[dict[str, Any]] = [
         "expected_exit": None,
         "required_kinds": [MIR_SLOT_KIND_F128_BINARY128],
         "forbidden_kinds": [],
-        "expect_supported": False,
-        "expected_unsupported_detail": "f128_execution_pending",
+        "expect_supported": True,
         "expect_elf": False,
     },
 ]
@@ -211,13 +210,13 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
             raise SystemExit(f"{case_id} did not emit an ELF")
     else:
         if "native_v2_compile: emitted" in compile_log:
-            raise SystemExit(f"{case_id} unexpectedly emitted execution-pending f128 slot; log={compile_log_path}")
+            raise SystemExit(f"{case_id} unexpectedly emitted native f128 ELF; log={compile_log_path}")
         if "native_v2_compile: FAIL" not in compile_log:
             raise SystemExit(f"{case_id} missing native-v2 fail-closed log line; log={compile_log_path}")
         if "Segmentation fault" in compile_log or "SIGSEGV" in compile_log or "legacy fallback" in compile_log:
             raise SystemExit(f"{case_id} crashed or used fallback; log={compile_log_path}")
         if elf_path.exists() and elf_path.stat().st_size > 0:
-            raise SystemExit(f"{case_id} emitted an ELF despite f128 execution-pending status")
+            raise SystemExit(f"{case_id} emitted an ELF despite f128 native execution still pending")
     if not mm_path.exists() or mm_path.stat().st_size <= 0:
         raise SystemExit(f"{case_id} did not emit MachineModule JSON")
 
@@ -311,8 +310,10 @@ def emit(args: argparse.Namespace) -> int:
         "wide_int_limb_slot_kind_reserved": True,
         "slot_kinds_seen": all_kinds,
         "f128_binary128_slot_metadata_emitted": True,
+        "f128_machine_ir_opaque_slot_promoted": True,
+        "f128_machine_ir_local_metadata_copy_promoted": True,
         "f128_execution_slot_emitted": False,
-        "f128_execution_pending_detail": "f128_execution_pending",
+        "f128_native_v2_execution_pending_detail": "f128_execution_pending",
         "f128_promoted": False,
         "s5_ready": False,
         "s5_implemented": False,
