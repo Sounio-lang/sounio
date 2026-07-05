@@ -1908,6 +1908,7 @@ fn lowerer_lower_fn_item_mut(
         }
         (*lo) = (*lo).ir_lower_inject_validated_param(fn_id)
     }
+    (*lo) = (*lo).ir_lower_reserve_sret_dest()
 
     (*lo).scope_depth = (*lo).scope_depth + 1
     if ir_param_list_count_ref(&fd.params) > 0 {
@@ -1945,7 +1946,7 @@ fn lowerer_lower_fn_item_mut(
     }
 
     if !(*lo).fn_ends_with_return() {
-        (*lo) = (*lo).emit(ir_return(result_reg))
+        (*lo) = (*lo).emit_current_return_value(result_reg)
     }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_return_check name=")
@@ -2288,6 +2289,14 @@ fn lower_extern_fn_ret_code_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
         }
         None => 0,
     }
+}
+
+fn lower_return_name_is_aggregate(n: Name) -> bool with Panic, Div {
+    if n.len <= 0 { return false }
+    if lower_name_is_int_scalar(n) { return false }
+    if n.len == 3 && n.buf[0] as i64 == 102 && n.buf[1] as i64 == 54 && n.buf[2] as i64 == 52 { return false } // f64
+    if n.len == 4 && n.buf[0] as i64 == 98 && n.buf[1] as i64 == 111 && n.buf[2] as i64 == 111 && n.buf[3] as i64 == 108 { return false } // bool
+    true
 }
 
 // Walk a sibling module's items and record each function's return-type code into the side table.
@@ -5080,6 +5089,59 @@ impl Lowerer {
         lo
     }
 
+    fn ir_lower_reserve_sret_dest(self) -> Lowerer with Mut, Panic, Div, IO {
+        if (*self.current_func).return_struct_name.len <= 0 {
+            return self
+        }
+        if !lower_return_name_is_aggregate((*self.current_func).return_struct_name) {
+            return self
+        }
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dest = pair.1
+        var cf_box = lo.current_func
+        (*cf_box).is_sret = 1
+        (*cf_box).sret_dest_reg = dest
+        lo.current_func = cf_box
+        lo
+    }
+
+    fn emit_sret_field_copy(self, src_reg: i64, dest_reg: i64, type_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var si: i64 = 0
+        while si < (*lo.struct_layouts).count {
+            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*lo.struct_layouts).entries[si as usize].field_count {
+                    let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
+                    let pair_tmp = lo.fresh_reg()
+                    lo = pair_tmp.0
+                    let tmp = pair_tmp.1
+                    lo = lo.emit(ir_field_get(tmp, src_reg, field.index, field.name))
+                    lo = lo.emit(ir_field_set(dest_reg, field.index, tmp, field.name))
+                    fi = fi + 1
+                }
+                return lo
+            }
+            si = si + 1
+        }
+        lo
+    }
+
+    fn emit_current_return_value(self, result_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if (*self.current_func).is_sret == 1 {
+            let dest_reg = (*self.current_func).sret_dest_reg
+            let ret_name = (*self.current_func).return_struct_name
+            var lo = self
+            if dest_reg >= 0 && ret_name.len > 0 && result_reg != dest_reg {
+                lo = lo.emit_sret_field_copy(result_reg, dest_reg, ret_name)
+                return lo.emit(ir_return_sret(dest_reg))
+            }
+            return lo.emit(ir_return_sret(result_reg))
+        }
+        self.emit(ir_return(result_reg))
+    }
+
     fn lower_fn_params_ref(self, params: &Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = params
@@ -5381,6 +5443,7 @@ impl Lowerer {
         if strategy == IR_STRATEGY_INSTRUMENTED {
             lo = lo.ir_lower_inject_validated_param(fn_id)
         }
+        lo = lo.ir_lower_reserve_sret_dest()
 
         if lo.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: params_begin fn=")
@@ -5448,7 +5511,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_current_return_value(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -5553,6 +5616,7 @@ impl Lowerer {
         if strategy == IR_STRATEGY_INSTRUMENTED {
             lo = lo.ir_lower_inject_validated_param(fn_id)
         }
+        lo = lo.ir_lower_reserve_sret_dest()
 
         if lo.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: params_begin fn=")
@@ -5603,7 +5667,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_current_return_value(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -7728,6 +7792,15 @@ impl Lowerer {
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
+        if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
+            let ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
+            if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 1 {
+                let first_two_sret = ir_reg_list_first_two(final_args)
+                var lo_sret = lo4.emit(ir_alloc(dst, 64))
+                lo_sret = lo_sret.emit(ir_call_sret(dst, dst, callee_name, fn_id, first_two_sret.0, final_argc))
+                return (lo_sret, dst)
+            }
+        }
         var call_instr = ir_call(dst, fn_id, callee_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             if (*lo4.module).functions[fn_id as usize].returns_float == 1 {
@@ -8311,7 +8384,7 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&e.left)
         let lo = pair.0
         let reg = pair.1
-        let lo2 = lo.emit(ir_return(reg))
+        let lo2 = lo.emit_current_return_value(reg)
         (lo2, reg)
     }
 
