@@ -19,6 +19,7 @@ METHOD_SRET_RECEIPT_DIR="$OUT_DIR/method_sret_receipt"
 F64_XMM0_RECEIPT_DIR="$OUT_DIR/f64_xmm0_receipt"
 WIDE_INT_RECEIPT_DIR="$OUT_DIR/wide_int_receipt"
 GENERIC_AGG_RECEIPT_DIR="$OUT_DIR/generic_aggregate_sret_receipt"
+F128_LITERAL_PROVENANCE_RECEIPT_DIR="$OUT_DIR/f128_literal_provenance_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
@@ -30,6 +31,7 @@ METHOD_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_method_sret_rece
 F64_XMM0_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f64_xmm0_receipt.py"
 WIDE_INT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_wide_int_receipt.py"
 GENERIC_AGG_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_generic_aggregate_sret_receipt.py"
+F128_LITERAL_PROVENANCE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_f128_literal_provenance_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
@@ -46,10 +48,11 @@ METHOD_SRET_RECEIPT="$METHOD_SRET_RECEIPT_DIR/madaros_v2_s5_method_sret.receipt.
 F64_XMM0_RECEIPT="$F64_XMM0_RECEIPT_DIR/madaros_v2_s5_f64_xmm0.receipt.json"
 WIDE_INT_RECEIPT="$WIDE_INT_RECEIPT_DIR/madaros_v2_s5_wide_int.receipt.json"
 GENERIC_AGG_RECEIPT="$GENERIC_AGG_RECEIPT_DIR/madaros_v2_s5_generic_aggregate_sret.receipt.json"
+F128_LITERAL_PROVENANCE_RECEIPT="$F128_LITERAL_PROVENANCE_RECEIPT_DIR/madaros_v2_f128_literal_provenance.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -165,6 +168,16 @@ if [[ ! -f "$GENERIC_AGG_RECEIPT" ]]; then
   exit 1
 fi
 
+python3 "$F128_LITERAL_PROVENANCE_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$F128_LITERAL_PROVENANCE_RECEIPT_DIR"
+
+if [[ ! -f "$F128_LITERAL_PROVENANCE_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 literal provenance receipt: $F128_LITERAL_PROVENANCE_RECEIPT" >&2
+  exit 1
+fi
+
 python3 "$DIAGNOSTICS_RECEIPT_TOOL" emit \
   --compiler "$COMPILER" \
   --out-dir "$DIAGNOSTICS_RECEIPT_DIR"
@@ -184,7 +197,7 @@ if [[ ! -f "$DIFFERENTIAL_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -236,10 +249,11 @@ method_sret_receipt_path = Path(sys.argv[7])
 f64_xmm0_receipt_path = Path(sys.argv[8])
 wide_int_receipt_path = Path(sys.argv[9])
 generic_agg_receipt_path = Path(sys.argv[10])
-diagnostics_receipt_path = Path(sys.argv[11])
-differential_receipt_path = Path(sys.argv[12])
-module_path = Path(sys.argv[13])
-receipt_path = Path(sys.argv[14])
+f128_literal_provenance_receipt_path = Path(sys.argv[11])
+diagnostics_receipt_path = Path(sys.argv[12])
+differential_receipt_path = Path(sys.argv[13])
+module_path = Path(sys.argv[14])
+receipt_path = Path(sys.argv[15])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -253,6 +267,7 @@ method_sret_receipt = load_json(method_sret_receipt_path)
 f64_xmm0_receipt = load_json(f64_xmm0_receipt_path)
 wide_int_receipt = load_json(wide_int_receipt_path)
 generic_agg_receipt = load_json(generic_agg_receipt_path)
+f128_literal_provenance_receipt = load_json(f128_literal_provenance_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
 
@@ -641,6 +656,30 @@ for case_id, expected in required_generic_cases.items():
             raise SystemExit(f"{case_id} must not retain fixed 64-byte Wide9 SRET destination, got {main_allocs}")
         if shape.get("main_field_load_indices") != list(range(9)):
             raise SystemExit(f"{case_id} must load all Wide9 fields in order")
+
+if f128_literal_provenance_receipt.get("schema") != "madaros.v2.f128_literal_provenance_receipt/0.1":
+    raise SystemExit("bad f128 literal provenance receipt schema")
+if f128_literal_provenance_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 literal provenance receipt")
+if f128_literal_provenance_receipt.get("stage_contract_level") != "S4_S5_F128_LITERAL_PROVENANCE_PROMOTED_NOT_F128_EXECUTION":
+    raise SystemExit("f128 literal provenance receipt must declare parser provenance stage contract")
+for field in [
+    "raw_literal_capture_before_advance",
+    "float_literal_ast_name_preserved",
+    "float_literal_f64_value_still_preserved",
+    "f128_literal_provenance_preserved_for_future_binary128",
+    "f128_decimal_not_forced_through_f64_only_ast",
+]:
+    if f128_literal_provenance_receipt.get(field) is not True:
+        raise SystemExit(f"f128 literal provenance receipt missing required true flag: {field}")
+for field in [
+    "f128_promoted",
+    "s5_ready",
+    "s5_implemented",
+    "s5_full_complete",
+]:
+    if f128_literal_provenance_receipt.get(field) is not False:
+        raise SystemExit(f"f128 literal provenance receipt must not overclaim {field}")
 
 if diagnostics_receipt.get("schema") != "madaros.v2.s5.diagnostics_receipt/0.1":
     raise SystemExit("bad S5 diagnostics receipt schema")
@@ -1095,7 +1134,12 @@ not_promoted = [
     {
         "surface": "f128_numeric_width",
         "status": "not_promoted_by_this_slice",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 now fails closed with stable native-v2 diagnostics but still requires primitive type, ABI, operations, and differential execution receipts",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literal provenance is preserved for future binary128 lowering and native-v2 f128 execution still fails closed with stable diagnostics until IR/MIR/ABI/software-helper receipts exist",
+    },
+    {
+        "surface": "f128_literal_provenance",
+        "status": "promoted_by_parser_provenance_receipt_not_execution",
+        "reason": "ExprFloatLit now preserves original source spelling in Expr.name before rounding to f64 compatibility value, enabling a future binary128 parser without claiming f128 execution",
     },
     {
         "surface": "unsupported_numeric_diagnostics",
@@ -1262,6 +1306,17 @@ module = {
         "positive_guard_case_count": diagnostics_receipt["positive_guard_case_count"],
         "cases": diagnostics_receipt["cases"],
     },
+    "f128_literal_provenance_receipt": {
+        "schema": f128_literal_provenance_receipt["schema"],
+        "path": f"{f128_literal_provenance_receipt_path.parent.name}/{f128_literal_provenance_receipt_path.name}",
+        "receipt_sha256": f128_literal_provenance_receipt["receipt_sha256"],
+        "stage_contract_level": f128_literal_provenance_receipt["stage_contract_level"],
+        "case_id": f128_literal_provenance_receipt["case_id"],
+        "parser_source_sha256": f128_literal_provenance_receipt["parser_source_sha256"],
+        "parse_float_literal_block_sha256": f128_literal_provenance_receipt["parse_float_literal_block_sha256"],
+        "probe_source_sha256": f128_literal_provenance_receipt["probe_source_sha256"],
+        "probe_check_rc": f128_literal_provenance_receipt["probe_check_rc"],
+    },
     "differential_receipt": {
         "schema": differential_receipt["schema"],
         "path": f"{differential_receipt_path.parent.name}/{differential_receipt_path.name}",
@@ -1293,6 +1348,7 @@ module = {
         "f64_xmm0_promoted": True,
         "wide_i128_i256_promoted": True,
         "wide_u128_u256_promoted": True,
+        "f128_literal_provenance_promoted": True,
         "unsupported_numeric_diagnostics_promoted": True,
         "unsupported_numeric_widths_fail_closed": True,
         "differential_native_v2_vs_lean_single_promoted": True,
@@ -1318,6 +1374,7 @@ module = {
         "f64_xmm0_call_return_receipt_recorded",
         "wide_int_i128_i256_receipt_recorded",
         "generic_aggregate_sret_layout_receipt_recorded",
+        "f128_literal_provenance_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
         "differential_native_v2_vs_lean_single_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
@@ -1361,6 +1418,7 @@ receipt = {
     "s5_f64_xmm0_call_return_complete": True,
     "s5_wide_int_i128_i256_complete": True,
     "s5_generic_aggregate_sret_layout_complete": True,
+    "s4_s5_f128_literal_provenance_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
