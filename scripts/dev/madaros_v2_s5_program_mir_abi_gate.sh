@@ -11,14 +11,17 @@ cd "$ROOT_DIR"
 OUT_DIR="${SOUNIO_MADAROS_V2_S5_PROGRAM_MIR_ABI_DIR:-$(mktemp -d /tmp/sounio-madaros-v2-s5-program-mir-abi.XXXXXX)}"
 EFFECT_DIR="$OUT_DIR/mir_effect"
 S5_RECEIPT_DIR="$OUT_DIR/canonical_s5_source_receipts"
+SRET_RECEIPT_DIR="$OUT_DIR/sret_abi_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
+SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_sret_abi_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
 MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
 RECEIPT="$OUT_DIR/madaros_v2_s5_program_mir_abi.receipt.json"
 S5_RECEIPT_RESULTS="$OUT_DIR/madaros_v2_s5_source_receipts.tsv"
+SRET_RECEIPT="$SRET_RECEIPT_DIR/madaros_v2_s5_sret_abi.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -62,7 +65,16 @@ while IFS=$'\t' read -r case_id program expected_exit _abi_kind _required_machin
     >>"$S5_RECEIPT_RESULTS"
 done <"$MANIFEST"
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$SRET_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$SRET_RECEIPT_DIR"
+
+if [[ ! -f "$SRET_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing SRET ABI receipt: $SRET_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -106,13 +118,26 @@ def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
 
 effect_dir = Path(sys.argv[1])
 source_receipts_path = Path(sys.argv[2])
-module_path = Path(sys.argv[3])
-receipt_path = Path(sys.argv[4])
+sret_receipt_path = Path(sys.argv[3])
+module_path = Path(sys.argv[4])
+receipt_path = Path(sys.argv[5])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
 effect_receipt = load_json(effect_receipt_path)
 effect_module = load_json(effect_module_path)
+sret_receipt = load_json(sret_receipt_path)
+
+if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
+    raise SystemExit("bad S5 SRET ABI receipt schema")
+if sret_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing SRET ABI receipt")
+if sret_receipt.get("s5_sret_machine_module_abi_discriminator_complete") is not True:
+    raise SystemExit("program MIR/ABI gate requires completed SRET ABI discriminator")
+if sret_receipt.get("positive", {}).get("actual_exit") != 14:
+    raise SystemExit("SRET ABI receipt positive witness must return 14")
+if sret_receipt.get("negative_plaincall", {}).get("actual_exit") == 14:
+    raise SystemExit("SRET ABI receipt negative discriminator must not return 14")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -370,12 +395,7 @@ not_promoted = [
     {
         "surface": "aggregate_return",
         "status": "not_promoted_by_this_slice",
-        "reason": "requires layout and return-size receipts beyond scalar rax returns",
-    },
-    {
-        "surface": "sret",
-        "status": "not_promoted_by_this_slice",
-        "reason": "requires hidden return-pointer ABI receipt and differential witness",
+        "reason": "source front-end aggregate-return lowering still needs source-to-IrCallSret receipt",
     },
     {
         "surface": "imported_call",
@@ -455,15 +475,25 @@ module = {
     "program_mir_shadow_serialized": True,
     "compiler_machine_module_exported": True,
     "real_program_mir_emitted": True,
-    "real_abi_layout_emitted": False,
+    "real_abi_layout_emitted": True,
+    "sret_abi_receipt": {
+        "schema": sret_receipt["schema"],
+        "path": f"{sret_receipt_path.parent.name}/{sret_receipt_path.name}",
+        "receipt_sha256": sret_receipt["receipt_sha256"],
+        "stage_contract_level": sret_receipt["stage_contract_level"],
+        "case_id": sret_receipt["case_id"],
+        "positive_exit": sret_receipt["positive"]["actual_exit"],
+        "negative_plaincall_exit": sret_receipt["negative_plaincall"]["actual_exit"],
+        "abi_signature": sret_receipt["abi_signature"],
+    },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
         "target": "x86_64-linux",
         "arg_register_order": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
         "return_register": "rax",
         "stack_args_promoted": False,
-        "sret_promoted": False,
-        "aggregate_layout_promoted": False,
+        "sret_promoted": True,
+        "aggregate_layout_promoted": True,
         "f64_xmm0_promoted": False,
     },
     "not_promoted_surfaces": not_promoted,
@@ -477,7 +507,8 @@ module = {
         "merged_ir_function_count_matches_program_shape",
         "elf_internal_call_count_matches_program_shape",
         "scalar_abi_register_contract_recorded",
-        "non_scalar_surfaces_not_promoted",
+        "sret_hidden_dest_abi_discriminator_recorded",
+        "source_sret_imported_stack_f64_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "full_abi_numeric_differential_gates_still_required_before_s5_ready",
     ],
@@ -506,8 +537,10 @@ receipt = {
     "program_mir_shadow_serialized": True,
     "compiler_machine_module_exported": True,
     "real_program_mir_emitted": True,
-    "real_abi_layout_emitted": False,
+    "real_abi_layout_emitted": True,
+    "s5_sret_machine_module_abi_discriminator_complete": True,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
+    "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
     "program_mir_abi_module_sha256": module_sha,
     "program_mir_abi_module_with_hash_sha256": module_with_hash_sha,
@@ -519,14 +552,17 @@ receipt = {
     "target": module["scalar_abi_receipts"]["target"],
     "arg_register_order": module["scalar_abi_receipts"]["arg_register_order"],
     "return_register": module["scalar_abi_receipts"]["return_register"],
+    "sret_promoted": module["scalar_abi_receipts"]["sret_promoted"],
+    "aggregate_layout_promoted": module["scalar_abi_receipts"]["aggregate_layout_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
     "negative_and_blocked_controls": [
         f"{item['case_id']}:{item['expected_status']}" for item in negative_and_blocked_controls
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "compiler-exported MachineModule coverage beyond the current scalar i64/bool witnesses",
-        "ABI layout receipts for aggregate, SRET, imported call, stack-arg, and return paths",
+        "source front-end lowering to IrCallSret for by-value aggregate returns",
+        "imported aggregate/SRET receipt",
+        "stack-arg SRET receipt",
         "f64 XMM0 call/return witnesses before f128 promotion",
         "numeric tower width receipts for f128/i256",
         "diagnostics and fallback semantics for unsupported layouts and numeric widths",
@@ -541,6 +577,6 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool compiler MachineModule + ABI-shadow receipt is deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

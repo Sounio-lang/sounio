@@ -71,6 +71,8 @@ pub let MIR_OP_STORE_ABS: i64 = 128          // mov [rbx],rax — store to absol
 
 pub let MIR_OP_PSEUDO_LOAD_GLOBAL: i64 = 20
 pub let MIR_OP_PSEUDO_STORE_GLOBAL: i64 = 21
+pub let MIR_OP_PSEUDO_CALL_SRET: i64 = 22
+pub let MIR_OP_PSEUDO_RET_SRET: i64 = 23
 
 pub let MIR_OP_PSEUDO_LOAD_FLOAT: i64 = 17
 pub let MIR_OP_PSEUDO_INT_TO_FLOAT: i64 = 18
@@ -323,7 +325,9 @@ pub fn native_v2_supported_ir_opcode(op: IrOpcode) -> bool with Mut, Panic, Div 
     if op == IrOpcode::IrBinOp { return true }
     if op == IrOpcode::IrUnaryOp { return true }
     if op == IrOpcode::IrCall { return true }
+    if op == IrOpcode::IrCallSret { return true }
     if op == IrOpcode::IrReturn { return true }
+    if op == IrOpcode::IrReturnSret { return true }
     if op == IrOpcode::IrJump { return true }
     if op == IrOpcode::IrBranchTrue { return true }
     if op == IrOpcode::IrBranchFalse { return true }
@@ -351,7 +355,9 @@ pub fn native_v2_ir_opcode_name(op: IrOpcode) -> string with Mut, Panic, Div {
     if op == IrOpcode::IrBinOp { return "binop" }
     if op == IrOpcode::IrUnaryOp { return "unaryop" }
     if op == IrOpcode::IrCall { return "call" }
+    if op == IrOpcode::IrCallSret { return "call_sret" }
     if op == IrOpcode::IrReturn { return "return" }
+    if op == IrOpcode::IrReturnSret { return "return_sret" }
     if op == IrOpcode::IrJump { return "jump" }
     if op == IrOpcode::IrBranchTrue { return "branch_true" }
     if op == IrOpcode::IrBranchFalse { return "branch_false" }
@@ -472,8 +478,24 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.call_arg_count = pair.1
         return mi
     }
+    if instr.op == IrOpcode::IrCallSret {
+        mi.opcode = MIR_OP_PSEUDO_CALL_SRET
+        mi.dst = machine_operand_stack_slot(instr.dst)
+        mi.src1 = machine_operand_call_target(instr.fn_id)
+        mi.src2 = machine_operand_stack_slot(instr.src1)
+        mi.aux = machine_operand_stack_slot(instr.field_idx)
+        mi.call_arg_count = instr.arg_count
+        return mi
+    }
     if instr.op == IrOpcode::IrReturn {
         mi.opcode = MIR_OP_PSEUDO_RET
+        if instr.src1 >= 0 {
+            mi.src1 = machine_operand_stack_slot(instr.src1)
+        }
+        return mi
+    }
+    if instr.op == IrOpcode::IrReturnSret {
+        mi.opcode = MIR_OP_PSEUDO_RET_SRET
         if instr.src1 >= 0 {
             mi.src1 = machine_operand_stack_slot(instr.src1)
         }
@@ -911,7 +933,23 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
             if machine_instr_dst_value(instr) >= 0 {
                 out.legal_instr_count = out.legal_instr_count + 2
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
+            if machine_instr_call_arg_count(instr) > 5 {
+                out.supported = false
+                out.unsupported_detail = "sret_call_arity_gt_5"
+                return out
+            }
+            out.legal_instr_count = out.legal_instr_count + 3 + (machine_instr_call_arg_count(instr) * 2)
+            if machine_instr_dst_value(instr) >= 0 {
+                out.legal_instr_count = out.legal_instr_count + 2
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_RET {
+            if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
+                out.legal_instr_count = out.legal_instr_count + 2
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 1
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_RET_SRET {
             if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
                 out.legal_instr_count = out.legal_instr_count + 2
             } else {
@@ -1194,7 +1232,41 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret(temp))
                 native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
+            if machine_instr_call_arg_count(instr) > 5 {
+                (*out).supported = false
+                (*out).unsupported_detail = "sret_call_arity_gt_5"
+                return
+            }
+            let dest_temp = (*out).temp_count
+            (*out).temp_count = dest_temp + 1
+            native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
+            native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(0, dest_temp))
+            var sret_ai: i64 = 0
+            while sret_ai < machine_instr_call_arg_count(instr) {
+                let temp = (*out).temp_count
+                (*out).temp_count = temp + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_aux_value(instr) + sret_ai))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(sret_ai + 1, temp))
+                sret_ai = sret_ai + 1
+            }
+            native_v2_emit_legal_instr_mut(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if machine_instr_dst_value(instr) >= 0 {
+                let ret_temp = (*out).temp_count
+                (*out).temp_count = ret_temp + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret(ret_temp))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), ret_temp))
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_RET {
+            if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
+                let temp = (*out).temp_count
+                (*out).temp_count = temp + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_src1_value(instr)))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_ret(temp))
+            } else {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_ret(0 - 1))
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_RET_SRET {
             if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
                 let temp = (*out).temp_count
                 (*out).temp_count = temp + 1
@@ -1383,7 +1455,41 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out = _emit_legal_byval(out, native_v2_make_capture_ret(temp))
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
+            if machine_instr_call_arg_count(instr) > 5 {
+                out.supported = false
+                out.unsupported_detail = "sret_call_arity_gt_5"
+                return out
+            }
+            let dest_temp = out.temp_count
+            out.temp_count = dest_temp + 1
+            out = _emit_legal_byval(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
+            out = _emit_legal_byval(out, native_v2_make_arg_move(0, dest_temp))
+            var sret_ai: i64 = 0
+            while sret_ai < machine_instr_call_arg_count(instr) {
+                let temp = out.temp_count
+                out.temp_count = temp + 1
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_aux_value(instr) + sret_ai))
+                out = _emit_legal_byval(out, native_v2_make_arg_move(sret_ai + 1, temp))
+                sret_ai = sret_ai + 1
+            }
+            out = _emit_legal_byval(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if machine_instr_dst_value(instr) >= 0 {
+                let ret_temp = out.temp_count
+                out.temp_count = ret_temp + 1
+                out = _emit_legal_byval(out, native_v2_make_capture_ret(ret_temp))
+                out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), ret_temp))
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_RET {
+            if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
+                let temp = out.temp_count
+                out.temp_count = temp + 1
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_src1_value(instr)))
+                out = _emit_legal_byval(out, native_v2_make_ret(temp))
+            } else {
+                out = _emit_legal_byval(out, native_v2_make_ret(0 - 1))
+            }
+        } else if instr.opcode == MIR_OP_PSEUDO_RET_SRET {
             if machine_instr_src1_kind(instr) == MIR_OPERAND_STACK_SLOT {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
