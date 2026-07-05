@@ -98,6 +98,16 @@ def pair_key(pair):
     (ulo, uhi, uneg), (vlo, vhi, vneg) = pair
     return (ulo, uhi, int(uneg), vlo, vhi, int(vneg))
 
+from fractions import Fraction  # unbounded exact rationals -> overflow-free reference for souc i64
+
+def measure_case(samples):
+    # samples: list of (alpha, beta, gamma, delta) as Fractions. F = r5 = alpha*gamma + beta*delta.
+    N = len(samples)
+    rs = [a * g + b * d for (a, b, g, d) in samples]
+    E = sum(rs, Fraction(0)) / N
+    Var = sum((r * r for r in rs), Fraction(0)) / N - E * E
+    return E, Var
+
 if __name__ == "__main__":
     validPrims, ordered, unordered = compute()
     print(f"COUNT validPrims {len(validPrims)}")
@@ -115,8 +125,18 @@ if __name__ == "__main__":
     print(f"COUNT arrows {len(arrows)}")
     for a in sorted(arrows):
         print("ARROW " + " ".join(str(x) for x in a))
-    # self-check against the Lean-proven counts
+    # Measure-layer (Frente A): exact E/Var over Q, same sample points as the Sounio test.
+    F = Fraction
+    onloc = [(F(1), F(1), F(1), F(-1)), (F(2), F(2), F(1), F(-1)), (F(1), F(1), F(3), F(-3))]
+    offloc = [(F(9, 10), F(1), F(1), F(-1)), (F(1), F(1), F(1), F(-1)), (F(11, 10), F(1), F(1), F(-1))]
+    for tag, samples in ((0, onloc), (1, offloc)):
+        E, Var = measure_case(samples)
+        print(f"MEASURE {tag} E {E.numerator} {E.denominator} VAR {Var.numerator} {Var.denominator}")
+    # self-check against the Lean-proven counts + the exact measure values
+    E0, V0 = measure_case(onloc)
+    E1, V1 = measure_case(offloc)
     ok = (len(validPrims) == 84 and len(ordered) == 336 and len(unordered) == 168
-          and len(nf) == 168 and len(arrows) == 84)
-    print("ORACLE " + ("OK zd=84/336/168 nonfano=168 arrows=84" if ok else "MISMATCH"))
+          and len(nf) == 168 and len(arrows) == 84
+          and E0 == 0 and V0 == 0 and E1 == 0 and V1 == Fraction(1, 150))
+    print("ORACLE " + ("OK zd=84/336/168 nonfano=168 arrows=84 measure=0/0,0/(1/150)" if ok else "MISMATCH"))
     sys.exit(0 if ok else 1)

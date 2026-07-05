@@ -114,12 +114,24 @@ partition 168/175/343, the Binary Norm Theorem (wave ∈ {−2,0,+2}), the 84↔
 the two-face `nonfano_zd_bridge` collapse onto |PSL(2,7)|. This certifies the *annihilation locus*:
 which pairs annihilate, how many, under which group, with which projective geometry.
 
-**NOT executed by this work**: the **measure-theoretic** half of the Structural Annihilation Theorem
-— the claim about probability *measures* whose support lies in the zero-divisor locus Z_k(M),
-yielding `E[F_N]=0` and `Var[F_N]=0`. That is an object over **ℚ** (measures), not ℤ (structure). The
-census proves the locus *exists* with the 168-structure; it proves nothing yet about *random
-variables supported on it*. That half remains proven at the statement level and **pending exact
-execution over ℚ**.
+**MEASURE LAYER — a first exact instance executed** (over ℚ; Frente A):
+`tests/run-pass/sedenion_measure_annihilation_exact.sio` executes the measure claim for a concrete
+exact empirical measure on the canonical channel `a=αe₃+βe₁₀, b=γe₆+δe₁₅` (functional `F = r5 =
+αγ+βδ`). Support **on** the locus → `E[F]=0/1` and `Var[F]=0/1` (exact zero); support perturbed
+**off** by exact `ε=1/10` → `E[F]=0/1` but `Var[F]=1/150` (exact positive rational, = GUM `2ε²/3`).
+By **decidable rational equality**, cross-verified against Python `fractions` (unbounded exact). The
+`Var` flips `0/1 → 1/150` as support leaves the locus — the confidence collapse, now exact:
+`Var>0` was the number, `Var=0/1` is the contract.
+
+> **Formalization note:** the measure-theoretic statement is **not** formalized in Lean
+> (`SounioSedenionMeasurement.lean` defers it — "requires Mathlib/Hilbert"). This artifact *defines*
+> the exact ℚ statement, grounded in the float witness `sedenion_zero_divisor.sio`. It is a first
+> exact instance, not the general theorem.
+
+**STILL NOT executed (the general measure theorem)**: arbitrary probability measures / general locus
+parameterizations / unbounded ℚ. This instance uses finite empirical measures with small rationals;
+souc's `rational.sio` is **i64-bounded** (no bigint), so general measures need overflow-checked or
+bigint rationals. The general statement remains proven at the statement level and pending.
 
 Reconciliation (why this is the same contract-vs-number theme, one layer up): the float artifact
 `sedenion_zero_divisor.sio` shows `E[a·b]=0` but `Var>0` — the "confidence collapse". That is what a
