@@ -226,6 +226,47 @@ consumption inside the nested block loop. Next dispatch: source bisect of
 campaign owner. Blocker stays open, class updated to
 **compiler-semantics (parser source)**, evidence level E2.
 
+## 7b. Addendum (2026-07-05 19:20 UTC): fix candidates — two independent confirmations
+
+Two independent fixes now exist, both attacking global-state reentrancy in
+`parse_expr_or_assign_stmt` when the assignment RHS re-enters `parse_block`:
+
+- **Candidate A (gated, parked on a branch):**
+  `fix/parser-assign-rhs-block-hang-v2` @ `0d89fe6be` (isolated worktree
+  `/tmp/sounio-strlib-parser-fix`). Holds the assignment LHS in a local
+  option instead of parking it in the global `LAST_ASSIGN_TARGET` across
+  `parse_expr_entry` recursion. Verified with one Madaros rebuild: the full
+  HANG/PASS matrix returns correctly (all previous HANG rows → exit 0),
+  tuple-let probe passes, `--check stdlib/eisa/evm.sio` exit 0,
+  `stdlib/math/dd64.sio` / `stdlib/eisa/format.sio` /
+  `stdlib/clinical/biomarker.sio` exit 0, lean_single sanity green.
+  Note: the old "Lean compiler safety" comment claimed holding both boxes
+  locally corrupts nested parenthesized RHS parses; the rebuilt-seed matrix
+  (including `x = (if ...)`) contradicts that claim today.
+- **Candidate B (in flight, uncommitted, main worktree):** a different
+  agent is editing `self-hosted/parser/stmts.sio` directly in
+  `/workspace/sounio` — drains `TPLET_PENDING` only after let-statements
+  and clears it while an assignment RHS parse is in flight. Not yet built
+  or gated at the time of this addendum.
+
+Integration deferred per the parallel-work contract (never edit the same
+file in parallel): candidate A stays parked until the main-worktree edit
+lands or is abandoned. Whichever lands first, the other must re-run the
+matrix before being discarded — the two mechanisms are not mutually
+exclusive and the gdb spin signature (Option-tagged list traversal) is
+more consistent with B's queue than with A's single slot; A passing the
+matrix suggests the queue corruption is *reached through* the in-flight
+assignment state.
+
+**Residual, separate defect:** with the hang fixed (candidate A binary),
+`--check stdlib/str/lib.sio` fails fast with repeated `E012: this type
+has no field named` (exit 1) — a checker gap, since lean_single checks
+the same file exit 0. Pre-existing debt unmasked by the fix, not
+introduced by it (the pre-fix binary hangs before reaching the checker).
+The blocker's acceptance gate ("str/lib exit 0") therefore splits: parser
+hang (fixed by A/B) and checker E012 on str/lib (new, separate record
+needed if it blocks anyone).
+
 ## 8. Session hygiene
 
 Every hang probe ran under `timeout` (25–60 s); after each timed-out check the
