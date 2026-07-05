@@ -290,9 +290,6 @@ def emit(args: argparse.Namespace) -> int:
             "receipt_does_not_promote_native_v2_f128_execution",
         ],
         "missing_full_obligations": [
-            "f128 IR opcodes and constructors",
-            "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
-            "f128 SysV ABI classification and call-return signature metadata",
             "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
             "f128 native-v2 execution and differential receipts",
         ],

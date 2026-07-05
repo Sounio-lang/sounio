@@ -227,12 +227,9 @@ def emit(args: argparse.Namespace) -> int:
             "Type printers and SOIR type serialization carry f128 explicitly without falling back to i64",
             "ExprFloatLit still carries the historical f64 parsed value for f64 compatibility",
             "f128 frontend check accepts high-precision decimal source before native-v2 execution",
-            "receipt does not claim f128 IR/MIR/ABI/codegen execution",
+            "receipt does not claim f128 helper/codegen execution",
         ],
         "missing_full_obligations": [
-            "f128 IR opcodes and constructors",
-            "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
-            "f128 SysV ABI classification and call-return signature metadata",
             "f128 software helper lowering and IEEE-754 rounding/NaN/Inf contract",
             "f128 native-v2 execution and differential receipts",
         ],

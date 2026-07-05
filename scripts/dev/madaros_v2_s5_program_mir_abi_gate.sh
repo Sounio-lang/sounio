@@ -24,6 +24,7 @@ GENERIC_AGG_RECEIPT_DIR="$OUT_DIR/generic_aggregate_sret_receipt"
 F128_LITERAL_PROVENANCE_RECEIPT_DIR="$OUT_DIR/f128_literal_provenance_receipt"
 F128_BINARY128_VALUE_RECEIPT_DIR="$OUT_DIR/f128_binary128_value_receipt"
 MACHINE_SLOT_METADATA_RECEIPT_DIR="$OUT_DIR/machine_slot_metadata_receipt"
+F128_ABI_METADATA_RECEIPT_DIR="$OUT_DIR/f128_abi_metadata_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
@@ -40,6 +41,7 @@ GENERIC_AGG_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_generic_aggregat
 F128_LITERAL_PROVENANCE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_f128_literal_provenance_receipt.py"
 F128_BINARY128_VALUE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_value_receipt.py"
 MACHINE_SLOT_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_machine_slot_metadata_receipt.py"
+F128_ABI_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_abi_metadata_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
@@ -61,6 +63,7 @@ GENERIC_AGG_RECEIPT="$GENERIC_AGG_RECEIPT_DIR/madaros_v2_s5_generic_aggregate_sr
 F128_LITERAL_PROVENANCE_RECEIPT="$F128_LITERAL_PROVENANCE_RECEIPT_DIR/madaros_v2_f128_literal_provenance.receipt.json"
 F128_BINARY128_VALUE_RECEIPT="$F128_BINARY128_VALUE_RECEIPT_DIR/madaros_v2_s5_f128_binary128_value.receipt.json"
 MACHINE_SLOT_METADATA_RECEIPT="$MACHINE_SLOT_METADATA_RECEIPT_DIR/madaros_v2_s5_machine_slot_metadata.receipt.json"
+F128_ABI_METADATA_RECEIPT="$F128_ABI_METADATA_RECEIPT_DIR/madaros_v2_s5_f128_abi_metadata.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
@@ -229,6 +232,16 @@ if [[ ! -f "$MACHINE_SLOT_METADATA_RECEIPT" ]]; then
   exit 1
 fi
 
+python3 "$F128_ABI_METADATA_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$F128_ABI_METADATA_RECEIPT_DIR"
+
+if [[ ! -f "$F128_ABI_METADATA_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 ABI metadata receipt: $F128_ABI_METADATA_RECEIPT" >&2
+  exit 1
+fi
+
 python3 "$DIAGNOSTICS_RECEIPT_TOOL" emit \
   --compiler "$COMPILER" \
   --out-dir "$DIAGNOSTICS_RECEIPT_DIR"
@@ -248,7 +261,7 @@ if [[ ! -f "$DIFFERENTIAL_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -305,10 +318,11 @@ generic_agg_receipt_path = Path(sys.argv[12])
 f128_literal_provenance_receipt_path = Path(sys.argv[13])
 f128_binary128_value_receipt_path = Path(sys.argv[14])
 machine_slot_metadata_receipt_path = Path(sys.argv[15])
-diagnostics_receipt_path = Path(sys.argv[16])
-differential_receipt_path = Path(sys.argv[17])
-module_path = Path(sys.argv[18])
-receipt_path = Path(sys.argv[19])
+f128_abi_metadata_receipt_path = Path(sys.argv[16])
+diagnostics_receipt_path = Path(sys.argv[17])
+differential_receipt_path = Path(sys.argv[18])
+module_path = Path(sys.argv[19])
+receipt_path = Path(sys.argv[20])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -327,6 +341,7 @@ generic_agg_receipt = load_json(generic_agg_receipt_path)
 f128_literal_provenance_receipt = load_json(f128_literal_provenance_receipt_path)
 f128_binary128_value_receipt = load_json(f128_binary128_value_receipt_path)
 machine_slot_metadata_receipt = load_json(machine_slot_metadata_receipt_path)
+f128_abi_metadata_receipt = load_json(f128_abi_metadata_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
 
@@ -992,6 +1007,75 @@ if slot_metadata_cases["f128_binary128_slot_kind_width_metadata"].get("machine_m
     raise SystemExit("f128 slot metadata case must keep MachineModule unsupported until execution promotion")
 if slot_metadata_cases["f128_binary128_slot_kind_width_metadata"].get("machine_module_unsupported_detail") != "f128_execution_pending":
     raise SystemExit("f128 slot metadata case must record f128_execution_pending")
+
+if f128_abi_metadata_receipt.get("schema") != "madaros.v2.s5.f128_abi_metadata_receipt/0.1":
+    raise SystemExit("bad S5 f128 ABI metadata receipt schema")
+if f128_abi_metadata_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 ABI metadata receipt")
+if f128_abi_metadata_receipt.get("stage_contract_level") != "S5_F128_ABI_METADATA_PROMOTED_NOT_F128_EXECUTION":
+    raise SystemExit("f128 ABI metadata receipt must declare ABI metadata stage contract")
+if f128_abi_metadata_receipt.get("case_count") != 3:
+    raise SystemExit("f128 ABI metadata receipt must contain exact three cases")
+if f128_abi_metadata_receipt.get("imported_module_case_count") != 1:
+    raise SystemExit("f128 ABI metadata receipt must contain one imported module case")
+for field in [
+    "f128_local_param_metadata_promoted",
+    "f128_local_return_metadata_promoted",
+    "f128_imported_param_metadata_promoted",
+    "f128_imported_return_metadata_promoted",
+    "f128_call_result_slot_metadata_promoted",
+    "f128_abi_metadata_promoted",
+]:
+    if f128_abi_metadata_receipt.get(field) is not True:
+        raise SystemExit(f"f128 ABI metadata receipt missing required true flag: {field}")
+if f128_abi_metadata_receipt.get("f128_binary128_slot_kind") != 3:
+    raise SystemExit("f128 ABI metadata receipt must use slot kind 3")
+if f128_abi_metadata_receipt.get("f128_binary128_width_words") != 2:
+    raise SystemExit("f128 ABI metadata receipt must use two 64-bit words")
+if f128_abi_metadata_receipt.get("f128_sysv_classes") != "SSE,SSEUP":
+    raise SystemExit("f128 ABI metadata receipt must record binary128 SysV SSE/SSEUP classes")
+for field in [
+    "f128_execution_promoted",
+    "f128_promoted",
+    "s5_ready",
+    "s5_implemented",
+    "s5_full_complete",
+    "legacy_fallback_for_f128_abi",
+]:
+    if f128_abi_metadata_receipt.get(field) is not False:
+        raise SystemExit(f"f128 ABI metadata receipt must not overclaim {field}")
+f128_abi_cases = {row.get("case_id"): row for row in f128_abi_metadata_receipt.get("cases", [])}
+required_f128_abi_cases = {
+    "local_f128_arg_return_metadata",
+    "local_f128_return_only_metadata",
+    "imported_f128_arg_return_metadata",
+}
+if set(f128_abi_cases) != required_f128_abi_cases:
+    raise SystemExit(f"f128 ABI metadata receipt cases mismatch: {sorted(f128_abi_cases)}")
+for case_id, row in f128_abi_cases.items():
+    if row.get("machine_supported") is not False:
+        raise SystemExit(f"{case_id} must keep MachineModule unsupported")
+    if row.get("machine_unsupported_detail") != "f128_execution_pending":
+        raise SystemExit(f"{case_id} must record f128_execution_pending")
+    if row.get("elf_emitted") is not False:
+        raise SystemExit(f"{case_id} must not emit an ELF before f128 execution promotion")
+    shape = row.get("machine_shape", {})
+    if shape.get("callee_source_returns_f128") is not True:
+        raise SystemExit(f"{case_id} callee must export f128 return metadata")
+    if shape.get("callee_source_return_slot_kind") != 3:
+        raise SystemExit(f"{case_id} callee return slot kind must be 3")
+    if shape.get("callee_source_return_width_words") != 2:
+        raise SystemExit(f"{case_id} callee return width words must be 2")
+    if shape.get("callee_source_f128_sysv_classes") != "SSE,SSEUP":
+        raise SystemExit(f"{case_id} callee must export f128 SysV classes")
+    if int(shape.get("main_f128_slot_row_count", 0)) <= 0:
+        raise SystemExit(f"{case_id} main must contain f128 slot metadata")
+if f128_abi_cases["local_f128_arg_return_metadata"].get("machine_shape", {}).get("callee_source_f128_param_count") != 1:
+    raise SystemExit("local f128 arg-return case must record one f128 callee param")
+if f128_abi_cases["imported_f128_arg_return_metadata"].get("machine_shape", {}).get("callee_source_f128_param_count") != 1:
+    raise SystemExit("imported f128 arg-return case must record one f128 callee param")
+if f128_abi_cases["local_f128_return_only_metadata"].get("machine_shape", {}).get("callee_source_f128_param_count") != 0:
+    raise SystemExit("local f128 return-only case must record zero f128 callee params")
 
 if diagnostics_receipt.get("schema") != "madaros.v2.s5.diagnostics_receipt/0.2":
     raise SystemExit("bad S5 diagnostics receipt schema")
@@ -1706,6 +1790,19 @@ module = {
         "f128_binary128_limb_bits": machine_slot_metadata_receipt["f128_binary128_limb_bits"],
         "cases": machine_slot_metadata_receipt["cases"],
     },
+    "f128_abi_metadata_receipt": {
+        "schema": f128_abi_metadata_receipt["schema"],
+        "path": f"{f128_abi_metadata_receipt_path.parent.name}/{f128_abi_metadata_receipt_path.name}",
+        "receipt_sha256": f128_abi_metadata_receipt["receipt_sha256"],
+        "stage_contract_level": f128_abi_metadata_receipt["stage_contract_level"],
+        "case_id": f128_abi_metadata_receipt["case_id"],
+        "case_count": f128_abi_metadata_receipt["case_count"],
+        "imported_module_case_count": f128_abi_metadata_receipt["imported_module_case_count"],
+        "f128_binary128_slot_kind": f128_abi_metadata_receipt["f128_binary128_slot_kind"],
+        "f128_binary128_width_words": f128_abi_metadata_receipt["f128_binary128_width_words"],
+        "f128_sysv_classes": f128_abi_metadata_receipt["f128_sysv_classes"],
+        "cases": f128_abi_metadata_receipt["cases"],
+    },
     "differential_receipt": {
         "schema": differential_receipt["schema"],
         "path": f"{differential_receipt_path.parent.name}/{differential_receipt_path.name}",
@@ -1745,6 +1842,7 @@ module = {
         "f128_type_system_awareness_promoted": True,
         "f128_binary128_value_contract_promoted": True,
         "machine_slot_metadata_promoted": True,
+        "f128_abi_metadata_promoted": True,
         "unsupported_numeric_diagnostics_promoted": True,
         "unsupported_numeric_widths_fail_closed": True,
         "differential_native_v2_vs_lean_single_promoted": True,
@@ -1777,12 +1875,13 @@ module = {
         "f128_type_system_awareness_receipt_recorded",
         "f128_binary128_value_receipt_recorded",
         "machine_slot_kind_width_metadata_receipt_recorded",
+        "f128_abi_metadata_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
         "differential_native_v2_vs_lean_single_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
         "f128_execution_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
-        "f128_ir_mir_abi_helpers_still_required_before_s5_ready",
+        "f128_helpers_and_execution_differentials_still_required_before_s5_ready",
     ],
 }
 canonical_module, module_sha = canonical_roundtrip(module)
@@ -1827,6 +1926,7 @@ receipt = {
     "s4_s5_f128_type_system_awareness_complete": True,
     "s5_f128_binary128_value_contract_complete": True,
     "s5_machine_slot_kind_width_metadata_complete": True,
+    "s5_f128_abi_metadata_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
@@ -1857,6 +1957,7 @@ receipt = {
     "native_v2_wide_limb_backend_promoted": True,
     "wide_type_identity_and_safety_promoted": True,
     "f128_binary128_value_contract_promoted": True,
+    "f128_abi_metadata_promoted": True,
     "s5_diagnostics_unsupported_numeric_complete": True,
     "unsupported_numeric_widths_fail_closed": True,
     "differential_native_v2_vs_lean_single_promoted": True,
@@ -1881,6 +1982,7 @@ receipt = {
     "generic_aggregate_sret_receipt_sha256": generic_agg_receipt["receipt_sha256"],
     "f128_binary128_value_receipt_sha256": f128_binary128_value_receipt["receipt_sha256"],
     "machine_slot_metadata_receipt_sha256": machine_slot_metadata_receipt["receipt_sha256"],
+    "f128_abi_metadata_receipt_sha256": f128_abi_metadata_receipt["receipt_sha256"],
     "diagnostics_receipt_sha256": diagnostics_receipt["receipt_sha256"],
     "differential_receipt_sha256": differential_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
@@ -1914,6 +2016,7 @@ receipt = {
     "wide_abi_call_return_two_wide_arg_case_count": wide_abi_call_return_receipt["two_wide_arg_case_count"],
     "f128_binary128_value_contract_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_promoted"],
     "machine_slot_metadata_promoted": module["scalar_abi_receipts"]["machine_slot_metadata_promoted"],
+    "f128_abi_metadata_promoted": module["scalar_abi_receipts"]["f128_abi_metadata_promoted"],
     "unsupported_numeric_diagnostics_promoted": module["scalar_abi_receipts"]["unsupported_numeric_diagnostics_promoted"],
     "unsupported_numeric_widths_fail_closed": module["scalar_abi_receipts"]["unsupported_numeric_widths_fail_closed"],
     "differential_compared_case_count": differential_receipt["matched_case_count"],
@@ -1927,9 +2030,6 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "f128 IR opcodes and constructors",
-        "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
-        "f128 SysV ABI classification and call-return signature metadata",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
         "f128 native-v2 execution and differential receipts",
     ],
@@ -1943,7 +2043,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits unsupported slot metadata and fails closed without ELF, segfault, or fallback"
-echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 execution remains the explicit full blocker"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits unsupported slot + ABI metadata and fails closed without ELF, segfault, or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

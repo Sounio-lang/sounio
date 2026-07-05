@@ -2078,6 +2078,30 @@ fn cmm_append_slot_metadata(buf: [i8; 65536], pos: i64, machine: MachineModule, 
     (out, p)
 }
 
+fn cmm_name_is_f128(n: Name) -> bool with Panic, Div {
+    if n.len != 4 { return false }
+    if n.buf[0] as i64 != 102 { return false } // f
+    if n.buf[1] as i64 != 49 { return false }  // 1
+    if n.buf[2] as i64 != 50 { return false }  // 2
+    if n.buf[3] as i64 != 56 { return false }  // 8
+    true
+}
+
+fn cmm_count_param_slots_with_kind(ir_func: IrFunction, func: MachineFunction, kind: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ir_func.param_count && i < 64 {
+        let slot = ir_func.param_regs[i as usize]
+        if slot >= 0 && slot < 256 {
+            if func.slot_kind[slot as usize] == kind {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
 fn cmm_append_function(buf: [i8; 65536], pos: i64, module: &IrModule, machine: MachineModule, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
     var out = buf
     var p = pos
@@ -2107,6 +2131,22 @@ fn cmm_append_function(buf: [i8; 65536], pos: i64, module: &IrModule, machine: M
     out = m1.0; p = m1.1
     let m2 = cmm_append_named_i64(out, p, "source_sret_dest_reg", ir_func.sret_dest_reg, true)
     out = m2.0; p = m2.1
+    let f128_param_count = cmm_count_param_slots_with_kind(ir_func, func, MIR_SLOT_KIND_F128_BINARY128)
+    let returns_f128 = cmm_name_is_f128(ir_func.return_struct_name)
+    let m3 = cmm_append_named_string(out, p, "source_abi_metadata_schema", "madaros.v2.s5.function_abi_metadata/0.1", true)
+    out = m3.0; p = m3.1
+    let m4 = cmm_append_named_i64(out, p, "source_f128_param_count", f128_param_count, true)
+    out = m4.0; p = m4.1
+    let m5 = cmm_append_named_bool(out, p, "source_returns_f128", returns_f128, true)
+    out = m5.0; p = m5.1
+    let m6 = cmm_append_named_i64(out, p, "source_return_slot_kind", if returns_f128 { MIR_SLOT_KIND_F128_BINARY128 } else { 0 }, true)
+    out = m6.0; p = m6.1
+    let m7 = cmm_append_named_i64(out, p, "source_return_width_words", if returns_f128 { 2 } else { 0 }, true)
+    out = m7.0; p = m7.1
+    let m8 = cmm_append_named_string(out, p, "source_f128_sysv_classes", if returns_f128 || f128_param_count > 0 { "SSE,SSEUP" } else { "" }, true)
+    out = m8.0; p = m8.1
+    let m9 = cmm_append_named_bool(out, p, "source_f128_execution_pending", returns_f128 || f128_param_count > 0, true)
+    out = m9.0; p = m9.1
     let h = cmm_append_named_string(out, p, "instr_encoding", "numeric_tuple_v1", true)
     out = h.0; p = h.1
     let j = lobl_append(out, p, "\"instrs\":[")

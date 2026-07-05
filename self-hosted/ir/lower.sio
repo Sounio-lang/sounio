@@ -1790,6 +1790,14 @@ fn lowerer_lower_fn_params_mut(
                     } else {
                         lowerer_mark_error(lo)
                     }
+                } else if lower_type_expr_is_f128(&(*list).head.ty) {
+                    let instr_count_f128 = current_func.instr_count
+                    if instr_count_f128 < IR_MAX_INSTRS {
+                        current_func.instrs[instr_count_f128 as usize] = ir_mark_f128_reg(preg)
+                        current_func.instr_count = instr_count_f128 + 1
+                    } else {
+                        lowerer_mark_error(lo)
+                    }
                 }
 
                 let _is_mut = (*list).head.is_self_mut
@@ -2246,7 +2254,7 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 // (i128/i256) are intentionally rejected: they use a separate wide-limb print
 // path, and mis-routing them to print_int would print only the low limb.
 // EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its
-// return-type code (1=int scalar, 2=f64) and aggregate return Name. Populated
+// return-type code (1=int scalar, 2=f64, 3=f128) and aggregate return Name. Populated
 // per-module from the OTHER programs' AST in the externs preseed
 // (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a
 // fallback when module.functions has no return type for an imported callee.
@@ -2468,6 +2476,7 @@ fn lower_return_name_is_aggregate(n: Name) -> bool with Panic, Div {
     if n.len <= 0 { return false }
     if lower_name_is_int_scalar(n) { return false }
     if n.len == 3 && n.buf[0] as i64 == 102 && n.buf[1] as i64 == 54 && n.buf[2] as i64 == 52 { return false } // f64
+    if lower_name_is_f128(n) { return false }
     if n.len == 4 && n.buf[0] as i64 == 98 && n.buf[1] as i64 == 111 && n.buf[2] as i64 == 111 && n.buf[3] as i64 == 108 { return false } // bool
     true
 }
@@ -2519,7 +2528,9 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                         Some(fd) => {
                             var code: i64 = 0
                             let ret_name = lower_opt_type_named_name(&(*fd).return_type)
-                            if lower_opt_type_is_f64(&(*fd).return_type) {
+                            if lower_opt_type_is_f128(&(*fd).return_type) {
+                                code = 3
+                            } else if lower_opt_type_is_f64(&(*fd).return_type) {
                                 code = 2
                             } else if lower_opt_type_is_int_scalar(&(*fd).return_type) {
                                 code = 1
@@ -4023,11 +4034,15 @@ impl Lowerer {
                     return ir_empty_name()
                 }
                 let imported_ret = lower_extern_fn_ret_name_lookup(callee_name)
+                if lower_name_is_f128(imported_ret) {
+                    return imported_ret
+                }
                 if lower_name_wide_int_bits(imported_ret) > 64 {
                     return imported_ret
                 }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
-                if lower_extern_fn_ret_lookup(callee_name) != 0 {
+                let imported_ret_code = lower_extern_fn_ret_lookup(callee_name)
+                if imported_ret_code == 1 || imported_ret_code == 2 {
                     return ir_empty_name()
                 }
                 let local_ret = self.return_struct_name_for_fn_id(fn_id)
@@ -5562,6 +5577,14 @@ impl Lowerer {
                         if instr_count < IR_MAX_INSTRS {
                             current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
                             current_func.instr_count = instr_count + 1
+                        } else {
+                            lo = lo.report_error()
+                        }
+                    } else if lower_type_expr_is_f128(&(*list).head.ty) {
+                        let instr_count_f128 = current_func.instr_count
+                        if instr_count_f128 < IR_MAX_INSTRS {
+                            current_func.instrs[instr_count_f128 as usize] = ir_mark_f128_reg(preg)
+                            current_func.instr_count = instr_count_f128 + 1
                         } else {
                             lo = lo.report_error()
                         }
@@ -8217,11 +8240,13 @@ impl Lowerer {
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
+        var call_returns_f128 = false
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             let ext_ret_code_sret = lower_extern_fn_ret_code_for_call(e)
             let ext_ret_name_sret = lower_extern_fn_ret_name_for_call(e)
             let ext_ret_wide_bits_sret = lower_extern_fn_ret_wide_bits_for_call(e)
             var ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
+            call_returns_f128 = lower_name_is_f128(ret_name_sret) || ext_ret_code_sret == 3 || lower_name_is_f128(ext_ret_name_sret)
             if ext_ret_wide_bits_sret > 64 {
                 ret_name_sret = ir_empty_name()
             } else if lower_name_wide_int_bits(ext_ret_name_sret) > 64 {
@@ -8278,6 +8303,9 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if call_returns_f128 {
+            lo5 = lo5.emit(ir_mark_f128_reg(dst))
         }
         (lo5, dst)
     }
@@ -8645,8 +8673,10 @@ impl Lowerer {
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
+        var method_call_returns_f128 = false
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
+            method_call_returns_f128 = lower_name_is_f128(ret_name_m)
             if lower_return_name_is_aggregate(ret_name_m) && final_argc <= 8 {
                 let ret_wide_bits_m = lower_name_wide_int_bits(ret_name_m)
                 if ret_wide_bits_m > 64 {
@@ -8677,6 +8707,9 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if method_call_returns_f128 {
+            lo6 = lo6.emit(ir_mark_f128_reg(dst))
         }
         (lo6, dst)
     }
