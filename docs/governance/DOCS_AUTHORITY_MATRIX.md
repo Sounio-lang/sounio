@@ -195,6 +195,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.seed-fix-general-lvalue-deref-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_GENERAL_LVALUE_DEREF_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-two-level-indexed-aggregate-store-2026-07-05 | repo_only | docs/audit/SEED_FIX_TWO_LEVEL_INDEXED_AGGREGATE_STORE_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-value-nested-field-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_VALUE_NESTED_FIELD_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.seed-general-place-resolver-2026-07-05 | repo_only | docs/audit/SEED_GENERAL_PLACE_RESOLVER_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sret-large-struct-smtcontext.dispatch | repo_only | docs/audit/sret_large_struct_smtcontext/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -328,6 +329,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.butterfly-handoff | repo_only | docs/handoff/butterfly-handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.compiler-generic-struct-return-fix-prompt | repo_only | docs/handoff/compiler_generic_struct_return_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.codex-claude-parallel-contract | historical | docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.completed-mega-project | historical | docs/implementation/COMPLETED_MEGA_PROJECT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
