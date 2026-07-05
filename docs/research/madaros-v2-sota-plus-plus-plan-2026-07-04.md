@@ -40,6 +40,32 @@ This is deliberately more ambitious than the current tactical bug lane. It also
 keeps the tactical lane honest: a compiler is not "fixed" until it can preserve
 the gates below, not merely pass a narrow local witness.
 
+## S-FULL implementation rule
+
+Every `S*` step is implemented as a full stage contract, not as the smallest
+local witness that turns a status line green. A step may be called complete only
+when it has all of the following:
+
+- canonical artifact schema, deterministic hash/receipt, and stable CLI or gate
+  surface;
+- positive fixtures that cover the intended accepted domain, plus negative and
+  blocked fixtures for unsafe, ambiguous, effectful, overflow/trap, or
+  unsupported cases;
+- manifest counts with both lower and upper bounds where accidental extra
+  rewrites would be a bug;
+- fail-closed gate assertions that prove accepted, rejected, and blocked records
+  are disjoint and that selected/extracted IDs exactly match the accepted set;
+- cross-stage input and output contracts for the neighboring `S(n-1)` and
+  `S(n+1)` stage, including ABI/MIR impact when relevant;
+- documentation of what is implemented, what is intentionally blocked, and what
+  remains future work;
+- LLM-offload review when the step touches math semantics, clinical code, or
+  external-facing claims;
+- local validation plus the relevant repo/CI gate before promotion.
+
+If only part of that bundle exists, the status is "slice implemented" or
+"preflight ready", not `S* complete`.
+
 ## SOTA anchors reviewed
 
 These are anchors, not claims of equivalence.
@@ -78,9 +104,18 @@ literature scout rather than a claim carried by this plan.
   `work/madaros-v2-sota-codex`):
   - `bin/madaros-relocgate` exists and is executable.
   - `scripts/dev/madaros_two_gate.sh` exists.
-  - `self-hosted/hlir/ir.sio` defines duplicate `HlirTypeContest` and
-    `HlirTypeRobust` enum entries at lines found by
-    `rg -n "HlirTypeContest|HlirTypeRobust" self-hosted/hlir/ir.sio`.
+  - `self-hosted/hlir/ir.sio` previously defined duplicate
+    `HlirTypeContest` and `HlirTypeRobust` enum entries. The duplicate enum
+    audit is now closed by `scripts/dev/madaros_v2_s3_readiness_gate.sh`, and
+    the native HLIR JSON/hash/roundtrip completion gate is now
+    `scripts/dev/madaros_v2_s3_gate.sh`.
+  - `bin/madaros --emit-hlir <source>` emits compiler-native
+    `madaros.hlir.module/0.2` JSON through `hlir_lower_module`, and
+    `bin/madaros s3-receipt <source> [--out-dir OUT]` writes deterministic S3
+    receipts for S4 consumers.
+  - `scripts/dev/madaros_v2_s4_preflight_gate.sh` consumes the S3 gate receipts
+    and emits `madaros.v2.s4.preflight/0.1`, proving the S4 input contract
+    without claiming S4 optimization is implemented.
   - `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`
     exists and records the GPU/PTX module-combination failure.
 - `docs/MADAROS_STATUS.md` says Madaros is the default `bin/souc` compiler and
@@ -161,6 +196,16 @@ Rule:
 Purpose: produce a deterministic, canonical representation of parsed source and
 module dependencies before type checking or optimization.
 
+Implementation status (2026-07-04): S1 receipt surface now emits and gates a
+real compiler-native top-level AST sidecar. The receipt schema is
+`madaros.v2.s1.receipt/0.2`; `canonical_ast_sha256` is non-null and is computed
+from `madaros.stage1.ast/0.1` bytes emitted by `--emit-ast`. The L1
+`canonical_source_graph_sha256` remains as a secondary source/module witness.
+Broader source-built compiler acceptance is now green: the freshly rebuilt
+`artifacts/self-hosted/madaros` passes `scripts/ci/madaros_full_gate.sh`,
+including imported-SMT 6/6, and passes `scripts/dev/madaros_v2_s1_gate.sh`.
+The old `test_smt_adaptive_epistemic.sio` source-built blocker is closed.
+
 Canonical artifact:
 - `MadarosV2S1Receipt` with source hash, include/import graph, canonical AST
   hash, parser version, diagnostic summary, and module path table.
@@ -211,6 +256,7 @@ Gate:
   `lower_to_ptx.sio` + `ptx.sio` combination that `mod.sio` previously missed.
 - no IR_MAX_INSTRS escape hatch as a "fix"; if caps fire, the receipt must say
   which phase and which module caused it.
+- current L1 gate: `bash scripts/dev/madaros_v2_s1_gate.sh`.
 
 Non-goal:
 - no type checking, no E-KAN optimization, no ABI decisions.
@@ -230,6 +276,17 @@ Gate:
 - type/effect diagnostics must be structured, not crash or bulk E175/E177/E046
   spew.
 
+Implementation status (2026-07-04): a deterministic S2 contract scaffold is
+implemented in `scripts/dev/madaros_v2_s2_receipt.py`,
+`scripts/dev/madaros_v2_s2_gate.sh`, `bin/madaros s2-receipt`, and
+`self-hosted/compiler/madaros_v2_s2_receipt.sio`.
+
+This is deliberately not a native typed-HIR completion claim. The receipt
+records `claim_level = s2_contract_scaffold`, `s2_complete = false`,
+`typed_hir_sha256 = null`, and
+`typed_hir_status = not_emitted_by_current_madaros`. S2 completion remains
+blocked on a compiler-native typed-HIR/THIR serializer and roundtrip hash gate.
+
 E-KAN status:
 - declaration surface only: basis family, domains, uncertainty model,
   approximation intent. No optimizer rewrite yet.
@@ -238,27 +295,85 @@ E-KAN status:
 
 Purpose: normalize control/data flow into a durable SSA-like compiler IR.
 
+Implementation status (2026-07-04): S3 is implemented for the compiler-native
+HLIR JSON/hash/roundtrip boundary. `bin/madaros --emit-hlir <source>` now
+parses, frontend-checks, lowers through `hlir_lower_module`, and emits clean
+`madaros.hlir.module/0.2` JSON without a banner. `bin/madaros s3-receipt
+<source> [--out-dir OUT]` writes the HLIR JSON plus a
+`madaros.v2.s3.receipt/0.1` receipt. `scripts/dev/madaros_v2_s3_gate.sh`
+validates deterministic byte-identical re-emission, JSON parse/roundtrip hash,
+module/function/block/instruction count consistency, and representative
+string/call/control/GPU-PTX-import witnesses. S4 is now ready to consume the
+HLIR JSON hash; `scripts/dev/madaros_v2_s4_preflight_gate.sh` makes this
+readiness executable. S4 optimization is not implemented by this status.
+
 Canonical artifact:
 - canonical HLIR module hash with normalized IDs, blocks, values, effects,
   ownership marks, and type layout placeholders.
 
 Gate:
+- `scripts/dev/madaros_v2_s3_gate.sh`.
 - HLIR serialization roundtrip.
-- source -> HIR -> HLIR deterministic hash.
+- source -> checked front-end -> HLIR deterministic hash.
 - no duplicate enum definitions or accidental semantic aliases in core type
-  systems. `self-hosted/hlir/ir.sio` currently has duplicated
-  `HlirTypeContest` / `HlirTypeRobust` enum entries that should be audited
-  before this stage is considered contractual.
+  systems. `scripts/dev/madaros_v2_s3_readiness_gate.sh` now enforces unique
+  `HlirTypeKind` variants and required epistemic variants.
 
 Rule:
 - HLIR owns high-level optimization legality. GPU KernelIR does not.
-- HLIR is not declared stable while the duplicate enum audit is open. The file
-  is a useful starting surface, not the S3 canonical artifact.
+- The S3 claim is the native HLIR serialization/hash/roundtrip boundary. It is
+  not a claim that all later optimizer legality proofs, e-graph rewrites, or
+  E-KAN approximations are implemented.
 
 ### S4 - Eq/E-KAN optimization IR
 
 Purpose: introduce non-destructive optimization and scientific symbolic
 surrogate reasoning without losing exact semantics.
+
+Implementation status (2026-07-05): the S4 conservative e-graph/E-KAN
+accepted/rejected/blocked receipt boundary plus receipt-only
+extraction/cost-model boundary is implemented and gated. This is not global S4
+completion.
+`bin/madaros s4-receipt <source> [--out-dir OUT]` consumes S3 HLIR receipts,
+builds a persistent
+`madaros.v2.s4.egraph/0.1` artifact, and emits
+`madaros.v2.ekan.rewrite/0.1` receipts for accepted, rejected, and blocked
+proposals plus `madaros.v2.s4.extraction/0.1` receipts for deterministic
+cost-model extraction decisions. The S3 operand-provenance blocker found on
+2026-07-05 is closed by the S3 operand-fidelity gate. The current accepted
+subset is deliberately narrow: exact i64 constant folds, neutral-element
+symbolic identities (`x + 0`, `0 + x`, `x * 1`, `1 * x`, `x - 0`), and
+same-SSA reflexive comparisons (`x == x`, `x != x`, `x <= x`, `x >= x`,
+`x < x`, `x > x`), plus same-SSA symbolic subtraction (`x - x -> 0`) over
+params/block params and local leaf call results with
+`basis_family = exact_symbolic`, `validator = translation-validation`,
+`error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
+The current local S4 gate reports `accepted=28`, `rejected=3`, `blocked=3`,
+and `selected=28`. The manifest now carries min/max rewrite counts so negative
+rows such as distinct symbolic comparisons, distinct symbolic subtraction, and
+effectful call-result self-comparisons fail if they accidentally start rewriting
+without a producer-evaluation proof. Local leaf call results are accepted only
+with keep-producer extraction effects (`*_keep_producer_evaluated`); callees that
+contain `call_direct` are blocked with `producer_evaluation_not_proven`.
+The current rejected subset includes the algebraic proposal `x_div_x_to_one`,
+rejected by counterexample-guided translation validation (`x = 0`,
+original division-by-zero trap vs rewritten constant `1`), and the tempting
+distinct-symbolic subtraction generalization `x - y -> 0` rejected with
+counterexample `x = 1, y = 2`. Both carry
+`selected_for_extraction = false` and `ir_mutation_allowed = false`.
+The blocked status remains available for future ambiguous proposals through
+`operand_provenance_blocked` receipts with `validator = blocked`,
+`rejection_reason_code = operand_provenance_ambiguous`,
+`selected_for_extraction = false`, and `ir_mutation_allowed = false`; the
+current fixture set also includes `producer_evaluation_not_proven` blockers for
+effectful/non-leaf call-result self-comparisons.
+`scripts/dev/madaros_v2_s4_gate.sh` validates both positive and negative
+receipts and proves that extraction-selected IDs exactly equal accepted IDs,
+rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
+mutation is allowed. Learned or approximate E-KAN rewrites, equality saturation,
+broader algebraic identities beyond the current neutral/reflexive/sub-self exact
+subset, broad counterexample search, producer purity/evaluation-preservation,
+and downstream applying optimizer integration remain future S4 work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
@@ -285,8 +400,14 @@ MadarosV2EkanRewriteReceipt {
 ```
 
 Gate:
+- `scripts/dev/madaros_v2_s4_gate.sh`.
+- S4 is not "complete" unless each admitted rewrite family is implemented as a
+  full receipt slice: accepted fixtures, rejected counterexamples, blocked
+  ambiguity/effect fixtures, extraction selection, S5 preflight compatibility,
+  docs, and validation. A narrow green fixture is only a slice witness.
 - equality-saturation extraction must carry proof obligations or translation
-  validation for every selected rewrite.
+  validation for every selected rewrite; the current boundary gate already
+  enforces this for deterministic receipt-only extraction decisions.
 - E-KAN proposals must include domain bounds, basis family, coefficients,
   training/provenance hashes, approximation error bound, GUM/covariance
   assumptions, and exact fallback expression.
@@ -294,6 +415,9 @@ Gate:
   validation succeeds for the declared domain.
 - the S4 gate consumes `MadarosV2EkanRewriteReceipt` records; an optimizer pass
   may emit proposals without receipts, but extraction must reject them.
+- S4 must not accept constant-fold or algebraic-identity candidates when S3
+  HLIR operand provenance is ambiguous; those candidates must be `blocked`, not
+  `accepted`.
 
 Novelty center:
 - compiler-native, receipt-carrying E-KAN/e-graph optimizer for epistemic
@@ -314,6 +438,74 @@ Implementation sketch:
 Purpose: commit to low-level program semantics: calls, layouts, returns,
 register classes, stack, aggregate passing, and exact numeric widths.
 
+Preflight status (2026-07-05): S5 has an executable input-contract preflight,
+and the current S4 output is classified as input-contract ready. S5 itself is
+not ready or implemented. `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+consumes the current S4 extraction boundary output and verifies that only
+extraction-selected accepted rewrites can be consumed. With the S3 operand
+fidelity blocker closed, the preflight receipt records `status = pass`,
+`s5_input_contract_ready = true`, `s5_ready = false`, and
+`s5_implemented = false`.
+
+Input-boundary status (2026-07-05): S5 also has a deterministic MIR/ABI
+input-boundary gate, `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`, which consumes
+the S5 preflight plus S4 extraction receipts and emits
+`madaros.v2.s5.mir_abi_input_boundary/0.1`. The current receipt classifies 28
+selected S4 rewrites as input-safe scalar values (`scalar_i64` or
+`scalar_bool`) with no call-signature, stack, SRET, aggregate-layout, or ABI
+impact, while preserving the 3 blocked producer-evaluation rewrites as excluded
+negative evidence. It records `s5_mir_abi_input_boundary_complete = true`,
+`real_mir_emitted = false`, `real_abi_layout_emitted = false`,
+`s5_mir_abi_boundary_complete = false`, `s5_ready = false`,
+`s5_implemented = false`, and `s5_full_complete = false`.
+
+Scalar MIR-effect status (2026-07-05): S5 now has a first scalar
+MIR/ABI full-slice gate, `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`. It
+consumes the input-boundary receipt, serializes the 28 selected exact S4 rewrites
+as deterministic MIR-effect records (`mir.const.i64`, `mir.const.bool`, and
+`mir.alias.i64`), proves canonical JSON roundtrip stability, and runs three real
+native-v2 scalar witnesses from `tests/madaros/v2_s5/`: i64 literal return,
+i64 direct-call return, and bool direct-call return. The gate enforces exact
+manifest cardinality, verifies exit codes, hashes each compiled ELF/log, and
+inspects executable ELF segments so direct-call witnesses must contain an
+additional internal call beyond the runtime-to-main call. The receipt schema is
+`madaros.v2.s5.mir_effect_roundtrip/0.1`; current evidence records
+`s5_mir_effect_roundtrip_complete = true`,
+`s5_scalar_i64_bool_direct_call_return_slice_complete = true`,
+`real_mir_effects_serialized = true`, `real_program_mir_emitted = false`,
+`real_abi_layout_emitted = false`, and `s5_full_complete = false`.
+
+Scalar compiler-MachineModule + ABI-shadow status (2026-07-05): S5 now also has
+`scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`, which consumes the
+MIR-effect receipt and emits `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
+It records compiler-exported `madaros.v2.s5.machine_module/0.1` JSON for the
+same three scalar witnesses: i64 literal return, i64 direct-call return, and
+bool direct-call return. The compiler interface is explicit:
+`--native-v2-compile <source.sio> -o <elf> --machine-module-json <json>`.
+The gate verifies the merged-IR function counts (`1,2,2`), MachineModule
+function/instruction totals, the ELF internal-call counts (`1,2,2`), scalar ABI
+signatures (`rdi` arguments where present, `rax` returns), canonical JSON
+roundtrip, and explicit non-promotion of stack-arg, aggregate, SRET,
+imported-call, f64 call/return, f128, and i256 surfaces. It also records S4
+negative/blocker controls that must remain unpromoted: distinct symbolic
+comparison/subtraction, `x_div_x` at zero, and the producer-evaluation blockers
+for call-result self comparison/subtraction.
+Canonical S5 receipt status (2026-07-05): `bin/madaros` now exposes
+`madaros s5-receipt <source.sio> [--out-dir OUT] [--expected-exit N] [--case-id ID]`.
+The program-MIR/ABI gate consumes that public compiler-facing receipt for each
+of the three scalar witnesses and rejects divergence between the canonical
+per-source S5 receipt and the aggregate module. The per-source receipt schema is
+`madaros.v2.s5.receipt/0.1`; the aggregate gate now records
+`canonical_s5_source_receipt_count = 3` and
+`canonical_s5_source_receipts_present = true`.
+Observed deterministic aggregate receipt prefix after compiler MachineModule
+export wiring: `84752dd8800d`. This is a stronger scalar S5 slice and records
+`compiler_machine_module_exported = true`, `real_program_mir_emitted = true`,
+`real_abi_layout_emitted = false`, `s5_ready = false`, and
+`s5_full_complete = false`. "Real program MIR" here is deliberately scoped to
+the compiler-exported MachineModule JSON for the current scalar witnesses; it is
+not a claim of full ABI/layout/numeric S5 completion.
+
 Canonical artifact:
 - MIR hash plus ABI receipt.
 
@@ -322,6 +514,12 @@ Gate:
   f64/f128, i128/u128, i256/u256, vector/tensor registers.
 - differential native-v2 vs interpreter/lean_single where applicable.
 - f64 print/return/call witnesses must pass before f128 or i256 are promoted.
+- S5 is not "complete" until compiler-exported MIR hashes, ABI/layout receipts,
+  call/return witnesses, numeric-width semantics, diagnostics, and fallbacks are
+  all gated. The current S5 preflight, input-boundary receipt, scalar
+  MIR-effect roundtrip, canonical `madaros s5-receipt` path, and scalar
+  compiler-MachineModule + ABI-shadow receipt close one scalar i64/bool
+  direct-call/return slice only. They are not global MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

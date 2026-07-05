@@ -2869,17 +2869,15 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
 fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
-    // Store 1e6 constant in .rodata
-    c.rodata = data_section_add_f64(c.rodata, 0x4124680000000000)
-    let rodata_1e6_offset = c.rodata.last_offset
-
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
     c.code = emit_sub_rsp_imm32(c.code, 64)
 
-    // rdi = f64 bit pattern
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    // S5 f64 ABI: the argument is carried in xmm0. Save the bit pattern before
+    // any syscall or integer formatting path can clobber GPRs.
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_store_rax_rbp_disp32(c.code, -48)   // save f64 bits
+    c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax for sign test
 
     // Sign check: test rdi, rdi; jns skip_neg
     c.code = emit_test_rdi_rdi(c.code)
@@ -2903,10 +2901,11 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Clear sign bit
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    // Clear sign bit (reload the saved f64 bits; the negative-path write clobbers rdi).
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)
     c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
     c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, -48)
     c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax
     c.code = emit_movq_xmm0_rax(c.code)
 
@@ -2918,7 +2917,7 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     // Integer part: cvttsd2si
     c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_store_rax_rbp_disp32(c.code, -48)   // save f64 bits
+    c.code = emit_store_rax_rbp_disp32(c.code, -48)   // save absolute f64 bits
     c.code = emit_movq_xmm0_rax(c.code)
     c.code = emit_cvttsd2si_rax_xmm0(c.code)
     c.code = emit_store_rax_rbp_disp32(c.code, -56)   // save int_part
@@ -2975,10 +2974,10 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     c.code = emit_subsd_xmm0_xmm1(c.code)
 
-    // Load 1e6 from .rodata
-    let movsd1_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+    // Load 1e6 directly into xmm1. Builtin bodies are emitted before final
+    // layout/rodata relocation is stable, so avoid a RIP-relative literal here.
+    c.code = emit_mov_rax_imm(c.code, 0x412e848000000000)
+    c.code = emit_movq_xmm1_rax(c.code)
 
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     c.code = emit_cvttsd2si_rax_xmm0(c.code)

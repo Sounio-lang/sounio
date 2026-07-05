@@ -616,8 +616,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-s1-receipt-implementation-2026-07-04 | historical | docs/research/madaros-v2-s1-receipt-implementation-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-s2-contract-scaffold-2026-07-04 | historical | docs/research/madaros-v2-s2-contract-scaffold-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-s3-hlir-serialization-2026-07-04 | historical | docs/research/madaros-v2-s3-hlir-serialization-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-s4-egraph-ekan-receipts-2026-07-05 | historical | docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.madaros-v2-sota-plus-plus-plan-2026-07-04 | historical | docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.madaros-v2-swarm-workflow-2026-07-04 | historical | docs/research/madaros-v2-swarm-workflow-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.madaros-v2-wave-a-scout-synthesis-2026-07-04 | historical | docs/research/madaros-v2-wave-a-scout-synthesis-2026-07-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.madore-spindle-q3q11-2026-05-30 | historical | docs/research/madore-spindle-q3q11-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-f32-cohort-analysis | historical | docs/research/moonshot-a-abide-f32-cohort-analysis.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-transport-conditioned-orc | historical | docs/research/moonshot-a-abide-transport-conditioned-orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

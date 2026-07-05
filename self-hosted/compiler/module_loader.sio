@@ -1767,6 +1767,9 @@ struct ModuleSummary {
     fn_names: [Name; 256],
     fn_param_counts: [i64; 256],
     fn_strategies: [i64; 256],
+    fn_returns_float: [i64; 256],
+    fn_return_struct_names: [Name; 256],
+    fn_is_sret: [i64; 256],
 }
 
 struct ThinModuleGraphNode {
@@ -1839,6 +1842,9 @@ fn thin_empty_module_summary() -> ModuleSummary {
         fn_names: [ir_empty_name(); 256],
         fn_param_counts: [0; 256],
         fn_strategies: [IR_STRATEGY_STANDARD; 256],
+        fn_returns_float: [0; 256],
+        fn_return_struct_names: [ir_empty_name(); 256],
+        fn_is_sret: [0; 256],
     }
 }
 
@@ -1929,13 +1935,16 @@ fn thin_module_summary_from_ir_module(
         summary.fn_names[i as usize] = (*module).functions[i as usize].name
         summary.fn_param_counts[i as usize] = (*module).functions[i as usize].param_count
         summary.fn_strategies[i as usize] = (*module).functions[i as usize].compile_strategy
+        summary.fn_returns_float[i as usize] = (*module).functions[i as usize].returns_float
+        summary.fn_return_struct_names[i as usize] = (*module).functions[i as usize].return_struct_name
+        summary.fn_is_sret[i as usize] = (*module).functions[i as usize].is_sret
         i = i + 1
     }
     summary
 }
 
 fn THIN_HASH_SEED() -> i64 { 1000003 }
-fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 1 }
+fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 2 }
 
 fn thin_hash_mix(base: i64, value: i64) -> i64 with Mut, Panic, Div {
     ((base * 131) + value + 97) % 2147483647
@@ -2111,8 +2120,20 @@ fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! 
         buf = a3.0; p = a3.1
         let a4 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_strategies[i as usize]))
         buf = a4.0; p = a4.1
-        let a5 = io_trace_append_byte(buf, p, 10)
+        let a5 = io_trace_append_byte(buf, p, 32)
         buf = a5.0; p = a5.1
+        let a6 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_returns_float[i as usize]))
+        buf = a6.0; p = a6.1
+        let a7 = io_trace_append_byte(buf, p, 32)
+        buf = a7.0; p = a7.1
+        let a8 = io_trace_append_string(buf, p, thin_name_to_cache_token(summary.fn_return_struct_names[i as usize]))
+        buf = a8.0; p = a8.1
+        let a9 = io_trace_append_byte(buf, p, 32)
+        buf = a9.0; p = a9.1
+        let a10 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_is_sret[i as usize]))
+        buf = a10.0; p = a10.1
+        let a11 = io_trace_append_byte(buf, p, 10)
+        buf = a11.0; p = a11.1
         i = i + 1
     }
     let ok = io_write_native_binary(path, buf, p)
@@ -2184,9 +2205,18 @@ fn thin_try_read_summary_cache(
         pos = param_tok.1
         let strat_tok = thin_cache_read_token(bytes, len, pos)
         pos = strat_tok.1
+        let ret_float_tok = thin_cache_read_token(bytes, len, pos)
+        pos = ret_float_tok.1
+        let ret_name_tok = thin_cache_read_token(bytes, len, pos)
+        pos = ret_name_tok.1
+        let sret_tok = thin_cache_read_token(bytes, len, pos)
+        pos = sret_tok.1
         summary.fn_names[i as usize] = make_name(name_tok.0)
         summary.fn_param_counts[i as usize] = parse_i64(param_tok.0)
         summary.fn_strategies[i as usize] = parse_i64(strat_tok.0)
+        summary.fn_returns_float[i as usize] = parse_i64(ret_float_tok.0)
+        summary.fn_return_struct_names[i as usize] = thin_cache_token_to_name(ret_name_tok.0)
+        summary.fn_is_sret[i as usize] = parse_i64(sret_tok.0)
         i = i + 1
     }
     (true, summary)
@@ -2440,6 +2470,9 @@ fn thin_module_summary_lookup_local(summary: ModuleSummary, fn_name: Name) -> (b
             func.name = summary.fn_names[i as usize]
             func.param_count = summary.fn_param_counts[i as usize]
             func.compile_strategy = summary.fn_strategies[i as usize]
+            func.returns_float = summary.fn_returns_float[i as usize]
+            func.return_struct_name = summary.fn_return_struct_names[i as usize]
+            func.is_sret = summary.fn_is_sret[i as usize]
             return (true, i, func)
         }
         i = i + 1
@@ -2500,6 +2533,20 @@ fn thin_name_to_string(name: Name) -> string with Mut, Panic, Div {
     buf_to_string(buf, i)
 }
 
+fn thin_name_to_cache_token(name: Name) -> string with Mut, Panic, Div {
+    if name.len <= 0 {
+        return "__empty__"
+    }
+    thin_name_to_string(name)
+}
+
+fn thin_cache_token_to_name(token: string) -> Name with Mut, Panic, Div {
+    if str_eq(token, "__empty__") {
+        return ir_empty_name()
+    }
+    make_name(token)
+}
+
 fn thin_is_builtin_name(name: Name) -> bool with Mut, Panic, Div {
     name_is_print_int(name) ||
     name_is_print_char(name) ||
@@ -2554,7 +2601,15 @@ fn thin_make_stub_from_func(func: IrFunction, stub_name: Name) -> IrFunction wit
 fn thin_append_stub_if_missing(module: IrModule, func: IrFunction, stub_name: Name) -> (IrModule, i64) with Mut, Panic, Div {
     let found = thin_find_fn_slot(module, stub_name)
     if found >= 0 {
-        return (module, found)
+        var out_found = module
+        var existing = out_found.functions[found as usize]
+        existing.param_count = func.param_count
+        existing.compile_strategy = func.compile_strategy
+        existing.returns_float = func.returns_float
+        existing.return_struct_name = func.return_struct_name
+        existing.is_sret = func.is_sret
+        out_found.functions[found as usize] = existing
+        return (out_found, found)
     }
     var out = module
     if out.fn_count >= IR_MAX_FUNCS {
@@ -2589,6 +2644,9 @@ fn thin_build_combined_summary_index(
             digest = thin_hash_mix(digest, thin_hash_name(func_name))
             digest = thin_hash_mix(digest, summary.fn_param_counts[fi as usize])
             digest = thin_hash_mix(digest, summary.fn_strategies[fi as usize])
+            digest = thin_hash_mix(digest, summary.fn_returns_float[fi as usize])
+            digest = thin_hash_mix(digest, thin_hash_name(summary.fn_return_struct_names[fi as usize]))
+            digest = thin_hash_mix(digest, summary.fn_is_sret[fi as usize])
             fi = fi + 1
         }
         mi = mi + 1
@@ -3527,7 +3585,8 @@ pub fn compile_multimodule_native_advanced(
 
         var ii: i64 = 0
         while ii < func.instr_count {
-            if func.instrs[ii as usize].op == IrOpcode::IrCall {
+            if func.instrs[ii as usize].op == IrOpcode::IrCall ||
+               func.instrs[ii as usize].op == IrOpcode::IrCallSret {
                 var instr = func.instrs[ii as usize]
                 let mapped = thin_map_target_to_global(
                     owner_module,

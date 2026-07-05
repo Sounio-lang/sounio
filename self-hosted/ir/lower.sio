@@ -804,6 +804,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                     }
                                 }
                                 entry.field_count = fc
+                                lower_extern_struct_layout_record(entry.type_name, fc)
                                 (*sl_box).entries[pre_count as usize] = entry
                                 (*sl_box).count = pre_count + 1
                                 (*lo).struct_layouts = sl_box
@@ -1763,11 +1764,37 @@ fn lowerer_lower_fn_params_mut(
                     }
                 }
 
+                let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                let param_wide_limbs = lower_wide_limb_count(param_wide_bits)
+                if param_wide_limbs > 1 {
+                    var wi: i64 = 1
+                    while wi < param_wide_limbs {
+                        let limb_reg = current_func.reg_count
+                        current_func.reg_count = limb_reg + 1
+                        if current_func.param_count < IR_MAX_PARAMS {
+                            let param_count_w = current_func.param_count
+                            current_func.param_regs[param_count_w as usize] = limb_reg
+                            current_func.param_count = param_count_w + 1
+                        } else {
+                            lowerer_mark_error(lo)
+                        }
+                        wi = wi + 1
+                    }
+                }
+
                 if lower_type_expr_is_f64(&(*list).head.ty) {
                     let instr_count = current_func.instr_count
                     if instr_count < IR_MAX_INSTRS {
                         current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
                         current_func.instr_count = instr_count + 1
+                    } else {
+                        lowerer_mark_error(lo)
+                    }
+                } else if lower_type_expr_is_f128(&(*list).head.ty) {
+                    let instr_count_f128 = current_func.instr_count
+                    if instr_count_f128 < IR_MAX_INSTRS {
+                        current_func.instrs[instr_count_f128 as usize] = ir_mark_f128_reg(preg)
+                        current_func.instr_count = instr_count_f128 + 1
                     } else {
                         lowerer_mark_error(lo)
                     }
@@ -1781,8 +1808,8 @@ fn lowerer_lower_fn_params_mut(
                     locals.depths[idx as usize] = (*lo).scope_depth
                     locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                     locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
-                    locals.wide_bits[idx as usize] = 0
-                    locals.wide_signed[idx as usize] = 0
+                    locals.wide_bits[idx as usize] = param_wide_bits
+                    locals.wide_signed[idx as usize] = if param_wide_bits > 64 { lower_type_expr_wide_signed(&(*list).head.ty) } else { 0 }
                     locals.global_bss_offsets[idx as usize] = 0
                     locals.global_bss_sizes[idx as usize] = 0
                     locals.is_global[idx as usize] = 0
@@ -1908,6 +1935,7 @@ fn lowerer_lower_fn_item_mut(
         }
         (*lo) = (*lo).ir_lower_inject_validated_param(fn_id)
     }
+    (*lo) = (*lo).ir_lower_reserve_sret_dest()
 
     (*lo).scope_depth = (*lo).scope_depth + 1
     if ir_param_list_count_ref(&fd.params) > 0 {
@@ -1945,7 +1973,7 @@ fn lowerer_lower_fn_item_mut(
     }
 
     if !(*lo).fn_ends_with_return() {
-        (*lo) = (*lo).emit(ir_return(result_reg))
+        (*lo) = (*lo).emit_current_return_value(result_reg)
     }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_return_check name=")
@@ -2225,15 +2253,23 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 // (strlen+write, which derefs the integer as char* and SIGSEGVs). Wide ints
 // (i128/i256) are intentionally rejected: they use a separate wide-limb print
 // path, and mis-routing them to print_int would print only the low limb.
-// EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its return-type code
-// (1=int scalar, 2=f64). Populated per-module from the OTHER programs' AST in the externs preseed
-// (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a fallback by
-// expr_result_is_int_ref / the let-binding when module.functions has no return type for an
-// imported callee. i64-only (no Name aggregate in globals); hash collisions degrade safely
-// (a number is printed instead of crashing). Mirrors the NV2_RELOC_* global-table pattern.
+// EXTERN_FN_RET side table: maps a sibling-module function's name-hash to its
+// return-type code (1=int scalar, 2=f64, 3=f128) and aggregate return Name. Populated
+// per-module from the OTHER programs' AST in the externs preseed
+// (lower_program_items_to_ir_summary_box_with_externs_ref) and read as a
+// fallback when module.functions has no return type for an imported callee.
+// Hash collisions degrade safely (a number is printed instead of crashing).
+// Mirrors the NV2_RELOC_* global-table pattern.
 var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_NAMES: [Name; 8192] = [ir_empty_name(); 8192]
+var LOWER_EXTERN_FN_RET_FIELD_COUNTS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_WIDE_BITS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_FN_RET_WIDE_SIGNED: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
+var LOWER_EXTERN_STRUCT_LAYOUT_HASHES: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS: [i64; 8192] = [0; 8192]
+var LOWER_EXTERN_STRUCT_LAYOUT_COUNT: i64 = 0
 
 fn lower_name_hash(n: Name) -> i64 with Panic, Div {
     var h: i64 = n.len & 1023
@@ -2247,13 +2283,39 @@ fn lower_name_hash(n: Name) -> i64 with Panic, Div {
 
 fn lower_extern_fn_ret_reset() with Mut, Panic {
     LOWER_EXTERN_FN_RET_COUNT = 0
+    LOWER_EXTERN_STRUCT_LAYOUT_COUNT = 0
 }
 
-fn lower_extern_fn_ret_record(name: Name, code: i64) with Mut, Panic, Div {
+fn lower_extern_struct_layout_record(type_name: Name, field_count: i64) with Mut, Panic, Div {
+    let idx = LOWER_EXTERN_STRUCT_LAYOUT_COUNT
+    if idx >= 0 && idx < 8192 {
+        LOWER_EXTERN_STRUCT_LAYOUT_HASHES[idx as usize] = lower_name_hash(type_name)
+        LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS[idx as usize] = field_count
+        LOWER_EXTERN_STRUCT_LAYOUT_COUNT = idx + 1
+    }
+}
+
+fn lower_extern_struct_layout_count_lookup(type_name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(type_name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_STRUCT_LAYOUT_COUNT && i < 8192 {
+        if LOWER_EXTERN_STRUCT_LAYOUT_HASHES[i as usize] == h {
+            return LOWER_EXTERN_STRUCT_LAYOUT_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_record(name: Name, code: i64, ret_name: Name, ret_field_count: i64, ret_wide_bits: i64, ret_wide_signed: i64) with Mut, Panic, Div {
     let idx = LOWER_EXTERN_FN_RET_COUNT
     if idx >= 0 && idx < 8192 {
         LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
         LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
+        LOWER_EXTERN_FN_RET_NAMES[idx as usize] = ret_name
+        LOWER_EXTERN_FN_RET_FIELD_COUNTS[idx as usize] = ret_field_count
+        LOWER_EXTERN_FN_RET_WIDE_BITS[idx as usize] = ret_wide_bits
+        LOWER_EXTERN_FN_RET_WIDE_SIGNED[idx as usize] = ret_wide_signed
         LOWER_EXTERN_FN_RET_COUNT = idx + 1
     }
 }
@@ -2264,6 +2326,54 @@ fn lower_extern_fn_ret_lookup(name: Name) -> i64 with Mut, Panic, Div {
     while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
         if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
             return LOWER_EXTERN_FN_RET_CODES[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_name_lookup(name: Name) -> Name with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_NAMES[i as usize]
+        }
+        i = i + 1
+    }
+    ir_empty_name()
+}
+
+fn lower_extern_fn_ret_field_count_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_wide_bits_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_WIDE_BITS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_extern_fn_ret_wide_signed_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            return LOWER_EXTERN_FN_RET_WIDE_SIGNED[i as usize]
         }
         i = i + 1
     }
@@ -2290,6 +2400,122 @@ fn lower_extern_fn_ret_code_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
     }
 }
 
+fn lower_extern_fn_ret_name_for_call(e: &Expr) -> Name with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return ir_empty_name() }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return ir_empty_name()
+            }
+            lower_extern_fn_ret_name_lookup(nm)
+        }
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_extern_fn_ret_field_count_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_field_count_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+fn lower_extern_fn_ret_wide_bits_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_wide_bits_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+fn lower_extern_fn_ret_wide_signed_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_wide_signed_lookup(nm)
+        }
+        None => 0,
+    }
+}
+
+fn lower_return_name_is_aggregate(n: Name) -> bool with Panic, Div {
+    if n.len <= 0 { return false }
+    if lower_name_is_int_scalar(n) { return false }
+    if n.len == 3 && n.buf[0] as i64 == 102 && n.buf[1] as i64 == 54 && n.buf[2] as i64 == 52 { return false } // f64
+    if lower_name_is_f128(n) { return false }
+    if n.len == 4 && n.buf[0] as i64 == 98 && n.buf[1] as i64 == 111 && n.buf[2] as i64 == 111 && n.buf[3] as i64 == 108 { return false } // bool
+    true
+}
+
+fn lower_field_def_count_ref(fields: &Option<Box<FieldDefList>>) -> i64 with Mut, Panic, Div, Alloc {
+    var count: i64 = 0
+    var current = fields
+    while true {
+        match *current {
+            Some(list) => {
+                count = count + 1
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    count
+}
+
+fn lower_struct_field_count_in_items(items: &Option<Box<ItemList>>, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head_owned = (*list).head
+                if head_owned.kind == ItemKind::ItemStruct && ir_name_eq(head_owned.name, type_name) {
+                    match head_owned.struct_def {
+                        Some(sd) => { return lower_field_def_count_ref(&(*sd).fields) }
+                        _ => { return 0 }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => { return 0 }
+        }
+    }
+    0
+}
+
 // Walk a sibling module's items and record each function's return-type code into the side table.
 fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
     var current = items
@@ -2301,13 +2527,19 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                     match head_owned.fn_def {
                         Some(fd) => {
                             var code: i64 = 0
-                            if lower_opt_type_is_f64(&(*fd).return_type) {
+                            let ret_name = lower_opt_type_named_name(&(*fd).return_type)
+                            if lower_opt_type_is_f128(&(*fd).return_type) {
+                                code = 3
+                            } else if lower_opt_type_is_f64(&(*fd).return_type) {
                                 code = 2
                             } else if lower_opt_type_is_int_scalar(&(*fd).return_type) {
                                 code = 1
                             }
-                            if code != 0 {
-                                lower_extern_fn_ret_record(head_owned.name, code)
+                            let ret_wide_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                            let ret_wide_signed = if ret_wide_bits > 64 { lower_opt_type_wide_signed(&(*fd).return_type) } else { 0 }
+                            if code != 0 || lower_return_name_is_aggregate(ret_name) || ret_wide_bits > 64 {
+                                let ret_field_count = if lower_return_name_is_aggregate(ret_name) { lower_struct_field_count_in_items(items, ret_name) } else { 0 }
+                                lower_extern_fn_ret_record(head_owned.name, code, ret_name, ret_field_count, ret_wide_bits, ret_wide_signed)
                             }
                         }
                         _ => {}
@@ -2389,9 +2621,67 @@ fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
     bits
 }
 
+fn lower_name_is_f128(n: Name) -> bool {
+    n.len == 4
+        && n.buf[0] as i64 == 102
+        && n.buf[1] as i64 == 49
+        && n.buf[2] as i64 == 50
+        && n.buf[3] as i64 == 56
+}
+
+fn lower_wide_bits_supported_s5(bits: i64) -> bool {
+    bits == 128 || bits == 256
+}
+
+fn lower_type_expr_has_unsupported_s5_numeric(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeNamed {
+        let n = ir_path_first_name((*te).path)
+        let bits = lower_name_wide_int_bits(n)
+        if bits > 64 && !lower_wide_bits_supported_s5(bits) { return true }
+        return false
+    }
+    if (*te).kind == TypeExprKind::TypeArray {
+        match (*te).inner {
+            Some(inner) => return lower_type_expr_has_unsupported_s5_numeric(&(*inner)),
+            None => return false,
+        }
+    }
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ref) => return lower_type_expr_has_unsupported_s5_numeric(&(*inner_ref)),
+            None => return false,
+        }
+    }
+    false
+}
+
+fn lower_opt_type_has_unsupported_s5_numeric(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_has_unsupported_s5_numeric(&(*te)),
+        None => false,
+    }
+}
+
+fn lower_type_expr_is_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_f128(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_f128(&(*te)),
+        None => false,
+    }
+}
+
 fn lower_type_expr_wide_bits(te: &TypeExpr) -> i64 with Mut, Panic, Div {
-    if (*te).kind != TypeExprKind::TypeNamed { return 0 }
-    lower_name_wide_int_bits(ir_path_first_name((*te).path))
+    lower_name_wide_int_bits(lower_param_struct_type_name(te))
+}
+
+fn lower_type_expr_wide_signed(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    let n = lower_param_struct_type_name(te)
+    if lower_name_wide_int_bits(n) <= 0 { return 0 }
+    if n.buf[0] as i64 == 105 { 1 } else { 0 }
 }
 
 fn lower_opt_type_wide_bits(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
@@ -2404,10 +2694,7 @@ fn lower_opt_type_wide_bits(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic,
 fn lower_opt_type_wide_signed(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(te) => {
-            if (*te).kind != TypeExprKind::TypeNamed { return 0 }
-            let n = ir_path_first_name((*te).path)
-            if lower_name_wide_int_bits(n) <= 0 { return 0 }
-            if n.buf[0] as i64 == 105 { 1 } else { 0 }
+            lower_type_expr_wide_signed(&(*te))
         }
         None => 0,
     }
@@ -2765,7 +3052,7 @@ impl Lowerer {
         let pair = self.fresh_reg()
         let lo = pair.0
         let reg = pair.1
-        let lo2 = lo.emit(ir_load_imm(reg, f64_to_bits(value)))
+        let lo2 = lo.emit(ir_load_float(reg, value))
         let lo3 = lo2.emit(ir_mark_float_reg(reg))
         (lo3, reg)
     }
@@ -2881,6 +3168,25 @@ impl Lowerer {
     fn aggregate_storage_bytes(self, elem_count: i64) -> i64 {
         let _lo = self
         if elem_count <= 0 { 8 } else { elem_count * 8 }
+    }
+
+    fn aggregate_storage_bytes_for_type(self, type_name: Name) -> i64 {
+        let wide_bits = lower_name_wide_int_bits(type_name)
+        if wide_bits > 64 {
+            return self.aggregate_storage_bytes(lower_wide_limb_count(wide_bits))
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                return self.aggregate_storage_bytes((*self.struct_layouts).entries[si as usize].field_count)
+            }
+            si = si + 1
+        }
+        let extern_field_count = lower_extern_struct_layout_count_lookup(type_name)
+        if extern_field_count > 0 {
+            return self.aggregate_storage_bytes(extern_field_count)
+        }
+        64
     }
 
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
@@ -3599,17 +3905,20 @@ impl Lowerer {
         0
     }
 
-    // Returns the print builtin name for println's first argument.
-    //   int literal / i64 var (scalar_kind=1) → print_int  (itoa+write)
-    //   everything else                        → print      (strlen+write, safe fallback)
-    // Note: f64 vars (scalar_kind=2) intentionally fall through to print here because
-    // emit_builtin_print_f64 reads its argument from RDI (integer ABI) but our inline
-    // println call path passes floats via XMM0 (float ABI), causing a mismatch.
-    // Wiring up f64 dispatch requires threading the float-arg ABI into println lowering.
+    // Returns the print builtin name for print/println's first argument.
+    //   int literal / i64 var / int call result -> print_int
+    //   f64 literal / f64 var / f64 call result -> print_f64
+    //   everything else                         -> print (string fallback)
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
-                if self.expr_result_is_int_ref(&(*list).head) { make_name("print_int") } else { make_name("print") }
+                if self.expr_result_is_int_ref(&(*list).head) {
+                    return make_name("print_int")
+                }
+                if self.expr_result_is_float_ref(&(*list).head) {
+                    return make_name("print_f64")
+                }
+                make_name("print")
             }
             _ => make_name("print"),
         }
@@ -3724,8 +4033,23 @@ impl Lowerer {
                 } else {
                     return ir_empty_name()
                 }
+                let imported_ret = lower_extern_fn_ret_name_lookup(callee_name)
+                if lower_name_is_f128(imported_ret) {
+                    return imported_ret
+                }
+                if lower_name_wide_int_bits(imported_ret) > 64 {
+                    return imported_ret
+                }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
-                self.return_struct_name_for_fn_id(fn_id)
+                let imported_ret_code = lower_extern_fn_ret_lookup(callee_name)
+                if imported_ret_code == 1 || imported_ret_code == 2 {
+                    return ir_empty_name()
+                }
+                let local_ret = self.return_struct_name_for_fn_id(fn_id)
+                if local_ret.len > 0 {
+                    return local_ret
+                }
+                lower_extern_fn_ret_name_lookup(callee_name)
             }
             None => ir_empty_name(),
         }
@@ -3773,6 +4097,13 @@ impl Lowerer {
             if bits > 64 { return bits }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
+        if (*expr).kind == ExprKind::ExprCall {
+            let ext_bits = lower_extern_fn_ret_wide_bits_for_call(expr)
+            if ext_bits > 64 { return ext_bits }
+            let ret_name = self.expr_call_return_struct_name_ref(expr)
+            let bits = lower_name_wide_int_bits(ret_name)
+            if bits > 64 { return bits }
+        }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_bits((*expr).name)
         }
@@ -3798,6 +4129,16 @@ impl Lowerer {
             let signed = lower_opt_type_wide_signed(&(*expr).cast_type)
             if lower_opt_type_wide_bits(&(*expr).cast_type) > 64 { return signed }
             return self.expr_wide_signed_opt_ref(&(*expr).left)
+        }
+        if (*expr).kind == ExprKind::ExprCall {
+            if lower_extern_fn_ret_wide_bits_for_call(expr) > 64 {
+                return lower_extern_fn_ret_wide_signed_for_call(expr)
+            }
+            let ret_name = self.expr_call_return_struct_name_ref(expr)
+            if lower_name_wide_int_bits(ret_name) > 64 {
+                if ret_name.len > 0 && ret_name.buf[0] as i64 == 105 { return 1 }
+                return 0
+            }
         }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_signed((*expr).name)
@@ -4015,7 +4356,22 @@ impl Lowerer {
             }
             si = si + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        // Struct not in layout table. Cross-module imported-call results can
+        // lose the nominal base type while still carrying a correctly preseeded
+        // layout table, so search every layout by field name before the legacy
+        // hash fallback.
+        var sk: i64 = 0
+        while sk < (*self.struct_layouts).count {
+            var fk: i64 = 0
+            while fk < (*self.struct_layouts).entries[sk as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[sk as usize].fields[fk as usize].name, field_name) {
+                    return (*self.struct_layouts).entries[sk as usize].fields[fk as usize].index
+                }
+                fk = fk + 1
+            }
+            sk = sk + 1
+        }
+        // Fallback: use first byte hash (legacy compat)
         if field_name.len <= 0 {
             0
         } else {
@@ -4223,6 +4579,9 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprFloatLit {
             return true
         }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 2
+        }
         if (*e).kind == ExprKind::ExprCast {
             return lower_cast_type_is_f64(&(*e).cast_type)
         }
@@ -4237,6 +4596,25 @@ impl Lowerer {
                 return false
             }
             return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_float_box) => {
+                    let callee_float_name = self.expr_to_callee_name_ref(&(*callee_float_box))
+                    let callee_float_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_float_name)
+                    if callee_float_id >= 0 && callee_float_id < (*self.module).fn_count {
+                        if (*self.module).functions[callee_float_id as usize].returns_float == 1 {
+                            return true
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let ret_name = self.expr_call_return_struct_name_ref(e)
+            if ret_name.len == 3 && ret_name.buf[0] as i64 == 102 && ret_name.buf[1] as i64 == 54 && ret_name.buf[2] as i64 == 52 {
+                return true
+            }
+            return lower_extern_fn_ret_code_for_call(e) == 2
         }
         false
     }
@@ -5080,6 +5458,69 @@ impl Lowerer {
         lo
     }
 
+    fn ir_lower_reserve_sret_dest(self) -> Lowerer with Mut, Panic, Div, IO {
+        if (*self.current_func).return_struct_name.len <= 0 {
+            return self
+        }
+        if !lower_return_name_is_aggregate((*self.current_func).return_struct_name) {
+            return self
+        }
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dest = pair.1
+        var cf_box = lo.current_func
+        (*cf_box).is_sret = 1
+        (*cf_box).sret_dest_reg = dest
+        lo.current_func = cf_box
+        lo
+    }
+
+    fn emit_sret_field_copy(self, src_reg: i64, dest_reg: i64, type_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let wide_bits = lower_name_wide_int_bits(type_name)
+        if wide_bits > 64 {
+            let limbs = lower_wide_limb_count(wide_bits)
+            var wi: i64 = 0
+            while wi < limbs {
+                lo = lo.emit(ir_field_set(dest_reg, wi, src_reg + wi, ir_empty_name()))
+                wi = wi + 1
+            }
+            return lo
+        }
+        var si: i64 = 0
+        while si < (*lo.struct_layouts).count {
+            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*lo.struct_layouts).entries[si as usize].field_count {
+                    let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
+                    let pair_tmp = lo.fresh_reg()
+                    lo = pair_tmp.0
+                    let tmp = pair_tmp.1
+                    lo = lo.emit(ir_field_get(tmp, src_reg, field.index, field.name))
+                    lo = lo.emit(ir_field_set(dest_reg, field.index, tmp, field.name))
+                    fi = fi + 1
+                }
+                return lo
+            }
+            si = si + 1
+        }
+        lo
+    }
+
+    fn emit_current_return_value(self, result_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if (*self.current_func).is_sret == 1 {
+            let dest_reg = (*self.current_func).sret_dest_reg
+            let ret_name = (*self.current_func).return_struct_name
+            var lo = self
+            if dest_reg >= 0 && ret_name.len > 0 && result_reg != dest_reg {
+                lo = lo.emit_sret_field_copy(result_reg, dest_reg, ret_name)
+                return lo.emit(ir_return_sret(dest_reg))
+            }
+            return lo.emit(ir_return_sret(result_reg))
+        }
+        self.emit(ir_return(result_reg))
+    }
+
     fn lower_fn_params_ref(self, params: &Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = params
@@ -5113,12 +5554,37 @@ impl Lowerer {
                     } else {
                         lo = lo.report_error()
                     }
+                    let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                    let param_wide_limbs = lower_wide_limb_count(param_wide_bits)
+                    if param_wide_limbs > 1 {
+                        var wi: i64 = 1
+                        while wi < param_wide_limbs {
+                            let limb_reg = current_func.reg_count
+                            current_func.reg_count = limb_reg + 1
+                            if current_func.param_count < IR_MAX_PARAMS {
+                                let param_count_w = current_func.param_count
+                                current_func.param_regs[param_count_w as usize] = limb_reg
+                                current_func.param_count = param_count_w + 1
+                            } else {
+                                lo = lo.report_error()
+                            }
+                            wi = wi + 1
+                        }
+                    }
 
                     if lower_type_expr_is_f64(&(*list).head.ty) {
                         let instr_count = current_func.instr_count
                         if instr_count < IR_MAX_INSTRS {
                             current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
                             current_func.instr_count = instr_count + 1
+                        } else {
+                            lo = lo.report_error()
+                        }
+                    } else if lower_type_expr_is_f128(&(*list).head.ty) {
+                        let instr_count_f128 = current_func.instr_count
+                        if instr_count_f128 < IR_MAX_INSTRS {
+                            current_func.instrs[instr_count_f128 as usize] = ir_mark_f128_reg(preg)
+                            current_func.instr_count = instr_count_f128 + 1
                         } else {
                             lo = lo.report_error()
                         }
@@ -5132,8 +5598,8 @@ impl Lowerer {
                         locals.depths[idx as usize] = lo.scope_depth
                         locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
-                        locals.wide_bits[idx as usize] = 0
-                        locals.wide_signed[idx as usize] = 0
+                        locals.wide_bits[idx as usize] = param_wide_bits
+                        locals.wide_signed[idx as usize] = if param_wide_bits > 64 { lower_type_expr_wide_signed(&(*list).head.ty) } else { 0 }
                         locals.global_bss_offsets[idx as usize] = 0
                         locals.global_bss_sizes[idx as usize] = 0
                         locals.is_global[idx as usize] = 0
@@ -5381,6 +5847,7 @@ impl Lowerer {
         if strategy == IR_STRATEGY_INSTRUMENTED {
             lo = lo.ir_lower_inject_validated_param(fn_id)
         }
+        lo = lo.ir_lower_reserve_sret_dest()
 
         if lo.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: params_begin fn=")
@@ -5448,7 +5915,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_current_return_value(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -5553,6 +6020,7 @@ impl Lowerer {
         if strategy == IR_STRATEGY_INSTRUMENTED {
             lo = lo.ir_lower_inject_validated_param(fn_id)
         }
+        lo = lo.ir_lower_reserve_sret_dest()
 
         if lo.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: params_begin fn=")
@@ -5603,7 +6071,7 @@ impl Lowerer {
         }
 
         if !lo.fn_ends_with_return() {
-            lo = lo.emit(ir_return(result_reg))
+            lo = lo.emit_current_return_value(result_reg)
         }
 
         if lo.scope_depth > 0 {
@@ -5849,6 +6317,19 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lower_opt_type_has_unsupported_s5_numeric(&s.ty) {
+            print("error: native-v2 S5 unsupported numeric width in let annotation; supported promoted widths are f64, i128, i256, u128, u256\n")
+            panic("native-v2 S5 unsupported numeric width in let annotation")
+        }
+        let annotated_f128 = lower_opt_type_is_f128(&s.ty)
+        let rhs_is_float_before_lower = match s.expr {
+            Some(expr_box_pre_float) => self.expr_result_is_float_ref(&(*expr_box_pre_float)),
+            _ => false,
+        }
+        let rhs_is_int_before_lower = match s.expr {
+            Some(expr_box_pre_int) => self.expr_result_is_int_ref(&(*expr_box_pre_int)),
+            _ => false,
+        }
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         var reg = pair.1
@@ -5859,7 +6340,20 @@ impl Lowerer {
             lo = lo.emit(ir_copy(dst, reg))
             reg = dst
         }
+        if annotated_f128 {
+            lo = lo.emit(ir_mark_f128_reg(reg))
+        }
         lo = lo.bind_local(s.name, reg, is_mut)
+        if rhs_is_float_before_lower || rhs_is_int_before_lower {
+            var stk_scalar_birth = *lo.locals
+            if stk_scalar_birth.count > 0 {
+                let idx_scalar_birth = stk_scalar_birth.count - 1
+                if ir_name_eq(stk_scalar_birth.names[idx_scalar_birth as usize], s.name) {
+                    stk_scalar_birth.scalar_kind[idx_scalar_birth as usize] = if rhs_is_float_before_lower { 2 } else { 1 }
+                    lo.locals = Box::new(stk_scalar_birth)
+                }
+            }
+        }
         if lower_name_is_tuple_temp(s.name) {
             match s.expr {
                 Some(expr_box_tuple_tmp) => {
@@ -5918,9 +6412,12 @@ impl Lowerer {
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
                         // Track string locals (kind 3) so `s + t` / `s ++ t` route to str_concat.
                         lo = lo.bind_local_scalar_kind(s.name, 3)
-                    } else if lo.expr_result_is_int_ref(&(*expr_box_sk)) {
+                    } else if rhs_is_int_before_lower || lo.expr_result_is_int_ref(&(*expr_box_sk)) {
                         // Track int locals (kind 1) bound from a call/binop so println(r) routes to print_int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if rhs_is_float_before_lower || lo.expr_result_is_float_ref(&(*expr_box_sk)) {
+                        // Track f64 locals (kind 2) bound from local/imported calls or f64 binops.
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
                     } else if (*expr_box_sk).kind == ExprKind::ExprCall
                               && lower_extern_fn_ret_code_for_call(&(*expr_box_sk)) == 2 {
                         // Imported f64-returning call (return type not in module.functions at body
@@ -6158,11 +6655,26 @@ impl Lowerer {
                 Some(list) => {
                     let pair_head = lo.lower_expr_ref(&(*list).head)
                     lo = pair_head.0
-                    if reg_count < 64 {
-                        regs[reg_count as usize] = pair_head.1
-                        reg_count = reg_count + 1
+                    let arg_wide_bits = lo.expr_wide_bits_ref(&(*list).head)
+                    let arg_wide_limbs = lower_wide_limb_count(arg_wide_bits)
+                    if arg_wide_limbs > 1 {
+                        var wi: i64 = 0
+                        while wi < arg_wide_limbs {
+                            if reg_count < 64 {
+                                regs[reg_count as usize] = pair_head.1 + wi
+                                reg_count = reg_count + 1
+                            } else {
+                                break
+                            }
+                            wi = wi + 1
+                        }
                     } else {
-                        break
+                        if reg_count < 64 {
+                            regs[reg_count as usize] = pair_head.1
+                            reg_count = reg_count + 1
+                        } else {
+                            break
+                        }
                     }
                     current = &(*list).tail
                 }
@@ -7503,11 +8015,11 @@ impl Lowerer {
             Some(c) => self.expr_to_callee_name_ref(&(*c)),
             None => ir_empty_name(),
         }
-        if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+        if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) || name_eq(callee_name, make_name("print_f64")) {
             // Redirect bare print(<int literal>) to the print_int builtin: print
             // (=print_str) treats its argument as a char* and would deref the integer
             // value as a pointer. Explicit print_int / print_char are left untouched.
-            let print_builtin_name = if name_eq(callee_name, make_name("print")) && lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { callee_name }
+            let print_builtin_name = if name_eq(callee_name, make_name("print")) { self.println_dispatch_name(&e.args) } else { callee_name }
             var lo_builtin = self
             let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
             let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
@@ -7728,6 +8240,60 @@ impl Lowerer {
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
+        var call_returns_f128 = false
+        if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
+            let ext_ret_code_sret = lower_extern_fn_ret_code_for_call(e)
+            let ext_ret_name_sret = lower_extern_fn_ret_name_for_call(e)
+            let ext_ret_wide_bits_sret = lower_extern_fn_ret_wide_bits_for_call(e)
+            var ret_name_sret = (*lo4.module).functions[fn_id as usize].return_struct_name
+            call_returns_f128 = lower_name_is_f128(ret_name_sret) || ext_ret_code_sret == 3 || lower_name_is_f128(ext_ret_name_sret)
+            if ext_ret_wide_bits_sret > 64 {
+                ret_name_sret = ir_empty_name()
+            } else if lower_name_wide_int_bits(ext_ret_name_sret) > 64 {
+                ret_name_sret = ext_ret_name_sret
+            } else if ext_ret_code_sret != 0 {
+                ret_name_sret = ir_empty_name()
+            } else if ret_name_sret.len <= 0 {
+                ret_name_sret = ext_ret_name_sret
+            }
+            if ext_ret_wide_bits_sret > 64 && final_argc <= 8 {
+                let ret_wide_limbs_ext = lower_wide_limb_count(ext_ret_wide_bits_sret)
+                let sret_alloc_bytes_ext = lo4.aggregate_storage_bytes(ret_wide_limbs_ext)
+                var lo_sret_wide_ext = lo4.emit(ir_alloc(dst, sret_alloc_bytes_ext))
+                lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                let pair_wide_dst_ext = lo_sret_wide_ext.fresh_wide_reg(ret_wide_limbs_ext)
+                lo_sret_wide_ext = pair_wide_dst_ext.0
+                let wide_dst_ext = pair_wide_dst_ext.1
+                var wi_ext: i64 = 0
+                while wi_ext < ret_wide_limbs_ext {
+                    lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_field_get(wide_dst_ext + wi_ext, dst, wi_ext, ir_empty_name()))
+                    wi_ext = wi_ext + 1
+                }
+                return (lo_sret_wide_ext, wide_dst_ext)
+            }
+            if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
+                let ext_ret_field_count_sret = lower_extern_fn_ret_field_count_for_call(e)
+                let sret_alloc_bytes = if ext_ret_field_count_sret > 0 { lo4.aggregate_storage_bytes(ext_ret_field_count_sret) } else { lo4.aggregate_storage_bytes_for_type(ret_name_sret) }
+                let ret_wide_bits = lower_name_wide_int_bits(ret_name_sret)
+                if ret_wide_bits > 64 {
+                    let ret_wide_limbs = lower_wide_limb_count(ret_wide_bits)
+                    var lo_sret_wide = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
+                    lo_sret_wide = lo_sret_wide.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                    let pair_wide_dst = lo_sret_wide.fresh_wide_reg(ret_wide_limbs)
+                    lo_sret_wide = pair_wide_dst.0
+                    let wide_dst = pair_wide_dst.1
+                    var wi: i64 = 0
+                    while wi < ret_wide_limbs {
+                        lo_sret_wide = lo_sret_wide.emit(ir_field_get(wide_dst + wi, dst, wi, ir_empty_name()))
+                        wi = wi + 1
+                    }
+                    return (lo_sret_wide, wide_dst)
+                }
+                var lo_sret = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
+                lo_sret = lo_sret.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                return (lo_sret, dst)
+            }
+        }
         var call_instr = ir_call(dst, fn_id, callee_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             if (*lo4.module).functions[fn_id as usize].returns_float == 1 {
@@ -7737,6 +8303,9 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if call_returns_f128 {
+            lo5 = lo5.emit(ir_mark_f128_reg(dst))
         }
         (lo5, dst)
     }
@@ -7977,6 +8546,39 @@ impl Lowerer {
         let sub = self.lower_opt_expr_ref(&e.left)
         let lo1 = sub.0
         let src_reg = sub.1
+        if lower_opt_type_has_unsupported_s5_numeric(&e.cast_type) {
+            print("error: native-v2 S5 unsupported numeric width in cast; supported promoted widths are f64, i128, i256, u128, u256\n")
+            panic("native-v2 S5 unsupported numeric width in cast")
+        }
+        if lower_opt_type_is_f128(&e.cast_type) {
+            let p_f128 = lo1.fresh_wide_reg(2)
+            let lo_f128 = p_f128.0
+            let dst_f128 = p_f128.1
+            let lo_copy = lo_f128.emit(ir_copy(dst_f128, src_reg))
+            match e.left {
+                Some(f128_lit_box) => {
+                    if (*f128_lit_box).kind == ExprKind::ExprFloatLit {
+                        return (
+                            lo_copy.emit(
+                                ir_mark_f128_literal_reg(
+                                    dst_f128,
+                                    (*f128_lit_box).name,
+                                    (*f128_lit_box).float_decimal_sign,
+                                    (*f128_lit_box).float_decimal_sig_hi,
+                                    (*f128_lit_box).float_decimal_sig_lo,
+                                    (*f128_lit_box).float_decimal_digit_count,
+                                    (*f128_lit_box).float_decimal_scale10,
+                                    (*f128_lit_box).float_decimal_truncated_digits
+                                )
+                            ),
+                            dst_f128
+                        )
+                    }
+                }
+                _ => {}
+            }
+            (lo_copy.emit(ir_mark_f128_reg(dst_f128)), dst_f128)
+        } else {
         let wide_bits = lower_opt_type_wide_bits(&e.cast_type)
         let source_is_float = lo1.opt_expr_result_is_float_ref(&e.left)
         if wide_bits > 64 {
@@ -8006,6 +8608,7 @@ impl Lowerer {
             (lo2.emit(ir_float_to_int(dst, src_reg)), dst)
         } else {
             (lo1, src_reg)
+        }
         }
     }
 
@@ -8092,6 +8695,31 @@ impl Lowerer {
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
+        var method_call_returns_f128 = false
+        if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
+            let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
+            method_call_returns_f128 = lower_name_is_f128(ret_name_m)
+            if lower_return_name_is_aggregate(ret_name_m) && final_argc <= 8 {
+                let ret_wide_bits_m = lower_name_wide_int_bits(ret_name_m)
+                if ret_wide_bits_m > 64 {
+                    let ret_wide_limbs_m = lower_wide_limb_count(ret_wide_bits_m)
+                    var lo_sret_wide_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
+                    lo_sret_wide_m = lo_sret_wide_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
+                    let pair_wide_dst_m = lo_sret_wide_m.fresh_wide_reg(ret_wide_limbs_m)
+                    lo_sret_wide_m = pair_wide_dst_m.0
+                    let wide_dst_m = pair_wide_dst_m.1
+                    var wi_m: i64 = 0
+                    while wi_m < ret_wide_limbs_m {
+                        lo_sret_wide_m = lo_sret_wide_m.emit(ir_field_get(wide_dst_m + wi_m, dst, wi_m, ir_empty_name()))
+                        wi_m = wi_m + 1
+                    }
+                    return (lo_sret_wide_m, wide_dst_m)
+                }
+                var lo_sret_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
+                lo_sret_m = lo_sret_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
+                return (lo_sret_m, dst)
+            }
+        }
         var call_instr_m = ir_call(dst, fn_id, call_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             if (*lo5.module).functions[fn_id as usize].returns_float == 1 {
@@ -8101,6 +8729,9 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if method_call_returns_f128 {
+            lo6 = lo6.emit(ir_mark_f128_reg(dst))
         }
         (lo6, dst)
     }
@@ -8311,7 +8942,7 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&e.left)
         let lo = pair.0
         let reg = pair.1
-        let lo2 = lo.emit(ir_return(reg))
+        let lo2 = lo.emit_current_return_value(reg)
         (lo2, reg)
     }
 
@@ -9429,6 +10060,37 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(&prog.items, summary, epistemic)
+}
+
+fn lower_program_bodies_from_summary_with_externs_boxed_ref(
+    prog: &Program,
+    summary: &IrProgramSummary,
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_program_items_bodies_from_summary_with_externs_boxed_ref(&prog.items, summary, programs, program_count, self_index, epistemic)
+}
+
+fn lower_program_items_bodies_from_summary_with_externs_boxed_ref(
+    items: &Option<Box<ItemList>>,
+    summary: &IrProgramSummary,
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_extern_fn_ret_reset()
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let ext_items = (*programs)[i as usize].items
+            lower_preseed_external_fn_rets(&ext_items)
+        }
+        i = i + 1
+    }
+    lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(items, summary, epistemic)
 }
 
 fn lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(

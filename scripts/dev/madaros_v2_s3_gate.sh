@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# Madaros v2 S3 gate: compiler-native HLIR JSON, deterministic hash, roundtrip.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+export SOUNIO_STDLIB_PATH="${SOUNIO_MADAROS_V2_GATE_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
+OUT_DIR="${SOUNIO_MADAROS_V2_S3_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-v2-s3.XXXXXX)}"
+COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
+MANIFEST="${ROOT_DIR}/tests/madaros/v2_s3/manifest.tsv"
+READINESS="${ROOT_DIR}/scripts/dev/madaros_v2_s3_readiness_gate.sh"
+
+receipt_ok() {
+  local elf="$1"
+  local receipt="$elf.gate-receipt"
+  [[ -f "$receipt" ]] || return 1
+  local want
+  want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want" ]] || return 1
+  grep -Fq "$want" "$receipt" 2>/dev/null || return 1
+  grep -Fxq "smt_skip=0" "$receipt" 2>/dev/null
+}
+
+ensure_s3_raw_artifact() {
+  if [[ -n "${MADAROS_RAW_BIN:-}" ]]; then
+    return 0
+  fi
+  local artifact="${ROOT_DIR}/artifacts/self-hosted/madaros"
+  if [[ ! -x "$artifact" ]]; then
+    echo "[madaros-v2-s3] FAIL: missing current Madaros artifact: $artifact" >&2
+    return 1
+  fi
+  if ! receipt_ok "$artifact"; then
+    echo "[madaros-v2-s3] proving current artifact with madaros_full_gate.sh before HLIR gate"
+    MADAROS_RAW_BIN="$artifact" bash "${ROOT_DIR}/scripts/ci/madaros_full_gate.sh" >/dev/null
+  fi
+  export MADAROS_RAW_BIN="$artifact"
+}
+
+ensure_s3_raw_artifact
+
+mkdir -p "$OUT_DIR"
+
+echo "[madaros-v2-s3] START"
+echo "[madaros-v2-s3] out=$OUT_DIR"
+echo "[madaros-v2-s3] compiler=$COMPILER"
+
+"$READINESS"
+
+run_case() {
+  local case_id="$1"
+  local source="$2"
+  local min_functions="$3"
+  local min_instrs="$4"
+  local required_ops="$5"
+  local required_terms="$6"
+  local required_calls="$7"
+  local required_const_kinds="$8"
+  local a_json="$OUT_DIR/$case_id.a.hlir.json"
+  local b_json="$OUT_DIR/$case_id.b.hlir.json"
+  local err="$OUT_DIR/$case_id.stderr.log"
+  local receipt="$OUT_DIR/$case_id.s3.receipt.json"
+
+  echo "[madaros-v2-s3] case=$case_id source=$source"
+  "$COMPILER" --emit-hlir "$source" >"$a_json" 2>"$err"
+  "$COMPILER" --emit-hlir "$source" >"$b_json" 2>>"$err"
+  cmp "$a_json" "$b_json" >/dev/null
+  if [[ -s "$err" ]]; then
+    echo "[madaros-v2-s3] stderr was not empty for $case_id" >&2
+    cat "$err" >&2
+    return 1
+  fi
+
+  python3 - "$case_id" "$source" "$a_json" "$receipt" "$min_functions" "$min_instrs" \
+    "$required_ops" "$required_terms" "$required_calls" "$required_const_kinds" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+(
+    case_id,
+    source,
+    json_path,
+    receipt_path,
+    min_functions,
+    min_instrs,
+    required_ops,
+    required_terms,
+    required_calls,
+    required_const_kinds,
+) = sys.argv[1:11]
+
+text = Path(json_path).read_text(encoding="utf-8")
+if not text.startswith('{"schema":"madaros.hlir.module/0.2"'):
+    raise SystemExit("HLIR output is not clean JSON; banner or diagnostics leaked to stdout")
+if "\n" in text.rstrip("\n"):
+    raise SystemExit("HLIR output must be one canonical JSON object line")
+
+data = json.loads(text)
+if data.get("schema") != "madaros.hlir.module/0.2":
+    raise SystemExit("bad schema")
+if data.get("stage") != "S3":
+    raise SystemExit("bad stage")
+if data.get("source") != source:
+    raise SystemExit(f"bad source field: {data.get('source')!r}")
+if data.get("source_to_hlir") != "compiler_native_hlir_lower_module":
+    raise SystemExit("HLIR was not produced by compiler_native_hlir_lower_module")
+if data.get("ownership_effect_normalization") != "hlir_lower_module_v0":
+    raise SystemExit("missing ownership/effect normalization marker")
+if data.get("normalized_ids") is not True:
+    raise SystemExit("normalized_ids must be true")
+
+module = data.get("module")
+if not isinstance(module, dict):
+    raise SystemExit("module must be an object")
+functions = module.get("functions")
+globals_ = module.get("globals")
+typedefs = module.get("typedefs")
+if module.get("function_count") != len(functions):
+    raise SystemExit("function_count mismatch")
+if module.get("global_count") != len(globals_):
+    raise SystemExit("global_count mismatch")
+if module.get("typedef_count") != len(typedefs):
+    raise SystemExit("typedef_count mismatch")
+if len(functions) < int(min_functions):
+    raise SystemExit(f"too few functions: {len(functions)} < {min_functions}")
+
+ops = set()
+terms = set()
+calls = set()
+const_kinds = set()
+operand_witnesses = []
+instr_total = 0
+
+def producer_label(producer):
+    if producer["kind"] == "param":
+        return f"param:{producer['name']}"
+    if producer["kind"] == "block_param":
+        return "block_param"
+    if producer["kind"] == "const":
+        return f"const:{producer['const_kind']}:{producer['value']}"
+    if producer["kind"] == "call_direct":
+        return f"call:{producer['name']}"
+    return producer["kind"]
+
+def find_single_binary(functions_by_name, fn_name, bin_op):
+    func = functions_by_name.get(fn_name)
+    if not func:
+        raise SystemExit(f"missing operand-fidelity function: {fn_name}")
+    matches = []
+    for block in func["blocks"]:
+        for instr in block["instrs"]:
+            if instr.get("op") == "binary" and instr.get("bin_op") == bin_op:
+                matches.append(instr)
+    if len(matches) != 1:
+        raise SystemExit(f"{fn_name} expected exactly one bin_op={bin_op}; got {len(matches)}")
+    return matches[0]
+
+for func in functions:
+    if func["param_count"] != len(func["params"]):
+        raise SystemExit(f"param_count mismatch in {func['name']}")
+    if func["effect_count"] != len(func["effects"]):
+        raise SystemExit(f"effect_count mismatch in {func['name']}")
+    if func["block_count"] != len(func["blocks"]):
+        raise SystemExit(f"block_count mismatch in {func['name']}")
+    if "return_type" not in func or "compile_strategy" not in func:
+        raise SystemExit(f"function missing S4-consumable metadata: {func['name']}")
+    producers = {}
+    for param in func["params"]:
+        producers[int(param["value_id"])] = {
+            "kind": "param",
+            "name": param["name"],
+            "function": func["name"],
+        }
+    for block in func["blocks"]:
+        if block["param_count"] != len(block["params"]):
+            raise SystemExit(f"block param_count mismatch in {func['name']}")
+        if block["instr_count"] != len(block["instrs"]):
+            raise SystemExit(f"instr_count mismatch in {func['name']}/{block['label']}")
+        for param in block["params"]:
+            producers[int(param["value_id"])] = {
+                "kind": "block_param",
+                "function": func["name"],
+                "block": block["label"],
+            }
+        instr_total += block["instr_count"]
+        term = block.get("terminator")
+        if not isinstance(term, dict):
+            raise SystemExit(f"missing terminator in {func['name']}/{block['label']}")
+        terms.add(term.get("kind"))
+        for instr in block["instrs"]:
+            ops.add(instr.get("op"))
+            calls.add(instr.get("call_name", ""))
+            const = instr.get("constant", {})
+            const_kinds.add(const.get("kind"))
+            if "ty" not in instr or "result" not in instr:
+                raise SystemExit("instruction missing result/type fields")
+            if instr.get("op") == "binary":
+                lhs = int(instr.get("lhs", -1))
+                rhs = int(instr.get("rhs", -1))
+                if lhs not in producers:
+                    raise SystemExit(f"binary lhs does not resolve to prior producer in {func['name']}: {lhs}")
+                if rhs not in producers:
+                    raise SystemExit(f"binary rhs does not resolve to prior producer in {func['name']}: {rhs}")
+                operand_witnesses.append({
+                    "function": func["name"],
+                    "result": int(instr["result"]),
+                    "bin_op": int(instr["bin_op"]),
+                    "lhs": lhs,
+                    "rhs": rhs,
+                    "lhs_producer": producer_label(producers[lhs]),
+                    "rhs_producer": producer_label(producers[rhs]),
+                })
+            result = int(instr.get("result", -1))
+            if result >= 0:
+                if instr.get("op") == "const":
+                    value = const.get("int_val")
+                    if const.get("kind") == "bool":
+                        value = const.get("bool_val")
+                    elif const.get("kind") == "float":
+                        value = const.get("float_val")
+                    elif const.get("kind") == "string":
+                        value = const.get("string_val")
+                    producers[result] = {
+                        "kind": "const",
+                        "const_kind": const.get("kind"),
+                        "value": value,
+                        "function": func["name"],
+                    }
+                elif instr.get("op") == "call_direct":
+                    producers[result] = {
+                        "kind": "call_direct",
+                        "name": instr.get("call_name", ""),
+                        "function": func["name"],
+                    }
+                else:
+                    producers[result] = {
+                        "kind": instr.get("op"),
+                        "function": func["name"],
+                    }
+
+if instr_total < int(min_instrs):
+    raise SystemExit(f"too few instructions: {instr_total} < {min_instrs}")
+
+def require_all(label, observed, csv):
+    wanted = [item for item in csv.split(",") if item and item != "-"]
+    missing = [item for item in wanted if item not in observed]
+    if missing:
+        raise SystemExit(f"missing {label}: {missing}; observed={sorted(observed)}")
+
+require_all("ops", ops, required_ops)
+require_all("terminators", terms, required_terms)
+require_all("calls", calls, required_calls)
+require_all("constant kinds", const_kinds, required_const_kinds)
+
+if case_id == "operand_fidelity":
+    functions_by_name = {func["name"]: func for func in functions}
+    witness_by_function = {w["function"]: w for w in operand_witnesses}
+    expected = {
+        "f_param_plus_zero": (0, "param:x", "const:int:0", False),
+        "f_zero_plus_param": (0, "const:int:0", "param:x", False),
+        "f_param_minus_zero": (1, "param:x", "const:int:0", False),
+        "f_param_minus_self": (1, "param:x", "param:x", True),
+        "f_call_plus_zero": (0, "call:seed", "const:int:0", False),
+        "f_zero_plus_call": (0, "const:int:0", "call:seed", False),
+    }
+    for fn_name, (bin_op, lhs_label, rhs_label, allow_same_operands) in expected.items():
+        instr = find_single_binary(functions_by_name, fn_name, bin_op)
+        witness = witness_by_function.get(fn_name)
+        if not witness:
+            raise SystemExit(f"missing operand witness for {fn_name}")
+        if witness["lhs_producer"] != lhs_label or witness["rhs_producer"] != rhs_label:
+            raise SystemExit(
+                f"{fn_name} operand provenance mismatch: "
+                f"{witness['lhs_producer']} / {witness['rhs_producer']} "
+                f"!= {lhs_label} / {rhs_label}"
+            )
+        if not allow_same_operands and witness["lhs"] == witness["rhs"]:
+            raise SystemExit(f"{fn_name} unexpectedly duplicated binary operands: {instr}")
+        if allow_same_operands and witness["lhs"] != witness["rhs"]:
+            raise SystemExit(f"{fn_name} expected intentional x-x same operand witness: {instr}")
+
+canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
+receipt = {
+    "schema": "madaros.v2.s3.receipt/0.1",
+    "case_id": case_id,
+    "source": source,
+    "source_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest(),
+    "hlir_schema": data["schema"],
+    "source_to_hlir": data["source_to_hlir"],
+    "normalized_ids": data["normalized_ids"],
+    "function_count": len(functions),
+    "instruction_count": instr_total,
+    "ops": sorted(op for op in ops if op),
+    "terminators": sorted(term for term in terms if term),
+    "calls": sorted(call for call in calls if call),
+    "const_kinds": sorted(kind for kind in const_kinds if kind),
+    "binary_operand_integrity": True,
+    "operand_witnesses": operand_witnesses,
+    "hlir_byte_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    "hlir_canonical_roundtrip_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+}
+payload = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+Path(receipt_path).write_text(payload, encoding="utf-8")
+print(
+    f"[madaros-v2-s3] ok case={case_id} fns={len(functions)} "
+    f"instrs={instr_total} hlir_sha={receipt['hlir_byte_sha256'][:12]}"
+)
+PY
+}
+
+tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r case_id source min_functions min_instrs required_ops required_terms required_calls required_const_kinds; do
+  run_case "$case_id" "$source" "$min_functions" "$min_instrs" "$required_ops" "$required_terms" "$required_calls" "$required_const_kinds"
+done
+
+python3 - "$OUT_DIR" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+receipts = []
+for path in sorted(out.glob("*.s3.receipt.json")):
+    receipts.append(json.loads(path.read_text(encoding="utf-8")))
+if not receipts:
+    raise SystemExit("no S3 receipts produced")
+summary = {
+    "schema": "madaros.v2.s3.gate/0.1",
+    "status": "pass",
+    "case_count": len(receipts),
+    "cases": receipts,
+}
+payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
+summary["gate_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
+(out / "madaros_v2_s3_gate.receipt.json").write_text(payload, encoding="utf-8")
+print(f"[madaros-v2-s3] summary_sha={summary['gate_sha256'][:12]} cases={len(receipts)}")
+PY
+
+echo "[madaros-v2-s3] PASS: native HLIR JSON deterministic, parseable, roundtrippable, S4-ready"
+echo "[madaros-v2-s3] receipts=$OUT_DIR"

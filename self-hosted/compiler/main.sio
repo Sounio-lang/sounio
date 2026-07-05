@@ -48,7 +48,7 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_file_maybe_has_use}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_file_maybe_has_use, module_frontend_lower_imported_to_module_box}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
@@ -67,6 +67,7 @@ use ir::opt_cleanup::*
 use ir::egraph::*
 use ir::loop_opt::*
 use ir::tailcall::*
+use hlir::mod::*
 use native::regalloc::*
 use native::peephole::*
 use interop::server::*
@@ -1010,6 +1011,7 @@ struct CompilerOptions {
     cache_stats: bool,
     verbose: bool,
     emit_ast: bool,
+    emit_hlir: bool,
     emit_tokens: bool,
     emit_manifest: bool,
     gpu_target: string,
@@ -1112,7 +1114,7 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     var i: i64 = flag_index + 1
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--machine-module-json" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             return arg
@@ -1133,7 +1135,7 @@ fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fall
     var seen: i64 = 0
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--machine-module-json" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             if seen == which {
@@ -1835,6 +1837,497 @@ fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with
         i = i + 1
     }
     (out, p)
+}
+
+fn cmm_append_json_string(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && p < 65536 {
+        let ch = str_char_at(s, i)
+        if ch == 34 {
+            let a = lobl_append(out, p, "\\\"")
+            out = a.0; p = a.1
+        } else if ch == 92 {
+            let a = lobl_append(out, p, "\\\\")
+            out = a.0; p = a.1
+        } else if ch == 10 {
+            let a = lobl_append(out, p, "\\n")
+            out = a.0; p = a.1
+        } else {
+            out[p as usize] = ch as i8
+            p = p + 1
+        }
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_string(buf: [i8; 65536], pos: i64, key: string, value: string, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":\"")
+    out = c.0; p = c.1
+    let d = cmm_append_json_string(out, p, value)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"")
+    out = e.0; p = e.1
+    if comma {
+        let f = lobl_append(out, p, ",")
+        out = f.0; p = f.1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_i64(buf: [i8; 65536], pos: i64, key: string, value: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":")
+    out = c.0; p = c.1
+    let d = lobl_append(out, p, i64_to_string_no_div(value))
+    out = d.0; p = d.1
+    if comma {
+        let e = lobl_append(out, p, ",")
+        out = e.0; p = e.1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_bool(buf: [i8; 65536], pos: i64, key: string, value: bool, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let bool_s = if value { "true" } else { "false" }
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":")
+    out = c.0; p = c.1
+    let d = lobl_append(out, p, bool_s)
+    out = d.0; p = d.1
+    if comma {
+        let e = lobl_append(out, p, ",")
+        out = e.0; p = e.1
+    }
+    (out, p)
+}
+
+fn cmm_append_i64(buf: [i8; 65536], pos: i64, value: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, i64_to_string_no_div(value))
+    out = a.0; p = a.1
+    if comma {
+        let b = lobl_append(out, p, ",")
+        out = b.0; p = b.1
+    }
+    (out, p)
+}
+
+fn cmm_append_instr_tuple(buf: [i8; 65536], pos: i64, instr: MachineInstr, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "[")
+    out = a.0; p = a.1
+    let b0 = cmm_append_i64(out, p, instr.opcode, true)
+    out = b0.0; p = b0.1
+    let b1 = cmm_append_i64(out, p, instr.dst.kind, true)
+    out = b1.0; p = b1.1
+    let b2 = cmm_append_i64(out, p, instr.dst.value, true)
+    out = b2.0; p = b2.1
+    let b3 = cmm_append_i64(out, p, instr.src1.kind, true)
+    out = b3.0; p = b3.1
+    let b4 = cmm_append_i64(out, p, instr.src1.value, true)
+    out = b4.0; p = b4.1
+    let b5 = cmm_append_i64(out, p, instr.src2.kind, true)
+    out = b5.0; p = b5.1
+    let b6 = cmm_append_i64(out, p, instr.src2.value, true)
+    out = b6.0; p = b6.1
+    let b7 = cmm_append_i64(out, p, instr.aux.kind, true)
+    out = b7.0; p = b7.1
+    let b8 = cmm_append_i64(out, p, instr.aux.value, true)
+    out = b8.0; p = b8.1
+    let b9 = cmm_append_i64(out, p, instr.cond, true)
+    out = b9.0; p = b9.1
+    let b10 = cmm_append_i64(out, p, instr.arg_index, true)
+    out = b10.0; p = b10.1
+    let b11 = cmm_append_i64(out, p, instr.call_arg_count, false)
+    out = b11.0; p = b11.1
+    let c = lobl_append(out, p, "]")
+    out = c.0; p = c.1
+    if comma {
+        let d = lobl_append(out, p, ",")
+        out = d.0; p = d.1
+    }
+    (out, p)
+}
+
+fn cmm_append_slot_metadata_tuple(buf: [i8; 65536], pos: i64, slot: i64, kind: i64, width_words: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "[")
+    out = a.0; p = a.1
+    let b = cmm_append_i64(out, p, slot, true)
+    out = b.0; p = b.1
+    let c = cmm_append_i64(out, p, kind, true)
+    out = c.0; p = c.1
+    let d = cmm_append_i64(out, p, width_words, false)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "]")
+    out = e.0; p = e.1
+    if comma {
+        let f = lobl_append(out, p, ",")
+        out = f.0; p = f.1
+    }
+    (out, p)
+}
+
+fn cmm_machine_slot_metadata_count(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    while i < limit {
+        if func.slot_kind[i as usize] != MIR_SLOT_KIND_UNKNOWN || func.slot_width_words[i as usize] != 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn cmm_append_slot_metadata_function(buf: [i8; 65536], pos: i64, func: MachineFunction, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_i64(out, p, "fn_index", fn_index, true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_i64(out, p, "base_slot_count", func.base_slot_count, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_i64(out, p, "temp_count", func.temp_count, true)
+    out = d.0; p = d.1
+    let e = cmm_append_named_i64(out, p, "slot_metadata_count", cmm_machine_slot_metadata_count(func), true)
+    out = e.0; p = e.1
+    let f = cmm_append_named_string(out, p, "slot_metadata_encoding", "[slot,kind,width_words]", true)
+    out = f.0; p = f.1
+    let g = lobl_append(out, p, "\"slots\":[")
+    out = g.0; p = g.1
+    var emitted: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    let total = cmm_machine_slot_metadata_count(func)
+    while i < limit {
+        if func.slot_kind[i as usize] != MIR_SLOT_KIND_UNKNOWN || func.slot_width_words[i as usize] != 0 {
+            emitted = emitted + 1
+            let t = cmm_append_slot_metadata_tuple(out, p, i, func.slot_kind[i as usize], func.slot_width_words[i as usize], emitted < total)
+            out = t.0; p = t.1
+        }
+        i = i + 1
+    }
+    let h = lobl_append(out, p, "]}")
+    out = h.0; p = h.1
+    if comma {
+        let j = lobl_append(out, p, ",")
+        out = j.0; p = j.1
+    }
+    (out, p)
+}
+
+fn cmm_append_slot_metadata(buf: [i8; 65536], pos: i64, machine: MachineModule, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"slot_metadata\":{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_string(out, p, "schema", "madaros.v2.s5.machine_module_slot_metadata/0.1", true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_bool(out, p, "machine_ir_slot_metadata_exported", true, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_string(out, p, "slot_kind_encoding", "0=unknown,1=i64,2=f64,3=f128_binary128,4=wide_int_limb", true)
+    out = d.0; p = d.1
+    let e = cmm_append_named_i64(out, p, "slot_word_bits", 64, true)
+    out = e.0; p = e.1
+    let f = cmm_append_named_i64(out, p, "f128_binary128_limb_count", 2, true)
+    out = f.0; p = f.1
+    let g = cmm_append_named_i64(out, p, "f128_binary128_limb_bits", 64, true)
+    out = g.0; p = g.1
+    let h = cmm_append_named_bool(out, p, "f128_execution_promoted", false, true)
+    out = h.0; p = h.1
+    let j = lobl_append(out, p, "\"functions\":[")
+    out = j.0; p = j.1
+    var fi: i64 = 0
+    while fi < machine.fn_count && fi < 32 {
+        let z = cmm_append_slot_metadata_function(out, p, machine.functions[fi as usize], fi, fi + 1 < machine.fn_count && fi + 1 < 32)
+        out = z.0; p = z.1
+        fi = fi + 1
+    }
+    let k = lobl_append(out, p, "]}")
+    out = k.0; p = k.1
+    if comma {
+        let m = lobl_append(out, p, ",")
+        out = m.0; p = m.1
+    }
+    (out, p)
+}
+
+fn cmm_f128_literal_metadata_count(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn cmm_append_f128_literal_metadata_tuple(buf: [i8; 65536], pos: i64, func: MachineFunction, slot: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "[")
+    out = a.0; p = a.1
+    let b0 = cmm_append_i64(out, p, slot, true)
+    out = b0.0; p = b0.1
+    let b1 = cmm_append_i64(out, p, func.f128_literal_sign[slot as usize], true)
+    out = b1.0; p = b1.1
+    let b2 = cmm_append_i64(out, p, func.f128_literal_sig_hi[slot as usize], true)
+    out = b2.0; p = b2.1
+    let b3 = cmm_append_i64(out, p, func.f128_literal_sig_lo[slot as usize], true)
+    out = b3.0; p = b3.1
+    let b4 = cmm_append_i64(out, p, func.f128_literal_digit_count[slot as usize], true)
+    out = b4.0; p = b4.1
+    let b5 = cmm_append_i64(out, p, func.f128_literal_scale10[slot as usize], true)
+    out = b5.0; p = b5.1
+    let b6 = cmm_append_i64(out, p, func.f128_literal_truncated_digits[slot as usize], false)
+    out = b6.0; p = b6.1
+    let c = lobl_append(out, p, "]")
+    out = c.0; p = c.1
+    if comma {
+        let d = lobl_append(out, p, ",")
+        out = d.0; p = d.1
+    }
+    (out, p)
+}
+
+fn cmm_append_f128_literal_metadata_function(buf: [i8; 65536], pos: i64, func: MachineFunction, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_i64(out, p, "fn_index", fn_index, true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_i64(out, p, "f128_literal_metadata_count", cmm_f128_literal_metadata_count(func), true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_string(out, p, "f128_literal_metadata_encoding", "[slot,decimal_sign,sig_hi,sig_lo,digit_count,scale10,truncated_digits]", true)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"rows\":[")
+    out = e.0; p = e.1
+    var emitted: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    let total = cmm_f128_literal_metadata_count(func)
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            emitted = emitted + 1
+            let row = cmm_append_f128_literal_metadata_tuple(out, p, func, i, emitted < total)
+            out = row.0; p = row.1
+        }
+        i = i + 1
+    }
+    let f = lobl_append(out, p, "]}")
+    out = f.0; p = f.1
+    if comma {
+        let g = lobl_append(out, p, ",")
+        out = g.0; p = g.1
+    }
+    (out, p)
+}
+
+fn cmm_append_f128_literal_metadata(buf: [i8; 65536], pos: i64, machine: MachineModule, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"f128_literal_metadata\":{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_string(out, p, "schema", "madaros.v2.s5.f128_literal_metadata/0.1", true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_bool(out, p, "f128_literal_decimal_metadata_exported", true, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_bool(out, p, "f128_execution_promoted", false, true)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"functions\":[")
+    out = e.0; p = e.1
+    var fi: i64 = 0
+    while fi < machine.fn_count && fi < 32 {
+        let z = cmm_append_f128_literal_metadata_function(out, p, machine.functions[fi as usize], fi, fi + 1 < machine.fn_count && fi + 1 < 32)
+        out = z.0; p = z.1
+        fi = fi + 1
+    }
+    let f = lobl_append(out, p, "]}")
+    out = f.0; p = f.1
+    if comma {
+        let g = lobl_append(out, p, ",")
+        out = g.0; p = g.1
+    }
+    (out, p)
+}
+
+fn cmm_name_is_f128(n: Name) -> bool with Panic, Div {
+    if n.len != 4 { return false }
+    if n.buf[0] as i64 != 102 { return false } // f
+    if n.buf[1] as i64 != 49 { return false }  // 1
+    if n.buf[2] as i64 != 50 { return false }  // 2
+    if n.buf[3] as i64 != 56 { return false }  // 8
+    true
+}
+
+fn cmm_count_param_slots_with_kind(ir_func: IrFunction, func: MachineFunction, kind: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ir_func.param_count && i < 64 {
+        let slot = ir_func.param_regs[i as usize]
+        if slot >= 0 && slot < 256 {
+            if func.slot_kind[slot as usize] == kind {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn cmm_append_function(buf: [i8; 65536], pos: i64, module: &IrModule, machine: MachineModule, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let func = machine.functions[fn_index as usize]
+    let ir_func = (*module).functions[fn_index as usize]
+    let raw_instr_count = if func.block_count > 0 { func.blocks[0].instr_count } else { 0 }
+    let instr_count = if func.legal_instr_count > 0 { func.legal_instr_count } else { raw_instr_count }
+    let name = str_from_bytes(ir_func.name.buf, ir_func.name.len)
+
+    let a = lobl_append(out, p, "{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_i64(out, p, "index", fn_index, true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_string(out, p, "name", name, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_bool(out, p, "supported", func.supported, true)
+    out = d.0; p = d.1
+    let e = cmm_append_named_i64(out, p, "source_instr_count", func.source_instr_count, true)
+    out = e.0; p = e.1
+    let f = cmm_append_named_i64(out, p, "legal_instr_count", func.legal_instr_count, true)
+    out = f.0; p = f.1
+    let g = cmm_append_named_i64(out, p, "instr_count", instr_count, true)
+    out = g.0; p = g.1
+    let m0 = cmm_append_named_i64(out, p, "source_param_count", ir_func.param_count, true)
+    out = m0.0; p = m0.1
+    let m1 = cmm_append_named_i64(out, p, "source_is_sret", ir_func.is_sret, true)
+    out = m1.0; p = m1.1
+    let m2 = cmm_append_named_i64(out, p, "source_sret_dest_reg", ir_func.sret_dest_reg, true)
+    out = m2.0; p = m2.1
+    let f128_param_count = cmm_count_param_slots_with_kind(ir_func, func, MIR_SLOT_KIND_F128_BINARY128)
+    let returns_f128 = cmm_name_is_f128(ir_func.return_struct_name)
+    let m3 = cmm_append_named_string(out, p, "source_abi_metadata_schema", "madaros.v2.s5.function_abi_metadata/0.1", true)
+    out = m3.0; p = m3.1
+    let m4 = cmm_append_named_i64(out, p, "source_f128_param_count", f128_param_count, true)
+    out = m4.0; p = m4.1
+    let m5 = cmm_append_named_bool(out, p, "source_returns_f128", returns_f128, true)
+    out = m5.0; p = m5.1
+    let m6 = cmm_append_named_i64(out, p, "source_return_slot_kind", if returns_f128 { MIR_SLOT_KIND_F128_BINARY128 } else { 0 }, true)
+    out = m6.0; p = m6.1
+    let m7 = cmm_append_named_i64(out, p, "source_return_width_words", if returns_f128 { 2 } else { 0 }, true)
+    out = m7.0; p = m7.1
+    let m8 = cmm_append_named_string(out, p, "source_f128_sysv_classes", if returns_f128 || f128_param_count > 0 { "SSE,SSEUP" } else { "" }, true)
+    out = m8.0; p = m8.1
+    let m9 = cmm_append_named_bool(out, p, "source_f128_execution_pending", returns_f128 || f128_param_count > 0, true)
+    out = m9.0; p = m9.1
+    let h = cmm_append_named_string(out, p, "instr_encoding", "numeric_tuple_v1", true)
+    out = h.0; p = h.1
+    let j = lobl_append(out, p, "\"instrs\":[")
+    out = j.0; p = j.1
+    var i: i64 = 0
+    while i < instr_count {
+        let t = cmm_append_instr_tuple(out, p, func.blocks[0].instrs[i as usize], i + 1 < instr_count)
+        out = t.0; p = t.1
+        i = i + 1
+    }
+    let k = lobl_append(out, p, "]}")
+    out = k.0; p = k.1
+    if comma {
+        let m = lobl_append(out, p, ",")
+        out = m.0; p = m.1
+    }
+    (out, p)
+}
+
+var COMPILER_MAIN_CMM_BUF: [i8; 65536] = [0; 65536]
+
+fn compiler_main_write_machine_module_json(path: string, module: &IrModule, spec: NativeTargetSpec) -> bool with IO, Mut, Panic, Div, Alloc {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+    let machine = native_v2_build_machine_module(module, spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX())
+    let a = lobl_append(buf, p, "{")
+    buf = a.0; p = a.1
+    let b = cmm_append_named_string(buf, p, "schema", "madaros.v2.s5.machine_module/0.1", true)
+    buf = b.0; p = b.1
+    let c = cmm_append_named_string(buf, p, "stage", "S5", true)
+    buf = c.0; p = c.1
+    let d = cmm_append_named_string(buf, p, "source", "native_v2_build_machine_module", true)
+    buf = d.0; p = d.1
+    let e = cmm_append_named_string(buf, p, "target", spec.resolved_target, true)
+    buf = e.0; p = e.1
+    let f = cmm_append_named_bool(buf, p, "compiler_machine_module_exported", true, true)
+    buf = f.0; p = f.1
+    let g = cmm_append_named_bool(buf, p, "active", machine.active, true)
+    buf = g.0; p = g.1
+    let h = cmm_append_named_bool(buf, p, "supported", machine.supported, true)
+    buf = h.0; p = h.1
+    let j = cmm_append_named_bool(buf, p, "fail_closed", machine.fail_closed, true)
+    buf = j.0; p = j.1
+    let k = cmm_append_named_bool(buf, p, "legacy_fallback", machine.legacy_fallback, true)
+    buf = k.0; p = k.1
+    let m = cmm_append_named_string(buf, p, "coverage", machine.coverage, true)
+    buf = m.0; p = m.1
+    let n = cmm_append_named_string(buf, p, "unsupported_detail", machine.unsupported_detail, true)
+    buf = n.0; p = n.1
+    let q = cmm_append_named_i64(buf, p, "fn_count", machine.fn_count, true)
+    buf = q.0; p = q.1
+    let r = cmm_append_named_i64(buf, p, "total_ir_instr_count", machine.total_ir_instr_count, true)
+    buf = r.0; p = r.1
+    let s = cmm_append_named_i64(buf, p, "total_machine_instr_count", machine.total_machine_instr_count, true)
+    buf = s.0; p = s.1
+    let sm = cmm_append_slot_metadata(buf, p, machine, true)
+    buf = sm.0; p = sm.1
+    let fl = cmm_append_f128_literal_metadata(buf, p, machine, true)
+    buf = fl.0; p = fl.1
+    let u = lobl_append(buf, p, "\"functions\":[")
+    buf = u.0; p = u.1
+    var fi: i64 = 0
+    while fi < machine.fn_count && fi < 32 {
+        let z = cmm_append_function(buf, p, module, machine, fi, fi + 1 < machine.fn_count)
+        buf = z.0; p = z.1
+        fi = fi + 1
+    }
+    let v = lobl_append(buf, p, "]}\n")
+    buf = v.0; p = v.1
+    if p >= 65536 {
+        return false
+    }
+    var ci: i64 = 0
+    while ci < p {
+        COMPILER_MAIN_CMM_BUF[ci as usize] = buf[ci as usize]
+        ci = ci + 1
+    }
+    write_file(path, &! COMPILER_MAIN_CMM_BUF, p) >= 0
 }
 
 fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -2896,17 +3389,42 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         panic("native-v2-compile failed: source not readable")
     }
     if module_frontend_file_maybe_has_use(source_path) {
-        let imported_rc = module_frontend_compile_imported_to_file(source_path, out_path)
-        if imported_rc != 0 {
-            print("native_v2_compile: imported front-half/backend failed rc=")
-            print_int(imported_rc as i64)
+        let imported_lower = module_frontend_lower_imported_to_module_box(source_path)
+        if !imported_lower.ok {
+            print("native_v2_compile: imported front-half failed: ")
+            print(imported_lower.error_msg)
             print("\n")
             panic("native-v2-compile failed: imported path")
         }
-        print("native_v2_compile: emitted path=")
-        print(out_path)
-        print("\n")
-        return
+        match imported_lower.module {
+            Some(module_box) => {
+                if (*module_box).fn_count <= 0 {
+                    panic("native-v2-compile failed: imported module empty")
+                }
+                let spec = native_resolve_target("x86_64-linux", "auto", true)
+                let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+                if str_len(machine_module_json_path) > 0 {
+                    if !compiler_main_write_machine_module_json(machine_module_json_path, &(*module_box), spec) {
+                        print("native_v2_compile: failed to write imported MachineModule JSON\n")
+                        return
+                    }
+                }
+                let rc = compile_native_v2_preview_to_file(&(*module_box), spec, out_path)
+                if rc != 0 {
+                    print("native_v2_compile: imported FAIL to_file rc=")
+                    print_int(rc as i64)
+                    print("\n")
+                    return
+                }
+                print("native_v2_compile: emitted path=")
+                print(out_path)
+                print("\n")
+                return
+            }
+            None => {
+                panic("native-v2-compile failed: imported module missing")
+            }
+        }
     }
     var trace = empty_load_multimodule_ir_trace()
     let ir_result = load_multimodule_ir_traced(source_path, &! trace)
@@ -2923,6 +3441,13 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
     write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
+    let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+    if str_len(machine_module_json_path) > 0 {
+        if !compiler_main_write_machine_module_json(machine_module_json_path, &ir_result.module, spec) {
+            print("native_v2_compile: failed to write MachineModule JSON\n")
+            return
+        }
+    }
     let rc = compile_native_v2_preview_to_file(&ir_result.module, spec, out_path)
     if rc != 0 {
         print("native_v2_compile: FAIL to_file rc=")
@@ -2936,7 +3461,7 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
-    if opts.emit_manifest || opts.emit_ast || opts.emit_tokens {
+    if opts.emit_manifest || opts.emit_ast || opts.emit_hlir || opts.emit_tokens {
         return false
     }
     if str_len(opts.gpu_target) > 0 {
@@ -3142,7 +3667,16 @@ fn run_native_v2_emit_sret(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
         panic("native-v2-emit-sret: usage --native-v2-emit-sret <out_path>")
     }
     let out_path = arg_list_get(args, flag_index + 1)
-    let rc = compile_native_v2_sret_witness_to_file(out_path, false)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_sret_module()
+    let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+    if str_len(machine_module_json_path) > 0 {
+        if !compiler_main_write_machine_module_json(machine_module_json_path, &module, spec) {
+            print("native_v2_emit_exit_code: FAIL to write sret MachineModule JSON\n")
+            return
+        }
+    }
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
     if rc != 0 {
         print("native_v2_emit_exit_code: FAIL to_file label=sret rc=")
         print_int(rc as i64)
@@ -3182,7 +3716,16 @@ fn run_native_v2_emit_sret_plaincall(args: ArgList, flag_index: i64) with IO, Mu
         panic("native-v2-emit-sret-plaincall: usage --native-v2-emit-sret-plaincall <out_path>")
     }
     let out_path = arg_list_get(args, flag_index + 1)
-    let rc = compile_native_v2_sret_witness_to_file(out_path, true)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_sret_plaincall_module()
+    let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+    if str_len(machine_module_json_path) > 0 {
+        if !compiler_main_write_machine_module_json(machine_module_json_path, &module, spec) {
+            print("native_v2_emit_exit_code: FAIL to write sret-plaincall MachineModule JSON\n")
+            return
+        }
+    }
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
     if rc != 0 {
         print("native_v2_emit_exit_code: FAIL to_file label=sret-plaincall rc=")
         print_int(rc as i64)
@@ -3346,6 +3889,7 @@ fn print_help() with IO {
     println("  --cache-stats          Print thin-link cache hit/miss counters")
     println("  -v, --verbose          Verbose output")
     println("  --emit-ast             Print AST to stdout")
+    println("  --emit-hlir            Print canonical Madaros v2 S3 HLIR JSON to stdout")
     println("  --emit-tokens          Print tokens to stdout")
     println("  --emit-manifest        Print epistemic audit manifest JSON to stdout")
     println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
@@ -3422,6 +3966,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var cache_stats = false
     var verbose = false
     var emit_ast = false
+    var emit_hlir = false
     var emit_tokens = false
     var emit_manifest = false
     var gpu_target = ""
@@ -3470,6 +4015,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         }
         else if arg == "--emit-ast" {
             emit_ast = true
+        }
+        else if arg == "--emit-hlir" {
+            emit_hlir = true
         }
         else if arg == "--emit-tokens" {
             emit_tokens = true
@@ -3538,6 +4086,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         cache_stats: cache_stats,
         verbose: verbose,
         emit_ast: emit_ast,
+        emit_hlir: emit_hlir,
         emit_tokens: emit_tokens,
         emit_manifest: emit_manifest,
         gpu_target: gpu_target,
@@ -3606,6 +4155,7 @@ fn compiler_manifest_print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Al
     if ty.kind == TypeKind::TyU64 { print("u64"); return }
     if ty.kind == TypeKind::TyF32 { print("f32"); return }
     if ty.kind == TypeKind::TyF64 { print("f64"); return }
+    if ty.kind == TypeKind::TyF128 { print("f128"); return }
     if ty.kind == TypeKind::TyBool { print("bool"); return }
     if ty.kind == TypeKind::TyUnit { print("()"); return }
     if ty.kind == TypeKind::TyString { print("string"); return }
@@ -4885,6 +5435,522 @@ fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO
     }
 }
 
+fn compiler_s1_ast_print_name_json(name: Name) with IO, Mut, Panic, Div {
+    print("\"")
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i] as i64)
+        i = i + 1
+    }
+    print("\"")
+}
+
+fn compiler_s1_ast_print_item_kind(kind: ItemKind) with IO {
+    if kind == ItemKind::ItemFn { print("fn"); return }
+    if kind == ItemKind::ItemStruct { print("struct"); return }
+    if kind == ItemKind::ItemEnum { print("enum"); return }
+    if kind == ItemKind::ItemImpl { print("impl"); return }
+    if kind == ItemKind::ItemTypeAlias { print("type_alias"); return }
+    if kind == ItemKind::ItemModels { print("models"); return }
+    if kind == ItemKind::ItemPolicy { print("policy"); return }
+    if kind == ItemKind::ItemAcquisitionPolicy { print("acquisition_policy"); return }
+    if kind == ItemKind::ItemRecoursePolicy { print("recourse_policy"); return }
+    if kind == ItemKind::ItemTransitionPolicy { print("transition_policy"); return }
+    if kind == ItemKind::ItemTransitionProtocol { print("transition_protocol"); return }
+    if kind == ItemKind::ItemMonitoringPolicy { print("monitoring_policy"); return }
+    if kind == ItemKind::ItemDecisionPolicy { print("decision_policy"); return }
+    if kind == ItemKind::ItemDeferralPolicy { print("deferral_policy"); return }
+    if kind == ItemKind::ItemAlternativePolicy { print("alternative_policy"); return }
+    if kind == ItemKind::ItemAlternativeFrontier { print("alternative_frontier"); return }
+    if kind == ItemKind::ItemValidation { print("validation"); return }
+    if kind == ItemKind::ItemAudit { print("audit"); return }
+    if kind == ItemKind::ItemUse { print("use"); return }
+    if kind == ItemKind::ItemUnit { print("unit"); return }
+    if kind == ItemKind::ItemEffect { print("effect"); return }
+    if kind == ItemKind::ItemSession { print("session"); return }
+    if kind == ItemKind::ItemTrait { print("trait"); return }
+    if kind == ItemKind::ItemAlgebra { print("algebra"); return }
+    if kind == ItemKind::ItemStudy { print("study"); return }
+    if kind == ItemKind::ItemOntology { print("ontology"); return }
+    print("unknown")
+}
+
+fn compiler_s1_ast_print_item(item: Item, index: i64) with IO, Mut, Panic, Div {
+    print("{\"index\":")
+    print(int_to_string(index))
+    print(",\"kind\":\"")
+    compiler_s1_ast_print_item_kind(item.kind)
+    print("\",\"name\":")
+    compiler_s1_ast_print_name_json(item.name)
+    print(",\"public\":")
+    if visibility_to_bool(item.visibility) {
+        print("true")
+    } else {
+        print("false")
+    }
+    print("}")
+}
+
+fn compiler_s1_ast_print_items(opt: Option<Box<ItemList>>, index: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            if index > 0 {
+                print(",")
+            }
+            compiler_s1_ast_print_item((*list).head, index)
+            compiler_s1_ast_print_items((*list).tail, index + 1)
+        }
+        None => index
+    }
+}
+
+fn compile_emit_ast_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let program = load_module_file(path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        var ast_errors = compile_errors_new()
+        ast_errors = compile_errors_push(ast_errors, "error: AST emission failed during parsing")
+        return CompileResult {
+            success: false,
+            errors: ast_errors,
+            output: "",
+        }
+    }
+
+    print("{\"schema\":\"madaros.stage1.ast/0.1\",\"source\":\"")
+    print(path)
+    print("\",\"items\":[")
+    let item_count = compiler_s1_ast_print_items(program.items, 0)
+    print("],\"item_count\":")
+    print(int_to_string(item_count))
+    print("}\n")
+    CompileResult {
+        success: true,
+        errors: compile_errors_new(),
+        output: "stdout",
+    }
+}
+
+fn compiler_s3_hlir_print_name_json(name: HlirName) with IO, Mut, Panic, Div {
+    print("\"")
+    var i: i64 = 0
+    while i < name.len {
+        let ch = name.buf[i as usize] as i64
+        if ch == 34 {
+            print("\\\"")
+        } else if ch == 92 {
+            print("\\\\")
+        } else if ch == 10 {
+            print("\\n")
+        } else if ch == 13 {
+            print("\\r")
+        } else if ch == 9 {
+            print("\\t")
+        } else {
+            print_char(ch)
+        }
+        i = i + 1
+    }
+    print("\"")
+}
+
+fn compiler_s3_hlir_print_i64(value: i64) with IO, Mut, Panic, Div {
+    print(int_to_string(value))
+}
+
+fn compiler_s3_hlir_print_f64(value: f64) with IO, Mut, Panic, Div {
+    let abs_value = if value < 0.0 { 0.0 - value } else { value }
+    let scaled = (abs_value * 1000.0) as i64
+    let whole = scaled / 1000
+    let frac = scaled - whole * 1000
+    if value < 0.0 {
+        print("-")
+    }
+    compiler_s3_hlir_print_i64(whole)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    compiler_s3_hlir_print_i64(frac)
+}
+
+fn compiler_s3_hlir_print_type_kind(kind: HlirTypeKind) with IO {
+    if kind == HlirTypeKind::HlirTypeVoid { print("void"); return }
+    if kind == HlirTypeKind::HlirTypeBool { print("bool"); return }
+    if kind == HlirTypeKind::HlirTypeI8 { print("i8"); return }
+    if kind == HlirTypeKind::HlirTypeI16 { print("i16"); return }
+    if kind == HlirTypeKind::HlirTypeI32 { print("i32"); return }
+    if kind == HlirTypeKind::HlirTypeI64 { print("i64"); return }
+    if kind == HlirTypeKind::HlirTypeI128 { print("i128"); return }
+    if kind == HlirTypeKind::HlirTypeU8 { print("u8"); return }
+    if kind == HlirTypeKind::HlirTypeU16 { print("u16"); return }
+    if kind == HlirTypeKind::HlirTypeU32 { print("u32"); return }
+    if kind == HlirTypeKind::HlirTypeU64 { print("u64"); return }
+    if kind == HlirTypeKind::HlirTypeU128 { print("u128"); return }
+    if kind == HlirTypeKind::HlirTypeF32 { print("f32"); return }
+    if kind == HlirTypeKind::HlirTypeF64 { print("f64"); return }
+    if kind == HlirTypeKind::HlirTypePtr { print("ptr"); return }
+    if kind == HlirTypeKind::HlirTypeArray { print("array"); return }
+    if kind == HlirTypeKind::HlirTypeStruct { print("struct"); return }
+    if kind == HlirTypeKind::HlirTypeTuple { print("tuple"); return }
+    if kind == HlirTypeKind::HlirTypeFunction { print("function"); return }
+    if kind == HlirTypeKind::HlirTypeKnowledge { print("knowledge"); return }
+    if kind == HlirTypeKind::HlirTypeContest { print("contest"); return }
+    if kind == HlirTypeKind::HlirTypeRobust { print("robust"); return }
+    if kind == HlirTypeKind::HlirTypeValidated { print("validated"); return }
+    if kind == HlirTypeKind::HlirTypeIntervention { print("intervention"); return }
+    if kind == HlirTypeKind::HlirTypeCounterfactual { print("counterfactual"); return }
+    print("other")
+}
+
+fn compiler_s3_hlir_print_type_json(ty: HlirType) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_type_kind(ty.kind)
+    print("\",\"inner_type_idx\":")
+    compiler_s3_hlir_print_i64(ty.inner_type_idx)
+    print(",\"array_len\":")
+    compiler_s3_hlir_print_i64(ty.array_len)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(ty.name)
+    print(",\"type_elems\":[")
+    var i: i64 = 0
+    while i < ty.type_elem_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(ty.type_elems[i as usize])
+        i = i + 1
+    }
+    print("],\"type_elem_count\":")
+    compiler_s3_hlir_print_i64(ty.type_elem_count)
+    print(",\"epsilon_bound\":")
+    compiler_s3_hlir_print_f64(ty.epsilon_bound)
+    print(",\"provenance_id\":")
+    compiler_s3_hlir_print_i64(ty.provenance_id)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_const_kind(kind: HlirConstKind) with IO {
+    if kind == HlirConstKind::HlirConstUnit { print("unit"); return }
+    if kind == HlirConstKind::HlirConstBool { print("bool"); return }
+    if kind == HlirConstKind::HlirConstInt { print("int"); return }
+    if kind == HlirConstKind::HlirConstFloat { print("float"); return }
+    if kind == HlirConstKind::HlirConstString { print("string"); return }
+    if kind == HlirConstKind::HlirConstCString { print("cstring"); return }
+    if kind == HlirConstKind::HlirConstArray { print("array"); return }
+    if kind == HlirConstKind::HlirConstStruct { print("struct"); return }
+    if kind == HlirConstKind::HlirConstNull { print("null"); return }
+    if kind == HlirConstKind::HlirConstUndef { print("undef"); return }
+    if kind == HlirConstKind::HlirConstFunctionRef { print("function_ref"); return }
+    if kind == HlirConstKind::HlirConstGlobalRef { print("global_ref"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_const_json(c: HlirConstant) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_const_kind(c.kind)
+    print("\",\"bool_val\":")
+    if c.bool_val { print("true") } else { print("false") }
+    print(",\"int_val\":")
+    compiler_s3_hlir_print_i64(c.int_val)
+    print(",\"float_val\":")
+    compiler_s3_hlir_print_f64(c.float_val)
+    print(",\"string_val\":")
+    compiler_s3_hlir_print_name_json(c.string_val)
+    print(",\"ref_name\":")
+    compiler_s3_hlir_print_name_json(c.ref_name)
+    print(",\"elem_indices\":[")
+    var i: i64 = 0
+    while i < c.elem_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(c.elem_indices[i as usize])
+        i = i + 1
+    }
+    print("],\"elem_count\":")
+    compiler_s3_hlir_print_i64(c.elem_count)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_op_kind(op: i64) with IO {
+    if op == HLIR_OP_CONST { print("const"); return }
+    if op == HLIR_OP_COPY { print("copy"); return }
+    if op == HLIR_OP_BINARY { print("binary"); return }
+    if op == HLIR_OP_UNARY { print("unary"); return }
+    if op == HLIR_OP_CALL { print("call"); return }
+    if op == HLIR_OP_CALL_DIRECT { print("call_direct"); return }
+    if op == HLIR_OP_LOAD { print("load"); return }
+    if op == HLIR_OP_STORE { print("store"); return }
+    if op == HLIR_OP_GET_FIELD_PTR { print("get_field_ptr"); return }
+    if op == HLIR_OP_GET_ELEMENT_PTR { print("get_element_ptr"); return }
+    if op == HLIR_OP_ALLOCA { print("alloca"); return }
+    if op == HLIR_OP_CAST { print("cast"); return }
+    if op == HLIR_OP_PHI { print("phi"); return }
+    if op == HLIR_OP_EXTRACT_VALUE { print("extract_value"); return }
+    if op == HLIR_OP_INSERT_VALUE { print("insert_value"); return }
+    if op == HLIR_OP_TUPLE { print("tuple"); return }
+    if op == HLIR_OP_ARRAY { print("array"); return }
+    if op == HLIR_OP_STRUCT { print("struct"); return }
+    if op == HLIR_OP_PERFORM_EFFECT { print("perform_effect"); return }
+    if op == HLIR_OP_PUSH_HANDLER { print("push_handler"); return }
+    if op == HLIR_OP_POP_HANDLER { print("pop_handler"); return }
+    if op == HLIR_OP_DISPATCH_EFFECT { print("dispatch_effect"); return }
+    if op == HLIR_OP_SELECT { print("select"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_instr_json(instr: HlirInstr) with IO, Mut, Panic, Div {
+    print("{\"result\":")
+    compiler_s3_hlir_print_i64(instr.result)
+    print(",\"op\":\"")
+    compiler_s3_hlir_print_op_kind(instr.op_kind)
+    print("\",\"op_kind\":")
+    compiler_s3_hlir_print_i64(instr.op_kind)
+    print(",\"ty\":")
+    compiler_s3_hlir_print_type_json(instr.ty)
+    print(",\"constant\":")
+    compiler_s3_hlir_print_const_json(instr.constant)
+    print(",\"src\":")
+    compiler_s3_hlir_print_i64(instr.src)
+    print(",\"bin_op\":")
+    compiler_s3_hlir_print_i64(instr.bin_op)
+    print(",\"lhs\":")
+    compiler_s3_hlir_print_i64(instr.lhs)
+    print(",\"rhs\":")
+    compiler_s3_hlir_print_i64(instr.rhs)
+    print(",\"call_name\":")
+    compiler_s3_hlir_print_name_json(instr.call_name)
+    print(",\"call_args\":[")
+    var i: i64 = 0
+    while i < instr.call_arg_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_i64(instr.call_args[i as usize])
+        i = i + 1
+    }
+    print("],\"call_arg_count\":")
+    compiler_s3_hlir_print_i64(instr.call_arg_count)
+    print(",\"effect_name\":")
+    compiler_s3_hlir_print_name_json(instr.effect_name)
+    print(",\"effect_op\":")
+    compiler_s3_hlir_print_name_json(instr.effect_op)
+    print(",\"select_cond\":")
+    compiler_s3_hlir_print_i64(instr.select_cond)
+    print(",\"select_true\":")
+    compiler_s3_hlir_print_i64(instr.select_true)
+    print(",\"select_false\":")
+    compiler_s3_hlir_print_i64(instr.select_false)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_term_kind(kind: i64) with IO {
+    if kind == HLIR_TERM_RETURN { print("return"); return }
+    if kind == HLIR_TERM_BRANCH { print("branch"); return }
+    if kind == HLIR_TERM_COND_BRANCH { print("cond_branch"); return }
+    if kind == HLIR_TERM_SWITCH { print("switch"); return }
+    if kind == HLIR_TERM_UNREACHABLE { print("unreachable"); return }
+    print("unknown")
+}
+
+fn compiler_s3_hlir_print_terminator_json(term: HlirTerminator) with IO, Mut, Panic, Div {
+    print("{\"kind\":\"")
+    compiler_s3_hlir_print_term_kind(term.kind)
+    print("\",\"kind_id\":")
+    compiler_s3_hlir_print_i64(term.kind)
+    print(",\"return_value\":")
+    compiler_s3_hlir_print_i64(term.return_value)
+    print(",\"branch_target\":")
+    compiler_s3_hlir_print_i64(term.branch_target)
+    print(",\"cond_value\":")
+    compiler_s3_hlir_print_i64(term.cond_value)
+    print(",\"then_block\":")
+    compiler_s3_hlir_print_i64(term.then_block)
+    print(",\"else_block\":")
+    compiler_s3_hlir_print_i64(term.else_block)
+    print(",\"switch_value\":")
+    compiler_s3_hlir_print_i64(term.switch_value)
+    print(",\"switch_default\":")
+    compiler_s3_hlir_print_i64(term.switch_default)
+    print(",\"switch_case_count\":")
+    compiler_s3_hlir_print_i64(term.switch_case_count)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_block_json(block: HlirBlock) with IO, Mut, Panic, Div {
+    print("{\"id\":")
+    compiler_s3_hlir_print_i64(block.id)
+    print(",\"label\":")
+    compiler_s3_hlir_print_name_json(block.label)
+    print(",\"params\":[")
+    var p: i64 = 0
+    while p < block.param_count {
+        if p > 0 { print(",") }
+        let param = block.params[p as usize]
+        print("{\"value_id\":")
+        compiler_s3_hlir_print_i64(param.value_id)
+        print(",\"ty\":")
+        compiler_s3_hlir_print_type_json(param.ty)
+        print("}")
+        p = p + 1
+    }
+    print("],\"param_count\":")
+    compiler_s3_hlir_print_i64(block.param_count)
+    print(",\"instrs\":[")
+    var i: i64 = 0
+    while i < block.instr_count {
+        if i > 0 { print(",") }
+        compiler_s3_hlir_print_instr_json(block.instrs[i as usize])
+        i = i + 1
+    }
+    print("],\"instr_count\":")
+    compiler_s3_hlir_print_i64(block.instr_count)
+    print(",\"terminator\":")
+    compiler_s3_hlir_print_terminator_json(block.terminator)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_param_json(param: HlirParam) with IO, Mut, Panic, Div {
+    print("{\"value_id\":")
+    compiler_s3_hlir_print_i64(param.value_id)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(param.name)
+    print(",\"ty\":")
+    compiler_s3_hlir_print_type_json(param.ty)
+    print("}")
+}
+
+fn compiler_s3_hlir_print_function_json(func: HlirFunction) with IO, Mut, Panic, Div {
+    print("{\"id\":")
+    compiler_s3_hlir_print_i64(func.id)
+    print(",\"name\":")
+    compiler_s3_hlir_print_name_json(func.name)
+    print(",\"link_name\":")
+    compiler_s3_hlir_print_name_json(func.link_name)
+    print(",\"params\":[")
+    var p: i64 = 0
+    while p < func.param_count {
+        if p > 0 { print(",") }
+        compiler_s3_hlir_print_param_json(func.params[p as usize])
+        p = p + 1
+    }
+    print("],\"param_count\":")
+    compiler_s3_hlir_print_i64(func.param_count)
+    print(",\"return_type\":")
+    compiler_s3_hlir_print_type_json(func.return_type)
+    print(",\"effects\":[")
+    var e: i64 = 0
+    while e < func.effect_count {
+        if e > 0 { print(",") }
+        compiler_s3_hlir_print_name_json(func.effects[e as usize])
+        e = e + 1
+    }
+    print("],\"effect_count\":")
+    compiler_s3_hlir_print_i64(func.effect_count)
+    print(",\"blocks\":[")
+    var b: i64 = 0
+    while b < func.block_count {
+        if b > 0 { print(",") }
+        compiler_s3_hlir_print_block_json(func.blocks[b as usize])
+        b = b + 1
+    }
+    print("],\"block_count\":")
+    compiler_s3_hlir_print_i64(func.block_count)
+    print(",\"local_count\":")
+    compiler_s3_hlir_print_i64(func.local_count)
+    print(",\"is_kernel\":")
+    if func.is_kernel { print("true") } else { print("false") }
+    print(",\"is_variadic\":")
+    if func.is_variadic { print("true") } else { print("false") }
+    print(",\"is_exported\":")
+    if func.is_exported { print("true") } else { print("false") }
+    print(",\"compile_strategy\":\"")
+    print(hlir_strategy_name(func.compile_strategy))
+    print("\"}")
+}
+
+fn compiler_s3_hlir_print_module_json(module: HlirModule) with IO, Mut, Panic, Div {
+    print("{\"name\":")
+    compiler_s3_hlir_print_name_json(module.name)
+    print(",\"functions\":[")
+    var f: i64 = 0
+    while f < module.fn_count {
+        if f > 0 { print(",") }
+        compiler_s3_hlir_print_function_json(module.functions[f as usize])
+        f = f + 1
+    }
+    print("],\"function_count\":")
+    compiler_s3_hlir_print_i64(module.fn_count)
+    print(",\"globals\":[")
+    var g: i64 = 0
+    while g < module.global_count {
+        if g > 0 { print(",") }
+        let global = module.globals[g as usize]
+        print("{\"id\":")
+        compiler_s3_hlir_print_i64(global.id)
+        print(",\"name\":")
+        compiler_s3_hlir_print_name_json(global.name)
+        print(",\"ty\":")
+        compiler_s3_hlir_print_type_json(global.ty)
+        print(",\"has_init\":")
+        if global.has_init { print("true") } else { print("false") }
+        print(",\"is_const\":")
+        if global.is_const { print("true") } else { print("false") }
+        print("}")
+        g = g + 1
+    }
+    print("],\"global_count\":")
+    compiler_s3_hlir_print_i64(module.global_count)
+    print(",\"typedefs\":[")
+    var t: i64 = 0
+    while t < module.typedef_count {
+        if t > 0 { print(",") }
+        let td = module.typedefs[t as usize]
+        print("{\"name\":")
+        compiler_s3_hlir_print_name_json(td.name)
+        print(",\"field_count\":")
+        compiler_s3_hlir_print_i64(td.field_count)
+        print("}")
+        t = t + 1
+    }
+    print("],\"typedef_count\":")
+    compiler_s3_hlir_print_i64(module.typedef_count)
+    print("}")
+}
+
+fn compile_emit_hlir_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let program = load_module_file(path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        var hlir_errors = compile_errors_new()
+        hlir_errors = compile_errors_push(hlir_errors, "error: HLIR emission failed during parsing")
+        return CompileResult {
+            success: false,
+            errors: hlir_errors,
+            output: "",
+        }
+    }
+
+    let frontend_verdict = module_frontend_check_items_with_source_context(program.items, path)
+    if frontend_verdict != 0 {
+        var check_errors = compile_errors_new()
+        check_errors = compile_errors_push(check_errors, "error: HLIR emission failed during frontend typecheck")
+        return CompileResult {
+            success: false,
+            errors: check_errors,
+            output: "",
+        }
+    }
+
+    let module = hlir_lower_module(program)
+
+    print("{\"schema\":\"madaros.hlir.module/0.2\",\"stage\":\"S3\",\"source\":\"")
+    print(path)
+    print("\",\"normalized_ids\":true,\"source_to_hlir\":\"compiler_native_hlir_lower_module\",\"ownership_effect_normalization\":\"hlir_lower_module_v0\",\"module\":")
+    compiler_s3_hlir_print_module_json(module)
+    print("}")
+    print("\n")
+    CompileResult {
+        success: true,
+        errors: compile_errors_new(),
+        output: "stdout",
+    }
+}
+
 // ============================================================================
 // COMPILATION PIPELINE
 // ============================================================================
@@ -4916,6 +5982,14 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     if opts.emit_manifest {
         return compile_emit_manifest_json_from_source(opts.input_file)
+    }
+
+    if opts.emit_ast {
+        return compile_emit_ast_from_source(opts.input_file)
+    }
+
+    if opts.emit_hlir {
+        return compile_emit_hlir_from_source(opts.input_file)
     }
 
     if str_eq(opts.target, "llvm") {
@@ -7301,6 +8375,14 @@ fn compiler_main_fill_native_v2_sret_plain_main_fn(main_fn: &! IrFunction) with 
 // >16B (3 i64 fields), matching the by-value >16B sret framing.
 fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
+    var main_fn = ir_empty_function()
+    var make_fn = ir_empty_function()
+    compiler_main_fill_native_v2_sret_main_fn(&! main_fn)
+    compiler_main_fill_native_v2_sret_make_fn(&! make_fn)
+    module.functions[0] = main_fn
+    module.functions[1] = make_fn
+    module.fn_count = 2
+    return module
 
     // fn make(v) -> Big  (is_sret: hidden dest in rdi -> vreg0; explicit v shifts to rsi -> vreg1)
     // The destination is not a declared param: it is ABI-injected and spilled by
@@ -7385,6 +8467,14 @@ fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, 
 // hidden destination and explicit v in rsi, so f1 must differ from the IrCallSret witness.
 fn compiler_main_make_native_v2_sret_plaincall_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
+    var main_fn = ir_empty_function()
+    var make_fn = ir_empty_function()
+    compiler_main_fill_native_v2_sret_plain_main_fn(&! main_fn)
+    compiler_main_fill_native_v2_sret_make_fn(&! make_fn)
+    module.functions[0] = main_fn
+    module.functions[1] = make_fn
+    module.fn_count = 2
+    return module
 
     module.functions[0].name.len = 4
     module.functions[0].name.buf[0] = 109 as i8
@@ -7620,6 +8710,36 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"ffi_pinning_model\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_runtime_retry_active\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_current_frame_root_scan\":true") { return false }
+    true
+}
+
+fn compiler_main_test_native_v2_machine_module_json_export() -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let path = "artifacts/omega/native_backend_v2_machine_module.selftest.json"
+    let module = compiler_main_make_native_v2_call_module()
+    if !compiler_main_write_machine_module_json(path, &module, spec) { return false }
+    let size = file_size(path)
+    if size <= 0 || size > 65536 { return false }
+    let wide = read_file(path)
+    var data: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < size {
+        data[i as usize] = wide[i as usize]
+        i = i + 1
+    }
+    if data[0 as usize] != (123 as i8) { return false }
+    if !compiler_bytes_contains(data, size, "\"schema\":\"madaros.v2.s5.machine_module/0.1\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"source\":\"native_v2_build_machine_module\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"compiler_machine_module_exported\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"fn_count\":2") { return false }
+    if !compiler_bytes_contains(data, size, "\"functions\":[") { return false }
+    if !compiler_bytes_contains(data, size, "\"instrs\":[") { return false }
+    if !compiler_bytes_contains(data, size, "\"instr_encoding\":\"numeric_tuple_v1\"") { return false }
+    if !compiler_bytes_contains(data, size, "[112,") { return false }
+    if !compiler_bytes_contains(data, size, "[113,") { return false }
+    if !compiler_bytes_contains(data, size, "[114,") { return false }
+    if !compiler_bytes_contains(data, size, "\"target\":\"x86_64-linux\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"legacy_fallback\":false") { return false }
     true
 }
 
@@ -22095,11 +23215,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_native_v2_fail_closed_vector() &&
-       compiler_main_test_native_v2_contract_machine_ir_fields() {
-        println("  T85 OK: native v2 preview contract emits JSON and fails closed on unsupported vectors")
+       compiler_main_test_native_v2_contract_machine_ir_fields() &&
+       compiler_main_test_native_v2_machine_module_json_export() {
+        println("  T85 OK: native v2 preview contract emits MachineModule JSON and fails closed on unsupported vectors")
         passed = passed + 1
     } else {
-        println("  FAIL: T85 native v2 preview contract/vector fail-closed")
+        println("  FAIL: T85 native v2 preview MachineModule contract/vector fail-closed")
     }
 
     if compiler_main_test_ocp_mul_identity_right() {
@@ -22592,11 +23713,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T155 native v2 runtime metadata shape")
     }
 
-    if compiler_main_test_native_v2_contract_machine_ir_fields() {
-        println("  T156 OK: native v2 contract publishes stack-map counts and runtime embedding")
+    if compiler_main_test_native_v2_contract_machine_ir_fields() &&
+       compiler_main_test_native_v2_machine_module_json_export() {
+        println("  T156 OK: native v2 contract publishes stack-map counts and MachineModule JSON")
         passed = passed + 1
     } else {
-        println("  FAIL: T156 native v2 contract runtime metadata fields")
+        println("  FAIL: T156 native v2 contract runtime metadata/MachineModule fields")
     }
 
     if compiler_main_test_eg_small_sat_mul_annihil_rhs() {
@@ -27757,6 +28879,16 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     }
     if compiler_mode_has_flag(args, "--version-json") {
         run_version_json_mode()
+        return
+    }
+    let quiet_structured_emit = compiler_mode_has_flag(args, "--emit-hlir")
+    if quiet_structured_emit {
+        let opts = parse_options(args)
+        let result = compile(opts)
+        if !result.success {
+            compiler_print_errors(result.errors)
+            panic("emit-hlir failed")
+        }
         return
     }
     println("Madares v0.80.0 -- the Sounio self-hosted compiler")

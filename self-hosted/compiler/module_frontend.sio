@@ -25,10 +25,10 @@ fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div 
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT: i64 = 0
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
-var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 128] = [0; 128]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 128] = [0; 128]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 128] = [0; 128]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 128] = [0; 128]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -1660,6 +1660,32 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
     out
 }
 
+// Imported/module-merged aggregate-return callees can arrive with IrReturnSret
+// bodies after stub promotion even when the IrFunction SRET metadata was lost
+// on the copied slot. Reconstruct the callee-side ABI marker from the body so
+// native-v2 shifts argument registers exactly as it does for local SRET.
+fn ir_module_restore_sret_metadata_from_body(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var out = module
+    var fi: i64 = 0
+    while fi < out.fn_count {
+        var ii: i64 = 0
+        while ii < out.functions[fi as usize].instr_count {
+            let ins = out.functions[fi as usize].instrs[ii as usize]
+            if ins.op == IrOpcode::IrReturnSret {
+                out.functions[fi as usize].is_sret = 1
+                if ins.src1 >= 0 {
+                    out.functions[fi as usize].sret_dest_reg = ins.src1
+                }
+                ii = out.functions[fi as usize].instr_count
+            } else {
+                ii = ii + 1
+            }
+        }
+        fi = fi + 1
+    }
+    out
+}
+
 // Deep-copy an IrFunction so lean_single struct assignment does not alias instr slots.
 fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     var out = func
@@ -1722,6 +1748,7 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
         }
         pass = pass + 1
     }
+    out = ir_module_restore_sret_metadata_from_body(out)
     out
 }
 
@@ -1758,6 +1785,7 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
         ii = ii + 1
     }
     out.functions[0 as usize] = slot
+    out = ir_module_restore_sret_metadata_from_body(out)
     out
 }
 
@@ -2028,9 +2056,35 @@ fn module_frontend_source_is_fn_at(data: string, pos: i64, size: i64) -> bool {
     if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
         return false
     }
-    data[pos as usize] == (102 as i8) &&
-    data[(pos + 1) as usize] == (110 as i8) &&
-    data[(pos + 2) as usize] == (32 as i8)
+    if data[pos as usize] == (102 as i8) &&
+       data[(pos + 1) as usize] == (110 as i8) &&
+       data[(pos + 2) as usize] == (32 as i8) {
+        return true
+    }
+    if pos + 6 >= size {
+        return false
+    }
+    data[pos as usize] == (112 as i8) &&
+    data[(pos + 1) as usize] == (117 as i8) &&
+    data[(pos + 2) as usize] == (98 as i8) &&
+    data[(pos + 3) as usize] == (32 as i8) &&
+    data[(pos + 4) as usize] == (102 as i8) &&
+    data[(pos + 5) as usize] == (110 as i8) &&
+    data[(pos + 6) as usize] == (32 as i8)
+}
+
+fn module_frontend_source_fn_name_start(data: string, pos: i64, size: i64) -> i64 {
+    if pos + 6 < size &&
+       data[pos as usize] == (112 as i8) &&
+       data[(pos + 1) as usize] == (117 as i8) &&
+       data[(pos + 2) as usize] == (98 as i8) &&
+       data[(pos + 3) as usize] == (32 as i8) &&
+       data[(pos + 4) as usize] == (102 as i8) &&
+       data[(pos + 5) as usize] == (110 as i8) &&
+       data[(pos + 6) as usize] == (32 as i8) {
+        return pos + 7
+    }
+    pos + 3
 }
 
 fn module_frontend_source_fn_name(data: string, start: i64, size: i64) -> Name with Mut, Panic, Div {
@@ -2202,7 +2256,7 @@ fn module_frontend_source_find_fn(data: string, size: i64, target: Name) -> i64 
     var i: i64 = 0
     while i + 2 < size {
         if module_frontend_source_is_fn_at(data, i, size) {
-            let name = module_frontend_source_fn_name(data, i + 3, size)
+            let name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             if ir_name_eq(name, target) {
                 return i
             }
@@ -3644,7 +3698,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
     while i + 2 < size && module.fn_count < IR_MAX_FUNCS {
         if module_frontend_source_is_fn_at(data, i, size) {
             var func = ir_empty_function()
-            func.name = module_frontend_source_fn_name(data, i + 3, size)
+            func.name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             func = module_frontend_lower_source_fn_body(path, data, i, size, func)
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
@@ -4058,9 +4112,12 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    let body_result = lower_program_bodies_from_summary_with_externs_boxed_ref(
         program,
         &summary_val,
+        programs,
+        program_count,
+        module_index,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -4105,9 +4162,12 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
-    let body_result = lower_program_items_bodies_from_summary_with_epistemic_boxed_ref(
+    let body_result = lower_program_items_bodies_from_summary_with_externs_boxed_ref(
         items,
         &summary_val,
+        programs,
+        program_count,
+        module_index,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -4636,6 +4696,105 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     0
 }
 
+pub fn module_frontend_lower_imported_to_module_box(main_path: string) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    parser_reset_last_errors()
+    print("imported_lower: begin\n")
+    var trace = empty_load_multimodule_ir_trace()
+    print("imported_lower: load_begin\n")
+    let main_prog = load_module_file(main_path)
+    print("imported_lower: load_done\n")
+    if parser_last_error_count() > 0 {
+        print("Parse failed during imported lower\n")
+        return module_frontend_lower_box_error("parse_failed")
+    }
+
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    var file_paths: [string; 256] = [""; 256]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var dep_i: i64 = 0
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        work_front = work_front + 1
+        dep_i = 0
+        while dep_i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[dep_i]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            dep_i = dep_i + 1
+        }
+    }
+
+    if loaded <= 0 {
+        print("Multi-module IR failed: no_modules_loaded\n")
+        return module_frontend_lower_box_error("no_modules_loaded")
+    }
+    trace.resolved_modules = loaded
+    print("imported_lower: loaded ")
+    print_int(loaded)
+    print(" modules\n")
+
+    trace.last_stage = "typecheck"
+    print("imported_lower: typecheck_begin\n")
+    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    print("imported_lower: typecheck_done\n")
+    if verdict != 0 {
+        print("Type check failed during imported IR merge\n")
+        return module_frontend_lower_box_error("type_check_failed")
+    }
+    trace.typechecked_modules = loaded
+    print("imported_lower: typecheck ok\n")
+
+    trace.last_stage = "lower_merge"
+    print("imported_lower: lower_begin\n")
+    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+    print("imported_lower: lower_done\n")
+    if !lowered.ok {
+        print("IR lowering failed during merge: ")
+        print(lowered.error_msg)
+        print("\n")
+        return module_frontend_lower_box_error(lowered.error_msg)
+    }
+
+    let module_box = lowered.module
+    let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+    var merged_module = ir_module_finalize_merged_calls(*module_box)
+    merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
+    let fn_count = merged_module.fn_count
+    trace.last_stage = "done"
+    trace.last_module_index = loaded - 1
+    trace.merged_modules = loaded
+    print("Merged IR: ")
+    print_int(fn_count)
+    print(" functions\n")
+    if fn_count <= 0 {
+        print("IR lowering produced empty module\n")
+        return module_frontend_lower_box_error("ir_lowering_empty_module")
+    }
+    parser_reset_last_errors()
+    module_frontend_lower_box_ok(Box::new(merged_module), ir_empty_validated_patch_stats())
+}
+
 fn load_multimodule_lower_program_traced(
     program: Program,
     epistemic: IrEpistemicSection,
@@ -4705,7 +4864,7 @@ fn module_frontend_source_name_hash_at(data: string, start: i64, size: i64) -> i
 fn module_frontend_imported_simple_global_reset() with Mut, Panic {
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = 0
     var i: i64 = 0
-    while i < 64 {
+    while i < 128 {
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[i as usize] = 0
@@ -4720,12 +4879,13 @@ fn module_frontend_imported_simple_global_push_fn(
     fn_pos: i64,
     size: i64
 ) with IO, Mut, Panic, Div {
-    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 64 {
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 128 {
         return
     }
     let idx = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
-    let fn_name = module_frontend_source_fn_name(data, fn_pos + 3, size)
-    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_pos + 3, size)
+    let fn_name_start = module_frontend_source_fn_name_start(data, fn_pos, size)
+    let fn_name = module_frontend_source_fn_name(data, fn_name_start, size)
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_name_start, size)
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = 0
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 0
@@ -4885,7 +5045,7 @@ fn module_frontend_imported_simple_global_push_fn(
                         if printed.0 {
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
                         }
-                    } else if callee.len > 0 {
+                    } else if callee.len > 0 && expr2 == expr {
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, expr2, size)
                     }
@@ -4911,7 +5071,7 @@ fn module_frontend_lower_source_file_simple_global(
     }
     let data = read_file(path)
     var i: i64 = 0
-    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
+    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 128 {
         if module_frontend_source_is_fn_at(data, i, size) {
             module_frontend_imported_simple_global_push_fn(path, data, i, size)
         }
