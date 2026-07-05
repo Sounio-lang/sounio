@@ -227,7 +227,8 @@ def emit(args: argparse.Namespace) -> int:
             "f128_slot_kind_3_is_not_emitted_by_this_receipt",
         ],
         "missing_full_obligations": [
-            "i256/u256 ABI call-return receipts across function boundaries",
+            "imported module-boundary i256/u256 ABI call-return receipts",
+            "wide ABI stack-pressure cases beyond local two-wide-arg calls",
             "i512/u512 generalized 8-limb execution receipts",
             "f128 IR/MIR/ABI/software-helper receipts",
         ],

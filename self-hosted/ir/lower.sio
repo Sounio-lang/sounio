@@ -1764,6 +1764,24 @@ fn lowerer_lower_fn_params_mut(
                     }
                 }
 
+                let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                let param_wide_limbs = lower_wide_limb_count(param_wide_bits)
+                if param_wide_limbs > 1 {
+                    var wi: i64 = 1
+                    while wi < param_wide_limbs {
+                        let limb_reg = current_func.reg_count
+                        current_func.reg_count = limb_reg + 1
+                        if current_func.param_count < IR_MAX_PARAMS {
+                            let param_count_w = current_func.param_count
+                            current_func.param_regs[param_count_w as usize] = limb_reg
+                            current_func.param_count = param_count_w + 1
+                        } else {
+                            lowerer_mark_error(lo)
+                        }
+                        wi = wi + 1
+                    }
+                }
+
                 if lower_type_expr_is_f64(&(*list).head.ty) {
                     let instr_count = current_func.instr_count
                     if instr_count < IR_MAX_INSTRS {
@@ -1782,8 +1800,8 @@ fn lowerer_lower_fn_params_mut(
                     locals.depths[idx as usize] = (*lo).scope_depth
                     locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                     locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
-                    locals.wide_bits[idx as usize] = 0
-                    locals.wide_signed[idx as usize] = 0
+                    locals.wide_bits[idx as usize] = param_wide_bits
+                    locals.wide_signed[idx as usize] = if param_wide_bits > 64 { lower_type_expr_wide_signed(&(*list).head.ty) } else { 0 }
                     locals.global_bss_offsets[idx as usize] = 0
                     locals.global_bss_sizes[idx as usize] = 0
                     locals.is_global[idx as usize] = 0
@@ -2569,8 +2587,13 @@ fn lower_opt_type_has_unsupported_s5_numeric(opt: &Option<Box<TypeExpr>>) -> boo
 }
 
 fn lower_type_expr_wide_bits(te: &TypeExpr) -> i64 with Mut, Panic, Div {
-    if (*te).kind != TypeExprKind::TypeNamed { return 0 }
-    lower_name_wide_int_bits(ir_path_first_name((*te).path))
+    lower_name_wide_int_bits(lower_param_struct_type_name(te))
+}
+
+fn lower_type_expr_wide_signed(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    let n = lower_param_struct_type_name(te)
+    if lower_name_wide_int_bits(n) <= 0 { return 0 }
+    if n.buf[0] as i64 == 105 { 1 } else { 0 }
 }
 
 fn lower_opt_type_wide_bits(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
@@ -2583,10 +2606,7 @@ fn lower_opt_type_wide_bits(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic,
 fn lower_opt_type_wide_signed(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(te) => {
-            if (*te).kind != TypeExprKind::TypeNamed { return 0 }
-            let n = ir_path_first_name((*te).path)
-            if lower_name_wide_int_bits(n) <= 0 { return 0 }
-            if n.buf[0] as i64 == 105 { 1 } else { 0 }
+            lower_type_expr_wide_signed(&(*te))
         }
         None => 0,
     }
@@ -3063,6 +3083,10 @@ impl Lowerer {
     }
 
     fn aggregate_storage_bytes_for_type(self, type_name: Name) -> i64 {
+        let wide_bits = lower_name_wide_int_bits(type_name)
+        if wide_bits > 64 {
+            return self.aggregate_storage_bytes(lower_wide_limb_count(wide_bits))
+        }
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
             if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
@@ -3977,6 +4001,11 @@ impl Lowerer {
             if bits > 64 { return bits }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
+        if (*expr).kind == ExprKind::ExprCall {
+            let ret_name = self.expr_call_return_struct_name_ref(expr)
+            let bits = lower_name_wide_int_bits(ret_name)
+            if bits > 64 { return bits }
+        }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_bits((*expr).name)
         }
@@ -4002,6 +4031,13 @@ impl Lowerer {
             let signed = lower_opt_type_wide_signed(&(*expr).cast_type)
             if lower_opt_type_wide_bits(&(*expr).cast_type) > 64 { return signed }
             return self.expr_wide_signed_opt_ref(&(*expr).left)
+        }
+        if (*expr).kind == ExprKind::ExprCall {
+            let ret_name = self.expr_call_return_struct_name_ref(expr)
+            if lower_name_wide_int_bits(ret_name) > 64 {
+                if ret_name.len > 0 && ret_name.buf[0] as i64 == 105 { return 1 }
+                return 0
+            }
         }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_signed((*expr).name)
@@ -5340,6 +5376,16 @@ impl Lowerer {
 
     fn emit_sret_field_copy(self, src_reg: i64, dest_reg: i64, type_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        let wide_bits = lower_name_wide_int_bits(type_name)
+        if wide_bits > 64 {
+            let limbs = lower_wide_limb_count(wide_bits)
+            var wi: i64 = 0
+            while wi < limbs {
+                lo = lo.emit(ir_field_set(dest_reg, wi, src_reg + wi, ir_empty_name()))
+                wi = wi + 1
+            }
+            return lo
+        }
         var si: i64 = 0
         while si < (*lo.struct_layouts).count {
             if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
@@ -5407,6 +5453,23 @@ impl Lowerer {
                     } else {
                         lo = lo.report_error()
                     }
+                    let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                    let param_wide_limbs = lower_wide_limb_count(param_wide_bits)
+                    if param_wide_limbs > 1 {
+                        var wi: i64 = 1
+                        while wi < param_wide_limbs {
+                            let limb_reg = current_func.reg_count
+                            current_func.reg_count = limb_reg + 1
+                            if current_func.param_count < IR_MAX_PARAMS {
+                                let param_count_w = current_func.param_count
+                                current_func.param_regs[param_count_w as usize] = limb_reg
+                                current_func.param_count = param_count_w + 1
+                            } else {
+                                lo = lo.report_error()
+                            }
+                            wi = wi + 1
+                        }
+                    }
 
                     if lower_type_expr_is_f64(&(*list).head.ty) {
                         let instr_count = current_func.instr_count
@@ -5426,8 +5489,8 @@ impl Lowerer {
                         locals.depths[idx as usize] = lo.scope_depth
                         locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
-                        locals.wide_bits[idx as usize] = 0
-                        locals.wide_signed[idx as usize] = 0
+                        locals.wide_bits[idx as usize] = param_wide_bits
+                        locals.wide_signed[idx as usize] = if param_wide_bits > 64 { lower_type_expr_wide_signed(&(*list).head.ty) } else { 0 }
                         locals.global_bss_offsets[idx as usize] = 0
                         locals.global_bss_sizes[idx as usize] = 0
                         locals.is_global[idx as usize] = 0
@@ -6479,11 +6542,26 @@ impl Lowerer {
                 Some(list) => {
                     let pair_head = lo.lower_expr_ref(&(*list).head)
                     lo = pair_head.0
-                    if reg_count < 64 {
-                        regs[reg_count as usize] = pair_head.1
-                        reg_count = reg_count + 1
+                    let arg_wide_bits = lo.expr_wide_bits_ref(&(*list).head)
+                    let arg_wide_limbs = lower_wide_limb_count(arg_wide_bits)
+                    if arg_wide_limbs > 1 {
+                        var wi: i64 = 0
+                        while wi < arg_wide_limbs {
+                            if reg_count < 64 {
+                                regs[reg_count as usize] = pair_head.1 + wi
+                                reg_count = reg_count + 1
+                            } else {
+                                break
+                            }
+                            wi = wi + 1
+                        }
                     } else {
-                        break
+                        if reg_count < 64 {
+                            regs[reg_count as usize] = pair_head.1
+                            reg_count = reg_count + 1
+                        } else {
+                            break
+                        }
                     }
                     current = &(*list).tail
                 }
@@ -8060,6 +8138,21 @@ impl Lowerer {
             if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
                 let ext_ret_field_count_sret = lower_extern_fn_ret_field_count_for_call(e)
                 let sret_alloc_bytes = if ext_ret_field_count_sret > 0 { lo4.aggregate_storage_bytes(ext_ret_field_count_sret) } else { lo4.aggregate_storage_bytes_for_type(ret_name_sret) }
+                let ret_wide_bits = lower_name_wide_int_bits(ret_name_sret)
+                if ret_wide_bits > 64 {
+                    let ret_wide_limbs = lower_wide_limb_count(ret_wide_bits)
+                    var lo_sret_wide = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
+                    lo_sret_wide = lo_sret_wide.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                    let pair_wide_dst = lo_sret_wide.fresh_wide_reg(ret_wide_limbs)
+                    lo_sret_wide = pair_wide_dst.0
+                    let wide_dst = pair_wide_dst.1
+                    var wi: i64 = 0
+                    while wi < ret_wide_limbs {
+                        lo_sret_wide = lo_sret_wide.emit(ir_field_get(wide_dst + wi, dst, wi, ir_empty_name()))
+                        wi = wi + 1
+                    }
+                    return (lo_sret_wide, wide_dst)
+                }
                 var lo_sret = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
                 lo_sret = lo_sret.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
                 return (lo_sret, dst)
@@ -8436,6 +8529,21 @@ impl Lowerer {
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
             if lower_return_name_is_aggregate(ret_name_m) && final_argc <= 8 {
+                let ret_wide_bits_m = lower_name_wide_int_bits(ret_name_m)
+                if ret_wide_bits_m > 64 {
+                    let ret_wide_limbs_m = lower_wide_limb_count(ret_wide_bits_m)
+                    var lo_sret_wide_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
+                    lo_sret_wide_m = lo_sret_wide_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
+                    let pair_wide_dst_m = lo_sret_wide_m.fresh_wide_reg(ret_wide_limbs_m)
+                    lo_sret_wide_m = pair_wide_dst_m.0
+                    let wide_dst_m = pair_wide_dst_m.1
+                    var wi_m: i64 = 0
+                    while wi_m < ret_wide_limbs_m {
+                        lo_sret_wide_m = lo_sret_wide_m.emit(ir_field_get(wide_dst_m + wi_m, dst, wi_m, ir_empty_name()))
+                        wi_m = wi_m + 1
+                    }
+                    return (lo_sret_wide_m, wide_dst_m)
+                }
                 var lo_sret_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
                 lo_sret_m = lo_sret_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
                 return (lo_sret_m, dst)
