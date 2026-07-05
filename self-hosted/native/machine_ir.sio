@@ -5,7 +5,7 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_F128_REG_MARKER_FLAG}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 512
@@ -82,6 +82,7 @@ pub let MIR_OP_PSEUDO_STORE_GLOBAL: i64 = 21
 pub let MIR_OP_PSEUDO_CALL_SRET: i64 = 22
 pub let MIR_OP_PSEUDO_RET_SRET: i64 = 23
 pub let MIR_OP_PSEUDO_WIDE_META: i64 = 24
+pub let MIR_OP_PSEUDO_F128_META: i64 = 25
 
 pub let MIR_OP_PSEUDO_LOAD_FLOAT: i64 = 17
 pub let MIR_OP_PSEUDO_INT_TO_FLOAT: i64 = 18
@@ -537,6 +538,12 @@ pub fn native_v2_collect_call_args(args: Option<Box<IrRegList>>, out: [i64; 8], 
 
 pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut, Panic, Div {
     var mi = machine_empty_instr()
+    if instr.op == IrOpcode::IrNop && instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+        mi.opcode = MIR_OP_PSEUDO_F128_META
+        mi.dst = machine_operand_stack_slot(instr.dst)
+        mi.aux = machine_operand_imm64(2)
+        return mi
+    }
     if native_v2_ir_opcode_is_wide_meta(instr.op) {
         mi.opcode = MIR_OP_PSEUDO_WIDE_META
         mi.dst = machine_operand_stack_slot(instr.dst)
@@ -765,6 +772,9 @@ pub fn native_v2_lower_function_to_machine(func: IrFunction) -> MachineFunction 
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
         if instr.op == IrOpcode::IrNop {
+            if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+                out = _add_instr_byval(out, native_v2_pseudo_from_ir(instr))
+            }
             i = i + 1
             continue
         }
@@ -1029,6 +1039,10 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
                 out.unsupported_detail = "wide_meta_bad_limb_count"
                 return out
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_F128_META {
+            out.supported = false
+            out.unsupported_detail = "f128_execution_pending"
+            return out
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             out.legal_instr_count = out.legal_instr_count + 2
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_STRING {
@@ -1168,6 +1182,11 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
     while i < (*func).instr_count {
         let instr = (*func).instrs[i as usize]
         if instr.op == IrOpcode::IrNop {
+            if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+                out.supported = false
+                out.unsupported_detail = "f128_execution_pending"
+                return out
+            }
             i = i + 1
             continue
         }
@@ -1330,6 +1349,12 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
     while i < (*func).instr_count {
         let ir_instr = (*func).instrs[i as usize]
         if ir_instr.op == IrOpcode::IrNop {
+            if ir_instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+                native_v2_mark_slot_ref(out, ir_instr.dst, MIR_SLOT_KIND_F128_BINARY128, 2)
+                (*out).supported = false
+                (*out).unsupported_detail = "f128_execution_pending"
+                return
+            }
             i = i + 1
             continue
         }
@@ -1646,6 +1671,11 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             } else {
                 out = native_v2_mark_wide_limb_range_byval(out, machine_instr_dst_value(instr), limbs)
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_F128_META {
+            out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+            out.supported = false
+            out.unsupported_detail = "f128_execution_pending"
+            return out
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             let temp = out.temp_count
             out.temp_count = temp + 1

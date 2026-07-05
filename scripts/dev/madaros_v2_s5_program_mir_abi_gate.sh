@@ -938,14 +938,14 @@ if f128_value_cases.get("high_precision_probe", {}).get("decimal_digit_count") !
 if f128_value_cases.get("high_precision_probe", {}).get("decimal_scale10") != 34:
     raise SystemExit("high_precision_probe must preserve decimal scale10=34 in the binary128 value receipt")
 
-if machine_slot_metadata_receipt.get("schema") != "madaros.v2.s5.machine_slot_metadata_receipt/0.1":
+if machine_slot_metadata_receipt.get("schema") != "madaros.v2.s5.machine_slot_metadata_receipt/0.2":
     raise SystemExit("bad MachineIR slot metadata receipt schema")
 if machine_slot_metadata_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing MachineIR slot metadata receipt")
-if machine_slot_metadata_receipt.get("stage_contract_level") != "S5_MACHINE_SLOT_KIND_WIDTH_METADATA_PROMOTED_NOT_F128_EXECUTION":
+if machine_slot_metadata_receipt.get("stage_contract_level") != "S5_MACHINE_SLOT_KIND_WIDTH_METADATA_AND_F128_SLOT_PROMOTED_NOT_F128_EXECUTION":
     raise SystemExit("MachineIR slot metadata receipt must declare slot-kind/width stage contract")
-if machine_slot_metadata_receipt.get("case_count") != 2:
-    raise SystemExit("MachineIR slot metadata receipt must contain exact two cases")
+if machine_slot_metadata_receipt.get("case_count") != 3:
+    raise SystemExit("MachineIR slot metadata receipt must contain exact three cases")
 required_slot_metadata_true_flags = [
     "machine_ir_slot_metadata_exported",
     "slot_kind_encoding_complete_for_current_scalars",
@@ -954,6 +954,7 @@ required_slot_metadata_true_flags = [
     "f64_slot_kind_width_promoted",
     "f64_slot_kind_distinguished_from_i64",
     "f128_binary128_slot_kind_reserved",
+    "f128_binary128_slot_kind_width_promoted",
     "f128_binary128_limb_contract_recorded",
     "wide_int_limb_slot_kind_reserved",
 ]
@@ -964,8 +965,12 @@ if machine_slot_metadata_receipt.get("f128_binary128_limb_count") != 2:
     raise SystemExit("MachineIR slot metadata receipt must reserve two limbs for binary128")
 if machine_slot_metadata_receipt.get("f128_binary128_limb_bits") != 64:
     raise SystemExit("MachineIR slot metadata receipt must reserve 64-bit binary128 limbs")
+if machine_slot_metadata_receipt.get("f128_binary128_slot_metadata_emitted") is not True:
+    raise SystemExit("MachineIR slot metadata receipt must emit f128 binary128 slot metadata")
 if machine_slot_metadata_receipt.get("f128_execution_slot_emitted") is not False:
-    raise SystemExit("MachineIR slot metadata receipt must not emit f128 execution slots")
+    raise SystemExit("MachineIR slot metadata receipt must not claim f128 execution-slot promotion")
+if machine_slot_metadata_receipt.get("f128_execution_pending_detail") != "f128_execution_pending":
+    raise SystemExit("MachineIR slot metadata receipt must record f128 execution-pending detail")
 for field in [
     "f128_promoted",
     "s5_ready",
@@ -975,21 +980,24 @@ for field in [
     if machine_slot_metadata_receipt.get(field) is not False:
         raise SystemExit(f"MachineIR slot metadata receipt must not overclaim {field}")
 slot_metadata_cases = {row.get("case_id"): row for row in machine_slot_metadata_receipt.get("cases", [])}
-if set(slot_metadata_cases) != {"i64_slot_kind_width_metadata", "f64_slot_kind_width_metadata"}:
+if set(slot_metadata_cases) != {"i64_slot_kind_width_metadata", "f64_slot_kind_width_metadata", "f128_binary128_slot_kind_width_metadata"}:
     raise SystemExit(f"MachineIR slot metadata receipt cases mismatch: {sorted(slot_metadata_cases)}")
 if 1 not in slot_metadata_cases["i64_slot_kind_width_metadata"].get("slot_kinds_seen", []):
     raise SystemExit("i64 slot metadata case must emit i64 kind")
 if 2 not in slot_metadata_cases["f64_slot_kind_width_metadata"].get("slot_kinds_seen", []):
     raise SystemExit("f64 slot metadata case must emit f64 kind")
-for case_id, row in slot_metadata_cases.items():
-    if 3 in row.get("slot_kinds_seen", []):
-        raise SystemExit(f"{case_id} must not emit f128 kind before f128 execution promotion")
+if 3 not in slot_metadata_cases["f128_binary128_slot_kind_width_metadata"].get("slot_kinds_seen", []):
+    raise SystemExit("f128 slot metadata case must emit f128 kind")
+if slot_metadata_cases["f128_binary128_slot_kind_width_metadata"].get("machine_module_supported") is not False:
+    raise SystemExit("f128 slot metadata case must keep MachineModule unsupported until execution promotion")
+if slot_metadata_cases["f128_binary128_slot_kind_width_metadata"].get("machine_module_unsupported_detail") != "f128_execution_pending":
+    raise SystemExit("f128 slot metadata case must record f128_execution_pending")
 
-if diagnostics_receipt.get("schema") != "madaros.v2.s5.diagnostics_receipt/0.1":
+if diagnostics_receipt.get("schema") != "madaros.v2.s5.diagnostics_receipt/0.2":
     raise SystemExit("bad S5 diagnostics receipt schema")
 if diagnostics_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing diagnostics receipt")
-if diagnostics_receipt.get("stage_contract_level") != "S5_UNSUPPORTED_NUMERIC_DIAGNOSTICS_PROMOTED_NOT_F128":
+if diagnostics_receipt.get("stage_contract_level") != "S5_UNSUPPORTED_NUMERIC_DIAGNOSTICS_AND_F128_EXECUTION_PENDING_PROMOTED":
     raise SystemExit("diagnostics receipt must declare unsupported numeric diagnostic stage contract")
 if diagnostics_receipt.get("case_count") != 5:
     raise SystemExit("diagnostics receipt must contain exact five cases")
@@ -1001,15 +1009,20 @@ required_diagnostics_true_flags = [
     "s5_diagnostics_unsupported_numeric_complete",
     "unsupported_numeric_widths_fail_closed",
     "unsupported_widths_do_not_emit_elf",
-    "unsupported_widths_do_not_emit_machine_module_json",
+    "front_half_unsupported_widths_do_not_emit_machine_module_json",
+    "f128_execution_pending_emits_machine_module_json",
     "unsupported_widths_do_not_segfault",
-    "f128_rejected_not_promoted",
+    "f128_execution_pending_not_promoted",
     "i512_u512_rejected_not_promoted",
     "promoted_i256_width_preserved",
 ]
 for field in required_diagnostics_true_flags:
     if diagnostics_receipt.get(field) is not True:
         raise SystemExit(f"diagnostics receipt missing required true flag: {field}")
+if diagnostics_receipt.get("f128_machine_module_supported") is not False:
+    raise SystemExit("diagnostics receipt must keep f128 MachineModule unsupported")
+if diagnostics_receipt.get("f128_machine_module_unsupported_detail") != "f128_execution_pending":
+    raise SystemExit("diagnostics receipt must record f128_execution_pending")
 for field in [
     "legacy_fallback_for_unsupported_widths",
     "f128_promoted",
@@ -1021,8 +1034,8 @@ for field in [
         raise SystemExit(f"diagnostics receipt must not overclaim {field}")
 diagnostic_cases = {row.get("case_id"): row for row in diagnostics_receipt.get("cases", [])}
 required_diagnostic_negative = {
-    "reject_f128_let_annotation_native_v2": {"width": "f128", "detail": "let annotation"},
-    "reject_f128_cast_native_v2": {"width": "f128", "detail": "cast"},
+    "reject_f128_let_annotation_native_v2": {"width": "f128", "detail": "f128_execution_pending", "fragment": "f128_execution_pending", "machine_module": True},
+    "reject_f128_cast_native_v2": {"width": "f128", "detail": "f128_execution_pending", "fragment": "f128_execution_pending", "machine_module": True},
     "reject_i512_let_annotation_native_v2": {"width": "i512", "detail": "let annotation"},
     "reject_u512_cast_native_v2": {"width": "u512", "detail": "cast"},
 }
@@ -1039,13 +1052,20 @@ for case_id, expected in required_diagnostic_negative.items():
         raise SystemExit(f"{case_id} expected unsupported width {expected['width']}, got {row.get('unsupported_width')}")
     if row.get("expected_detail") != expected["detail"]:
         raise SystemExit(f"{case_id} expected detail {expected['detail']}, got {row.get('expected_detail')}")
-    if row.get("native_v2_compile_rc") == 0:
+    if row.get("native_v2_compile_rc") == 0 and not expected.get("machine_module", False):
         raise SystemExit(f"{case_id} unexpectedly has rc=0")
-    if row.get("diagnostic_fragment") != "native-v2 S5 unsupported numeric width":
+    if row.get("diagnostic_fragment") != expected.get("fragment", "native-v2 S5 unsupported numeric width"):
         raise SystemExit(f"{case_id} missing stable diagnostic fragment")
     if row.get("elf_emitted") is not False:
         raise SystemExit(f"{case_id} must not emit an ELF")
-    if row.get("machine_module_json_emitted") is not False:
+    if expected.get("machine_module", False):
+        if row.get("machine_module_json_emitted") is not True:
+            raise SystemExit(f"{case_id} must emit unsupported f128 MachineModule JSON")
+        if row.get("machine_module_supported") is not False:
+            raise SystemExit(f"{case_id} MachineModule must be unsupported")
+        if row.get("machine_module_unsupported_detail") != "f128_execution_pending":
+            raise SystemExit(f"{case_id} must record f128_execution_pending")
+    elif row.get("machine_module_json_emitted") is not False:
         raise SystemExit(f"{case_id} must not emit MachineModule JSON")
     if row.get("segfault") is not False:
         raise SystemExit(f"{case_id} must not segfault")
@@ -1453,7 +1473,7 @@ not_promoted = [
     {
         "surface": "unsupported_numeric_diagnostics",
         "status": "promoted_by_diagnostics_receipt",
-        "reason": "unsupported f128/i512/u512 native-v2 numeric widths now fail closed without ELF, MachineModule JSON, segfault, or legacy fallback",
+        "reason": "i512/u512 native-v2 numeric widths fail closed before MachineModule export; f128 now emits unsupported MachineModule slot metadata and still fails closed without ELF, segfault, or legacy fallback",
     },
 ]
 
@@ -1841,10 +1861,11 @@ receipt = {
     "unsupported_numeric_widths_fail_closed": True,
     "differential_native_v2_vs_lean_single_promoted": True,
     "unsupported_widths_do_not_emit_elf": True,
-    "unsupported_widths_do_not_emit_machine_module_json": True,
+    "front_half_unsupported_widths_do_not_emit_machine_module_json": True,
+    "f128_execution_pending_emits_machine_module_json": True,
     "unsupported_widths_do_not_segfault": True,
     "legacy_fallback_for_unsupported_widths": False,
-    "f128_rejected_not_promoted": True,
+    "f128_execution_pending_not_promoted": True,
     "i512_u512_rejected_not_promoted": True,
     "f128_promoted": False,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
@@ -1922,7 +1943,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: unsupported f128/i512/u512 native-v2 numeric widths fail closed without ELF, MachineModule JSON, segfault, or fallback"
-echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 remains the explicit full blocker"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits unsupported slot metadata and fails closed without ELF, segfault, or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 execution remains the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

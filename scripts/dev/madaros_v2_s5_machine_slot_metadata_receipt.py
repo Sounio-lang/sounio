@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.1"
+SCHEMA_VERSION = "madaros.v2.s5.machine_slot_metadata_receipt/0.2"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-STAGE_CONTRACT_LEVEL = "S5_MACHINE_SLOT_KIND_WIDTH_METADATA_PROMOTED_NOT_F128_EXECUTION"
+STAGE_CONTRACT_LEVEL = "S5_MACHINE_SLOT_KIND_WIDTH_METADATA_AND_F128_SLOT_PROMOTED_NOT_F128_EXECUTION"
 
 MIR_SLOT_KIND_I64 = 1
 MIR_SLOT_KIND_F64 = 2
@@ -51,6 +51,20 @@ CASES: list[dict[str, Any]] = [
         "expected_exit": 7,
         "required_kinds": [MIR_SLOT_KIND_I64, MIR_SLOT_KIND_F64],
         "forbidden_kinds": [MIR_SLOT_KIND_F128_BINARY128],
+    },
+    {
+        "case_id": "f128_binary128_slot_kind_width_metadata",
+        "source": """fn main() -> i64 {
+    let x: f128 = 1.0 as f128
+    0
+}
+""",
+        "expected_exit": None,
+        "required_kinds": [MIR_SLOT_KIND_F128_BINARY128],
+        "forbidden_kinds": [],
+        "expect_supported": False,
+        "expected_unsupported_detail": "f128_execution_pending",
+        "expect_elf": False,
     },
 ]
 
@@ -105,7 +119,7 @@ def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
     return first, sha256_text(first)
 
 
-def load_machine_module(path: Path) -> dict[str, Any]:
+def load_machine_module(path: Path, expect_supported: bool) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != MACHINE_SCHEMA:
         raise SystemExit(f"bad MachineModule schema: {payload.get('schema')!r}")
@@ -117,8 +131,11 @@ def load_machine_module(path: Path) -> dict[str, Any]:
         raise SystemExit("MachineModule target mismatch")
     if payload.get("active") is not True:
         raise SystemExit("MachineModule is not active")
-    if payload.get("supported") is not True:
-        raise SystemExit(f"MachineModule unsupported: {payload.get('unsupported_detail')!r}")
+    if bool(payload.get("supported") is True) != expect_supported:
+        raise SystemExit(
+            f"MachineModule supported mismatch: expected {expect_supported}, "
+            f"got {payload.get('supported')!r} detail={payload.get('unsupported_detail')!r}"
+        )
     if payload.get("legacy_fallback") is not False:
         raise SystemExit("MachineModule must not use legacy fallback")
     slot_metadata = payload.get("slot_metadata")
@@ -184,22 +201,42 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     )
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
-    if compile_rc != 0 or "native_v2_compile: emitted" not in compile_log:
-        raise SystemExit(f"{case_id} failed native-v2 compile; log={compile_log_path}")
-    if not elf_path.exists() or elf_path.stat().st_size <= 0:
-        raise SystemExit(f"{case_id} did not emit an ELF")
+    expect_elf = bool(case.get("expect_elf", True))
+    expect_supported = bool(case.get("expect_supported", True))
+    expected_detail = str(case.get("expected_unsupported_detail", ""))
+    if expect_elf:
+        if compile_rc != 0 or "native_v2_compile: emitted" not in compile_log:
+            raise SystemExit(f"{case_id} failed native-v2 compile; log={compile_log_path}")
+        if not elf_path.exists() or elf_path.stat().st_size <= 0:
+            raise SystemExit(f"{case_id} did not emit an ELF")
+    else:
+        if "native_v2_compile: emitted" in compile_log:
+            raise SystemExit(f"{case_id} unexpectedly emitted execution-pending f128 slot; log={compile_log_path}")
+        if "native_v2_compile: FAIL" not in compile_log:
+            raise SystemExit(f"{case_id} missing native-v2 fail-closed log line; log={compile_log_path}")
+        if "Segmentation fault" in compile_log or "SIGSEGV" in compile_log or "legacy fallback" in compile_log:
+            raise SystemExit(f"{case_id} crashed or used fallback; log={compile_log_path}")
+        if elf_path.exists() and elf_path.stat().st_size > 0:
+            raise SystemExit(f"{case_id} emitted an ELF despite f128 execution-pending status")
     if not mm_path.exists() or mm_path.stat().st_size <= 0:
         raise SystemExit(f"{case_id} did not emit MachineModule JSON")
 
-    elf_path.chmod(elf_path.stat().st_mode | 0o111)
-    actual_exit, stdout, stderr = run_binary(elf_path, timeout_s)
-    stdout_path.write_bytes(stdout)
-    stderr_path.write_bytes(stderr)
-    expected_exit = int(case["expected_exit"])
-    if actual_exit != expected_exit:
-        raise SystemExit(f"{case_id} expected exit {expected_exit}, got {actual_exit}")
+    actual_exit: int | None = None
+    stdout = b""
+    stderr = b""
+    expected_exit_raw = case.get("expected_exit")
+    if expect_elf:
+        elf_path.chmod(elf_path.stat().st_mode | 0o111)
+        actual_exit, stdout, stderr = run_binary(elf_path, timeout_s)
+        stdout_path.write_bytes(stdout)
+        stderr_path.write_bytes(stderr)
+        expected_exit = int(expected_exit_raw)
+        if actual_exit != expected_exit:
+            raise SystemExit(f"{case_id} expected exit {expected_exit}, got {actual_exit}")
 
-    module = load_machine_module(mm_path)
+    module = load_machine_module(mm_path, expect_supported)
+    if not expect_supported and expected_detail and module.get("unsupported_detail") != expected_detail:
+        raise SystemExit(f"{case_id} bad MachineModule unsupported detail: {module.get('unsupported_detail')!r}")
     rows = slot_rows(module)
     if not rows:
         raise SystemExit(f"{case_id} emitted no slot metadata rows")
@@ -209,8 +246,8 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         widths_by_kind.setdefault(row["kind"], []).append(row["width_words"])
         if row["kind"] in (MIR_SLOT_KIND_I64, MIR_SLOT_KIND_F64) and row["width_words"] != 1:
             raise SystemExit(f"{case_id} scalar slot kind {row['kind']} must have width_words=1")
-        if row["kind"] == MIR_SLOT_KIND_F128_BINARY128:
-            raise SystemExit(f"{case_id} unexpectedly emitted f128 slot metadata")
+        if row["kind"] == MIR_SLOT_KIND_F128_BINARY128 and row["width_words"] != 2:
+            raise SystemExit(f"{case_id} f128 binary128 slots must have width_words=2")
 
     for required in case["required_kinds"]:
         if int(required) not in kinds:
@@ -225,12 +262,15 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "source_sha256": sha256_text(source_text),
         "compile_rc": compile_rc,
         "actual_exit": actual_exit,
-        "expected_exit": expected_exit,
+        "expected_exit": expected_exit_raw,
         "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
         "stdout_sha256": sha256_bytes(stdout),
         "stderr_sha256": sha256_bytes(stderr),
-        "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+        "elf_sha256": sha256_bytes(elf_path.read_bytes()) if expect_elf else None,
         "machine_module_json_sha256": module["machine_module_json_sha256"],
+        "machine_module_supported": bool(module.get("supported") is True),
+        "machine_module_unsupported_detail": str(module.get("unsupported_detail", "")),
+        "elf_emitted": expect_elf,
         "slot_metadata_schema": module["slot_metadata"]["schema"],
         "slot_metadata_function_count": len(module["slot_metadata"].get("functions", [])),
         "slot_metadata_row_count": len(rows),
@@ -264,19 +304,20 @@ def emit(args: argparse.Namespace) -> int:
         "f64_slot_kind_width_promoted": True,
         "f64_slot_kind_distinguished_from_i64": True,
         "f128_binary128_slot_kind_reserved": True,
+        "f128_binary128_slot_kind_width_promoted": True,
         "f128_binary128_limb_contract_recorded": True,
         "f128_binary128_limb_count": 2,
         "f128_binary128_limb_bits": 64,
         "wide_int_limb_slot_kind_reserved": True,
         "slot_kinds_seen": all_kinds,
+        "f128_binary128_slot_metadata_emitted": True,
         "f128_execution_slot_emitted": False,
+        "f128_execution_pending_detail": "f128_execution_pending",
         "f128_promoted": False,
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,
         "missing_full_obligations": [
-            "f128 IR opcodes and constructors",
-            "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
             "f128 SysV ABI classification and call-return signature metadata",
             "f128 software-helper lowering with IEEE rounding and NaN/Inf receipts",
             "native-v2 f128 execution differential receipts",

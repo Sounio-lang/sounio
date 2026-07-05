@@ -2625,7 +2625,6 @@ fn lower_wide_bits_supported_s5(bits: i64) -> bool {
 fn lower_type_expr_has_unsupported_s5_numeric(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind == TypeExprKind::TypeNamed {
         let n = ir_path_first_name((*te).path)
-        if lower_name_is_f128(n) { return true }
         let bits = lower_name_wide_int_bits(n)
         if bits > 64 && !lower_wide_bits_supported_s5(bits) { return true }
         return false
@@ -2648,6 +2647,18 @@ fn lower_type_expr_has_unsupported_s5_numeric(te: &TypeExpr) -> bool with Mut, P
 fn lower_opt_type_has_unsupported_s5_numeric(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match *opt {
         Some(te) => lower_type_expr_has_unsupported_s5_numeric(&(*te)),
+        None => false,
+    }
+}
+
+fn lower_type_expr_is_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_f128(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_f128(&(*te)),
         None => false,
     }
 }
@@ -6287,6 +6298,7 @@ impl Lowerer {
             print("error: native-v2 S5 unsupported numeric width in let annotation; supported promoted widths are f64, i128, i256, u128, u256\n")
             panic("native-v2 S5 unsupported numeric width in let annotation")
         }
+        let annotated_f128 = lower_opt_type_is_f128(&s.ty)
         let rhs_is_float_before_lower = match s.expr {
             Some(expr_box_pre_float) => self.expr_result_is_float_ref(&(*expr_box_pre_float)),
             _ => false,
@@ -6304,6 +6316,9 @@ impl Lowerer {
             let dst = pair_dst.1
             lo = lo.emit(ir_copy(dst, reg))
             reg = dst
+        }
+        if annotated_f128 {
+            lo = lo.emit(ir_mark_f128_reg(reg))
         }
         lo = lo.bind_local(s.name, reg, is_mut)
         if rhs_is_float_before_lower || rhs_is_int_before_lower {
@@ -8507,6 +8522,13 @@ impl Lowerer {
             print("error: native-v2 S5 unsupported numeric width in cast; supported promoted widths are f64, i128, i256, u128, u256\n")
             panic("native-v2 S5 unsupported numeric width in cast")
         }
+        if lower_opt_type_is_f128(&e.cast_type) {
+            let p_f128 = lo1.fresh_reg()
+            let lo_f128 = p_f128.0
+            let dst_f128 = p_f128.1
+            let lo_copy = lo_f128.emit(ir_copy(dst_f128, src_reg))
+            (lo_copy.emit(ir_mark_f128_reg(dst_f128)), dst_f128)
+        } else {
         let wide_bits = lower_opt_type_wide_bits(&e.cast_type)
         let source_is_float = lo1.opt_expr_result_is_float_ref(&e.left)
         if wide_bits > 64 {
@@ -8536,6 +8558,7 @@ impl Lowerer {
             (lo2.emit(ir_float_to_int(dst, src_reg)), dst)
         } else {
             (lo1, src_reg)
+        }
         }
     }
 

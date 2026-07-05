@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.diagnostics_receipt/0.1"
-STAGE_CONTRACT_LEVEL = "S5_UNSUPPORTED_NUMERIC_DIAGNOSTICS_PROMOTED_NOT_F128"
+SCHEMA_VERSION = "madaros.v2.s5.diagnostics_receipt/0.2"
+STAGE_CONTRACT_LEVEL = "S5_UNSUPPORTED_NUMERIC_DIAGNOSTICS_AND_F128_EXECUTION_PENDING_PROMOTED"
 DIAGNOSTIC_FRAGMENT = "native-v2 S5 unsupported numeric width"
+F128_EXECUTION_PENDING_FRAGMENT = "f128_execution_pending"
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
     {
@@ -28,14 +29,20 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "class": "unsupported_float_width",
         "source": "fn main() -> i64 { let x: f128 = 1.0 as f128; 0 }\n",
         "unsupported_width": "f128",
-        "expected_detail": "let annotation",
+        "expected_detail": F128_EXECUTION_PENDING_FRAGMENT,
+        "expected_fragment": F128_EXECUTION_PENDING_FRAGMENT,
+        "expect_machine_module_json": True,
+        "expected_machine_module_supported": False,
     },
     {
         "case_id": "reject_f128_cast_native_v2",
         "class": "unsupported_float_width",
         "source": "fn main() -> i64 { let x = 1.0 as f128; 0 }\n",
         "unsupported_width": "f128",
-        "expected_detail": "cast",
+        "expected_detail": F128_EXECUTION_PENDING_FRAGMENT,
+        "expected_fragment": F128_EXECUTION_PENDING_FRAGMENT,
+        "expect_machine_module_json": True,
+        "expected_machine_module_supported": False,
     },
     {
         "case_id": "reject_i512_let_annotation_native_v2",
@@ -145,11 +152,18 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     )
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
-    if compile_rc == 0:
+    expected_fragment = str(case.get("expected_fragment", DIAGNOSTIC_FRAGMENT))
+    expect_machine_module_json = bool(case.get("expect_machine_module_json", False))
+    if expect_machine_module_json:
+        if "native_v2_compile: emitted" in compile_log:
+            raise SystemExit(f"{case_id} unexpectedly emitted f128 execution-pending ELF; log={compile_log_path}")
+        if "native_v2_compile: FAIL" not in compile_log:
+            raise SystemExit(f"{case_id} missing native-v2 fail-closed log line; log={compile_log_path}")
+    elif compile_rc == 0:
         raise SystemExit(f"{case_id} unexpectedly compiled unsupported S5 width; log={compile_log_path}")
-    if DIAGNOSTIC_FRAGMENT not in compile_log:
-        raise SystemExit(f"{case_id} missing stable unsupported-width diagnostic; log={compile_log_path}")
-    if str(case["expected_detail"]) not in compile_log:
+    if expected_fragment not in compile_log and not expect_machine_module_json:
+        raise SystemExit(f"{case_id} missing stable diagnostic {expected_fragment!r}; log={compile_log_path}")
+    if str(case["expected_detail"]) not in compile_log and not expect_machine_module_json:
         raise SystemExit(f"{case_id} missing expected diagnostic detail {case['expected_detail']!r}; log={compile_log_path}")
     forbidden = ["native_v2_compile: emitted", "Segmentation fault", "SIGSEGV", "legacy fallback"]
     for token in forbidden:
@@ -157,7 +171,25 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
             raise SystemExit(f"{case_id} contains forbidden fallback/crash token {token!r}; log={compile_log_path}")
     if elf_path.exists() and elf_path.stat().st_size > 0:
         raise SystemExit(f"{case_id} emitted an ELF despite unsupported numeric width: {elf_path}")
-    if mm_path.exists() and mm_path.stat().st_size > 0:
+    machine_module_json_emitted = mm_path.exists() and mm_path.stat().st_size > 0
+    machine_module_supported = None
+    machine_module_unsupported_detail = ""
+    machine_module_json_sha256 = None
+    if expect_machine_module_json:
+        if not machine_module_json_emitted:
+            raise SystemExit(f"{case_id} did not emit expected f128 MachineModule JSON: {mm_path}")
+        machine_module = json.loads(mm_path.read_text(encoding="utf-8"))
+        if machine_module.get("schema") != "madaros.v2.s5.machine_module/0.1":
+            raise SystemExit(f"{case_id} bad MachineModule schema")
+        expected_supported = bool(case.get("expected_machine_module_supported", True))
+        machine_module_supported = bool(machine_module.get("supported") is True)
+        if machine_module_supported != expected_supported:
+            raise SystemExit(f"{case_id} MachineModule supported mismatch")
+        machine_module_unsupported_detail = str(machine_module.get("unsupported_detail", ""))
+        if str(case["expected_detail"]) and machine_module_unsupported_detail != str(case["expected_detail"]):
+            raise SystemExit(f"{case_id} bad MachineModule unsupported detail")
+        machine_module_json_sha256 = sha256_text(stable_json(machine_module))
+    elif machine_module_json_emitted:
         raise SystemExit(f"{case_id} emitted MachineModule JSON despite front-half unsupported numeric width: {mm_path}")
 
     return {
@@ -171,9 +203,12 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
         "native_v2_compile_rc": compile_rc,
         "check_log_sha256": sha256_text(normalize_log(check_log, out_dir)),
         "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
-        "diagnostic_fragment": DIAGNOSTIC_FRAGMENT,
+        "diagnostic_fragment": expected_fragment,
         "elf_emitted": False,
-        "machine_module_json_emitted": False,
+        "machine_module_json_emitted": machine_module_json_emitted,
+        "machine_module_supported": machine_module_supported,
+        "machine_module_unsupported_detail": machine_module_unsupported_detail,
+        "machine_module_json_sha256": machine_module_json_sha256,
         "segfault": False,
         "legacy_fallback": False,
         "status": "fail_closed",
@@ -269,10 +304,13 @@ def emit(args: argparse.Namespace) -> int:
         "s5_diagnostics_unsupported_numeric_complete": True,
         "unsupported_numeric_widths_fail_closed": True,
         "unsupported_widths_do_not_emit_elf": True,
-        "unsupported_widths_do_not_emit_machine_module_json": True,
+        "front_half_unsupported_widths_do_not_emit_machine_module_json": True,
+        "f128_execution_pending_emits_machine_module_json": True,
+        "f128_machine_module_supported": False,
+        "f128_machine_module_unsupported_detail": F128_EXECUTION_PENDING_FRAGMENT,
         "unsupported_widths_do_not_segfault": True,
         "legacy_fallback_for_unsupported_widths": False,
-        "f128_rejected_not_promoted": True,
+        "f128_execution_pending_not_promoted": True,
         "i512_u512_rejected_not_promoted": True,
         "promoted_i256_width_preserved": True,
         "f128_promoted": False,
@@ -280,11 +318,13 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
-            "f128_native_v2_cast_fails_closed_with_stable_diagnostic",
+            "f128_native_v2_let_annotation_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_cast_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",
-            "unsupported_numeric_widths_emit_no_elf_or_machine_module_json",
+            "unsupported_numeric_widths_emit_no_elf",
+            "i512_u512_front_half_rejections_emit_no_machine_module_json",
+            "f128_execution_pending_cases_emit_unsupported_machine_module_json",
             "unsupported_numeric_widths_do_not_segfault_or_use_legacy_fallback",
             "promoted_i256_native_v2_path_still_executes",
             "f128_is_not_promoted_by_this_receipt",
