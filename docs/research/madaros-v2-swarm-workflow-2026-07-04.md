@@ -209,3 +209,29 @@ receipts remain future work. The S4-ready boundary is executable through
 `scripts/dev/madaros_v2_s4_preflight_gate.sh`, which emits
 `madaros.v2.s4.preflight/0.1` with `s4_ready = true` and
 `s4_implemented = false`.
+
+## Wave D S4/S5 Status
+
+S4 exact-rewrite receipts landed on 2026-07-05:
+
+- `bin/madaros s4-receipt`
+- `scripts/dev/madaros_v2_s4_receipt.py`
+- `scripts/dev/madaros_v2_s4_gate.sh`
+- `tests/madaros/v2_s4/manifest.tsv`
+- `tests/madaros/v2_s4/exact_identity.sio`
+
+The S4 gate consumes S3 HLIR receipts, builds persistent e-graph artifacts, and
+emits `madaros.v2.ekan.rewrite/0.1` receipts. This is a completed boundary for
+one exact subset, not global S4 completion. The accepted subset is exact and
+conservative: `constant_fold_i64`, `basis_family = exact_symbolic`,
+`validator = translation-validation`, `error_bound = 0`, exact fallback hash,
+and original/rewritten e-node hashes.
+
+S5 now has an executable input-contract preflight:
+
+- `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+
+The preflight consumes current S4 boundary receipts and rejects rewrites that
+could change MIR or ABI semantics. It emits `madaros.v2.s5.preflight/0.1` with
+`s5_input_contract_ready = true`, `s5_ready = false`, and
+`s5_implemented = false`.

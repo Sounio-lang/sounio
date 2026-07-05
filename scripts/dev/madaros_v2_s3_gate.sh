@@ -4,11 +4,41 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+export SOUNIO_STDLIB_PATH="${SOUNIO_MADAROS_V2_GATE_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 OUT_DIR="${SOUNIO_MADAROS_V2_S3_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-v2-s3.XXXXXX)}"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
 MANIFEST="${ROOT_DIR}/tests/madaros/v2_s3/manifest.tsv"
 READINESS="${ROOT_DIR}/scripts/dev/madaros_v2_s3_readiness_gate.sh"
+
+receipt_ok() {
+  local elf="$1"
+  local receipt="$elf.gate-receipt"
+  [[ -f "$receipt" ]] || return 1
+  local want
+  want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want" ]] || return 1
+  grep -Fq "$want" "$receipt" || return 1
+  grep -Fxq "smt_skip=0" "$receipt"
+}
+
+ensure_s3_raw_artifact() {
+  if [[ -n "${MADAROS_RAW_BIN:-}" ]]; then
+    return 0
+  fi
+  local artifact="${ROOT_DIR}/artifacts/self-hosted/madaros"
+  if [[ ! -x "$artifact" ]]; then
+    echo "[madaros-v2-s3] FAIL: missing current Madaros artifact: $artifact" >&2
+    return 1
+  fi
+  if ! receipt_ok "$artifact"; then
+    echo "[madaros-v2-s3] proving current artifact with madaros_full_gate.sh before HLIR gate"
+    MADAROS_RAW_BIN="$artifact" bash "${ROOT_DIR}/scripts/ci/madaros_full_gate.sh" >/dev/null
+  fi
+  export MADAROS_RAW_BIN="$artifact"
+}
+
+ensure_s3_raw_artifact
 
 mkdir -p "$OUT_DIR"
 

@@ -304,12 +304,18 @@ Rule:
 Purpose: introduce non-destructive optimization and scientific symbolic
 surrogate reasoning without losing exact semantics.
 
-Preflight status (2026-07-04): S4 is ready to start, not implemented.
-`scripts/dev/madaros_v2_s4_preflight_gate.sh` consumes the S3 gate output and
-verifies stable HLIR byte/canonical hashes, compiler-native lowering markers,
-function/block/instruction metadata, representative `const`/`call_direct`/
-`binary` ops, and `return`/`branch`/`cond_branch` terminators. The preflight
-receipt records `s4_ready = true` and `s4_implemented = false`.
+Implementation status (2026-07-05): the S4 conservative e-graph/E-KAN
+exact-rewrite receipt boundary is implemented and gated. This is not global S4
+completion. `bin/madaros s4-receipt <source> [--out-dir OUT]` consumes S3 HLIR
+receipts, builds a persistent
+`madaros.v2.s4.egraph/0.1` artifact, and emits
+`madaros.v2.ekan.rewrite/0.1` receipts for accepted rewrites. The current
+accepted subset is deliberately narrow: `constant_fold_i64` with
+`basis_family = exact_symbolic`, `validator = translation-validation`,
+`error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
+`scripts/dev/madaros_v2_s4_gate.sh` validates this boundary. Learned or
+approximate E-KAN rewrites, equality saturation, rejected proposal receipts,
+counterexample search, and downstream extraction remain future S4 work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or
@@ -336,6 +342,7 @@ MadarosV2EkanRewriteReceipt {
 ```
 
 Gate:
+- `scripts/dev/madaros_v2_s4_gate.sh`.
 - equality-saturation extraction must carry proof obligations or translation
   validation for every selected rewrite.
 - E-KAN proposals must include domain bounds, basis family, coefficients,
@@ -364,6 +371,15 @@ Implementation sketch:
 
 Purpose: commit to low-level program semantics: calls, layouts, returns,
 register classes, stack, aggregate passing, and exact numeric widths.
+
+Preflight status (2026-07-05): S5 has a ready input-contract preflight, but S5
+itself is not ready or implemented. `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+consumes the current S4 boundary output and proves that this accepted subset is
+MIR/ABI-safe input: exact i64 constant folds only, no approximate basis,
+translation validation required, zero error bound, exact fallback hash, and no
+call/control/signature rewrite. The preflight receipt records
+`s5_input_contract_ready = true`, `s5_ready = false`, and
+`s5_implemented = false`.
 
 Canonical artifact:
 - MIR hash plus ABI receipt.

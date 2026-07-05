@@ -3040,7 +3040,7 @@ status: lock-released
   - `env SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1 MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/madaros run tests/stdlib/theorem/test_smt_adaptive_epistemic.sio` passed with `Merged IR: 76`, compact path, native binary size `590`.
   - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_full_gate.sh` passed, including imported-SMT solver gate `6/6`, and wrote local gate receipt `artifacts/self-hosted/madaros.gate-receipt`.
   - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s1_gate.sh` passed: 4 deterministic S1 receipts + contract module checks.
-- Blocker closed:
+- Blocker closed for this boundary (global S4 remains open):
   - Blocker-ID: `MADAROS-V2-S1-FULL-GATE-SMT-ADAPTIVE-2026-07-04`
   - Severity: P1
   - Class: source-built compiler operational regression / source-to-green gap
@@ -3167,4 +3167,58 @@ status: lock-released
   - Acceptance gate: `scripts/dev/madaros_v2_s3_gate.sh` passes.
   - Next action: start S4 e-graph/E-KAN optimizer receipt lane from the S3 HLIR
     JSON/hash contract and the `madaros.v2.s4.preflight/0.1` input contract.
-    S4 optimization is not implemented yet.
+    Superseded by the 2026-07-05 S4 exact-boundary receipt slice below; global
+    S4 optimization is still not complete.
+
+## 2026-07-05 — Madaros v2 S4 conservative e-graph/E-KAN boundary receipts and S5 input preflight
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Files changed:
+  - `bin/madaros`
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/exact_identity.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added `bin/madaros s4-receipt <source> [--out-dir OUT]`.
+  - Added deterministic S4 boundary receipt generation that consumes S3 HLIR receipts,
+    builds `madaros.v2.s4.egraph/0.1`, and emits
+    `madaros.v2.ekan.rewrite/0.1` receipts.
+  - The current S4 accepted subset is conservative and exact:
+    `constant_fold_i64`, `basis_family = exact_symbolic`,
+    `validator = translation-validation`, `error_bound = 0`, exact fallback
+    hash, and original/rewritten e-node hashes.
+  - Added `scripts/dev/madaros_v2_s5_preflight_gate.sh`, which consumes current
+    S4 boundary receipts and proves this accepted subset is MIR/ABI-safe input
+    for S5. It does not claim global S4 completion or S5 implementation.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/madaros s4-receipt tests/madaros/v2_s4/exact_identity.sio --out-dir /tmp/madaros-s4-one` emitted schema `madaros.v2.s4.receipt/0.1` with 3 accepted exact-symbolic rewrites.
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    - `exact_identity`: accepted=3, `egraph_sha=f99cee31ce4a`
+    - `recursion_fact`: accepted=2, `egraph_sha=c74170fdb0af`
+    - summary accepted=5, `summary_sha=772c11ba0122`
+  - `env MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=2`, `rewrites=5`, preflight sha `db1975df25d3...`.
+- Blocker closed:
+  - Blocker-ID: `MADAROS-V2-S4-EGRAPH-EKAN-RECEIPTS-2026-07-05`
+  - Severity: P2
+  - Class: compiler architecture / missing exact optimizer receipt boundary
+  - Evidence level: deterministic local S4 boundary gate, exact rewrite receipts,
+    translation-validation markers, e-graph hashes, S5 input-contract preflight.
+  - Owner: closed by Codex on this lane.
+  - Acceptance gate: `scripts/dev/madaros_v2_s4_gate.sh` passes.
+  - LLM-offload: `bin/llm-offload -t math-review -p xai -i /tmp/madaros-v2-s4-s5.diff`
+    returned `NO MATHEMATICAL CONTENT TO REVIEW`.
+  - Next action: complete global S4 before promoting the lane to S5 work:
+    equality saturation, rejected/approximate E-KAN proposal receipts,
+    counterexample-guided validation, extraction/cost model, and downstream
+    integration. `madaros.v2.s5.preflight/0.1` is available as a future input
+    contract, but S5 MIR/ABI is not implemented yet.
