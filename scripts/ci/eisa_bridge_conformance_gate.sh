@@ -31,6 +31,9 @@ programs=(
   "v1e-fixedpoint"
   "v1e-frail"
   "v1e-emov-negzero"
+  "v1-arith-high"
+  "v1-fuel-high"
+  "v1-branch-high"
 )
 
 for name in "${programs[@]}"; do
