@@ -3672,7 +3672,7 @@ status: lock-released
   - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
   - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
     `accepted=28`, `rejected=3`, `blocked=3`, `selected=28`, summary sha
-    `9da826a771df...`.
+    `2b6d6a1dcacf...`.
   - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
     `cases=13`, selected rewrites `28`, blocked rewrites `3`, `status=pass`,
     preflight sha `ea7f1ffc4eeb...`.
@@ -3682,3 +3682,45 @@ status: lock-released
     counterexample search, downstream optimizer mutation/application, and
     full-domain translation validation remain open.
   - S5 is still input-contract preflight, not MIR/ABI implementation.
+
+## 2026-07-05 — Madaros v2 S5 MIR/ABI input-boundary receipts
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: advance S5 under the S-FULL discipline by landing a complete
+  input-boundary receipt surface for the current exact S4 selected subset,
+  without claiming real MIR/ABI implementation.
+- Files changed:
+  - `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`, which runs the S5
+    preflight, consumes the S4 extraction receipts, and emits
+    `madaros.v2.s5.mir_abi_input_boundary/0.1`.
+  - The new receipt classifies the 28 currently selected exact S4 rewrites as
+    scalar S5 input only: `scalar_i64` or `scalar_bool`, with register classes
+    `gpr_i64` or `gpr_predicate`.
+  - Every selected witness records no call-signature, stack, SRET,
+    aggregate-layout, or ABI impact and no MIR/ABI mutation:
+    `applied_to_mir = false`, `applied_to_abi = false`.
+  - Keep-producer rewrites retain
+    `required_keep_original_producer_evaluated`; rejected and blocked S4
+    rewrites remain excluded from S5 input.
+  - The receipt deliberately records `s5_mir_abi_input_boundary_complete = true`
+    but `real_mir_emitted = false`, `real_abi_layout_emitted = false`,
+    `s5_mir_abi_boundary_complete = false`, `s5_ready = false`,
+    `s5_implemented = false`, and `s5_full_complete = false`.
+- Local proof:
+  - `bash -n scripts/dev/madaros_v2_s5_mir_abi_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_MIR_ABI_DIR=/tmp/sounio-s5-mir-abi-final bash scripts/dev/madaros_v2_s5_mir_abi_gate.sh` passed:
+    `rewrites=28`, `blocked=3`, `abi_classes=scalar_bool,scalar_i64`,
+    boundary sha `985a4f69c5cd...`.
+- Remaining boundary:
+  - Real S5 still needs MIR serialization/hash receipts, ABI layout receipts,
+    scalar/aggregate/SRET/imported-call/return witnesses, f64 call/return
+    closure before f128/i256 promotion, diagnostics, fallback semantics, and
+    differential validation.

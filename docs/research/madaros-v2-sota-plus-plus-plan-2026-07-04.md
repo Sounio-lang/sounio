@@ -447,6 +447,18 @@ fidelity blocker closed, the preflight receipt records `status = pass`,
 `s5_input_contract_ready = true`, `s5_ready = false`, and
 `s5_implemented = false`.
 
+Input-boundary status (2026-07-05): S5 also has a deterministic MIR/ABI
+input-boundary gate, `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`, which consumes
+the S5 preflight plus S4 extraction receipts and emits
+`madaros.v2.s5.mir_abi_input_boundary/0.1`. The current receipt classifies 28
+selected S4 rewrites as input-safe scalar values (`scalar_i64` or
+`scalar_bool`) with no call-signature, stack, SRET, aggregate-layout, or ABI
+impact, while preserving the 3 blocked producer-evaluation rewrites as excluded
+negative evidence. It records `s5_mir_abi_input_boundary_complete = true`,
+`real_mir_emitted = false`, `real_abi_layout_emitted = false`,
+`s5_mir_abi_boundary_complete = false`, `s5_ready = false`,
+`s5_implemented = false`, and `s5_full_complete = false`.
+
 Canonical artifact:
 - MIR hash plus ABI receipt.
 
@@ -457,8 +469,9 @@ Gate:
 - f64 print/return/call witnesses must pass before f128 or i256 are promoted.
 - S5 is not "complete" until MIR hashes, ABI/layout receipts, call/return
   witnesses, numeric-width semantics, diagnostics, and fallbacks are all gated.
-  The current S5 preflight only proves that the accepted S4 extraction subset is
-  safe to consume as input; it is not MIR/ABI implementation.
+  The current S5 preflight plus MIR/ABI input-boundary receipt only prove that
+  the accepted S4 extraction subset is safe to consume and classify as scalar
+  input; they are not MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

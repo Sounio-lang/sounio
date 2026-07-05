@@ -30,8 +30,10 @@ optimization is not complete:
 equality saturation, approximate learned E-KAN proposals, broad counterexample
 search, and downstream optimizer integration remain future work. S5 has an
 executable preflight from the S4 extraction receipts and now reports
-`status = pass` with `s5_input_contract_ready = true`; S5 MIR/ABI implementation
-itself remains future work.
+`status = pass` with `s5_input_contract_ready = true`. S5 now also has an
+input-boundary MIR/ABI classification receipt for the current selected exact S4
+subset, but real MIR serialization and ABI layout/call/return receipts remain
+future work.
 
 ## Implemented surface
 
@@ -233,7 +235,7 @@ reflexive-comparison slice, and sub-self arithmetic slice:
 [madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=496e7ccf7342
 [madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=54e83fe3c2d0
 [madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=a34f4ab3e0b8
-[madaros-v2-s4] summary_sha=9da826a771df accepted=28 rejected=3 blocked=3 selected=28
+[madaros-v2-s4] summary_sha=2b6d6a1dcacf accepted=28 rejected=3 blocked=3 selected=28
 [madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)
 ```
 
@@ -261,6 +263,28 @@ Observed local result on 2026-07-05 after the sub-self arithmetic slice:
 The preflight receipt uses schema `madaros.v2.s5.preflight/0.1` and records
 `s5_input_contract_ready = true`, `s5_ready = false`, and
 `s5_implemented = false`.
+
+The S5 MIR/ABI input-boundary gate is executable through:
+
+```bash
+bash scripts/dev/madaros_v2_s5_mir_abi_gate.sh
+```
+
+Observed local result on 2026-07-05:
+
+```text
+[madaros-v2-s5-mir-abi] ok rewrites=28 blocked=3 abi_classes=scalar_bool,scalar_i64 sha=985a4f69c5cd
+[madaros-v2-s5-mir-abi] PASS: S5 MIR/ABI input-boundary receipts classify the current S4 selected subset without claiming real MIR/ABI or S5 FULL
+```
+
+The input-boundary receipt uses schema
+`madaros.v2.s5.mir_abi_input_boundary/0.1` and records
+`s5_mir_abi_input_boundary_complete = true`,
+`s5_mir_abi_boundary_complete = false`, `real_mir_emitted = false`,
+`real_abi_layout_emitted = false`, `s5_ready = false`,
+`s5_implemented = false`, and `s5_full_complete = false`. It classifies the
+current selected S4 subset as scalar input only (`scalar_i64`/`scalar_bool`) and
+records no call-signature, stack, SRET, aggregate-layout, or ABI impact.
 
 That is deliberately not a claim that S5 is implemented. Under the S-FULL rule,
 S5 completion requires MIR hashes, ABI/layout/call/return receipts, numeric tower

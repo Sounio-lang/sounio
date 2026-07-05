@@ -264,6 +264,7 @@ mutation is performed.
 S5 now has an executable input-contract preflight:
 
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+- `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`
 
 The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
@@ -271,6 +272,13 @@ implemented: `madaros.v2.s5.preflight/0.1` records `status = pass`,
 `s5_input_contract_ready = true`, `s5_ready = false`, and
 `s5_implemented = false`; latest local preflight consumes 28 selected accepted
 rewrites and classifies 3 blocked rewrites as excluded negative evidence.
-Next critical lane: implement S5 MIR/ABI receipt
-surface over the selected accepted S4 rewrites without mutating IR until the MIR
-and ABI hashes are proved.
+The MIR/ABI input-boundary gate consumes that preflight and emits
+`madaros.v2.s5.mir_abi_input_boundary/0.1`: 28 selected exact S4 rewrites are
+classified as scalar input (`scalar_i64`/`scalar_bool`) with no call-signature,
+stack, SRET, aggregate-layout, or ABI impact, while 3 producer-evaluation
+blockers remain excluded. It records `real_mir_emitted = false`,
+`real_abi_layout_emitted = false`, `s5_mir_abi_boundary_complete = false`, and
+`s5_full_complete = false`.
+Next critical lane: real S5 MIR serialization/roundtrip plus ABI
+layout/call/return witnesses for the selected exact subset, still without
+promoting f128/i256 before f64 call/return witnesses are gated.
