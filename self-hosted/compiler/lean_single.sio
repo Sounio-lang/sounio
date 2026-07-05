@@ -19843,6 +19843,62 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // Array slots: base..base+nslots-1, lowest addr = rbp-(base+nslots-1)*8
             // rep stosq: store rax to [rdi], rdi += 8, rcx--; repeats rcx times (DF=0 → ascending)
             let base = ptr_slot - nslots
+            // Aggregate elements: a single-pointer splat would alias every
+            // slot (tests/known_failures/lean_decl_repeat_alias.sio). Emit a
+            // RUNTIME loop — O(1) code per decl, mandatory at [T;1024] scale
+            // (the compile-time-unrolled variant grew Madaros +11MB and
+            // broke self-host) — that heap-allocs and copies one fresh
+            // element per slot from the once-compiled V.
+            let dcl_elem_ty = arr_hash_elem_ty(decl_ty_hash)
+            let dcl_elem_hash = arr_hash_elem_hash(decl_ty_hash)
+            if dcl_elem_ty == 6 && struct_like_nslots(dcl_elem_hash) > 0 && LAST_LOCAL_BSS_SPILL == 0 {
+                let d_nsl = struct_like_nslots(dcl_elem_hash)
+                EP = val_ep
+                compile_or()
+                EP = after_ep
+                let rl_src = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(rl_src)
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp+disp] (array base, lowest addr)
+                em32(0 - (base + nslots - 1) * 8)
+                let rl_base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(rl_base)
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax (i = 0)
+                let rl_i = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(rl_i)
+                let rl_head = CL
+                emit_load_var(rl_i)
+                em(0x48); em(0x3d); em32(nslots)  // cmp rax, nslots
+                em(0x0f); em(0x8d)                // jge done (fwd, patched)
+                let rl_exit = CL
+                em32(0)
+                emit_imm64(d_nsl * 8)
+                emit_heap_alloc_x86()
+                let rl_new = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(rl_new)
+                emit_load_var(rl_src)
+                em(0x48); em(0x89); em(0xc2)      // mov rdx, rax (src)
+                emit_load_var(rl_new)             // rax = dst
+                emit_copy_agg_to_ptr_x86(6, dcl_elem_hash)
+                emit_load_var(rl_new)
+                em(0x48); em(0x89); em(0xc2)      // mov rdx, rax (new ptr)
+                emit_load_var(rl_i)
+                em(0x48); em(0x89); em(0xc1)      // mov rcx, rax (i)
+                emit_load_var(rl_base)            // rax = array base
+                em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax+rcx*8], rdx
+                emit_load_var(rl_i)
+                em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
+                emit_store_var(rl_i)
+                em(0xe9)                          // jmp head (backward rel32)
+                em32(rl_head - (CL + 4))
+                patch32(rl_exit, CL)
+                emit_load_var(rl_base)
+                emit_store_var(ptr_slot)
+                return
+            }
             // Compute the fill value into rax. For 8-byte elements (i64/f64/ptr) splat
             // the real V; var_add_arr emits no code and the rdi setup below does not
             // clobber rax, so V survives into the rep-store.
@@ -31433,8 +31489,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
+            let a64_val_ep = EP
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }
+            let a64_after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
@@ -31444,6 +31502,73 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
             VAR_MUT[arr_vi as usize] = decl_is_mut
             let base = ptr_slot - nslots
+            // Mirror of the x86 decl-init: aggregates get a RUNTIME loop
+            // (O(1) code) allocating a fresh heap copy per slot; 8-byte
+            // scalars get the real V-splat (this path used to IGNORE V and
+            // zero-fill: null element pointers / silent zeros).
+            let d_ty = arr_hash_elem_ty(decl_ty_hash)
+            let d_hash = arr_hash_elem_hash(decl_ty_hash)
+            if d_ty == 6 && struct_like_nslots(d_hash) > 0 && LAST_LOCAL_BSS_SPILL == 0 {
+                let d_nsl = struct_like_nslots(d_hash)
+                EP = a64_val_ep
+                compile_or_a64()
+                EP = a64_after_ep
+                let rl_src = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(rl_src)
+                emit_lea_var_a64(base + nslots - 1)
+                let rl_base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(rl_base)
+                em32(0xD2800000)  // mov x0, #0 (i)
+                let rl_i = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(rl_i)
+                let rl_head = CL
+                emit_load_var_a64(rl_i)
+                em32(0xAA0003E9)  // mov x9, x0
+                emit_imm64_reg_a64(10, nslots)
+                em32(0xEB0A013F)  // cmp x9, x10
+                let rl_exit = CL
+                em32(0x5400000A)  // b.ge done (patched)
+                emit_imm64_a64(d_nsl * 8)
+                emit_heap_alloc_a64()
+                let rl_new = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(rl_new)
+                emit_load_var_a64(rl_src)
+                em32(0xAA0003EA)  // mov x10, x0 (src)
+                emit_load_var_a64(rl_new)
+                emit_copy_agg_to_ptr_a64(6, d_hash)
+                emit_load_var_a64(rl_new)
+                em32(0xAA0003EA)  // mov x10, x0 (new)
+                emit_load_var_a64(rl_i)
+                em32(0xAA0003E1)  // mov x1, x0 (i)
+                emit_load_var_a64(rl_base)
+                em32(0xF821780A)  // str x10, [x0, x1, lsl #3]
+                emit_load_var_a64(rl_i)
+                em32(0x91000400)  // add x0, x0, #1
+                emit_store_var_a64(rl_i)
+                let rl_b = CL
+                let rl_rel = (rl_head - rl_b) / 4
+                em32(0x14000000 | (rl_rel & 0x3FFFFFF))  // b head
+                patch_branch_a64(rl_exit, CL)
+                emit_load_var_a64(rl_base)
+                emit_store_var_a64(ptr_slot)
+                return
+            }
+            if arr_esiz != 1 && LAST_LOCAL_BSS_SPILL == 0 {
+                EP = a64_val_ep
+                compile_or_a64()
+                EP = a64_after_ep
+                em32(0xAA0003ED)  // mov x13, x0 (V)
+                emit_lea_var_a64(base + nslots - 1)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_fill_words_x13_x11_a64(nslots)
+                emit_lea_var_a64(base + nslots - 1)
+                emit_store_var_a64(ptr_slot)
+                return
+            }
             if LAST_LOCAL_BSS_SPILL != 0 {
                 emit_image_addr_reg_a64(11, LAST_LOCAL_BSS_ADDR)
                 emit_zero_words_x11_a64(nslots)
