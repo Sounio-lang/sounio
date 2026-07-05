@@ -83,14 +83,14 @@ if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
 fi
 
 if grep -q 'falling back to full IR path' "$LOG_DIR/native_compile.log"; then
-  echo "[native-v2-imported-closure-boundary] FAIL: compact imported path fell back to full IR" >&2
+  echo "[native-v2-imported-closure-boundary] FAIL: imported native-v2 path reported fallback" >&2
   cat "$LOG_DIR/native_compile.log" >&2 || true
   exit 1
 fi
 
 if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/native_compile.log" ||
-   ! grep -q 'module_native_driver: imported source uses compact modular IR table path' "$LOG_DIR/native_compile.log"; then
-  echo "[native-v2-imported-closure-boundary] FAIL: native compile did not use imported compact modular IR path" >&2
+   ! grep -Eq 'module_native_driver: imported source uses (compact modular IR table|full modular native-v2) path' "$LOG_DIR/native_compile.log"; then
+  echo "[native-v2-imported-closure-boundary] FAIL: native compile did not use an imported modular native path" >&2
   cat "$LOG_DIR/native_compile.log" >&2 || true
   exit 1
 fi

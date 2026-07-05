@@ -814,12 +814,17 @@ if wide_abi_call_return_receipt.get("two_wide_arg_case_count") != 4:
     raise SystemExit("wide ABI call-return receipt must contain four two-wide-arg cases")
 if wide_abi_call_return_receipt.get("imported_module_case_count") != 4:
     raise SystemExit("wide ABI call-return receipt must contain four imported module cases")
+if wide_abi_call_return_receipt.get("public_native_imported_case_count") != 4:
+    raise SystemExit("wide ABI call-return receipt must check four imported public native cases")
 for field in [
     "s5_wide_i256_u256_local_abi_call_return_complete",
     "s5_wide_i256_u256_imported_abi_call_return_complete",
     "wide_i256_u256_local_abi_call_return_promoted",
     "wide_i256_u256_imported_abi_call_return_promoted",
     "imported_module_wide_abi_promoted",
+    "public_native_imported_route_checked",
+    "public_native_imported_route_uses_full_modular_native_v2",
+    "stale_compact_modular_ir_table_path_blocked",
     "wide_return_uses_sret",
     "wide_arg_limb_expansion_promoted",
     "wide_two_arg_order_preserved",
@@ -866,6 +871,15 @@ for case_id, expected_exit in required_wide_abi_cases.items():
         raise SystemExit(f"{case_id} matched fake scalar/truncated discriminator")
     if not row.get("elf_sha256") or not row.get("machine_module_json_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule sha256")
+    if row.get("imported_module") is True:
+        if row.get("public_native_compile_checked") is not True:
+            raise SystemExit(f"{case_id} must check the public native compile route")
+        if row.get("public_native_compile_rc") != 0:
+            raise SystemExit(f"{case_id} public native compile rc must be 0")
+        if row.get("public_native_actual_exit") != expected_exit:
+            raise SystemExit(f"{case_id} public native expected exit {expected_exit}, got {row.get('public_native_actual_exit')}")
+        if not row.get("public_native_elf_sha256"):
+            raise SystemExit(f"{case_id} missing public native ELF sha256")
     shape = row.get("machine_shape", {})
     if shape.get("callee_source_is_sret") != 1:
         raise SystemExit(f"{case_id} callee must be SRET lowered")
@@ -2105,12 +2119,16 @@ module = {
         "u256_case_count": wide_abi_call_return_receipt["u256_case_count"],
         "two_wide_arg_case_count": wide_abi_call_return_receipt["two_wide_arg_case_count"],
         "imported_module_case_count": wide_abi_call_return_receipt["imported_module_case_count"],
+        "public_native_imported_case_count": wide_abi_call_return_receipt["public_native_imported_case_count"],
         "cases": wide_abi_call_return_receipt["cases"],
         "s5_wide_i256_u256_local_abi_call_return_complete": wide_abi_call_return_receipt["s5_wide_i256_u256_local_abi_call_return_complete"],
         "s5_wide_i256_u256_imported_abi_call_return_complete": wide_abi_call_return_receipt["s5_wide_i256_u256_imported_abi_call_return_complete"],
         "wide_i256_u256_local_abi_call_return_promoted": wide_abi_call_return_receipt["wide_i256_u256_local_abi_call_return_promoted"],
         "wide_i256_u256_imported_abi_call_return_promoted": wide_abi_call_return_receipt["wide_i256_u256_imported_abi_call_return_promoted"],
         "imported_module_wide_abi_promoted": wide_abi_call_return_receipt["imported_module_wide_abi_promoted"],
+        "public_native_imported_route_checked": wide_abi_call_return_receipt["public_native_imported_route_checked"],
+        "public_native_imported_route_uses_full_modular_native_v2": wide_abi_call_return_receipt["public_native_imported_route_uses_full_modular_native_v2"],
+        "stale_compact_modular_ir_table_path_blocked": wide_abi_call_return_receipt["stale_compact_modular_ir_table_path_blocked"],
     },
     "generic_aggregate_sret_receipt": {
         "schema": generic_agg_receipt["schema"],

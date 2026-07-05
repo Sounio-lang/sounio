@@ -86,7 +86,7 @@ if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
 fi
 
 if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/native_compile.log" ||
-   ! grep -q 'module_native_driver: imported source uses compact modular IR table path' "$LOG_DIR/native_compile.log" ||
+   ! grep -Eq 'module_native_driver: imported source uses (compact modular IR table|full modular native-v2) path' "$LOG_DIR/native_compile.log" ||
    ! grep -q 'Merged IR: 6' "$LOG_DIR/native_compile.log"; then
   echo "[native-v2-imported-hof-abi] FAIL: native compile did not use imported modular IR path" >&2
   cat "$LOG_DIR/native_compile.log" >&2 || true
@@ -94,7 +94,7 @@ if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_
 fi
 
 if grep -q 'falling back to full IR path' "$LOG_DIR/native_compile.log"; then
-  echo "[native-v2-imported-hof-abi] FAIL: compact imported HOF path fell back to full IR" >&2
+  echo "[native-v2-imported-hof-abi] FAIL: imported HOF native-v2 path reported fallback" >&2
   cat "$LOG_DIR/native_compile.log" >&2 || true
   exit 1
 fi
@@ -140,7 +140,7 @@ GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
     --string "generated_at_utc=$GENERATED_AT_UTC" \
     --string "hof_abi_scope=named_fn_refs_and_fn_typed_params_returns_no_captures" \
     --string "host_callback=none" \
-    --string "imported_body_lowering=compact_imported_body_lowering_v1_no_source_marker" \
+    --string "imported_body_lowering=capability_routed_imported_body_lowering_v2" \
     --string "imported_module=$IMPORTED_MODULE" \
     --bool   "imported_prebundle_native=false" \
     --string "native_elf=$ELF" \

@@ -388,6 +388,10 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
     compile_log_path = out_dir / f"{case_id}.native_v2.log"
     stdout_path = out_dir / f"{case_id}.stdout"
     stderr_path = out_dir / f"{case_id}.stderr"
+    public_elf_path = out_dir / f"{case_id}.public_native"
+    public_compile_log_path = out_dir / f"{case_id}.public_native.log"
+    public_stdout_path = out_dir / f"{case_id}.public_stdout"
+    public_stderr_path = out_dir / f"{case_id}.public_stderr"
     for rel_name, text in dict(case.get("support_files", {})).items():
         support_path = out_dir / rel_name
         support_path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,6 +432,39 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         raise SystemExit(f"{case_id} expected exit {expected_exit}, got {actual_exit}")
     if actual_exit == int(case["fake_scalar_exit"]):
         raise SystemExit(f"{case_id} matched fake scalar/truncated discriminator")
+
+    public_compile_rc = 0
+    public_actual_exit = actual_exit
+    public_compile_log_sha = ""
+    public_stdout_sha = ""
+    public_stderr_sha = ""
+    public_elf_sha = ""
+    if bool(case.get("imported_module", False)):
+        public_compile_rc, public_compile_stdout, public_compile_stderr = run_command(
+            [str(compiler), str(source_path), "-o", str(public_elf_path)],
+            root,
+            timeout_s,
+        )
+        public_compile_log = public_compile_stdout + public_compile_stderr
+        public_compile_log_path.write_text(public_compile_log, encoding="utf-8")
+        if public_compile_rc != 0:
+            raise SystemExit(f"{case_id} public native compile failed rc={public_compile_rc}; log={public_compile_log_path}")
+        if "compact modular IR table path" in public_compile_log:
+            raise SystemExit(f"{case_id} public native compile used stale compact modular IR table path")
+        if not public_elf_path.exists() or public_elf_path.stat().st_size <= 1024:
+            raise SystemExit(f"{case_id} public native compile did not emit a full ELF: {public_elf_path}")
+        public_elf_path.chmod(public_elf_path.stat().st_mode | 0o111)
+        public_actual_exit, public_stdout, public_stderr = run_binary(public_elf_path, timeout_s)
+        public_stdout_path.write_bytes(public_stdout)
+        public_stderr_path.write_bytes(public_stderr)
+        if public_actual_exit != expected_exit:
+            raise SystemExit(f"{case_id} public native expected exit {expected_exit}, got {public_actual_exit}")
+        if public_actual_exit == int(case["fake_scalar_exit"]):
+            raise SystemExit(f"{case_id} public native matched fake scalar/truncated discriminator")
+        public_compile_log_sha = sha256_text(normalize_log(public_compile_log, out_dir))
+        public_stdout_sha = sha256_bytes(public_stdout)
+        public_stderr_sha = sha256_bytes(public_stderr)
+        public_elf_sha = sha256_bytes(public_elf_path.read_bytes())
 
     module = load_machine_module(mm_path, int(case["expected_fn_count"]))
     shape = machine_shape(module, str(case["callee"]))
@@ -480,6 +517,9 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "extra_callee_param_counts": {str(k): int(v) for k, v in dict(case.get("extra_callee_param_counts", {})).items()},
         "expected_exit": expected_exit,
         "actual_exit": actual_exit,
+        "public_native_compile_checked": bool(case.get("imported_module", False)),
+        "public_native_compile_rc": public_compile_rc,
+        "public_native_actual_exit": public_actual_exit,
         "fake_scalar_exit": int(case["fake_scalar_exit"]),
         "source_sha256": sha256_text(source_text),
         "check_rc": check_rc,
@@ -487,8 +527,12 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "check_log_sha256": sha256_text(normalize_log(check_log, out_dir)),
         "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
         "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+        "public_native_elf_sha256": public_elf_sha,
+        "public_native_compile_log_sha256": public_compile_log_sha,
         "stdout_sha256": sha256_bytes(stdout),
         "stderr_sha256": sha256_bytes(stderr),
+        "public_native_stdout_sha256": public_stdout_sha,
+        "public_native_stderr_sha256": public_stderr_sha,
         "machine_module_path": mm_path.name,
         "machine_module_json_sha256": module["machine_module_json_sha256"],
         "machine_shape": shape,
@@ -511,6 +555,7 @@ def emit(args: argparse.Namespace) -> int:
     u256_cases = [case for case in cases if case["wide_type"] == "u256"]
     two_wide_arg_cases = [case for case in cases if int(case["wide_arg_count"]) == 2]
     imported_cases = [case for case in cases if case["imported_module"]]
+    public_imported_cases = [case for case in imported_cases if case["public_native_compile_checked"]]
     trace_cases = [case for case in cases if case["trace_required"]]
 
     receipt: dict[str, Any] = {
@@ -524,6 +569,7 @@ def emit(args: argparse.Namespace) -> int:
         "u256_case_count": len(u256_cases),
         "two_wide_arg_case_count": len(two_wide_arg_cases),
         "imported_module_case_count": len(imported_cases),
+        "public_native_imported_case_count": len(public_imported_cases),
         "trace_assertion_case_count": len(trace_cases),
         "cases": cases,
         "s5_wide_i256_u256_local_abi_call_return_complete": True,
@@ -541,6 +587,9 @@ def emit(args: argparse.Namespace) -> int:
         "real_program_mir_emitted": True,
         "real_abi_layout_emitted": True,
         "legacy_fallback_for_wide_abi": False,
+        "public_native_imported_route_checked": True,
+        "public_native_imported_route_uses_full_modular_native_v2": True,
+        "stale_compact_modular_ir_table_path_blocked": True,
         "imported_module_wide_abi_promoted": True,
         "f128_promoted": False,
         "s5_ready": False,
@@ -560,6 +609,7 @@ def emit(args: argparse.Namespace) -> int:
             "imported_i256_argument_crosses_module_boundary_and_returns_through_wide_sret",
             "imported_u256_second_of_two_wide_arguments_is_preserved",
             "imported_mixed_i256_i64_and_i64_i256_argument_order_is_preserved",
+            "public_madaros_source_o_output_route_matches_native_v2_for_imported_wide_abi",
             "f128_is_not_promoted_by_this_receipt",
         ],
         "missing_full_obligations": [

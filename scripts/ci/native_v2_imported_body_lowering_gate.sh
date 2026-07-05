@@ -91,15 +91,15 @@ run_case() {
   fi
 
   if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/${name}.native_compile.log" ||
-     ! grep -q 'module_native_driver: imported source uses compact modular IR table path' "$LOG_DIR/${name}.native_compile.log" ||
+     ! grep -Eq 'module_native_driver: imported source uses (compact modular IR table|full modular native-v2) path' "$LOG_DIR/${name}.native_compile.log" ||
      ! grep -q "Merged IR: ${expected_functions}" "$LOG_DIR/${name}.native_compile.log"; then
-    echo "[native-v2-imported-body-lowering] FAIL: $name native compile did not use imported compact modular IR path" >&2
+    echo "[native-v2-imported-body-lowering] FAIL: $name native compile did not use an imported modular native path" >&2
     cat "$LOG_DIR/${name}.native_compile.log" >&2 || true
     exit 1
   fi
 
   if grep -q 'falling back to full IR path' "$LOG_DIR/${name}.native_compile.log"; then
-    echo "[native-v2-imported-body-lowering] FAIL: $name compact imported path fell back to full IR" >&2
+    echo "[native-v2-imported-body-lowering] FAIL: $name imported native-v2 path reported fallback" >&2
     cat "$LOG_DIR/${name}.native_compile.log" >&2 || true
     exit 1
   fi
@@ -169,7 +169,7 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --string "fallback_path=none" \
   --string "generated_at_utc=$ts" \
   --string "host_callback=none" \
-  --string "imported_body_lowering=compact_imported_body_lowering_v1_no_source_marker" \
+  --string "imported_body_lowering=capability_routed_imported_body_lowering_v2" \
   --bool   "imported_prebundle_native=false" \
   --int    "pass_count=$case_count" \
   --string "schema=sounio.native_v2_imported_body_lowering.v1" \
