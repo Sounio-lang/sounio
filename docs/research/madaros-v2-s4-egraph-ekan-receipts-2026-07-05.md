@@ -313,6 +313,32 @@ the expected internal-call shape before recording the Machine-IR contract
 `ARG_MOVE,CALL,CAPTURE_RET,STORE_STACK,RET`. Aggregate, SRET, imported-call,
 stack-arg, f64, f128, and i256 promotion remain blocked.
 
+The scalar program-MIR/ABI shadow gate is executable through:
+
+```bash
+bash scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh
+```
+
+Observed deterministic local result on 2026-07-05:
+
+```text
+[madaros-v2-s5-program-mir-abi] ok programs=3 target=x86_64-linux sha=bb9618c4a231
+[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool program-MIR/ABI shadow receipt is deterministic without claiming S5 FULL
+```
+
+That receipt uses schema `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
+It checks the three scalar programs at the program boundary: merged-IR function
+counts (`1,2,2`), ELF internal-call counts (`1,2,2`), scalar ABI signatures
+(`rdi` for the single i64 parameter where present, `rax` for i64/bool returns),
+and the legal MIR call-return contract anchored to
+`self-hosted/native/machine_ir.sio` and `self-hosted/native/codegen_x86_linux.sio`.
+It also records S4 semantic negatives and producer-evaluation blockers as
+not-selected/not-promoted controls, so rejected or blocked rewrites cannot leak
+into the scalar S5 slice.
+It deliberately records `compiler_machine_module_exported = false`,
+`real_program_mir_emitted = false`, `real_abi_layout_emitted = false`,
+`s5_ready = false`, and `s5_full_complete = false`.
+
 That is deliberately not a claim that S5 is implemented. Under the S-FULL rule,
 S5 completion requires MIR hashes, ABI/layout/call/return receipts, numeric tower
 witnesses, diagnostics, fallback semantics, and cross-stage differential gates.

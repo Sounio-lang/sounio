@@ -475,6 +475,24 @@ additional internal call beyond the runtime-to-main call. The receipt schema is
 `real_mir_effects_serialized = true`, `real_program_mir_emitted = false`,
 `real_abi_layout_emitted = false`, and `s5_full_complete = false`.
 
+Scalar program-MIR/ABI shadow status (2026-07-05): S5 now also has
+`scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`, which consumes the
+MIR-effect receipt and emits `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
+It records a deterministic program-level MIR/ABI shadow module for the same
+three scalar witnesses: i64 literal return, i64 direct-call return, and bool
+direct-call return. The gate verifies the merged-IR function counts (`1,2,2`),
+the ELF internal-call counts (`1,2,2`), scalar ABI signatures (`rdi` arguments
+where present, `rax` returns), canonical JSON roundtrip, and explicit
+non-promotion of stack-arg, aggregate, SRET, imported-call, f64 call/return,
+f128, and i256 surfaces. It also records S4 negative/blocker controls that must
+remain unpromoted: distinct symbolic comparison/subtraction, `x_div_x` at zero,
+and the producer-evaluation blockers for call-result self comparison/subtraction.
+Observed deterministic receipt prefix: `bb9618c4a231`. This is a stronger
+scalar S5 slice, but still records
+`compiler_machine_module_exported = false`, `real_program_mir_emitted = false`,
+`real_abi_layout_emitted = false`, `s5_ready = false`, and
+`s5_full_complete = false`.
+
 Canonical artifact:
 - MIR hash plus ABI receipt.
 
@@ -483,11 +501,12 @@ Gate:
   f64/f128, i128/u128, i256/u256, vector/tensor registers.
 - differential native-v2 vs interpreter/lean_single where applicable.
 - f64 print/return/call witnesses must pass before f128 or i256 are promoted.
-- S5 is not "complete" until MIR hashes, ABI/layout receipts, call/return
-  witnesses, numeric-width semantics, diagnostics, and fallbacks are all gated.
-  The current S5 preflight, input-boundary receipt, and scalar MIR-effect
-  roundtrip close one scalar i64/bool direct-call/return slice only. They are
-  not full-program MIR/ABI implementation.
+- S5 is not "complete" until compiler-exported MIR hashes, ABI/layout receipts,
+  call/return witnesses, numeric-width semantics, diagnostics, and fallbacks are
+  all gated. The current S5 preflight, input-boundary receipt, scalar
+  MIR-effect roundtrip, and scalar program-MIR/ABI shadow receipt close one
+  scalar i64/bool direct-call/return slice only. They are not the full compiler
+  `MachineModule` export and not global MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

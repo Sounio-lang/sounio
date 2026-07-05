@@ -3776,3 +3776,49 @@ status: lock-released
     aggregate/SRET/imported-call/stack-arg witnesses, f64 call/return closure
     before f128/i256 promotion, diagnostics, fallback semantics, and
     differential validation.
+
+## 2026-07-05 — Madaros v2 S5 scalar program-MIR/ABI shadow slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: advance S5 beyond MIR-effect records by landing a deterministic
+  program-level scalar MIR/ABI shadow receipt for the same i64/bool call-return
+  family, while keeping the compiler-exported MachineModule requirement explicit.
+- Files changed:
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`, which consumes
+    the MIR-effect receipt and emits
+    `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
+  - The gate records a deterministic program-level shadow module for exactly 3
+    scalar programs: i64 literal return, i64 direct-call return, and bool
+    direct-call return.
+  - It verifies merged-IR function counts (`1,2,2`), ELF internal-call counts
+    (`1,2,2`), expected scalar ABI signatures (`rdi` argument where present,
+    `rax` return), canonical JSON roundtrip, and per-program shadow hashes.
+  - It explicitly records non-promotion of stack-arg, aggregate, SRET,
+    imported-call, f64 call/return, f128, and i256 surfaces.
+  - It records S4 negative/blocker controls as not-promoted: distinct symbolic
+    comparison/subtraction, `x_div_x` at zero, and the producer-evaluation
+    blockers for call-result self comparison/subtraction.
+  - The receipt sets
+    `s5_program_mir_abi_scalar_shadow_slice_complete = true`, while keeping
+    `compiler_machine_module_exported = false`, `real_program_mir_emitted = false`,
+    `real_abi_layout_emitted = false`, `s5_ready = false`, `s5_implemented = false`,
+    and `s5_full_complete = false`.
+- Local proof:
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - Two independent deterministic runs passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_PROGRAM_MIR_ABI_DIR=/tmp/sounio-s5-program-mir-abi-{a,b} bash scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    produced identical receipt sha
+    `bb9618c4a2318ce309a1b55881e6c293e911d97b37faa48b09a6bf22e4fc1307`.
+- Remaining boundary:
+  - S5 ready still requires compiler-exported full-program MachineModule
+    serialization, ABI layout receipts for aggregate/SRET/imported/stack-arg
+    paths, f64 XMM0 call/return closure before f128/i256 promotion, diagnostics,
+    fallback semantics, and differential validation.

@@ -266,6 +266,7 @@ S5 now has an executable input-contract preflight:
 - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
 - `scripts/dev/madaros_v2_s5_mir_abi_gate.sh`
 - `scripts/dev/madaros_v2_s5_mir_effect_gate.sh`
+- `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
 
 The preflight consumes current S4 extraction receipts and rejects rewrites that
 could change MIR or ABI semantics. Current status is input-contract ready, not
@@ -284,8 +285,14 @@ The MIR-effect gate then serializes those 28 selected rewrites into canonical
 MIR-effect records (`mir.const.i64`, `mir.const.bool`, `mir.alias.i64`) and runs
 3 scalar native-v2 witnesses: i64 literal return, i64 direct-call return, and
 bool direct-call return. This closes the scalar i64/bool direct-call/return
-slice only; `real_program_mir_emitted = false`, aggregate/SRET/imported-call,
-stack-arg, f64, f128, and i256 remain unpromoted.
-Next critical lane: real full-program MIR serialization plus ABI layout/call
-receipts for aggregate/SRET/imported-call and then f64 call/return before f128
-or i256 promotion.
+slice only. The program-MIR/ABI shadow gate then records deterministic
+program-level shadow receipts for the same 3 scalar witnesses, verifies merged-IR
+function counts (`1,2,2`), ELF internal-call counts (`1,2,2`), scalar ABI
+signatures (`rdi` where present, `rax` returns), and non-promotion of stack-arg,
+aggregate, SRET, imported-call, f64, f128, and i256 surfaces. It still records
+S4 semantic negatives and producer-evaluation blockers as not-promoted controls,
+and still records `compiler_machine_module_exported = false`,
+`real_program_mir_emitted = false`, and `s5_full_complete = false`.
+Next critical lane: compiler-exported full-program MachineModule serialization
+plus ABI layout/call receipts for aggregate/SRET/imported-call and then f64
+call/return before f128 or i256 promotion.
