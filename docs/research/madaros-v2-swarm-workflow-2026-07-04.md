@@ -222,6 +222,9 @@ receipts landed on 2026-07-05:
 - `tests/madaros/v2_s4/exact_identity.sio`
 - `tests/madaros/v2_s4/extract_cost_chain_i64.sio`
 - `tests/madaros/v2_s4/symbolic_identity_i64.sio`
+- `tests/madaros/v2_s4/symbolic_reflexive_cmp_i64.sio`
+- `tests/madaros/v2_s4/reject_distinct_symbolic_cmp_i64.sio`
+- `tests/madaros/v2_s4/reject_call_result_self_cmp_i64.sio`
 - `tests/madaros/v2_s4/reject_div_self_zero.sio`
 - `tests/madaros/v2_s4/reject_div_self_mixed_with_accepted.sio`
 
@@ -231,14 +234,18 @@ emits `madaros.v2.ekan.rewrite/0.1` rewrite receipts plus
 completed boundary for one exact accepted/rejected/extraction subset, not global
 S4 completion. The S3 operand-fidelity gate now closes the temporary blocker
 where binary operands could be duplicated by lowering. Current S4 local proof:
-`accepted=18`, `rejected=2`, `blocked=0`, `selected=18`, including
+`accepted=24`, `rejected=2`, `blocked=0`, `selected=24`, including
 `symbolic_identity_i64` neutral-element rewrites over non-constant params/call
-results. The rejected subset records `x_div_x_to_one` with counterexample `x = 0`,
-`selected_for_extraction = false`, and `ir_mutation_allowed = false`. The blocked
-status remains available for future ambiguous proposals, but the current fixture
-set has no blocked rewrites. The extraction boundary proves selected IDs exactly
-equal accepted IDs, rejected/blocked IDs are excluded, cost-model hashes are
-present, and no IR mutation is performed.
+results and `symbolic_reflexive_cmp_i64` param/block-param same-SSA comparison
+rewrites to exact bool constants. The manifest now has min/max rewrite counts,
+so distinct symbolic comparisons and call-result self-comparisons stay at exact
+zero until producer evaluation/purity is proven. The rejected subset records
+`x_div_x_to_one` with counterexample `x = 0`, `selected_for_extraction = false`,
+and `ir_mutation_allowed = false`. The blocked status remains available for
+future ambiguous proposals, but the current fixture set has no blocked rewrites.
+The extraction boundary proves selected IDs exactly equal accepted IDs,
+rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
+mutation is performed.
 
 S5 now has an executable input-contract preflight:
 

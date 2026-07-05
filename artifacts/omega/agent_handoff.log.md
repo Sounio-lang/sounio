@@ -3480,3 +3480,57 @@ status: lock-released
     and downstream optimizer integration remain open.
   - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
     implementation remains open.
+
+## 2026-07-05 — Madaros v2 S4 reflexive comparison receipts
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Commit target: S4 expansion toward full optimizer receipts; still not global
+  S4 completion.
+- Files changed:
+  - `scripts/dev/madaros_v2_s4_receipt.py`
+  - `scripts/dev/madaros_v2_s4_gate.sh`
+  - `scripts/dev/madaros_v2_s5_preflight_gate.sh`
+  - `tests/madaros/v2_s4/manifest.tsv`
+  - `tests/madaros/v2_s4/symbolic_reflexive_cmp_i64.sio`
+  - `tests/madaros/v2_s4/reject_distinct_symbolic_cmp_i64.sio`
+  - `tests/madaros/v2_s4/reject_call_result_self_cmp_i64.sio`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+- What changed:
+  - Added accepted `symbolic_reflexive_cmp_i64` receipts for same-SSA
+    param/block-param comparisons: `x == x -> true`, `x != x -> false`,
+    `x <= x -> true`, `x >= x -> true`, `x < x -> false`, and
+    `x > x -> false`.
+  - Receipts carry `same_operand_id = true`,
+    `producer_evaluation_policy = producer_is_param_or_block_param_no_effectful_eval`,
+    exact bool `result_const`, domain
+    `all-i64-values-with-reflexive-equality-and-order`, and
+    `reflexive-comparison-proof`.
+  - The first accepted tranche deliberately excludes call-produced values until
+    S3/S4 has explicit producer purity/evaluation-preservation evidence.
+  - Added exact-zero negative fixtures for distinct symbolic comparisons and
+    call-result self-comparisons.
+  - Strengthened `tests/madaros/v2_s4/manifest.tsv` with min/max rewrite counts
+    so negative/no-op rows fail if accidental rewrites appear.
+  - S5 preflight now allows `symbolic_reflexive_cmp_i64` only when the
+    extraction decision has `mir_abi_safe = true`, `abi_impact = none`, and
+    `lowering_effect = replace_binary_predicate_expr_with_const_bool`.
+- Local proof:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s4_receipt.py` passed.
+  - `bash -n scripts/dev/madaros_v2_s4_gate.sh scripts/dev/madaros_v2_s5_preflight_gate.sh` passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s4_gate.sh` passed:
+    `accepted=24`, `rejected=2`, `blocked=0`, `selected=24`, summary sha
+    `8d37b38ada25...`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/dev/madaros_v2_s5_preflight_gate.sh` passed:
+    `cases=9`, selected rewrites `24`, blocked rewrites `0`, `status=pass`,
+    preflight sha `6daacdd7e7c5...`.
+- Remaining boundary:
+  - Global S4 is still not complete: multi-rule equality saturation,
+    approximate/learned E-KAN proposals, producer purity/evaluation-preservation,
+    broader algebraic identities, broad counterexample search, and downstream
+    optimizer integration remain open.
+  - S5 input contract is ready for the accepted exact subset, but S5 MIR/ABI
+    implementation remains open.

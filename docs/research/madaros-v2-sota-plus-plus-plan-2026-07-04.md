@@ -315,12 +315,16 @@ builds a persistent
 proposals plus `madaros.v2.s4.extraction/0.1` receipts for deterministic
 cost-model extraction decisions. The S3 operand-provenance blocker found on
 2026-07-05 is closed by the S3 operand-fidelity gate. The current accepted
-subset is deliberately narrow: exact i64 constant folds plus neutral-element
-symbolic identities (`x + 0`, `0 + x`, `x * 1`, `1 * x`, `x - 0`) with
+subset is deliberately narrow: exact i64 constant folds, neutral-element
+symbolic identities (`x + 0`, `0 + x`, `x * 1`, `1 * x`, `x - 0`), and
+param/block-param same-SSA reflexive comparisons (`x == x`, `x != x`,
+`x <= x`, `x >= x`, `x < x`, `x > x`) with
 `basis_family = exact_symbolic`, `validator = translation-validation`,
 `error_bound = 0`, exact fallback hash, and original/rewritten e-node hashes.
-The current local S4 gate reports `accepted=18`, `rejected=2`, `blocked=0`,
-and `selected=18`.
+The current local S4 gate reports `accepted=24`, `rejected=2`, `blocked=0`,
+and `selected=24`. The manifest now carries min/max rewrite counts so negative
+rows such as distinct symbolic comparisons and call-result self-comparisons
+fail if they accidentally start rewriting without a producer-evaluation proof.
 The current rejected subset includes the algebraic proposal `x_div_x_to_one`,
 rejected by counterexample-guided translation validation (`x = 0`,
 original division-by-zero trap vs rewritten constant `1`) with
@@ -334,8 +338,9 @@ current fixture set has zero blocked rewrites.
 receipts and proves that extraction-selected IDs exactly equal accepted IDs,
 rejected/blocked IDs are excluded, cost-model hashes are present, and no IR
 mutation is allowed. Learned or approximate E-KAN rewrites, equality saturation,
-broader algebraic identities beyond neutral elements, broad counterexample
-search, and downstream applying optimizer integration remain future S4 work.
+broader algebraic identities beyond the current neutral/reflexive exact subset,
+broad counterexample search, producer purity/evaluation-preservation, and
+downstream applying optimizer integration remain future S4 work.
 
 Canonical artifact:
 - persistent e-graph/equality receipt plus E-KAN receipts for any learned or

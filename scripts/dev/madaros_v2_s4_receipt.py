@@ -343,6 +343,112 @@ def symbolic_identity_receipt(
     }
 
 
+def symbolic_reflexive_cmp_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    comparison_kind: str,
+    symbolic_value_id: int,
+    symbolic_producer: dict[str, Any],
+    result_const: tuple[str, bool],
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr["bin_op"]), f"op{instr['bin_op']}")
+    proposed = make_const_enode(*result_const)
+    fallback = {
+        "op": op_name,
+        "lhs": ["hlir_value", int(instr["lhs"])],
+        "rhs": ["hlir_value", int(instr["rhs"])],
+        "comparison_kind": comparison_kind,
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "result_const": result_const,
+    }
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["reflexive_comparison"],
+        "comparison_kind": comparison_kind,
+        "symbolic_value": symbolic_value_id,
+        "result_const": result_const,
+    }
+    domain_bounds = {
+        "kind": "all-i64-values-with-reflexive-equality-and-order",
+        "comparison_kind": comparison_kind,
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "result_const": result_const,
+        "preconditions": [
+            "both operands are the same S3 HLIR SSA value",
+            "symbolic operand is not a constant-fold duplicate",
+            "operand type is exact i64, not f64 or an approximate numeric domain",
+            "comparison has no side effects and evaluates the existing SSA value once",
+        ],
+    }
+    validator_log = {
+        "validator": "translation-validation",
+        "method": "reflexive-comparison-symbolic-proof-over-s3-hlir",
+        "accepted": True,
+        "comparison_kind": comparison_kind,
+        "domain_bounds": domain_bounds,
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "comparison_kind": comparison_kind,
+        "symbolic_value": symbolic_value_id,
+        "result_const": result_const,
+    }
+    rid = "s4-reflexive-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_reflexive_cmp_i64",
+        "comparison_kind": comparison_kind,
+        "proposal_kind": "exact_symbolic_reflexive_comparison",
+        "proposal_origin": "madaros_v2_s4_receipt.reflexive-comparison-symbolic-proof",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "symbolic_reflexive_cmp_i64", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_exact_symbolic_predicate",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "symbolic_value": symbolic_value_id,
+        "symbolic_producer": symbolic_producer,
+        "same_operand_id": True,
+        "producer_evaluation_policy": "producer_is_param_or_block_param_no_effectful_eval",
+        "result_const": result_const,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(proposed)),
+        "rewritten_enode_sha256": sha256_text(stable_json(proposed)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "exact-symbolic-reflexive-predicate-no-training"})),
+        "domain": "all-i64-values-with-reflexive-equality-and-order",
+        "domain_bounds": domain_bounds,
+        "error_bound": "0",
+        "error_bound_method": "exact-reflexive-comparison",
+        "gum_covariance_assumptions": "not-applicable: exact i64 symbolic predicate",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "translation-validation",
+        "validator_attempted": ["translation-validation", "reflexive-comparison-proof"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "selected_for_extraction": True,
+        "ir_mutation_allowed": False,
+        "accepted": True,
+    }
+
+
 def rejected_div_self_receipt(
     case_id: str,
     source: str,
@@ -607,9 +713,13 @@ def build_extraction(case_id: str, source: str, hlir_sha: str, egraph: dict[str,
                 "error_bound": rewrite["error_bound"],
                 "domain": rewrite["domain"],
                 "domain_bounds": rewrite["domain_bounds"],
-                "lowering_effect": "replace_binary_constant_expr_with_const"
-                if rewrite["rewrite_kind"] == "constant_fold_i64"
-                else "replace_binary_identity_expr_with_existing_value",
+                "lowering_effect": (
+                    "replace_binary_identity_expr_with_existing_value"
+                    if rewrite["rewrite_kind"] == "symbolic_identity_i64"
+                    else "replace_binary_predicate_expr_with_const_bool"
+                    if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64"
+                    else "replace_binary_constant_expr_with_const"
+                ),
                 "abi_impact": "none",
                 "mir_abi_safe": True,
             }
@@ -839,6 +949,38 @@ def identity_candidate(
     return None
 
 
+def reflexive_cmp_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[str, int, dict[str, Any], tuple[str, bool]] | None:
+    if int(instr.get("lhs", -1)) != int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not rhs_info:
+        return None
+    if lhs_info.get("value_id") != rhs_info.get("value_id"):
+        return None
+    if lhs_info.get("producer_kind") not in {"param", "block_param"}:
+        return None
+    if instr.get("ty", {}).get("kind") != "bool":
+        return None
+    op = int(instr.get("bin_op", -1))
+    lhs_id = int(instr.get("lhs", -1))
+    if op == 18:
+        return ("eq_self_true", lhs_id, lhs_info, ("bool", True))
+    if op == 19:
+        return ("ne_self_false", lhs_id, lhs_info, ("bool", False))
+    if op == 21:
+        return ("le_self_true", lhs_id, lhs_info, ("bool", True))
+    if op == 23:
+        return ("ge_self_true", lhs_id, lhs_info, ("bool", True))
+    if op == 20:
+        return ("lt_self_false", lhs_id, lhs_info, ("bool", False))
+    if op == 22:
+        return ("gt_self_false", lhs_id, lhs_info, ("bool", False))
+    return None
+
+
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = json.loads(hlir_text)
     module = data["module"]
@@ -940,6 +1082,41 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     block["label"],
                                 )
                     else:
+                        reflexive_cmp = reflexive_cmp_candidate(instr, lhs_info, rhs_info)
+                        if reflexive_cmp is not None:
+                            comparison_kind, symbolic_value_id, symbolic_producer, result_const = reflexive_cmp
+                            receipt = symbolic_reflexive_cmp_receipt(
+                                case_id,
+                                source,
+                                hlir_sha,
+                                func["name"],
+                                block["label"],
+                                instr,
+                                comparison_kind,
+                                symbolic_value_id,
+                                symbolic_producer,
+                                result_const,
+                            )
+                            rewrites.append(receipt)
+                            enodes.append({
+                                "kind": "s4-rewrite",
+                                "rewrite_id": receipt["proposed_rewrite_id"],
+                                "sha256": receipt["rewritten_enode_sha256"],
+                                "op": "const",
+                            })
+                            value_info[result] = const_info(
+                                {
+                                    "result": result,
+                                    "constant": {
+                                        "kind": result_const[0],
+                                        "int_val": 0,
+                                        "bool_val": bool(result_const[1]),
+                                    },
+                                },
+                                result_const,
+                                func["name"],
+                                block["label"],
+                            )
                         identity = identity_candidate(instr, lhs_info, rhs_info)
                         if identity is not None:
                             identity_kind, symbolic_value_id, symbolic_producer, neutral_side, neutral_const = identity
@@ -1066,7 +1243,7 @@ def emit(args: argparse.Namespace) -> int:
         "s4_claim": "conservative_egraph_ekan_receipt_boundary_with_operand_provenance_guard",
         "s4_remaining": [
             "multi-rule equality saturation",
-            "broader non-constant algebraic identities beyond neutral-element identities",
+            "broader non-constant algebraic identities beyond neutral-element and reflexive-comparison identities",
             "downstream optimizer integration beyond receipt-only extraction",
         ],
     }

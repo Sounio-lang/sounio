@@ -52,9 +52,12 @@ run_case() {
   local min_accepted="$3"
   local min_rejected="$4"
   local min_blocked="$5"
-  local required_accepted="$6"
-  local required_rejected="$7"
-  local required_blocked="$8"
+  local max_accepted="$6"
+  local max_rejected="$7"
+  local max_blocked="$8"
+  local required_accepted="$9"
+  local required_rejected="${10}"
+  local required_blocked="${11}"
   local a_dir="$OUT_DIR/$case_id/a"
   local b_dir="$OUT_DIR/$case_id/b"
   mkdir -p "$a_dir" "$b_dir"
@@ -68,7 +71,7 @@ run_case() {
   cmp "$a_dir/$case_id.s4.rewrites.json" "$b_dir/$case_id.s4.rewrites.json" >/dev/null
   cmp "$a_dir/$case_id.s4.extraction.json" "$b_dir/$case_id.s4.extraction.json" >/dev/null
 
-  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$a_dir/$case_id.s4.extraction.json" "$min_accepted" "$min_rejected" "$min_blocked" "$required_accepted" "$required_rejected" "$required_blocked" <<'PY'
+  python3 - "$a_dir/$case_id.s4.receipt.json" "$a_dir/$case_id.s4.egraph.json" "$a_dir/$case_id.s4.rewrites.json" "$a_dir/$case_id.s4.extraction.json" "$min_accepted" "$min_rejected" "$min_blocked" "$max_accepted" "$max_rejected" "$max_blocked" "$required_accepted" "$required_rejected" "$required_blocked" <<'PY'
 import hashlib
 import json
 import sys
@@ -80,6 +83,14 @@ IDENTITY_KINDS = {
     "mul_one_rhs": {"neutral_side": "rhs", "neutral_const": ["int", 1]},
     "mul_one_lhs": {"neutral_side": "lhs", "neutral_const": ["int", 1]},
     "sub_zero_rhs": {"neutral_side": "rhs", "neutral_const": ["int", 0]},
+}
+REFLEXIVE_CMP_KINDS = {
+    "eq_self_true": ["bool", True],
+    "ne_self_false": ["bool", False],
+    "le_self_true": ["bool", True],
+    "ge_self_true": ["bool", True],
+    "lt_self_false": ["bool", False],
+    "gt_self_false": ["bool", False],
 }
 
 def stable_json(payload):
@@ -97,7 +108,18 @@ def value_ref_hash(value_id, producer):
     }
     return sha256_text(stable_json(payload))
 
-receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, min_blocked, required_accepted, required_rejected, required_blocked = sys.argv[1:11]
+def const_hash(kind, value):
+    payload = {
+        "op": "const",
+        "constant": {
+            "kind": kind,
+            "int_val": int(value) if kind == "int" else 0,
+            "bool_val": bool(value) if kind == "bool" else False,
+        },
+    }
+    return sha256_text(stable_json(payload))
+
+receipt_path, egraph_path, rewrites_path, extraction_path, min_accepted, min_rejected, min_blocked, max_accepted, max_rejected, max_blocked, required_accepted, required_rejected, required_blocked = sys.argv[1:14]
 receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
 egraph = json.loads(Path(egraph_path).read_text(encoding="utf-8"))
 rewrites = json.loads(Path(rewrites_path).read_text(encoding="utf-8"))
@@ -181,6 +203,12 @@ if receipt["rejected_rewrite_count"] < int(min_rejected):
     raise SystemExit(f"too few rejected rewrites: {receipt['rejected_rewrite_count']} < {min_rejected}")
 if receipt["blocked_rewrite_count"] < int(min_blocked):
     raise SystemExit(f"too few blocked rewrites: {receipt['blocked_rewrite_count']} < {min_blocked}")
+if max_accepted != "-" and receipt["accepted_rewrite_count"] > int(max_accepted):
+    raise SystemExit(f"too many accepted rewrites: {receipt['accepted_rewrite_count']} > {max_accepted}")
+if max_rejected != "-" and receipt["rejected_rewrite_count"] > int(max_rejected):
+    raise SystemExit(f"too many rejected rewrites: {receipt['rejected_rewrite_count']} > {max_rejected}")
+if max_blocked != "-" and receipt["blocked_rewrite_count"] > int(max_blocked):
+    raise SystemExit(f"too many blocked rewrites: {receipt['blocked_rewrite_count']} > {max_blocked}")
 accepted_ids = set(receipt.get("accepted_rewrite_ids", []))
 rejected_ids = set(receipt.get("rejected_rewrite_ids", []))
 blocked_ids = set(receipt.get("blocked_rewrite_ids", []))
@@ -267,6 +295,43 @@ for rewrite in rewrites:
                 raise SystemExit("symbolic identity proposed enode is not value_ref(symbolic_value)")
             if rewrite.get("rewritten_enode_sha256") != expected_hash:
                 raise SystemExit("symbolic identity rewritten enode is not value_ref(symbolic_value)")
+        if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64":
+            comparison_kind = rewrite.get("comparison_kind")
+            if comparison_kind not in REFLEXIVE_CMP_KINDS:
+                raise SystemExit(f"unexpected reflexive comparison kind: {comparison_kind}")
+            if rewrite.get("proposal_kind") != "exact_symbolic_reflexive_comparison":
+                raise SystemExit("reflexive comparison must use exact symbolic proposal")
+            if rewrite.get("ekan_receipt_kind") != "ekan_exact_symbolic_predicate":
+                raise SystemExit("reflexive comparison must use exact predicate E-KAN receipt")
+            symbolic_value = int(rewrite.get("symbolic_value", -1))
+            if symbolic_value != int(rewrite.get("original_lhs", -2)):
+                raise SystemExit("reflexive comparison symbolic value must equal original lhs")
+            if symbolic_value != int(rewrite.get("original_rhs", -3)):
+                raise SystemExit("reflexive comparison symbolic value must equal original rhs")
+            if rewrite.get("same_operand_id") is not True:
+                raise SystemExit("reflexive comparison must assert same_operand_id")
+            if rewrite.get("producer_evaluation_policy") != "producer_is_param_or_block_param_no_effectful_eval":
+                raise SystemExit("reflexive comparison producer evaluation policy mismatch")
+            producer = rewrite.get("symbolic_producer", {})
+            if producer.get("producer_kind") not in {"param", "block_param"}:
+                raise SystemExit("reflexive comparison first tranche accepts only param/block_param producers")
+            if not producer.get("producer_label") and not producer.get("label"):
+                raise SystemExit("reflexive comparison missing stable producer label")
+            if rewrite.get("domain") != "all-i64-values-with-reflexive-equality-and-order":
+                raise SystemExit("reflexive comparison domain mismatch")
+            bounds = rewrite.get("domain_bounds", {})
+            if bounds.get("kind") != "all-i64-values-with-reflexive-equality-and-order":
+                raise SystemExit("reflexive comparison domain bounds mismatch")
+            if "reflexive-comparison-proof" not in rewrite.get("validator_attempted", []):
+                raise SystemExit("reflexive comparison missing proof marker")
+            expected_const = REFLEXIVE_CMP_KINDS[comparison_kind]
+            if list(rewrite.get("result_const", [])) != expected_const:
+                raise SystemExit("reflexive comparison result const mismatch")
+            expected_hash = const_hash(expected_const[0], expected_const[1])
+            if rewrite.get("proposed_enode_sha256") != expected_hash:
+                raise SystemExit("reflexive comparison proposed enode is not expected bool const")
+            if rewrite.get("rewritten_enode_sha256") != expected_hash:
+                raise SystemExit("reflexive comparison rewritten enode is not expected bool const")
         observed_accepted.add(rewrite["rewrite_kind"])
         observed_accepted.add(rewrite["ekan_receipt_kind"])
     elif rewrite.get("blocked") is True:
@@ -348,6 +413,11 @@ for decision in extraction["decisions"]:
                 raise SystemExit("symbolic identity extraction has wrong lowering effect")
             if decision.get("abi_impact") != "none":
                 raise SystemExit("symbolic identity extraction must have no ABI impact")
+        if decision.get("rewrite_kind") == "symbolic_reflexive_cmp_i64":
+            if decision.get("lowering_effect") != "replace_binary_predicate_expr_with_const_bool":
+                raise SystemExit("reflexive comparison extraction has wrong lowering effect")
+            if decision.get("abi_impact") != "none":
+                raise SystemExit("reflexive comparison extraction must have no ABI impact")
     elif rid in rejected_ids:
         if decision["decision"] != "reject" or decision["selected"] is not False:
             raise SystemExit("rejected rewrite must not be selected by extractor")
@@ -389,8 +459,8 @@ print(
 PY
 }
 
-tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r case_id source min_accepted min_rejected min_blocked required_accepted required_rejected required_blocked; do
-  run_case "$case_id" "$source" "$min_accepted" "$min_rejected" "$min_blocked" "$required_accepted" "$required_rejected" "$required_blocked"
+tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r case_id source min_accepted min_rejected min_blocked max_accepted max_rejected max_blocked required_accepted required_rejected required_blocked; do
+  run_case "$case_id" "$source" "$min_accepted" "$min_rejected" "$min_blocked" "$max_accepted" "$max_rejected" "$max_blocked" "$required_accepted" "$required_rejected" "$required_blocked"
 done
 
 python3 - "$OUT_DIR" <<'PY'
