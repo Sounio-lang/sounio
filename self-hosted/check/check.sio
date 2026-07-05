@@ -4380,6 +4380,23 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     ty_unit()
 }
 
+// Array integer-literal narrowing: the array-shaped mirror of the scalar
+// int_lit_narrow rule. `var buf: [i8; N] = [0; N]` types the literal RHS
+// bottom-up as [i64; N]; a small-int element annotation must accept it
+// (canonical lean lane does; the EISA v1 and str::lib byte buffers depend
+// on this shape — it alone blocked 3/4 EISA tests on the default lane).
+fn array_int_lit_narrow(ann_ty: TypeEntry, init_ty: TypeEntry) -> bool with Panic, Div {
+    if ann_ty.kind != TypeKind::TyArray { return false }
+    if init_ty.kind != TypeKind::TyArray { return false }
+    if ann_ty.array_size != init_ty.array_size { return false }
+    var ann_k = TypeKind::TyUnknown
+    match ann_ty.inner { Some(e) => { ann_k = (*e).kind }, None => {} }
+    var init_k = TypeKind::TyUnknown
+    match init_ty.inner { Some(e) => { init_k = (*e).kind }, None => {} }
+    if init_k != TypeKind::TyI64 { return false }
+    ann_k == TypeKind::TyI8 || ann_k == TypeKind::TyI32
+}
+
 fn checker_check_block_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     checker_check_opt_block_inplace(c, e.block)
 }
@@ -6579,7 +6596,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok && !array_int_lit_narrow(ann_ty, init_ty) {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -6631,7 +6648,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow {
+        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !array_int_lit_narrow(ann_ty, init_ty) {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -17035,7 +17052,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow && !array_int_lit_narrow(ann_ty, init_ty) {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -17087,7 +17104,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow && !array_int_lit_narrow(ann_ty, init_ty) {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
