@@ -9760,6 +9760,204 @@ fn compile_place_assign_general_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// ─── ARM64 mirror of the general place engine ───
+// Same representation rules and PLACE_* contract as the x86 engine above.
+fn compile_place_projections_a64(start_ty: i64, start_hash: i64) with IO, Mut, Panic, Div {
+    PLACE_OK = 0
+    var cur_ty = start_ty
+    var cur_hash = start_hash
+    var kind: i64 = 0 - 1
+    var arrh: i64 = 0
+    while true {
+        if TK[EP as usize] == 50 {
+            EP = EP + 1
+            let f_tok = EP
+            let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+            EP = EP + 1
+            let si = st_find(cur_hash)
+            if si < 0 {
+                tc_error(f_tok, "field access requires struct base")
+                return
+            }
+            if st_private_access_denied(si, f_tok) {
+                tc_error_hard(f_tok, "private struct field access")
+                return
+            }
+            ST_QUERY_NS = TS[f_tok as usize]
+            ST_QUERY_NE = TE[f_tok as usize]
+            let off = st_field_offset(si, fh)
+            let fty = st_field_ty(si, fh)
+            let fhash = st_field_hash(si, fh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if off < 0 {
+                tc_error(f_tok, "unknown field access")
+                return
+            }
+            if off != 0 {
+                emit_imm64_reg_a64(11, off)
+                em32(0x8B0B0000)
+            }
+            cur_ty = fty
+            cur_hash = fhash
+            if TK[EP as usize] == 50 || TK[EP as usize] == 41 {
+                if cur_ty == 11 && box_hash_is(cur_hash) {
+                    em32(0xF9400000)
+                    cur_ty = ptr_hash_inner_ty(cur_hash)
+                    cur_hash = ptr_hash_inner_hash(cur_hash)
+                } else if cur_ty == 10 {
+                    em32(0xF9400000)
+                    cur_ty = ref_hash_inner_ty(cur_hash)
+                    cur_hash = ref_hash_inner_hash(cur_hash)
+                }
+                continue
+            }
+            if type_is_aggregate(cur_ty, cur_hash) { kind = 3 } else { kind = 0 }
+            break
+        }
+        if TK[EP as usize] == 41 {
+            if cur_ty != 8 {
+                tc_error(EP, "indexing requires a fixed-array place")
+                return
+            }
+            let sp = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(sp)
+            EP = EP + 1
+            compile_or_a64()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            let sidx = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(sidx)
+            let el_ty = arr_hash_elem_ty(cur_hash)
+            let el_hash = arr_hash_elem_hash(cur_hash)
+            let esiz = arr_hash_esiz(cur_hash)
+            let more = if TK[EP as usize] == 50 || TK[EP as usize] == 41 { 1 } else { 0 }
+            emit_load_var_a64(sidx)
+            em32(0xAA0003E1)
+            let saved_arr_hash = cur_hash
+            emit_load_var_a64(sp)
+            if more == 1 {
+                if type_is_aggregate(el_ty, el_hash) || el_ty == 8 {
+                    em32(0xF8617800)
+                    cur_ty = el_ty
+                    cur_hash = el_hash
+                    continue
+                }
+                tc_error(EP, "projection through scalar array element")
+                return
+            }
+            if type_is_aggregate(el_ty, el_hash) || el_ty == 8 {
+                em32(0x8B010C00)
+                kind = 2
+                arrh = saved_arr_hash
+            } else if esiz == 8 {
+                em32(0x8B010C00)
+                kind = 0
+            } else {
+                em32(0x8B010000)
+                kind = 1
+            }
+            cur_ty = el_ty
+            cur_hash = el_hash
+            break
+        }
+        tc_error(EP, "unsupported place projection")
+        return
+    }
+    PLACE_TY = cur_ty
+    PLACE_TY_HASH = cur_hash
+    PLACE_KIND = kind
+    PLACE_ARR_HASH = arrh
+    PLACE_OK = 1
+}
+
+fn compile_place_assign_general_a64() with IO, Mut, Panic, Div {
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    var cur_ty: i64 = 0
+    var cur_hash: i64 = 0
+    if TK[EP as usize] == 6 {
+        let ptr_tok = EP + 2
+        let pns = TS[ptr_tok as usize]
+        let pne = TE[ptr_tok as usize]
+        EP = EP + 4
+        let pvi = var_find_idx(pns, pne)
+        if pvi < 0 {
+            tc_undefined_var(ptr_tok)
+            return
+        }
+        emit_load_var_a64(VAR_SLOT[pvi as usize])
+        cur_ty = VAR_TY[pvi as usize]
+        cur_hash = VAR_TY_HASH[pvi as usize]
+        if type_is_pointer_like(cur_ty, cur_hash) {
+            cur_ty = ptr_hash_inner_ty(cur_hash)
+            cur_hash = ptr_hash_inner_hash(cur_hash)
+        }
+    } else {
+        let name_tok = EP
+        let ns = TS[EP as usize]
+        let ne = TE[EP as usize]
+        EP = EP + 1
+        let vi = var_find_idx(ns, ne)
+        if vi >= 0 {
+            emit_load_var_a64(VAR_SLOT[vi as usize])
+            cur_ty = VAR_TY[vi as usize]
+            cur_hash = VAR_TY_HASH[vi as usize]
+            if type_is_pointer_like(cur_ty, cur_hash) {
+                cur_ty = ptr_hash_inner_ty(cur_hash)
+                cur_hash = ptr_hash_inner_hash(cur_hash)
+            }
+        } else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 {
+                emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])
+                cur_ty = GL_TY[gi as usize]
+                cur_hash = GL_TY_HASH[gi as usize]
+            } else {
+                tc_undefined_var(name_tok)
+                return
+            }
+        }
+    }
+    compile_place_projections_a64(cur_ty, cur_hash)
+    if PLACE_OK == 0 {
+        return
+    }
+    let pa = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(pa)
+    let want_ty = PLACE_TY
+    let want_hash = PLACE_TY_HASH
+    let kind = PLACE_KIND
+    let arrh = PLACE_ARR_HASH
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    compile_or_a64()
+    if ty_eq(want_ty, want_hash, EXPR_TY, EXPR_TY_HASH) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    if kind == 2 {
+        materialize_aggregate_array_element_a64(arrh)
+        em32(0xAA0003EA)
+        emit_load_var_a64(pa)
+        em32(0xF900000A)
+    } else if kind == 3 {
+        em32(0xAA0003EA)
+        emit_load_var_a64(pa)
+        emit_copy_agg_to_ptr_a64(want_ty, want_hash)
+    } else if kind == 1 {
+        em32(0xAA0003EA)
+        emit_load_var_a64(pa)
+        em32(0x3900000A)
+    } else {
+        em32(0xAA0003EA)
+        emit_load_var_a64(pa)
+        em32(0xF900000A)
+    }
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -21370,24 +21568,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // name.f1.f2[idx] = expr through either a pointer root or an inline value struct.
-    if stmt_is_field_field_array_store_shape(EP) {
-        if token_chain_root_is_pointer(EP) {
-            compile_autoderef_field_field_array_store_x86()
-        } else {
-            compile_value_field_field_array_store_x86()
-        }
-        return
-    }
-    // name.f1.f2 = expr through a pointer var (auto-deref) OR an inline value struct.
-    if stmt_is_field_field_store_shape(EP) {
-        if token_chain_root_is_pointer(EP) {
-            compile_autoderef_field_field_store_x86()
-        } else {
-            compile_value_field_field_store_x86()
-        }
-        return
-    }
+    // Zoo retirement round 1: `name.f1.f2[idx] =` and `name.f1.f2 =`
+    // (pointer and value roots) are served by the general place-assign
+    // fallback at the tail of this dispatch. Their detectors/handlers remain
+    // only for the a64 lane until the a64 projection engine lands.
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
         if current_fn_allows_mutation() == false {
@@ -21397,14 +21581,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // x.array_field[idx].leaf_array[idx2] = expr
-    if stmt_is_indexed_field_field_array_store(EP) {
-        if current_fn_allows_mutation() == false {
-            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
-        }
-        compile_indexed_field_field_array_store_x86()
-        return
-    }
+    // Retired: `x.f1[i].f2[j] =` (two-level indexed) — general fallback.
 
     // x.array_field[idx].field = expr
     if stmt_is_indexed_field_field_store(EP) {
@@ -21682,11 +21859,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
-    if stmt_is_deref_field_array_store(EP) {
-        compile_deref_field_array_store_x86()
-        return
-    }
+    // Retired: `(*name).field[idx] =` — general place-assign fallback.
     // (*<complex-expr>).field[idx] = expr  (e.g. (*(*c).w).data[i]) — general deref base
     if stmt_is_deref_complex_field_array_store(EP) {
         compile_deref_complex_field_array_store_x86()
@@ -21769,16 +21942,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         return
     }
-    // (*name).f1.f2[idx] = expr  (two-level nested deref store into an array field)
-    if stmt_is_deref_field_field_array_store(EP) {
-        compile_deref_field_field_array_store_x86()
-        return
-    }
-    // (*name).f1.f2 = expr  (two-level nested deref store)
-    if stmt_is_deref_field_field_store(EP) {
-        compile_deref_field_field_store_x86()
-        return
-    }
+    // Retired: `(*name).f1.f2[idx] =` and `(*name).f1.f2 =` — general fallback.
+
     // (*PTR).field = expr
     if stmt_is_deref_field_store(EP) {
         let name_tok = EP + 2
@@ -21834,18 +21999,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // (*name).field.field[idx] = expr  and  (*name).field.field = expr — two-level nested
-    // *mut writes. Without these, the two-field LHS fell to the generic assignment path,
-    // which materialised the inline intermediate struct field as a value-copy, wrote into
-    // the copy, and discarded it (read back as 0) — the nested-*mut-write codegen bug.
-    if stmt_is_deref_field_field_array_store(EP) {
-        compile_deref_field_field_array_store_x86()
-        return
-    }
-    if stmt_is_deref_field_field_store(EP) {
-        compile_deref_field_field_store_x86()
-        return
-    }
+    // Retired duplicate dispatch of the two-level deref stores — general fallback.
 
     // return expr
     if k == 2 {
@@ -32701,14 +32855,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         return
     }
-    // x.array_field[idx].leaf_array[idx2] = expr
-    if stmt_is_indexed_field_field_array_store(EP) {
-        if current_fn_allows_mutation() == false {
-            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
-        }
-        compile_indexed_field_field_array_store_a64()
-        return
-    }
+    // Retired: `x.f1[i].f2[j] =` — a64 general place-assign fallback.
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
         if current_fn_allows_mutation() == false {
@@ -32926,11 +33073,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         return
     }
-    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
-    if stmt_is_deref_field_array_store(EP) {
-        compile_deref_field_array_store_a64()
-        return
-    }
+    // Retired: `(*name).field[idx] =` — a64 general place-assign fallback.
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
@@ -33896,6 +34039,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    // General place-assign fallback (a64 mirror): any lvalue chain the
+    // specific handlers above did not claim.
+    if stmt_scan_place_assign(EP) {
+        compile_place_assign_general_a64()
+        LAST_STMT_HAS_VALUE = 0
+        LAST_STMT_TY = 0
+        LAST_STMT_TY_HASH = 0
+        return
+    }
+
     // Expression statement
     compile_or_a64()
     LAST_STMT_HAS_VALUE = 1
