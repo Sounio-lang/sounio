@@ -16,12 +16,14 @@ SOURCE_SRET_RECEIPT_DIR="$OUT_DIR/source_sret_receipt"
 STACK_CALL_RECEIPT_DIR="$OUT_DIR/stack_call_receipt"
 IMPORTED_SRET_RECEIPT_DIR="$OUT_DIR/imported_sret_receipt"
 METHOD_SRET_RECEIPT_DIR="$OUT_DIR/method_sret_receipt"
+F64_XMM0_RECEIPT_DIR="$OUT_DIR/f64_xmm0_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
 SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_sret_abi_receipt.py"
 SOURCE_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_source_sret_receipt.py"
 STACK_CALL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_stack_call_receipt.py"
 IMPORTED_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_imported_sret_receipt.py"
 METHOD_SRET_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_method_sret_receipt.py"
+F64_XMM0_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f64_xmm0_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
 MANIFEST="${SOUNIO_MADAROS_V2_S5_SCALAR_MANIFEST:-tests/madaros/v2_s5/scalar_mir_abi_manifest.tsv}"
 MODULE="$OUT_DIR/madaros_v2_s5_program_mir_abi.module.json"
@@ -32,8 +34,9 @@ SOURCE_SRET_RECEIPT="$SOURCE_SRET_RECEIPT_DIR/madaros_v2_s5_source_sret.receipt.
 STACK_CALL_RECEIPT="$STACK_CALL_RECEIPT_DIR/madaros_v2_s5_stack_call.receipt.json"
 IMPORTED_SRET_RECEIPT="$IMPORTED_SRET_RECEIPT_DIR/madaros_v2_s5_imported_sret.receipt.json"
 METHOD_SRET_RECEIPT="$METHOD_SRET_RECEIPT_DIR/madaros_v2_s5_method_sret.receipt.json"
+F64_XMM0_RECEIPT="$F64_XMM0_RECEIPT_DIR/madaros_v2_s5_f64_xmm0.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -122,7 +125,16 @@ if [[ ! -f "$METHOD_SRET_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$F64_XMM0_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$F64_XMM0_RECEIPT_DIR"
+
+if [[ ! -f "$F64_XMM0_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f64 XMM0 receipt: $F64_XMM0_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -171,8 +183,9 @@ source_sret_receipt_path = Path(sys.argv[4])
 stack_call_receipt_path = Path(sys.argv[5])
 imported_sret_receipt_path = Path(sys.argv[6])
 method_sret_receipt_path = Path(sys.argv[7])
-module_path = Path(sys.argv[8])
-receipt_path = Path(sys.argv[9])
+f64_xmm0_receipt_path = Path(sys.argv[8])
+module_path = Path(sys.argv[9])
+receipt_path = Path(sys.argv[10])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -183,6 +196,7 @@ source_sret_receipt = load_json(source_sret_receipt_path)
 stack_call_receipt = load_json(stack_call_receipt_path)
 imported_sret_receipt = load_json(imported_sret_receipt_path)
 method_sret_receipt = load_json(method_sret_receipt_path)
+f64_xmm0_receipt = load_json(f64_xmm0_receipt_path)
 
 if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
     raise SystemExit("bad S5 SRET ABI receipt schema")
@@ -386,6 +400,60 @@ if method_stack.get("machine_shape", {}).get("main_field_load_indices") != [0, 1
     raise SystemExit("method SRET stack receipt must prove aggregate field indices 0,1,2")
 if method_stack.get("machine_shape", {}).get("method_source_is_sret") != 1:
     raise SystemExit("method SRET stack callee must be source_is_sret")
+
+if f64_xmm0_receipt.get("schema") != "madaros.v2.s5.f64_xmm0_receipt/0.1":
+    raise SystemExit("bad S5 f64 XMM0 receipt schema")
+if f64_xmm0_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f64 XMM0 receipt")
+if f64_xmm0_receipt.get("stage_contract_level") != "S5_F64_XMM0_CALL_RETURN_PROMOTED":
+    raise SystemExit("f64 XMM0 receipt must declare promoted stage contract")
+if f64_xmm0_receipt.get("s5_f64_xmm0_call_return_complete") is not True:
+    raise SystemExit("program MIR/ABI gate requires completed f64 XMM0 call-return receipt")
+if f64_xmm0_receipt.get("f64_xmm0_promoted") is not True:
+    raise SystemExit("program MIR/ABI gate requires f64 XMM0 promotion flag")
+if f64_xmm0_receipt.get("case_count") != 7:
+    raise SystemExit("program MIR/ABI gate requires exact seven f64 XMM0 cases")
+required_f64_flags = [
+    "source_frontend_dispatches_print_to_print_f64",
+    "source_frontend_dispatches_println_f64_to_print_f64",
+    "source_frontend_tracks_let_bound_f64_identifiers",
+    "ir_lowers_f64_literals_to_IrLoadFloat",
+    "native_v2_lowers_f64_to_i64_cast",
+    "native_v2_lowers_fractional_f64_binops",
+    "native_v2_materializes_print_f64_fraction_scale_without_rodata_relocation",
+    "native_v2_bridges_print_f64_arg0_to_xmm0",
+    "compiler_machine_module_exported",
+    "real_program_mir_emitted",
+    "real_abi_layout_emitted",
+]
+for field in required_f64_flags:
+    if f64_xmm0_receipt.get(field) is not True:
+        raise SystemExit(f"f64 XMM0 receipt missing required true flag: {field}")
+f64_cases = {row.get("case_id"): row for row in f64_xmm0_receipt.get("cases", [])}
+required_f64_cases = {
+    "f64_cast_literal_to_i64_return_4": {"exit": 4, "stdout": ""},
+    "f64_fractional_binop_cast_return_50": {"exit": 50, "stdout": ""},
+    "f64_return_compare_exit_45": {"exit": 45, "stdout": ""},
+    "f64_mixed_args_return_compare_exit_55": {"exit": 55, "stdout": ""},
+    "f64_println_call_stdout_4_5": {"exit": 0, "stdout": "4.500000\n"},
+    "f64_print_call_stdout_4_5": {"exit": 0, "stdout": "4.500000"},
+    "f64_let_bound_println_stdout_4_5": {"exit": 0, "stdout": "4.500000\n"},
+}
+if set(f64_cases) != set(required_f64_cases):
+    raise SystemExit(f"f64 XMM0 receipt cases mismatch: {sorted(f64_cases)}")
+for case_id, expected in required_f64_cases.items():
+    row = f64_cases[case_id]
+    if row.get("actual_exit") != expected["exit"]:
+        raise SystemExit(f"{case_id} expected exit {expected['exit']}, got {row.get('actual_exit')}")
+    if row.get("actual_stdout") != expected["stdout"]:
+        raise SystemExit(f"{case_id} expected stdout {expected['stdout']!r}, got {row.get('actual_stdout')!r}")
+    shape = row.get("machine_shape", {})
+    if "main" not in shape.get("function_names", []):
+        raise SystemExit(f"{case_id} must include main in MachineModule functions")
+    if not row.get("machine_module_json_sha256"):
+        raise SystemExit(f"{case_id} missing MachineModule sha256")
+    if not row.get("elf_sha256"):
+        raise SystemExit(f"{case_id} missing ELF sha256")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -651,11 +719,6 @@ not_promoted = [
         "reason": "imported aggregate-return calls now export MachineModule JSON and execute one-arg, register multi-arg, and stack-arg SRET witnesses",
     },
     {
-        "surface": "f64_call_return",
-        "status": "not_promoted_by_this_slice",
-        "reason": "must close XMM0 call-return receipt before f128 promotion",
-    },
-    {
         "surface": "f128_i256",
         "status": "not_promoted_by_this_slice",
         "reason": "requires layout, operations, ABI, diagnostics, and fallback semantics",
@@ -778,11 +841,21 @@ module = {
         "case_count": method_sret_receipt["case_count"],
         "cases": method_sret_receipt["cases"],
     },
+    "f64_xmm0_receipt": {
+        "schema": f64_xmm0_receipt["schema"],
+        "path": f"{f64_xmm0_receipt_path.parent.name}/{f64_xmm0_receipt_path.name}",
+        "receipt_sha256": f64_xmm0_receipt["receipt_sha256"],
+        "stage_contract_level": f64_xmm0_receipt["stage_contract_level"],
+        "case_id": f64_xmm0_receipt["case_id"],
+        "case_count": f64_xmm0_receipt["case_count"],
+        "cases": f64_xmm0_receipt["cases"],
+    },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
         "target": "x86_64-linux",
         "arg_register_order": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
         "return_register": "rax",
+        "f64_return_register": "xmm0",
         "normal_call_stack_args_promoted": True,
         "source_sret_stack_args_promoted": True,
         "imported_sret_module_boundary_promoted": True,
@@ -791,7 +864,7 @@ module = {
         "source_sret_local_one_arg_promoted": True,
         "source_sret_local_register_multi_arg_promoted": True,
         "aggregate_layout_promoted": True,
-        "f64_xmm0_promoted": False,
+        "f64_xmm0_promoted": True,
     },
     "not_promoted_surfaces": not_promoted,
     "negative_and_blocked_controls": negative_and_blocked_controls,
@@ -810,8 +883,9 @@ module = {
         "source_sret_local_stack_arg_receipt_recorded",
         "imported_sret_module_boundary_receipt_recorded",
         "method_sret_receipt_recorded",
+        "f64_xmm0_call_return_receipt_recorded",
         "normal_call_stack_arg_receipt_recorded",
-        "generic_and_f64_surfaces_not_promoted",
+        "generic_numeric_width_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "full_abi_numeric_differential_gates_still_required_before_s5_ready",
     ],
@@ -848,17 +922,27 @@ receipt = {
     "s5_imported_sret_module_boundary_complete": True,
     "s5_method_sret_complete": True,
     "s5_normal_call_stack_args_complete": True,
+    "s5_f64_xmm0_call_return_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_local_stack_arg_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_imported_aggregate_return_to_IrCallSret": True,
     "source_frontend_lowers_method_aggregate_return_to_IrCallSret": True,
+    "source_frontend_dispatches_print_to_print_f64": True,
+    "source_frontend_dispatches_println_f64_to_print_f64": True,
+    "source_frontend_tracks_let_bound_f64_identifiers": True,
+    "ir_lowers_f64_literals_to_IrLoadFloat": True,
+    "native_v2_lowers_f64_to_i64_cast": True,
+    "native_v2_lowers_fractional_f64_binops": True,
+    "native_v2_materializes_print_f64_fraction_scale_without_rodata_relocation": True,
+    "native_v2_bridges_print_f64_arg0_to_xmm0": True,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "source_sret_receipt_sha256": source_sret_receipt["receipt_sha256"],
     "stack_call_receipt_sha256": stack_call_receipt["receipt_sha256"],
     "imported_sret_receipt_sha256": imported_sret_receipt["receipt_sha256"],
     "method_sret_receipt_sha256": method_sret_receipt["receipt_sha256"],
+    "f64_xmm0_receipt_sha256": f64_xmm0_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
     "program_mir_abi_module_sha256": module_sha,
     "program_mir_abi_module_with_hash_sha256": module_with_hash_sha,
@@ -878,6 +962,7 @@ receipt = {
     "method_sret_promoted": module["scalar_abi_receipts"]["method_sret_promoted"],
     "normal_call_stack_args_promoted": module["scalar_abi_receipts"]["normal_call_stack_args_promoted"],
     "aggregate_layout_promoted": module["scalar_abi_receipts"]["aggregate_layout_promoted"],
+    "f64_xmm0_promoted": module["scalar_abi_receipts"]["f64_xmm0_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
     "negative_and_blocked_controls": [
         f"{item['case_id']}:{item['expected_status']}" for item in negative_and_blocked_controls
@@ -885,7 +970,6 @@ receipt = {
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
         "generic aggregate return coverage",
-        "f64 XMM0 call/return witnesses before f128 promotion",
         "numeric tower width receipts for f128/i256",
         "diagnostics and fallback semantics for unsupported layouts and numeric widths",
         "differential native-v2 vs interpreter/lean_single validation where available",
@@ -899,6 +983,6 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"
