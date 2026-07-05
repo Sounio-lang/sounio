@@ -3872,3 +3872,52 @@ status: lock-released
     serialization/hash receipts, then ABI layout/call receipts for
     aggregate/SRET/imported/stack-arg paths and f64 XMM0 call/return before
     f128/i256 promotion.
+
+## 2026-07-05 — Madaros v2 S5 compiler-exported MachineModule scalar slice
+
+- Lane: `work/madaros-v2-sota-codex`
+- Worktree: `/tmp/sounio-madaros-v2-sota-codex`
+- Coordinator: Codex
+- Intent: move the S5 scalar witness evidence from wrapper/receipt-only status
+  into a real compiler export surface, while still refusing to claim S5 FULL.
+- Files changed:
+  - `self-hosted/compiler/main.sio`
+  - `scripts/dev/madaros_v2_s5_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+  - `docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`
+  - `docs/research/madaros-v2-swarm-workflow-2026-07-04.md`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added explicit compiler export option:
+    `--native-v2-compile <source.sio> -o <elf> --machine-module-json <json>`.
+  - The native-v2 compile path now serializes
+    `madaros.v2.s5.machine_module/0.1` from
+    `native_v2_build_machine_module` for the current scalar witnesses.
+  - The export writes through a compiler-main BSS buffer before the builtin
+    `write_file` syscall; local stack/by-value buffers returned `-2` in the
+    self-hosted binary.
+  - `madaros s5-receipt` now requires the compiler MachineModule JSON and checks
+    schema, target, active/supported/no-legacy-fallback flags, function counts,
+    instruction counts, and total machine instruction count.
+  - The aggregate S5 gate now records
+    `compiler_machine_module_exported = true` and
+    `real_program_mir_emitted = true` for the scalar slice, while keeping
+    `real_abi_layout_emitted = false`, `s5_ready = false`, `s5_implemented = false`,
+    and `s5_full_complete = false`.
+- Local proof:
+  - `make build-madaros` passed and rebuilt `artifacts/self-hosted/madaros`.
+  - Direct compiler export passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros ./bin/madaros --native-v2-compile tests/madaros/v2_s5/scalar_i64_direct_call_return_42.sio -o /tmp/s5-mm-local/out.elf --machine-module-json /tmp/s5-mm-local/mm.json`
+    produced ELF plus `madaros.v2.s5.machine_module/0.1` JSON with 2 functions
+    and 17 machine instructions.
+  - Unit CLI receipt passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros ./bin/madaros s5-receipt tests/madaros/v2_s5/scalar_i64_direct_call_return_42.sio --out-dir /tmp/s5-mm-one --expected-exit 42 --case-id scalar_i64_direct_call_return_42`.
+  - Aggregate gate passed:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_MADAROS_V2_S5_PROGRAM_MIR_ABI_DIR=/tmp/s5-mm-program bash scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    with receipt prefix `84752dd8800d`.
+- Remaining boundary:
+  - S5 FULL still requires broader MachineModule coverage, ABI layout receipts
+    for aggregate/SRET/imported/stack-arg paths, f64 XMM0 call/return closure
+    before f128/i256 promotion, diagnostics, fallback semantics, and
+    differential validation.

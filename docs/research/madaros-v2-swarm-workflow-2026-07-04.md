@@ -286,18 +286,20 @@ The MIR-effect gate then serializes those 28 selected rewrites into canonical
 MIR-effect records (`mir.const.i64`, `mir.const.bool`, `mir.alias.i64`) and runs
 3 scalar native-v2 witnesses: i64 literal return, i64 direct-call return, and
 bool direct-call return. This closes the scalar i64/bool direct-call/return
-slice only. The program-MIR/ABI shadow gate then records deterministic
-program-level shadow receipts for the same 3 scalar witnesses, verifies merged-IR
-function counts (`1,2,2`), ELF internal-call counts (`1,2,2`), scalar ABI
-signatures (`rdi` where present, `rax` returns), and non-promotion of stack-arg,
-aggregate, SRET, imported-call, f64, f128, and i256 surfaces. It still records
-S4 semantic negatives and producer-evaluation blockers as not-promoted controls,
-and still records `compiler_machine_module_exported = false`,
-`real_program_mir_emitted = false`, and `s5_full_complete = false`.
-The program-MIR/ABI shadow gate must consume the public `madaros s5-receipt`
-path for each scalar witness and require matching
+slice only. The program-MIR/ABI gate now requires compiler-exported
+`madaros.v2.s5.machine_module/0.1` JSON for the same 3 scalar witnesses via
+`--native-v2-compile <src> -o <elf> --machine-module-json <json>`. It verifies
+merged-IR function counts (`1,2,2`), MachineModule function/instruction totals,
+ELF internal-call counts (`1,2,2`), scalar ABI signatures (`rdi` where present,
+`rax` returns), and non-promotion of stack-arg, aggregate, SRET, imported-call,
+f64, f128, and i256 surfaces. It still records S4 semantic negatives and
+producer-evaluation blockers as not-promoted controls, and records
+`compiler_machine_module_exported = true`, `real_program_mir_emitted = true`,
+`real_abi_layout_emitted = false`, and `s5_full_complete = false`.
+The program-MIR/ABI gate must consume the public `madaros s5-receipt` path for
+each scalar witness and require matching
 `madaros.v2.s5.receipt/0.1` per-source receipts before accepting the aggregate
-shadow receipt.
-Next critical lane: compiler-exported full-program MachineModule serialization
-plus ABI layout/call receipts for aggregate/SRET/imported-call and then f64
-call/return before f128 or i256 promotion.
+receipt.
+Next critical lane: broaden MachineModule coverage and add ABI layout/call
+receipts for aggregate/SRET/imported-call, then f64 call/return before f128 or
+i256 promotion.

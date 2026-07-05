@@ -475,31 +475,36 @@ additional internal call beyond the runtime-to-main call. The receipt schema is
 `real_mir_effects_serialized = true`, `real_program_mir_emitted = false`,
 `real_abi_layout_emitted = false`, and `s5_full_complete = false`.
 
-Scalar program-MIR/ABI shadow status (2026-07-05): S5 now also has
+Scalar compiler-MachineModule + ABI-shadow status (2026-07-05): S5 now also has
 `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`, which consumes the
 MIR-effect receipt and emits `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
-It records a deterministic program-level MIR/ABI shadow module for the same
-three scalar witnesses: i64 literal return, i64 direct-call return, and bool
-direct-call return. The gate verifies the merged-IR function counts (`1,2,2`),
-the ELF internal-call counts (`1,2,2`), scalar ABI signatures (`rdi` arguments
-where present, `rax` returns), canonical JSON roundtrip, and explicit
-non-promotion of stack-arg, aggregate, SRET, imported-call, f64 call/return,
-f128, and i256 surfaces. It also records S4 negative/blocker controls that must
-remain unpromoted: distinct symbolic comparison/subtraction, `x_div_x` at zero,
-and the producer-evaluation blockers for call-result self comparison/subtraction.
+It records compiler-exported `madaros.v2.s5.machine_module/0.1` JSON for the
+same three scalar witnesses: i64 literal return, i64 direct-call return, and
+bool direct-call return. The compiler interface is explicit:
+`--native-v2-compile <source.sio> -o <elf> --machine-module-json <json>`.
+The gate verifies the merged-IR function counts (`1,2,2`), MachineModule
+function/instruction totals, the ELF internal-call counts (`1,2,2`), scalar ABI
+signatures (`rdi` arguments where present, `rax` returns), canonical JSON
+roundtrip, and explicit non-promotion of stack-arg, aggregate, SRET,
+imported-call, f64 call/return, f128, and i256 surfaces. It also records S4
+negative/blocker controls that must remain unpromoted: distinct symbolic
+comparison/subtraction, `x_div_x` at zero, and the producer-evaluation blockers
+for call-result self comparison/subtraction.
 Canonical S5 receipt status (2026-07-05): `bin/madaros` now exposes
 `madaros s5-receipt <source.sio> [--out-dir OUT] [--expected-exit N] [--case-id ID]`.
-The program-MIR/ABI shadow gate consumes that public compiler-facing receipt for
-each of the three scalar witnesses and rejects divergence between the canonical
-per-source S5 receipt and the aggregate shadow module. The per-source receipt
-schema is `madaros.v2.s5.receipt/0.1`; the aggregate gate now records
+The program-MIR/ABI gate consumes that public compiler-facing receipt for each
+of the three scalar witnesses and rejects divergence between the canonical
+per-source S5 receipt and the aggregate module. The per-source receipt schema is
+`madaros.v2.s5.receipt/0.1`; the aggregate gate now records
 `canonical_s5_source_receipt_count = 3` and
 `canonical_s5_source_receipts_present = true`.
-Observed deterministic aggregate receipt prefix after canonical receipt wiring:
-`680abb620b2f`. This is a stronger scalar S5 slice, but still records
-`compiler_machine_module_exported = false`, `real_program_mir_emitted = false`,
+Observed deterministic aggregate receipt prefix after compiler MachineModule
+export wiring: `84752dd8800d`. This is a stronger scalar S5 slice and records
+`compiler_machine_module_exported = true`, `real_program_mir_emitted = true`,
 `real_abi_layout_emitted = false`, `s5_ready = false`, and
-`s5_full_complete = false`.
+`s5_full_complete = false`. "Real program MIR" here is deliberately scoped to
+the compiler-exported MachineModule JSON for the current scalar witnesses; it is
+not a claim of full ABI/layout/numeric S5 completion.
 
 Canonical artifact:
 - MIR hash plus ABI receipt.
@@ -513,9 +518,8 @@ Gate:
   call/return witnesses, numeric-width semantics, diagnostics, and fallbacks are
   all gated. The current S5 preflight, input-boundary receipt, scalar
   MIR-effect roundtrip, canonical `madaros s5-receipt` path, and scalar
-  program-MIR/ABI shadow receipt close one scalar i64/bool direct-call/return
-  slice only. They are not the full compiler `MachineModule` export and not
-  global MIR/ABI implementation.
+  compiler-MachineModule + ABI-shadow receipt close one scalar i64/bool
+  direct-call/return slice only. They are not global MIR/ABI implementation.
 
 Rule:
 - f128/i256 are not "types in the parser" milestones. They become real only

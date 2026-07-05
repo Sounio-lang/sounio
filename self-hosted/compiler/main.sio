@@ -1114,7 +1114,7 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     var i: i64 = flag_index + 1
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--machine-module-json" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             return arg
@@ -1135,7 +1135,7 @@ fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fall
     var seen: i64 = 0
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--machine-module-json" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             if seen == which {
@@ -1837,6 +1837,237 @@ fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with
         i = i + 1
     }
     (out, p)
+}
+
+fn cmm_append_json_string(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && p < 65536 {
+        let ch = str_char_at(s, i)
+        if ch == 34 {
+            let a = lobl_append(out, p, "\\\"")
+            out = a.0; p = a.1
+        } else if ch == 92 {
+            let a = lobl_append(out, p, "\\\\")
+            out = a.0; p = a.1
+        } else if ch == 10 {
+            let a = lobl_append(out, p, "\\n")
+            out = a.0; p = a.1
+        } else {
+            out[p as usize] = ch as i8
+            p = p + 1
+        }
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_string(buf: [i8; 65536], pos: i64, key: string, value: string, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":\"")
+    out = c.0; p = c.1
+    let d = cmm_append_json_string(out, p, value)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"")
+    out = e.0; p = e.1
+    if comma {
+        let f = lobl_append(out, p, ",")
+        out = f.0; p = f.1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_i64(buf: [i8; 65536], pos: i64, key: string, value: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":")
+    out = c.0; p = c.1
+    let d = lobl_append(out, p, i64_to_string_no_div(value))
+    out = d.0; p = d.1
+    if comma {
+        let e = lobl_append(out, p, ",")
+        out = e.0; p = e.1
+    }
+    (out, p)
+}
+
+fn cmm_append_named_bool(buf: [i8; 65536], pos: i64, key: string, value: bool, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let bool_s = if value { "true" } else { "false" }
+    let a = lobl_append(out, p, "\"")
+    out = a.0; p = a.1
+    let b = lobl_append(out, p, key)
+    out = b.0; p = b.1
+    let c = lobl_append(out, p, "\":")
+    out = c.0; p = c.1
+    let d = lobl_append(out, p, bool_s)
+    out = d.0; p = d.1
+    if comma {
+        let e = lobl_append(out, p, ",")
+        out = e.0; p = e.1
+    }
+    (out, p)
+}
+
+fn cmm_append_i64(buf: [i8; 65536], pos: i64, value: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, i64_to_string_no_div(value))
+    out = a.0; p = a.1
+    if comma {
+        let b = lobl_append(out, p, ",")
+        out = b.0; p = b.1
+    }
+    (out, p)
+}
+
+fn cmm_append_instr_tuple(buf: [i8; 65536], pos: i64, instr: MachineInstr, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "[")
+    out = a.0; p = a.1
+    let b0 = cmm_append_i64(out, p, instr.opcode, true)
+    out = b0.0; p = b0.1
+    let b1 = cmm_append_i64(out, p, instr.dst.kind, true)
+    out = b1.0; p = b1.1
+    let b2 = cmm_append_i64(out, p, instr.dst.value, true)
+    out = b2.0; p = b2.1
+    let b3 = cmm_append_i64(out, p, instr.src1.kind, true)
+    out = b3.0; p = b3.1
+    let b4 = cmm_append_i64(out, p, instr.src1.value, true)
+    out = b4.0; p = b4.1
+    let b5 = cmm_append_i64(out, p, instr.src2.kind, true)
+    out = b5.0; p = b5.1
+    let b6 = cmm_append_i64(out, p, instr.src2.value, true)
+    out = b6.0; p = b6.1
+    let b7 = cmm_append_i64(out, p, instr.aux.kind, true)
+    out = b7.0; p = b7.1
+    let b8 = cmm_append_i64(out, p, instr.aux.value, true)
+    out = b8.0; p = b8.1
+    let b9 = cmm_append_i64(out, p, instr.cond, true)
+    out = b9.0; p = b9.1
+    let b10 = cmm_append_i64(out, p, instr.arg_index, true)
+    out = b10.0; p = b10.1
+    let b11 = cmm_append_i64(out, p, instr.call_arg_count, false)
+    out = b11.0; p = b11.1
+    let c = lobl_append(out, p, "]")
+    out = c.0; p = c.1
+    if comma {
+        let d = lobl_append(out, p, ",")
+        out = d.0; p = d.1
+    }
+    (out, p)
+}
+
+fn cmm_append_function(buf: [i8; 65536], pos: i64, module: &IrModule, machine: MachineModule, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let func = machine.functions[fn_index as usize]
+    let ir_func = (*module).functions[fn_index as usize]
+    let raw_instr_count = if func.block_count > 0 { func.blocks[0].instr_count } else { 0 }
+    let instr_count = if func.legal_instr_count > 0 { func.legal_instr_count } else { raw_instr_count }
+    let name = str_from_bytes(ir_func.name.buf, ir_func.name.len)
+
+    let a = lobl_append(out, p, "{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_i64(out, p, "index", fn_index, true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_string(out, p, "name", name, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_bool(out, p, "supported", func.supported, true)
+    out = d.0; p = d.1
+    let e = cmm_append_named_i64(out, p, "source_instr_count", func.source_instr_count, true)
+    out = e.0; p = e.1
+    let f = cmm_append_named_i64(out, p, "legal_instr_count", func.legal_instr_count, true)
+    out = f.0; p = f.1
+    let g = cmm_append_named_i64(out, p, "instr_count", instr_count, true)
+    out = g.0; p = g.1
+    let h = cmm_append_named_string(out, p, "instr_encoding", "numeric_tuple_v1", true)
+    out = h.0; p = h.1
+    let j = lobl_append(out, p, "\"instrs\":[")
+    out = j.0; p = j.1
+    var i: i64 = 0
+    while i < instr_count {
+        let t = cmm_append_instr_tuple(out, p, func.blocks[0].instrs[i as usize], i + 1 < instr_count)
+        out = t.0; p = t.1
+        i = i + 1
+    }
+    let k = lobl_append(out, p, "]}")
+    out = k.0; p = k.1
+    if comma {
+        let m = lobl_append(out, p, ",")
+        out = m.0; p = m.1
+    }
+    (out, p)
+}
+
+var COMPILER_MAIN_CMM_BUF: [i8; 65536] = [0; 65536]
+
+fn compiler_main_write_machine_module_json(path: string, module: &IrModule, spec: NativeTargetSpec) -> bool with IO, Mut, Panic, Div, Alloc {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+    let machine = native_v2_build_machine_module(module, spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX())
+    let a = lobl_append(buf, p, "{")
+    buf = a.0; p = a.1
+    let b = cmm_append_named_string(buf, p, "schema", "madaros.v2.s5.machine_module/0.1", true)
+    buf = b.0; p = b.1
+    let c = cmm_append_named_string(buf, p, "stage", "S5", true)
+    buf = c.0; p = c.1
+    let d = cmm_append_named_string(buf, p, "source", "native_v2_build_machine_module", true)
+    buf = d.0; p = d.1
+    let e = cmm_append_named_string(buf, p, "target", spec.resolved_target, true)
+    buf = e.0; p = e.1
+    let f = cmm_append_named_bool(buf, p, "compiler_machine_module_exported", true, true)
+    buf = f.0; p = f.1
+    let g = cmm_append_named_bool(buf, p, "active", machine.active, true)
+    buf = g.0; p = g.1
+    let h = cmm_append_named_bool(buf, p, "supported", machine.supported, true)
+    buf = h.0; p = h.1
+    let j = cmm_append_named_bool(buf, p, "fail_closed", machine.fail_closed, true)
+    buf = j.0; p = j.1
+    let k = cmm_append_named_bool(buf, p, "legacy_fallback", machine.legacy_fallback, true)
+    buf = k.0; p = k.1
+    let m = cmm_append_named_string(buf, p, "coverage", machine.coverage, true)
+    buf = m.0; p = m.1
+    let n = cmm_append_named_string(buf, p, "unsupported_detail", machine.unsupported_detail, true)
+    buf = n.0; p = n.1
+    let q = cmm_append_named_i64(buf, p, "fn_count", machine.fn_count, true)
+    buf = q.0; p = q.1
+    let r = cmm_append_named_i64(buf, p, "total_ir_instr_count", machine.total_ir_instr_count, true)
+    buf = r.0; p = r.1
+    let s = cmm_append_named_i64(buf, p, "total_machine_instr_count", machine.total_machine_instr_count, true)
+    buf = s.0; p = s.1
+    let u = lobl_append(buf, p, "\"functions\":[")
+    buf = u.0; p = u.1
+    var fi: i64 = 0
+    while fi < machine.fn_count && fi < 32 {
+        let z = cmm_append_function(buf, p, module, machine, fi, fi + 1 < machine.fn_count)
+        buf = z.0; p = z.1
+        fi = fi + 1
+    }
+    let v = lobl_append(buf, p, "]}\n")
+    buf = v.0; p = v.1
+    if p >= 65536 {
+        return false
+    }
+    var ci: i64 = 0
+    while ci < p {
+        COMPILER_MAIN_CMM_BUF[ci as usize] = buf[ci as usize]
+        ci = ci + 1
+    }
+    write_file(path, &! COMPILER_MAIN_CMM_BUF, p) >= 0
 }
 
 fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -2925,6 +3156,13 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
     write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
+    let machine_module_json_path = compiler_mode_option_string(args, "", "--machine-module-json", "")
+    if str_len(machine_module_json_path) > 0 {
+        if !compiler_main_write_machine_module_json(machine_module_json_path, &ir_result.module, spec) {
+            print("native_v2_compile: failed to write MachineModule JSON\n")
+            return
+        }
+    }
     let rc = compile_native_v2_preview_to_file(&ir_result.module, spec, out_path)
     if rc != 0 {
         print("native_v2_compile: FAIL to_file rc=")
@@ -8152,6 +8390,36 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"ffi_pinning_model\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_runtime_retry_active\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_current_frame_root_scan\":true") { return false }
+    true
+}
+
+fn compiler_main_test_native_v2_machine_module_json_export() -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let path = "artifacts/omega/native_backend_v2_machine_module.selftest.json"
+    let module = compiler_main_make_native_v2_call_module()
+    if !compiler_main_write_machine_module_json(path, &module, spec) { return false }
+    let size = file_size(path)
+    if size <= 0 || size > 65536 { return false }
+    let wide = read_file(path)
+    var data: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < size {
+        data[i as usize] = wide[i as usize]
+        i = i + 1
+    }
+    if data[0 as usize] != (123 as i8) { return false }
+    if !compiler_bytes_contains(data, size, "\"schema\":\"madaros.v2.s5.machine_module/0.1\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"source\":\"native_v2_build_machine_module\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"compiler_machine_module_exported\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"fn_count\":2") { return false }
+    if !compiler_bytes_contains(data, size, "\"functions\":[") { return false }
+    if !compiler_bytes_contains(data, size, "\"instrs\":[") { return false }
+    if !compiler_bytes_contains(data, size, "\"instr_encoding\":\"numeric_tuple_v1\"") { return false }
+    if !compiler_bytes_contains(data, size, "[112,") { return false }
+    if !compiler_bytes_contains(data, size, "[113,") { return false }
+    if !compiler_bytes_contains(data, size, "[114,") { return false }
+    if !compiler_bytes_contains(data, size, "\"target\":\"x86_64-linux\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"legacy_fallback\":false") { return false }
     true
 }
 
@@ -22627,11 +22895,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_native_v2_fail_closed_vector() &&
-       compiler_main_test_native_v2_contract_machine_ir_fields() {
-        println("  T85 OK: native v2 preview contract emits JSON and fails closed on unsupported vectors")
+       compiler_main_test_native_v2_contract_machine_ir_fields() &&
+       compiler_main_test_native_v2_machine_module_json_export() {
+        println("  T85 OK: native v2 preview contract emits MachineModule JSON and fails closed on unsupported vectors")
         passed = passed + 1
     } else {
-        println("  FAIL: T85 native v2 preview contract/vector fail-closed")
+        println("  FAIL: T85 native v2 preview MachineModule contract/vector fail-closed")
     }
 
     if compiler_main_test_ocp_mul_identity_right() {
@@ -23124,11 +23393,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T155 native v2 runtime metadata shape")
     }
 
-    if compiler_main_test_native_v2_contract_machine_ir_fields() {
-        println("  T156 OK: native v2 contract publishes stack-map counts and runtime embedding")
+    if compiler_main_test_native_v2_contract_machine_ir_fields() &&
+       compiler_main_test_native_v2_machine_module_json_export() {
+        println("  T156 OK: native v2 contract publishes stack-map counts and MachineModule JSON")
         passed = passed + 1
     } else {
-        println("  FAIL: T156 native v2 contract runtime metadata fields")
+        println("  FAIL: T156 native v2 contract runtime metadata/MachineModule fields")
     }
 
     if compiler_main_test_eg_small_sat_mul_annihil_rhs() {

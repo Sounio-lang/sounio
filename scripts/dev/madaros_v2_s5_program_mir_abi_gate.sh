@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Madaros v2 S5 scalar program-MIR/ABI gate: build a deterministic
-# program-level MIR/ABI shadow receipt for the current scalar i64/bool
-# call-return slice. This is stronger than MIR-effect input receipts, but it is
-# still not a compiler-exported MachineModule dump and does not claim S5 FULL.
+# Madaros v2 S5 scalar program-MIR/ABI gate: build deterministic
+# program-level receipts for compiler-exported MachineModule JSON plus the
+# current scalar i64/bool ABI shadow contract. This is stronger than
+# MIR-effect input receipts, but it still does not claim S5 FULL.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -261,12 +261,17 @@ for line in receipt_lines[1:]:
         "s5_ready",
         "s5_implemented",
         "s5_full_complete",
-        "compiler_machine_module_exported",
-        "real_program_mir_emitted",
         "real_abi_layout_emitted",
     ]:
         if payload.get(false_field) is not False:
             raise SystemExit(f"canonical S5 receipt must not overclaim {false_field} for {case_id}")
+    for true_field in [
+        "compiler_machine_module_exported",
+        "real_program_mir_emitted",
+        "s5_compiler_machine_module_export_slice_complete",
+    ]:
+        if payload.get(true_field) is not True:
+            raise SystemExit(f"canonical S5 receipt must prove {true_field} for {case_id}")
     source_receipt_rows[case_id] = {
         "row": row,
         "payload": payload,
@@ -324,8 +329,11 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
         "actual_exit": int(row["actual_exit"]),
         "merged_ir_function_count": function_count,
         "program_mir_schema": "madaros.v2.s5.program_mir_shadow/0.1",
-        "program_mir_source": "derived-from-versioned-machine-ir-contract-and-native-v2-witness",
-        "compiler_machine_module_exported": False,
+        "program_mir_source": "compiler_exported_machine_module_json",
+        "compiler_machine_module_exported": True,
+        "machine_module_schema": source_receipt["machine_module_schema"],
+        "machine_module_path": source_receipt["machine_module_path"],
+        "machine_module_json_sha256": source_receipt["machine_module_json_sha256"],
         "entry_function_legal_mir_ops": spec["entry_function_legal_mir_ops"],
         "call_boundary_ops": spec["call_boundary_ops"],
         "machine_ir_contract_source": "self-hosted/native/machine_ir.sio:native_v2_lower_legal_function_from_ir_ref",
@@ -347,6 +355,7 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
             "file_sha256": source_receipt_rows[case_id]["row"]["s5_receipt_sha256"],
             "receipt_sha256": source_receipt["receipt_sha256"],
             "stage_contract_level": source_receipt["stage_contract_level"],
+            "machine_module_json_sha256": source_receipt["machine_module_json_sha256"],
         },
     }
     program["program_shadow_sha256"] = sha256_text(stable_json(program))
@@ -420,7 +429,7 @@ negative_and_blocked_controls = [
 
 module = {
     "schema": "madaros.v2.s5.program_mir_abi_module/0.1",
-    "stage_contract_level": "S5_PROGRAM_MIR_ABI_SCALAR_SHADOW_NOT_FULL",
+    "stage_contract_level": "S5_SCALAR_MACHINE_MODULE_EXPORT_WITH_ABI_SHADOW_NOT_FULL",
     "input_mir_effect_schema": effect_receipt["schema"],
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "input_boundary_sha256": effect_receipt["input_boundary_sha256"],
@@ -444,8 +453,8 @@ module = {
         for case_id in sorted(source_receipt_rows)
     ],
     "program_mir_shadow_serialized": True,
-    "compiler_machine_module_exported": False,
-    "real_program_mir_emitted": False,
+    "compiler_machine_module_exported": True,
+    "real_program_mir_emitted": True,
     "real_abi_layout_emitted": False,
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
@@ -464,12 +473,13 @@ module = {
         "exact_three_scalar_program_witnesses",
         "program_shadow_hash_per_witness",
         "canonical_madaros_s5_receipt_per_witness",
+        "compiler_exported_machine_module_json_per_witness",
         "merged_ir_function_count_matches_program_shape",
         "elf_internal_call_count_matches_program_shape",
         "scalar_abi_register_contract_recorded",
         "non_scalar_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
-        "compiler_machine_module_export_still_required_before_s5_ready",
+        "full_abi_numeric_differential_gates_still_required_before_s5_ready",
     ],
 }
 canonical_module, module_sha = canonical_roundtrip(module)
@@ -484,7 +494,7 @@ if stable_json(reloaded) != stable_json(module):
 receipt = {
     "schema": "madaros.v2.s5.program_mir_abi_scalar_shadow/0.1",
     "status": "pass",
-    "stage_contract_level": "S5_PROGRAM_MIR_ABI_SCALAR_SHADOW_NOT_FULL",
+    "stage_contract_level": "S5_SCALAR_MACHINE_MODULE_EXPORT_WITH_ABI_SHADOW_NOT_FULL",
     "s5_program_mir_abi_scalar_shadow_slice_complete": True,
     "s5_mir_effect_roundtrip_complete": True,
     "s5_mir_abi_input_boundary_complete": True,
@@ -492,10 +502,10 @@ receipt = {
     "s5_ready": False,
     "s5_implemented": False,
     "s5_full_complete": False,
-    "s_full_contract": "blocked_until_compiler_exports_real_machine_module_and_full_abi_numeric_differential_gates_exist",
+    "s_full_contract": "blocked_until_full_abi_numeric_differential_gates_exist",
     "program_mir_shadow_serialized": True,
-    "compiler_machine_module_exported": False,
-    "real_program_mir_emitted": False,
+    "compiler_machine_module_exported": True,
+    "real_program_mir_emitted": True,
     "real_abi_layout_emitted": False,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "program_mir_abi_module_path": module_path.name,
@@ -515,7 +525,7 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "compiler-exported full program MachineModule serialization and hash receipts",
+        "compiler-exported MachineModule coverage beyond the current scalar i64/bool witnesses",
         "ABI layout receipts for aggregate, SRET, imported call, stack-arg, and return paths",
         "f64 XMM0 call/return witnesses before f128 promotion",
         "numeric tower width receipts for f128/i256",
@@ -531,6 +541,6 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool program-MIR/ABI shadow receipt is deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool compiler MachineModule + ABI-shadow receipt is deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

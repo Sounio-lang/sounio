@@ -3,9 +3,9 @@
 
 This is a canonical per-source receipt for the current S5 scalar slice. It
 proves that one native-v2 scalar witness compiles, runs with the expected exit
-code, exposes the expected merged-IR shape in the compiler log, and has native
-ELF call/return/syscall evidence. It is still a shadow receipt derived from
-native-v2 witness evidence, not a compiler-exported full MachineModule dump.
+code, exposes the expected merged-IR shape in the compiler log, exports the
+compiler's MachineModule JSON for that witness, and has native ELF
+call/return/syscall evidence.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ SCHEMA_VERSION = "madaros.v2.s5.receipt/0.1"
 PROGRAM_SCHEMA = "madaros.v2.s5.program_mir_abi_program/0.1"
 PROGRAM_MIR_SCHEMA = "madaros.v2.s5.program_mir_shadow/0.1"
 ABI_SCHEMA = "madaros.v2.s5.abi_scalar_call_return/0.1"
-STAGE_CONTRACT_LEVEL = "S5_SCALAR_PROGRAM_MIR_ABI_RECEIPT_NOT_FULL"
+STAGE_CONTRACT_LEVEL = "S5_SCALAR_MACHINE_MODULE_EXPORT_WITH_ABI_SHADOW_NOT_FULL"
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -70,11 +70,20 @@ def run_compile(
     compiler: Path,
     source_arg: str,
     bin_path: Path,
+    machine_module_path: Path,
     root: Path,
     timeout_s: int,
 ) -> tuple[int, str, str]:
     proc = subprocess.run(
-        [str(compiler), "--native-v2-compile", source_arg, "-o", str(bin_path)],
+        [
+            str(compiler),
+            "--native-v2-compile",
+            source_arg,
+            "-o",
+            str(bin_path),
+            "--machine-module-json",
+            str(machine_module_path),
+        ],
         cwd=str(root),
         text=True,
         stdout=subprocess.PIPE,
@@ -222,6 +231,48 @@ def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
     return first, sha256_text(first)
 
 
+def load_machine_module(path: Path, case_id: str, source_rel: str, function_count: int) -> dict[str, Any]:
+    if not path.is_file():
+        raise SystemExit(
+            f"{case_id}: compiler did not export MachineModule JSON at {path}; "
+            "S5 requires --native-v2-compile --machine-module-json support"
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "madaros.v2.s5.machine_module/0.1":
+        raise SystemExit(f"{case_id}: bad MachineModule schema: {payload.get('schema')!r}")
+    if payload.get("source") != "native_v2_build_machine_module":
+        raise SystemExit(f"{case_id}: MachineModule source is not native_v2_build_machine_module")
+    if payload.get("compiler_machine_module_exported") is not True:
+        raise SystemExit(f"{case_id}: MachineModule export flag is not true")
+    if payload.get("target") != "x86_64-linux":
+        raise SystemExit(f"{case_id}: MachineModule target mismatch")
+    if payload.get("active") is not True:
+        raise SystemExit(f"{case_id}: MachineModule is not active")
+    if payload.get("supported") is not True:
+        raise SystemExit(f"{case_id}: MachineModule unsupported: {payload.get('unsupported_detail')!r}")
+    if payload.get("legacy_fallback") is not False:
+        raise SystemExit(f"{case_id}: MachineModule must not use legacy fallback")
+    if int(payload.get("fn_count", -1)) != function_count:
+        raise SystemExit(f"{case_id}: MachineModule fn_count != merged IR function count")
+    functions = payload.get("functions")
+    if not isinstance(functions, list) or len(functions) != function_count:
+        raise SystemExit(f"{case_id}: MachineModule functions array mismatch")
+    instr_total = 0
+    for fn in functions:
+        instrs = fn.get("instrs")
+        if not isinstance(instrs, list):
+            raise SystemExit(f"{case_id}: MachineModule function lacks instrs")
+        if int(fn.get("instr_count", -1)) != len(instrs):
+            raise SystemExit(f"{case_id}: MachineModule instr_count mismatch")
+        instr_total += len(instrs)
+    if instr_total <= 0:
+        raise SystemExit(f"{case_id}: MachineModule has no instructions")
+    if int(payload.get("total_machine_instr_count", -1)) != instr_total:
+        raise SystemExit(f"{case_id}: MachineModule total_machine_instr_count mismatch")
+    payload["machine_module_json_sha256"] = sha256_text(stable_json(payload))
+    return payload
+
+
 def emit(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     source = Path(args.source).resolve()
@@ -239,13 +290,14 @@ def emit(args: argparse.Namespace) -> int:
     source_rel = relpath(source, root)
     source_arg = source_rel if not source_rel.startswith("/") else str(source)
     bin_path = out_dir / f"{case_id}.native_v2"
+    machine_module_path = out_dir / f"{case_id}.machine_module.json"
     compile_log_path = out_dir / f"{case_id}.compile.log"
     stdout_path = out_dir / f"{case_id}.stdout"
     stderr_path = out_dir / f"{case_id}.stderr"
     program_path = out_dir / f"{case_id}.s5.program_mir_abi.json"
     receipt_path = out_dir / f"{case_id}.s5.receipt.json"
 
-    rc, compile_stdout, compile_stderr = run_compile(compiler, source_arg, bin_path, root, args.timeout)
+    rc, compile_stdout, compile_stderr = run_compile(compiler, source_arg, bin_path, machine_module_path, root, args.timeout)
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
     if rc != 0:
@@ -260,6 +312,7 @@ def emit(args: argparse.Namespace) -> int:
 
     normalized_compile_log = normalize_log(compile_log, out_dir)
     function_count = parse_function_count(compile_log)
+    machine_module = load_machine_module(machine_module_path, case_id, source_rel, function_count)
     metrics = elf_exec_metrics(bin_path)
     source_text = source.read_text(encoding="utf-8")
     classification = classify_program(case_id, source_text, expected_exit, function_count, metrics)
@@ -273,8 +326,11 @@ def emit(args: argparse.Namespace) -> int:
         "actual_exit": actual_exit,
         "merged_ir_function_count": function_count,
         "program_mir_schema": PROGRAM_MIR_SCHEMA,
-        "program_mir_source": "derived-from-versioned-machine-ir-contract-and-native-v2-witness",
-        "compiler_machine_module_exported": False,
+        "program_mir_source": "compiler_exported_machine_module_json",
+        "compiler_machine_module_exported": True,
+        "machine_module_schema": machine_module["schema"],
+        "machine_module_path": machine_module_path.name,
+        "machine_module_json_sha256": machine_module["machine_module_json_sha256"],
         "entry_function_legal_mir_ops": classification["entry_function_legal_mir_ops"],
         "call_boundary_ops": classification["call_boundary_ops"],
         "machine_ir_contract_source": "self-hosted/native/machine_ir.sio:native_v2_lower_legal_function_from_ir_ref",
@@ -314,29 +370,34 @@ def emit(args: argparse.Namespace) -> int:
         "program_mir_abi_program_path": program_path.name,
         "program_mir_abi_program_sha256": program_sha,
         "program_shadow_sha256": program["program_shadow_sha256"],
+        "machine_module_schema": machine_module["schema"],
+        "machine_module_path": machine_module_path.name,
+        "machine_module_json_sha256": machine_module["machine_module_json_sha256"],
         "merged_ir_function_count": function_count,
         "native_v2_compile": program["native_v2_compile"],
         "s5_receipt_ready": True,
         "s5_program_mir_abi_scalar_shadow_slice_complete": True,
+        "s5_compiler_machine_module_export_slice_complete": True,
         "s5_mir_abi_boundary_complete": False,
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,
-        "s_full_contract": "blocked_until_compiler_exports_real_machine_module_and_full_abi_numeric_differential_gates_exist",
+        "s_full_contract": "blocked_until_full_abi_numeric_differential_gates_exist",
         "program_mir_shadow_serialized": True,
-        "compiler_machine_module_exported": False,
-        "real_program_mir_emitted": False,
+        "compiler_machine_module_exported": True,
+        "real_program_mir_emitted": True,
         "real_abi_layout_emitted": False,
         "roundtrip_contract": [
             "canonical_json_stable_after_parse_dump",
             "source_to_native_v2_compile_exit_matches_expected",
+            "compiler_exported_machine_module_json_present",
+            "machine_module_total_instr_count_matches_function_instrs",
             "merged_ir_function_count_matches_program_shape",
             "elf_internal_call_count_matches_program_shape",
             "scalar_abi_register_contract_recorded",
-            "compiler_machine_module_export_still_required_before_s5_ready",
+            "full_abi_numeric_differential_gates_still_required_before_s5_ready",
         ],
         "missing_full_obligations": [
-            "compiler-exported full program MachineModule serialization and hash receipts",
             "ABI layout receipts for aggregate, SRET, imported call, stack-arg, and return paths",
             "f64 XMM0 call/return witnesses before f128 promotion",
             "numeric tower width receipts for f128/i256",
