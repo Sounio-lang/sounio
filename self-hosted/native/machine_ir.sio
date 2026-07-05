@@ -135,6 +135,12 @@ pub struct MachineFunction {
     pub is_float_slot: [i64; 256],
     pub slot_kind: [i64; 256],
     pub slot_width_words: [i64; 256],
+    pub f128_literal_sign: [i64; 256],
+    pub f128_literal_sig_hi: [i64; 256],
+    pub f128_literal_sig_lo: [i64; 256],
+    pub f128_literal_digit_count: [i64; 256],
+    pub f128_literal_scale10: [i64; 256],
+    pub f128_literal_truncated_digits: [i64; 256],
 }
 
 pub struct NativeV2LegalizeSummary {
@@ -273,6 +279,12 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
         is_float_slot: [0; 256],
         slot_kind: [0; 256],
         slot_width_words: [0; 256],
+        f128_literal_sign: [0; 256],
+        f128_literal_sig_hi: [0; 256],
+        f128_literal_sig_lo: [0; 256],
+        f128_literal_digit_count: [0; 256],
+        f128_literal_scale10: [0; 256],
+        f128_literal_truncated_digits: [0; 256],
     }
 }
 
@@ -288,11 +300,28 @@ fn native_v2_mark_slot_ref(out: &! MachineFunction, slot: i64, kind: i64, width_
     }
 }
 
+fn native_v2_mark_f128_literal_ref(out: &! MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64) with Mut, Panic, Div {
+    if native_v2_slot_is_valid(slot) && digit_count > 0 {
+        (*out).f128_literal_sign[slot as usize] = sign
+        (*out).f128_literal_sig_hi[slot as usize] = sig_hi
+        (*out).f128_literal_sig_lo[slot as usize] = sig_lo
+        (*out).f128_literal_digit_count[slot as usize] = digit_count
+        (*out).f128_literal_scale10[slot as usize] = scale10
+        (*out).f128_literal_truncated_digits[slot as usize] = truncated_digits
+    }
+}
+
 fn native_v2_copy_slot_ref(out: &! MachineFunction, dst_slot: i64, src_slot: i64) with Mut, Panic, Div {
     if native_v2_slot_is_valid(dst_slot) && native_v2_slot_is_valid(src_slot) {
         (*out).slot_kind[dst_slot as usize] = (*out).slot_kind[src_slot as usize]
         (*out).slot_width_words[dst_slot as usize] = (*out).slot_width_words[src_slot as usize]
         (*out).is_float_slot[dst_slot as usize] = (*out).is_float_slot[src_slot as usize]
+        (*out).f128_literal_sign[dst_slot as usize] = (*out).f128_literal_sign[src_slot as usize]
+        (*out).f128_literal_sig_hi[dst_slot as usize] = (*out).f128_literal_sig_hi[src_slot as usize]
+        (*out).f128_literal_sig_lo[dst_slot as usize] = (*out).f128_literal_sig_lo[src_slot as usize]
+        (*out).f128_literal_digit_count[dst_slot as usize] = (*out).f128_literal_digit_count[src_slot as usize]
+        (*out).f128_literal_scale10[dst_slot as usize] = (*out).f128_literal_scale10[src_slot as usize]
+        (*out).f128_literal_truncated_digits[dst_slot as usize] = (*out).f128_literal_truncated_digits[src_slot as usize]
     }
 }
 
@@ -306,12 +335,31 @@ fn native_v2_mark_slot_byval(out: MachineFunction, slot: i64, kind: i64, width_w
     next
 }
 
+fn native_v2_mark_f128_literal_byval(out: MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64) -> MachineFunction with Mut, Panic, Div {
+    var next = out
+    if native_v2_slot_is_valid(slot) && digit_count > 0 {
+        next.f128_literal_sign[slot as usize] = sign
+        next.f128_literal_sig_hi[slot as usize] = sig_hi
+        next.f128_literal_sig_lo[slot as usize] = sig_lo
+        next.f128_literal_digit_count[slot as usize] = digit_count
+        next.f128_literal_scale10[slot as usize] = scale10
+        next.f128_literal_truncated_digits[slot as usize] = truncated_digits
+    }
+    next
+}
+
 fn native_v2_copy_slot_byval(out: MachineFunction, dst_slot: i64, src_slot: i64) -> MachineFunction with Mut, Panic, Div {
     var next = out
     if native_v2_slot_is_valid(dst_slot) && native_v2_slot_is_valid(src_slot) {
         next.slot_kind[dst_slot as usize] = next.slot_kind[src_slot as usize]
         next.slot_width_words[dst_slot as usize] = next.slot_width_words[src_slot as usize]
         next.is_float_slot[dst_slot as usize] = next.is_float_slot[src_slot as usize]
+        next.f128_literal_sign[dst_slot as usize] = next.f128_literal_sign[src_slot as usize]
+        next.f128_literal_sig_hi[dst_slot as usize] = next.f128_literal_sig_hi[src_slot as usize]
+        next.f128_literal_sig_lo[dst_slot as usize] = next.f128_literal_sig_lo[src_slot as usize]
+        next.f128_literal_digit_count[dst_slot as usize] = next.f128_literal_digit_count[src_slot as usize]
+        next.f128_literal_scale10[dst_slot as usize] = next.f128_literal_scale10[src_slot as usize]
+        next.f128_literal_truncated_digits[dst_slot as usize] = next.f128_literal_truncated_digits[src_slot as usize]
     }
     next
 }
@@ -541,7 +589,13 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
     if instr.op == IrOpcode::IrNop && instr.imm_flags == IR_F128_REG_MARKER_FLAG {
         mi.opcode = MIR_OP_PSEUDO_F128_META
         mi.dst = machine_operand_stack_slot(instr.dst)
-        mi.aux = machine_operand_imm64(2)
+        mi.src1 = machine_operand_imm64(instr.src1)
+        mi.src2 = machine_operand_imm64(instr.src2)
+        mi.aux = machine_operand_imm64(instr.imm_i64)
+        mi.cond = instr.label_id
+        mi.arg_index = instr.field_idx
+        mi.call_arg_count = instr.arg_count
+        mi.name = instr.name
         return mi
     }
     if native_v2_ir_opcode_is_wide_meta(instr.op) {
@@ -1338,6 +1392,12 @@ fn native_v2_reset_machine_function_out(out: &! MachineFunction, base_slots: i64
         (*out).is_float_slot[i as usize] = 0
         (*out).slot_kind[i as usize] = MIR_SLOT_KIND_UNKNOWN
         (*out).slot_width_words[i as usize] = 0
+        (*out).f128_literal_sign[i as usize] = 0
+        (*out).f128_literal_sig_hi[i as usize] = 0
+        (*out).f128_literal_sig_lo[i as usize] = 0
+        (*out).f128_literal_digit_count[i as usize] = 0
+        (*out).f128_literal_scale10[i as usize] = 0
+        (*out).f128_literal_truncated_digits[i as usize] = 0
         i = i + 1
     }
 }
@@ -1351,6 +1411,7 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
         if ir_instr.op == IrOpcode::IrNop {
             if ir_instr.imm_flags == IR_F128_REG_MARKER_FLAG {
                 native_v2_mark_slot_ref(out, ir_instr.dst, MIR_SLOT_KIND_F128_BINARY128, 2)
+                native_v2_mark_f128_literal_ref(out, ir_instr.dst, ir_instr.src1, ir_instr.src2, ir_instr.imm_i64, ir_instr.label_id, ir_instr.field_idx, ir_instr.arg_count)
                 (*out).supported = false
                 (*out).unsupported_detail = "f128_execution_pending"
                 i = i + 1
@@ -1674,6 +1735,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             }
         } else if instr.opcode == MIR_OP_PSEUDO_F128_META {
             out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+            out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), machine_instr_src1_value(instr), machine_instr_src2_value(instr), machine_instr_aux_value(instr), instr.cond, instr.arg_index, instr.call_arg_count)
             out.supported = false
             out.unsupported_detail = "f128_execution_pending"
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {

@@ -2078,6 +2078,109 @@ fn cmm_append_slot_metadata(buf: [i8; 65536], pos: i64, machine: MachineModule, 
     (out, p)
 }
 
+fn cmm_f128_literal_metadata_count(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn cmm_append_f128_literal_metadata_tuple(buf: [i8; 65536], pos: i64, func: MachineFunction, slot: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "[")
+    out = a.0; p = a.1
+    let b0 = cmm_append_i64(out, p, slot, true)
+    out = b0.0; p = b0.1
+    let b1 = cmm_append_i64(out, p, func.f128_literal_sign[slot as usize], true)
+    out = b1.0; p = b1.1
+    let b2 = cmm_append_i64(out, p, func.f128_literal_sig_hi[slot as usize], true)
+    out = b2.0; p = b2.1
+    let b3 = cmm_append_i64(out, p, func.f128_literal_sig_lo[slot as usize], true)
+    out = b3.0; p = b3.1
+    let b4 = cmm_append_i64(out, p, func.f128_literal_digit_count[slot as usize], true)
+    out = b4.0; p = b4.1
+    let b5 = cmm_append_i64(out, p, func.f128_literal_scale10[slot as usize], true)
+    out = b5.0; p = b5.1
+    let b6 = cmm_append_i64(out, p, func.f128_literal_truncated_digits[slot as usize], false)
+    out = b6.0; p = b6.1
+    let c = lobl_append(out, p, "]")
+    out = c.0; p = c.1
+    if comma {
+        let d = lobl_append(out, p, ",")
+        out = d.0; p = d.1
+    }
+    (out, p)
+}
+
+fn cmm_append_f128_literal_metadata_function(buf: [i8; 65536], pos: i64, func: MachineFunction, fn_index: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_i64(out, p, "fn_index", fn_index, true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_i64(out, p, "f128_literal_metadata_count", cmm_f128_literal_metadata_count(func), true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_string(out, p, "f128_literal_metadata_encoding", "[slot,decimal_sign,sig_hi,sig_lo,digit_count,scale10,truncated_digits]", true)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"rows\":[")
+    out = e.0; p = e.1
+    var emitted: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    let total = cmm_f128_literal_metadata_count(func)
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            emitted = emitted + 1
+            let row = cmm_append_f128_literal_metadata_tuple(out, p, func, i, emitted < total)
+            out = row.0; p = row.1
+        }
+        i = i + 1
+    }
+    let f = lobl_append(out, p, "]}")
+    out = f.0; p = f.1
+    if comma {
+        let g = lobl_append(out, p, ",")
+        out = g.0; p = g.1
+    }
+    (out, p)
+}
+
+fn cmm_append_f128_literal_metadata(buf: [i8; 65536], pos: i64, machine: MachineModule, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let a = lobl_append(out, p, "\"f128_literal_metadata\":{")
+    out = a.0; p = a.1
+    let b = cmm_append_named_string(out, p, "schema", "madaros.v2.s5.f128_literal_metadata/0.1", true)
+    out = b.0; p = b.1
+    let c = cmm_append_named_bool(out, p, "f128_literal_decimal_metadata_exported", true, true)
+    out = c.0; p = c.1
+    let d = cmm_append_named_bool(out, p, "f128_execution_promoted", false, true)
+    out = d.0; p = d.1
+    let e = lobl_append(out, p, "\"functions\":[")
+    out = e.0; p = e.1
+    var fi: i64 = 0
+    while fi < machine.fn_count && fi < 32 {
+        let z = cmm_append_f128_literal_metadata_function(out, p, machine.functions[fi as usize], fi, fi + 1 < machine.fn_count && fi + 1 < 32)
+        out = z.0; p = z.1
+        fi = fi + 1
+    }
+    let f = lobl_append(out, p, "]}")
+    out = f.0; p = f.1
+    if comma {
+        let g = lobl_append(out, p, ",")
+        out = g.0; p = g.1
+    }
+    (out, p)
+}
+
 fn cmm_name_is_f128(n: Name) -> bool with Panic, Div {
     if n.len != 4 { return false }
     if n.buf[0] as i64 != 102 { return false } // f
@@ -2204,6 +2307,8 @@ fn compiler_main_write_machine_module_json(path: string, module: &IrModule, spec
     buf = s.0; p = s.1
     let sm = cmm_append_slot_metadata(buf, p, machine, true)
     buf = sm.0; p = sm.1
+    let fl = cmm_append_f128_literal_metadata(buf, p, machine, true)
+    buf = fl.0; p = fl.1
     let u = lobl_append(buf, p, "\"functions\":[")
     buf = u.0; p = u.1
     var fi: i64 = 0
