@@ -275,7 +275,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "missing_full_obligations": [
-            "f128 binary128 parser numeric value independent of f64",
+            "f128 decimal-to-binary128 rounded value from parser decimal metadata",
             "f128 IR opcodes and constructors",
             "f128 MachineIR lowering that emits slot kind 3 with two 64-bit limbs",
             "f128 SysV ABI classification and call-return signature metadata",

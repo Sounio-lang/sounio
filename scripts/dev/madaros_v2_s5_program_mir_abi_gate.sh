@@ -671,16 +671,20 @@ for case_id, expected in required_generic_cases.items():
         if shape.get("main_field_load_indices") != list(range(9)):
             raise SystemExit(f"{case_id} must load all Wide9 fields in order")
 
-if f128_literal_provenance_receipt.get("schema") != "madaros.v2.f128_literal_provenance_receipt/0.1":
+if f128_literal_provenance_receipt.get("schema") != "madaros.v2.f128_literal_provenance_receipt/0.2":
     raise SystemExit("bad f128 literal provenance receipt schema")
 if f128_literal_provenance_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 literal provenance receipt")
-if f128_literal_provenance_receipt.get("stage_contract_level") != "S4_S5_F128_LITERAL_PROVENANCE_PROMOTED_NOT_F128_EXECUTION":
-    raise SystemExit("f128 literal provenance receipt must declare parser provenance stage contract")
+if f128_literal_provenance_receipt.get("stage_contract_level") != "S4_S5_F128_LITERAL_DECIMAL_METADATA_PROMOTED_NOT_F128_EXECUTION":
+    raise SystemExit("f128 literal provenance receipt must declare parser decimal-metadata stage contract")
 for field in [
     "raw_literal_capture_before_advance",
     "float_literal_ast_name_preserved",
     "float_literal_f64_value_still_preserved",
+    "float_literal_decimal_metadata_fields_present",
+    "float_literal_decimal_metadata_helper_present",
+    "float_literal_decimal_metadata_attached_in_parser",
+    "f128_literal_decimal_metadata_independent_from_f64",
     "f128_literal_provenance_preserved_for_future_binary128",
     "f128_decimal_not_forced_through_f64_only_ast",
 ]:
@@ -1195,12 +1199,12 @@ not_promoted = [
     {
         "surface": "f128_numeric_width",
         "status": "not_promoted_by_this_slice",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literal provenance is preserved for future binary128 lowering and native-v2 f128 execution still fails closed with stable diagnostics until IR/MIR/ABI/software-helper receipts exist",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata independent from f64, and native-v2 f128 execution still fails closed with stable diagnostics until binary128 rounding, IR/MIR/ABI/software-helper receipts exist",
     },
     {
-        "surface": "f128_literal_provenance",
-        "status": "promoted_by_parser_provenance_receipt_not_execution",
-        "reason": "ExprFloatLit now preserves original source spelling in Expr.name before rounding to f64 compatibility value, enabling a future binary128 parser without claiming f128 execution",
+        "surface": "f128_literal_decimal_metadata",
+        "status": "promoted_by_parser_decimal_metadata_receipt_not_execution",
+        "reason": "ExprFloatLit now preserves original source spelling and bounded decimal sign/significand/scale metadata before retaining the f64 compatibility value, enabling future binary128 rounding without claiming f128 execution",
     },
     {
         "surface": "unsupported_numeric_diagnostics",
@@ -1374,9 +1378,13 @@ module = {
         "stage_contract_level": f128_literal_provenance_receipt["stage_contract_level"],
         "case_id": f128_literal_provenance_receipt["case_id"],
         "parser_source_sha256": f128_literal_provenance_receipt["parser_source_sha256"],
+        "ast_source_sha256": f128_literal_provenance_receipt["ast_source_sha256"],
         "parse_float_literal_block_sha256": f128_literal_provenance_receipt["parse_float_literal_block_sha256"],
         "probe_source_sha256": f128_literal_provenance_receipt["probe_source_sha256"],
         "probe_check_rc": f128_literal_provenance_receipt["probe_check_rc"],
+        "f128_literal_decimal_digit_count": f128_literal_provenance_receipt["f128_literal_decimal_digit_count"],
+        "f128_literal_decimal_scale10": f128_literal_provenance_receipt["f128_literal_decimal_scale10"],
+        "f128_literal_decimal_metadata_independent_from_f64": f128_literal_provenance_receipt["f128_literal_decimal_metadata_independent_from_f64"],
     },
     "machine_slot_metadata_receipt": {
         "schema": machine_slot_metadata_receipt["schema"],
@@ -1422,7 +1430,7 @@ module = {
         "f64_xmm0_promoted": True,
         "wide_i128_i256_promoted": True,
         "wide_u128_u256_promoted": True,
-        "f128_literal_provenance_promoted": True,
+        "f128_literal_decimal_metadata_promoted": True,
         "machine_slot_metadata_promoted": True,
         "unsupported_numeric_diagnostics_promoted": True,
         "unsupported_numeric_widths_fail_closed": True,
@@ -1449,7 +1457,7 @@ module = {
         "f64_xmm0_call_return_receipt_recorded",
         "wide_int_i128_i256_receipt_recorded",
         "generic_aggregate_sret_layout_receipt_recorded",
-        "f128_literal_provenance_receipt_recorded",
+        "f128_literal_decimal_metadata_receipt_recorded",
         "machine_slot_kind_width_metadata_receipt_recorded",
         "unsupported_numeric_diagnostics_receipt_recorded",
         "differential_native_v2_vs_lean_single_receipt_recorded",
@@ -1494,7 +1502,7 @@ receipt = {
     "s5_f64_xmm0_call_return_complete": True,
     "s5_wide_int_i128_i256_complete": True,
     "s5_generic_aggregate_sret_layout_complete": True,
-    "s4_s5_f128_literal_provenance_complete": True,
+    "s4_s5_f128_literal_decimal_metadata_complete": True,
     "s5_machine_slot_kind_width_metadata_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
