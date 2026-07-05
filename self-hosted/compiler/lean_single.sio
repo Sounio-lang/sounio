@@ -28832,6 +28832,75 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
         }
         let borrow_tok = EP - 1
+        // General place borrow (a64 mirror of the x86 borrow engine):
+        // `&(*name).chain...` and `&name.chain...` resolve through
+        // compile_place_projections_a64; aggregate array-slot places borrow
+        // the LOADED element pointer, everything else borrows the address.
+        // The whole-var and slice-range borrows below keep their paths.
+        if TK[EP as usize] == 6 && TK[(EP + 1) as usize] == 19 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 7 && (TK[(EP + 4) as usize] == 50 || TK[(EP + 4) as usize] == 41) {
+            let bptr_tok = EP + 2
+            let bpns = TS[bptr_tok as usize]
+            let bpne = TE[bptr_tok as usize]
+            EP = EP + 4
+            let bpvi = var_find_idx(bpns, bpne)
+            if bpvi < 0 {
+                tc_undefined_var(bptr_tok)
+                EXPR_TY = 10
+                EXPR_TY_HASH = ref_hash_make(0, 0, want_mut)
+                return
+            }
+            emit_load_var_a64(VAR_SLOT[bpvi as usize])
+            var bcur_ty = VAR_TY[bpvi as usize]
+            var bcur_hash = VAR_TY_HASH[bpvi as usize]
+            if type_is_pointer_like(bcur_ty, bcur_hash) {
+                bcur_ty = ptr_hash_inner_ty(bcur_hash)
+                bcur_hash = ptr_hash_inner_hash(bcur_hash)
+            }
+            compile_place_projections_a64(bcur_ty, bcur_hash)
+            if PLACE_OK == 1 && PLACE_KIND == 2 { em32(0xF9400000) }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if PLACE_OK == 1 { EXPR_TY_HASH = ref_hash_make(PLACE_TY, PLACE_TY_HASH, want_mut) }
+            else { EXPR_TY_HASH = ref_hash_make(0, 0, want_mut) }
+            return
+        }
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 2) as usize] == 3 {
+            let bnns = TS[EP as usize]
+            let bnne = TE[EP as usize]
+            let bname_tok = EP
+            EP = EP + 1
+            var bcur_ty2: i64 = 0
+            var bcur_hash2: i64 = 0
+            let bvi2 = var_find_idx(bnns, bnne)
+            if bvi2 >= 0 {
+                emit_load_var_a64(VAR_SLOT[bvi2 as usize])
+                bcur_ty2 = VAR_TY[bvi2 as usize]
+                bcur_hash2 = VAR_TY_HASH[bvi2 as usize]
+                if type_is_pointer_like(bcur_ty2, bcur_hash2) {
+                    bcur_ty2 = ptr_hash_inner_ty(bcur_hash2)
+                    bcur_hash2 = ptr_hash_inner_hash(bcur_hash2)
+                }
+            } else {
+                let bgi2 = gl_find(bnns, bnne)
+                if bgi2 >= 0 {
+                    emit_image_addr_a64(GL_BSS_BASE + GL[(bgi2 * 4 + 1) as usize])
+                    bcur_ty2 = GL_TY[bgi2 as usize]
+                    bcur_hash2 = GL_TY_HASH[bgi2 as usize]
+                } else {
+                    tc_undefined_var(bname_tok)
+                    EXPR_TY = 10
+                    EXPR_TY_HASH = ref_hash_make(0, 0, want_mut)
+                    return
+                }
+            }
+            compile_place_projections_a64(bcur_ty2, bcur_hash2)
+            if PLACE_OK == 1 && PLACE_KIND == 2 { em32(0xF9400000) }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if PLACE_OK == 1 { EXPR_TY_HASH = ref_hash_make(PLACE_TY, PLACE_TY_HASH, want_mut) }
+            else { EXPR_TY_HASH = ref_hash_make(0, 0, want_mut) }
+            return
+        }
         let rns = TS[EP as usize]
         let rne = TE[EP as usize]
         EP = EP + 1
@@ -29260,8 +29329,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if g_found == 1 { EP = EP + 3 }
         }
         let ident_fi = fn_find(ns, ne)
-        // Function call
-        if TK[EP as usize] == 6 {
+        // Function call — the '(' must sit on the SAME LINE as the callee name
+        // (mirrors the x86 primary guard at its ident-call site): without this,
+        // an expression ending in a name followed by a next-line parenthesized
+        // statement (e.g. `.a = i` newline `(*hb).arr[...] = ...`) was
+        // misparsed as an indirect CALL of the name, emitting blr-to-garbage
+        // (found by the 2026-07-05 a64 hardware soak).
+        if TK[EP as usize] == 6 && TL[EP as usize] == TL[name_tok as usize] {
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
