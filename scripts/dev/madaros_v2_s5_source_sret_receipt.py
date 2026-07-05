@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5 source front-end SRET receipt.
 
-This receipt proves a real source program returning an aggregate from a local
-function is lowered to the native-v2 SRET ABI path. It is deliberately narrower
-than S5 FULL: it covers local one-argument aggregate return only.
+This receipt proves real source programs returning aggregates from local
+functions are lowered to the native-v2 SRET ABI path. It is deliberately
+narrower than S5 FULL: it covers local register-argument aggregate returns only.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 
 SCHEMA_VERSION = "madaros.v2.s5.source_sret_receipt/0.1"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_SOURCE_SRET_LOCAL_ONE_ARG_NOT_FULL"
+STAGE_CONTRACT_LEVEL = "S5_SOURCE_SRET_LOCAL_REGISTER_ARGS_NOT_FULL"
 
 MIR_OP_LOAD_STACK = 100
 MIR_OP_ARG_MOVE = 112
@@ -29,7 +29,7 @@ MIR_OP_ALLOC = 116
 MIR_OP_FIELD_LOAD = 117
 MIR_OP_FIELD_STORE = 118
 
-SOURCE = """struct Big {
+ONE_ARG_SOURCE = """struct Big {
     f0: i64,
     f1: i64,
     f2: i64,
@@ -44,6 +44,43 @@ fn main() -> i64 {
     b.f1
 }
 """
+
+REGISTER_MULTI_ARG_SOURCE = """struct Big {
+    f0: i64,
+    f1: i64,
+    f2: i64,
+}
+
+fn make(a: i64, b: i64, c: i64, d: i64, e: i64) -> Big {
+    Big { f0: a + c, f1: b * 2, f2: d + e }
+}
+
+fn main() -> i64 {
+    let x = make(3, 7, 4, 20, 2)
+    x.f0 + x.f1 + x.f2
+}
+"""
+
+CASES = [
+    {
+        "case_id": "source_sret_local_i64_triple_return_14",
+        "source": ONE_ARG_SOURCE,
+        "expected_exit": 14,
+        "program_kind": "source_local_one_arg_aggregate_sret_return",
+        "expected_arg_indices": [0, 1],
+        "expected_arg_source_slots": [1, 0],
+        "explicit_arg_count": 1,
+    },
+    {
+        "case_id": "source_sret_local_register_multi_arg_return_43",
+        "source": REGISTER_MULTI_ARG_SOURCE,
+        "expected_exit": 43,
+        "program_kind": "source_local_register_multi_arg_aggregate_sret_return",
+        "expected_arg_indices": [0, 1, 2, 3, 4, 5],
+        "expected_arg_source_slots": [5, 0, 1, 2, 3, 4],
+        "explicit_arg_count": 5,
+    },
+]
 
 
 def repo_root_from_script() -> Path:
@@ -166,7 +203,11 @@ def arg_move_source_stack_slots(function: dict[str, Any]) -> list[int]:
     return slots
 
 
-def validate_source_sret_machine_module(module: dict[str, Any]) -> dict[str, Any]:
+def validate_source_sret_machine_module(
+    module: dict[str, Any],
+    expected_arg_indices: list[int],
+    expected_arg_source_slots: list[int],
+) -> dict[str, Any]:
     by_name = functions_by_name(module)
     if set(by_name) != {"make", "main"}:
         raise SystemExit(f"source SRET functions must be make/main, got {sorted(by_name)}")
@@ -190,13 +231,13 @@ def validate_source_sret_machine_module(module: dict[str, Any]) -> dict[str, Any
     if missing_make:
         raise SystemExit(f"source SRET make MachineModule missing opcodes: {missing_make}")
     indices = arg_move_indices(main_fn)
-    if indices != [0, 1]:
-        raise SystemExit(f"source SRET call must move hidden dest to arg0 and explicit v to arg1, got {indices}")
+    if indices != expected_arg_indices:
+        raise SystemExit(f"source SRET call arg indices mismatch: expected {expected_arg_indices}, got {indices}")
     stack_slots = arg_move_source_stack_slots(main_fn)
-    if stack_slots != [1, 0]:
+    if stack_slots != expected_arg_source_slots:
         raise SystemExit(
-            "source SRET call must load hidden dest from slot1 and explicit arg from slot0, "
-            f"got {stack_slots}"
+            "source SRET call source stack slots mismatch: "
+            f"expected {expected_arg_source_slots}, got {stack_slots}"
         )
     if make_ops.count(MIR_OP_FIELD_STORE) < 6:
         raise SystemExit("source SRET make must store three local fields and copy three SRET fields")
@@ -219,21 +260,19 @@ def validate_source_sret_machine_module(module: dict[str, Any]) -> dict[str, Any
     }
 
 
-def emit(args: argparse.Namespace) -> int:
-    root = Path(args.root).resolve()
-    compiler = Path(args.compiler).resolve()
-    out_dir = Path(args.out_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], timeout_s: int) -> dict[str, Any]:
+    case_id = str(case["case_id"])
+    source_text = str(case["source"])
+    expected_exit = int(case["expected_exit"])
+    explicit_arg_count = int(case["explicit_arg_count"])
+    source_path = out_dir / f"{case_id}.sio"
+    elf_path = out_dir / f"{case_id}.native_v2"
+    mm_path = out_dir / f"{case_id}.machine_module.json"
+    compile_log_path = out_dir / f"{case_id}.compile.log"
+    stdout_path = out_dir / f"{case_id}.stdout"
+    stderr_path = out_dir / f"{case_id}.stderr"
 
-    source_path = out_dir / "source_sret_local_i64_triple_return_14.sio"
-    elf_path = out_dir / "source_sret_local_i64_triple_return_14.native_v2"
-    mm_path = out_dir / "source_sret_local_i64_triple_return_14.machine_module.json"
-    compile_log_path = out_dir / "source_sret_local_i64_triple_return_14.compile.log"
-    stdout_path = out_dir / "source_sret_local_i64_triple_return_14.stdout"
-    stderr_path = out_dir / "source_sret_local_i64_triple_return_14.stderr"
-    receipt_path = out_dir / "madaros_v2_s5_source_sret.receipt.json"
-
-    source_path.write_text(SOURCE, encoding="utf-8")
+    source_path.write_text(source_text, encoding="utf-8")
     rc, compile_stdout, compile_stderr = run_command(
         [
             str(compiler),
@@ -245,34 +284,34 @@ def emit(args: argparse.Namespace) -> int:
             str(mm_path),
         ],
         root,
-        args.timeout,
+        timeout_s,
     )
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
     if rc != 0:
-        raise SystemExit(f"source SRET compile failed rc={rc}; log={compile_log_path}")
+        raise SystemExit(f"source SRET compile failed for {case_id} rc={rc}; log={compile_log_path}")
     elf_path.chmod(elf_path.stat().st_mode | 0o111)
 
-    actual_exit, stdout, stderr = run_binary(elf_path, args.timeout)
+    actual_exit, stdout, stderr = run_binary(elf_path, timeout_s)
     stdout_path.write_bytes(stdout)
     stderr_path.write_bytes(stderr)
-    if actual_exit != 14:
-        raise SystemExit(f"source SRET expected exit 14, got {actual_exit}")
+    if actual_exit != expected_exit:
+        raise SystemExit(f"source SRET {case_id} expected exit {expected_exit}, got {actual_exit}")
 
     module = load_machine_module(mm_path)
-    machine_shape = validate_source_sret_machine_module(module)
-    receipt = {
-        "schema": SCHEMA_VERSION,
-        "status": "pass",
-        "stage_contract_level": STAGE_CONTRACT_LEVEL,
-        "target": "x86_64-linux",
-        "case_id": "source_sret_local_i64_triple_return_14",
-        "program_kind": "source_local_one_arg_aggregate_sret_return",
-        "abi_kind": "aggregate_sret_hidden_dest_call_return",
+    machine_shape = validate_source_sret_machine_module(
+        module,
+        list(case["expected_arg_indices"]),
+        list(case["expected_arg_source_slots"]),
+    )
+    return {
+        "case_id": case_id,
+        "program_kind": case["program_kind"],
         "source": source_path.name,
-        "expected_exit": 14,
+        "expected_exit": expected_exit,
         "actual_exit": actual_exit,
-        "source_sha256": sha256_text(SOURCE),
+        "explicit_arg_count": explicit_arg_count,
+        "source_sha256": sha256_text(source_text),
         "elf_sha256": sha256_bytes(elf_path.read_bytes()),
         "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
         "stdout_sha256": sha256_bytes(stdout),
@@ -286,24 +325,53 @@ def emit(args: argparse.Namespace) -> int:
             "hidden_return_destination": {
                 "register": "rdi",
                 "machine_arg_index": 0,
-                "caller_source_stack_slot": 1,
+                "caller_source_stack_slot": int(case["expected_arg_source_slots"][0]),
             },
             "params": [
                 {
                     "type": "i64",
                     "class": "scalar_i64",
-                    "register": "rsi",
-                    "machine_arg_index": 1,
-                    "caller_source_stack_slot": 0,
+                    "register": reg,
+                    "machine_arg_index": idx + 1,
+                    "caller_source_stack_slot": idx,
                 }
+                for idx, reg in enumerate(["rsi", "rdx", "rcx", "r8", "r9"][:explicit_arg_count])
             ],
             "return": {"type": "aggregate_pointer", "class": "sret_hidden_dest", "register": "rax"},
             "sret": True,
             "aggregate_layout": True,
             "stack_arg_count": 0,
         },
+    }
+
+
+def emit(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    compiler = Path(args.compiler).resolve()
+    out_dir = Path(args.out_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    receipt_path = out_dir / "madaros_v2_s5_source_sret.receipt.json"
+    case_results = [emit_case(root, compiler, out_dir, case, args.timeout) for case in CASES]
+    one_arg = case_results[0]
+    multi_arg = case_results[1]
+    receipt = {
+        "schema": SCHEMA_VERSION,
+        "status": "pass",
+        "stage_contract_level": STAGE_CONTRACT_LEVEL,
+        "target": "x86_64-linux",
+        "case_id": "source_sret_local_register_args",
+        "case_count": len(case_results),
+        "cases": case_results,
+        "abi_kind": "aggregate_sret_hidden_dest_call_return",
+        "one_arg_case_id": one_arg["case_id"],
+        "one_arg_actual_exit": one_arg["actual_exit"],
+        "register_multi_arg_case_id": multi_arg["case_id"],
+        "register_multi_arg_actual_exit": multi_arg["actual_exit"],
         "s5_source_sret_local_one_arg_complete": True,
+        "s5_source_sret_local_register_multi_arg_complete": True,
         "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
+        "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
         "compiler_machine_module_exported": True,
         "real_program_mir_emitted": True,
         "real_abi_layout_emitted": True,
@@ -314,14 +382,15 @@ def emit(args: argparse.Namespace) -> int:
         "roundtrip_contract": [
             "real_source_program_compiles_with_native_v2_compile",
             "MachineModule_contains_make_and_main_without_legacy_fallback",
-            "caller_uses_IrCallSret_shape_with_two_ARG_MOVE_ops",
-            "hidden_dest_loaded_from_caller_slot_1_to_machine_arg_0",
-            "explicit_arg_loaded_from_caller_slot_0_to_machine_arg_1",
+            "one_arg_caller_uses_IrCallSret_shape_with_two_ARG_MOVE_ops",
+            "register_multi_arg_caller_uses_IrCallSret_shape_with_six_ARG_MOVE_ops",
+            "hidden_dest_loaded_to_machine_arg_0",
+            "explicit_register_args_loaded_to_machine_args_1_through_5",
             "callee_copies_three_fields_to_hidden_dest",
-            "native_elf_returns_14",
+            "native_elves_return_expected_discriminators",
         ],
         "missing_full_obligations": [
-            "source SRET multi-arg and stack-arg aggregate return coverage",
+            "source SRET stack-arg aggregate return coverage",
             "imported aggregate/SRET receipt",
             "method/generic/module-boundary aggregate return coverage",
             "f64 XMM0 call/return receipt before f128 promotion",
@@ -336,7 +405,7 @@ def emit(args: argparse.Namespace) -> int:
     receipt_path.write_text(pretty_json(receipt), encoding="utf-8")
     print(
         f"madaros-v2-s5-source-sret: case={receipt['case_id']} "
-        f"exit={actual_exit} sha={receipt['receipt_sha256'][:12]} receipt={receipt_path}"
+        f"cases={receipt['case_count']} sha={receipt['receipt_sha256'][:12]} receipt={receipt_path}"
     )
     return 0
 

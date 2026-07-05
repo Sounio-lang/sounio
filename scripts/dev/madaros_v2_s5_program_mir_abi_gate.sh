@@ -159,14 +159,29 @@ if source_sret_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing source SRET receipt")
 if source_sret_receipt.get("s5_source_sret_local_one_arg_complete") is not True:
     raise SystemExit("program MIR/ABI gate requires completed source local one-arg SRET receipt")
+if source_sret_receipt.get("s5_source_sret_local_register_multi_arg_complete") is not True:
+    raise SystemExit("program MIR/ABI gate requires completed source local register multi-arg SRET receipt")
 if source_sret_receipt.get("source_frontend_lowers_local_aggregate_return_to_IrCallSret") is not True:
     raise SystemExit("program MIR/ABI gate requires source front-end SRET lowering evidence")
-if source_sret_receipt.get("actual_exit") != 14:
-    raise SystemExit("source SRET receipt witness must return 14")
-if source_sret_receipt.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1]:
-    raise SystemExit("source SRET receipt must pass hidden dest then explicit arg")
-if source_sret_receipt.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [1, 0]:
-    raise SystemExit("source SRET receipt must prove hidden dest from slot1 and explicit arg from slot0")
+if source_sret_receipt.get("source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret") is not True:
+    raise SystemExit("program MIR/ABI gate requires source register multi-arg SRET lowering evidence")
+source_sret_cases = {row.get("case_id"): row for row in source_sret_receipt.get("cases", [])}
+one_arg_case = source_sret_cases.get("source_sret_local_i64_triple_return_14")
+multi_arg_case = source_sret_cases.get("source_sret_local_register_multi_arg_return_43")
+if not one_arg_case or not multi_arg_case:
+    raise SystemExit("source SRET receipt must contain one-arg and register multi-arg cases")
+if one_arg_case.get("actual_exit") != 14:
+    raise SystemExit("source SRET one-arg witness must return 14")
+if one_arg_case.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1]:
+    raise SystemExit("source SRET one-arg receipt must pass hidden dest then explicit arg")
+if one_arg_case.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [1, 0]:
+    raise SystemExit("source SRET one-arg receipt must prove hidden dest from slot1 and explicit arg from slot0")
+if multi_arg_case.get("actual_exit") != 43:
+    raise SystemExit("source SRET register multi-arg witness must return 43")
+if multi_arg_case.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
+    raise SystemExit("source SRET register multi-arg receipt must pass hidden dest plus five register args")
+if multi_arg_case.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [5, 0, 1, 2, 3, 4]:
+    raise SystemExit("source SRET register multi-arg receipt must prove hidden dest slot5 then explicit arg slots 0..4")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -423,8 +438,8 @@ not_promoted = [
     },
     {
         "surface": "aggregate_return",
-        "status": "partially_promoted_by_source_sret_local_one_arg_receipt",
-        "reason": "local one-arg source aggregate return now has source-to-IrCallSret receipt; multi-arg, stack-arg, imported, and generic/module-boundary surfaces remain",
+        "status": "partially_promoted_by_source_sret_local_register_args_receipt",
+        "reason": "local one-arg and five-register-arg source aggregate returns now have source-to-IrCallSret receipts; stack-arg, imported, and generic/module-boundary surfaces remain",
     },
     {
         "surface": "imported_call",
@@ -521,9 +536,12 @@ module = {
         "receipt_sha256": source_sret_receipt["receipt_sha256"],
         "stage_contract_level": source_sret_receipt["stage_contract_level"],
         "case_id": source_sret_receipt["case_id"],
-        "actual_exit": source_sret_receipt["actual_exit"],
-        "machine_shape": source_sret_receipt["machine_shape"],
-        "abi_signature": source_sret_receipt["abi_signature"],
+        "case_count": source_sret_receipt["case_count"],
+        "one_arg_case_id": source_sret_receipt["one_arg_case_id"],
+        "one_arg_actual_exit": source_sret_receipt["one_arg_actual_exit"],
+        "register_multi_arg_case_id": source_sret_receipt["register_multi_arg_case_id"],
+        "register_multi_arg_actual_exit": source_sret_receipt["register_multi_arg_actual_exit"],
+        "cases": source_sret_receipt["cases"],
     },
     "scalar_abi_receipts": {
         "schema": "madaros.v2.s5.abi_scalar_call_return/0.1",
@@ -533,6 +551,7 @@ module = {
         "stack_args_promoted": False,
         "sret_promoted": True,
         "source_sret_local_one_arg_promoted": True,
+        "source_sret_local_register_multi_arg_promoted": True,
         "aggregate_layout_promoted": True,
         "f64_xmm0_promoted": False,
     },
@@ -549,7 +568,8 @@ module = {
         "scalar_abi_register_contract_recorded",
         "sret_hidden_dest_abi_discriminator_recorded",
         "source_sret_local_one_arg_receipt_recorded",
-        "source_sret_multi_arg_imported_stack_f64_surfaces_not_promoted",
+        "source_sret_local_register_multi_arg_receipt_recorded",
+        "source_sret_imported_stack_f64_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
         "full_abi_numeric_differential_gates_still_required_before_s5_ready",
     ],
@@ -581,7 +601,9 @@ receipt = {
     "real_abi_layout_emitted": True,
     "s5_sret_machine_module_abi_discriminator_complete": True,
     "s5_source_sret_local_one_arg_complete": True,
+    "s5_source_sret_local_register_multi_arg_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
+    "source_frontend_lowers_local_register_multi_arg_aggregate_return_to_IrCallSret": True,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "source_sret_receipt_sha256": source_sret_receipt["receipt_sha256"],
@@ -598,6 +620,7 @@ receipt = {
     "return_register": module["scalar_abi_receipts"]["return_register"],
     "sret_promoted": module["scalar_abi_receipts"]["sret_promoted"],
     "source_sret_local_one_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_one_arg_promoted"],
+    "source_sret_local_register_multi_arg_promoted": module["scalar_abi_receipts"]["source_sret_local_register_multi_arg_promoted"],
     "aggregate_layout_promoted": module["scalar_abi_receipts"]["aggregate_layout_promoted"],
     "not_promoted_surfaces": [item["surface"] for item in not_promoted],
     "negative_and_blocked_controls": [
@@ -605,7 +628,7 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "source SRET multi-arg and stack-arg aggregate return coverage",
+        "source SRET stack-arg aggregate return coverage",
         "imported aggregate/SRET receipt",
         "method/generic/module-boundary aggregate return coverage",
         "f64 XMM0 call/return witnesses before f128 promotion",
