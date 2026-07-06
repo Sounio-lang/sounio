@@ -1,17 +1,16 @@
 <!-- docs:meta
 topic_id: repo.docs.research.eisa-v2-positioning-2026-07-05
-authority: research-draft
+authority: historical
 audience: researchers
-last_validated: 2026-07-06
-validated_by: W5-pre
+last_validated: 2026-03-07
+validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.eisa-v2-positioning-2026-07-05
 -->
 
+
 <!-- docs:status-note:start -->
-> Docs status: `research-draft`
-> Draft for EISA v2 phase W5 (scientific positioning). Written pre-adversarial
-> review and pre-`llm-offload`; every "first" claim below is hedged with
-> "to our knowledge" and must survive both reviews before any external use.
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
 # EISA v2 — scientific positioning: a deterministic, receipt-carried roundoff lane against the prior art (2026-07-05)
@@ -26,11 +25,14 @@ external-facing text; internal identifiers (`eisa::evm`, `.eisax`) are unchanged
 
 ## 1. Thesis
 
-EISA v2 is — to our knowledge — the first *executable format* whose machine
-model cannot execute an arithmetic instruction without propagating a
-deterministic, EFT-measured roundoff correction alongside a separate GUM
-uncertainty lane, with every observation gate emitting an audit receipt that
-cites the hash of the program that produced it. Each register carries three
+EISA v2 occupies a design point we fix by three explicit criteria: **(C1)** a
+mandatory, per-operation, EFT-measured roundoff-correction lane the machine
+model cannot bypass; **(C2)** a separate first-order GUM uncertainty lane; and
+**(C3)** an observation-gate audit receipt that cites the hash of the program
+that produced it. No system meeting C1–C3 *together* appears among the
+traditions and references surveyed in §7; to our knowledge EISA v2 is the
+first *executable format* to combine all three, and §6.8 states the criteria
+under which that bounded claim is falsifiable. Each register carries three
 lanes: `val` (the bit-exact IEEE-754 double the plain hardware computes),
 `err` (a measured correction — double-double in v1, quad-double in v2 —
 defined by the closure contract `true(z) = round_qd(true(x) op true(y))`),
@@ -129,7 +131,14 @@ be expressed in a 64-register, 256-instruction `.eisax` image — hand-lowered
 or compiled from the minimal Metron surface — which today admits kernels,
 not applications. MCA also probes the code *as optimised by the compiler*,
 a surface EISA deliberately fixes instead (the val lane is defined to be
-plain SSE2 scalar IEEE semantics; there is nothing to probe).
+plain SSE2 scalar IEEE semantics; there is nothing to probe). To be exact
+about what "deterministic" claims here: the conformance bridge chooses its
+*own* fixed SSE2-scalar, non-FMA lowering and is **not** required to
+reproduce whatever an arbitrary optimising compiler emits. Determinism in
+this document means the three executors — the reference chains, the Metron
+VM, and that one fixed bridge lowering — produce byte-identical receipts for
+a given `.eisax` image; it is not a claim about "whatever a compiler emitted"
+(which is the surface MCA probes and EISA fixes).
 
 ### 2.3 Static tools — Herbie and FPTaylor
 
@@ -246,11 +255,24 @@ inside that bound; CADNA/DSA (Vignes 2004) detects the same instability
 class via disagreement across random-rounding samples. Same failure class
 flagged, different detection semantics.*
 
-Mechanically: a v1+ branch (`ebrz`/`ebrn`) decides on the `val` lane alone.
-When the operand satisfies `|val| <= max(u, |err.x0|)` — with the exact case
-excluded: if `max(u, |err.x0|) == 0` the operand is exact and the branch is
-never frail — the branch direction is epistemically unsupported, and a
-per-run counter `frail_branches` increments. CADNA's analogue is the
+Mechanically: a v1+ branch (`ebrz`/`ebrn`) decides on the `val` lane alone;
+the frail test is the exact Sounio predicate (`stdlib/eisa/evm.sio`), with no
+unstated total order over the mixed lanes:
+
+```
+fn branch_frail_predicate(val: f64, ehi: f64, u: f64) -> bool {
+    let band = if u > abs_f64_local(ehi) { u } else { abs_f64_local(ehi) }
+    if band == 0.0 { return false }
+    abs_f64_local(val) <= band
+}
+```
+
+The `max` is a plain f64 comparison of the declared uncertainty `u` against
+`|err.x0|` (the err leading component, passed as `ehi`); the exact case
+(`band == 0.0`) returns early so an exact operand is never frail; and the
+decision is a single f64 `<=`. When the predicate holds the branch direction
+is epistemically unsupported, and a per-run counter `frail_branches`
+increments. CADNA's analogue is the
 *unstable branching* anomaly: the difference between the two comparison
 operands is a computational zero, i.e. the samples cannot agree that the
 comparison has a definite outcome. The correspondence is close but not an
@@ -294,11 +316,16 @@ for his own account of the S/370 history).
 The three regimes, as witnessed in this repository:
 
 1. **f64 — debris.** `test_qd128_rump.sio` R4 pins the plain-double result
-   at more than 10¹⁵ absolute error in this evaluation order (measured
-   ≈ −1.18e21). In the hand-lowered v2 image (different but fixed order),
+   at more than 10¹⁵ absolute error in this evaluation order (the
+   ≈ −1.18e21 figure and this repository's specific evaluation order are
+   *measured from the repository corpus* at R4, not transcribed from Rump
+   1988 or Loh & Walster 2002, which are cited only for the phenomenon and
+   its IEEE-754 reproducibility history). In the hand-lowered v2 image
+   (different but fixed order),
    the final register's val lane is exactly −2⁷⁰ (`s1e1093m0` in the
-   receipt decomposition). Different orders, different debris — no
-   stability anywhere in this regime.
+   receipt decomposition). Both land ~21 orders of magnitude from the true
+   −0.827…, their exact debris fixed by the evaluation order — no stability
+   anywhere in this regime.
 2. **dd64 — wrong sign, derivably.** dd64 carries ~106 bits against a
    ~122-bit cancellation requirement. Every polynomial term *except* the
    exact −2 residue is exactly representable in dd64 and cancels to zero;
@@ -334,7 +361,10 @@ The receipt v3 lines for those gates — `val=<s,e,m>` debris plus
 `roundoff0..3=<s,e,m>` corrections, under `prog=<hash>` — are the evidence
 artefacts this document's thesis rests on: the wrong number the hardware
 computed and the measured correction that recovers the exact rational,
-carried in the same executable's audit trail.
+carried in the same executable's audit trail. They are reproduced verbatim,
+with the program hash, the ELF SHA-256, the reconstruction arithmetic and the
+one-command replay, in the §8 reproducibility appendix — including the
+byte-identical agreement between the Metron VM and the x86-64 bridge.
 
 ## 6. Honest limitations and future work
 
@@ -372,19 +402,30 @@ carried in the same executable's audit trail.
 7. **Corpus conformance is corpus conformance.** Three-executor bit-exact
    agreement is checked on the witness corpus, not proved for all programs;
    the claim is falsifiable (any counterexample indicts an executor) but
-   deliberately not overstated.
-8. **Priority hedge.** The claim of "first executable format with mandatory
-   measured-roundoff semantics and receipt-carried provenance" is stated to
-   our knowledge, based on the literature reviewed here; this is a
-   pre-publication draft and the claim stands only until adversarial review
-   or a reader produces a prior instance.
+   deliberately not overstated. The closure contract
+   `true(z) = round_qd(true(x) op true(y))` is defined *normatively* in
+   `eisa-v2-arch-2026-07-05.md §2` and enforced by the differential harness;
+   a machine-checked Lean obligation (call it `closure_sound`) is named
+   **deferred future work**, not asserted here. This document states no
+   theorem it has not proved and adds no `sorry` placeholder in its place —
+   the adversarial reviewer's call for the contract as a Lean theorem is
+   acknowledged and scheduled, not papered over.
+8. **Priority hedge — criteria C1–C3.** The §1 "first" claim is bounded to
+   the *conjunction* of **C1** (mandatory per-operation EFT-measured roundoff
+   lane), **C2** (separate GUM uncertainty lane) and **C3** (receipt citing
+   program-hash provenance), over the traditions and references surveyed in
+   §7. It is stated to our knowledge and is falsifiable: any prior system
+   meeting C1–C3 together — or a reference we did not survey — retires it.
+   This is a pre-publication draft.
 
-Future work, in the order the W-plan already fixes: the W4 bridge templates
-under the micro-step/snapshot discipline; the frail escalation policy once
-corpus kernels discriminate the defaults; per-site gate policies in
-receipts; and a static companion (FPTaylor-style a priori bounds over
-Metron kernels) so that the a priori and per-execution axes can be carried
-by the same artefact.
+Future work, in the order the W-plan fixes: the frail escalation policy once
+corpus kernels discriminate the defaults; per-site gate policies in receipts;
+the `closure_sound` Lean obligation (§6.7); and a static companion
+(FPTaylor-style a priori bounds over Metron kernels) so that the a priori and
+per-execution axes can be carried by the same artefact. (The W4 qd128 bridge
+templates, listed here as future work in earlier drafts, are now **landed and
+gated byte-identical** — the receipt evidence in §8 is produced by that
+bridge; W4 is retained in the W-plan only as completed context.)
 
 ## 7. References
 
@@ -488,3 +529,71 @@ Repository-internal evidence cited above:
 `tests/stdlib/eisa/test_eisa_evm_v2.sio` (W-A…W-H, esp. the W-H honesty
 note), `tests/stdlib/eisa/test_eisa_v1e_showcase.sio` (S1 framing),
 `.claude/decisions.md` #14–#16.
+
+## 8. Appendix — reproducibility (v2-rump-qd)
+
+This appendix makes the §1/§5 thesis checkable from the artefact: the actual
+receipt v3 text, its hashes, the reconstruction arithmetic, and a one-command
+replay. Every figure below is emitted by the shipped code, not transcribed.
+
+**The image.** Rump 1988 at (77617, 33096), hand-lowered to a 30-instruction
+version-2 `.eisax` image (registers e0..e14, fuel 64), built by `rump_build`
+in `tools/eisa/eisa_evm_run.sio` and `tools/eisa/eisa_bridge_emit.sio`, and by
+`wv2_build_wh_rump` (witness W-H) in `tests/stdlib/eisa/test_eisa_evm_v2.sio`.
+Its version-1 twin (`v1-rump-dd`) is the mandatory dd64 *failure* lane.
+
+**Replay (from the repository root):**
+
+```
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"; export SOUNIO_SOUC_ENGINE=lean_single
+./bin/souc run tools/eisa/eisa_evm_run.sio      # Metron VM receipts (the oracle)
+./bin/souc run tools/eisa/eisa_bridge_emit.sio  # emit the x86-64 AOT ELFs
+./artifacts/eisa/v2-rump-qd.eisax.elf           # the AOT bridge's own receipts
+bash scripts/ci/eisa_bridge_conformance_gate.sh # EVM-vs-AOT byte-diff, all lanes
+```
+
+**The receipt v3 lines** (identical from the Metron VM and from the x86-64
+bridge ELF; `prog=845863096942225452`):
+
+```
+eisa-receipt: v=3 prog=845863096942225452 gate=1 reg=e13 val=s1e1093m0 roundoff0=s0e1093m0 roundoff1=s1e1024m0 roundoff2=s0e0m0 roundoff3=s0e0m0 u=s0e0m0 poisoned=0 frail=0
+eisa-receipt: v=3 prog=845863096942225452 gate=2 reg=e12 val=s0e1023m777339040106175 roundoff0=s1e969m612890159586558 roundoff1=s0e915m713042725629121 roundoff2=s0e861m1170260961910390 roundoff3=s0e0m0 u=s0e0m0 poisoned=0 frail=0
+eisa-receipt: v=3 prog=845863096942225452 gate=3 reg=e14 val=s1e1093m0 roundoff0=s0e1093m0 roundoff1=s1e1022m2948921547158147 roundoff2=s0e968m3277819308197381 roundoff3=s1e914m3077514176112253 u=s0e0m0 poisoned=0 frail=0
+```
+
+- Fields are `f64_parts` sign/exponent/mantissa decompositions (`s<sign>e<biased-exp>m<mantissa>`); e.g. `s1e1093m0` = −2⁷⁰, `s0e1093m0` = +2⁷⁰.
+- **Byte-identity.** The Metron VM output and the AOT ELF output for these
+  three lines are byte-for-byte identical; the conformance gate asserts this
+  over all 33 lanes (`PASS eisa_bridge_conformance`). AOT ELF:
+  `artifacts/eisa/v2-rump-qd.eisax.elf`, 71 819 bytes,
+  SHA-256 `b04f7795f3a9558bee428ab9fdfaaf649b8056515cb0500ab7cd3323cb581a5f`.
+
+**The reconstruction (derived bits, zero fitted tolerance).** Decode the
+final gate (`gate=3`, register e14) and sum val + roundoff0..3 as exact
+rationals:
+
+| field | value |
+|---|---|
+| `val` (s1e1093m0) | −2⁷⁰ |
+| `roundoff0` (s0e1093m0) | +2⁷⁰ |
+| `roundoff1` (s1e1022m…) | −0.827396059946821… |
+| `roundoff2` (s0e968m…) | +… (2⁻⁵⁵-scale) |
+| `roundoff3` (s1e914m…) | −… (2⁻¹⁰⁹-scale) |
+
+The ±2⁷⁰ debris cancels exactly (`val + roundoff0 = 0`), and the surviving
+quad-double sum agrees with the exact rational digit-for-digit through the
+~49th significant decimal, then diverges (the space marks the first differing
+digit):
+
+```
+val + roundoff0..3 = −0.827396059946821368141165095479816291999033115784 2…
+      −54767/66192 = −0.827396059946821368141165095479816291999033115784 3…
+```
+
+i.e. |Δ| ≈ 1.27 × 10⁻⁴⁹ ≈ 2⁻¹⁶² — about 163 significand bits of agreement. The `val` lane *alone* is −2⁷⁰ — wrong sign, ~21 orders of
+magnitude off — so the entire recovered result lives in the measured
+`roundoff` correction, on derived bits, exactly as the thesis claims. (The
+single-register anchor-limit caveat of §5 — x3 unreachable from one register
+anchored at 2⁷⁰ — is why the flagship assertion reconstructs from the two
+gated source registers s2 and t4; the three-line receipt above is the
+end-to-end demonstration.)
