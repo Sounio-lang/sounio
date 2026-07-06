@@ -72,6 +72,9 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+@[default_target]
+lean_lib «SounioSedenionFiberIdentity» where
+
 -- Independent-spec (native_decide) leg for the sedenion ZD e8-boundary + 7-fiber decomposition.
 -- Mathlib-free, no sorry; the third checker (Lean kernel) behind the executed-in-Sounio results
 -- tests/run-pass/sedenion_e8_boundary.sio and sedenion_zd_fibers.sio.
