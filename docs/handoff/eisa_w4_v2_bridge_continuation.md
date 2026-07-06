@@ -73,12 +73,30 @@ rc=0, 33 lanes** — every v0/v1/v2 lane (arithmetic + control-flow), `v2-rump-q
 `strings → grep -a` portability patch landed (`ci(eisa): anti-vacuity uses
 grep -a`), clearing the environmental `strings`-missing FAIL.
 
-## Remaining (landing)
+## W5 — LANDED (positioning revision)
 
-**W5** — Rump receipt showcase in the positioning doc (now unblocked: the real
-v2-rump-qd bridge receipt exists), and branch reconciliation + push (hold for
-operator direction; branch is 8 ahead / 8 behind origin). The v2 AOT bridge
-itself is functionally complete at full v1 parity.
+`docs/research/eisa-v2-positioning-2026-07-05.md` revised to adopt all 6
+findings of the 2026-07-06 adversarial review (commit `33305c96`):
+- **§8 reproducibility appendix** (blocker #1) — verbatim v2-rump-qd receipt v3
+  (`prog=845863096942225452`), ELF SHA-256 `b04f7795…` (71 819 B), one-command
+  replay, and the `val+roundoff0..3 = −54767/66192` reconstruction (~163 bits;
+  EVM-vs-AOT byte-identical). This is produced by the W4 bridge.
+- §6.7 keeps the Lean-theorem refusal honestly (names the deferred
+  `closure_sound` obligation; no theorem, no `sorry`); §1+§6.8 bound the
+  "first" claim to criteria C1–C3; §2.2 resolves the determinism-vs-provenance
+  tension; §4 pastes the exact frail predicate; §5 marks the −1.18e21 figure as
+  corpus-measured. Internal adversarial verifier: 6/6 resolved.
+- **External §10 offload re-review is PENDING operator keys** (`.sounio-keys.env`
+  absent in this environment): run
+  `bin/llm-offload --raw docs/research/eisa-v2-positioning-2026-07-05.md deepseek xai gemini`.
+
+## Remaining (operator-gated)
+
+**Branch reconciliation + push** — held for operator direction (branch is 8
+ahead / 8 behind origin; the shared checkout has concurrent agents, and the
+project forbids ad-hoc rebase/reset flows). The v2 AOT bridge is functionally
+complete at full v1 parity and the positioning doc is revised; nothing else is
+blocked. All work is committed locally.
 
 ## Verify
 ```
