@@ -3921,3 +3921,85 @@ status: lock-released
     for aggregate/SRET/imported/stack-arg paths, f64 XMM0 call/return closure
     before f128/i256 promotion, diagnostics, fallback semantics, and
     differential validation.
+
+## 2026-07-06 — Madaros S-next f128 arithmetic matrix promoted under rebuilt compiler
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: move S5.6 from the singleton `1.0f128 + 2.0f128 -> 3.0f128`
+  witness to a finite exact decimal-tenths arithmetic value-contract matrix
+  with one-chain metadata propagation, while still refusing to claim S5 FULL.
+- Files changed:
+  - `self-hosted/native/machine_ir.sio`
+  - `self-hosted/native/codegen_x86_linux.sio`
+  - `scripts/dev/madaros_v2_s5_f128_arithmetic_value_contract_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+- What changed:
+  - MachineIR now accepts a small fail-closed f128 decimal-tenths matrix for
+    positive finite values with `sig_hi=0`, `digit_count=2`, `scale10=1`,
+    `truncated=0`, and operand/result tenths in `{0,5,10,20,30,40}`.
+  - Codegen mirrors the same value lattice, adds a value-kind for `4.0`, emits
+    f128 opaque binary128 words, and re-marks the destination f128 kind so a
+    one-chain `add -> sub` witness can remain consistent.
+  - The S5.6 receipt now expects seven cases: five positives
+    (`add 1+2`, `mul 1*2`, `add 0.5+0.5`, `div 1/2`, `chain add-sub`) and two
+    fail-closed negatives (`0.5+1.0`, `0.5*0.5`).
+  - The aggregate S5 gate consumes that seven-case receipt and updates wording
+    from singleton arithmetic to finite decimal-tenths matrix.
+- Source-buffer recovery:
+  - Initial S-next baseline (`90e05e25a`) and this patch both failed
+    `make build-madaros` with `error: import too large for SRC buffer:
+    self-hosted/parser/patterns.sio (18366 bytes)`.
+  - Control build on `work/madaros-v2-sota-codex` passed with the same
+    `bin/souc-lean-single-x86_64` seed, proving a source-size cliff rather than
+    a seed mismatch.
+  - Removed comment-only lines from `self-hosted/native/codegen_x86_linux.sio`
+    and `self-hosted/native/frame.sio` to bring the bundle back under the seed
+    SRC buffer limit without changing compiler behavior.
+- Local proof completed:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_f128_arithmetic_value_contract_receipt.py`
+    passed.
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - `git diff --check` passed.
+  - `timeout 900 make build-madaros` passed and rebuilt
+    `artifacts/self-hosted/madaros` (sha256
+    `cd4e14df486e097b50875d052d6858e2face1ff3a299ecf3cc4c54bba47e60c2`).
+  - S5.6 f128 arithmetic value-contract receipt passed:
+    `case_count=7`, `positive_case_count=5`, `negative_case_count=2`, receipt
+    sha256 `349eedae3f35ecf4969a13699d98e43427bd1ec30c0ad912e7f0091144f05bd1`.
+  - Aggregate S5 program MIR/ABI gate passed with receipt sha256
+    `feb8a05c2d11f07db24c58fae0488b3178728c3ea7cc957272ba3c188380f629`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`, and wrote local gate
+    receipt `artifacts/self-hosted/madaros.gate-receipt`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260706-madaros-snext-f128-rebuild-timeout`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: bootstrap-runtime
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5.6 f128 arithmetic value-contract matrix
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Files-Owned: the five files listed above
+  - Do-Not-Touch: `/workspace/sounio` dirty primary checkout
+  - Repro: former `make build-madaros` SRC-buffer failure
+  - Observed: closed by comment-only source-size reduction; official
+    `make build-madaros` now exits 0 and rebuilt the artifact
+  - Expected: rebuilt Madaros ELF from current S-next source
+  - Acceptance-Gate: S5.6 receipt, aggregate S5 gate, full gate, source-to-ELF gate
+  - Evidence-Level: E3
+  - Evidence: `/tmp/s5-f128-arith-matrix`, `/tmp/s5-program-matrix`,
+    `/tmp/snext-madaros-full-gate.log`, `/tmp/snext-madaros-source-to-elf.log`
+  - Fallback-Path: none for merge; validation used freshly rebuilt
+    `artifacts/self-hosted/madaros`
+  - Legacy-Kept: yes
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    any external-facing SOTA/novelty claim based on this lane
+  - Next-Action: continue S5 FULL toward S6 readiness by promoting remaining
+    f128 generic helper/IEEE/call-return ABI surfaces or explicitly carrying
+    them as S6 blockers.

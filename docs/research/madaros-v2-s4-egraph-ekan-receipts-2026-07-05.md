@@ -382,6 +382,21 @@ MIR call-return contract anchored to `self-hosted/native/machine_ir.sio` and
 It also records S4 semantic negatives and producer-evaluation blockers as
 not-selected/not-promoted controls, so rejected or blocked rewrites cannot leak
 into the scalar S5 slice.
+The S5.6 f128 arithmetic value-contract surface is now intentionally a finite
+decimal-tenths matrix rather than a singleton: exact positive finite cases cover
+add, multiply, divide, and a one-chain `add -> sub` metadata propagation witness,
+while unsupported fractional products and out-of-matrix sums remain fail-closed
+with `f128_arithmetic_pending`. This still does not promote generic IEEE f128
+helpers, arbitrary decimal materialization, NaN/Inf behavior, external SysV
+f128 ABI, f128 call ABI, or f128 return ABI.
+The rebuilt S-next compiler on 2026-07-06 produced S5.6 receipt sha
+`349eedae3f35ecf4969a13699d98e43427bd1ec30c0ad912e7f0091144f05bd1`
+(`case_count=7`, `positive_case_count=5`, `negative_case_count=2`) and
+aggregate S5 program MIR/ABI receipt sha
+`feb8a05c2d11f07db24c58fae0488b3178728c3ea7cc957272ba3c188380f629`.
+The same rebuilt `artifacts/self-hosted/madaros` also passed
+`scripts/ci/madaros_full_gate.sh` (including imported-SMT `6/6`) and
+`scripts/ci/madaros_source_to_elf_gate.sh`.
 The final program receipt now records `input_applied_extraction_sha256 =
 4527e90ac399de5ce6f746d328a95dfd8c85d819d908aaf2f5bfb94a81b35f8d` and
 `s4_applied_extraction_consumed = true`, matching the preflight, MIR/ABI

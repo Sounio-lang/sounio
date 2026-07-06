@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5.6 f128 arithmetic value-contract receipt.
 
-This promotes one finite, exact binary128 arithmetic witness end-to-end:
-1.0f128 + 2.0f128 materializes as 3.0f128 in native-v2 MachineModule and ELF
-output. It deliberately does not promote generic IEEE helpers, NaN/Inf,
+This promotes a finite, exact binary128 arithmetic value-contract matrix
+end-to-end. It deliberately does not promote generic IEEE helpers, NaN/Inf,
 arbitrary decimal arithmetic, external SysV f128 ABI, SRET, or multi-arg shapes.
 """
 
@@ -23,9 +22,10 @@ STAGE = "S5_6_F128_ARITHMETIC_VALUE_CONTRACT_NATIVE_MATERIALIZATION"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 
 
-POSITIVE = {
-    "case_id": "f128_add_one_two_to_three",
-    "source": """fn main() -> i64 {
+POSITIVE = [
+    {
+        "case_id": "f128_add_one_two_to_three",
+        "source": """fn main() -> i64 {
   let x: f128 = 1.0 as f128
   let y: f128 = 2.0 as f128
   let z: f128 = x + y
@@ -33,9 +33,63 @@ POSITIVE = {
   0
 }
 """,
-    "expected_hex": "40008000000000000000000000000000",
-    "expected_metadata": [1, 0, 30, 2, 1, 0],
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": [1, 0, 30, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_mul_one_two_to_two",
+        "source": """fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let y: f128 = 2.0 as f128
+  let z: f128 = x * y
+  let w: f128 = z
+  0
 }
+""",
+        "expected_hex": "40000000000000000000000000000000",
+        "expected_metadata": [1, 0, 20, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_add_half_half_to_one",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.5 as f128
+  let y: f128 = 0.5 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff0000000000000000000000000000",
+        "expected_metadata": [1, 0, 10, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_div_one_two_to_half",
+        "source": """fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let y: f128 = 2.0 as f128
+  let z: f128 = x / y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffe0000000000000000000000000000",
+        "expected_metadata": [1, 0, 5, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_chain_add_sub_to_one",
+        "source": """fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let y: f128 = 2.0 as f128
+  let z: f128 = x + y
+  let w: f128 = z - y
+  let q: f128 = w
+  0
+}
+""",
+        "expected_hex": "3fff0000000000000000000000000000",
+        "expected_metadata": [1, 0, 10, 2, 1, 0],
+    },
+]
 
 NEGATIVE = [
     {
@@ -50,10 +104,10 @@ NEGATIVE = [
         "expected_detail": "f128_arithmetic_pending",
     },
     {
-        "case_id": "f128_mul_one_two_still_blocked",
+        "case_id": "f128_mul_half_half_still_blocked",
         "source": """fn main() -> i64 {
-  let x: f128 = 1.0 as f128
-  let y: f128 = 2.0 as f128
+  let x: f128 = 0.5 as f128
+  let y: f128 = 0.5 as f128
   let z: f128 = x * y
   0
 }
@@ -138,51 +192,51 @@ def metadata_rows(module: dict[str, Any]) -> list[list[int]]:
     return rows
 
 
-def emit_positive(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
-    case_dir = out_dir / str(POSITIVE["case_id"])
+def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], timeout_s: int) -> dict[str, Any]:
+    case_dir = out_dir / str(case["case_id"])
     case_dir.mkdir(parents=True, exist_ok=True)
     src = case_dir / "case.sio"
     elf = case_dir / "case.native_v2"
     mm = case_dir / "machine.json"
-    src.write_text(str(POSITIVE["source"]), encoding="utf-8")
+    src.write_text(str(case["source"]), encoding="utf-8")
     rc, log = run([str(compiler), "--native-v2-compile", str(src), "-o", str(elf), "--machine-module-json", str(mm)], root, timeout_s)
     (case_dir / "compile.log").write_text(log, encoding="utf-8")
     if rc != 0 or "native_v2_compile: emitted" not in log:
-        raise SystemExit(f"{POSITIVE['case_id']}: expected native-v2 ELF emission")
+        raise SystemExit(f"{case['case_id']}: expected native-v2 ELF emission")
     if "SIGSEGV" in log or "Segmentation fault" in log or "legacy fallback" in log:
-        raise SystemExit(f"{POSITIVE['case_id']}: crash/fallback in compile log")
+        raise SystemExit(f"{case['case_id']}: crash/fallback in compile log")
     os.chmod(elf, 0o755)
     run_rc, run_log = run([str(elf)], root, timeout_s)
     (case_dir / "run.log").write_text(run_log, encoding="utf-8")
     if run_rc != 0:
-        raise SystemExit(f"{POSITIVE['case_id']}: emitted ELF rc={run_rc}, expected 0")
+        raise SystemExit(f"{case['case_id']}: emitted ELF rc={run_rc}, expected 0")
     module = load_machine(mm)
     if module.get("supported") is not True or module.get("unsupported_detail") not in ("", None):
-        raise SystemExit(f"{POSITIVE['case_id']}: MachineModule must be supported")
+        raise SystemExit(f"{case['case_id']}: MachineModule must be supported")
     rows = metadata_rows(module)
-    expected_metadata = list(POSITIVE["expected_metadata"])
+    expected_metadata = list(case["expected_metadata"])
     if expected_metadata not in [row[1:] for row in rows]:
-        raise SystemExit(f"{POSITIVE['case_id']}: missing result metadata {expected_metadata}")
+        raise SystemExit(f"{case['case_id']}: missing result metadata {expected_metadata}")
     elf_bytes = elf.read_bytes()
-    hi, lo = u64_words_from_hex(str(POSITIVE["expected_hex"]))
+    hi, lo = u64_words_from_hex(str(case["expected_hex"]))
     hi_pattern = mov_rax_imm_pattern(hi)
     lo_pattern = mov_rax_imm_pattern(lo)
     hi_found = hi_pattern in elf_bytes
     lo_found = lo_pattern in elf_bytes
     if not hi_found:
-        raise SystemExit(f"{POSITIVE['case_id']}: missing expected 3.0 high-word immediate")
+        raise SystemExit(f"{case['case_id']}: missing expected high-word immediate")
     if lo != 0 and not lo_found:
-        raise SystemExit(f"{POSITIVE['case_id']}: missing expected 3.0 low-word immediate")
+        raise SystemExit(f"{case['case_id']}: missing expected low-word immediate")
     return {
-        "case_id": POSITIVE["case_id"],
+        "case_id": case["case_id"],
         "kind": "positive",
         "compile_rc": rc,
         "run_rc": run_rc,
         "machine_module_supported": True,
-        "source_sha256": sha256_text(str(POSITIVE["source"])),
+        "source_sha256": sha256_text(str(case["source"])),
         "elf_sha256": sha256_bytes(elf_bytes),
         "machine_module_sha256": sha256_text(stable_json(module)),
-        "expected_binary128_hex": POSITIVE["expected_hex"],
+        "expected_binary128_hex": case["expected_hex"],
         "expected_hi_u64": hi,
         "expected_hi_i64": signed_i64(hi),
         "expected_lo_u64": lo,
@@ -228,7 +282,7 @@ def emit(args: argparse.Namespace) -> None:
     compiler = Path(args.compiler).resolve()
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    cases = [emit_positive(root, compiler, out_dir, args.timeout_s)]
+    cases = [emit_positive(root, compiler, out_dir, c, args.timeout_s) for c in POSITIVE]
     cases.extend(emit_negative(root, compiler, out_dir, c, args.timeout_s) for c in NEGATIVE)
     payload: dict[str, Any] = {
         "schema": SCHEMA,
@@ -236,7 +290,7 @@ def emit(args: argparse.Namespace) -> None:
         "stage_contract_level": STAGE,
         "case_id": "s5_6_f128_arithmetic_value_contract",
         "case_count": len(cases),
-        "positive_case_count": 1,
+        "positive_case_count": len(POSITIVE),
         "negative_case_count": len(NEGATIVE),
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_arithmetic_promoted": True,
@@ -252,7 +306,8 @@ def emit(args: argparse.Namespace) -> None:
         "f128_promoted": False,
         "contract_scope": [
             "finite exact binary128 value-contract arithmetic only",
-            "1.0 + 2.0 materializes as 3.0",
+            "finite exact decimal-tenths matrix materializes as binary128 words",
+            "single-chain arithmetic preserves compiler value-kind metadata",
             "unsupported f128 arithmetic remains fail-closed",
         ],
         "cases": cases,

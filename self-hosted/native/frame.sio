@@ -1,8 +1,3 @@
-// self-hosted::native::frame — Stack frame management for x86-64 System V ABI
-//
-// Handles function prologue/epilogue, local variable allocation, and frame layout.
-// Also owns NativeCompiler state (shared between codegen and lower_ir to break
-// the mutual dependency between those two modules).
 
 module native::frame
 
@@ -11,8 +6,6 @@ use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le, ExternRelocT
 use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new}
 use native::runtime_context::{runtime_context_global_slot_size}
 use native::target_policy::{native_target_policy_x86_allocatable_mask_for_reg}
-
-// Stack frame state for a single function
 pub struct StackFrame {
     pub frame_size: i64,              // Total frame size (16-byte aligned)
     pub local_count: i64,             // Number of local variables
@@ -28,23 +21,15 @@ pub fn stack_frame_new() -> StackFrame {
         return_jump_count: 0,
     }
 }
-
-// Prepare frame layout: allocate space for params + locals
 pub fn prepare_frame(params: i64, locals: i64) -> StackFrame with Mut, Panic {
     var frame = stack_frame_new()
     frame.param_count = params
     frame.local_count = locals
-
-    // Each param/local gets 8 bytes (i64)
     let total_vars = params + locals
     let raw_size = total_vars * 8
-
-    // Align to 16 bytes (System V ABI requirement)
     frame.frame_size = align16(raw_size)
     frame
 }
-
-// Align size up to next 16-byte boundary
 pub fn align16(size: i64) -> i64 with Mut, Panic {
     var aligned = size
     let remainder = size % 16
@@ -53,8 +38,6 @@ pub fn align16(size: i64) -> i64 with Mut, Panic {
     }
     aligned
 }
-
-// Align size up to next 64-byte boundary (required for ZMM vmovapd loads/stores)
 pub fn align64(size: i64) -> i64 with Mut, Panic {
     var aligned = size
     let remainder = size % 64
@@ -63,18 +46,6 @@ pub fn align64(size: i64) -> i64 with Mut, Panic {
     }
     aligned
 }
-
-// Allocate a ZMM stack slot (64 bytes) in the current frame.
-// Returns the rbp-relative offset (negative) of the slot's low address.
-// The caller must ensure prepare_frame was called with sufficient space;
-// this helper computes the offset for slot_index (0-based) below the
-// first 64-byte-aligned boundary below rbp.
-//
-// Layout (growing downward from rbp):
-//   rbp - 64*(slot_index+1)  →  slot_index=0 at rbp-64, slot 1 at rbp-128, …
-//
-// Callers must also ensure frame_size is passed through align64() so that
-// rsp ends up 64-byte aligned before the first vmovapd.
 pub fn zmm_stack_slot_offset(slot_index: i64) -> i64 {
     -(slot_index + 1) * 64
 }
@@ -106,9 +77,6 @@ pub fn nc_used_allocatable_preg_mask(nc: NativeCompiler, reg_count: i64) -> i64 
     }
     mask
 }
-
-// SysV x86-64 requires rsp%16==0 before an internal CALL.
-// With push rbp always present, odd numbers of saved allocatable regs need an extra 8-byte pad.
 pub fn x86_align_frame_size_for_calls(frame_size: i64, preg_mask: i64) -> i64 with Mut, Panic {
     if (x86_allocatable_preg_count(preg_mask) % 2) == 0 {
         frame_size
@@ -116,8 +84,6 @@ pub fn x86_align_frame_size_for_calls(frame_size: i64, preg_mask: i64) -> i64 wi
         frame_size + 8
     }
 }
-
-// Emit function prologue for the allocatable preg subset actually used by the lowered function.
 pub fn emit_prologue_with_preg_mask(buf: CodeBuffer, frame_size: i64, preg_mask: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     if (preg_mask & X86_ALLOCATABLE_R15_MASK()) != 0 { b = emit_push_r15(b) }
@@ -143,8 +109,6 @@ pub fn emit_epilogue_with_preg_mask(buf: CodeBuffer, preg_mask: i64) -> CodeBuff
     b = emit_ret(b)
     b
 }
-
-// Compatibility wrappers for the existing low-level encoder tests.
 pub fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
     emit_prologue_with_preg_mask(
         buf,
@@ -165,24 +129,12 @@ pub fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
         X86_ALLOCATABLE_R15_MASK()
     )
 }
-
-// Get local variable offset from rbp (negative offsets)
 pub fn local_offset(frame: StackFrame, local_index: i64) -> i64 {
-    // Locals: rbp-8, rbp-16, rbp-24, ...
-    // Params come first, then locals
     -(frame.param_count + local_index + 1) * 8
 }
-
-// Get parameter offset from rbp (negative offsets)
 pub fn param_offset(param_index: i64) -> i64 {
-    // Params: rbp-8, rbp-16, rbp-24, ...
     -(param_index + 1) * 8
 }
-
-// ============================================================================
-// Label patching for intra-function control flow
-// (Defined here to break codegen <-> lower_ir mutual dependency)
-// ============================================================================
 
 pub struct LabelPatch {
     pub code_offset: i64,       // Position of the rel32 operand to patch
@@ -192,80 +144,44 @@ pub struct LabelPatch {
 pub fn empty_label_patch() -> LabelPatch {
     LabelPatch { code_offset: 0, label_id: -1 }
 }
-
-// Global label-tracking arrays for native_v2 path.
-// Array element writes through &! NativeCompiler fail for large struct offsets,
-// so label state lives in module-level globals instead.
 pub var NC_V2_LABEL_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 
-// ============================================================================
-// Compiler state
-// ============================================================================
-
 pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
     pub relocs: RelocationTable,
-    // flat_reloc_{offsets,kind_codes,is_functions,target_indices} moved to module
-    // globals NV2_RELOC_* in codegen_x86_linux.sio (were [i64;4096] here — the 4096 cap
-    // silently dropped relocs in call-dense modules >~256KB .text). Count stays here.
     pub flat_reloc_count: i64,
     pub flat_rodata_bytes: [i8; 8192],
     pub flat_rodata_len: i64,
     pub rodata: StringTable,            // String literals for .rodata
     pub data: StringTable,              // Writable .data section (profiling counters)
     pub symbols: SymbolData,            // Function name symbol table for .symtab/.strtab
-
-    // Module-level: function layout
     pub fn_offsets: [i64; 2048],         // function index -> code buffer offset
     pub fn_returns_float: [i64; 2048],   // function index -> declared f64 return
     pub fn_count: i64,
-
-    // Per-function: return jump patching
     pub return_jumps: [i64; 16],        // positions of jmp rel32 operands
     pub return_jump_count: i64,
-
-    // Per-function: label tracking for branches
     pub label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
     pub label_patch_code_offsets: [i64; 256],  // patch position (rel32 operand offset)
     pub label_patch_label_ids: [i64; 256],     // which label to resolve
     pub label_patch_count: i64,
-
-    // Per-function: frame info
     pub current_frame_size: i64,
-
-    // Entry trampoline offset (recorded during emit_entry_trampoline)
     pub entry_offset: i64,
-
-    // Per-function: scalar class tracking.
-    // is_f128_reg marks two-word opaque f128 storage (vreg, vreg+1). It is
-    // intentionally separate from is_float_reg: f64 uses XMM0 today, while f128
-    // S5.2 only promotes local opaque storage/copy and must not enter f64 paths.
     pub is_float_reg: [i64; 512],
     pub is_f128_reg: [i64; 512],
     pub f128_value_kind: [i64; 512],
     pub field_float_base_regs: [i64; 256],
     pub field_float_indices: [i64; 256],
     pub field_float_count: i64,
-
-    // Per-function: compile strategy (Sprint 38)
-    // 0=standard, 1=aggressive, 2=precision_preserving, 3=instrumented,
-    // 4=gpu_kernel, 5=probabilistic
     pub current_strategy: i64,
-
-    // Sprint 46: profiling counter metadata for exit-time dump
     pub prof_counter_names: [i64; 256],     // .rodata offset for each counter's fn name
     pub prof_counter_count: i64,           // number of profiling counters
     pub prof_dump_fn_index: i64,           // fn_offsets index for __prof_dump function
-
-    // Sprint 47: .sprof file output metadata
     pub prof_sprof_name_offset: i64,       // .rodata offset for "profile.sprof" filename
-
-    // RuntimeContext metadata (.data slot + counter base)
     pub runtime_context_slot_offset: i64,
     pub prof_counter_data_base: i64,
     pub descriptor_data_offset: i64,
@@ -273,8 +189,6 @@ pub struct NativeCompiler {
     pub gc_state_data_offset: i64,
     pub stack_map_data_offset: i64,
     pub deopt_state_data_offset: i64,
-
-    // Native-v2 runtime metadata publication
     pub stack_map_record_count: i64,
     pub safepoint_count: i64,
     pub deopt_point_count: i64,
@@ -292,23 +206,12 @@ pub struct NativeCompiler {
     pub stack_map_deopt_ids: [i64; 256],
     pub stack_map_tier_ids: [i64; 256],
     pub stack_map_osr_eligibility: [i64; 256],
-
-    // Sprint 52: register allocation — vreg → physical register mapping
-    // RA_UNASSIGNED(-2) = not processed, RA_SPILLED(-1) = on stack, >=0 = x86 reg number
     pub vreg_to_preg: [i64; 512],
     pub vreg_spill_slots: [i64; 512],      // spill slot index when vreg_to_preg[v] == -1
-
-    // Native-v2 Machine IR frame metadata
     pub current_machine_base_slots: i64,
     pub current_machine_spill_count: i64,
-
-    // Sprint 108: extern "C" fn relocations
     pub extern_relocs: ExternRelocTable,
-
-    // Target OS for conditional builtin code generation (0=unknown, 1=Linux, 2=macOS, 3=Windows)
     pub target_os_id: i64,
-
-    // BSS segment size (copied from IrModule before ELF write)
     pub bss_total_size: i64,
 }
 
@@ -405,8 +308,6 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     (*nc).current_machine_base_slots = 0
     (*nc).current_machine_spill_count = 0
 }
-
-// Reset per-function state before compiling a new function
 pub fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     reset_function_state_mut(&! c)
@@ -432,19 +333,9 @@ pub fn emit_store_rax_runtime_context_field(nc: NativeCompiler, field_offset: i6
     c.code = emit_store_rax_mem_rbx_disp32(c.code, field_offset)
     c
 }
-
-// ============================================================================
-// Stack slot mapping: IR virtual register -> rbp-relative offset
-// ============================================================================
-
-// IR virtual register N lives at rbp - (N+1)*8
 pub fn ir_slot_offset(vreg: i64) -> i64 {
     -(vreg + 1) * 8
 }
-
-// ============================================================================
-// Return jump patching
-// ============================================================================
 
 pub fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -520,11 +411,6 @@ fn label_patch_is_rel32_branch(nc: &NativeCompiler, patch_off: i64) -> bool with
     }
     false
 }
-
-// patch_label_forwards_mut: reads label patch info from the NC_V2_LABEL_* globals
-// (written by nc_add_label_patch / nc_define_label in codegen_x86_linux.sio).
-// Direct array element writes through &! NativeCompiler fail for large struct offsets,
-// so label state lives in globals instead.
 pub fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     var i = 0
     while i < NC_V2_LABEL_PATCH_COUNT {
