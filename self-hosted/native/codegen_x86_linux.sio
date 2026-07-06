@@ -1096,6 +1096,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
     if name_is_assert((*func).name) { return 21 }
+    if name_is_agg_copy_words((*func).name) { return 22 }
     0
 }
 
@@ -1234,6 +1235,26 @@ fn name_is_str_concat(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[7] != 99 as i8 { return false }      // 'c'
     if n.buf[8] != 97 as i8 { return false }      // 'a'
     if n.buf[9] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_agg_copy_words(n: Name) -> bool with Mut, Panic, Div {
+    // "agg_copy_words" = 14 chars
+    if n.len != 14 { return false }
+    if n.buf[0] != 97 as i8 { return false }      // 'a'
+    if n.buf[1] != 103 as i8 { return false }     // 'g'
+    if n.buf[2] != 103 as i8 { return false }     // 'g'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 99 as i8 { return false }      // 'c'
+    if n.buf[5] != 111 as i8 { return false }     // 'o'
+    if n.buf[6] != 112 as i8 { return false }     // 'p'
+    if n.buf[7] != 121 as i8 { return false }     // 'y'
+    if n.buf[8] != 95 as i8 { return false }      // '_'
+    if n.buf[9] != 119 as i8 { return false }     // 'w'
+    if n.buf[10] != 111 as i8 { return false }    // 'o'
+    if n.buf[11] != 114 as i8 { return false }    // 'r'
+    if n.buf[12] != 100 as i8 { return false }    // 'd'
+    if n.buf[13] != 115 as i8 { return false }    // 's'
     true
 }
 
@@ -3570,6 +3591,69 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
+// agg_copy_words(dst_handle: i64, src_handle: i64, nwords: i64) -> i64
+// Deep-copies `nwords` 8-byte words from the aggregate object referenced by
+// `src_handle` into the aggregate referenced by `dst_handle`. Both args are
+// GC handles (not raw pointers) — every register that holds a struct/array
+// value in this backend is an index into the runtime handle table, resolved
+// to a raw payload address via native_v2_resolve_handle_to_object_base_rax.
+// This builtin exists to fix the copy-aliasing bug where a bare
+// `var bad = img` / `bad = img` (ident-init/assign of a struct or array
+// local) only copied the handle (a register/pointer copy), so mutating
+// `bad.field` also mutated `img.field` through the shared backing object.
+// The lowerer (self-hosted/ir/lower.sio) now allocates fresh storage for
+// such aggregate copies and calls this builtin to populate it with an
+// actual value copy of the source's words (recursing one level into any
+// array-typed fields so nested array aliasing is broken too).
+fn emit_builtin_agg_copy_words(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // Entry (SysV): rdi = dst_handle, rsi = src_handle, rdx = nwords.
+    // Stash all three on the stack so we can resolve dst/src handles (which
+    // clobbers rax/rbx/rdi) without losing the other operands.
+    c.code = emit_push_rdi(c.code)   // [rsp+0] = dst_handle
+    c.code = emit_push_rsi(c.code)   // [rsp+0] = src_handle, [rsp+8] = dst_handle
+    c.code = emit_push_rdx(c.code)   // [rsp+0] = nwords, [rsp+8] = src_handle, [rsp+16] = dst_handle
+
+    // Resolve dst_handle -> payload address, write the resolved address
+    // back into its stack slot (rsp+16).
+    c.code = emit_mov_rax_mem_rsp_disp8(c.code, 16)
+    c = native_v2_resolve_handle_to_object_base_rax(c)
+    c.code = emit_mov_reg_imm(c.code, 1, native_v2_object_header_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)          // rax = object_base(dst) + header_size
+    c.code = emit_byte(c.code, 0x48)
+    c.code = emit_byte(c.code, 0x89)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 16)                    // mov [rsp+16], rax
+
+    // Resolve src_handle -> payload address, write it back at rsp+8.
+    c.code = emit_mov_rax_mem_rsp_disp8(c.code, 8)
+    c = native_v2_resolve_handle_to_object_base_rax(c)
+    c.code = emit_mov_reg_imm(c.code, 1, native_v2_object_header_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)          // rax = object_base(src) + header_size
+    c.code = emit_byte(c.code, 0x48)
+    c.code = emit_byte(c.code, 0x89)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 8)                     // mov [rsp+8], rax
+
+    // Pop the three stack slots directly into the registers `rep movsq`
+    // needs: rcx = nwords (was rdx, rsp+0), rsi = src payload addr
+    // (rsp+8), rdi = dst payload addr (rsp+16).
+    c.code = emit_pop_rcx(c.code)
+    c.code = emit_pop_rsi(c.code)
+    c.code = emit_pop_rdi(c.code)
+
+    // rep movsq: copy rcx quadwords from [rsi] to [rdi], advancing both by 8.
+    c.code = emit_byte(c.code, 0xF3)
+    c.code = emit_byte(c.code, 0x48)
+    c.code = emit_byte(c.code, 0xA5)
+
+    c.code = emit_xor_rax_rax(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // str_slice(s: *u8, start: i64) -> *u8
 // Returns s + start (pointer arithmetic — string is null-terminated)
 fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -4840,6 +4924,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_agg_copy_words(func.name) { return emit_builtin_agg_copy_words(c) }
     // M5: file I/O builtins
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
@@ -5598,6 +5683,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_log(name) { return 17 }
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
+    if name_is_agg_copy_words(name) { return 22 }
     0
 }
 
@@ -5631,6 +5717,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 17 { native_v2_persist_builtin_emit_into(nc, emit_builtin_log((*nc))); return }
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
+    if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_agg_copy_words((*nc))); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5674,6 +5761,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_agg_copy_words(func.name) { return emit_builtin_agg_copy_words(c) }
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
@@ -7644,6 +7732,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
     if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
     if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
+    if name_is_agg_copy_words(func.name) { (*nc) = emit_builtin_agg_copy_words((*nc)); return }
     if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
     if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
     if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
