@@ -19,7 +19,7 @@ Statuses: `TODO` | `CLAIMED(<session>)` | `IN-PROGRESS` | `DONE(<commit/PR>)` | 
 | A1 | Skeleton E035 effects | Haiku | A0 | TODO | Madaros compile of cd_exact: E035×3 gone; lean_single BYTECOMPARE PASS intact |
 | A2 | Primitive-receiver dispatch (E019/E011) | Opus | A0 | TODO | dispatch witnesses rc=23/74 and rc=23/60; `trait_bounded_dispatch{,_multi_call}.sio` green on Madaros |
 | A3 | Specializer in multi-module lane | Opus | A0 | TODO | cd_exact compile: no `E008 ... CDElementExact__T` |
-| A4 | SRET struct-by-value return | Opus | — (own branch/PR) | TODO | bisect ladder L1–L4 green; `generic_struct_return.sio` runs rc=0 "6"/"spike PASS" |
+| A4 | SRET struct-by-value return | Opus | — (own branch/PR) | DONE(fix/madaros-struct-return-runtime, PR pending) | ladder L0–L4 green on Slurm-built madaros: L0 sret_8 rc=0"OK"; L2 [i64;4] rc=13; L3 generic<F>@i64 rc=13; ARGS 3-arg wide rc=20; `generic_struct_return.sio` rc=0 "6"/"spike PASS". Root cause was NOT SRET (struct-by-value array-field return already works — handle-based) but `println` dispatch missing `ExprIndex` in `expr_result_scalar_kind_ref`; i64 array element `r.c[0]` routed to char* printer → SIGSEGV. |
 | A5 | Convergence + phase-2 PR | Opus+Haiku | A1–A4 | TODO | cd_exact on Madaros: ZD PROVED + SQ PASS + NONZERO PASS + 16×COMP 0 |
 | B1 | EISA `str_from_bytes` dep-closure (ud2/SIGILL) | Opus | — | TODO | `test_eisa_isa` + `test_eisa_evm` PASS on default lane, no SIGILL |
 | B2 | EISA gate refresh + suite | Haiku | B1 | TODO | conformance gate 21/21; 13-test suite green on default lane |
@@ -30,6 +30,7 @@ Statuses: `TODO` | `CLAIMED(<session>)` | `IN-PROGRESS` | `DONE(<commit/PR>)` | 
 |---|---|---|
 | fable5 | `println(<annotated computed local>)` segfaults on Madaros (e.g. `let y: i64 = x+11; println(y)`) — pre-existing, distinct from the fixed call/field cases | rc=139 on baseline madaros-m0 too |
 | fable5 | `method_receiver_correct.sio` + `generic_struct_instantiate.sio` rc=139 on baseline — families per `docs/audit/MADAROS_METHOD_CALL_SIGSEGV_2026-06-20.md` / `MADAROS_BOXNEW_SIGSEGV_2026-06-19.md` | pre-existing |
+| A4 | Madaros default lane REJECTS several run-pass tests at type-checking preflight (build rc=1 "type checking preflight failed"): `hof_mut_struct_min.sio` (fn-pointer HOF param), `bdf_stiff.sio`, `ode_generic_solver.sio`, `linear_return_value.sio` — pre-existing checker gaps, not a lowering/codegen bug | Observed on WP-A4 Slurm build; the failure is at the checker phase, which runs BEFORE the WP-A4 lowering-pass edit (`expr_result_scalar_kind_ref`), so the edit cannot be the cause |
 
 ## Fixed reference state (do not re-derive)
 
