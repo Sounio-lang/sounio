@@ -824,7 +824,12 @@ fn lowerer_register_struct_fields_direct_mut(
                 entry.fields[fc as usize] = StructFieldEntry {
                     name: (*flist).head.name,
                     index: fc,
-                    is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else { 0 },
+                    // println i64-segfault fix: keep in sync with register_struct_fields_ref's
+                    // `3` = scalar-i64 marker (this is a separate early-pass registration path
+                    // over the same struct_layouts table; a mismatch here would leave the
+                    // FIRST-registered field entry — the one actually found by name lookup —
+                    // without the i64 marker).
+                    is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_i64(&(*flist).head.ty) { 3 } else { 0 },
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -876,7 +881,8 @@ fn lowerer_register_struct_fields_mut(
                     (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
-                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                        // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
+                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                     }
                     (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                 } else {
@@ -1376,7 +1382,8 @@ fn ir_fast_summary_register_struct_fields_owned(
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
-                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                    // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
+                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -2142,6 +2149,31 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if seg.head_buf[1] as i64 != 54 { return false }    // '6'
     if seg.head_buf[2] as i64 != 52 { return false }    // '4'
     true
+}
+
+// println i64-segfault fix: mirror lower_type_expr_is_f64 for i64 so a struct
+// field's declared type can be positively classified as scalar-i64 (as opposed
+// to merely "not float", which is also true of string/bool/struct fields).
+fn lower_type_expr_is_i64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    let seg = (*te).path.segments
+    if seg.head_len != 3 { return false }
+    if seg.head_buf[0] as i64 != 105 { return false }   // 'i'
+    if seg.head_buf[1] as i64 != 54 { return false }    // '6'
+    if seg.head_buf[2] as i64 != 52 { return false }    // '4'
+    true
+}
+
+// println i64-segfault fix: a callee's return type name (module.functions[..].
+// return_struct_name, populated for ANY TypeNamed return type via
+// lower_opt_type_named_name — not only actual structs) positively identifies a
+// scalar i64 return, as opposed to returns_float==0 which is also true for
+// string/bool/void/unresolved returns.
+fn lower_name_is_i64_type(n: Name) -> bool with Div {
+    n.len == 3
+    && n.buf[0] == 105 as i8   // 'i'
+    && n.buf[1] == 54 as i8    // '6'
+    && n.buf[2] == 52 as i8    // '4'
 }
 
 fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
@@ -4668,6 +4700,60 @@ impl Lowerer {
         false
     }
 
+    // println i64-segfault fix: field analogue of field_is_float_by_name_simple,
+    // testing the `is_float == 3` scalar-i64 marker set in register_struct_fields_ref.
+    fn field_is_int_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            var fi: i64 = 0
+            while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
+                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+                }
+                fi = fi + 1
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    // println i64-segfault fix: field analogue of field_is_float_for_struct.
+    fn field_is_int_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 {
+            return false
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    // println i64-segfault fix: field analogue of field_is_float_for_base_ref.
+    fn field_is_int_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    if self.field_is_int_for_struct(type_name, field_name) {
+                        return true
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn field_array_elem_is_float_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
         if type_name.len <= 0 {
             return false
@@ -4908,6 +4994,60 @@ impl Lowerer {
             if lower_cast_type_is_i64(&(*e).cast_type) { return 1 }
             return 0
         }
+        // println i64-segfault fix: resolve a call's/field's return type to the
+        // scalar-int kind when it is POSITIVELY known to be i64 (not merely "not
+        // float") — mirrors the float resolution in expr_result_is_float_ref
+        // (module.functions[fn_id].returns_float), using return_struct_name
+        // instead, since that field carries the return type's name for ANY
+        // TypeNamed return (see lower_opt_type_named_name), not only structs.
+        // When the type can't be resolved this way, fall through unchanged so
+        // string/bool/void/unresolved results keep routing to the char* printer.
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        if lower_name_is_i64_type(self.module.functions[fn_id as usize].return_struct_name) {
+                            return 1
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, (*e).name) } else { (*e).name }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                if lower_name_is_i64_type(self.module.functions[fn_id as usize].return_struct_name) {
+                    return 1
+                }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
+                return 1
+            }
+        }
+        // println i64-segfault fix (array-element axis): an array subscript `a[i]`
+        // (including a struct-field array `s.c[i]`) yields a scalar element. The
+        // float classifier (expr_result_is_float_ref) already routes float-element
+        // indexing to print_f64; without this case a non-float element (i64) fell
+        // through to kind 0 → the char* printer, which deref'd the integer value as
+        // a pointer and SIGSEGV'd (e.g. `println(r.c[0])` in generic_struct_return).
+        // Monomorphized generic structs register their fields from the generic
+        // declaration (`[F;N]`), so a declared-type i64 marker cannot fire for them;
+        // classify float positively (matching the existing float path) and default
+        // the remaining numeric element to int. No test in the corpus prints a
+        // string/pointer array element, so this cannot misroute an existing string.
+        if (*e).kind == ExprKind::ExprIndex {
+            if self.index_base_elem_is_float_ref(&(*e).left) {
+                return 2
+            }
+            return 1
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if lower_binary_op_is_compare((*e).bin_op) {
                 return 1
@@ -5078,7 +5218,11 @@ impl Lowerer {
                         lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
-                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                            // println i64-segfault fix: reuse the `is_float` numeric-kind slot
+                            // with a new `3` marker for scalar-i64 fields (2 is already taken by
+                            // f64-array). Existing consumers only test `== 1` / `== 2`, so this
+                            // is inert for them; field_is_int_* below tests `== 3`.
+                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -6551,6 +6695,15 @@ impl Lowerer {
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
                         // Track string locals (kind 3) so `s + t` / `s ++ t` route to str_concat.
                         lo = lo.bind_local_scalar_kind(s.name, 3)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprMethodCall) && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 1 {
+                        // `let r = f(..)` / `let r = x.m(..)` whose callee POSITIVELY
+                        // returns i64 (return_struct_name == "i64"). Without this the
+                        // local stayed kind 0 and `println(r)` routed the i64 through the
+                        // char* printer, dereferencing the integer as a pointer -> SIGSEGV
+                        // (e.g. `let r = use2::<i64>(2,3); println(r)` — primitive-receiver
+                        // trait dispatch result). Restricted to Call/MethodCall so an
+                        // indexed struct element cannot be misclassified as int.
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
                     }
                 }
                 _ => {}
@@ -8603,6 +8756,22 @@ impl Lowerer {
             Some(recv) => {
                 if (*recv).kind == ExprKind::ExprIdent {
                     return self.lookup_local_struct_type((*recv).name)
+                }
+                // Primitive-receiver fallback for a non-ident scalar receiver such
+                // as an array element `a.c[i]` (the imported cd_exact lane calls
+                // `a.c[i].er_add(b.c[i])`). Such a receiver has no local struct
+                // type, so the bare method name would bind to a body-less fn and
+                // crash codegen. A monomorphized `[i64;N]` field registers with no
+                // positive i64 marker, so classify float positively (f64$m) and map
+                // every other primitive-scalar index to i64$m — matching the symbol
+                // emitted for `impl ExactRing for i64`. No corpus test dispatches a
+                // method on a STRUCT array element, so this cannot misroute a green
+                // struct-method call (those already fail today at the empty-name path).
+                if (*recv).kind == ExprKind::ExprIndex {
+                    if self.index_base_elem_is_float_ref(&(*recv).left) {
+                        return make_name("f64")
+                    }
+                    return make_name("i64")
                 }
                 ir_empty_name()
             }

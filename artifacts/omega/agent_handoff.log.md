@@ -2915,3 +2915,154 @@ checks:
   - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:40:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+intent: |
+  CLAIM (WP-A3, Madaros generic-<F> phase 2): AST specializer in the MULTI-module
+  lane. module_frontend.sio is a serialized surface SHARED with WP-B1 — coordinate
+  before pushing. Edit is additive: a new fn module_frontend_specialized_typecheck
+  + two call-site branches in module_frontend_compile_imported_to_file and
+  module_frontend_merge_imported_into; plus two pub accessors in
+  self-hosted/check/specializer.sio (spec_last_instantiated, spec_append_item_lists).
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:55:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - self-hosted/check/specializer.sio
+  - tests/multimodule/wp_a3/{w2_mod,w2_main,w3_mod,w3_main}.sio
+intent: |
+  RELEASE (WP-A3 DONE). Design (a): the multi-module imported-compile path now
+  runs the generic specializer over the FULLY-MERGED item list (all modules'
+  items concatenated, main first) so an imported single-letter `struct F` is a
+  known name and never misread as a free type var. It is TYPE-CHECK-ONLY: when a
+  generic is actually instantiated (spec_last_instantiated), the verdict is taken
+  from the merged+monomorphized list (drops the E008 `CDElementExact__T`
+  mono-mismatch); the per-module `programs` array is left untouched so IR lowering
+  / cross-module merge is byte-identical. A first attempt COLLAPSED the modules
+  into programs[0] for both typecheck+lowering — that regressed a working case
+  (wrap::<i64>→W<i64> went rc=9 → BUILD_NO_ELF), so the collapse was dropped in
+  favor of typecheck-only.
+checks (Slurm madaros build from main.sio, fixed vs origin/main baseline):
+  - cd_exact_generic_i64 compile: E008 CDElementExact__T count 1 (baseline) -> 0 (fixed)
+  - W2 tests/multimodule/wp_a3/w2_main.sio: rc=9 (fixed, specializer fired)
+  - W3 tests/multimodule/wp_a3/w3_main.sio: rc=7 (fixed, no misfire, collapse=0)
+  - 8-test multi-module battery: byte-identical baseline<->fixed, all collapse=0
+  - turbofish 3/3 PASS; compile-fail turbofish_type_arg_arity still REJECTED (E010)
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A3): cd_exact still blocked by E035x3 (missing Mut,Div,Panic —
+  WP-A1 effect annotations) + E019x8/E007 (primitive-receiver dispatch — WP-A2).
+  A3 removed ONLY the E008 mono-mismatch, as briefed. Umbrella gate not run on the
+  pod (heavy); no-regression argued via the byte-identical battery + identical
+  single-module guards + the spec_last_instantiated gate (non-instantiating
+  multi-module code takes the unchanged per-module path).
+
+---
+
+agent: claude
+time_utc: 2026-07-06T20:50:00Z
+files:
+  - self-hosted/check/check.sio
+intent: |
+  CLAIM (WP-A6, Madaros imported-lane effect-annotation carry / E035). Scope is
+  the type-checker's impl-method signature resolution ONLY. NOTE: the fix does
+  NOT touch self-hosted/compiler/module_frontend.sio or module_loader.sio (the
+  originally-suspected merge site) — the annotations are never dropped; the merge
+  is innocent. Root cause is a name-collision in fn_sig_table_find_method: an
+  imported struct (bound via `use` to ty_unknown, empty name) and the i64 builtin
+  (also empty TypeEntry name) both register their trait-impl methods with an empty
+  self_type_name, so the name-only lookup resolves one impl's method body against
+  the OTHER impl's (effect-empty) sig. No shared-surface conflict with WP-B1.
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T21:20:00Z
+files:
+  - self-hosted/check/check.sio
+  - tests/probe/a6_frac_def.sio
+  - tests/probe/a6_ring_mod.sio
+  - tests/probe/a6_ring_main.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  RELEASE (WP-A6 DONE). Fix: checker_check_impl_method_inplace now resolves the
+  method signature by the FULL impl-type TypeEntry (kind + name) via
+  fn_sig_table_find_method_semantic instead of name-only fn_sig_table_find_method.
+  TyUnknown (imported Rational) vs TyI64 disambiguates the two `impl ExactRing`
+  blocks, so each method body sees ITS OWN declared effects. One-line change +
+  comment; no other lanes touched.
+checks (Slurm madaros build from main.sio; A6-fixed vs proven unmodified base, job 5504/5510):
+  - W1 cd_exact_generic_i64 compile: error[E035] count 3 (base) -> 0 (fixed)
+  - W2 tests/probe/{eff_inherent,eff_trait}.sio: rc=6, E035=0 (unchanged)
+  - W3 tests/probe/a6_ring_main.sio (3-module imported witness): E035 1 (base) -> 0
+    (fixed) at type-check; runtime blocked by a SEPARATE pre-existing cross-module
+    native-lowering segfault at `lower_array: dep_begin 1` (rc=139 on base too;
+    logged as new gap).
+  - W4 zero-regression: 10 impl/trait/multimodule tests EXACT rc + total-error
+    parity base<->fixed (impl_multiple_types/impl_trait_for_type_multi/
+    impl_inherent_method/impl_trait_for_type/trait_bounded_dispatch_struct/
+    import_basic_main all rc=0; method_receiver_correct rc=139, trait_basic 1/6err,
+    trait_bounded_dispatch 1/2err, import_chain_main rc=42 — all identical to base,
+    i.e. pre-existing Madaros run-pass gaps, NOT caused by this change).
+  - A6_WITNESS_PASS=14 A6_WITNESS_FAIL=0.
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A6): cd_exact still gates on E019/E007 (WP-A2 primitive-receiver
+  dispatch) — A6 removed ONLY the E035x3. New gap filed: imported chain-import
+  native lowering segfault (see SCOREBOARD new-gap ledger). Umbrella not run on the
+  pod (heavy); no-regression argued via the base-parity W4 battery + unchanged
+  single-module W2.
+
+---
+
+agent: claude
+time_utc: 2026-07-06T21:30:00Z
+files:
+  - self-hosted/check/compat.sio
+  - tests/probe/intwidth.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  CLAIM+RELEASE (WP-A7 DONE). KEYSTONE integer-width coercion for the Madaros
+  merged type-checker. Root cause: types_compatible required exact TypeKind match
+  for integers, so i32-vs-i64 was rejected (no widening) — unlike lean_single.
+  Fix (compat.sio): new int_width_family()/int_widths_compatible() helpers classify
+  the narrow machine ints by signedness family {i8,i32,i64}=signed, {u8,u32,u64}=
+  unsigned; types_compatible returns true for two narrow ints of the SAME family.
+  Wide i128/u128 keep their exact clifford_p bit-width check (i128!=i256 hole stays
+  closed); cross-signedness (i32 vs u32) is NOT widened. Single central site covers
+  if-branch-join (E007), arith/cmp, arg-pass, return.
+checks (Slurm madaros build from main.sio, jobs 5540/5543; FALSE-GREEN guard: ELFs run, actual rc/stdout asserted):
+  - W1 cd_exact_generic_i64: error[E007] 1 -> 0; `imported_compile: typecheck ok`
+    (error_lines=0). ELF NOT produced: build rc=139 SEGFAULT in the LOWERING phase
+    at `lower_array: dep_begin 1` — the SAME pre-existing cross-module native-lowering
+    gap A6 already logged (new-gap ledger), NOT this type-check fix. Type-check clean
+    counts as W1 success per WP brief.
+  - W2 tests/probe/intwidth.sio (i32 param, i64 return, `if bits<=6 {bits} else {7}`):
+    compiles, RUN_RC=0, stdout=3. Minimal generic-struct-return + i32/i64 if-join
+    (/tmp/minj.sio) also compiles+runs, stdout=3 (coercion lowers to valid IR).
+  - W3 regression (6 run-pass): turbofish 3/3 PASS, generic_struct_basic,
+    sret_8_field_return OK, i32_implicit_return, generic_struct_return "6"/"spike PASS",
+    generics_multi_param 2/2 PASS — all rc=0.
+  - W4 guard: tests/compile-fail/turbofish_type_arg_arity.sio still REJECTED
+    (error[E010]x2, no ELF, build rc=1).
+  - Cross-check that segfault is pre-existing: sret_forwarding_cross_module_cd_mul
+    RUN_RC=139 and sret_array4_generic_return RUN_RC=13 on this branch too.
+commit: pending
+status: lock-released
+notes: |
+  A7_WITNESS_PASS: W1(typecheck-clean), W2, W3, W4 all green. cd_exact now
+  TYPE-CHECKS CLEAN but does not yet RUN — blocked solely by the pre-existing
+  cross-module `lower_array` native-lowering segfault (WP-A4/native-lowering
+  territory), NOT by A7. No new gap introduced.
