@@ -269,6 +269,7 @@ if receipt["blocked_from_extraction_count"] != len(blocked_ids):
 observed_accepted = set()
 observed_rejected = set()
 observed_blocked = set()
+accepted_identity_kinds = set()
 accepted_reflexive_cmp_kinds = set()
 rejected_reflexive_cmp_kinds = set()
 blocked_reflexive_cmp_kinds = set()
@@ -338,6 +339,7 @@ for rewrite in rewrites:
                 raise SystemExit("symbolic identity proposed enode is not value_ref(symbolic_value)")
             if rewrite.get("rewritten_enode_sha256") != expected_hash:
                 raise SystemExit("symbolic identity rewritten enode is not value_ref(symbolic_value)")
+            accepted_identity_kinds.add(identity_kind)
         if rewrite["rewrite_kind"] == "symbolic_reflexive_cmp_i64":
             comparison_kind = rewrite.get("comparison_kind")
             if comparison_kind not in REFLEXIVE_CMP_KINDS:
@@ -555,8 +557,15 @@ if missing_rejected:
 missing_blocked = [item for item in required_blocked.split(",") if item and item != "-" and item not in observed_blocked]
 if missing_blocked:
     raise SystemExit(f"missing required blocked markers: {missing_blocked}; observed={sorted(observed_blocked)}")
-required_reflexive_cmp_kinds = set(REFLEXIVE_CMP_KINDS)
+required_identity_kinds = set(IDENTITY_KINDS)
 case_id = receipt.get("case_id")
+if case_id in {"symbolic_identity_i64", "symbolic_identity_pure_call_i64"}:
+    if accepted_identity_kinds != required_identity_kinds:
+        raise SystemExit(
+            f"{case_id} must accept the complete symbolic identity matrix; "
+            f"observed={sorted(accepted_identity_kinds)}"
+        )
+required_reflexive_cmp_kinds = set(REFLEXIVE_CMP_KINDS)
 if case_id in {"symbolic_reflexive_cmp_i64", "symbolic_reflexive_cmp_pure_call_i64"}:
     if accepted_reflexive_cmp_kinds != required_reflexive_cmp_kinds:
         raise SystemExit(
