@@ -2022,16 +2022,45 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 }
                 f128_ai = f128_ai + 1
             }
-            if f128_count > 0 && expanded_arg_count > 6 {
+            if f128_count > 0 && expanded_arg_count > 8 {
                 out.supported = false
                 out.unsupported_detail = "f128_call_shape_pending"
                 return out
             }
-            let stack_count = if f128_count > 0 { 0 } else if machine_instr_call_arg_count(instr) > 6 { machine_instr_call_arg_count(instr) - 6 } else { 0 }
+            let stack_count = if f128_count > 0 { if expanded_arg_count > 6 { expanded_arg_count - 6 } else { 0 } } else if machine_instr_call_arg_count(instr) > 6 { machine_instr_call_arg_count(instr) - 6 } else { 0 }
             if (stack_count % 2) != 0 {
                 out = _emit_legal_byval(out, native_v2_make_stack_adjust(-8))
             }
-            if f128_count == 0 {
+            if f128_count > 0 {
+                var f128_si = expanded_arg_count - 1
+                while f128_si >= 6 {
+                    let temp = out.temp_count
+                    out.temp_count = temp + 1
+                    var scan_ai: i64 = 0
+                    var scan_abi: i64 = 0
+                    var found_slot: i64 = -1
+                    while scan_ai < machine_instr_call_arg_count(instr) {
+                        let arg_slot = machine_instr_call_arg_value(instr, scan_ai)
+                        if native_v2_slot_is_f128_byval(out, arg_slot) {
+                            if f128_si == scan_abi { found_slot = arg_slot }
+                            if f128_si == scan_abi + 1 { found_slot = arg_slot + 1 }
+                            scan_abi = scan_abi + 2
+                        } else {
+                            if f128_si == scan_abi { found_slot = arg_slot }
+                            scan_abi = scan_abi + 1
+                        }
+                        scan_ai = scan_ai + 1
+                    }
+                    if found_slot < 0 {
+                        out.supported = false
+                        out.unsupported_detail = "f128_call_arg_pending"
+                        return out
+                    }
+                    out = _emit_legal_byval(out, native_v2_make_load_stack(temp, found_slot))
+                    out = _emit_legal_byval(out, native_v2_make_stack_arg_push(f128_si, temp))
+                    f128_si = f128_si - 1
+                }
+            } else {
                 var si = machine_instr_call_arg_count(instr) - 1
                 while si >= 6 {
                     let temp = out.temp_count
@@ -2048,15 +2077,21 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 let temp = out.temp_count
                 out.temp_count = temp + 1
                 let arg_slot = machine_instr_call_arg_value(instr, ai)
-                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, arg_slot))
-                out = _emit_legal_byval(out, native_v2_make_arg_move(abi_i, temp))
                 if native_v2_slot_is_f128_byval(out, arg_slot) {
-                    let temp2 = out.temp_count
-                    out.temp_count = temp2 + 1
-                    out = _emit_legal_byval(out, native_v2_make_load_stack(temp2, arg_slot + 1))
-                    out = _emit_legal_byval(out, native_v2_make_arg_move(abi_i + 1, temp2))
+                    if abi_i < 6 {
+                        out = _emit_legal_byval(out, native_v2_make_load_stack(temp, arg_slot))
+                        out = _emit_legal_byval(out, native_v2_make_arg_move(abi_i, temp))
+                    }
+                    if abi_i + 1 < 6 {
+                        let temp2 = out.temp_count
+                        out.temp_count = temp2 + 1
+                        out = _emit_legal_byval(out, native_v2_make_load_stack(temp2, arg_slot + 1))
+                        out = _emit_legal_byval(out, native_v2_make_arg_move(abi_i + 1, temp2))
+                    }
                     abi_i = abi_i + 2
                 } else {
+                    out = _emit_legal_byval(out, native_v2_make_load_stack(temp, arg_slot))
+                    out = _emit_legal_byval(out, native_v2_make_arg_move(abi_i, temp))
                     abi_i = abi_i + 1
                 }
                 ai = ai + 1

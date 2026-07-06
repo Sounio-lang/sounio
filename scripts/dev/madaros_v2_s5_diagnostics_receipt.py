@@ -38,7 +38,7 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
     {
         "case_id": "reject_f128_overwide_arg_shape_native_v2",
         "class": "unsupported_f128_operation",
-        "source": "fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 { 9 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; too_many(x, x, x, x) }\n",
+        "source": "fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 9 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; too_many(x, x, x, x, x) }\n",
         "unsupported_width": "f128",
         "expected_detail": "f128_call_shape_pending",
         "expected_fragment": "f128_call_shape_pending",
@@ -322,6 +322,7 @@ def emit(args: argparse.Namespace) -> int:
         "f128_full_execution_not_promoted": True,
         "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
         "f128_direct_expanded_gpr_call_shape_promoted_elsewhere": True,
+        "f128_direct_stack_call_shape_promoted_elsewhere": True,
         "f128_overwide_call_shape_promoted": False,
         "i512_u512_rejected_not_promoted": True,
         "promoted_i256_width_preserved": True,

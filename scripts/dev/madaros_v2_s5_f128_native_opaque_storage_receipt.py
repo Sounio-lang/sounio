@@ -4,7 +4,7 @@
 S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
 words in native-v2 x86 ELF output. Later S5 receipts promote direct f128
 call/return shapes; this receipt still guards arithmetic and over-wide f128
-call shapes that exceed the promoted expanded-register window.
+call shapes that exceed the promoted direct register+stack window.
 """
 
 from __future__ import annotations
@@ -55,13 +55,13 @@ CASES: list[dict[str, Any]] = [
         "case_id": "f128_overwide_arg_shape_stays_blocked",
         "kind": "block",
         "expected_detail": "f128_call_shape_pending",
-        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 {
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 {
     9
 }
 
 fn main() -> i64 {
     let x: f128 = 1.0 as f128
-    too_many(x, x, x, x)
+    too_many(x, x, x, x, x)
 }
 """,
     },
@@ -268,6 +268,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_external_sysv_abi_promoted": False,
             "f128_sret_abi_promoted": False,
             "f128_direct_expanded_gpr_call_shape_promoted_elsewhere": True,
+            "f128_direct_stack_call_shape_promoted_elsewhere": True,
             "f128_overwide_call_shape_promoted": False,
             "legacy_fallback_used": False,
         },

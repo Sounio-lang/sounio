@@ -1332,6 +1332,8 @@ if claims.get("f128_opaque_direct_call_return_abi_promoted_elsewhere") is not Tr
     raise SystemExit("f128 native opaque storage receipt must acknowledge S5.5 direct call/return promotion")
 if claims.get("f128_direct_expanded_gpr_call_shape_promoted_elsewhere") is not True:
     raise SystemExit("f128 native opaque storage receipt must acknowledge expanded-GPR direct call promotion")
+if claims.get("f128_direct_stack_call_shape_promoted_elsewhere") is not True:
+    raise SystemExit("f128 native opaque storage receipt must acknowledge stack direct call promotion")
 if claims.get("f128_native_payload_words") != ["decimal_sig_hi", "decimal_sig_lo"]:
     raise SystemExit("f128 native opaque storage receipt must use decimal metadata words as opaque payload")
 f128_native_cases = {row.get("case_id"): row for row in f128_native_opaque_storage_receipt.get("cases", [])}
@@ -1364,15 +1366,16 @@ if f128_opaque_call_return_abi_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 opaque call-return ABI receipt")
 if f128_opaque_call_return_abi_receipt.get("stage_contract_level") != "S5_5_F128_OPAQUE_DIRECT_CALL_RETURN_ABI_PROMOTED":
     raise SystemExit("f128 opaque call-return ABI receipt must declare S5.5 stage contract")
-if f128_opaque_call_return_abi_receipt.get("case_count") != 10:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact ten cases")
-if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 8:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact eight positive cases")
+if f128_opaque_call_return_abi_receipt.get("case_count") != 11:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact eleven cases")
+if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 9:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact nine positive cases")
 if f128_opaque_call_return_abi_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 opaque call-return ABI receipt must contain exact two negative cases")
 for field in [
     "f128_opaque_direct_call_return_abi_promoted",
     "f128_opaque_direct_expanded_gpr_call_abi_promoted",
+    "f128_opaque_direct_stack_call_abi_promoted",
 ]:
     if f128_opaque_call_return_abi_receipt.get(field) is not True:
         raise SystemExit(f"f128 opaque call-return ABI receipt missing required true flag: {field}")
@@ -1395,8 +1398,9 @@ required_f128_call_cases = {
     "local_i64_plus_f128_arg_return",
     "local_two_f128_args_return",
     "local_mixed_arg_f128_return",
+    "local_four_f128_args_stack_return",
     "f128_arithmetic_still_blocked",
-    "f128_four_arg_shape_still_blocked",
+    "f128_five_arg_shape_still_blocked",
 }
 if set(f128_call_cases) != required_f128_call_cases:
     raise SystemExit(f"f128 opaque call-return ABI receipt cases mismatch: {sorted(f128_call_cases)}")
@@ -1409,6 +1413,7 @@ for case_id in [
     "local_i64_plus_f128_arg_return",
     "local_two_f128_args_return",
     "local_mixed_arg_f128_return",
+    "local_four_f128_args_stack_return",
 ]:
     row = f128_call_cases[case_id]
     if row.get("machine_module_supported") is not True:
@@ -1421,7 +1426,7 @@ for case_id in [
         raise SystemExit(f"{case_id} must record f128 slot rows")
 for case_id, detail in {
     "f128_arithmetic_still_blocked": "f128_arithmetic_pending",
-    "f128_four_arg_shape_still_blocked": "f128_call_shape_pending",
+    "f128_five_arg_shape_still_blocked": "f128_call_shape_pending",
 }.items():
     row = f128_call_cases[case_id]
     if row.get("machine_module_supported") is not False:
@@ -1662,6 +1667,7 @@ required_diagnostics_true_flags = [
     "f128_full_execution_not_promoted",
     "f128_opaque_direct_call_return_abi_promoted_elsewhere",
     "f128_direct_expanded_gpr_call_shape_promoted_elsewhere",
+    "f128_direct_stack_call_shape_promoted_elsewhere",
     "i512_u512_rejected_not_promoted",
     "promoted_i256_width_preserved",
 ]
@@ -2495,6 +2501,7 @@ module = {
         "f128_abi_metadata_promoted": True,
         "f128_native_opaque_storage_promoted": True,
         "f128_opaque_direct_call_return_abi_promoted": True,
+        "f128_opaque_direct_stack_call_abi_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
         "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2551,7 +2558,7 @@ module = {
         "f128_binary128_native_anchor_materialization_promoted_for_exact_0_5_and_1_0_only",
         "f128_binary128_value_contract_native_materialization_promoted_for_current_case_set",
         "f128_arithmetic_value_contract_promoted_for_finite_decimal_tenths_matrix_with_one_chain",
-        "f128_opaque_direct_call_return_abi_promoted_for_return_only_mixed_order_two_f128_and_imported_direct_shapes",
+        "f128_opaque_direct_call_return_abi_promoted_for_return_only_mixed_order_two_f128_imported_direct_and_four_f128_stack_shapes",
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
         "f128_ieee_arithmetic_and_abi_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
@@ -2646,6 +2653,7 @@ receipt = {
     "f128_abi_metadata_promoted": True,
     "f128_native_opaque_storage_promoted": True,
     "f128_opaque_direct_call_return_abi_promoted": True,
+    "f128_opaque_direct_stack_call_abi_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2729,6 +2737,7 @@ receipt = {
     "f128_abi_metadata_promoted": module["scalar_abi_receipts"]["f128_abi_metadata_promoted"],
     "f128_native_opaque_storage_promoted": module["scalar_abi_receipts"]["f128_native_opaque_storage_promoted"],
     "f128_opaque_direct_call_return_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_call_return_abi_promoted"],
+    "f128_opaque_direct_stack_call_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_stack_call_abi_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],

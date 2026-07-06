@@ -4,7 +4,7 @@
 This promotes an internal native-v2 contract only: f128 moves across direct
 Madaros calls as two opaque binary128 words in the integer-register ABI,
 including mixed i64/f128 orders and two-f128-arg shapes when the expanded
-argument word count fits the six-register direct-call window. It does not
+argument word count fits the direct-call register+stack window. It does not
 promote external SysV ABI, SRET, IEEE helpers, NaN/Inf handling, or full f128
 execution.
 """
@@ -116,6 +116,17 @@ fn main() -> i64 {
 """,
         "callee": "pick",
     },
+    {
+        "case_id": "local_four_f128_args_stack_return",
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 { 9 }
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  too_many(x, x, x, x)
+}
+""",
+        "callee": "too_many",
+        "expected_exit": 9,
+    },
 ]
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
@@ -131,11 +142,11 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "expected_detail": "f128_arithmetic_pending",
     },
     {
-        "case_id": "f128_four_arg_shape_still_blocked",
-        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 { 9 }
+        "case_id": "f128_five_arg_shape_still_blocked",
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 9 }
 fn main() -> i64 {
   let x: f128 = 1.0 as f128
-  too_many(x, x, x, x)
+  too_many(x, x, x, x, x)
 }
 """,
         "expected_detail": "f128_call_shape_pending",
@@ -291,6 +302,7 @@ def emit(args: argparse.Namespace) -> None:
         "negative_case_count": len(NEGATIVE_CASES),
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_opaque_direct_expanded_gpr_call_abi_promoted": True,
+        "f128_opaque_direct_stack_call_abi_promoted": True,
         "f128_external_sysv_abi_promoted": False,
         "f128_sret_abi_promoted": False,
         "f128_arithmetic_promoted": False,
