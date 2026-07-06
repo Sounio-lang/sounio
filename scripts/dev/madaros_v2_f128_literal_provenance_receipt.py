@@ -37,6 +37,7 @@ REQUIRED_AST_SNIPPETS = [
     "float_decimal_digit_count: i64",
     "float_decimal_scale10: i64",
     "float_decimal_truncated_digits: i64",
+    "float_decimal_truncated_tail_info: i64",
     "pub fn expr_apply_float_literal_decimal_metadata(e: &! Expr, raw: Name)",
 ]
 REQUIRED_CHECKER_SNIPPETS = {
@@ -194,6 +195,7 @@ def emit(args: argparse.Namespace) -> int:
         "float_literal_ast_name_preserved": True,
         "float_literal_f64_value_still_preserved": True,
         "float_literal_decimal_metadata_fields_present": True,
+        "float_literal_truncated_tail_metadata_present": True,
         "float_literal_decimal_metadata_helper_present": True,
         "float_literal_decimal_metadata_attached_in_parser": True,
         "f128_type_kind_present": True,
@@ -221,7 +223,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_full_complete": False,
         "roundtrip_contract": [
             "ExprFloatLit preserves source spelling in Expr.name",
-            "ExprFloatLit carries bounded decimal sign/significand/scale metadata independent of Expr.float_val",
+            "ExprFloatLit carries bounded decimal sign/significand/scale/truncated-tail metadata independent of Expr.float_val",
             "Checker recognizes f128 as TypeKind::TyF128 instead of leaving it as a generic named type",
             "Checker test suite includes a positive f128 parameter/return recognition case",
             "Type printers and SOIR type serialization carry f128 explicitly without falling back to i64",

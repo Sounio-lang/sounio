@@ -999,6 +999,7 @@ for field in [
     "float_literal_ast_name_preserved",
     "float_literal_f64_value_still_preserved",
     "float_literal_decimal_metadata_fields_present",
+    "float_literal_truncated_tail_metadata_present",
     "float_literal_decimal_metadata_helper_present",
     "float_literal_decimal_metadata_attached_in_parser",
     "f128_literal_decimal_metadata_independent_from_f64",
@@ -1168,6 +1169,8 @@ for case_id, expected in required_bridge_cases.items():
     literal_row = literal_rows[0]
     if [literal_row.get("decimal_sign"), literal_row.get("sig_hi"), literal_row.get("sig_lo"), literal_row.get("digit_count"), literal_row.get("scale10"), literal_row.get("truncated_digits")] != expected:
         raise SystemExit(f"{case_id} f128 literal metadata row mismatch")
+    if literal_row.get("truncated_tail_info", 0) != 0:
+        raise SystemExit(f"{case_id} should not carry truncated tail info for non-truncated bridge literal")
 
 if machine_slot_metadata_receipt.get("schema") != "madaros.v2.s5.machine_slot_metadata_receipt/0.4":
     raise SystemExit("bad MachineIR slot metadata receipt schema")
@@ -1364,6 +1367,10 @@ for case_id, detail in {
         raise SystemExit(f"{case_id} expected detail mismatch")
     if row.get("machine_unsupported_detail") != detail:
         raise SystemExit(f"{case_id} machine unsupported detail mismatch")
+arb_row = f128_native_cases["f128_arbitrary_decimal_materialization_stays_blocked"]
+arb_literals = arb_row.get("f128_literal_rows", [])
+if not any(lit.get("truncated_tail_info") == 71 for lit in arb_literals):
+    raise SystemExit("arbitrary decimal blocker must preserve truncated_tail_info=71 for future IEEE rounding")
 
 if f128_opaque_call_return_abi_receipt.get("schema") != "madaros.v2.s5.f128_opaque_call_return_abi_receipt/0.1":
     raise SystemExit("bad S5 f128 opaque call-return ABI receipt schema")

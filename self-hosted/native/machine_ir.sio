@@ -141,6 +141,7 @@ pub struct MachineFunction {
     pub f128_literal_digit_count: [i64; 256],
     pub f128_literal_scale10: [i64; 256],
     pub f128_literal_truncated_digits: [i64; 256],
+    pub f128_literal_truncated_tail_info: [i64; 256],
 }
 
 pub struct NativeV2LegalizeSummary {
@@ -285,6 +286,7 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
         f128_literal_digit_count: [0; 256],
         f128_literal_scale10: [0; 256],
         f128_literal_truncated_digits: [0; 256],
+        f128_literal_truncated_tail_info: [0; 256],
     }
 }
 
@@ -300,14 +302,31 @@ fn native_v2_mark_slot_ref(out: &! MachineFunction, slot: i64, kind: i64, width_
     }
 }
 
-fn native_v2_mark_f128_literal_ref(out: &! MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64) with Mut, Panic, Div {
+fn native_v2_f128_truncated_count(v: i64) -> i64 {
+    if v >= 100 { return v / 100 }
+    v
+}
+
+fn native_v2_f128_truncated_tail_info(v: i64) -> i64 {
+    if v >= 100 { return v % 100 }
+    0
+}
+
+fn native_v2_f128_effective_truncated_tail_info(truncated_digits: i64, truncated_tail_info: i64) -> i64 {
+    let packed_tail_info = native_v2_f128_truncated_tail_info(truncated_digits)
+    if packed_tail_info != 0 { return packed_tail_info }
+    truncated_tail_info
+}
+
+fn native_v2_mark_f128_literal_ref(out: &! MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64, truncated_tail_info: i64) with Mut, Panic, Div {
     if native_v2_slot_is_valid(slot) && digit_count > 0 {
         (*out).f128_literal_sign[slot as usize] = sign
         (*out).f128_literal_sig_hi[slot as usize] = sig_hi
         (*out).f128_literal_sig_lo[slot as usize] = sig_lo
         (*out).f128_literal_digit_count[slot as usize] = digit_count
         (*out).f128_literal_scale10[slot as usize] = scale10
-        (*out).f128_literal_truncated_digits[slot as usize] = truncated_digits
+        (*out).f128_literal_truncated_digits[slot as usize] = native_v2_f128_truncated_count(truncated_digits)
+        (*out).f128_literal_truncated_tail_info[slot as usize] = native_v2_f128_effective_truncated_tail_info(truncated_digits, truncated_tail_info)
     }
 }
 
@@ -322,6 +341,7 @@ fn native_v2_copy_slot_ref(out: &! MachineFunction, dst_slot: i64, src_slot: i64
         (*out).f128_literal_digit_count[dst_slot as usize] = (*out).f128_literal_digit_count[src_slot as usize]
         (*out).f128_literal_scale10[dst_slot as usize] = (*out).f128_literal_scale10[src_slot as usize]
         (*out).f128_literal_truncated_digits[dst_slot as usize] = (*out).f128_literal_truncated_digits[src_slot as usize]
+        (*out).f128_literal_truncated_tail_info[dst_slot as usize] = (*out).f128_literal_truncated_tail_info[src_slot as usize]
     }
 }
 
@@ -335,7 +355,7 @@ fn native_v2_mark_slot_byval(out: MachineFunction, slot: i64, kind: i64, width_w
     next
 }
 
-fn native_v2_mark_f128_literal_byval(out: MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64) -> MachineFunction with Mut, Panic, Div {
+fn native_v2_mark_f128_literal_byval(out: MachineFunction, slot: i64, sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64, truncated_tail_info: i64) -> MachineFunction with Mut, Panic, Div {
     var next = out
     if native_v2_slot_is_valid(slot) && digit_count > 0 {
         next.f128_literal_sign[slot as usize] = sign
@@ -343,7 +363,8 @@ fn native_v2_mark_f128_literal_byval(out: MachineFunction, slot: i64, sign: i64,
         next.f128_literal_sig_lo[slot as usize] = sig_lo
         next.f128_literal_digit_count[slot as usize] = digit_count
         next.f128_literal_scale10[slot as usize] = scale10
-        next.f128_literal_truncated_digits[slot as usize] = truncated_digits
+        next.f128_literal_truncated_digits[slot as usize] = native_v2_f128_truncated_count(truncated_digits)
+        next.f128_literal_truncated_tail_info[slot as usize] = native_v2_f128_effective_truncated_tail_info(truncated_digits, truncated_tail_info)
     }
     next
 }
@@ -360,6 +381,7 @@ fn native_v2_copy_slot_byval(out: MachineFunction, dst_slot: i64, src_slot: i64)
         next.f128_literal_digit_count[dst_slot as usize] = next.f128_literal_digit_count[src_slot as usize]
         next.f128_literal_scale10[dst_slot as usize] = next.f128_literal_scale10[src_slot as usize]
         next.f128_literal_truncated_digits[dst_slot as usize] = next.f128_literal_truncated_digits[src_slot as usize]
+        next.f128_literal_truncated_tail_info[dst_slot as usize] = next.f128_literal_truncated_tail_info[src_slot as usize]
     }
     next
 }
@@ -463,7 +485,8 @@ fn native_v2_f128_bit_len_pos(v: i64) -> i64 {
 }
 
 fn native_v2_f128_value_contract_known(sign: i64, sig_hi: i64, sig_lo: i64, digit_count: i64, scale10: i64, truncated_digits: i64) -> bool {
-    if sig_hi == 0 && digit_count == 2 && scale10 == 1 && truncated_digits == 0 {
+    let trunc_count = native_v2_f128_truncated_count(truncated_digits)
+    if sig_hi == 0 && digit_count == 2 && scale10 == 1 && trunc_count == 0 {
         if sig_lo == 0 { return sign == 1 || sign == (0 - 1) }
         if sign != 1 { return false }
         if sig_lo == 5 { return true }
@@ -474,13 +497,13 @@ fn native_v2_f128_value_contract_known(sign: i64, sig_hi: i64, sig_lo: i64, digi
         if sig_lo == 1 { return true }
     }
     if sign != 1 { return false }
-    if sig_hi == 90123456789012345 && sig_lo == 123456789012345678 && digit_count == 35 && scale10 == 34 && truncated_digits == 0 { return true }
-    if sig_hi == 626267781732175260 && sig_lo == 336210314311209350 && digit_count == 51 && scale10 == 4982 && truncated_digits == 15 { return true }
+    if sig_hi == 90123456789012345 && sig_lo == 123456789012345678 && digit_count == 35 && scale10 == 34 && trunc_count == 0 { return true }
+    if sig_hi == 626267781732175260 && sig_lo == 336210314311209350 && digit_count == 51 && scale10 == 4982 && trunc_count == 15 { return true }
     false
 }
 
 fn native_v2_f128_dyadic_n(sig_hi: i64, sig_lo: i64, scale10: i64, truncated_digits: i64) -> i64 {
-    if sig_hi != 0 || sig_lo < 0 || truncated_digits != 0 { return -1 }
+    if sig_hi != 0 || sig_lo < 0 || native_v2_f128_truncated_count(truncated_digits) != 0 { return -1 }
     if scale10 < 0 {
         let e10 = 0 - scale10
         if e10 > 18 { return -1 }
@@ -501,7 +524,7 @@ fn native_v2_f128_dyadic_n(sig_hi: i64, sig_lo: i64, scale10: i64, truncated_dig
 }
 
 fn native_v2_f128_dyadic_exp2(sig_hi: i64, sig_lo: i64, scale10: i64, truncated_digits: i64) -> i64 {
-    if sig_hi != 0 || sig_lo < 0 || truncated_digits != 0 { return -999999 }
+    if sig_hi != 0 || sig_lo < 0 || native_v2_f128_truncated_count(truncated_digits) != 0 { return -999999 }
     if scale10 < 0 {
         if (0 - scale10) > 18 { return -999999 }
         return 0
@@ -515,7 +538,7 @@ fn native_v2_f128_dyadic_exp2(sig_hi: i64, sig_lo: i64, scale10: i64, truncated_
 
 fn native_v2_f128_dyadic_materializable(sign: i64, sig_hi: i64, sig_lo: i64, scale10: i64, truncated_digits: i64) -> bool {
     if !(sign == 1 || sign == (0 - 1)) { return false }
-    if sig_lo == 0 { return sig_hi == 0 && truncated_digits == 0 }
+    if sig_lo == 0 { return sig_hi == 0 && native_v2_f128_truncated_count(truncated_digits) == 0 }
     let n = native_v2_f128_dyadic_n(sig_hi, sig_lo, scale10, truncated_digits)
     if n <= 0 { return false }
     let bits = native_v2_f128_bit_len_pos(n)
@@ -558,7 +581,7 @@ fn native_v2_f128_dec_norm_den(den: i64, e: i64) -> i64 {
 
 fn native_v2_f128_rounded_dec_materializable(sign: i64, sig_hi: i64, sig_lo: i64, scale10: i64, truncated_digits: i64) -> bool {
     if !(sign == 1 || sign == (0 - 1)) { return false }
-    if sig_hi != 0 || sig_lo <= 0 || truncated_digits != 0 { return false }
+    if sig_hi != 0 || sig_lo <= 0 || native_v2_f128_truncated_count(truncated_digits) != 0 { return false }
     if scale10 < 1 || scale10 > 18 { return false }
     let den = native_v2_f128_pow10(scale10)
     if den <= 0 { return false }
@@ -1737,6 +1760,7 @@ fn native_v2_reset_machine_function_out(out: &! MachineFunction, base_slots: i64
         (*out).f128_literal_digit_count[i as usize] = 0
         (*out).f128_literal_scale10[i as usize] = 0
         (*out).f128_literal_truncated_digits[i as usize] = 0
+        (*out).f128_literal_truncated_tail_info[i as usize] = 0
         i = i + 1
     }
 }
@@ -1750,7 +1774,7 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
         if ir_instr.op == IrOpcode::IrNop {
             if ir_instr.imm_flags == IR_F128_REG_MARKER_FLAG {
                 native_v2_mark_slot_ref(out, ir_instr.dst, MIR_SLOT_KIND_F128_BINARY128, 2)
-                native_v2_mark_f128_literal_ref(out, ir_instr.dst, ir_instr.src1, ir_instr.src2, ir_instr.imm_i64, ir_instr.label_id, ir_instr.field_idx, ir_instr.arg_count)
+                native_v2_mark_f128_literal_ref(out, ir_instr.dst, ir_instr.src1, ir_instr.src2, ir_instr.imm_i64, ir_instr.label_id, ir_instr.field_idx, ir_instr.arg_count, ir_instr.fn_id)
                 if !native_v2_f128_literal_materializable(ir_instr.src1, ir_instr.src2, ir_instr.imm_i64, ir_instr.label_id, ir_instr.field_idx, ir_instr.arg_count) {
                     (*out).supported = false
                     (*out).unsupported_detail = "f128_decimal_materialization_pending"
@@ -2124,7 +2148,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             }
         } else if instr.opcode == MIR_OP_PSEUDO_F128_META {
             out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
-            out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), machine_instr_src1_value(instr), machine_instr_src2_value(instr), machine_instr_aux_value(instr), instr.cond, instr.arg_index, instr.call_arg_count)
+            out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), machine_instr_src1_value(instr), machine_instr_src2_value(instr), machine_instr_aux_value(instr), instr.cond, instr.arg_index, instr.call_arg_count, 0)
             if !native_v2_f128_literal_materializable(machine_instr_src1_value(instr), machine_instr_src2_value(instr), machine_instr_aux_value(instr), instr.cond, instr.arg_index, instr.call_arg_count) {
                 out.supported = false
                 out.unsupported_detail = "f128_decimal_materialization_pending"
@@ -2201,9 +2225,9 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, lo_temp))
                 out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
                 if result_hundredths == 25 {
-                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, 25, 3, 2, 0)
+                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, 25, 3, 2, 0, 0)
                 } else {
-                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, result_hundredths / 10, 2, 1, 0)
+                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, result_hundredths / 10, 2, 1, 0, 0)
                 }
                 f128_done = true
             }

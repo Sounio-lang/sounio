@@ -22,7 +22,7 @@ from typing import Any
 SCHEMA_VERSION = "madaros.v2.s5.f128_literal_value_bridge_receipt/0.3"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.1"
+F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.2"
 STAGE_CONTRACT_LEVEL = "S5_2_F128_LITERAL_VALUE_BRIDGED_WITH_NATIVE_OPAQUE_LOCAL_STORAGE"
 
 F128_SLOT_KIND = 3
@@ -131,9 +131,10 @@ def f128_literal_rows(module: dict[str, Any]) -> list[dict[str, int]]:
     for fn in meta.get("functions", []):
         fn_index = int(fn.get("fn_index", -1))
         for raw in fn.get("rows", []):
-            if not isinstance(raw, list) or len(raw) != 7:
+            if not isinstance(raw, list) or len(raw) < 7:
                 raise SystemExit(f"bad f128 literal metadata row: {raw!r}")
-            slot, sign, sig_hi, sig_lo, digit_count, scale10, truncated = [int(v) for v in raw]
+            slot, sign, sig_hi, sig_lo, digit_count, scale10, truncated = [int(v) for v in raw[:7]]
+            tail_info = int(raw[7]) if len(raw) > 7 else 0
             rows.append(
                 {
                     "fn_index": fn_index,
@@ -144,6 +145,7 @@ def f128_literal_rows(module: dict[str, Any]) -> list[dict[str, int]]:
                     "digit_count": digit_count,
                     "scale10": scale10,
                     "truncated_digits": truncated,
+                    "truncated_tail_info": tail_info,
                 }
             )
     return rows

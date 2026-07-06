@@ -213,7 +213,7 @@ def metadata_rows(module: dict[str, Any]) -> list[list[int]]:
     meta = module.get("f128_literal_metadata", {})
     for fn in meta.get("functions", []):
         for row in fn.get("rows", []):
-            if isinstance(row, list) and len(row) == 7:
+            if isinstance(row, list) and len(row) >= 7:
                 rows.append([int(x) for x in row])
     return rows
 
@@ -241,7 +241,7 @@ def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
         raise SystemExit(f"{case['case_id']}: MachineModule must be supported")
     rows = metadata_rows(module)
     expected_metadata = list(case["expected_metadata"])
-    if expected_metadata not in [row[1:] for row in rows]:
+    if expected_metadata not in [row[1:7] for row in rows]:
         raise SystemExit(f"{case['case_id']}: missing result metadata {expected_metadata}")
     elf_bytes = elf.read_bytes()
     hi, lo = u64_words_from_hex(str(case["expected_hex"]))

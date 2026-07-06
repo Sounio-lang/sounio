@@ -139,7 +139,7 @@ def extract_f128_metadata_rows(module: dict[str, Any]) -> list[list[int]]:
     meta = module.get("f128_literal_metadata", {})
     for fn in meta.get("functions", []):
         for row in fn.get("rows", []):
-            if isinstance(row, list) and len(row) == 7:
+            if isinstance(row, list) and len(row) >= 7:
                 rows.append([int(x) for x in row])
     return rows
 
@@ -195,7 +195,7 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: Case, timeout_
     if not metadata_rows:
         raise SystemExit(f"{case.case_id}: expected f128 literal metadata row")
     expected_row_tail = case.expected_metadata
-    if expected_row_tail not in [row[1:] for row in metadata_rows]:
+    if expected_row_tail not in [row[1:7] for row in metadata_rows]:
         raise SystemExit(f"{case.case_id}: expected metadata {expected_row_tail}, got {metadata_rows}")
 
     elf = elf_path.read_bytes()

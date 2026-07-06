@@ -22,7 +22,7 @@ SCHEMA_VERSION = "madaros.v2.s5.f128_native_opaque_storage_receipt/0.1"
 STAGE_CONTRACT_LEVEL = "S5_2_F128_NATIVE_OPAQUE_LOCAL_STORAGE_COPY"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 SLOT_METADATA_SCHEMA = "madaros.v2.s5.machine_module_slot_metadata/0.1"
-F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.1"
+F128_LITERAL_METADATA_SCHEMA = "madaros.v2.s5.f128_literal_metadata/0.2"
 F128_SLOT_KIND = 3
 F128_WIDTH_WORDS = 2
 
@@ -70,6 +70,7 @@ fn main() -> i64 {
         "kind": "block",
         "expected_detail": "f128_decimal_materialization_pending",
         "expected_log_fragment": "native_v2_compile: FAIL",
+        "expected_truncated_tail_info": 71,
         "source": """fn main() -> i64 {
     let x: f128 = 1.23456789012345678901234567890123456789 as f128
     let y: f128 = x
@@ -157,9 +158,10 @@ def require_f128_literal_metadata(module: dict[str, Any], case_id: str) -> list[
     rows: list[dict[str, int]] = []
     for fn in meta.get("functions", []):
         for raw in fn.get("rows", []):
-            if not isinstance(raw, list) or len(raw) != 7:
+            if not isinstance(raw, list) or len(raw) < 7:
                 raise SystemExit(f"{case_id}: bad f128 literal row {raw!r}")
-            slot, sign, sig_hi, sig_lo, digit_count, scale10, truncated = [int(v) for v in raw]
+            slot, sign, sig_hi, sig_lo, digit_count, scale10, truncated = [int(v) for v in raw[:7]]
+            tail_info = int(raw[7]) if len(raw) > 7 else 0
             rows.append(
                 {
                     "fn_index": int(fn.get("fn_index", -1)),
@@ -170,6 +172,7 @@ def require_f128_literal_metadata(module: dict[str, Any], case_id: str) -> list[
                     "digit_count": digit_count,
                     "scale10": scale10,
                     "truncated_digits": truncated,
+                    "truncated_tail_info": tail_info,
                 }
             )
     if not rows:
@@ -209,6 +212,10 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any]
     module = load_machine_module(mm_path)
     slots = require_f128_slot_metadata(module, case_id)
     literals = require_f128_literal_metadata(module, case_id)
+    expected_tail_info = case.get("expected_truncated_tail_info")
+    if expected_tail_info is not None:
+        if not any(row.get("truncated_tail_info") == int(expected_tail_info) for row in literals):
+            raise SystemExit(f"{case_id}: expected truncated_tail_info={expected_tail_info}, got {literals!r}")
     result: dict[str, Any] = {
         "case_id": case_id,
         "kind": case["kind"],
