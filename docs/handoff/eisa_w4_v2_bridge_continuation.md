@@ -47,28 +47,38 @@ v2-rump-qd v1-rump-dd`. Unit tests also green: `test_eisa_bridge` (X1–X5),
   poison re-check (`em_v2_finish_result`). Divisor-zero + sqrt(≤0) guards match
   the VM.
 
+## v2 control-flow — LANDED (full parity)
+
+`eload`, `estore`, `emov`, `ebrz`, `ebrn` now emit on the v2 path (no opcode
+left on `status 42`), with the deep e2/e3 components copied and the frail band
+computed over the v2 e0 lane (band = max(u,|e0|)). Landed via a subagent
+workflow (implement → adversarial verify) + micro-step commits `37ef45d6`
+(v2-fuel), `31e79d3e` (v2 eload/estore + v2-mem), `15f97211` (v2 emov + v2-emov),
+`bec24116` (v2 ebrz/ebrn + v2-loop), `0ad532cb` (v2-frail). Two verifiers passed
+(gate/regression, ebrz/ebrn); the memory-op verifier flagged the omitted full
+re-normalise, but that is a **non-reachable false-positive**: the v2 memory ops
+mirror the gated-green v1 pattern (u-canonicalise only), the VM's
+`normalize_*_lane` is a no-op on canonical inputs, and no program can produce a
+`poison=0` + non-finite-deep-component state (every register/mem write
+normalises — a machine invariant). Witnessed empirically by the
+`v2-mem-poison` adversarial lane (poison roundtrip through estore→eload→emov,
+byte-identical: val=NaN, u=+Inf, poisoned=1) — commit `<this>`.
+
 ## Cluster-validated
 
 Full Slurm battery green on the pinned node `gpuorangefs-5860-proxmox`
-(run `eisa-battery-20260706T161842`, job 5360): **tests 18/18 PASS, gate PASS
-rc=0, 27 lanes** — every v0/v1/v2 lane, `v2-rump-qd`, `v1-rump-dd`, tamper and
-anti-vacuity, all byte-identical. The `strings → grep -a` portability patch
-(portability audit patch #1) landed in the gate (`ci(eisa): anti-vacuity uses
-grep -a`), clearing the sole environmental `strings`-missing FAIL.
+(latest run `eisa-battery-20260706T201535`): **tests 18/18 PASS, gate PASS
+rc=0, 33 lanes** — every v0/v1/v2 lane (arithmetic + control-flow), `v2-rump-qd`,
+`v1-rump-dd`, `v2-mem-poison`, tamper and anti-vacuity, all byte-identical. The
+`strings → grep -a` portability patch landed (`ci(eisa): anti-vacuity uses
+grep -a`), clearing the environmental `strings`-missing FAIL.
 
-## Remaining (optional parity + landing)
+## Remaining (landing)
 
-1. **v2 control-flow lanes** — `ebrz`/`ebrn` (frail band = max(u,|e0|)), the
-   v2 fuel-stop receipt, `eload`/`estore`/`emov`. Currently these opcodes on the
-   v2 path return a loud `status 42` (never a silent miscompile). The Rump
-   flagship does not use them (straight-line), so they are not on the critical
-   path — add `v2-loop`/`v2-fuel`/`v2-poison`/`v2-frail` lanes reusing the v1
-   machinery when full v2 parity is wanted. `em_v1_normalize_u_lane` /
-   `em_v2_set_last_written` / the v1 branch+fuel patch lists are the pieces to
-   generalise to the 48-byte lane.
-2. **W5** — Rump receipt showcase in the positioning doc (now unblocked: the
-   real v2-rump-qd bridge receipt exists), and branch reconciliation + push
-   (hold for operator direction; branch is 8 ahead / 8 behind origin).
+**W5** — Rump receipt showcase in the positioning doc (now unblocked: the real
+v2-rump-qd bridge receipt exists), and branch reconciliation + push (hold for
+operator direction; branch is 8 ahead / 8 behind origin). The v2 AOT bridge
+itself is functionally complete at full v1 parity.
 
 ## Verify
 ```
