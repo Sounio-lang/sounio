@@ -1482,6 +1482,12 @@ fn nc_emit_add_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Pani
     nc_emit_byte(nc, modrm_rr(dst, src))
 }
 
+fn nc_emit_sub_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x29)
+    nc_emit_byte(nc, modrm_rr(dst, src))
+}
+
 fn nc_emit_mov_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x89)
@@ -1855,7 +1861,7 @@ fn nc_v2_reset_label_state() with Mut, Panic {
         i = i + 1
     }
     NC_V2_LABEL_PATCH_COUNT = 0
-    NC_V2_NEXT_CMP_LABEL = 210
+    NC_V2_NEXT_CMP_LABEL = 80
 }
 
 
@@ -1872,6 +1878,24 @@ fn nc_define_label(nc: &! NativeCompiler, label_id: i64) with Mut, Panic {
     if label_id >= 0 && label_id < 256 {
         NC_V2_LABEL_OFFSETS[label_id as usize] = (*nc).code.len
     }
+}
+
+fn nc_next_cmp_label() -> i64 with Mut {
+    let out = NC_V2_NEXT_CMP_LABEL
+    NC_V2_NEXT_CMP_LABEL = out + 1
+    out
+}
+
+fn nc_emit_jmp_to_label(nc: &! NativeCompiler, label_id: i64) with Mut, Panic, Div {
+    let jmp_pos = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    nc_add_label_patch(nc, jmp_pos + 1, label_id)
+}
+
+fn nc_emit_jnz_to_label(nc: &! NativeCompiler, label_id: i64) with Mut, Panic, Div {
+    let jnz_pos = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_add_label_patch(nc, jnz_pos + 2, label_id)
 }
 
 fn nc_emit_xor_rdx_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -4374,6 +4398,9 @@ fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpl
                    let src2 = if instr.opcode == MIR_OP_RET && instr.cond == 1 { machine_instr_src2_value(instr) } else { 0 - 1 }
                    out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_src1_value(instr), src2)
                    count = count + 1
+        } else if instr.opcode == MIR_OP_F128_VC_BINOP {
+            out[count as usize] = native_v2_ra_simple(0 - 1, 0 - 1, 0 - 1)
+            count = count + 1
         } else if instr.opcode == MIR_OP_MOVE || instr.opcode == MIR_OP_UNARY || instr.opcode == MIR_OP_LOAD_ABS {
             out[count as usize] = native_v2_ra_simple(machine_instr_dst_value(instr), machine_instr_src1_value(instr), 0 - 1)
             count = count + 1
@@ -4593,6 +4620,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         c.code = emit_pop_rbx(c.code)
         emit_binop_code(&!c, instr.bin_op)
         return native_v2_store_rax_to_temp(c, instr.dst.value)
+    }
+
+    if instr.opcode == MIR_OP_F128_VC_BINOP {
+        nc_core_emit_f128_vc_binop(&! c, instr.dst.value, instr.src1.value, instr.src2.value, instr.bin_op)
+        return c
     }
 
     if instr.opcode == MIR_OP_UNARY {
@@ -5471,6 +5503,133 @@ fn nc_f128_vc_kind_from_hundredths(v: i64) -> i64 {
     if v == 400 { return 10 }
     if v < 0 { return nc_f128_vc_neg_kind_for_positive(nc_f128_vc_kind_from_hundredths(0 - v)) }
     0
+}
+
+fn nc_core_emit_f128_classify_case(nc: &! NativeCompiler, src_slot: i64, dest_slot: i64, kind: i64, end_label: i64) with Mut, Panic, Div {
+    let next_label = nc_next_cmp_label()
+    nc_core_load_temp_to_rax(nc, src_slot)
+    nc_emit_mov_reg_imm(nc, 3, nc_f128_vc_hi(kind))
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jnz_to_label(nc, next_label)
+    nc_emit_mov_rax_imm(nc, nc_f128_vc_hundredths(kind))
+    nc_core_store_rax_to_temp(nc, dest_slot)
+    nc_emit_jmp_to_label(nc, end_label)
+    nc_define_label(nc, next_label)
+}
+
+fn nc_core_emit_f128_classify_to_hundredths(nc: &! NativeCompiler, src_slot: i64, dest_slot: i64) with Mut, Panic, Div {
+    let end_label = nc_next_cmp_label()
+    let fail_label = nc_next_cmp_label()
+    nc_emit_mov_rax_imm(nc, 0 - 1)
+    nc_core_store_rax_to_temp(nc, dest_slot)
+    nc_core_load_temp_to_rax(nc, src_slot + 1)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, fail_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 1, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 3, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 4, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 5, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 9, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 10, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 11, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 12, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 16, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 17, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 18, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 19, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 20, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 21, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 22, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 23, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 24, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 25, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 26, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 27, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 28, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 29, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 30, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 31, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 32, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 33, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 34, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 35, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 36, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 37, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 38, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 39, end_label)
+    nc_core_emit_f128_classify_case(nc, src_slot, dest_slot, 40, end_label)
+    nc_define_label(nc, fail_label)
+    nc_emit_exit_code(nc, 12)
+    nc_define_label(nc, end_label)
+}
+
+fn nc_core_emit_f128_materialize_case(nc: &! NativeCompiler, hundredths_slot: i64, dst_slot: i64, hundredths: i64, end_label: i64) with Mut, Panic, Div {
+    let next_label = nc_next_cmp_label()
+    let kind = nc_f128_vc_kind_from_hundredths(hundredths)
+    nc_core_load_temp_to_rax(nc, hundredths_slot)
+    nc_emit_mov_reg_imm(nc, 3, hundredths)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jnz_to_label(nc, next_label)
+    nc_core_store_f128_opaque_words(nc, dst_slot, nc_f128_vc_hi(kind), nc_f128_vc_lo(kind))
+    nc_emit_jmp_to_label(nc, end_label)
+    nc_define_label(nc, next_label)
+}
+
+fn nc_core_emit_f128_materialize_hundredths(nc: &! NativeCompiler, hundredths_slot: i64, dst_slot: i64) with Mut, Panic, Div {
+    let end_label = nc_next_cmp_label()
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 25, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 50, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 75, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 100, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 125, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 150, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 175, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 200, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 225, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 250, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 275, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 300, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 325, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 350, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 375, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 400, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 25, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 50, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 75, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 100, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 125, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 150, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 175, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 200, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 225, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 250, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 275, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 300, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 325, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 350, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 375, end_label)
+    nc_core_emit_f128_materialize_case(nc, hundredths_slot, dst_slot, 0 - 400, end_label)
+    nc_emit_exit_code(nc, 12)
+    nc_define_label(nc, end_label)
+}
+
+fn nc_core_emit_f128_vc_binop(nc: &! NativeCompiler, dst_slot: i64, lhs_slot: i64, rhs_slot: i64, op: BinaryOp) with Mut, Panic, Div {
+    nc_core_emit_f128_classify_to_hundredths(nc, lhs_slot, dst_slot)
+    nc_core_emit_f128_classify_to_hundredths(nc, rhs_slot, dst_slot + 1)
+    nc_core_load_temp_to_rax(nc, dst_slot + 1)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, dst_slot)
+    nc_emit_pop_rbx(nc)
+    if op == BinaryOp::OpAdd {
+        nc_emit_add_reg_reg(nc, 0, 3)
+    } else if op == BinaryOp::OpSub {
+        nc_emit_sub_reg_reg(nc, 0, 3)
+    } else {
+        nc_emit_exit_code(nc, 12)
+    }
+    nc_core_store_rax_to_temp(nc, dst_slot)
+    nc_core_emit_f128_materialize_hundredths(nc, dst_slot, dst_slot)
 }
 
 fn nc_f128_pow5(e: i64) -> i64 {
@@ -7075,6 +7234,17 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     nc_core_mark_f128_kind(nc, (*func).instrs[i as usize].dst, result_kind)
                     i = i + 1
                     continue
+                } else if (*func).instrs[i as usize].bin_op == BinaryOp::OpAdd || (*func).instrs[i as usize].bin_op == BinaryOp::OpSub {
+                    nc_core_emit_f128_vc_binop(
+                        nc,
+                        (*func).instrs[i as usize].dst,
+                        (*func).instrs[i as usize].src1,
+                        (*func).instrs[i as usize].src2,
+                        (*func).instrs[i as usize].bin_op,
+                    )
+                    nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+                    i = i + 1
+                    continue
                 } else {
                     return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_arithmetic_pending")
                 }
@@ -7965,7 +8135,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
        || opcode == MIR_OP_LOAD_FLOAT_RIP { CGOP_LOAD }
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { CGOP_STORE }
-    else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP { CGOP_MUL }
+    else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP { CGOP_MUL }
     else if opcode == MIR_OP_CALL { CGOP_CALL }
     else if opcode == MIR_OP_RET { CGOP_RET }
     else if opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { CGOP_BRANCH }
@@ -7975,7 +8145,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
 fn mir_opcode_latency(opcode: i64) -> i64 {
     if opcode == MIR_OP_LOAD_STACK || opcode == MIR_OP_FIELD_LOAD
        || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 4 }
-    else if opcode == MIR_OP_FLOAT_BINOP { 5 }
+    else if opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP { 5 }
     else if opcode == MIR_OP_BINOP { 3 }
     else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET { 5 }
     else { 1 }
@@ -7987,7 +8157,7 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
             || opcode == MIR_OP_INDEX_STORE { 144 }                                // P4,P7
     else if opcode == MIR_OP_FLOAT_BINOP { 1 }                                    // P0 (FP MUL)
     else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET
-            || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { 64 }                // P6
+            || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC || opcode == MIR_OP_F128_VC_BINOP { 64 }                // P6
     else { 99 }                                                                    // P0,P1,P5,P6
 }
 fn native_v2_scheduler_enabled() -> bool { true }

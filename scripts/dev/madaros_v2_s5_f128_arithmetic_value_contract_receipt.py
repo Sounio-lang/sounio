@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.6 f128 arithmetic value-contract receipt.
+"""Emit a Madaros v2 S5.8 f128 arithmetic value-contract receipt.
 
 This promotes a finite, exact binary128 arithmetic value-contract matrix
-end-to-end for local literal-derived values. It deliberately does not promote
-generic IEEE helpers, NaN/Inf, arbitrary decimal arithmetic, external SysV f128
-ABI, SRET, or f128 callee-side arithmetic. Direct internal calls whose callee
-returns an f128 parameter preserve the caller argument's value contract when the
-argument still has exact finite literal metadata.
+end-to-end for local literal-derived values plus a finite runtime add/sub helper
+for callee-side f128 parameters that carry supported value-contract binary128
+words. It deliberately does not promote generic IEEE helpers, NaN/Inf, arbitrary
+decimal arithmetic, external SysV f128 ABI, SRET, or Mul/Div runtime helpers.
+Direct internal calls whose callee returns an f128 parameter preserve the caller
+argument's value contract when the argument still has exact finite literal
+metadata.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_arithmetic_value_contract_receipt/0.1"
-STAGE = "S5_6_F128_ARITHMETIC_VALUE_CONTRACT_NATIVE_MATERIALIZATION"
+STAGE = "S5_8_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_HELPER"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 
 
@@ -265,22 +267,8 @@ fn main() -> i64 {
         "expected_hex": "40008000000000000000000000000000",
         "expected_metadata": [1, 0, 30, 2, 1, 0],
     },
-]
-
-NEGATIVE = [
     {
-        "case_id": "f128_add_rounded_tenths_still_blocked",
-        "source": """fn main() -> i64 {
-  let x: f128 = 0.1 as f128
-  let y: f128 = 0.2 as f128
-  let z: f128 = x + y
-  0
-}
-""",
-        "expected_detail": "f128_arithmetic_pending",
-    },
-    {
-        "case_id": "f128_callee_add_args_still_requires_helper",
+        "case_id": "f128_callee_add_args_runtime_helper_to_three",
         "source": """fn add_f128(x: f128, y: f128) -> f128 { x + y }
 fn main() -> i64 {
   let a: f128 = 1.0 as f128
@@ -290,7 +278,39 @@ fn main() -> i64 {
   0
 }
 """,
-        "expected_detail": "f128_arithmetic_pending",
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_callee_sub_args_runtime_helper_to_one",
+        "source": """fn sub_f128(x: f128, y: f128) -> f128 { x - y }
+fn main() -> i64 {
+  let a: f128 = 2.0 as f128
+  let b: f128 = 1.0 as f128
+  let c: f128 = sub_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "3fff0000000000000000000000000000",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+]
+
+NEGATIVE = [
+    {
+        "case_id": "f128_add_rounded_tenths_runtime_fail_closed",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.1 as f128
+  let y: f128 = 0.2 as f128
+  let z: f128 = x + y
+  0
+}
+""",
+        "expected_runtime_rc": 12,
+        "expected_machine_opcode": 131,
     },
 ]
 
@@ -392,9 +412,19 @@ def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     if module.get("supported") is not True or module.get("unsupported_detail") not in ("", None):
         raise SystemExit(f"{case['case_id']}: MachineModule must be supported")
     rows = metadata_rows(module)
-    expected_metadata = list(case["expected_metadata"])
-    if expected_metadata not in [row[1:7] for row in rows]:
+    expected_metadata_raw = case.get("expected_metadata")
+    expected_metadata = list(expected_metadata_raw) if expected_metadata_raw is not None else None
+    if expected_metadata is not None and expected_metadata not in [row[1:7] for row in rows]:
         raise SystemExit(f"{case['case_id']}: missing result metadata {expected_metadata}")
+    expected_machine_opcode = int(case.get("expected_machine_opcode", 0) or 0)
+    opcode_found = False
+    if expected_machine_opcode != 0:
+        for fn in module.get("functions", []):
+            for instr in fn.get("instrs", []):
+                if isinstance(instr, list) and len(instr) > 0 and int(instr[0]) == expected_machine_opcode:
+                    opcode_found = True
+        if not opcode_found:
+            raise SystemExit(f"{case['case_id']}: missing MachineIR opcode {expected_machine_opcode}")
     elf_bytes = elf.read_bytes()
     hi, lo = u64_words_from_hex(str(case["expected_hex"]))
     hi_pattern = mov_rax_imm_pattern(hi)
@@ -421,6 +451,8 @@ def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
         "expected_lo_i64": signed_i64(lo),
         "expected_result_metadata": expected_metadata,
         "machine_module_metadata_rows": rows,
+        "expected_machine_opcode": expected_machine_opcode,
+        "expected_machine_opcode_found": opcode_found,
         "hi_mov_imm_pattern_hex": hi_pattern.hex(),
         "lo_mov_imm_pattern_hex": lo_pattern.hex(),
         "hi_mov_imm_pattern_found": hi_found,
@@ -437,6 +469,41 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     src.write_text(str(case["source"]), encoding="utf-8")
     rc, log = run([str(compiler), "--native-v2-compile", str(src), "-o", str(elf), "--machine-module-json", str(mm)], root, timeout_s)
     (case_dir / "compile.log").write_text(log, encoding="utf-8")
+    if "expected_runtime_rc" in case:
+        if rc != 0 or "native_v2_compile: emitted" not in log or not elf.exists():
+            raise SystemExit(f"{case['case_id']}: expected emitted runtime fail-closed executable")
+        os.chmod(elf, 0o755)
+        run_rc, run_log = run([str(elf)], root, timeout_s)
+        (case_dir / "run.log").write_text(run_log, encoding="utf-8")
+        expected_runtime_rc = int(case["expected_runtime_rc"])
+        if run_rc != expected_runtime_rc:
+            raise SystemExit(f"{case['case_id']}: expected runtime rc={expected_runtime_rc}, got {run_rc}")
+        module = load_machine(mm)
+        if module.get("supported") is not True or module.get("unsupported_detail") not in ("", None):
+            raise SystemExit(f"{case['case_id']}: expected supported MachineModule for runtime fail-closed helper")
+        expected_machine_opcode = int(case.get("expected_machine_opcode", 0) or 0)
+        opcode_found = False
+        for fn in module.get("functions", []):
+            for instr in fn.get("instrs", []):
+                if isinstance(instr, list) and len(instr) > 0 and int(instr[0]) == expected_machine_opcode:
+                    opcode_found = True
+        if expected_machine_opcode != 0 and not opcode_found:
+            raise SystemExit(f"{case['case_id']}: missing MachineIR opcode {expected_machine_opcode}")
+        return {
+            "case_id": case["case_id"],
+            "kind": "negative",
+            "negative_mode": "runtime_fail_closed",
+            "compile_rc": rc,
+            "run_rc": run_rc,
+            "expected_runtime_rc": expected_runtime_rc,
+            "machine_module_supported": True,
+            "machine_module_unsupported_detail": "",
+            "expected_machine_opcode": expected_machine_opcode,
+            "expected_machine_opcode_found": opcode_found,
+            "source_sha256": sha256_text(str(case["source"])),
+            "elf_sha256": sha256_bytes(elf.read_bytes()),
+            "machine_module_sha256": sha256_text(stable_json(module)),
+        }
     if "native_v2_compile: emitted" in log or elf.exists():
         raise SystemExit(f"{case['case_id']}: unexpectedly emitted executable")
     module = load_machine(mm)
@@ -472,6 +539,7 @@ def emit(args: argparse.Namespace) -> None:
         "negative_case_count": len(NEGATIVE),
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_arithmetic_promoted": True,
+        "f128_runtime_callee_add_sub_value_contract_promoted": True,
         "f128_native_ieee_binary128_materialization_promoted": False,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -488,8 +556,9 @@ def emit(args: argparse.Namespace) -> None:
             "single-chain arithmetic preserves compiler value-kind metadata",
             "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
             "direct internal calls whose callee returns one f128 parameter preserve that argument's exact value-contract metadata into caller arithmetic",
-            "unsupported f128 arithmetic remains fail-closed",
-            "f128 callee-side arithmetic remains fail-closed until real binary128 software helpers or broader interprocedural value reasoning exist",
+            "callee-side f128 add/sub over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
+            "unsupported f128 arithmetic remains fail-closed at compile time or through runtime rc=12 helper traps",
+            "f128 callee-side Mul/Div and non-value-contract runtime arithmetic remain fail-closed until real binary128 software helpers exist",
         ],
         "cases": cases,
     }

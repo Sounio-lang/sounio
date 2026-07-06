@@ -2,9 +2,10 @@
 """Emit a Madaros v2 S5 f128 parameter slot-layout receipt.
 
 This receipt protects a narrow but important ABI invariant: each source f128
-parameter is expanded into two non-overlapping 64-bit MachineIR slots. It does
-not promote generic f128 arithmetic helpers, external SysV f128 ABI, SRET, or
-full f128 execution.
+parameter is expanded into two non-overlapping 64-bit MachineIR slots. It also
+records that the later S5 finite value-contract add/sub helper can consume that
+layout without reintroducing overlap. It does not promote generic IEEE f128
+helpers, external SysV f128 ABI, SRET, or full f128 execution.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ fn main() -> i64 {
         "expected_detail": "",
     },
     {
-        "case_id": "f128_callee_arithmetic_still_helper_blocked",
+        "case_id": "f128_callee_add_args_slot_layout_feeds_runtime_helper",
         "source": """fn add_f128(x: f128, y: f128) -> f128 { x + y }
 fn main() -> i64 {
   let a: f128 = 1.0 as f128
@@ -94,9 +95,9 @@ fn main() -> i64 {
         "expected_fn_count": 2,
         "expected_source_param_count": 4,
         "expected_source_f128_param_count": 2,
-        "expected_f128_rows": [[0, 3, 2], [2, 3, 2]],
-        "expected_supported": False,
-        "expected_detail": "f128_arithmetic_pending",
+        "expected_f128_rows": [[0, 3, 2], [2, 3, 2], [4, 3, 2]],
+        "expected_supported": True,
+        "expected_detail": "",
     },
 ]
 
@@ -298,7 +299,7 @@ def emit(args: argparse.Namespace) -> int:
         "f128_param_slots_non_overlapping": True,
         "f128_binary128_slot_kind": F128_SLOT_KIND,
         "f128_binary128_width_words": F128_WIDTH_WORDS,
-        "f128_callee_arithmetic_helper_still_blocked": True,
+        "f128_callee_add_sub_value_contract_helper_layout_promoted": True,
         "f128_full_execution_promoted": False,
         "f128_promoted": False,
         "s5_ready": False,
@@ -310,11 +311,11 @@ def emit(args: argparse.Namespace) -> int:
             "consecutive_f128_parameters_do_not_overlap",
             "mixed_i64_f128_parameter_layout_preserves_non_overlap",
             "imported_f128_parameter_layout_matches_local_layout",
-            "callee_f128_arithmetic_still_fail_closed_until_helpers_exist",
+            "callee_f128_add_sub_value_contract_helper_preserves_non_overlapping_param_slots",
         ],
         "missing_full_obligations": [
             "f128 software-helper lowering with IEEE rounding and NaN/Inf contract",
-            "generic f128 callee arithmetic over runtime values",
+            "generic f128 callee arithmetic over runtime values outside the finite add/sub value-contract helper",
             "external SysV f128 ABI/SRET and differential receipts",
         ],
     }

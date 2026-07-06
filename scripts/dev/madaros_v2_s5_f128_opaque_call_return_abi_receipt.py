@@ -196,7 +196,7 @@ fn main() -> i64 {
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
     {
-        "case_id": "f128_rounded_decimal_arithmetic_still_blocked",
+        "case_id": "f128_rounded_decimal_arithmetic_runtime_traps",
         "source": """fn main() -> i64 {
   let x: f128 = 0.1 as f128
   let y: f128 = 0.2 as f128
@@ -204,7 +204,8 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
   0
 }
 """,
-        "expected_detail": "f128_arithmetic_pending",
+        "expected_runtime_rc": 12,
+        "expected_machine_opcode": 131,
     },
     {
         "case_id": "f128_nine_arg_arity_still_blocked",
@@ -221,6 +222,10 @@ fn main() -> i64 {
 
 def root_from_script() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def sha256_text(text: str) -> str:
@@ -406,6 +411,43 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     mm = case_dir / "machine.json"
     rc, log = run([str(compiler), "--native-v2-compile", str(src), "-o", str(elf), "--machine-module-json", str(mm)], root, timeout_s)
     (case_dir / "compile.log").write_text(log, encoding="utf-8")
+    if "expected_runtime_rc" in case:
+        if "native_v2_compile: emitted" not in log:
+            raise SystemExit(f"{case['case_id']}: expected runtime fail-closed executable")
+        if not elf.exists() or elf.stat().st_size <= 0:
+            raise SystemExit(f"{case['case_id']}: missing runtime fail-closed executable")
+        os.chmod(elf, 0o755)
+        run_rc, run_log = run([str(elf)], root, timeout_s)
+        (case_dir / "run.log").write_text(run_log, encoding="utf-8")
+        expected_runtime_rc = int(case["expected_runtime_rc"])
+        if run_rc != expected_runtime_rc:
+            raise SystemExit(f"{case['case_id']}: expected runtime rc={expected_runtime_rc}, got {run_rc}")
+        module = load_machine(mm)
+        if module.get("supported") is not True:
+            raise SystemExit(f"{case['case_id']}: runtime helper MachineModule must be supported")
+        expected_machine_opcode = int(case.get("expected_machine_opcode", 0) or 0)
+        opcode_found = False
+        for fn in module.get("functions", []):
+            for instr in fn.get("instrs", []):
+                if isinstance(instr, list) and len(instr) > 0 and int(instr[0]) == expected_machine_opcode:
+                    opcode_found = True
+        if expected_machine_opcode != 0 and not opcode_found:
+            raise SystemExit(f"{case['case_id']}: missing runtime helper opcode")
+        return {
+            "case_id": case["case_id"],
+            "kind": "negative",
+            "negative_mode": "runtime_fail_closed",
+            "compile_rc": rc,
+            "run_rc": run_rc,
+            "expected_runtime_rc": expected_runtime_rc,
+            "machine_module_supported": True,
+            "machine_module_unsupported_detail": "",
+            "expected_machine_opcode": expected_machine_opcode,
+            "expected_machine_opcode_found": opcode_found,
+            "machine_module_sha256": sha256_text(stable_json(module)),
+            "elf_sha256": sha256_bytes(elf.read_bytes()),
+            "source_sha256": sha256_text(str(case["source"])),
+        }
     detail = str(case["expected_detail"])
     if "native_v2_compile: emitted" in log:
         raise SystemExit(f"{case['case_id']}: unexpectedly emitted executable")
@@ -449,6 +491,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_external_sysv_abi_promoted": False,
         "f128_sret_abi_promoted": False,
         "f128_arithmetic_promoted": False,
+        "f128_runtime_add_sub_helper_promoted_elsewhere": True,
         "f128_software_helpers_promoted": False,
         "f128_nan_inf_contract_promoted": False,
         "cases": cases,

@@ -30,10 +30,12 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "class": "unsupported_f128_operation",
         "source": "fn main() -> i64 { let x: f128 = 0.1 as f128; let y: f128 = 0.2 as f128; let z = x + y; 0 }\n",
         "unsupported_width": "f128",
-        "expected_detail": "f128_arithmetic_pending",
-        "expected_fragment": "f128_arithmetic_pending",
+        "expected_detail": "runtime_rc_12",
+        "expected_fragment": "native_v2_compile: emitted",
         "expect_machine_module_json": True,
-        "expected_machine_module_supported": False,
+        "expected_machine_module_supported": True,
+        "expected_runtime_rc": 12,
+        "expected_machine_opcode": 131,
     },
     {
         "case_id": "reject_f128_overwide_arg_shape_native_v2",
@@ -160,6 +162,57 @@ def emit_negative(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
     compile_log = compile_stdout + compile_stderr
     compile_log_path.write_text(compile_log, encoding="utf-8")
     expected_fragment = str(case.get("expected_fragment", DIAGNOSTIC_FRAGMENT))
+    if "expected_runtime_rc" in case:
+        if "native_v2_compile: emitted" not in compile_log:
+            raise SystemExit(f"{case_id} expected runtime fail-closed ELF emission; log={compile_log_path}")
+        if not elf_path.exists() or elf_path.stat().st_size <= 0:
+            raise SystemExit(f"{case_id} missing runtime fail-closed ELF: {elf_path}")
+        os.chmod(elf_path, 0o755)
+        run_rc, run_stdout, run_stderr = run_binary(elf_path, timeout_s)
+        expected_runtime_rc = int(case["expected_runtime_rc"])
+        if run_rc != expected_runtime_rc:
+            raise SystemExit(f"{case_id} expected runtime rc={expected_runtime_rc}, got {run_rc}")
+        if not mm_path.exists() or mm_path.stat().st_size <= 0:
+            raise SystemExit(f"{case_id} did not emit expected runtime helper MachineModule JSON: {mm_path}")
+        machine_module = json.loads(mm_path.read_text(encoding="utf-8"))
+        if machine_module.get("schema") != "madaros.v2.s5.machine_module/0.1":
+            raise SystemExit(f"{case_id} bad MachineModule schema")
+        if machine_module.get("supported") is not True:
+            raise SystemExit(f"{case_id} runtime helper MachineModule must be supported")
+        expected_machine_opcode = int(case.get("expected_machine_opcode", 0) or 0)
+        opcode_found = False
+        for fn in machine_module.get("functions", []):
+            for instr in fn.get("instrs", []):
+                if isinstance(instr, list) and len(instr) > 0 and int(instr[0]) == expected_machine_opcode:
+                    opcode_found = True
+        if expected_machine_opcode != 0 and not opcode_found:
+            raise SystemExit(f"{case_id} missing runtime helper MachineIR opcode")
+        return {
+            "case_id": case_id,
+            "class": case["class"],
+            "unsupported_width": case["unsupported_width"],
+            "expected_detail": case["expected_detail"],
+            "source": source_path.name,
+            "source_sha256": sha256_text(source_text),
+            "check_rc": check_rc,
+            "native_v2_compile_rc": compile_rc,
+            "run_rc": run_rc,
+            "expected_runtime_rc": expected_runtime_rc,
+            "check_log_sha256": sha256_text(normalize_log(check_log, out_dir)),
+            "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
+            "diagnostic_fragment": expected_fragment,
+            "elf_emitted": True,
+            "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+            "machine_module_json_emitted": True,
+            "machine_module_supported": True,
+            "machine_module_unsupported_detail": str(machine_module.get("unsupported_detail", "")),
+            "machine_module_json_sha256": sha256_text(stable_json(machine_module)),
+            "expected_machine_opcode": expected_machine_opcode,
+            "expected_machine_opcode_found": opcode_found,
+            "segfault": False,
+            "legacy_fallback": False,
+            "status": "runtime_fail_closed",
+        }
     if expect_machine_module_json:
         if "native_v2_compile: emitted" in compile_log:
             raise SystemExit(f"{case_id} unexpectedly emitted f128 execution-pending ELF; log={compile_log_path}")
@@ -312,9 +365,9 @@ def emit(args: argparse.Namespace) -> int:
         "unsupported_widths_do_not_emit_elf": True,
         "front_half_unsupported_widths_do_not_emit_machine_module_json": True,
         "f128_blockers_emit_machine_module_json": True,
-        "f128_machine_module_supported": False,
+        "f128_machine_module_supported": "mixed",
+        "f128_runtime_fail_closed_rc12": True,
         "f128_machine_module_unsupported_details": [
-            "f128_arithmetic_pending",
             "call_arity_gt_8",
         ],
         "unsupported_widths_do_not_segfault": True,
@@ -331,11 +384,11 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_rounded_decimal_arithmetic_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_rounded_decimal_arithmetic_emits_runtime_helper_and_traps_rc12",
             "f128_native_v2_overwide_arg_shape_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",
-            "unsupported_numeric_widths_emit_no_elf",
+            "front_half_unsupported_numeric_widths_emit_no_elf",
             "i512_u512_front_half_rejections_emit_no_machine_module_json",
             "f128_blocker_cases_emit_unsupported_machine_module_json",
             "unsupported_numeric_widths_do_not_segfault_or_use_legacy_fallback",

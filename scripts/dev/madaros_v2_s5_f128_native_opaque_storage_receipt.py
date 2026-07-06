@@ -3,8 +3,10 @@
 
 S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
 words in native-v2 x86 ELF output. Later S5 receipts promote direct f128
-call/return shapes; this receipt still guards arithmetic and over-wide f128
-call shapes that exceed the promoted direct register+stack window.
+    call/return shapes and S5.8 promotes a finite runtime add/sub helper. This
+    receipt still guards over-wide f128 call shapes and records that rounded
+    decimal arithmetic fails closed through the S5.8 runtime trap rather than
+    full IEEE arithmetic.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ CASES: list[dict[str, Any]] = [
         "expected_exit": 0,
     },
     {
-        "case_id": "f128_rounded_decimal_arithmetic_stays_blocked",
-        "kind": "block",
-        "expected_detail": "f128_arithmetic_pending",
+        "case_id": "f128_rounded_decimal_arithmetic_runtime_traps",
+        "kind": "runtime_fail_closed",
+        "expected_runtime_rc": 12,
         "source": """fn main() -> i64 {
     let x: f128 = 0.1 as f128
     let y: f128 = 0.2 as f128
@@ -244,6 +246,31 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any]
                 "native_v2_emitted": True,
             }
         )
+    elif case["kind"] == "runtime_fail_closed":
+        if rc != 0 or "native_v2_compile: emitted" not in log:
+            raise SystemExit(f"{case_id}: expected runtime fail-closed ELF emission; log={log_path}")
+        if not elf_path.exists() or elf_path.stat().st_size <= 0:
+            raise SystemExit(f"{case_id}: missing runtime fail-closed ELF")
+        if module.get("supported") is not True:
+            raise SystemExit(f"{case_id}: runtime fail-closed helper MachineModule must be supported")
+        os.chmod(elf_path, 0o755)
+        run_rc, run_stdout, run_stderr = run_command([str(elf_path)], root, timeout_s)
+        run_log = run_stdout + run_stderr
+        expected_runtime_rc = int(case["expected_runtime_rc"])
+        if run_rc != expected_runtime_rc:
+            raise SystemExit(f"{case_id}: expected runtime rc={expected_runtime_rc}, got {run_rc}; run_log={run_log!r}")
+        result.update(
+            {
+                "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+                "run_rc": run_rc,
+                "run_log_sha256": sha256_text(run_log),
+                "expected_runtime_rc": expected_runtime_rc,
+                "native_v2_emitted": True,
+                "blocked_fail_closed": True,
+                "runtime_fail_closed": True,
+                "machine_unsupported_detail": "",
+            }
+        )
     else:
         detail = str(case["expected_detail"])
         if rc == 0 and elf_path.exists() and elf_path.stat().st_size > 0:
@@ -287,6 +314,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_truncated_arbitrary_decimal_materialization_promoted_elsewhere": True,
             "f128_native_ieee_binary128_materialization_promoted": False,
             "f128_native_arithmetic_promoted": False,
+            "f128_runtime_add_sub_helper_promoted_elsewhere": True,
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
             "f128_external_sysv_abi_promoted": False,
             "f128_sret_abi_promoted": False,
