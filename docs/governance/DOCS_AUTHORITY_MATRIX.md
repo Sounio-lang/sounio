@@ -338,6 +338,16 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.compiler-generic-struct-return-fix-prompt | repo_only | docs/handoff/compiler_generic_struct_return_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-impl-trait-for-type-fix-prompt | repo_only | docs/handoff/compiler_impl_trait_for_type_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-trait-bounded-dispatch-fix-prompt | repo_only | docs/handoff/compiler_trait_bounded_dispatch_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.bootstrap | repo_only | docs/handoff/continuity/BOOTSTRAP.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.scoreboard | repo_only | docs/handoff/continuity/SCOREBOARD.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a0 | repo_only | docs/handoff/continuity/WP-A0.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a1 | repo_only | docs/handoff/continuity/WP-A1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a2 | repo_only | docs/handoff/continuity/WP-A2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a3 | repo_only | docs/handoff/continuity/WP-A3.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a4 | repo_only | docs/handoff/continuity/WP-A4.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-a5 | repo_only | docs/handoff/continuity/WP-A5.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-b1 | repo_only | docs/handoff/continuity/WP-B1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.continuity.wp-b2 | repo_only | docs/handoff/continuity/WP-B2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.exact-engine-prereqs | repo_only | docs/handoff/exact_engine_prereqs.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-v0800-defects | repo_only | docs/handoff/souc_v0800_defects.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
