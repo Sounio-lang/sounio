@@ -143,6 +143,36 @@ struct StrsV1 {
     pub endpos: i64,
 }
 
+// Receipt v3 string blob (qd128 err lane): four roundoff labels ro0..ro3.
+struct StrsV2 {
+    pub se: i64,
+    pub sm: i64,
+    pub pfx: i64,
+    pub pfxlen: i64,
+    pub reg: i64,
+    pub reglen: i64,
+    pub val: i64,
+    pub vallen: i64,
+    pub ro0: i64,
+    pub ro0len: i64,
+    pub ro1: i64,
+    pub ro1len: i64,
+    pub ro2: i64,
+    pub ro2len: i64,
+    pub ro3: i64,
+    pub ro3len: i64,
+    pub lu: i64,
+    pub lulen: i64,
+    pub po: i64,
+    pub polen: i64,
+    pub frail: i64,
+    pub fraillen: i64,
+    pub stopfuel: i64,
+    pub stopfuellen: i64,
+    pub nl: i64,
+    pub endpos: i64,
+}
+
 // ---- geometry constants -----------------------------------------------------
 fn c_base() -> i64 { 4194304 }        // 0x400000
 fn c_state_off() -> i64 { 128 }
@@ -219,6 +249,52 @@ fn mem_u_off_v1(s: i64) -> i64 {
 fn mem_poison_off_v1(s: i64) -> i64 {
     if s < 8 { mp(s) } else { v1_mem_poison_base() + s * 8 }
 }
+
+// ---- v2 state layout (qd128 err lane) ---------------------------------------
+// v2 images dispatch to their own translator; a v2 ELF never mixes with v0/v1
+// state, so the v2 blocks reuse the whole state region with a fresh layout.
+// Each register is 6 CONTIGUOUS f64 (val, e0, e1, e2, e3, u = 48 bytes); the
+// contiguity lets the shared lane subroutines take one base offset and stride.
+// The v0 scratch/digit region [960..1536) is preserved verbatim so
+// em_print_uint / em_decompose keep working, and the v1 runtime counters in
+// sc(32..36),(55) are reused (sc(56..61) hold the 6-word fuel-stop snapshot).
+// Disjoint blocks (all >= 2048):
+//   regs:       64 * 48B at 2048 + r*48                 [2048 .. 5120)
+//   reg poison: 64 * i64 at 5120 + r*8                  [5120 .. 5632)
+//   mem:        32 * 48B at 5632 + s*48                 [5632 .. 7168)
+//   mem poison: 32 * i64 at 7168 + s*8                  [7168 .. 7424)
+//   qd scratch: 224 * f64 at 7424 + i*8                 [7424 .. 9216)
+// state top = 9216 (rbx-relative); strings blob at file 9472 (128 + 9216 + 128
+// slack) so it can NEVER overlap the state region (file top 128+9216 = 9344).
+fn v2_reg_base() -> i64 { 2048 }
+fn v2_lanes(r: i64) -> i64 { v2_reg_base() + r * 48 }
+fn v2_l_val() -> i64 { 0 }
+fn v2_l_e0() -> i64 { 8 }
+fn v2_l_e1() -> i64 { 16 }
+fn v2_l_e2() -> i64 { 24 }
+fn v2_l_e3() -> i64 { 32 }
+fn v2_l_u() -> i64 { 40 }
+fn v2_rp2(r: i64) -> i64 { 5120 + r * 8 }
+fn v2_mlanes(s: i64) -> i64 { 5632 + s * 48 }
+fn v2_mp2(s: i64) -> i64 { 7168 + s * 8 }
+fn v2q(i: i64) -> i64 { 7424 + i * 8 }
+fn v2_state_size() -> i64 { 9216 }
+fn v2_strings_off() -> i64 { 9472 }
+
+fn v2_reg_val_off(r: i64) -> i64 { v2_lanes(r) + v2_l_val() }
+fn v2_reg_e0_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e0() }
+fn v2_reg_e1_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e1() }
+fn v2_reg_e2_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e2() }
+fn v2_reg_e3_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e3() }
+fn v2_reg_u_off(r: i64) -> i64 { v2_lanes(r) + v2_l_u() }
+fn v2_reg_poison_off(r: i64) -> i64 { v2_rp2(r) }
+fn v2_mem_val_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_val() }
+fn v2_mem_e0_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e0() }
+fn v2_mem_e1_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e1() }
+fn v2_mem_e2_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e2() }
+fn v2_mem_e3_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e3() }
+fn v2_mem_u_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_u() }
+fn v2_mem_poison_off(s: i64) -> i64 { v2_mp2(s) }
 
 // f64 bit-pattern constants (sign 0)
 fn f64bits(exp: i64, mant: i64) -> i64 { exp * 4503599627370496 + mant }
@@ -1216,6 +1292,220 @@ fn em_v1_abs_copy(out: &![i8; 65536], p: i64, src_off: i64, dst_off: i64) -> i64
     pp
 }
 
+// ---- v2 (qd128) lane helpers ------------------------------------------------
+// Poison a v2 register: val = NaN, e0..e3 = 0, u = +Inf, poison = 1. Mirrors
+// evm_set_reg_poison -> write_reg_raw (make_nan, 0,0,+inf) with the two deep
+// components zeroed as write_reg_raw does on the v2 path.
+fn em_v2_set_poison(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, v2_reg_val_off(r))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_e0_off(r))
+    pp = st(out, pp, 0, v2_reg_e1_off(r))
+    pp = st(out, pp, 0, v2_reg_e2_off(r))
+    pp = st(out, pp, 0, v2_reg_e3_off(r))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, v2_reg_u_off(r))
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(r))
+    pp
+}
+
+// Normalise+validate a v2 register (I3 over all four err components). Poisons r
+// and leaves rax = 1 when bad, else rax = 0. The u lane must already be
+// canonicalised (-0.0 -> +0.0) by em_v1_normalize_u_lane before this runs, so
+// the raw sign-bit test is exact. Equivalent to normalize_reg_lane: a poisoned
+// register always carries val = NaN (caught by the val exponent test), and
+// lane_tuple_ok(val,e0,e1,u) plus the e2/e3 finiteness check are all covered by
+// testing exp == 0x7FF on val,e0,e1,e2,e3 and the u sign bit.
+fn em_v2_normalize(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_mem(out, p, v2_reg_val_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j1 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j2 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j3 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j4 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j5 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(r))
+    pp = shr_rax(out, pp, 63)
+    pp = test_rax(out, pp)
+    let j6 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)
+    pp = xor_rax(out, pp)
+    let j7 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let bad_lbl = pp
+    pp = em_v2_set_poison(out, pp, r)
+    pp = mov_rax_imm64(out, pp, 1)
+    let done_lbl = pp
+    patch32(out, j1, bad_lbl - (j1 + 4))
+    patch32(out, j2, bad_lbl - (j2 + 4))
+    patch32(out, j3, bad_lbl - (j3 + 4))
+    patch32(out, j4, bad_lbl - (j4 + 4))
+    patch32(out, j5, bad_lbl - (j5 + 4))
+    patch32(out, j6, bad_lbl - (j6 + 4))
+    patch32(out, j7, done_lbl - (j7 + 4))
+    pp
+}
+
+// Snapshot the 6-word v2 lane + poison for the fuel-stop receipt. sc(36)=idx,
+// sc(56..61)=val,e0,e1,e2,e3,u, sc(55)=poison.
+fn em_v2_set_last_written(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_imm64(out, p, r)
+    pp = mov_mem_rax(out, pp, sc(36))
+    pp = mov_rax_mem(out, pp, v2_reg_val_off(r))
+    pp = mov_mem_rax(out, pp, sc(56))
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(r))
+    pp = mov_mem_rax(out, pp, sc(57))
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(r))
+    pp = mov_mem_rax(out, pp, sc(58))
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(r))
+    pp = mov_mem_rax(out, pp, sc(59))
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(r))
+    pp = mov_mem_rax(out, pp, sc(60))
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(r))
+    pp = mov_mem_rax(out, pp, sc(61))
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(r))
+    pp = mov_mem_rax(out, pp, sc(55))
+    pp
+}
+
+// econst on the v2 path: write val = const bits, e0..e3 = 0, u = 0, poison = 0.
+fn em_v2_econst(out: &![i8; 65536], p: i64, dst: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, bits)
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    pp
+}
+
+// Emit a receipt v3 line for register dst (gate path). Byte-identical to
+// emit_receipt_v3: val, roundoff0..3, u, poisoned, frail[, stop=fuel].
+fn em_v2_emit_receipt(
+    out: &![i8; 65536],
+    p: i64,
+    dst: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV2,
+    force_poison_one: i64,
+    emit_stop_fuel: i64
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_imm64(out, pp, dst)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, v2_reg_val_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro0, s.ro0len)
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro1, s.ro1len)
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro2, s.ro2len)
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro3, s.ro3len)
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(dst))
+    pp = or_rax_mem(out, pp, sc(35))
+    if force_poison_one == 1 {
+        pp = mov_rax_imm64(out, pp, 1)
+    }
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    if emit_stop_fuel == 1 {
+        pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    }
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
+// Fuel-stop receipt v3 from the snapshot slots (forced poisoned=1, stop=fuel).
+fn em_v2_emit_fuel_stop_receipt(
+    out: &![i8; 65536],
+    p: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV2
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_mem(out, pp, sc(36))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, sc(56))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro0, s.ro0len)
+    pp = mov_rax_mem(out, pp, sc(57))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro1, s.ro1len)
+    pp = mov_rax_mem(out, pp, sc(58))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro2, s.ro2len)
+    pp = mov_rax_mem(out, pp, sc(59))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro3, s.ro3len)
+    pp = mov_rax_mem(out, pp, sc(60))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, sc(61))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
 // ---- shared subroutines -----------------------------------------------------
 // print_uint: decimal of unsigned rax to DIGIT buffer, then write(1,...).
 fn em_print_uint(out: &![i8; 65536], p: i64) -> i64 with Mut, Panic, Div {
@@ -1513,6 +1803,73 @@ fn build_strings_v1(out: &![i8; 65536], img: EisaxImage) -> StrsV1 with Mut, Div
     s.ro = p
     p = put_lit(out, p, " roundoff=s")
     s.rolen = p - s.ro
+
+    s.lu = p
+    p = put_lit(out, p, " u=s")
+    s.lulen = p - s.lu
+
+    s.po = p
+    p = put_lit(out, p, " poisoned=")
+    s.polen = p - s.po
+
+    s.frail = p
+    p = put_lit(out, p, " frail=")
+    s.fraillen = p - s.frail
+
+    s.stopfuel = p
+    p = put_lit(out, p, " stop=fuel")
+    s.stopfuellen = p - s.stopfuel
+
+    s.nl = p
+    p = put_lit(out, p, "\n")
+    s.endpos = p
+    s
+}
+
+fn build_strings_v2(out: &![i8; 65536], img: EisaxImage) -> StrsV2 with Mut, Div, Panic {
+    var s = StrsV2 {
+        se: 0, sm: 0, pfx: 0, pfxlen: 0, reg: 0, reglen: 0, val: 0, vallen: 0,
+        ro0: 0, ro0len: 0, ro1: 0, ro1len: 0, ro2: 0, ro2len: 0, ro3: 0, ro3len: 0,
+        lu: 0, lulen: 0, po: 0, polen: 0,
+        frail: 0, fraillen: 0, stopfuel: 0, stopfuellen: 0, nl: 0, endpos: 0,
+    }
+    var p = v2_strings_off()
+    let hash = eisax_prog_hash(img)
+
+    s.se = p
+    p = put_lit(out, p, "e")
+    s.sm = p
+    p = put_lit(out, p, "m")
+
+    s.pfx = p
+    p = put_lit(out, p, "eisa-receipt: v=3 prog=")
+    p = put_dec(out, p, hash)
+    p = put_lit(out, p, " gate=")
+    s.pfxlen = p - s.pfx
+
+    s.reg = p
+    p = put_lit(out, p, " reg=e")
+    s.reglen = p - s.reg
+
+    s.val = p
+    p = put_lit(out, p, " val=s")
+    s.vallen = p - s.val
+
+    s.ro0 = p
+    p = put_lit(out, p, " roundoff0=s")
+    s.ro0len = p - s.ro0
+
+    s.ro1 = p
+    p = put_lit(out, p, " roundoff1=s")
+    s.ro1len = p - s.ro1
+
+    s.ro2 = p
+    p = put_lit(out, p, " roundoff2=s")
+    s.ro2len = p - s.ro2
+
+    s.ro3 = p
+    p = put_lit(out, p, " roundoff3=s")
+    s.ro3len = p - s.ro3
 
     s.lu = p
     p = put_lit(out, p, " u=s")
@@ -1944,9 +2301,215 @@ fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta w
     BridgeMeta { len: total, status: 0 }
 }
 
+// v2 (qd128) AOT translator. Shares the v1 control-flow/fuel/branch machinery;
+// only the err lane deepens to 4 components and the receipt is v3. Opcodes not
+// yet implemented on the v2 path return a loud status (never emit garbage that
+// would run) per the W4 micro-step discipline.
+fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with Mut, Div, Panic {
+    var z = 0
+    while z < 16384 {
+        (*out)[z as usize] = 0 as i8
+        z = z + 1
+    }
+
+    let s = build_strings_v2(out, img)
+    let code_off = s.endpos
+
+    var p = code_off
+    let pu_off = p
+    p = em_print_uint(out, p)
+    let dp_off = p
+    let dss = Strs {
+        p0off: [0; 8], p0len: [0; 8], se: s.se, sm: s.sm, ro: 0, rolen: 0, lu: 0, lulen: 0, po: 0, polen: 0, nl: s.nl, endpos: s.endpos,
+    }
+    p = em_decompose(out, p, pu_off, &dss)
+    let ns_off = p
+    p = em_newton(out, p)
+
+    let main_off = p
+    p = put8(out, p, 0x48)
+    p = put8(out, p, 0xBB)
+    p = put64(out, p, c_state_vaddr())
+
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(33))
+    p = mov_mem_rax(out, p, sc(34))
+    p = mov_mem_rax(out, p, sc(35))
+    p = mov_rax_imm64(out, p, 0 - 1)
+    p = mov_mem_rax(out, p, sc(36))
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(55))
+    p = mov_mem_rax(out, p, sc(56))
+    p = mov_mem_rax(out, p, sc(57))
+    p = mov_mem_rax(out, p, sc(58))
+    p = mov_mem_rax(out, p, sc(59))
+    p = mov_mem_rax(out, p, sc(60))
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_rax_imm64(out, p, eisax_fuel(img))
+    p = mov_mem_rax(out, p, sc(32))
+
+    let n = eisax_n_code(img)
+    var starts: [i64; 256] = [0; 256]
+    var br_at: [i64; 512] = [0; 512]
+    var br_tgt: [i64; 512] = [0; 512]
+    var br_n = 0
+    var fuel_at: [i64; 512] = [0; 512]
+    var fuel_n = 0
+
+    var i = 0
+    while i < n {
+        starts[i as usize] = p
+        p = mov_rax_mem(out, p, sc(32))
+        p = cmp_rax(out, p, 0)
+        fuel_at[fuel_n as usize] = p + 2
+        p = jcc(out, p, 0x8E, 0)
+        fuel_n = fuel_n + 1
+        p = dec_rax(out, p)
+        p = mov_mem_rax(out, p, sc(32))
+
+        let op = eisax_code_op(img, i)
+        let dst = eisax_code_dst(img, i)
+        let a = eisax_code_a(img, i)
+        let b = eisax_code_b(img, i)
+
+        if dst < 0 || dst >= 64 {
+            return BridgeMeta { len: 0, status: 45 }
+        }
+
+        if op == op_econst() {
+            p = em_v2_econst(out, p, dst, const_bits(img, a))
+            p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
+            p = em_v2_set_last_written(out, p, dst)
+        } else {
+            if op == op_egate() {
+                p = em_v2_normalize(out, p, dst)
+                p = test_rax(out, p)
+                let jskip_glw = p + 2
+                p = jcc(out, p, 0x84, 0)
+                p = em_v2_set_last_written(out, p, dst)
+                let skip_glw = p
+                patch32(out, jskip_glw, skip_glw - (jskip_glw + 4))
+                p = inc_mem64(out, p, sc(33))
+                p = em_v2_emit_receipt(out, p, dst, pu_off, dp_off, &s, 0, 0)
+            } else {
+                if op == op_ebr() {
+                    br_at[br_n as usize] = p + 1
+                    br_tgt[br_n as usize] = a
+                    br_n = br_n + 1
+                    p = jmp32(out, p, 0)
+                } else {
+                    if op == op_ehalt() {
+                        br_at[br_n as usize] = p + 1
+                        br_tgt[br_n as usize] = n
+                        br_n = br_n + 1
+                        p = jmp32(out, p, 0)
+                    } else {
+                        // v2 arithmetic / control-flow templates not yet landed
+                        return BridgeMeta { len: 0, status: 42 }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    let run_end = p
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    let fuel_stop = p
+    p = mov_rax_mem(out, p, sc(36))
+    p = cmp_rax(out, p, 0)
+    let jlw_bad_lo = p + 2
+    p = jcc(out, p, 0x8C, 0)
+    p = cmp_rax(out, p, 63)
+    let jlw_ok = p + 2
+    p = jcc(out, p, 0x8E, 0)
+    let lw_bad = p
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(36))
+    p = mov_rax_mem(out, p, v2_reg_val_off(0))
+    p = mov_mem_rax(out, p, sc(56))
+    p = mov_rax_mem(out, p, v2_reg_e0_off(0))
+    p = mov_mem_rax(out, p, sc(57))
+    p = mov_rax_mem(out, p, v2_reg_e1_off(0))
+    p = mov_mem_rax(out, p, sc(58))
+    p = mov_rax_mem(out, p, v2_reg_e2_off(0))
+    p = mov_mem_rax(out, p, sc(59))
+    p = mov_rax_mem(out, p, v2_reg_e3_off(0))
+    p = mov_mem_rax(out, p, sc(60))
+    p = mov_rax_mem(out, p, v2_reg_u_off(0))
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_rax_mem(out, p, v2_reg_poison_off(0))
+    p = mov_mem_rax(out, p, sc(55))
+    let lw_done = p
+    patch32(out, jlw_bad_lo, lw_bad - (jlw_bad_lo + 4))
+    patch32(out, jlw_ok, lw_done - (jlw_ok + 4))
+    p = em_v2_emit_fuel_stop_receipt(out, p, pu_off, dp_off, &s)
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    i = 0
+    while i < fuel_n {
+        let at = fuel_at[i as usize]
+        patch32(out, at, fuel_stop - (at + 4))
+        i = i + 1
+    }
+    i = 0
+    while i < br_n {
+        let at = br_at[i as usize]
+        let t = br_tgt[i as usize]
+        let to = if t == n { run_end } else { starts[t as usize] }
+        patch32(out, at, to - (at + 4))
+        i = i + 1
+    }
+
+    let total = p
+    if total > 65536 { return BridgeMeta { len: 0, status: 3 } }
+    let base = c_base()
+    let entry = base + main_off
+
+    var _q = put8(out, 0, 0x7f)
+    _q = put8(out, 1, 0x45)
+    _q = put8(out, 2, 0x4c)
+    _q = put8(out, 3, 0x46)
+    _q = put8(out, 4, 2)
+    _q = put8(out, 5, 1)
+    _q = put8(out, 6, 1)
+    w16(out, 16, 2)
+    w16(out, 18, 0x3E)
+    w32(out, 20, 1)
+    w64(out, 24, entry)
+    w64(out, 32, 64)
+    w16(out, 52, 64)
+    w16(out, 54, 56)
+    w16(out, 56, 1)
+    w32(out, 64, 1)
+    w32(out, 68, 7)
+    w64(out, 72, 0)
+    w64(out, 80, base)
+    w64(out, 88, base)
+    w64(out, 96, total)
+    w64(out, 104, total)
+    w64(out, 112, 0x1000)
+
+    BridgeMeta { len: total, status: 0 }
+}
+
 pub fn bridge_translate(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with Mut, Div, Panic {
     let rc = eisax_validate(img)
     if rc != 0 { return BridgeMeta { len: 0, status: 1 } }
+    if img.w[1] == eisax_version_v2() {
+        return bridge_translate_v2(img, out)
+    }
     if img.w[1] == eisax_version_v1() {
         return bridge_translate_v1_stub(img, out)
     }

@@ -34,6 +34,7 @@ programs=(
   "v1-arith-high"
   "v1-fuel-high"
   "v1-branch-high"
+  "v2-const-gate"
 )
 
 for name in "${programs[@]}"; do
@@ -105,6 +106,7 @@ for name in "${programs[@]}"; do
   expected_prefix="v=1 prog="
   case "$name" in
     v1-*|v1e-*) expected_prefix="v=2 prog=" ;;
+    v2-*) expected_prefix="v=3 prog=" ;;
   esac
   if ! strings -a "$elf" | grep -q "$expected_prefix"; then
     echo "FAIL anti-vacuity ${name}: label prefix not found in ELF (strings check broken)"
