@@ -86,9 +86,14 @@ findings of the 2026-07-06 adversarial review (commit `33305c96`):
   "first" claim to criteria C1–C3; §2.2 resolves the determinism-vs-provenance
   tension; §4 pastes the exact frail predicate; §5 marks the −1.18e21 figure as
   corpus-measured. Internal adversarial verifier: 6/6 resolved.
-- **External §10 offload re-review is PENDING operator keys** (`.sounio-keys.env`
-  absent in this environment): run
-  `bin/llm-offload --raw docs/research/eisa-v2-positioning-2026-07-05.md deepseek xai gemini`.
+- **External §10 offload — DONE** (xai/Grok, keys at
+  `/workspace/.home/openvscode-server/.sounio-keys.env` via HOME override;
+  deepseek/openrouter/groq unfunded, so xai is the only funded provider). The
+  round-2 review returned 1 blocker + 2 major + 1 minor + 1 nit on the revised
+  draft, **all adopted** (commit `83856ecb`): C1–C3 per-tradition exclusion
+  table (§1), a self-contained decode recipe (§8), performance-as-estimate,
+  frail-in-conformance, and the lean_single audit pointer. A second funded
+  provider (deepseek balance / a gemini key) would strengthen it further.
 
 ## Remaining (operator-gated)
 
