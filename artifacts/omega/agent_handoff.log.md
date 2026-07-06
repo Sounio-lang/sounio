@@ -2915,3 +2915,54 @@ checks:
   - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:40:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+intent: |
+  CLAIM (WP-A3, Madaros generic-<F> phase 2): AST specializer in the MULTI-module
+  lane. module_frontend.sio is a serialized surface SHARED with WP-B1 — coordinate
+  before pushing. Edit is additive: a new fn module_frontend_specialized_typecheck
+  + two call-site branches in module_frontend_compile_imported_to_file and
+  module_frontend_merge_imported_into; plus two pub accessors in
+  self-hosted/check/specializer.sio (spec_last_instantiated, spec_append_item_lists).
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:55:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - self-hosted/check/specializer.sio
+  - tests/multimodule/wp_a3/{w2_mod,w2_main,w3_mod,w3_main}.sio
+intent: |
+  RELEASE (WP-A3 DONE). Design (a): the multi-module imported-compile path now
+  runs the generic specializer over the FULLY-MERGED item list (all modules'
+  items concatenated, main first) so an imported single-letter `struct F` is a
+  known name and never misread as a free type var. It is TYPE-CHECK-ONLY: when a
+  generic is actually instantiated (spec_last_instantiated), the verdict is taken
+  from the merged+monomorphized list (drops the E008 `CDElementExact__T`
+  mono-mismatch); the per-module `programs` array is left untouched so IR lowering
+  / cross-module merge is byte-identical. A first attempt COLLAPSED the modules
+  into programs[0] for both typecheck+lowering — that regressed a working case
+  (wrap::<i64>→W<i64> went rc=9 → BUILD_NO_ELF), so the collapse was dropped in
+  favor of typecheck-only.
+checks (Slurm madaros build from main.sio, fixed vs origin/main baseline):
+  - cd_exact_generic_i64 compile: E008 CDElementExact__T count 1 (baseline) -> 0 (fixed)
+  - W2 tests/multimodule/wp_a3/w2_main.sio: rc=9 (fixed, specializer fired)
+  - W3 tests/multimodule/wp_a3/w3_main.sio: rc=7 (fixed, no misfire, collapse=0)
+  - 8-test multi-module battery: byte-identical baseline<->fixed, all collapse=0
+  - turbofish 3/3 PASS; compile-fail turbofish_type_arg_arity still REJECTED (E010)
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A3): cd_exact still blocked by E035x3 (missing Mut,Div,Panic —
+  WP-A1 effect annotations) + E019x8/E007 (primitive-receiver dispatch — WP-A2).
+  A3 removed ONLY the E008 mono-mismatch, as briefed. Umbrella gate not run on the
+  pod (heavy); no-regression argued via the byte-identical battery + identical
+  single-module guards + the spec_last_instantiated gate (non-instantiating
+  multi-module code takes the unchanged per-module path).
