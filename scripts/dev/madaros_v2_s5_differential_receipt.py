@@ -22,11 +22,17 @@ from typing import Any
 
 SCHEMA_VERSION = "madaros.v2.s5.differential_receipt/0.1"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_PROMOTED_NOT_F128"
+STAGE_CONTRACT_LEVEL = "S5_11_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES"
 
 UNAVAILABLE_REFERENCE_CASES = {
     "f64_println_call_stdout_4_5": "lean_single prints f64 println without the trailing newline emitted by native-v2 print_char",
     "f64_let_bound_println_stdout_4_5": "lean_single prints let-bound f64 println without the trailing newline emitted by native-v2 print_char",
+    "imported_f128_identity_arg_return": "lean_single returns rc=1 for imported f128 return while native-v2 executes the promoted imported f128 ABI surface",
+    "imported_f128_return_only": "lean_single returns rc=1 for imported f128 return while native-v2 executes the promoted imported f128 ABI surface",
+    "imported_f128_arg_i64_return": "lean_single returns rc=1 for imported f128 arg call while native-v2 executes the promoted imported f128 ABI surface",
+    "imported_f128_plus_i64_arg_return": "lean_single returns rc=1 for imported mixed f128/i64 call while native-v2 executes the promoted imported f128 ABI surface",
+    "imported_two_f128_args_return": "lean_single returns rc=1 for imported two-f128-arg call while native-v2 executes the promoted imported f128 ABI surface",
+    "imported_two_f128_params_non_overlapping": "lean_single returns rc=1 for imported f128 param layout case while native-v2 executes the promoted imported f128 layout surface",
 }
 
 REQUIRED_CATEGORIES = {
@@ -39,6 +45,20 @@ REQUIRED_CATEGORIES = {
     "f64_xmm0",
     "wide_int_source",
     "generic_aggregate_sret",
+    "f128_arithmetic_value_contract",
+    "f128_opaque_call_return_abi",
+    "f128_sret_internal_arg_boundary",
+    "f128_param_slot_layout",
+}
+
+EXPECTED_CASE_COUNT = 78
+EXPECTED_MATCHED_CASE_COUNT = 70
+
+F128_PARAM_EXPECTED_EXITS = {
+    "local_two_f128_params_non_overlapping": 5,
+    "local_f128_i64_f128_params_non_overlapping": 7,
+    "imported_two_f128_params_non_overlapping": 12,
+    "f128_callee_add_args_slot_layout_feeds_runtime_helper": 0,
 }
 
 
@@ -60,6 +80,34 @@ def stable_json(payload: object) -> str:
 
 def pretty_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, indent=2) + "\n"
+
+
+def signed_i64(value: int) -> int:
+    if value >= (1 << 63):
+        return value - (1 << 64)
+    return value
+
+
+def u64_words_from_hex(hex_text: str) -> tuple[int, int]:
+    bits = int(hex_text, 16)
+    return (bits >> 64) & ((1 << 64) - 1), bits & ((1 << 64) - 1)
+
+
+def mov_rax_imm_pattern(value: int) -> bytes:
+    signed = signed_i64(value)
+    if -(1 << 31) <= signed <= (1 << 31) - 1:
+        return b"\x48\xc7\xc0" + (value & ((1 << 32) - 1)).to_bytes(4, "little", signed=False)
+    return b"\x48\xb8" + (value & ((1 << 64) - 1)).to_bytes(8, "little", signed=False)
+
+
+def metadata_rows(module: dict[str, Any]) -> list[list[int]]:
+    rows: list[list[int]] = []
+    meta = module.get("f128_literal_metadata", {})
+    for fn in meta.get("functions", []):
+        for row in fn.get("rows", []):
+            if isinstance(row, list) and len(row) >= 7:
+                rows.append([int(x) for x in row])
+    return rows
 
 
 def canonical_roundtrip(payload: dict[str, Any]) -> tuple[str, str]:
@@ -124,6 +172,10 @@ def case_source_rows(root: Path) -> list[dict[str, Any]]:
     f64 = load_module(root, "madaros_v2_s5_f64_xmm0_receipt")
     wide = load_module(root, "madaros_v2_s5_wide_int_receipt")
     generic = load_module(root, "madaros_v2_s5_generic_aggregate_sret_receipt")
+    f128_arith = load_module(root, "madaros_v2_s5_f128_arithmetic_value_contract_receipt")
+    f128_call = load_module(root, "madaros_v2_s5_f128_opaque_call_return_abi_receipt")
+    f128_sret = load_module(root, "madaros_v2_s5_f128_sret_internal_arg_boundary_receipt")
+    f128_param = load_module(root, "madaros_v2_s5_f128_param_slot_layout_receipt")
 
     rows: list[dict[str, Any]] = []
     for case_id, source_path, expected_exit, category in [
@@ -243,6 +295,55 @@ def case_source_rows(root: Path) -> list[dict[str, Any]]:
                 "declared_layout_bytes": int(case["declared_layout_bytes"]),
             }
         )
+    for case in f128_arith.POSITIVE:
+        rows.append(
+            {
+                "case_id": case["case_id"],
+                "category": "f128_arithmetic_value_contract",
+                "source": case["source"],
+                "expected_exit": 0,
+                "support_files": {},
+                "expected_binary128_hex": case["expected_hex"],
+                "expected_f128_metadata": case.get("expected_metadata"),
+                "expected_machine_opcode": int(case.get("expected_machine_opcode", 0) or 0),
+            }
+        )
+    for case in f128_call.POSITIVE_CASES:
+        rows.append(
+            {
+                "case_id": case["case_id"],
+                "category": "f128_opaque_call_return_abi",
+                "source": case["source"],
+                "expected_exit": int(case.get("expected_exit", 0)),
+                "support_files": dict(case.get("support_files", {})),
+                "callee": case["callee"],
+            }
+        )
+    for case in f128_sret.CASES:
+        rows.append(
+            {
+                "case_id": case["case_id"],
+                "category": "f128_sret_internal_arg_boundary",
+                "source": case["source"],
+                "expected_exit": int(case["expected_exit"]),
+                "support_files": {},
+                "callee": case["callee"],
+                "f128_boundary_kind": case["kind"],
+            }
+        )
+    for case in f128_param.CASES:
+        rows.append(
+            {
+                "case_id": case["case_id"],
+                "category": "f128_param_slot_layout",
+                "source": case["source"],
+                "expected_exit": F128_PARAM_EXPECTED_EXITS[str(case["case_id"])],
+                "support_files": dict(case.get("support_files", {})),
+                "callee": case["callee"],
+                "expected_source_f128_param_count": int(case["expected_source_f128_param_count"]),
+                "expected_f128_slot_rows": list(case["expected_f128_rows"]),
+            }
+        )
 
     seen: set[str] = set()
     for row in rows:
@@ -297,6 +398,7 @@ def emit_case(
     if not elf_path.is_file():
         raise SystemExit(f"{case_id} native-v2 compile did not produce ELF")
     elf_path.chmod(0o755)
+    elf_bytes = elf_path.read_bytes()
     machine_module = load_machine_module(mm_path)
 
     native_rc, native_stdout, native_stderr = run_command([str(elf_path)], root, timeout_s)
@@ -318,7 +420,7 @@ def emit_case(
     mismatch_reason = ""
     if native_rc != expected_exit:
         raise SystemExit(f"{case_id} native-v2 exit mismatch: expected {expected_exit}, got {native_rc}")
-    if lean_rc != expected_exit:
+    if available and lean_rc != expected_exit:
         raise SystemExit(f"{case_id} lean_single exit mismatch: expected {expected_exit}, got {lean_rc}")
     if available and native_stdout != lean_stdout:
         raise SystemExit(
@@ -326,8 +428,73 @@ def emit_case(
         )
     if not available:
         mismatch_reason = UNAVAILABLE_REFERENCE_CASES[case_id]
-        if native_stdout == lean_stdout:
-            raise SystemExit(f"{case_id} was listed unavailable but stdout now matches; update receipt contract")
+        if lean_rc == expected_exit and native_stdout == lean_stdout:
+            raise SystemExit(f"{case_id} was listed unavailable but now matches; update receipt contract")
+
+    expected_hex = case.get("expected_binary128_hex")
+    expected_metadata = case.get("expected_f128_metadata")
+    expected_machine_opcode = int(case.get("expected_machine_opcode", 0) or 0)
+    expected_f128_slot_rows = case.get("expected_f128_slot_rows")
+    f128_contract: dict[str, Any] = {}
+    if expected_hex is not None:
+        hi, lo = u64_words_from_hex(str(expected_hex))
+        hi_pattern = mov_rax_imm_pattern(hi)
+        lo_pattern = mov_rax_imm_pattern(lo)
+        hi_found = hi_pattern in elf_bytes
+        lo_found = lo_pattern in elf_bytes
+        if not hi_found:
+            raise SystemExit(f"{case_id} missing expected f128 high-word immediate")
+        if lo != 0 and not lo_found:
+            raise SystemExit(f"{case_id} missing expected f128 low-word immediate")
+        f128_contract.update(
+            {
+                "expected_binary128_hex": str(expected_hex),
+                "expected_hi_u64": hi,
+                "expected_lo_u64": lo,
+                "hi_mov_imm_pattern_found": hi_found,
+                "lo_mov_imm_pattern_found": lo_found,
+            }
+        )
+    if expected_metadata is not None:
+        rows = metadata_rows(machine_module)
+        expected_row = [int(x) for x in expected_metadata]
+        if expected_row not in [row[1:7] for row in rows]:
+            raise SystemExit(f"{case_id} missing expected f128 metadata row {expected_row}")
+        f128_contract["expected_f128_metadata"] = expected_row
+        f128_contract["metadata_row_found"] = True
+    if expected_machine_opcode != 0:
+        opcode_found = any(
+            isinstance(instr, list) and len(instr) > 0 and int(instr[0]) == expected_machine_opcode
+            for fn in machine_module.get("functions", [])
+            for instr in fn.get("instrs", [])
+        )
+        if not opcode_found:
+            raise SystemExit(f"{case_id} missing expected MachineIR opcode {expected_machine_opcode}")
+        f128_contract["expected_machine_opcode"] = expected_machine_opcode
+        f128_contract["expected_machine_opcode_found"] = True
+    if expected_f128_slot_rows is not None:
+        callee = str(case.get("callee", ""))
+        fn = next((fn for fn in machine_module.get("functions", []) if fn.get("name") == callee), None)
+        if fn is None:
+            raise SystemExit(f"{case_id} missing f128 slot-layout callee {callee}")
+        actual_count = int(fn.get("source_f128_param_count", -1))
+        expected_count = int(case["expected_source_f128_param_count"])
+        if actual_count != expected_count:
+            raise SystemExit(f"{case_id} f128 param count mismatch: {actual_count} != {expected_count}")
+        slots = machine_module.get("slot_metadata", {})
+        actual_rows: list[list[int]] = []
+        callee_index = int(fn.get("index", -1))
+        for row in slots.get("functions", []):
+            if int(row.get("fn_index", -2)) == callee_index:
+                for slot in row.get("slots", []):
+                    if isinstance(slot, list) and len(slot) >= 3 and int(slot[1]) == 3:
+                        actual_rows.append([int(slot[0]), int(slot[1]), int(slot[2])])
+        expected_rows = [[int(x) for x in row] for row in expected_f128_slot_rows]
+        if actual_rows != expected_rows:
+            raise SystemExit(f"{case_id} f128 slot rows mismatch: {actual_rows} != {expected_rows}")
+        f128_contract["expected_source_f128_param_count"] = expected_count
+        f128_contract["expected_f128_slot_rows"] = expected_rows
+        f128_contract["f128_slot_rows_match"] = True
 
     row = {
         "case_id": case_id,
@@ -351,7 +518,7 @@ def emit_case(
         "machine_module_supported": machine_module.get("supported"),
         "machine_module_unsupported_detail": machine_module.get("unsupported_detail"),
         "machine_module_legacy_fallback": machine_module["legacy_fallback"],
-        "elf_sha256": sha256_bytes(elf_path.read_bytes()),
+        "elf_sha256": sha256_bytes(elf_bytes),
         "native_stdout_sha256": sha256_bytes(native_stdout),
         "native_stderr_sha256": sha256_bytes(native_stderr),
         "lean_single_stdout_sha256": sha256_bytes(lean_stdout),
@@ -359,7 +526,18 @@ def emit_case(
         "native_stdout": native_stdout.decode("utf-8", errors="replace"),
         "lean_single_stdout": lean_stdout.decode("utf-8", errors="replace"),
     }
-    for key in ["expected_stdout", "wide_type", "wide_ops", "path_kind", "field_count", "declared_layout_bytes"]:
+    if f128_contract:
+        row["f128_value_contract_evidence"] = f128_contract
+    for key in [
+        "expected_stdout",
+        "wide_type",
+        "wide_ops",
+        "path_kind",
+        "field_count",
+        "declared_layout_bytes",
+        "callee",
+        "f128_boundary_kind",
+    ]:
         if key in case:
             row[key] = case[key]
     row["differential_case_sha256"] = sha256_text(stable_json(row))
@@ -377,10 +555,12 @@ def emit(args: argparse.Namespace) -> int:
     results = [emit_case(root, compiler, reference_souc, out_dir, case, args.timeout) for case in cases]
     matched = [row for row in results if row["status"] == "matched"]
     unavailable = [row for row in results if row["status"] == "reference_unavailable"]
-    if len(results) != 33:
-        raise SystemExit(f"differential receipt expected 33 cases, got {len(results)}")
-    if len(matched) != 31:
-        raise SystemExit(f"differential receipt expected 31 matched cases, got {len(matched)}")
+    if len(results) != EXPECTED_CASE_COUNT:
+        raise SystemExit(f"differential receipt expected {EXPECTED_CASE_COUNT} cases, got {len(results)}")
+    if len(matched) != EXPECTED_MATCHED_CASE_COUNT:
+        raise SystemExit(
+            f"differential receipt expected {EXPECTED_MATCHED_CASE_COUNT} matched cases, got {len(matched)}"
+        )
     if {row["case_id"] for row in unavailable} != set(UNAVAILABLE_REFERENCE_CASES):
         raise SystemExit(f"unexpected unavailable differential cases: {[row['case_id'] for row in unavailable]}")
     matched_categories = {str(row["category"]) for row in matched}
@@ -409,13 +589,22 @@ def emit(args: argparse.Namespace) -> int:
         "all_reference_available_cases_match_exit_and_stdout": True,
         "all_native_v2_cases_compile_without_legacy_fallback": True,
         "all_native_v2_cases_return_expected_exit": True,
-        "all_lean_single_cases_return_expected_exit": True,
+        "all_reference_available_lean_single_cases_return_expected_exit": True,
         "known_reference_unavailable_cases_recorded": True,
         "f128_promoted": False,
+        "f128_promoted_surface_differentials_complete": True,
+        "f128_arithmetic_value_contract_differential_complete": True,
+        "f128_opaque_call_return_abi_differential_complete": True,
+        "f128_sret_internal_arg_boundary_differential_complete": True,
+        "f128_param_slot_layout_differential_complete": True,
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,
-        "missing_full_obligations": ["f128 IR/MIR/ABI/software-helper receipts"],
+        "missing_full_obligations": [
+            "generic IEEE f128 software-helper semantics and differentials",
+            "external SysV f128 ABI/SRET differentials",
+            "arbitrary decimal f128 materialization beyond the finite value-contract case set",
+        ],
     }
     canonical, payload_sha = canonical_roundtrip(payload)
     payload["receipt_sha256"] = payload_sha

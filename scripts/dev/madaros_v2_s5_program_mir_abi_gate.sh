@@ -2041,14 +2041,14 @@ if differential_receipt.get("schema") != "madaros.v2.s5.differential_receipt/0.1
     raise SystemExit("bad S5 differential receipt schema")
 if differential_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing differential receipt")
-if differential_receipt.get("stage_contract_level") != "S5_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_PROMOTED_NOT_F128":
-    raise SystemExit("differential receipt must declare promoted native-v2/lean_single stage contract")
-if differential_receipt.get("case_count") != 33:
-    raise SystemExit("differential receipt must contain exact 33 cases")
-if differential_receipt.get("matched_case_count") != 31:
-    raise SystemExit("differential receipt must contain exact 31 matched comparable cases")
-if differential_receipt.get("reference_unavailable_case_count") != 2:
-    raise SystemExit("differential receipt must contain exact two reference-unavailable cases")
+if differential_receipt.get("stage_contract_level") != "S5_11_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES":
+    raise SystemExit("differential receipt must declare S5.11 promoted native-v2/lean_single stage contract")
+if differential_receipt.get("case_count") != 78:
+    raise SystemExit("differential receipt must contain exact 78 cases")
+if differential_receipt.get("matched_case_count") != 70:
+    raise SystemExit("differential receipt must contain exact 70 matched comparable cases")
+if differential_receipt.get("reference_unavailable_case_count") != 8:
+    raise SystemExit("differential receipt must contain exact eight reference-unavailable cases")
 required_differential_flags = [
     "native_v2_vs_lean_single_differential_complete",
     "s5_differential_native_v2_lean_single_complete",
@@ -2056,8 +2056,13 @@ required_differential_flags = [
     "all_reference_available_cases_match_exit_and_stdout",
     "all_native_v2_cases_compile_without_legacy_fallback",
     "all_native_v2_cases_return_expected_exit",
-    "all_lean_single_cases_return_expected_exit",
+    "all_reference_available_lean_single_cases_return_expected_exit",
     "known_reference_unavailable_cases_recorded",
+    "f128_promoted_surface_differentials_complete",
+    "f128_arithmetic_value_contract_differential_complete",
+    "f128_opaque_call_return_abi_differential_complete",
+    "f128_sret_internal_arg_boundary_differential_complete",
+    "f128_param_slot_layout_differential_complete",
 ]
 for field in required_differential_flags:
     if differential_receipt.get(field) is not True:
@@ -2075,6 +2080,10 @@ required_differential_categories = {
     "f64_xmm0",
     "wide_int_source",
     "generic_aggregate_sret",
+    "f128_arithmetic_value_contract",
+    "f128_opaque_call_return_abi",
+    "f128_sret_internal_arg_boundary",
+    "f128_param_slot_layout",
 }
 if set(differential_receipt.get("categories_compared", [])) != required_differential_categories:
     raise SystemExit("differential receipt categories mismatch")
@@ -2082,6 +2091,12 @@ differential_cases = {row.get("case_id"): row for row in differential_receipt.ge
 required_unavailable = {
     "f64_println_call_stdout_4_5",
     "f64_let_bound_println_stdout_4_5",
+    "imported_f128_identity_arg_return",
+    "imported_f128_return_only",
+    "imported_f128_arg_i64_return",
+    "imported_f128_plus_i64_arg_return",
+    "imported_two_f128_args_return",
+    "imported_two_f128_params_non_overlapping",
 }
 if {case_id for case_id, row in differential_cases.items() if row.get("status") == "reference_unavailable"} != required_unavailable:
     raise SystemExit("differential receipt reference-unavailable cases mismatch")
@@ -2097,6 +2112,59 @@ required_wide_source_differential_cases = {
     "source_u256_mul_add_ne",
     "source_i128_sub_eq_zero",
     "source_i256_add_eq",
+}
+required_f128_arithmetic_differential_cases = {
+    "f128_add_one_two_to_three",
+    "f128_mul_one_two_to_two",
+    "f128_add_half_half_to_one",
+    "f128_div_one_two_to_half",
+    "f128_chain_add_sub_to_one",
+    "f128_add_half_one_to_one_and_half",
+    "f128_mul_half_half_to_quarter",
+    "f128_mul_one_and_half_half_to_three_quarters",
+    "f128_add_quarter_one_to_one_and_quarter",
+    "f128_sub_half_one_to_negative_half",
+    "f128_add_negative_half_one_to_half",
+    "f128_add_negative_half_negative_half_to_negative_one",
+    "f128_mul_negative_half_half_to_negative_quarter",
+    "f128_div_negative_one_two_to_negative_half",
+    "f128_call_literal_return_then_add_to_three",
+    "f128_call_identity_return_then_add_to_three",
+    "f128_call_pick_first_return_then_add_to_three",
+    "f128_call_pick_second_return_then_add_to_three",
+    "f128_callee_add_args_runtime_helper_to_three",
+    "f128_callee_sub_args_runtime_helper_to_one",
+    "f128_callee_mul_args_runtime_helper_to_three_quarters",
+    "f128_callee_div_args_runtime_helper_to_half",
+    "f128_callee_div_negative_args_runtime_helper_to_negative_half",
+}
+required_f128_abi_differential_cases = {
+    "local_f128_identity_arg_return",
+    "local_f128_return_only",
+    "local_f128_arg_i64_return",
+    "imported_f128_identity_arg_return",
+    "imported_f128_return_only",
+    "imported_f128_arg_i64_return",
+    "imported_f128_plus_i64_arg_return",
+    "imported_two_f128_args_return",
+    "local_f128_plus_i64_arg_return",
+    "local_i64_plus_f128_arg_return",
+    "local_two_f128_args_return",
+    "local_mixed_arg_f128_return",
+    "local_four_f128_args_stack_return",
+    "local_five_f128_args_deeper_stack_return",
+}
+required_f128_sret_differential_cases = {
+    "direct_f128_then_i64_arithmetic_classifier_guard",
+    "sret_f128_arg_then_i64_arithmetic",
+    "sret_f128_arg_copied_to_f128_field_payload",
+    "sret_three_f128_args_crosses_stack_boundary",
+}
+required_f128_param_differential_cases = {
+    "local_two_f128_params_non_overlapping",
+    "local_f128_i64_f128_params_non_overlapping",
+    "imported_two_f128_params_non_overlapping",
+    "f128_callee_add_args_slot_layout_feeds_runtime_helper",
 }
 required_matched_cases = (
     required_scalar_differential_cases
@@ -2126,6 +2194,10 @@ required_matched_cases = (
     }
     | required_wide_source_differential_cases
     | set(required_generic_cases)
+    | required_f128_arithmetic_differential_cases
+    | required_f128_abi_differential_cases
+    | required_f128_sret_differential_cases
+    | required_f128_param_differential_cases
 ) - required_unavailable
 if {case_id for case_id, row in differential_cases.items() if row.get("status") == "matched"} != required_matched_cases:
     raise SystemExit("differential receipt matched case set mismatch")
@@ -2136,12 +2208,13 @@ for case_id, row in differential_cases.items():
         raise SystemExit(f"{case_id} differential case missing MachineModule or ELF hash")
     if row.get("native_v2_exit") != row.get("expected_exit"):
         raise SystemExit(f"{case_id} differential native-v2 exit mismatch")
-    if row.get("lean_single_exit") != row.get("expected_exit"):
+    if row.get("status") == "matched" and row.get("lean_single_exit") != row.get("expected_exit"):
         raise SystemExit(f"{case_id} differential lean_single exit mismatch")
     if row.get("status") == "matched" and row.get("stdout_equal") is not True:
         raise SystemExit(f"{case_id} matched differential case must have equal stdout")
-    if row.get("status") == "reference_unavailable" and row.get("stdout_equal") is not False:
-        raise SystemExit(f"{case_id} unavailable differential case must record stdout mismatch")
+    if row.get("status") == "reference_unavailable":
+        if row.get("lean_single_exit") == row.get("expected_exit") and row.get("stdout_equal") is True:
+            raise SystemExit(f"{case_id} unavailable differential case unexpectedly matches")
 
 if effect_receipt.get("schema") != "madaros.v2.s5.mir_effect_roundtrip/0.1":
     raise SystemExit("bad S5 MIR-effect receipt schema")
@@ -2902,7 +2975,7 @@ module = {
         "s4_negative_and_blocked_controls_not_promoted",
         "s4_applied_extraction_hash_propagates_to_program_receipt",
         "each_mir_effect_is_bound_to_a_source_s4_applied_effect_hash",
-        "f128_ieee_helpers_and_abi_differentials_still_required_before_s5_ready",
+        "f128_promoted_surface_differentials_recorded_generic_ieee_and_external_abi_still_required_before_s5_ready",
     ],
 }
 canonical_module, module_sha = canonical_roundtrip(module)
@@ -3128,7 +3201,7 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
-        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, full IEEE helper lowering, and f128 differential receipts",
+        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper lowering/differentials",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -3141,6 +3214,6 @@ PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul/div runtime helper execution, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
-echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout cases; generic IEEE f128 helper and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"
