@@ -17,9 +17,19 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.seden
 **One line.** Of the 112 mixed-half signed two-support sedenion primitives, **exactly 84 participate in a
 zero-divisor pair and 28 participate in none**, and the 28 dead ones are **exactly the `e8` family** —
 the imaginary unit that doubles the octonions into the sedenions, plus its xor-grade-8 diagonal. The
-zero-divisor geometry lives strictly *away from the doubling seam*. Computed by the running language
-from the exact Cayley–Dickson product (decidable integer equality, no tolerance) and cross-verified
-element-wise against an independent Python toolchain.
+zero-divisor geometry lives strictly *away from the doubling seam*.
+
+**Prior work and contribution (read this first).** The `84/28` split and the e8-characterization were
+already established **empirically, in Python**, in `SEDENION_ZERO_DIVISOR_GEOMETRY_REPORT.md` (finding #2:
+*"the excluded cases are precisely the ones touching `e8` or having xor-label 8"*). This document does
+**not** claim that discovery. Its contribution is threefold: (a) **executes** the boundary in the running
+Sounio language as decidable ℤ-equality (no float, no tolerance); (b) **cross-verifies** the 28 *specific*
+excluded triples element-wise across two souc builds and an independent Python implementation (guarding
+against souc's silent-miscompile mode — a bare `PASS` is not proof of execution); and (c) identifies the
+boundary as the **exact justification of the 168-census's generation filter** (`hi∈{9..15}, lo^hi≠8`),
+which previously assumed it silently. All three legs transcribe the *same* Cayley–Dickson sign law, so the
+cross-check certifies implementation-agreement, not spec-independence; the independent-spec leg is Lean's
+`native_decide` (see "Lean-friendly next target").
 
 ## Setup
 
