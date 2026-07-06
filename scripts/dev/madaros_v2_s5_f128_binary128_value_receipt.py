@@ -74,6 +74,10 @@ CASES: list[Case] = [
     Case("negative_scale18_rounded", "-1e-18", "bfc32725dd1d243aba0e75fe645cc487", "normal", False),
     Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", "normal", False),
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", "normal", False),
+    Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", "subnormal", False),
+    Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", "zero", False),
+    Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", "infinity", False),
+    Case("overflow_to_negative_infinity", "-1e5000", "ffff0000000000000000000000000000", "infinity", False),
 ]
 
 PROBE_SOURCE = (
@@ -219,7 +223,20 @@ def binary128_from_decimal(literal: str) -> dict[str, Any]:
             e += 1
         exponent_field = e + BINARY128_EXP_BIAS
         if exponent_field >= BINARY128_EXP_MAX:
-            raise SystemExit(f"binary128 overflow for finite receipt case: {literal}")
+            bits = (sign << 127) | (BINARY128_EXP_MAX << BINARY128_FRACTION_BITS)
+            return {
+                "literal": literal,
+                "class": "infinity",
+                "sign": sign,
+                "exponent_field": BINARY128_EXP_MAX,
+                "fraction_hi": 0,
+                "fraction_lo": 0,
+                "hex": f"{bits:032x}",
+                "rounded": True,
+                "tie_to_even": False,
+                "exact": False,
+                **decimal_metadata,
+            }
         fraction = significand - (1 << BINARY128_FRACTION_BITS)
         cls = "normal"
     else:
@@ -232,6 +249,8 @@ def binary128_from_decimal(literal: str) -> dict[str, Any]:
         else:
             exponent_field = 0
             cls = "subnormal"
+        if exponent_field == 0 and fraction == 0:
+            cls = "zero"
 
     if fraction < 0 or fraction >= (1 << BINARY128_FRACTION_BITS):
         raise SystemExit(f"bad binary128 fraction for {literal}: {fraction}")
@@ -300,6 +319,7 @@ def emit(args: argparse.Namespace) -> int:
         "probe_check_log_sha256": sha256_text(check_log),
         "f128_binary128_value_contract_complete": True,
         "f128_binary128_round_ties_to_even_recorded": True,
+        "f128_binary128_subnormal_underflow_overflow_recorded": True,
         "f128_binary128_sign_exponent_fraction_recorded": True,
         "f128_binary128_anchor_cases_verified": True,
         "f128_binary128_decimal_metadata_bridge_recorded": True,
@@ -311,6 +331,7 @@ def emit(args: argparse.Namespace) -> int:
             "finite_decimal_literal_to_binary128_uses_exact_rational_arithmetic",
             "binary128_rounding_mode_is_roundTiesToEven",
             "zero_sign_is_preserved",
+            "subnormal_underflow_and_finite_overflow_to_infinity_classes_are_recorded",
             "normal_anchor_encodings_for_0_5_1_0_2_0_are_verified",
             "high_precision_decimal_probe_frontend_checks_as_f128",
             "receipt_records_sign_exponent_and_112_fraction_bits_as_two_limbs",

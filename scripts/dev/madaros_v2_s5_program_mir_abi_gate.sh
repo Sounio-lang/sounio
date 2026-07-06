@@ -1032,11 +1032,12 @@ if f128_binary128_value_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
 if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
     raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
-if f128_binary128_value_receipt.get("case_count") != 35:
-    raise SystemExit("f128 binary128 value receipt must contain exact thirty-five cases")
+if f128_binary128_value_receipt.get("case_count") != 39:
+    raise SystemExit("f128 binary128 value receipt must contain exact thirty-nine cases")
 for field in [
     "f128_binary128_value_contract_complete",
     "f128_binary128_round_ties_to_even_recorded",
+    "f128_binary128_subnormal_underflow_overflow_recorded",
     "f128_binary128_sign_exponent_fraction_recorded",
     "f128_binary128_anchor_cases_verified",
     "f128_binary128_decimal_metadata_bridge_recorded",
@@ -1088,6 +1089,16 @@ required_f128_value_hex = {
     "negative_scale18_rounded": "bfc32725dd1d243aba0e75fe645cc487",
     "large_scale6_rounded": "4023cbe991a14587e5a78f25a250f840",
     "large_all_nines_scale6_rounded": "4026d1a94a1fffffffde7210be9424e6",
+    "minimum_subnormal_rounded": "00000000000000000000000000000001",
+    "underflow_to_positive_zero": "00000000000000000000000000000000",
+    "overflow_to_positive_infinity": "7fff0000000000000000000000000000",
+    "overflow_to_negative_infinity": "ffff0000000000000000000000000000",
+}
+required_f128_value_classes = {
+    "minimum_subnormal_rounded": "subnormal",
+    "underflow_to_positive_zero": "zero",
+    "overflow_to_positive_infinity": "infinity",
+    "overflow_to_negative_infinity": "infinity",
 }
 if set(f128_value_cases) != set(required_f128_value_hex):
     raise SystemExit(f"f128 binary128 value receipt cases mismatch: {sorted(f128_value_cases)}")
@@ -1097,6 +1108,9 @@ for case_id, expected_hex in required_f128_value_hex.items():
         raise SystemExit(f"{case_id} expected binary128 hex {expected_hex}, got {row.get('hex')}")
     if "fraction_hi" not in row or "fraction_lo" not in row or "exponent_field" not in row:
         raise SystemExit(f"{case_id} must record sign/exponent/fraction limbs")
+for case_id, expected_class in required_f128_value_classes.items():
+    if f128_value_cases.get(case_id, {}).get("class") != expected_class:
+        raise SystemExit(f"{case_id} expected binary128 class {expected_class}")
 if f128_value_cases.get("high_precision_probe", {}).get("decimal_digit_count") != 35:
     raise SystemExit("high_precision_probe must preserve 35 decimal digits in the binary128 value receipt")
 if f128_value_cases.get("high_precision_probe", {}).get("decimal_scale10") != 34:
