@@ -77,6 +77,55 @@ fn main() -> i64 {
         "callee": "id_f128_imported",
     },
     {
+        "case_id": "imported_f128_return_only",
+        "support_files": {"f128_lib.sio": "pub fn ret_f128_imported() -> f128 { 1.0 as f128 }\n"},
+        "source": """import "f128_lib.sio"
+fn main() -> i64 {
+  let x: f128 = ret_f128_imported()
+  let y: f128 = x
+  0
+}
+""",
+        "callee": "ret_f128_imported",
+    },
+    {
+        "case_id": "imported_f128_arg_i64_return",
+        "support_files": {"f128_lib.sio": "pub fn sink_f128_imported(x: f128) -> i64 { 11 }\n"},
+        "source": """import "f128_lib.sio"
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  sink_f128_imported(x)
+}
+""",
+        "callee": "sink_f128_imported",
+        "expected_exit": 11,
+    },
+    {
+        "case_id": "imported_f128_plus_i64_arg_return",
+        "support_files": {"f128_lib.sio": "pub fn pick_f128_imported(x: f128, y: i64) -> f128 { x }\n"},
+        "source": """import "f128_lib.sio"
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let z: f128 = pick_f128_imported(x, 3)
+  0
+}
+""",
+        "callee": "pick_f128_imported",
+    },
+    {
+        "case_id": "imported_two_f128_args_return",
+        "support_files": {"f128_lib.sio": "pub fn two_f128_imported(a: f128, b: f128) -> i64 { 12 }\n"},
+        "source": """import "f128_lib.sio"
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 0.5 as f128
+  two_f128_imported(a, b)
+}
+""",
+        "callee": "two_f128_imported",
+        "expected_exit": 12,
+    },
+    {
         "case_id": "local_f128_plus_i64_arg_return",
         "source": """fn mix(x: f128, y: i64) -> i64 { y }
 fn main() -> i64 {
@@ -353,6 +402,9 @@ def emit(args: argparse.Namespace) -> None:
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_opaque_direct_expanded_gpr_call_abi_promoted": True,
         "f128_opaque_direct_stack_call_abi_promoted": True,
+        "f128_opaque_imported_direct_call_return_abi_promoted": True,
+        "f128_native_internal_call_abi_promoted": True,
+        "f128_native_internal_return_abi_promoted": True,
         "f128_machineir_return_high_word_capture_promoted": True,
         "f128_external_sysv_abi_promoted": False,
         "f128_sret_abi_promoted": False,

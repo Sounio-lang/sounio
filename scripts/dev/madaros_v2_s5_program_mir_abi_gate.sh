@@ -1381,16 +1381,19 @@ if f128_opaque_call_return_abi_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 opaque call-return ABI receipt")
 if f128_opaque_call_return_abi_receipt.get("stage_contract_level") != "S5_5_F128_OPAQUE_DIRECT_CALL_RETURN_ABI_PROMOTED":
     raise SystemExit("f128 opaque call-return ABI receipt must declare S5.5 stage contract")
-if f128_opaque_call_return_abi_receipt.get("case_count") != 12:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact twelve cases")
-if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 10:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact ten positive cases")
+if f128_opaque_call_return_abi_receipt.get("case_count") != 16:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact sixteen cases")
+if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 14:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact fourteen positive cases")
 if f128_opaque_call_return_abi_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 opaque call-return ABI receipt must contain exact two negative cases")
 for field in [
     "f128_opaque_direct_call_return_abi_promoted",
     "f128_opaque_direct_expanded_gpr_call_abi_promoted",
     "f128_opaque_direct_stack_call_abi_promoted",
+    "f128_opaque_imported_direct_call_return_abi_promoted",
+    "f128_native_internal_call_abi_promoted",
+    "f128_native_internal_return_abi_promoted",
     "f128_machineir_return_high_word_capture_promoted",
 ]:
     if f128_opaque_call_return_abi_receipt.get(field) is not True:
@@ -1410,6 +1413,10 @@ required_f128_call_cases = {
     "local_f128_return_only",
     "local_f128_arg_i64_return",
     "imported_f128_identity_arg_return",
+    "imported_f128_return_only",
+    "imported_f128_arg_i64_return",
+    "imported_f128_plus_i64_arg_return",
+    "imported_two_f128_args_return",
     "local_f128_plus_i64_arg_return",
     "local_i64_plus_f128_arg_return",
     "local_two_f128_args_return",
@@ -1426,6 +1433,10 @@ for case_id in [
     "local_f128_return_only",
     "local_f128_arg_i64_return",
     "imported_f128_identity_arg_return",
+    "imported_f128_return_only",
+    "imported_f128_arg_i64_return",
+    "imported_f128_plus_i64_arg_return",
+    "imported_two_f128_args_return",
     "local_f128_plus_i64_arg_return",
     "local_i64_plus_f128_arg_return",
     "local_two_f128_args_return",
@@ -2145,8 +2156,8 @@ not_promoted = [
     },
     {
         "surface": "f128_numeric_width",
-        "status": "opaque_local_storage_copy_and_exact_value_contract_arithmetic_promoted_generic_arithmetic_and_abi_not_promoted",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, S5.2 native-v2 local opaque storage/copy execution, S5.3 native binary128 anchor materialization, S5.4 native materialization for the complete current f128 value-contract case set, and S5.6 native arithmetic for a finite exact decimal-tenths plus quarter value-contract matrix with one-chain metadata propagation. Arbitrary decimal binary128 materialization, generic IEEE arithmetic, call ABI, and return ABI remain fail-closed.",
+        "status": "opaque_storage_value_contract_arithmetic_and_internal_call_return_abi_promoted_generic_ieee_not_promoted",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, S5.2 native-v2 local opaque storage/copy execution, S5.3 native binary128 anchor materialization, S5.4 native materialization for the complete current f128 value-contract case set, S5.5 internal native-v2 local/imported direct call-return ABI, and S5.6 native arithmetic for a finite exact decimal-tenths plus quarter value-contract matrix with one-chain metadata propagation. Arbitrary decimal binary128 materialization, generic IEEE arithmetic, external SysV f128 ABI, and f128 SRET remain fail-closed.",
     },
     {
         "surface": "f128_literal_decimal_metadata_and_type",
@@ -2161,7 +2172,7 @@ not_promoted = [
     {
         "surface": "f128_binary128_native_anchor_materialization",
         "status": "promoted_for_exact_0_5_and_1_0_anchors_only",
-        "reason": "native-v2 emits and runs local f128 literal/copy programs for exact 0.5 and 1.0, and the emitted ELF contains the expected IEEE-754 binary128 high-word mov immediates; no general decimal, arithmetic, call ABI, or return ABI promotion is claimed",
+        "reason": "native-v2 emits and runs local f128 literal/copy programs for exact 0.5 and 1.0, and the emitted ELF contains the expected IEEE-754 binary128 high-word mov immediates; no general decimal, generic IEEE arithmetic, external SysV ABI, or SRET promotion is claimed",
     },
     {
         "surface": "f128_binary128_value_contract_native_materialization",
@@ -2453,6 +2464,9 @@ module = {
         "case_count": f128_opaque_call_return_abi_receipt["case_count"],
         "positive_case_count": f128_opaque_call_return_abi_receipt["positive_case_count"],
         "negative_case_count": f128_opaque_call_return_abi_receipt["negative_case_count"],
+        "f128_opaque_imported_direct_call_return_abi_promoted": f128_opaque_call_return_abi_receipt["f128_opaque_imported_direct_call_return_abi_promoted"],
+        "f128_native_internal_call_abi_promoted": f128_opaque_call_return_abi_receipt["f128_native_internal_call_abi_promoted"],
+        "f128_native_internal_return_abi_promoted": f128_opaque_call_return_abi_receipt["f128_native_internal_return_abi_promoted"],
         "cases": f128_opaque_call_return_abi_receipt["cases"],
     },
     "f128_binary128_native_anchor_receipt": {
@@ -2531,6 +2545,9 @@ module = {
         "f128_native_opaque_storage_promoted": True,
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_opaque_direct_stack_call_abi_promoted": True,
+        "f128_opaque_imported_direct_call_return_abi_promoted": True,
+        "f128_native_internal_call_abi_promoted": True,
+        "f128_native_internal_return_abi_promoted": True,
         "f128_machineir_return_high_word_capture_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
@@ -2589,7 +2606,7 @@ module = {
         "f128_binary128_native_anchor_materialization_promoted_for_exact_0_5_and_1_0_only",
         "f128_binary128_value_contract_native_materialization_promoted_for_current_case_set_including_truncated_high_precision_decimals",
         "f128_arithmetic_value_contract_promoted_for_finite_decimal_tenths_matrix_with_one_chain",
-        "f128_opaque_direct_call_return_abi_promoted_for_return_only_mixed_order_two_f128_imported_direct_and_four_f128_stack_shapes",
+        "f128_opaque_direct_call_return_abi_promoted_for_local_and_imported_return_only_mixed_order_two_f128_direct_and_stack_shapes",
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
         "f128_ieee_arithmetic_and_abi_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
@@ -2685,6 +2702,9 @@ receipt = {
     "f128_native_opaque_storage_promoted": True,
     "f128_opaque_direct_call_return_abi_promoted": True,
     "f128_opaque_direct_stack_call_abi_promoted": True,
+    "f128_opaque_imported_direct_call_return_abi_promoted": True,
+    "f128_native_internal_call_abi_promoted": True,
+    "f128_native_internal_return_abi_promoted": True,
     "f128_machineir_return_high_word_capture_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
@@ -2771,6 +2791,9 @@ receipt = {
     "f128_native_opaque_storage_promoted": module["scalar_abi_receipts"]["f128_native_opaque_storage_promoted"],
     "f128_opaque_direct_call_return_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_call_return_abi_promoted"],
     "f128_opaque_direct_stack_call_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_stack_call_abi_promoted"],
+    "f128_opaque_imported_direct_call_return_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_imported_direct_call_return_abi_promoted"],
+    "f128_native_internal_call_abi_promoted": module["scalar_abi_receipts"]["f128_native_internal_call_abi_promoted"],
+    "f128_native_internal_return_abi_promoted": module["scalar_abi_receipts"]["f128_native_internal_return_abi_promoted"],
     "f128_machineir_return_high_word_capture_promoted": module["scalar_abi_receipts"]["f128_machineir_return_high_word_capture_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
@@ -2799,7 +2822,7 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
-        "f128 arithmetic beyond the finite decimal-tenths plus quarter value-contract matrix, f128 call ABI, f128 return ABI, and f128 differential receipts",
+        "f128 arithmetic beyond the finite decimal-tenths plus quarter value-contract matrix, external SysV f128 ABI/SRET, full IEEE helper lowering, and f128 differential receipts",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -2810,7 +2833,7 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite decimal-tenths and quarter value-contract arithmetic, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
