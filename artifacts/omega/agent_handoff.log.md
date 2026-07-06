@@ -2966,3 +2966,64 @@ notes: |
   pod (heavy); no-regression argued via the byte-identical battery + identical
   single-module guards + the spec_last_instantiated gate (non-instantiating
   multi-module code takes the unchanged per-module path).
+
+---
+
+agent: claude
+time_utc: 2026-07-06T20:35:00Z
+files:
+  - self-hosted/check/check.sio
+  - self-hosted/check/compat.sio
+  - self-hosted/ir/lower.sio
+intent: |
+  CLAIM WP-A2 (Madaros trait-method dispatch on PRIMITIVE receivers). Fixing the
+  checker E019 method-call gate that rejects `impl R for i64 { fn m(self,..) }`
+  dispatch in BOTH the in-place and value checker lanes, plus IR mangling for
+  non-ident (array-element) primitive receivers.
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T20:50:00Z
+files:
+  - self-hosted/check/check.sio
+  - self-hosted/check/compat.sio
+  - self-hosted/ir/lower.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  RELEASE WP-A2. Root cause: the method-call checker gate only routed struct
+  (TyNamed) receivers through fn_sig_table_find_method_semantic; primitive
+  receivers (empty .name, disambiguated on kind) fell to the else -> error[E019]
+  "method calls are not supported for this type". Fix, in ALL THREE call-site
+  E019 emitters (in-place checker_check_method_call_with_base_ty_inplace + BOTH
+  value fns check_method_call / check_method_call_with_base_ty): add an
+  `is_primitive_receiver_type(base_ty)` branch (new helper in compat.sio =
+  numeric|bool|char) mirroring the struct branch — semantic lookup by kind, E019
+  preserved only on genuine lookup miss. lower.sio: (1) lower_method_recv_type
+  gains an ExprIndex fallback returning "i64"/"f64" so an imported array-element
+  receiver `a.c[i].er_add(b.c[i])` mangles to the emitted `i64$er_add` symbol
+  instead of a body-less bare-name fn; (2) let-binding scalar_kind classifier now
+  marks `let r = f(..)`/`x.m(..)` int when the callee positively returns i64,
+  fixing a `println(r)` SIGSEGV (i64 routed through the char* printer).
+checks (Slurm job 5490, madaros.elf built from main.sio, run-verified rc/stdout):
+  - W1 use2::<i64> rmix(self*10+o): (2,3)->rc23, (7,4)->rc74  PASS
+  - W2 g::<i64> ea(self+o) (20,3)->rc23; g::<Wrap>(20,3).v (self.v*o.v)->rc60  PASS
+  - W3 trait_bounded_dispatch.sio -> "5"/"spike PASS" rc=0  PASS
+  - regressions GREEN: trait_bounded_dispatch_struct "10"/"struct PASS";
+    impl_trait_for_type "3"/"spike PASS"; impl_trait_for_type_multi 7/9/10/"multi PASS";
+    turbofish 3/3; generic_struct_basic "generic struct parse ok"
+  - compile-fail turbofish_type_arg_arity still REJECTED with error[E010]
+  - BONUS: cd_exact_generic_i64 imported lane error[E019] count 8 -> 0
+commit: pending
+status: lock-released
+notes: |
+  RESIDUAL (NOT A2, logged in new-gap ledger): W4 trait_bounded_dispatch_multi_call.sio
+  still rc=1 with E009x3 "expected i64 found F" + E008 "expected F found i64" —
+  a specializer transitive-instantiation gap (a generic fn passing its own type
+  param as a nested turbofish arg: `fn combine<F>{ compute::<F>(a,b) }`). It hits
+  the STRUCT path too, so it is upstream of receiver typing; revealed only after
+  A2 removed the E019 wall. Belongs to the specializer (A3/A5), not method
+  dispatch. cd_exact still gated by E035x3 (WP-A1 effects). Umbrella gate not run
+  on the pod (heavy); no-regression argued via the green witness+regression
+  battery and the disjoint-kind branch insertion (primitive kinds only).
