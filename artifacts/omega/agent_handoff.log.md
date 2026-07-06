@@ -3068,53 +3068,52 @@ notes: |
   territory), NOT by A7. No new gap introduced.
 
 ---
-session: A8 (Opus) — cross-module large-struct forwarding lowering blocker
-timestamp: 2026-07-06
-action: CLAIM+RELEASE
-wp: A8 (FINAL A5) — cross-module large-struct SRET forwarding lowering segfault
-branch: fix/madaros-crossmod-sret-lowering (base fix/madaros-checker-intwidth)
-status: BLOCKED (root-caused, not fixed)
-finding: |
-  The original A8 hypothesis (compile-time SIGSEGV in the module_frontend
-  dep-lowering `while i < loaded` loop at `lower_array: dep_begin <i>`) is FALSE
-  for the minimal/non-generic cross-module case. Verified on Slurm-built madaros
-  (FALSE-GREEN guard: every ELF run, actual rc/stdout asserted):
-    - sret_forwarding_cross_module_min ([i64;256], 2 modules): BUILD rc=0, RUN rc=139
-    - sret_forwarding_cross_module_cd_mul ([f64;2048]):        BUILD rc=0, RUN rc=139
-    - a8_diag_single (SAME shape, single module):              BUILD rc=0, RUN rc=0  (OK)
-    - a8_diag_ctrl (imported scalar + direct-literal Small):   RUN rc=0  (OK)
-    - a8_diag_step: imported big_zero (direct) prints OK; big_basis (forward) SIGSEGV
-    - a8_diag_fwd (imported Small{[i64;4]} forward):           RUN rc=139  (SIZE-INDEPENDENT)
-    - sret_8_field_return / generic_struct_return (A4 guards): RUN rc=0  (no regression)
-    - cd_exact_generic_i64: BUILD rc=139 (SEPARATE compile-time crash at dep_begin 1 —
-      the A6-ledger generic/chain-import gap, NOT this bug)
-  ROOT CAUSE (Defect 1, the crasher): the Madaros imported-lane (summary+bodies)
-  body lowering miscompiles `var r = <inner same-module struct-returning call>`.
-  Post-finalize merged IR of small_basis_fwd:
-      i0 Call dst=3 arg=[2] fn=5 ; i1 LoadImm dst=3 imm=1 ; i4 FieldGet dst=5 s1=2 fi=0
-      i5 IndexSet s1=5 s2=1 imm=3 ; i6 Return s1=2
-  `r` is vreg2 (FieldGet base + Return) but the call result lands in vreg3 (then
-  clobbered by the literal 1); the call ARG is vreg2 (uninitialized — param k=vreg0
-  is never passed). So r is never assigned the result → `r.c[idx]`/`return r` deref
-  a garbage handle. Disasm of the ELF (small_basis_fwd @0x4012c4) confirms: field
-  base loaded from -0x18(=vreg2, uninitialized), `mov 0x0(%rax),%rax` faults.
-  Finalize passes only rewrite fn_id/name (never vregs) → the scramble is produced
-  by the body lowering itself; the single-module single-pass lowering is correct.
-  Defect 2 (independent, not the crash): compaction collapses distinct *_zero call
-  targets onto one fn_id (small_basis_fwd calls fn=5=big_zero).
-  Full evidence + fix entry points: docs/handoff/continuity/A8_CROSSMOD_FORWARDING_MISCOMPILE.md
-deliverables: |
-  - Minimal 2-module repro: stdlib/testmod/sret_min.sio + tests/run-pass/
-    sret_forwarding_cross_module_min.sio (+ a8_diag_{single,ctrl,step,fwd,sizes}.sio
-    bisection ladder; failing ones marked //@ known-failure with the diagnosis).
-  - Env-guarded merged-IR diagnostic in self-hosted/compiler/module_frontend.sio
-    (SOUNIO_DUMP_ALL_CALLS=1; inert by default; built clean).
-  - Root-cause doc (above).
-next: |
-  Diff the forwarding fn's IR through the single-pass lowering vs the summary+bodies
-  path (lower_program_bodies_from_summary_with_epistemic_boxed_ref). Single-pass
-  yields `call dst=2 arg=[0]`; imported yields `call dst=3 arg=[2]`. Fix the
-  param/let-binding desync in that path (lower_let_stmt_ref binding of
-  `var = <ExprCall>` + param-ident resolution). Then Defect 2 in
-  ir_module_compact_duplicate_fn_refs.
-lock: released
+
+agent: claude
+time_utc: 2026-07-06T22:30:00Z
+files:
+  - self-hosted/check/defs.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  CLAIM+RELEASE (WP-A9 DONE). EISA merged-checker struct-ref field resolution.
+  Reframed from the brief's E137 hypothesis: after A7, test_eisa_isa emits ZERO
+  E137 — the residual default-lane blocker is error[E012]x10 ("this type has no
+  field named"). Root cause is NOT transitive-symbol omission (the merged boot4
+  pass already collects every loaded module's items). It is struct_table_find_by_buf8
+  (defs.sio) — the ref-type -> struct-index lookup that can only see the 8-byte
+  SRET name window — doing a PREFIX compare of min(len,8) bytes. With both `Str`
+  (len 3) and `StrSplit` (len 8) from str::lib in ONE merged multi-module struct
+  table, `&StrSplit` params resolved to the shorter `Str` (lower index, prefix
+  hit), so `str_split_get`'s `out.count`/`out.lens` reads (StrSplit-only fields)
+  reported spurious E012. Fix: compare a FIXED 8-byte window, padding entry-name
+  bytes past len with 0, so a shorter entry name must match EXACTLY (its trailing
+  window bytes are zero, matching make_name's zero-filled + SRET-preserved buf),
+  never as a prefix. Single-function change; check.sio/mod.sio untouched.
+checks (Slurm madaros build from main.sio, jobs 5573/5575/5576; base=A7 @ddd42bdb9 vs fixed; FALSE-GREEN guard: ELFs run, actual rc/tc_ok asserted; EISA stdlib + math/dd64.sio + math/qd128.sio copied for verification, kept OUT of git):
+  - W0/W1 test_eisa_isa: base compile_rc=1 E012=10 tc_ok=0  ->  fixed compile_rc=139
+    E012=0 E137=0 E015=0 E004=0 tc_ok=1. TYPECHECK NOW CLEAN. rc=139 is the LOWERING
+    phase (after `imported_compile: typecheck ok`) = pre-existing cross-module gap,
+    NOT this fix. (W0 E004=0 confirmed; A7's str::lib int-width fix intact.)
+  - W2 test_eisa_evm: base E012=10 tc_ok=0 -> fixed E012=0 E137=0 E015=0 E004=0
+    tc_ok=1. NOTE: evm's E137x19 seen mid-diagnosis was purely the MISSING
+    math/qd128.sio dependency in the verification env (qd_add/qd_sub/qd_from_f64
+    ... all from math::qd128); once qd128.sio present, E137=0 pre-fix too.
+  - W3 minimal transitive toy: could NOT isolate the collision in a 2-struct toy
+    (even with the short struct forced to a lower merged index via an earlier
+    module) — base compiles+lowers clean. The REAL str::lib Str/StrSplit case is
+    the authoritative differential. Toy removed (was misleading); logged to new-gap
+    ledger. isa (5-module) + evm (9-module) ARE transitive multi-module witnesses.
+  - W4 regression (9 tests, base vs fixed, byte-identical): cd_exact_generic_i64
+    tc_ok=1 unchanged; wp_a3 w2_main rc=9, w3_main rc=7; cd_exact_generic_vs_concrete
+    / associator_field_octonion / algebra_g2_invariants_import / compress_huffman_fixed
+    rc=139 tc_ok=1 (pre-existing lowering gap); audit_trail_basic rc=1;
+    d4_optimizer_integration E137x71 rc=1 (pre-existing) — ALL identical base<->fixed.
+    ZERO regressions.
+commit: pending
+status: lock-released
+notes: |
+  A9_WITNESS_PASS: isa/evm E012 10->0 (typecheck CLEAN, tc_ok 0->1); 9-test battery
+  zero-regression. Residual: EISA default-lane RUN still blocked by the pre-existing
+  cross-module native-lowering segfault (A6/A8 territory), not A9. New-gap ledger
+  updated (lowering rc=139 post-typecheck; toy non-repro). Shares self-hosted/check/
+  with nobody this wave.
