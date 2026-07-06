@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.13 f128 IEEE class-code helper receipt.
+"""Emit a Madaros v2 S5.14 f128 IEEE class-code helper receipt.
 
 This promotes a narrow compiler-owned helper surface:
 
@@ -7,10 +7,10 @@ This promotes a narrow compiler-owned helper surface:
 
 The native-v2 backend recognizes that name as a builtin and classifies the
 binary128 payload into zero/subnormal/normal/infinity/NaN class codes. The
-receipt only promotes source-observable zero, subnormal, normal, and infinity
-cases because the current source surface does not yet expose a NaN constructor.
-It deliberately does not promote generic f128 IEEE arithmetic, external SysV
-ABI, or arbitrary decimal materialization.
+receipt promotes source-observable zero, subnormal, normal, infinity, and NaN
+classification. NaN is constructed through the compiler-owned `f128_nan()`
+canonical quiet-NaN builtin. It deliberately does not promote generic f128 IEEE
+arithmetic, external SysV ABI, or arbitrary decimal materialization.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.f128_ieee_class_helper_receipt/0.1"
-STAGE_CONTRACT_LEVEL = "S5_13_F128_NATIVE_IEEE_CLASS_CODE_HELPER"
+SCHEMA = "madaros.v2.s5.f128_ieee_class_helper_receipt/0.2"
+STAGE_CONTRACT_LEVEL = "S5_14_F128_NATIVE_IEEE_CLASS_CODE_HELPER_WITH_NAN_SOURCE"
 CASE_ID = "f128_ieee_class_code_source_observable_binary128_payloads"
 EXPONENT_MASK = 0x7FFF000000000000
 FRACTION_HIGH_MASK = 0x0000FFFFFFFFFFFF
@@ -63,6 +63,7 @@ CASES: list[Case] = [
     Case("underflow_positive_zero", "1e-5000", 0, "zero"),
     Case("infinity_positive_overflow", "1e5000", 3, "infinity"),
     Case("infinity_negative_overflow", "-1e5000", 3, "infinity"),
+    Case("nan_canonical_quiet_builtin", "f128_nan()", 4, "nan"),
 ]
 
 NEGATIVE_CASES: list[Case] = [
@@ -125,9 +126,11 @@ def extract_literal_rows(module: dict[str, Any]) -> list[list[int]]:
 
 
 def compile_case(root: Path, compiler: Path, out_dir: Path, case: Case, timeout_s: int) -> dict[str, Any]:
-    source = f"""fn f128_class_code(x: f128) -> i64 {{ 0 }}
+    nan_decl = "fn f128_nan() -> f128 { 0.0 as f128 }\n" if case.literal == "f128_nan()" else ""
+    value_expr = case.literal if case.literal == "f128_nan()" else f"{case.literal} as f128"
+    source = f"""{nan_decl}fn f128_class_code(x: f128) -> i64 {{ 0 }}
 fn main() -> i64 {{
-    let x: f128 = {case.literal} as f128
+    let x: f128 = {value_expr}
     f128_class_code(x)
 }}
 """
@@ -184,7 +187,7 @@ fn main() -> i64 {{
             raise SystemExit(f"{case.case_id}: MachineModule must not use legacy fallback")
         if module.get("unsupported_detail") not in ("", None):
             raise SystemExit(f"{case.case_id}: unexpected unsupported detail {module.get('unsupported_detail')!r}")
-        if not row["f128_literal_metadata_rows"]:
+        if case.expected_class_name != "nan" and not row["f128_literal_metadata_rows"]:
             raise SystemExit(f"{case.case_id}: expected f128 literal metadata row")
         os.chmod(elf_path, 0o755)
         run_rc, run_stdout, run_stderr = run_command([str(elf_path)], root, timeout_s)
@@ -267,7 +270,8 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
             "f128_native_ieee_class_code_helper_promoted": True,
             "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
             "f128_native_ieee_class_code_nan_branch_emitted": True,
-            "f128_native_ieee_class_code_nan_source_surface_promoted": False,
+            "f128_native_ieee_class_code_nan_source_surface_promoted": True,
+            "f128_native_canonical_quiet_nan_constructor_promoted": True,
             "f128_native_generic_ieee_arithmetic_promoted": False,
             "f128_external_sysv_abi_promoted": False,
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,

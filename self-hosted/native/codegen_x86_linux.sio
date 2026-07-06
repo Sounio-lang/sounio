@@ -1055,6 +1055,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
     if name_is_f128_class_code((*func).name) { return 21 }
+    if name_is_f128_nan((*func).name) { return 22 }
     0
 }
 fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
@@ -1254,6 +1255,19 @@ pub fn name_is_f128_class_code(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[12] != 111 as i8 { return false }   // 'o'
     if n.buf[13] != 100 as i8 { return false }   // 'd'
     if n.buf[14] != 101 as i8 { return false }   // 'e'
+    true
+}
+
+pub fn name_is_f128_nan(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }
+    if n.buf[0] != 102 as i8 { return false }    // 'f'
+    if n.buf[1] != 49 as i8 { return false }     // '1'
+    if n.buf[2] != 50 as i8 { return false }     // '2'
+    if n.buf[3] != 56 as i8 { return false }     // '8'
+    if n.buf[4] != 95 as i8 { return false }     // '_'
+    if n.buf[5] != 110 as i8 { return false }    // 'n'
+    if n.buf[6] != 97 as i8 { return false }     // 'a'
+    if n.buf[7] != 110 as i8 { return false }    // 'n'
     true
 }
 
@@ -3180,6 +3194,18 @@ fn emit_builtin_f128_class_code(nc: NativeCompiler) -> NativeCompiler with Mut, 
     c
 }
 
+fn emit_builtin_f128_nan_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, nc_f128_vc_hi(44))
+    nc_emit_mov_reg_imm(nc, 2, nc_f128_vc_lo(44))
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_f128_nan(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    emit_builtin_f128_nan_into(&! c)
+    c
+}
+
 fn emit_builtin_print_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
@@ -4124,7 +4150,7 @@ pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrMod
             f128_summary_kind = nc_machine_func_single_f128_value_kind(machine_summary.functions[fmeta as usize])
         }
         let f128_ir_kind = nc_core_func_f128_return_value_kind(&module.functions[fmeta as usize])
-        (*nc).fn_f128_return_value_kind[fmeta as usize] = if f128_summary_kind > 0 { f128_summary_kind } else { f128_ir_kind }
+        (*nc).fn_f128_return_value_kind[fmeta as usize] = if name_is_f128_nan(module.functions[fmeta as usize].name) { f128_ir_kind } else if f128_summary_kind > 0 { f128_summary_kind } else { f128_ir_kind }
         let f128_machine_param_index = if fmeta < machine_summary.fn_count && fmeta < 32 {
             machine_summary.f128_return_param_indices[fmeta as usize]
         } else {
@@ -4386,6 +4412,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_sin(func.name) { return emit_builtin_sin(c) }
     if name_is_cos(func.name) { return emit_builtin_cos(c) }
     if name_is_f128_class_code(func.name) { return emit_builtin_f128_class_code(c) }
+    if name_is_f128_nan(func.name) { return emit_builtin_f128_nan(c) }
     c.current_strategy = func.compile_strategy
     var effective_func = func
     if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
@@ -5133,6 +5160,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
     if name_is_f128_class_code(name) { return 21 }
+    if name_is_f128_nan(name) { return 22 }
     0
 }
 
@@ -5161,6 +5189,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
     if builtin_id == 21 { emit_builtin_f128_class_code_into(nc); return }
+    if builtin_id == 22 { emit_builtin_f128_nan_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5328,6 +5357,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         }
         if builtin_id == 21 {
             emit_builtin_f128_class_code_into(nc)
+            return
+        }
+        if builtin_id == 22 {
+            emit_builtin_f128_nan_into(nc)
             return
         }
         return
@@ -5545,6 +5578,7 @@ fn nc_f128_vc_hi(k: i64) -> i64 {
     if k >= 25 && k <= 40 { return nc_f128_vc_hi(nc_f128_vc_pos_kind_for_negative(k)) + (0 - 9223372036854775807 - 1) }
     if k == 42 { return 9223090561878065152 }
     if k == 43 { return 0 - 281474976710656 }
+    if k == 44 { return 9223231299366420480 }
     0
 }
 
@@ -5555,6 +5589,7 @@ fn nc_f128_vc_lo(k: i64) -> i64 {
     if k == 14 { return 0 - 8905435550453399112 }
     if k == 15 { return 6148914691236517205 }
     if k == 41 { return 1 }
+    if k == 44 { return 0 }
     0
 }
 
@@ -6533,6 +6568,40 @@ fn nc_core_call_arg_at(args: Option<Box<IrRegList>>, index: i64) -> i64 with Mut
     }
 }
 
+fn nc_core_reg_last_def_before_is_call(func: &IrFunction, marker_index: i64, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 {
+        return false
+    }
+    var last_is_call = false
+    var i: i64 = 0
+    while i < marker_index && i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.dst == reg {
+            last_is_call = instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallIndirect
+        }
+        i = i + 1
+    }
+    last_is_call
+}
+
+fn nc_core_reg_has_f128_marker_after(func: &IrFunction, call_index: i64, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 {
+        return false
+    }
+    var i: i64 = call_index + 1
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.dst == reg {
+            if instr.op == IrOpcode::IrNop && instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+                return true
+            }
+            return false
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn nc_core_func_param_is_f128(func: &IrFunction, reg: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
@@ -6593,6 +6662,7 @@ fn nc_core_compiler_f128_value_kind(nc: &NativeCompiler, fn_index: i64, reg: i64
 }
 
 fn nc_core_func_f128_return_value_kind(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    if name_is_f128_nan((*func).name) { return 44 }
     var i: i64 = 0
     var kind: i64 = 0
     var seen: i64 = 0
@@ -7139,6 +7209,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG {
             if (*func).instrs[i as usize].label_id > 0 {
+                if nc_core_reg_last_def_before_is_call(func, i, (*func).instrs[i as usize].dst) {
+                    if !nc_core_reg_is_f128(nc, (*func).instrs[i as usize].dst) {
+                        nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+                    }
+                    i = i + 1
+                    continue
+                }
                 let f128_value_kind = nc_f128_vc_kind(
                     (*func).instrs[i as usize].src1,
                     (*func).instrs[i as usize].src2,
@@ -7528,7 +7605,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 } else {
                     -1
                 }
-                let call_returns_f128 = (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG || callee_f128_kind > 0 || callee_f128_param_index >= 0 || nc_core_reg_is_f128(nc, (*func).instrs[i as usize].dst)
+                let call_returns_f128 = (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG || callee_f128_kind > 0 || callee_f128_param_index >= 0 || nc_core_reg_is_f128(nc, (*func).instrs[i as usize].dst) || nc_core_reg_has_f128_marker_after(func, i, (*func).instrs[i as usize].dst)
                 if call_returns_f128 {
                     nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                     nc_emit_store_rbp_disp32_reg(nc, 2, ir_slot_offset((*func).instrs[i as usize].dst + 1))
@@ -8313,6 +8390,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
     if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
     if name_is_f128_class_code(func.name) { emit_builtin_f128_class_code_into(nc); return }
+    if name_is_f128_nan(func.name) { emit_builtin_f128_nan_into(nc); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)

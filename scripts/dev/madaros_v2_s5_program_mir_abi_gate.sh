@@ -1919,14 +1919,14 @@ for case_id in [
     if row.get("expected_machine_opcode_found") is not True:
         raise SystemExit(f"{case_id} must prove runtime helper opcode")
 
-if f128_ieee_class_helper_receipt.get("schema") != "madaros.v2.s5.f128_ieee_class_helper_receipt/0.1":
+if f128_ieee_class_helper_receipt.get("schema") != "madaros.v2.s5.f128_ieee_class_helper_receipt/0.2":
     raise SystemExit("bad S5 f128 IEEE class-code helper receipt schema")
 if f128_ieee_class_helper_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 IEEE class-code helper receipt")
-if f128_ieee_class_helper_receipt.get("stage_contract_level") != "S5_13_F128_NATIVE_IEEE_CLASS_CODE_HELPER":
-    raise SystemExit("f128 IEEE class-code helper receipt must declare S5.13 stage contract")
-if f128_ieee_class_helper_receipt.get("case_count") != 10:
-    raise SystemExit("f128 IEEE class-code helper receipt must contain exact ten positive cases")
+if f128_ieee_class_helper_receipt.get("stage_contract_level") != "S5_14_F128_NATIVE_IEEE_CLASS_CODE_HELPER_WITH_NAN_SOURCE":
+    raise SystemExit("f128 IEEE class-code helper receipt must declare S5.14 NaN-source stage contract")
+if f128_ieee_class_helper_receipt.get("case_count") != 11:
+    raise SystemExit("f128 IEEE class-code helper receipt must contain exact eleven positive cases")
 if f128_ieee_class_helper_receipt.get("negative_case_count") != 1:
     raise SystemExit("f128 IEEE class-code helper receipt must contain one negative fail-closed case")
 class_helper_claims = f128_ieee_class_helper_receipt.get("claims", {})
@@ -1934,11 +1934,12 @@ for field in [
     "f128_native_ieee_class_code_helper_promoted",
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted",
     "f128_native_ieee_class_code_nan_branch_emitted",
+    "f128_native_ieee_class_code_nan_source_surface_promoted",
+    "f128_native_canonical_quiet_nan_constructor_promoted",
 ]:
     if class_helper_claims.get(field) is not True:
         raise SystemExit(f"f128 IEEE class-code helper receipt missing required true claim: {field}")
 for field in [
-    "f128_native_ieee_class_code_nan_source_surface_promoted",
     "f128_native_generic_ieee_arithmetic_promoted",
     "f128_external_sysv_abi_promoted",
     "f128_native_arbitrary_decimal_binary128_materialization_promoted",
@@ -1966,6 +1967,7 @@ required_class_helper_cases = {
     "underflow_positive_zero": 0,
     "infinity_positive_overflow": 3,
     "infinity_negative_overflow": 3,
+    "nan_canonical_quiet_builtin": 4,
 }
 if set(class_helper_cases) != set(required_class_helper_cases):
     raise SystemExit(f"f128 IEEE class-code helper cases mismatch: {sorted(class_helper_cases)}")
@@ -2582,7 +2584,7 @@ not_promoted = [
     {
         "surface": "f128_generic_ieee_software_helper_semantics",
         "status": "not_promoted",
-        "reason": "source-observable binary128 class-code helper is promoted for zero/subnormal/normal/infinity; generic IEEE arithmetic, rounding-mode helper semantics, NaN source construction/classification, and differentials remain blockers",
+        "reason": "source-observable binary128 class-code helper is promoted for zero/subnormal/normal/infinity/NaN via a canonical quiet-NaN constructor; generic IEEE arithmetic, rounding-mode helper semantics, and differentials remain blockers",
     },
     {
         "surface": "f128_external_sysv_abi_and_sret",
@@ -3015,7 +3017,8 @@ module = {
         "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
         "f128_native_ieee_class_code_helper_promoted": True,
         "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
-        "f128_native_ieee_class_code_nan_source_surface_promoted": False,
+        "f128_native_ieee_class_code_nan_source_surface_promoted": True,
+        "f128_native_canonical_quiet_nan_constructor_promoted": True,
         "f128_param_slot_layout_promoted": True,
         "f128_param_slots_non_overlapping": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
@@ -3189,7 +3192,8 @@ receipt = {
     "f128_arithmetic_value_contract_promoted": True,
     "f128_native_ieee_class_code_helper_promoted": True,
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
-    "f128_native_ieee_class_code_nan_source_surface_promoted": False,
+    "f128_native_ieee_class_code_nan_source_surface_promoted": True,
+    "f128_native_canonical_quiet_nan_constructor_promoted": True,
     "f128_param_slot_layout_promoted": True,
     "f128_param_slots_non_overlapping": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
@@ -3292,6 +3296,7 @@ receipt = {
     "f128_native_ieee_class_code_helper_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_helper_promoted"],
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted"],
     "f128_native_ieee_class_code_nan_source_surface_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_nan_source_surface_promoted"],
+    "f128_native_canonical_quiet_nan_constructor_promoted": module["scalar_abi_receipts"]["f128_native_canonical_quiet_nan_constructor_promoted"],
     "f128_param_slot_layout_promoted": module["scalar_abi_receipts"]["f128_param_slot_layout_promoted"],
     "f128_param_slots_non_overlapping": module["scalar_abi_receipts"]["f128_param_slots_non_overlapping"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
@@ -3315,7 +3320,6 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 generic IEEE arithmetic helpers beyond the class-code helper, including rounding-mode-sensitive operations",
-        "f128 NaN source-surface construction and source-observable NaN classification",
         "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper differentials",
     ],
 }
@@ -3328,7 +3332,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul/div runtime helper execution, plus source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
-echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout cases; generic IEEE arithmetic/NaN-source and external ABI differentials remain explicit full blockers"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul/div runtime helper execution, plus source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"
