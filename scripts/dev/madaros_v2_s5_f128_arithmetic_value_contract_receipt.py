@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.9 f128 arithmetic value-contract receipt.
+"""Emit a Madaros v2 S5.10 f128 arithmetic value-contract receipt.
 
 This promotes a finite, exact binary128 arithmetic value-contract matrix
 end-to-end for local literal-derived values plus a finite runtime binop helper
 for callee-side f128 parameters that carry supported value-contract binary128
 words. It deliberately does not promote generic IEEE helpers, NaN/Inf, arbitrary
 decimal arithmetic, external SysV f128 ABI, SRET, or non-value-contract runtime helpers.
+Runtime division is promoted only for exact quotient cases; divide-by-zero and
+non-exact quotient cases fail closed with rc=12.
 Direct internal calls whose callee returns an f128 parameter preserve the caller
 argument's value contract when the argument still has exact finite literal
 metadata.
@@ -23,7 +25,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_arithmetic_value_contract_receipt/0.1"
-STAGE = "S5_9_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_HELPER"
+STAGE = "S5_10_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_DIV_HELPER"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 
 
@@ -312,6 +314,36 @@ fn main() -> i64 {
         "expected_metadata": None,
         "expected_machine_opcode": 131,
     },
+    {
+        "case_id": "f128_callee_div_args_runtime_helper_to_half",
+        "source": """fn div_f128(x: f128, y: f128) -> f128 { x / y }
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 2.0 as f128
+  let c: f128 = div_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "3ffe0000000000000000000000000000",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_callee_div_negative_args_runtime_helper_to_negative_half",
+        "source": """fn div_f128(x: f128, y: f128) -> f128 { x / y }
+fn main() -> i64 {
+  let a: f128 = -1.0 as f128
+  let b: f128 = 2.0 as f128
+  let c: f128 = div_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "bffe0000000000000000000000000000",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
 ]
 
 NEGATIVE = [
@@ -321,6 +353,34 @@ NEGATIVE = [
   let x: f128 = 0.1 as f128
   let y: f128 = 0.2 as f128
   let z: f128 = x + y
+  0
+}
+""",
+        "expected_runtime_rc": 12,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_callee_div_one_three_runtime_fail_closed",
+        "source": """fn div_f128(x: f128, y: f128) -> f128 { x / y }
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 3.0 as f128
+  let c: f128 = div_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_runtime_rc": 12,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_callee_div_by_zero_runtime_fail_closed",
+        "source": """fn div_f128(x: f128, y: f128) -> f128 { x / y }
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 0.0 as f128
+  let c: f128 = div_f128(a, b)
+  let d: f128 = c
   0
 }
 """,
@@ -548,13 +608,13 @@ def emit(args: argparse.Namespace) -> None:
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
-        "case_id": "s5_9_f128_arithmetic_value_contract",
+        "case_id": "s5_10_f128_arithmetic_value_contract",
         "case_count": len(cases),
         "positive_case_count": len(POSITIVE),
         "negative_case_count": len(NEGATIVE),
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_arithmetic_promoted": True,
-        "f128_runtime_callee_add_sub_mul_value_contract_promoted": True,
+        "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
         "f128_native_ieee_binary128_materialization_promoted": False,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -571,9 +631,10 @@ def emit(args: argparse.Namespace) -> None:
             "single-chain arithmetic preserves compiler value-kind metadata",
             "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
             "direct internal calls whose callee returns one f128 parameter preserve that argument's exact value-contract metadata into caller arithmetic",
-            "callee-side f128 add/sub/mul over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
+            "callee-side f128 add/sub/mul/div over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
             "unsupported f128 arithmetic remains fail-closed at compile time or through runtime rc=12 helper traps",
-            "callee-side f128 div and non-value-contract runtime arithmetic remain fail-closed until real binary128 software helpers exist",
+            "callee-side f128 div is exact-quotient-only; divide-by-zero and non-exact quotients fail closed with rc=12",
+            "non-value-contract runtime arithmetic remains fail-closed until real binary128 software helpers exist",
         ],
         "cases": cases,
     }

@@ -1766,18 +1766,18 @@ if f128_arithmetic_value_contract_receipt.get("schema") != "madaros.v2.s5.f128_a
     raise SystemExit("bad S5 f128 arithmetic value-contract receipt schema")
 if f128_arithmetic_value_contract_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 arithmetic value-contract receipt")
-if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_9_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_HELPER":
-    raise SystemExit("f128 arithmetic value-contract receipt must declare S5.9 runtime add/sub/mul helper stage contract")
-if f128_arithmetic_value_contract_receipt.get("case_count") != 22:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain exact twenty-two cases")
-if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 21:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain twenty-one positive cases")
-if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 1:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain one negative case")
+if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_10_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_DIV_HELPER":
+    raise SystemExit("f128 arithmetic value-contract receipt must declare S5.10 runtime add/sub/mul/div helper stage contract")
+if f128_arithmetic_value_contract_receipt.get("case_count") != 26:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain exact twenty-six cases")
+if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 23:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain twenty-three positive cases")
+if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 3:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain three negative cases")
 for field in [
     "f128_arithmetic_value_contract_promoted",
     "f128_native_arithmetic_promoted",
-    "f128_runtime_callee_add_sub_mul_value_contract_promoted",
+    "f128_runtime_callee_add_sub_mul_div_value_contract_promoted",
 ]:
     if f128_arithmetic_value_contract_receipt.get(field) is not True:
         raise SystemExit(f"f128 arithmetic value-contract receipt missing required true flag: {field}")
@@ -1818,7 +1818,11 @@ required_arith_cases = {
     "f128_callee_add_args_runtime_helper_to_three",
     "f128_callee_sub_args_runtime_helper_to_one",
     "f128_callee_mul_args_runtime_helper_to_three_quarters",
+    "f128_callee_div_args_runtime_helper_to_half",
+    "f128_callee_div_negative_args_runtime_helper_to_negative_half",
     "f128_add_rounded_tenths_runtime_fail_closed",
+    "f128_callee_div_one_three_runtime_fail_closed",
+    "f128_callee_div_by_zero_runtime_fail_closed",
 }
 if set(arith_cases) != required_arith_cases:
     raise SystemExit(f"f128 arithmetic value-contract receipt cases mismatch: {sorted(arith_cases)}")
@@ -1844,6 +1848,8 @@ required_arith_positive = {
     "f128_callee_add_args_runtime_helper_to_three": {"hex": "40008000000000000000000000000000", "metadata": None, "opcode": 131},
     "f128_callee_sub_args_runtime_helper_to_one": {"hex": "3fff0000000000000000000000000000", "metadata": None, "opcode": 131},
     "f128_callee_mul_args_runtime_helper_to_three_quarters": {"hex": "3ffe8000000000000000000000000000", "metadata": None, "opcode": 131},
+    "f128_callee_div_args_runtime_helper_to_half": {"hex": "3ffe0000000000000000000000000000", "metadata": None, "opcode": 131},
+    "f128_callee_div_negative_args_runtime_helper_to_negative_half": {"hex": "bffe0000000000000000000000000000", "metadata": None, "opcode": 131},
 }
 for case_id, expected in required_arith_positive.items():
     row = arith_cases[case_id]
@@ -1865,15 +1871,20 @@ for case_id, expected in required_arith_positive.items():
         raise SystemExit(f"{case_id} must prove high-word immediate")
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
-row = arith_cases["f128_add_rounded_tenths_runtime_fail_closed"]
-if row.get("negative_mode") != "runtime_fail_closed":
-    raise SystemExit("rounded tenths arithmetic control must be runtime fail-closed")
-if row.get("machine_module_supported") is not True:
-    raise SystemExit("rounded tenths arithmetic control must emit supported helper MachineModule")
-if row.get("run_rc") != 12 or row.get("expected_runtime_rc") != 12:
-    raise SystemExit("rounded tenths arithmetic control must trap with rc=12")
-if row.get("expected_machine_opcode_found") is not True:
-    raise SystemExit("rounded tenths arithmetic control must prove runtime helper opcode")
+for case_id in [
+    "f128_add_rounded_tenths_runtime_fail_closed",
+    "f128_callee_div_one_three_runtime_fail_closed",
+    "f128_callee_div_by_zero_runtime_fail_closed",
+]:
+    row = arith_cases[case_id]
+    if row.get("negative_mode") != "runtime_fail_closed":
+        raise SystemExit(f"{case_id} must be runtime fail-closed")
+    if row.get("machine_module_supported") is not True:
+        raise SystemExit(f"{case_id} must emit supported helper MachineModule")
+    if row.get("run_rc") != 12 or row.get("expected_runtime_rc") != 12:
+        raise SystemExit(f"{case_id} must trap with rc=12")
+    if row.get("expected_machine_opcode_found") is not True:
+        raise SystemExit(f"{case_id} must prove runtime helper opcode")
 
 if f128_param_slot_layout_receipt.get("schema") != "madaros.v2.s5.f128_param_slot_layout_receipt/0.1":
     raise SystemExit("bad S5 f128 parameter slot-layout receipt schema")
@@ -2398,7 +2409,7 @@ not_promoted = [
     {
         "surface": "f128_numeric_width",
         "status": "opaque_storage_value_contract_arithmetic_and_internal_call_return_abi_promoted_generic_ieee_not_promoted",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, S5.2 native-v2 local opaque storage/copy execution, S5.3 native binary128 anchor materialization, S5.4 native materialization for the complete current f128 value-contract case set, S5.5 internal native-v2 local/imported direct call-return ABI, and S5.6 native arithmetic for a finite exact decimal-tenths plus quarter value-contract matrix with one-chain metadata propagation. Arbitrary decimal binary128 materialization, generic IEEE arithmetic, external SysV f128 ABI, and f128 SRET remain fail-closed.",
+        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, native-v2 local opaque storage/copy execution, native binary128 value-contract materialization, internal native-v2 local/imported direct call-return ABI, and finite exact decimal-tenths plus quarter value-contract arithmetic with one-chain metadata propagation and callee-side add/sub/mul/div runtime helper execution. Arbitrary decimal binary128 materialization, generic IEEE arithmetic, external SysV f128 ABI, and f128 SRET remain fail-closed.",
     },
     {
         "surface": "f128_literal_decimal_metadata_and_type",
@@ -2829,7 +2840,7 @@ module = {
         "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
         "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
-        "f128_runtime_callee_add_sub_mul_value_contract_promoted": True,
+        "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
         "f128_param_slot_layout_promoted": True,
         "f128_param_slots_non_overlapping": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
@@ -2883,7 +2894,7 @@ module = {
         "normal_call_stack_arg_receipt_recorded",
         "f128_binary128_native_anchor_materialization_promoted_for_exact_0_5_and_1_0_only",
         "f128_binary128_value_contract_native_materialization_promoted_for_current_case_set_including_truncated_high_precision_decimals",
-        "f128_arithmetic_value_contract_promoted_for_finite_decimal_tenths_matrix_with_one_chain_and_callee_add_sub_mul_helper",
+        "f128_arithmetic_value_contract_promoted_for_finite_decimal_tenths_matrix_with_one_chain_and_callee_add_sub_mul_div_helper",
         "f128_parameter_slots_non_overlapping_for_local_imported_and_mixed_shapes",
         "f128_opaque_direct_call_return_abi_promoted_for_local_and_imported_return_only_mixed_order_two_f128_direct_and_stack_shapes",
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
@@ -3117,7 +3128,7 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
-        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side add/sub/mul runtime helper, external SysV f128 ABI/SRET, full IEEE helper lowering, runtime div helper, and f128 differential receipts",
+        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, full IEEE helper lowering, and f128 differential receipts",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -3129,7 +3140,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul runtime helper execution, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul/div runtime helper execution, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"
