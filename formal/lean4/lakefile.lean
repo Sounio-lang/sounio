@@ -72,6 +72,11 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B brick 3: isomorphism type of the sedenion ZD fibers (each ≅ K_{6,6} - 3*K_{2,2}),
+-- native_decide over the common-neighbor profile (6,24,36). Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioSedenionFiberIdentity» where
+
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
 
