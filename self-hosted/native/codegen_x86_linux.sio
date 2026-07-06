@@ -1054,6 +1054,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_log((*func).name) { return 17 }
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
+    if name_is_f128_class_code((*func).name) { return 21 }
     0
 }
 fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
@@ -1233,6 +1234,26 @@ pub fn name_is_print_f64(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[6] != 102 as i8 { return false }     // 'f'
     if n.buf[7] != 54 as i8 { return false }      // '6'
     if n.buf[8] != 52 as i8 { return false }      // '4'
+    true
+}
+
+pub fn name_is_f128_class_code(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 15 { return false }
+    if n.buf[0] != 102 as i8 { return false }    // 'f'
+    if n.buf[1] != 49 as i8 { return false }     // '1'
+    if n.buf[2] != 50 as i8 { return false }     // '2'
+    if n.buf[3] != 56 as i8 { return false }     // '8'
+    if n.buf[4] != 95 as i8 { return false }     // '_'
+    if n.buf[5] != 99 as i8 { return false }     // 'c'
+    if n.buf[6] != 108 as i8 { return false }    // 'l'
+    if n.buf[7] != 97 as i8 { return false }     // 'a'
+    if n.buf[8] != 115 as i8 { return false }    // 's'
+    if n.buf[9] != 115 as i8 { return false }    // 's'
+    if n.buf[10] != 95 as i8 { return false }    // '_'
+    if n.buf[11] != 99 as i8 { return false }    // 'c'
+    if n.buf[12] != 111 as i8 { return false }   // 'o'
+    if n.buf[13] != 100 as i8 { return false }   // 'd'
+    if n.buf[14] != 101 as i8 { return false }   // 'e'
     true
 }
 
@@ -2139,6 +2160,12 @@ fn nc_emit_or_rax_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x09)
     nc_emit_byte(nc, 0xd0)
+}
+
+fn nc_emit_or_rax_rsi(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x09)
+    nc_emit_byte(nc, 0xf0)
 }
 
 fn nc_emit_and_rax_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -3094,6 +3121,63 @@ fn emit_builtin_print_char_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     emit_stdout_write_syscall_linux_into(nc)
     nc_emit_add_rsp_8(nc)
     nc_emit_ret(nc)
+}
+
+fn emit_builtin_f128_class_code_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_v2_reset_label_state()
+    let exp_zero_label = nc_next_cmp_label()
+    let exp_all_label = nc_next_cmp_label()
+    let zero_label = nc_next_cmp_label()
+    let inf_label = nc_next_cmp_label()
+    let done_label = nc_next_cmp_label()
+
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    nc_emit_mov_reg_imm(nc, 3, 9223090561878065152)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jz_to_label(nc, exp_zero_label)
+    nc_emit_mov_reg_imm(nc, 3, 9223090561878065152)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jz_to_label(nc, exp_all_label)
+    nc_emit_mov_rax_imm(nc, 2)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, exp_zero_label)
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    nc_emit_mov_reg_imm(nc, 3, 281474976710655)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_or_rax_rsi(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jz_to_label(nc, zero_label)
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, exp_all_label)
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    nc_emit_mov_reg_imm(nc, 3, 281474976710655)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_or_rax_rsi(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jz_to_label(nc, inf_label)
+    nc_emit_mov_rax_imm(nc, 4)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, zero_label)
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, inf_label)
+    nc_emit_mov_rax_imm(nc, 3)
+
+    nc_define_label(nc, done_label)
+    native_v2_patch_label_forwards_text_mirror(nc)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_f128_class_code(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    emit_builtin_f128_class_code_into(&! c)
+    c
 }
 
 fn emit_builtin_print_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -4301,6 +4385,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_log(func.name) { return emit_builtin_log(c) }
     if name_is_sin(func.name) { return emit_builtin_sin(c) }
     if name_is_cos(func.name) { return emit_builtin_cos(c) }
+    if name_is_f128_class_code(func.name) { return emit_builtin_f128_class_code(c) }
     c.current_strategy = func.compile_strategy
     var effective_func = func
     if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
@@ -5047,6 +5132,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_log(name) { return 17 }
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
+    if name_is_f128_class_code(name) { return 21 }
     0
 }
 
@@ -5074,6 +5160,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 17 { native_v2_persist_builtin_emit_into(nc, emit_builtin_log((*nc))); return }
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
+    if builtin_id == 21 { emit_builtin_f128_class_code_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5237,6 +5324,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         }
         if builtin_id == 3 {
             emit_builtin_print_str_into(nc)
+            return
+        }
+        if builtin_id == 21 {
+            emit_builtin_f128_class_code_into(nc)
             return
         }
         return
@@ -8221,6 +8312,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
     if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
     if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
+    if name_is_f128_class_code(func.name) { emit_builtin_f128_class_code_into(nc); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
