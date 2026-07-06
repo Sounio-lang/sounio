@@ -4407,18 +4407,50 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
 }
 
 
-// Sprint 121: sin builtin — range reduction + degree-7 minimax polynomial
-// Algorithm: sin(x) ≈ x(1 - x²(1/6 - x²(1/120 - x²/5040)))
-// Range reduction: n = round(x/(2π)), r = x - n*2π
-// Stack layout: [rbp-8]=r, [rbp-16]=r², [rbp-24]=scratch
+// Sprint 121 (revised): sin builtin — Payne-Hanek-lite (2-term Cody-Waite)
+// range reduction to r in [-pi/4, pi/4], quadrant q = k mod 4, then a
+// degree-7 minimax Taylor polynomial evaluated at the SMALL r. The old
+// reduction (mod 2*pi) left |r| as large as pi, where the same polynomial
+// loses ~0.05 absolute error (sin(3.0) came out 0.091071 instead of
+// 0.141120); reducing to a quadrant of [-pi/4, pi/4] keeps the polynomial
+// well within its accurate range for all inputs.
+//
+// Algorithm:
+//   k = round(x * 2/pi)                          (cvtsd2si rounds nearest)
+//   r = x - k*pi_2_hi - k*pi_2_lo                 (2-term correction so the
+//                                                   pi/2 constant keeps more
+//                                                   than double precision)
+//   q = k & 3                                     (2's-complement AND already
+//                                                   gives the correct residue
+//                                                   mod 4 for negative k)
+//   sin(r), cos(r) via Horner on the existing minimax coefficients
+//   quadrant select/negate:
+//     sin(x) = [sin(r), cos(r), -sin(r), -cos(r)][q]
+//     cos(x) = [cos(r), -sin(r), -cos(r), sin(r)][q]
+//   Implemented as two independent bit tests on q instead of a 4-way
+//   dispatch:
+//     bit0 (q&1): swap  -> (val_sin,val_cos) = bit0 ? (cos(r),-sin(r))
+//                                                     : (sin(r), cos(r))
+//     bit1 (q&2): negate both val_sin and val_cos if set
+//   (Verify against the table: q=0 -> (sin r,cos r); q=1 -> (cos r,-sin r);
+//    q=2 -> (-sin r,-cos r); q=3 -> (-cos r, sin r). All four match.)
+//
+// Stack layout (96 bytes):
+//   [rbp-8]=r  [rbp-16]=r²  [rbp-24]=Horner scratch  [rbp-32]=reduction temp
+//   [rbp-40]=sin(r)  [rbp-48]=cos(r)  [rbp-56]=q  [rbp-64]=val_sin
+//   [rbp-72]=val_cos  [rbp-80]=x (saved)  [rbp-88]=k (integer)
 fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
     // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let inv_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE45F306DC9C883)   // 2/pi
+    let two_over_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF921FB54442D18)   // pi/2 hi
+    let pi_2_hi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C91A62633145C07)   // pi/2 lo correction
+    let pi_2_lo_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x0000000000000000)   // 0.0 (for negation via 0.0 - v)
+    let zero_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
     let one_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
@@ -4427,46 +4459,64 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     let c5_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
     let c7_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
+    let c2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
+    let c4_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
+    let c6_off = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_sub_rsp_imm32(c.code, 96)
 
     // rdi = f64 bit pattern of x
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -80)   // [rbp-80] = x (saved)
 
-    // Step 1: Range reduction — n = round(x/(2π)), r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
-    let sin_inv2pi = c.code.len
+    // Step 1: k = round(x * 2/pi)
+    let sin_load_2opi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
-    let sin_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    // r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r = x - n*2π
+    c.relocs = add_rip_reloc(c.relocs, sin_load_2opi + 4, two_over_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x * 2/pi
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x*2/pi) = k
+    c.code = emit_store_rax_rbp_disp32(c.code, -88)   // [rbp-88] = k
 
-    // Store r and compute r²
+    // Step 2: r = x - k*pi_2_hi - k*pi_2_lo
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = k (f64)
+    let sin_load_hi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_load_hi + 4, pi_2_hi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = k*pi_2_hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = k*pi_2_hi
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -80)   // xmm0 = x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = k*pi_2_hi
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = x - k*pi_2_hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r (partial)
+
+    c.code = emit_load_rbp_disp32_rax(c.code, -88)    // rax = k
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = k (f64)
+    let sin_load_lo = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_load_lo + 4, pi_2_lo_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = k*pi_2_lo
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = k*pi_2_lo
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)    // xmm0 = r (partial)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = k*pi_2_lo
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r (final)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = r (copy for mul)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
+
+    // r²
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)    // xmm0 = r
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
 
-    // Step 2: Horner — sin(x) = r * (1 - r²(1/6 - r²(1/120 - r²*1/5040)))
-    // Innermost: s = 1/5040
+    // Step 3: sin(r) = r*(1 - r²(1/6 - r²(1/120 - r²/5040)))
     let sin_c7 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
-    // s = 1/120 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
@@ -4475,7 +4525,6 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
-    // s = 1/6 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
@@ -4484,7 +4533,6 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
-    // s = 1 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
@@ -4493,31 +4541,136 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
-    // result = r * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(x)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)   // [rbp-40] = sin(r)
 
-    // Return as bit pattern in rax
+    // Step 4: cos(r) = 1 - r²(1/2 - r²(1/24 - r²/720))
+    let sin_cos_c6 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_cos_c6 + 4, c6_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_cos_c4 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_cos_c4 + 4, c4_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_cos_c2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_cos_c2 + 4, c2_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_cos_one = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_cos_one + 4, one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)   // [rbp-48] = cos(r)
+
+    // Step 5: q = k & 3 (2's-complement AND already gives the correct
+    // residue mod 4 even for negative k: e.g. k=-1 -> ...11 & 3 = 3 = -1 mod 4)
+    c.code = emit_load_rbp_disp32_rax(c.code, -88)    // rax = k
+    c.code = emit_mov_reg_imm(c.code, 3, 3)           // mov rbx, 3
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)   // [rbp-56] = q
+
+    // Step 6: bit0 test -> swap (val_sin,val_cos) = bit0 ? (cos(r),-sin(r))
+    //                                                       : (sin(r), cos(r))
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = q
+    c.code = emit_mov_reg_imm(c.code, 3, 1)           // mov rbx, 1
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q & 1
+    c.code = emit_test_rax_rax(c.code)
+    let sin_jz_noswap = c.code.len
+    c.code = emit_jz_rel8(c.code, 0)                  // placeholder -> no_swap
+    // swap path (bit0 == 1)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)   // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = cos(r)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)   // xmm1 = sin(r)
+    let sin_zero1 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_zero1 + 4, zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = -sin(r)
+    let sin_jmp_afterswap = c.code.len
+    c.code = emit_jmp_rel8(c.code, 0)                 // placeholder -> after_swap
+    let sin_no_swap_at = c.code.len
+    if sin_jz_noswap + 1 < 131072 {
+        c.code.bytes[(sin_jz_noswap + 1) as usize] = low8(sin_no_swap_at - (sin_jz_noswap + 2)) as i8
+    }
+    // no-swap path (bit0 == 0)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)   // xmm0 = sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = sin(r)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)   // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = cos(r)
+    let sin_after_swap_at = c.code.len
+    if sin_jmp_afterswap + 1 < 131072 {
+        c.code.bytes[(sin_jmp_afterswap + 1) as usize] = low8(sin_after_swap_at - (sin_jmp_afterswap + 2)) as i8
+    }
+
+    // Step 7: bit1 test -> negate both val_sin and val_cos if set
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = q
+    c.code = emit_mov_reg_imm(c.code, 3, 2)           // mov rbx, 2
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q & 2
+    c.code = emit_test_rax_rax(c.code)
+    let sin_jz_nonegate = c.code.len
+    c.code = emit_jz_rel8(c.code, 0)                  // placeholder -> skip negate
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -64)   // xmm1 = val_sin
+    let sin_zero2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_zero2 + 4, zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -val_sin
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = -val_sin
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -72)   // xmm1 = val_cos
+    let sin_zero3 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_zero3 + 4, zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -val_cos
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = -val_cos
+    let sin_nonegate_at = c.code.len
+    if sin_jz_nonegate + 1 < 131072 {
+        c.code.bytes[(sin_jz_nonegate + 1) as usize] = low8(sin_nonegate_at - (sin_jz_nonegate + 2)) as i8
+    }
+
+    // Return sin(x) = val_sin
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -64)
     c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
+    c.code = emit_add_rsp_imm32(c.code, 96)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
 }
 
-// Sprint 121: cos builtin — range reduction + degree-6 minimax polynomial
-// Algorithm: cos(x) ≈ 1 - x²(1/2 - x²(1/24 - x²/720))
-// Same range reduction as sin, same stack layout
+// Sprint 121 (revised): cos builtin — identical range reduction and
+// quadrant selection as emit_builtin_sin (see comment there); only the
+// final return value differs (val_cos instead of val_sin).
 fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
     // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let cos_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let cos_inv_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE45F306DC9C883)   // 2/pi
+    let cos_two_over_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF921FB54442D18)   // pi/2 hi
+    let cos_pi_2_hi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C91A62633145C07)   // pi/2 lo correction
+    let cos_pi_2_lo_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x0000000000000000)   // 0.0 (for negation via 0.0 - v)
+    let cos_zero_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
     let cos_one_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
+    let cos_c3_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
+    let cos_c5_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
+    let cos_c7_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
     let cos_c2_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
@@ -4527,72 +4680,179 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_sub_rsp_imm32(c.code, 96)
 
     // rdi = f64 bit pattern of x
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -80)   // [rbp-80] = x (saved)
 
-    // Step 1: Range reduction (same as sin)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
-    let cos_inv2pi = c.code.len
+    // Step 1: k = round(x * 2/pi)
+    let cos_load_2opi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
-    let cos_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r
+    c.relocs = add_rip_reloc(c.relocs, cos_load_2opi + 4, cos_two_over_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x * 2/pi
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x*2/pi) = k
+    c.code = emit_store_rax_rbp_disp32(c.code, -88)   // [rbp-88] = k
 
-    // Compute r²
+    // Step 2: r = x - k*pi_2_hi - k*pi_2_lo
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = k (f64)
+    let cos_load_hi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_load_hi + 4, cos_pi_2_hi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = k*pi_2_hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = k*pi_2_hi
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -80)   // xmm0 = x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = k*pi_2_hi
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = x - k*pi_2_hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r (partial)
+
+    c.code = emit_load_rbp_disp32_rax(c.code, -88)    // rax = k
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = k (f64)
+    let cos_load_lo = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_load_lo + 4, cos_pi_2_lo_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = k*pi_2_lo
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = k*pi_2_lo
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)    // xmm0 = r (partial)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = k*pi_2_lo
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r (final)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // copy for mul
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
+
+    // r²
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)    // xmm0 = r
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
 
-    // Step 2: Horner — cos(x) = 1 - r²(1/2 - r²(1/24 - r²/720))
-    // Innermost: s = 1/720
-    let cos_c6 = c.code.len
+    // Step 3: sin(r) = r*(1 - r²(1/6 - r²(1/120 - r²/5040)))
+    let cos_sin_c7 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
-    // s = 1/24 - r² * s
+    c.relocs = add_rip_reloc(c.relocs, cos_sin_c7 + 4, cos_c7_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_sin_c5 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_sin_c5 + 4, cos_c5_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_sin_c3 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_sin_c3 + 4, cos_c3_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_sin_one = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_sin_one + 4, cos_one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)   // [rbp-40] = sin(r)
+
+    // Step 4: cos(r) = 1 - r²(1/2 - r²(1/24 - r²/720))
+    let cos_cos_c6 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_cos_c6 + 4, cos_c6_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c4 = c.code.len
+    let cos_cos_c4 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
+    c.relocs = add_rip_reloc(c.relocs, cos_cos_c4 + 4, cos_c4_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
-    // s = 1/2 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/24 - r²/720)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c2 = c.code.len
+    let cos_cos_c2 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
+    c.relocs = add_rip_reloc(c.relocs, cos_cos_c2 + 4, cos_c2_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
-    // result = 1 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/2 - ...)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_one = c.code.len
+    let cos_cos_one = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
+    c.relocs = add_rip_reloc(c.relocs, cos_cos_one + 4, cos_one_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)   // [rbp-48] = cos(r)
 
-    // Return as bit pattern in rax
+    // Step 5: q = k & 3
+    c.code = emit_load_rbp_disp32_rax(c.code, -88)    // rax = k
+    c.code = emit_mov_reg_imm(c.code, 3, 3)           // mov rbx, 3
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)   // [rbp-56] = q
+
+    // Step 6: bit0 test -> swap
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = q
+    c.code = emit_mov_reg_imm(c.code, 3, 1)           // mov rbx, 1
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q & 1
+    c.code = emit_test_rax_rax(c.code)
+    let cos_jz_noswap = c.code.len
+    c.code = emit_jz_rel8(c.code, 0)                  // placeholder -> no_swap
+    // swap path (bit0 == 1)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)   // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = cos(r)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)   // xmm1 = sin(r)
+    let cos_zero1 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_zero1 + 4, cos_zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = -sin(r)
+    let cos_jmp_afterswap = c.code.len
+    c.code = emit_jmp_rel8(c.code, 0)                 // placeholder -> after_swap
+    let cos_no_swap_at = c.code.len
+    if cos_jz_noswap + 1 < 131072 {
+        c.code.bytes[(cos_jz_noswap + 1) as usize] = low8(cos_no_swap_at - (cos_jz_noswap + 2)) as i8
+    }
+    // no-swap path (bit0 == 0)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)   // xmm0 = sin(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = sin(r)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)   // xmm0 = cos(r)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = cos(r)
+    let cos_after_swap_at = c.code.len
+    if cos_jmp_afterswap + 1 < 131072 {
+        c.code.bytes[(cos_jmp_afterswap + 1) as usize] = low8(cos_after_swap_at - (cos_jmp_afterswap + 2)) as i8
+    }
+
+    // Step 7: bit1 test -> negate both
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = q
+    c.code = emit_mov_reg_imm(c.code, 3, 2)           // mov rbx, 2
+    c.code = emit_and_rax_rbx(c.code)                 // rax = q & 2
+    c.code = emit_test_rax_rax(c.code)
+    let cos_jz_nonegate = c.code.len
+    c.code = emit_jz_rel8(c.code, 0)                  // placeholder -> skip negate
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -64)   // xmm1 = val_sin
+    let cos_zero2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_zero2 + 4, cos_zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -val_sin
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64)   // val_sin = -val_sin
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -72)   // xmm1 = val_cos
+    let cos_zero3 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_zero3 + 4, cos_zero_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = -val_cos
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -72)   // val_cos = -val_cos
+    let cos_nonegate_at = c.code.len
+    if cos_jz_nonegate + 1 < 131072 {
+        c.code.bytes[(cos_jz_nonegate + 1) as usize] = low8(cos_nonegate_at - (cos_jz_nonegate + 2)) as i8
+    }
+
+    // Return cos(x) = val_cos
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -72)
     c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
+    c.code = emit_add_rsp_imm32(c.code, 96)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
@@ -4610,6 +4870,11 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     // (e.g. 3.141593 -> "3.094679"). 1000000.0 = 0x412E848000000000.
     c.rodata = data_section_add_f64(c.rodata, 0x412E848000000000)
     let rodata_1e6_offset = c.rodata.last_offset
+    // 0.5, added to frac*1e6 before the truncating cvttsd2si so the last
+    // printed digit is *rounded* rather than truncated (e.g. pi -> 3.141593,
+    // not 3.141592; 0.9999995 -> 1.000000, testing the carry into int part).
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)
+    let rodata_half_offset = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
@@ -4666,7 +4931,66 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_cvttsd2si_rax_xmm0(c.code)
     c.code = emit_store_rax_rbp_disp32(c.code, -56)   // save int_part
 
-    // itoa for integer part
+    // Fractional part is computed (and rounded) BEFORE the integer part is
+    // printed. Rounding the 6th fractional digit can carry into the integer
+    // part (e.g. 0.9999995 -> "1.000000"), so the carry must be applied to
+    // [rbp-56] before the integer digits are converted/written — the old
+    // code printed the integer part first and could never take this back.
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
+    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
+    var cb5 = c.code
+    cb5 = emit_byte(cb5, 0xF2)
+    cb5 = emit_byte(cb5, 0x48)
+    cb5 = emit_byte(cb5, 0x0F)
+    cb5 = emit_byte(cb5, 0x2A)
+    cb5 = emit_byte(cb5, 0xC8)
+    c.code = cb5
+
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = frac in [0,1)
+
+    // Load 1e6 from .rodata
+    let movsd1_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = frac*1e6
+
+    // Round to nearest: add 0.5 before the truncating cvttsd2si. frac*1e6 is
+    // always in [0, 1e6) here (frac itself is always in [0,1)), so this is a
+    // plain round-half-up with no sign concerns.
+    let movsd_half_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd_half_pos + 4, rodata_half_offset)
+    c.code = emit_addsd_xmm0_xmm1(c.code)             // xmm0 = frac*1e6 + 0.5
+
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)          // rax = round(frac*1e6)
+
+    // Ensure non-negative
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jns_rel8(c.code, 3)
+    c.code = emit_xor_rax_rax(c.code)
+
+    // Carry: if rounding pushed the fraction up to 1000000, it must print as
+    // "000000" with the integer part incremented by one.
+    c.code = emit_mov_reg_imm(c.code, 3, 1000000)     // mov rbx, 1000000
+    c.code = emit_cmp_rbx_rax(c.code)                 // cmp rbx, rax (ZF set iff equal)
+    let jnz_no_carry_pos = c.code.len
+    c.code = emit_jnz_rel8(c.code, 0)                 // placeholder
+    // Carry path: int_part += 1; fraction becomes 0.
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = int_part
+    c.code = emit_mov_reg_imm(c.code, 3, 1)           // mov rbx, 1
+    c.code = emit_add_rax_rbx(c.code)                 // rax = int_part + 1
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)   // int_part += 1
+    c.code = emit_xor_rax_rax(c.code)                 // rax = 0 (fraction, post-carry)
+    let carry_block_len = c.code.len - (jnz_no_carry_pos + 2)
+    if jnz_no_carry_pos + 1 < 131072 {
+        c.code.bytes[(jnz_no_carry_pos + 1) as usize] = low8(carry_block_len) as i8
+    }
+    c.code = emit_store_rax_rbp_disp32(c.code, -64)   // save final fraction digits (0..999999)
+
+    // itoa for integer part (reloaded — may have been incremented by carry)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)    // rax = int_part
     c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
     c.code = emit_sub_rsi_imm8(c.code, 1)
     c.code = emit_xor_rcx_rcx(c.code)
@@ -4703,35 +5027,9 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Fractional part
-    c.code = emit_load_rbp_disp32_rax(c.code, -48)
-    c.code = emit_movq_xmm0_rax(c.code)
-    c.code = emit_load_rbp_disp32_rax(c.code, -56)
-    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
-    var cb5 = c.code
-    cb5 = emit_byte(cb5, 0xF2)
-    cb5 = emit_byte(cb5, 0x48)
-    cb5 = emit_byte(cb5, 0x0F)
-    cb5 = emit_byte(cb5, 0x2A)
-    cb5 = emit_byte(cb5, 0xC8)
-    c.code = cb5
-
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-
-    // Load 1e6 from .rodata
-    let movsd1_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
-
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_cvttsd2si_rax_xmm0(c.code)
-
-    // Ensure non-negative
-    c.code = emit_test_rax_rax(c.code)
-    c.code = emit_jns_rel8(c.code, 3)
-    c.code = emit_xor_rax_rax(c.code)
-
-    // 6-digit fixed-width itoa (unrolled)
+    // 6-digit fixed-width itoa (unrolled) — reload the final (post-carry)
+    // rounded fraction digits saved above.
+    c.code = emit_load_rbp_disp32_rax(c.code, -64)
     c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
     c.code = emit_sub_rsi_imm8(c.code, 3)
 
