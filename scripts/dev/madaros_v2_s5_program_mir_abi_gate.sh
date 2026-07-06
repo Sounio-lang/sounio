@@ -1075,8 +1075,8 @@ if f128_binary128_value_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
 if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
     raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
-if f128_binary128_value_receipt.get("case_count") != 39:
-    raise SystemExit("f128 binary128 value receipt must contain exact thirty-nine cases")
+if f128_binary128_value_receipt.get("case_count") != 40:
+    raise SystemExit("f128 binary128 value receipt must contain exact forty cases")
 for field in [
     "f128_binary128_value_contract_complete",
     "f128_binary128_round_ties_to_even_recorded",
@@ -1133,12 +1133,14 @@ required_f128_value_hex = {
     "large_scale6_rounded": "4023cbe991a14587e5a78f25a250f840",
     "large_all_nines_scale6_rounded": "4026d1a94a1fffffffde7210be9424e6",
     "minimum_subnormal_rounded": "00000000000000000000000000000001",
+    "negative_minimum_subnormal_rounded": "80000000000000000000000000000001",
     "underflow_to_positive_zero": "00000000000000000000000000000000",
     "overflow_to_positive_infinity": "7fff0000000000000000000000000000",
     "overflow_to_negative_infinity": "ffff0000000000000000000000000000",
 }
 required_f128_value_classes = {
     "minimum_subnormal_rounded": "subnormal",
+    "negative_minimum_subnormal_rounded": "subnormal",
     "underflow_to_positive_zero": "zero",
     "overflow_to_positive_infinity": "infinity",
     "overflow_to_negative_infinity": "infinity",
@@ -1663,10 +1665,10 @@ if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.
     raise SystemExit("bad S5 f128 binary128 value-contract native receipt schema")
 if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
-if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_16_F128_NATIVE_TWO_LIMB_DECIMAL_BINARY128_MATERIALIZATION":
-    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.16 two-limb decimal stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 72:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact seventy-two cases")
+if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_17_F128_NATIVE_SIGNED_EXTREME_BINARY128_MATERIALIZATION":
+    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.17 signed extreme binary128 stage contract")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 73:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact seventy-three cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 4:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact four negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1680,6 +1682,7 @@ for field in [
     "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted",
     "f128_native_truncated_decimal_binary128_value_contract_promoted",
     "f128_native_subnormal_underflow_overflow_value_contract_promoted",
+    "f128_native_signed_minimum_subnormal_binary128_materialization_promoted",
     "uncontracted_f128_decimal_materialization_fails_closed",
 ]:
     if value_native_claims.get(field) is not True:
@@ -1761,6 +1764,7 @@ required_value_native_cases = {
     "large_scale6_rounded": {"literal": "123456789012.345678", "hex": "4023cbe991a14587e5a78f25a250f840", "metadata": [1, 0, 123456789012345678, 18, 6, 0]},
     "large_all_nines_scale6_rounded": {"literal": "999999999999.999999", "hex": "4026d1a94a1fffffffde7210be9424e6", "metadata": [1, 0, 999999999999999999, 18, 6, 0]},
     "minimum_subnormal_rounded": {"literal": "6.475175119438025110924438958227646552499569338034681e-4966", "hex": "00000000000000000000000000000001", "metadata": [1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
+    "negative_minimum_subnormal_rounded": {"literal": "-6.475175119438025110924438958227646552499569338034681e-4966", "hex": "80000000000000000000000000000001", "metadata": [-1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
     "underflow_to_positive_zero": {"literal": "1e-5000", "hex": "00000000000000000000000000000000", "metadata": [1, 0, 1, 1, 5000, 0]},
     "overflow_to_positive_infinity": {"literal": "1e5000", "hex": "7fff0000000000000000000000000000", "metadata": [1, 0, 1, 1, -5000, 0]},
     "overflow_to_negative_infinity": {"literal": "-1e5000", "hex": "ffff0000000000000000000000000000", "metadata": [-1, 0, 1, 1, -5000, 0]},
@@ -1938,14 +1942,15 @@ if f128_ieee_class_helper_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 IEEE class-code helper receipt")
 if f128_ieee_class_helper_receipt.get("stage_contract_level") != "S5_14_F128_NATIVE_IEEE_CLASS_CODE_HELPER_WITH_NAN_SOURCE":
     raise SystemExit("f128 IEEE class-code helper receipt must declare S5.14 NaN-source stage contract")
-if f128_ieee_class_helper_receipt.get("case_count") != 11:
-    raise SystemExit("f128 IEEE class-code helper receipt must contain exact eleven positive cases")
-if f128_ieee_class_helper_receipt.get("negative_case_count") != 1:
-    raise SystemExit("f128 IEEE class-code helper receipt must contain one negative fail-closed case")
+if f128_ieee_class_helper_receipt.get("case_count") != 12:
+    raise SystemExit("f128 IEEE class-code helper receipt must contain exact twelve positive cases")
+if f128_ieee_class_helper_receipt.get("negative_case_count") != 0:
+    raise SystemExit("f128 IEEE class-code helper receipt must contain zero negative fail-closed cases")
 class_helper_claims = f128_ieee_class_helper_receipt.get("claims", {})
 for field in [
     "f128_native_ieee_class_code_helper_promoted",
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted",
+    "f128_native_ieee_class_code_source_observable_signed_subnormal_promoted",
     "f128_native_ieee_class_code_nan_branch_emitted",
     "f128_native_ieee_class_code_nan_source_surface_promoted",
     "f128_native_canonical_quiet_nan_constructor_promoted",
@@ -1977,6 +1982,7 @@ required_class_helper_cases = {
     "normal_negative_one_tenth": 2,
     "normal_smallest_binary128": 2,
     "subnormal_min_positive": 1,
+    "subnormal_min_negative": 1,
     "underflow_positive_zero": 0,
     "infinity_positive_overflow": 3,
     "infinity_negative_overflow": 3,
@@ -2001,15 +2007,8 @@ for case_id, expected_rc in required_class_helper_cases.items():
 class_helper_negative_cases = {
     row.get("case_id"): row for row in f128_ieee_class_helper_receipt.get("negative_cases", [])
 }
-if set(class_helper_negative_cases) != {"negative_min_subnormal_materialization_pending"}:
-    raise SystemExit(f"f128 IEEE class-code helper negative cases mismatch: {sorted(class_helper_negative_cases)}")
-negative_min_subnormal = class_helper_negative_cases["negative_min_subnormal_materialization_pending"]
-if negative_min_subnormal.get("machine_module_supported") is not False:
-    raise SystemExit("negative min-subnormal class helper case must fail closed before ELF")
-if negative_min_subnormal.get("machine_module_unsupported_detail") != "f128_decimal_materialization_pending":
-    raise SystemExit("negative min-subnormal class helper case must keep the decimal-materialization blocker")
-if negative_min_subnormal.get("machine_module_legacy_fallback") is not False:
-    raise SystemExit("negative min-subnormal class helper case must not use legacy fallback")
+if class_helper_negative_cases:
+    raise SystemExit(f"f128 IEEE class-code helper negative cases must be empty: {sorted(class_helper_negative_cases)}")
 
 if f128_param_slot_layout_receipt.get("schema") != "madaros.v2.s5.f128_param_slot_layout_receipt/0.1":
     raise SystemExit("bad S5 f128 parameter slot-layout receipt schema")

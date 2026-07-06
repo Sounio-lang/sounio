@@ -75,6 +75,7 @@ CASES: list[Case] = [
     Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", "normal", False),
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", "normal", False),
     Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", "subnormal", False),
+    Case("negative_minimum_subnormal_rounded", "-6.475175119438025110924438958227646552499569338034681e-4966", "80000000000000000000000000000001", "subnormal", False),
     Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", "zero", False),
     Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", "infinity", False),
     Case("overflow_to_negative_infinity", "-1e5000", "ffff0000000000000000000000000000", "infinity", False),

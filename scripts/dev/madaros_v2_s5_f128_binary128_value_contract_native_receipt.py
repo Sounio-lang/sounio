@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.16 f128 native binary128 materialization receipt.
+"""Emit a Madaros v2 S5.17 f128 native binary128 materialization receipt.
 
 This promotes native-v2 materialization for the f128 binary128 value-contract
 case set plus an explicit bounded-decimal class: sig_hi=0, no truncation, and
@@ -22,7 +22,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.1"
-STAGE_CONTRACT_LEVEL = "S5_16_F128_NATIVE_TWO_LIMB_DECIMAL_BINARY128_MATERIALIZATION"
+STAGE_CONTRACT_LEVEL = "S5_17_F128_NATIVE_SIGNED_EXTREME_BINARY128_MATERIALIZATION"
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ CASES: list[Case] = [
     Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", [1, 0, 123456789012345678, 18, 6, 0]),
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", [1, 0, 999999999999999999, 18, 6, 0]),
     Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", [1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
+    Case("negative_minimum_subnormal_rounded", "-6.475175119438025110924438958227646552499569338034681e-4966", "80000000000000000000000000000001", [-1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
     Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", [1, 0, 1, 1, 5000, 0]),
     Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", [1, 0, 1, 1, -5000, 0]),
     Case("overflow_to_negative_infinity", "-1e5000", "ffff0000000000000000000000000000", [-1, 0, 1, 1, -5000, 0]),
@@ -414,6 +415,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
+            "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -428,7 +430,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_generated_sig_hi_zero_no_truncation_scale10_le_18_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale0_integer_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
-            "native_v2_materializes_explicit_value_contract_subnormal_underflow_and_finite_overflow_to_infinity_cases",
+            "native_v2_materializes_explicit_value_contract_signed_subnormal_underflow_and_finite_overflow_to_infinity_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",

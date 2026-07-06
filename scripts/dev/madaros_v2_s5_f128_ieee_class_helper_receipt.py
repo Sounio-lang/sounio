@@ -60,22 +60,19 @@ CASES: list[Case] = [
         1,
         "subnormal",
     ),
+    Case(
+        "subnormal_min_negative",
+        "-6.475175119438025110924438958227646552499569338034681e-4966",
+        1,
+        "subnormal",
+    ),
     Case("underflow_positive_zero", "1e-5000", 0, "zero"),
     Case("infinity_positive_overflow", "1e5000", 3, "infinity"),
     Case("infinity_negative_overflow", "-1e5000", 3, "infinity"),
     Case("nan_canonical_quiet_builtin", "f128_nan()", 4, "nan"),
 ]
 
-NEGATIVE_CASES: list[Case] = [
-    Case(
-        "negative_min_subnormal_materialization_pending",
-        "-6.475175119438025110924438958227646552499569338034681e-4966",
-        1,
-        "subnormal",
-        expected_supported=False,
-        expected_unsupported_detail="f128_decimal_materialization_pending",
-    ),
-]
+NEGATIVE_CASES: list[Case] = []
 
 
 def repo_root_from_script() -> Path:
@@ -269,6 +266,7 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
         "claims": {
             "f128_native_ieee_class_code_helper_promoted": True,
             "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
+            "f128_native_ieee_class_code_source_observable_signed_subnormal_promoted": True,
             "f128_native_ieee_class_code_nan_branch_emitted": True,
             "f128_native_ieee_class_code_nan_source_surface_promoted": True,
             "f128_native_canonical_quiet_nan_constructor_promoted": True,
