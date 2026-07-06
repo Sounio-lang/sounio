@@ -55,6 +55,18 @@ CASES: list[Case] = [
     Case("thirty_two_exact", "32.0", "40040000000000000000000000000000", "normal", True),
     Case("ten_twenty_four_exact", "1024.0", "40090000000000000000000000000000", "normal", True),
     Case("one_e3_exact", "1e3", "4008f400000000000000000000000000", "normal", True),
+    Case("two_tenths_rounded", "0.2", "3ffc999999999999999999999999999a", "normal", False),
+    Case("three_tenths_rounded", "0.3", "3ffd3333333333333333333333333333", "normal", False),
+    Case("six_tenths_rounded", "0.6", "3ffe3333333333333333333333333333", "normal", False),
+    Case("seven_tenths_rounded", "0.7", "3ffe6666666666666666666666666666", "normal", False),
+    Case("nine_tenths_rounded", "0.9", "3ffecccccccccccccccccccccccccccd", "normal", False),
+    Case("one_point_one_rounded", "1.1", "3fff199999999999999999999999999a", "normal", False),
+    Case("negative_one_point_one_rounded", "-1.1", "bfff199999999999999999999999999a", "normal", False),
+    Case("one_hundredth_rounded", "0.01", "3ff847ae147ae147ae147ae147ae147b", "normal", False),
+    Case("one_thousandth_rounded", "0.001", "3ff50624dd2f1a9fbe76c8b439581062", "normal", False),
+    Case("one_point_2345_rounded", "1.2345", "3fff3c083126e978d4fdf3b645a1cac1", "normal", False),
+    Case("twelve_point_345_rounded", "12.345", "40028b0a3d70a3d70a3d70a3d70a3d71", "normal", False),
+    Case("one_twenty_three_point_456_rounded", "123.456", "4005edd2f1a9fbe76c8b4395810624dd", "normal", False),
 ]
 
 PROBE_SOURCE = (

@@ -1031,8 +1031,8 @@ if f128_binary128_value_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
 if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
     raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
-if f128_binary128_value_receipt.get("case_count") != 16:
-    raise SystemExit("f128 binary128 value receipt must contain exact sixteen cases")
+if f128_binary128_value_receipt.get("case_count") != 28:
+    raise SystemExit("f128 binary128 value receipt must contain exact twenty-eight cases")
 for field in [
     "f128_binary128_value_contract_complete",
     "f128_binary128_round_ties_to_even_recorded",
@@ -1068,6 +1068,18 @@ required_f128_value_hex = {
     "thirty_two_exact": "40040000000000000000000000000000",
     "ten_twenty_four_exact": "40090000000000000000000000000000",
     "one_e3_exact": "4008f400000000000000000000000000",
+    "two_tenths_rounded": "3ffc999999999999999999999999999a",
+    "three_tenths_rounded": "3ffd3333333333333333333333333333",
+    "six_tenths_rounded": "3ffe3333333333333333333333333333",
+    "seven_tenths_rounded": "3ffe6666666666666666666666666666",
+    "nine_tenths_rounded": "3ffecccccccccccccccccccccccccccd",
+    "one_point_one_rounded": "3fff199999999999999999999999999a",
+    "negative_one_point_one_rounded": "bfff199999999999999999999999999a",
+    "one_hundredth_rounded": "3ff847ae147ae147ae147ae147ae147b",
+    "one_thousandth_rounded": "3ff50624dd2f1a9fbe76c8b439581062",
+    "one_point_2345_rounded": "3fff3c083126e978d4fdf3b645a1cac1",
+    "twelve_point_345_rounded": "40028b0a3d70a3d70a3d70a3d70a3d71",
+    "one_twenty_three_point_456_rounded": "4005edd2f1a9fbe76c8b4395810624dd",
 }
 if set(f128_value_cases) != set(required_f128_value_hex):
     raise SystemExit(f"f128 binary128 value receipt cases mismatch: {sorted(f128_value_cases)}")
@@ -1083,6 +1095,8 @@ if f128_value_cases.get("high_precision_probe", {}).get("decimal_scale10") != 34
     raise SystemExit("high_precision_probe must preserve decimal scale10=34 in the binary128 value receipt")
 if f128_value_cases.get("one_e3_exact", {}).get("decimal_scale10") != -3:
     raise SystemExit("one_e3_exact must preserve decimal scale10=-3 in the binary128 value receipt")
+if f128_value_cases.get("one_twenty_three_point_456_rounded", {}).get("decimal_scale10") != 3:
+    raise SystemExit("one_twenty_three_point_456_rounded must preserve decimal scale10=3 in the binary128 value receipt")
 
 if f128_literal_value_bridge_receipt.get("schema") != "madaros.v2.s5.f128_literal_value_bridge_receipt/0.3":
     raise SystemExit("bad S5 f128 literal value bridge receipt schema")
@@ -1468,13 +1482,14 @@ if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
 if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 16:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact sixteen cases")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 28:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact twenty-eight cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
 for field in [
     "f128_binary128_value_contract_native_materialization_promoted",
     "f128_binary128_value_contract_case_set_complete",
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted",
+    "f128_native_bounded_rounded_decimal_binary128_materialization_promoted",
 ]:
     if value_native_claims.get(field) is not True:
         raise SystemExit(f"f128 binary128 value-contract native receipt missing required true claim: {field}")
@@ -1505,6 +1520,18 @@ required_value_native_cases = {
     "thirty_two_exact": {"literal": "32.0", "hex": "40040000000000000000000000000000", "metadata": [1, 0, 320, 3, 1, 0]},
     "ten_twenty_four_exact": {"literal": "1024.0", "hex": "40090000000000000000000000000000", "metadata": [1, 0, 10240, 5, 1, 0]},
     "one_e3_exact": {"literal": "1e3", "hex": "4008f400000000000000000000000000", "metadata": [1, 0, 1, 1, -3, 0]},
+    "two_tenths_rounded": {"literal": "0.2", "hex": "3ffc999999999999999999999999999a", "metadata": [1, 0, 2, 2, 1, 0]},
+    "three_tenths_rounded": {"literal": "0.3", "hex": "3ffd3333333333333333333333333333", "metadata": [1, 0, 3, 2, 1, 0]},
+    "six_tenths_rounded": {"literal": "0.6", "hex": "3ffe3333333333333333333333333333", "metadata": [1, 0, 6, 2, 1, 0]},
+    "seven_tenths_rounded": {"literal": "0.7", "hex": "3ffe6666666666666666666666666666", "metadata": [1, 0, 7, 2, 1, 0]},
+    "nine_tenths_rounded": {"literal": "0.9", "hex": "3ffecccccccccccccccccccccccccccd", "metadata": [1, 0, 9, 2, 1, 0]},
+    "one_point_one_rounded": {"literal": "1.1", "hex": "3fff199999999999999999999999999a", "metadata": [1, 0, 11, 2, 1, 0]},
+    "negative_one_point_one_rounded": {"literal": "-1.1", "hex": "bfff199999999999999999999999999a", "metadata": [-1, 0, 11, 2, 1, 0]},
+    "one_hundredth_rounded": {"literal": "0.01", "hex": "3ff847ae147ae147ae147ae147ae147b", "metadata": [1, 0, 1, 3, 2, 0]},
+    "one_thousandth_rounded": {"literal": "0.001", "hex": "3ff50624dd2f1a9fbe76c8b439581062", "metadata": [1, 0, 1, 4, 3, 0]},
+    "one_point_2345_rounded": {"literal": "1.2345", "hex": "3fff3c083126e978d4fdf3b645a1cac1", "metadata": [1, 0, 12345, 5, 4, 0]},
+    "twelve_point_345_rounded": {"literal": "12.345", "hex": "40028b0a3d70a3d70a3d70a3d70a3d71", "metadata": [1, 0, 12345, 5, 3, 0]},
+    "one_twenty_three_point_456_rounded": {"literal": "123.456", "hex": "4005edd2f1a9fbe76c8b4395810624dd", "metadata": [1, 0, 123456, 6, 3, 0]},
 }
 if set(value_native_cases) != set(required_value_native_cases):
     raise SystemExit(f"f128 binary128 value-contract native receipt cases mismatch: {sorted(value_native_cases)}")
@@ -2455,6 +2482,7 @@ module = {
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
         "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
+        "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2605,6 +2633,7 @@ receipt = {
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
+    "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2687,6 +2716,7 @@ receipt = {
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
+    "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_bounded_rounded_decimal_binary128_materialization_promoted"],
     "f128_arithmetic_value_contract_promoted": module["scalar_abi_receipts"]["f128_arithmetic_value_contract_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],
@@ -2721,7 +2751,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata and finite decimal-tenths value-contract arithmetic, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic plus bounded-rounded binary128 materialization, and finite decimal-tenths value-contract arithmetic, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

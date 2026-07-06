@@ -3,9 +3,10 @@
 
 This promotes native-v2 materialization for the complete current
 f128_binary128_value_receipt case set, including exact dyadic decimal literals
-that can be represented without rounding. It deliberately does not promote
-arbitrary rounded decimal-to-binary128 materialization beyond that contract,
-f128 arithmetic, call ABI, or return ABI.
+and bounded rounded decimal literals with sig_hi=0, scale10<=6, and
+roundTiesToEven. It deliberately does not promote arbitrary rounded
+decimal-to-binary128 materialization beyond that contract, f128 arithmetic,
+call ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -59,6 +60,18 @@ CASES: list[Case] = [
     Case("thirty_two_exact", "32.0", "40040000000000000000000000000000", [1, 0, 320, 3, 1, 0]),
     Case("ten_twenty_four_exact", "1024.0", "40090000000000000000000000000000", [1, 0, 10240, 5, 1, 0]),
     Case("one_e3_exact", "1e3", "4008f400000000000000000000000000", [1, 0, 1, 1, -3, 0]),
+    Case("two_tenths_rounded", "0.2", "3ffc999999999999999999999999999a", [1, 0, 2, 2, 1, 0]),
+    Case("three_tenths_rounded", "0.3", "3ffd3333333333333333333333333333", [1, 0, 3, 2, 1, 0]),
+    Case("six_tenths_rounded", "0.6", "3ffe3333333333333333333333333333", [1, 0, 6, 2, 1, 0]),
+    Case("seven_tenths_rounded", "0.7", "3ffe6666666666666666666666666666", [1, 0, 7, 2, 1, 0]),
+    Case("nine_tenths_rounded", "0.9", "3ffecccccccccccccccccccccccccccd", [1, 0, 9, 2, 1, 0]),
+    Case("one_point_one_rounded", "1.1", "3fff199999999999999999999999999a", [1, 0, 11, 2, 1, 0]),
+    Case("negative_one_point_one_rounded", "-1.1", "bfff199999999999999999999999999a", [-1, 0, 11, 2, 1, 0]),
+    Case("one_hundredth_rounded", "0.01", "3ff847ae147ae147ae147ae147ae147b", [1, 0, 1, 3, 2, 0]),
+    Case("one_thousandth_rounded", "0.001", "3ff50624dd2f1a9fbe76c8b439581062", [1, 0, 1, 4, 3, 0]),
+    Case("one_point_2345_rounded", "1.2345", "3fff3c083126e978d4fdf3b645a1cac1", [1, 0, 12345, 5, 4, 0]),
+    Case("twelve_point_345_rounded", "12.345", "40028b0a3d70a3d70a3d70a3d70a3d71", [1, 0, 12345, 5, 3, 0]),
+    Case("one_twenty_three_point_456_rounded", "123.456", "4005edd2f1a9fbe76c8b4395810624dd", [1, 0, 123456, 6, 3, 0]),
 ]
 
 
@@ -229,6 +242,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_binary128_value_contract_native_materialization_promoted": True,
             "f128_binary128_value_contract_case_set_complete": True,
             "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
+            "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -238,7 +252,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "legacy_fallback_used": False,
         },
         "roundtrip_contract": [
-            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_decimals",
+            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_and_bounded_rounded_decimals",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",
