@@ -977,6 +977,36 @@ var AST_ARENA_BASE_BSS_OFF: i64 = 0
 var AST_ARENA_CURSOR_BSS_OFF: i64 = 0
 var AST_ARENA_LIMIT_BSS_OFF: i64 = 0
 
+// Aggregate-storage bump pool: packs the never-freed aggregate backing blocks
+// (struct-array element copies, array-literal blocks, Seq element
+// materializations, closure envs) that previously went through
+// emit_heap_alloc_x86 — one page-granular mmap EACH, so a ~250-byte struct
+// temp cost 4 KiB of VmSize forever (measured: +11.5 GiB during native
+// codegen of a 369-fn merged module, ~0.5 GiB per lowered module). The pool
+// bump-packs them 8-aligned instead. Semantics are unchanged: blocks are
+// never freed (same as the leaked mmaps), never reallocated, and the pool is
+// deliberately SEPARATE from the Box arena so __arena_reset can never touch
+// aggregate storage that outlives a reset window (e.g. merged-module element
+// blocks aliased by struct assignment). heap_free/heap_realloc/seq_new keep
+// the header'd mmap path.
+var AGG_POOL_BASE_BSS_OFF: i64 = 0
+var AGG_POOL_CURSOR_BSS_OFF: i64 = 0
+var AGG_POOL_LIMIT_BSS_OFF: i64 = 0
+
+// Diagnostics: count + total bytes of runtime mmap-path allocations
+// (heap_alloc, heap_realloc, malloc/mmap_len). Read via __rtmmap_count() /
+// __rtmmap_bytes().
+var RTMMAP_COUNT_BSS_OFF: i64 = 0
+var RTMMAP_BYTES_BSS_OFF: i64 = 0
+// Cached 16 MiB read_file scratch buffer (lazy mmap, reused every call).
+var READFILE_SCRATCH_BSS_OFF: i64 = 0
+var ARENA_REFILL_COUNT_BSS_OFF: i64 = 0
+var ARENA_REFILL_BYTES_BSS_OFF: i64 = 0
+var ARENA_UNMAP_COUNT_BSS_OFF: i64 = 0
+var ARENA_UNMAP_BYTES_BSS_OFF: i64 = 0
+var POOL_REFILL_COUNT_BSS_OFF: i64 = 0
+var POOL_REFILL_BYTES_BSS_OFF: i64 = 0
+
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
 
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
@@ -7869,8 +7899,7 @@ fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut,
             emit_store_var(src_slot)
             var j: i64 = 0
             while j < nslots {
-                emit_imm64(elem_nslots * 8)
-                emit_heap_alloc_x86()
+                emit_pool_alloc_x86(elem_nslots * 8)
                 em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (dest)
                 emit_load_var(src_slot)
                 em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (source)
@@ -7890,8 +7919,7 @@ fn fill_repeat_struct_array_slots_x86(dst_start: i64, field_hash: i64) with Mut,
             var j: i64 = 0
             while j < nslots {
                 // allocate inner_nslots * 8 bytes for this outer slot's copy
-                emit_imm64(inner_nslots * 8)
-                emit_heap_alloc_x86()
+                emit_pool_alloc_x86(inner_nslots * 8)
                 // rax = new inner array ptr; set up copy from src
                 let new_ptr_slot = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
@@ -8775,7 +8803,31 @@ fn emit_starts_with_regs_x86() with Mut {
     em(0x48); em(0x31); em(0xc0)            // no_match: xor rax, rax
 }
 
+fn emit_bump_counter_rsi_x86(count_off: i64, bytes_off: i64) with Mut {
+    // increment [count_off] and add rsi (length) to [bytes_off]; preserves rax/rcx? NO —
+    // clobbers rcx; preserves rax and rsi via push/pop.
+    em(0x50)                                 // push rax
+    em(0x48); em(0x89); em(0xf1)             // mov rcx, rsi
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + count_off)
+    em(0x48); em(0xff); em(0x00)             // inc qword [rax]
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + bytes_off)
+    em(0x48); em(0x01); em(0x08)             // add [rax], rcx
+    em(0x58)                                 // pop rax
+}
+
+fn emit_rtmmap_count_x86() with Mut {
+    // rax = requested size at entry; bump count and bytes counters, preserve rax.
+    em(0x50)                                 // push rax (size)
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax (size)
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + RTMMAP_COUNT_BSS_OFF)
+    em(0x48); em(0xff); em(0x00)             // inc qword [rax]
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + RTMMAP_BYTES_BSS_OFF)
+    em(0x48); em(0x01); em(0x08)             // add [rax], rcx
+    em(0x58)                                 // pop rax (size)
+}
+
 fn emit_mmap_len_in_rax_x86() with Mut {
+    emit_rtmmap_count_x86()
     em(0x48); em(0x89); em(0xc6)            // mov rsi, rax
     em(0x48); em(0x31); em(0xff)            // xor rdi, rdi
     em(0xba); em32(3)                       // mov edx, 3
@@ -8788,6 +8840,7 @@ fn emit_mmap_len_in_rax_x86() with Mut {
 
 fn emit_heap_alloc_x86() with Mut {
     // rax = requested size. Allocate size+8 via mmap, write header, return user ptr.
+    emit_rtmmap_count_x86()
     em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (total = size + header)
     em(0x48); em(0x89); em(0xc6)             // mov rsi, rax (mmap size arg)
     em(0x50)                                  // push rax (save total size)
@@ -8815,6 +8868,7 @@ fn emit_heap_free_x86() with Mut {
 fn emit_heap_realloc_x86() with Mut {
     // stack = [old_user_ptr], rax = new_size.
     // mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
+    emit_rtmmap_count_x86()
     em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (new_total = new_size + header)
     em(0x48); em(0x89); em(0xc2)             // mov rdx, rax (new_total for mremap arg3)
     em(0x49); em(0x89); em(0xc0)             // mov r8, rax (save new_total)
@@ -8874,8 +8928,16 @@ fn emit_ast_arena_init_x86() with Mut, Panic {
     let init_abort = CL
     em32(0)
     patch32(init_ok, CL)
+    // Chunk header (16 bytes at chunk base): {prev_base, prev_limit} back-link
+    // for __arena_reset's walk-back munmap of dead chunks. Initial chunk links
+    // to {0, 0} (chain terminator). User allocations start at base + 16.
+    em(0x48); em(0xc7); em(0x00); em32(0)            // mov qword [rax], 0 (prev_base)
+    em(0x48); em(0xc7); em(0x40); em(8); em32(0)     // mov qword [rax+8], 0 (prev_limit)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax (rax preserved)
-    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = rax
+    em(0x50)                                        // push rax (chunk base)
+    em(0x48); em(0x83); em(0xc0); em(16)             // add rax, 16 (skip header)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = base + 16
+    em(0x58)                                        // pop rax (chunk base)
     em(0x48); em(0x01); em(0xf0)                     // add rax, rsi -> rax = base + actual
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
     em(0xe9)                                        // jmp done
@@ -8954,14 +9016,25 @@ fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
     let slow_abort = CL
     em32(0)
     patch32(slow_ok, CL)
+    emit_bump_counter_rsi_x86(ARENA_REFILL_COUNT_BSS_OFF, ARENA_REFILL_BYTES_BSS_OFF)
+    // Write the back-link header {old_base, old_limit} into the NEW chunk
+    // before repointing the BSS triple — __arena_reset walks this chain to
+    // munmap chunks reserved after a mark. rax = new chunk base, rsi = size.
+    em(0x48); em(0x89); em(0xc2)                     // mov rdx, rax (rdx = new chunk base)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)     // rax = old base
+    em(0x48); em(0x89); em(0x02)                     // mov [rdx], rax (header.prev_base)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)    // rax = old limit
+    em(0x48); em(0x89); em(0x42); em(8)              // mov [rdx+8], rax (header.prev_limit)
+    em(0x48); em(0x89); em(0xd0)                     // mov rax, rdx (new chunk base)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)    // [base] = rax
     em(0x50)                                        // push rax (chunk base)
     em(0x48); em(0x01); em(0xf0)                      // add rax, rsi -> rax = base + actual
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)   // [limit] = rax
     em(0x58)                                        // pop rax (chunk base)
+    em(0x48); em(0x83); em(0xc0); em(16)             // add rax, 16 (skip header -> alloc base)
     em(0x50)                                        // push rax (return base)
     em(0x48); em(0x05); em32(sz)                     // add rax, sz
-    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = base + sz
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)  // [cursor] = base + 16 + sz
     em(0x58)                                        // pop rax (return base = alloc base)
     em(0xe9)                                        // jmp done
     let slow_done = CL
@@ -8974,7 +9047,135 @@ fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
     patch32(slow_done, CL)
 }
 
-fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut {
+// Code offset of the shared pool-alloc routine in the CURRENT compile's CD
+// buffer; -1 = not yet emitted. Reset alongside CL in compile_all. The routine
+// is shared (call rel32 per site) rather than inlined: an inline expansion at
+// every aggregate site overflowed the fixed 128 MiB CD buffer on the Madaros
+// main.sio bundle (103.8 MiB of emitted code before this change).
+var POOL_ALLOC_ROUTINE_CL: i64 = 0 - 1
+
+// Emit (once, lazily, jumped over inside whatever function first needs it) the
+// shared aggregate-pool allocation routine. ABI: rax = size in, rax = pointer
+// out; clobbers rcx/rdx/rsi/rdi/r8-r11 (the same caller-saved set the old
+// per-site inline mmap sequence clobbered). Pool state is the AGG_POOL_* BSS
+// triple, lazily initialized ({0,0,0} fails the first fit check and reserves
+// the first chunk). Chunk = max(limit-base, 256 MiB, size+4096); mmap halves
+// on failure to a 16 MiB floor, then aborts with exit 42 like the Box arena.
+fn emit_pool_alloc_routine_x86() with Mut, Panic, Div {
+    em(0xe9)                                        // jmp over (routine body is not fall-through)
+    let pool_skip = CL
+    em32(0)
+    POOL_ALLOC_ROUTINE_CL = CL
+    // entry: rax = size -> 8-align
+    em(0x48); em(0x83); em(0xc0); em(7)              // add rax, 7
+    em(0x48); em(0x83); em(0xe0); em(0xf8)           // and rax, -8
+    em(0x48); em(0x89); em(0xc1)                     // mov rcx, rax (rcx = sz)
+    let pool_loop = CL
+    // fast fit check: r8 = cursor, r9 = cursor + sz; if r9 <= limit commit
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AGG_POOL_CURSOR_BSS_OFF)
+    em(0x49); em(0x89); em(0xc0)                     // mov r8, rax (candidate base)
+    em(0x48); em(0x01); em(0xc8)                     // add rax, rcx (end)
+    em(0x49); em(0x89); em(0xc1)                     // mov r9, rax (end)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AGG_POOL_LIMIT_BSS_OFF)
+    em(0x49); em(0x39); em(0xc1)                     // cmp r9, rax (end - limit)
+    em(0x0f); em(0x87)                              // ja slow (end > limit; limit=0 first time)
+    let pool_slow = CL
+    em32(0)
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + AGG_POOL_CURSOR_BSS_OFF)
+    em(0x4c); em(0x89); em(0x08)                     // mov [rax], r9 (cursor = end)
+    em(0x4c); em(0x89); em(0xc0)                     // mov rax, r8 (return base)
+    em(0xc3)                                        // ret
+    // SLOW: reserve a fresh chunk, then loop back to the fit check.
+    patch32(pool_slow, CL)
+    em(0x51)                                        // push rcx (save sz across syscalls)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AGG_POOL_LIMIT_BSS_OFF)
+    em(0x48); em(0x89); em(0xc6)                     // mov rsi, rax
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AGG_POOL_BASE_BSS_OFF)
+    em(0x48); em(0x29); em(0xc6)                     // sub rsi, rax (current chunk size)
+    em(0x48); em(0xba); em64(268435456)              // movabs rdx, 256 MiB
+    em(0x48); em(0x39); em(0xd6)                     // cmp rsi, rdx
+    em(0x0f); em(0x83)                               // jae keep1
+    let pool_keep1 = CL
+    em32(0)
+    em(0x48); em(0x89); em(0xd6)                     // mov rsi, rdx
+    patch32(pool_keep1, CL)
+    em(0x48); em(0x89); em(0xca)                     // mov rdx, rcx (sz)
+    em(0x48); em(0x81); em(0xc2); em32(4096)         // add rdx, 4096 (request + slack)
+    em(0x48); em(0x39); em(0xd6)                     // cmp rsi, rdx
+    em(0x0f); em(0x83)                               // jae keep2
+    let pool_keep2 = CL
+    em32(0)
+    em(0x48); em(0x89); em(0xd6)                     // mov rsi, rdx (grow to need)
+    patch32(pool_keep2, CL)
+    let pool_retry = CL
+    em(0x48); em(0x31); em(0xff)                     // xor rdi, rdi
+    em(0xba); em32(3)                                // mov edx, 3
+    em(0x41); em(0xba); em32(0x22)                   // mov r10d, 0x22
+    em(0x49); em(0xc7); em(0xc0); em32(0 - 1)        // mov r8, -1
+    em(0x4d); em(0x31); em(0xc9)                      // xor r9, r9
+    em(0xb8); em32(9)                                // mov eax, 9 (SYS_mmap)
+    em(0x0f); em(0x05)                               // syscall (clobbers rcx/r11 — sz is on the stack)
+    em(0x48); em(0x3d); em32(0 - 4096)               // cmp rax, -4096
+    em(0x0f); em(0x86)                               // jbe ok
+    let pool_ok = CL
+    em32(0)
+    em(0x48); em(0xd1); em(0xee)                    // shr rsi, 1
+    em(0x48); em(0xba); em64(16777216)              // movabs rdx, 16 MiB floor
+    em(0x48); em(0x39); em(0xd6)                    // cmp rsi, rdx
+    em(0x0f); em(0x83)                              // jae retry
+    em32(pool_retry - (CL + 4))
+    em(0xbf); em32(42)                              // mov edi, 42
+    em(0xb8); em32(60)                              // mov eax, 60 (SYS_exit)
+    em(0x0f); em(0x05)                              // syscall
+    patch32(pool_ok, CL)
+    emit_bump_counter_rsi_x86(POOL_REFILL_COUNT_BSS_OFF, POOL_REFILL_BYTES_BSS_OFF)
+    // install chunk: base = cursor = rax, limit = rax + rsi; retry the fit
+    em(0x48); em(0x89); em(0xc1)                     // mov rcx, rax (new base)
+    em(0x48); em(0x89); em(0xc2)                     // mov rdx, rax
+    em(0x48); em(0x01); em(0xf2)                     // add rdx, rsi (new limit)
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + AGG_POOL_BASE_BSS_OFF)
+    em(0x48); em(0x89); em(0x08)                     // mov [rax], rcx
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + AGG_POOL_CURSOR_BSS_OFF)
+    em(0x48); em(0x89); em(0x08)                     // mov [rax], rcx
+    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + AGG_POOL_LIMIT_BSS_OFF)
+    em(0x48); em(0x89); em(0x10)                     // mov [rax], rdx
+    em(0x59)                                        // pop rcx (sz)
+    em(0xe9); em32(pool_loop - (CL + 4))             // jmp fit check
+    patch32(pool_skip, CL)
+}
+
+// Emit a bump allocation of `alloc_size` bytes (8-aligned) from the aggregate
+// pool (AGG_POOL_* — see the BSS decl comment). Returns the pointer in rax.
+// Per-site cost is 15 bytes (movabs rax, sz; call routine) — smaller than the
+// old inline mmap sequence it replaces. Chunks are never freed and there is NO
+// reset for this pool — it holds aggregate backing storage of arbitrary
+// lifetime; the win over the old per-block mmap is purely packing (8-byte
+// instead of 4 KiB page granularity).
+fn emit_pool_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
+    var sz = alloc_size
+    if sz < 8 { sz = 8 }
+    sz = (sz + 7) / 8 * 8
+    if POOL_ALLOC_ROUTINE_CL < 0 {
+        emit_pool_alloc_routine_x86()
+    }
+    em(0x48); em(0xb8); em64(sz)                     // movabs rax, sz
+    em(0xe8); em32(POOL_ALLOC_ROUTINE_CL - (CL + 4)) // call routine
+}
+
+// Pool allocation with a RUNTIME size already in rax (the routine 8-aligns).
+// Replaces emit_mmap_len_in_rax_x86 for string concat/slice result buffers:
+// every string op used to mmap a fresh page-granular block (a 20-byte concat
+// cost 4 KiB of VmSize forever — measured ~12 GiB across a large merged
+// compile's native codegen). Strings have arbitrary lifetime and are never
+// freed either way, so pool-packing them changes nothing but the density.
+fn emit_pool_alloc_rax_x86() with Mut, Panic, Div {
+    if POOL_ALLOC_ROUTINE_CL < 0 {
+        emit_pool_alloc_routine_x86()
+    }
+    em(0xe8); em32(POOL_ALLOC_ROUTINE_CL - (CL + 4)) // call routine (rax = size in)
+}
+
+fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     let slot_len_a = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     let slot_len_b = NEXT_SLOT
@@ -8996,7 +9197,7 @@ fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut {
     em(0x59)
     em(0x48); em(0x01); em(0xc8)            // add rax, rcx
     em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
-    emit_mmap_len_in_rax_x86()
+    emit_pool_alloc_rax_x86()
     emit_store_var(slot_res)
 
     em(0xfc)                                // cld
@@ -9018,7 +9219,7 @@ fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut {
     emit_load_var(slot_res)
 }
 
-fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) with Mut {
+fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic, Div {
     let slot_len = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     let slot_res = NEXT_SLOT
@@ -9034,7 +9235,7 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
 
     emit_load_var(slot_len)
     em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
-    emit_mmap_len_in_rax_x86()
+    emit_pool_alloc_rax_x86()
     emit_store_var(slot_res)
 
     em(0xfc)                                // cld
@@ -9052,43 +9253,73 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
     emit_load_var(slot_res)
 }
 
-fn emit_read_file() with Mut, Panic {
-    // Simpler: rax=path. open → save fd → mmap → read → close → return buf
-    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
-    em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi
-    em(0xb8); em32(2); em(0x0f); em(0x05)  // open → fd in rax
-    em(0x50)  // push fd
-    // mmap(NULL, 16MB+1, 3, 0x22, -1, 0)
+fn emit_read_file() with Mut, Panic, Div {
+    // rax = path. open -> read into a CACHED 16 MiB scratch (lazy mmap, reused
+    // every call) -> close -> pool-alloc (bytes_read + 64) -> copy + 64-byte
+    // zero tail -> return the right-sized pool block.
+    //
+    // The old form mmap'd a FRESH 16 MiB zero-filled buffer per call and never
+    // freed it: read_env() reads /proc/self/environ through here, and Madaros
+    // trace gates call read_env per compiled function/module -- measured 1047
+    // calls x 16 MiB = ~16.8 GiB of VmSize on one eisa_evm merged compile.
+    // The 64-byte zero tail preserves the old zero-fill semantics for callers
+    // that scan a few bytes past the content for NUL / double-NUL terminators
+    // (read_env scans exactly content+2); length-bounded callers are unaffected.
+    if POOL_ALLOC_ROUTINE_CL < 0 {
+        emit_pool_alloc_routine_x86()
+    }
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
+    em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi (O_RDONLY)
+    em(0xb8); em32(2); em(0x0f); em(0x05)  // open -> fd in rax
+    em(0x50)  // push fd                                  stack=[fd]
+    // scratch = [READFILE_SCRATCH]; lazy mmap on first use
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x85); let rf_have = CL; em32(0)  // jnz have_scratch
     em(0x48); em(0x31); em(0xff)  // rdi=0
     em(0xbe); em32(0x1000001)  // esi=16MB+1
     em(0xba); em32(3)  // edx=PROT_RW
     em(0x41); em(0xba); em32(0x22)  // r10d=MAP_PRIVATE|MAP_ANON
     em(0x49); em(0xc7); em(0xc0); em32(-1)  // r8=-1
     em(0x4d); em(0x31); em(0xc9)  // r9=0
-    em(0xb8); em32(9); em(0x0f); em(0x05)  // mmap → buf in rax
-    // MAP_FAILED check: rax in [-4095,-1] -> graceful exit 42 (was unchecked; on OOM the
-    // zero-store below at `mov byte [rax+rcx],0` wrote to the -errno address -> SIGSEGV).
+    em(0xb8); em32(9); em(0x0f); em(0x05)  // mmap -> scratch in rax
     em(0x48); em(0x3d); em32(0 - 4096)  // cmp rax, -4096
-    em(0x0f); em(0x87); let rf_abort = CL; em32(0)  // ja rf_abort (unsigned: MAP_FAILED)
-    em(0x50)  // push buf; stack=[fd, buf]
-    // read(fd, buf, 16MB)
-    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (buf)
+    em(0x0f); em(0x87); let rf_abort = CL; em32(0)  // ja abort (MAP_FAILED)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)  // cache (rax preserved)
+    patch32(rf_have, CL)
+    em(0x50)  // push scratch                             stack=[fd, scratch]
+    // read(fd, scratch, 16MB)
+    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (scratch)
     em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
     em(0xba); em32(0x1000000)  // edx=16MB
-    em(0xb8); em32(0); em(0x0f); em(0x05)  // read
+    em(0xb8); em32(0); em(0x0f); em(0x05)  // read -> bytes in rax
     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (bytes read)
     em(0x48); em(0x85); em(0xc9)  // test rcx, rcx
     em(0x79); em(0x02)  // jns read_ok
-    em(0x31); em(0xc9)  // xor ecx, ecx
-    em(0x48); em(0x8b); em(0x04); em(0x24)  // mov rax, [rsp] (buf)
-    em(0xc6); em(0x04); em(0x08); em(0x00)  // mov byte [rax + rcx], 0
-    // close(fd)
-    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
+    em(0x31); em(0xc9)  // xor ecx, ecx (read error -> len 0)
+    // close(fd) -- preserve len across the syscall
+    em(0x51)  // push rcx (len)                           stack=[fd, scratch, len]
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x10)  // mov rdi, [rsp+16] (fd)
     em(0xb8); em32(3); em(0x0f); em(0x05)  // close
-    // return buf
-    em(0x58)  // pop rax (buf)
-    em(0x48); em(0x83); em(0xc4); em(0x08)  // add rsp, 8 (discard fd)
-    em(0xe9); let rf_done = CL; em32(0)  // jmp rf_done (skip abort; rax already = buf)
+    em(0x59)  // pop rcx (len)                            stack=[fd, scratch]
+    // dst = pool_alloc(len + 64)
+    em(0x51)  // push rcx (len)                           stack=[fd, scratch, len]
+    em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
+    em(0x48); em(0x83); em(0xc0); em(64)  // add rax, 64
+    em(0xe8); em32(POOL_ALLOC_ROUTINE_CL - (CL + 4))  // call pool routine -> rax = dst
+    em(0x59)  // pop rcx (len)                            stack=[fd, scratch]
+    // copy len bytes scratch -> dst, then 64 zero tail bytes
+    em(0x50)  // push rax (dst, the return value)         stack=[fd, scratch, dst]
+    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (dst)
+    em(0x48); em(0x8b); em(0x74); em(0x24); em(0x08)  // mov rsi, [rsp+8] (scratch)
+    em(0xfc)  // cld
+    em(0xf3); em(0xa4)  // rep movsb (rcx = len)
+    em(0x31); em(0xc0)  // xor eax, eax
+    em(0xb9); em32(64)  // mov ecx, 64
+    em(0xf3); em(0xaa)  // rep stosb (zero tail)
+    em(0x58)  // pop rax (dst = return buf)               stack=[fd, scratch]
+    em(0x48); em(0x83); em(0xc4); em(0x10)  // add rsp, 16 (discard scratch, fd)
+    em(0xe9); let rf_done = CL; em32(0)  // jmp done
     patch32(rf_abort, CL)
     em(0xbf); em32(42)  // mov edi, 42 (distinct OOM exit code, mirrors arena)
     em(0xb8); em32(60)  // mov eax, 60 (SYS_exit)
@@ -10363,8 +10594,7 @@ fn materialize_struct_value_x86(struct_hash: i64) with Mut, Panic, Div {
     let dst_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     emit_store_var(src_slot)
-    emit_imm64(nslots * 8)
-    emit_heap_alloc_x86()
+    emit_pool_alloc_x86(nslots * 8)
     emit_store_var(dst_slot)
     emit_load_var(src_slot)
     em(0x48); em(0x89); em(0xc2)   // mov rdx, rax (src)
@@ -10530,8 +10760,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let lit_v = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var(lit_v)
-                    emit_imm64(rep_count * s_nslots * 8)
-                    emit_heap_alloc_x86()
+                    emit_pool_alloc_x86(rep_count * s_nslots * 8)
                     let lit_blk = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var(lit_blk)
@@ -10862,9 +11091,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em(0x48); em(0x8d); em(0x85)
             em32(0 - struct_top * 8)
         } else {
-            // heap path: mov rax, struct_size*8; mmap; save heap_ptr; fill fields
-            em(0x48); em(0xb8); em64(struct_size * 8)  // mov rax, size
-            emit_heap_alloc_x86()                       // rax = heap_ptr
+            // heap path: pool-alloc struct_size*8; save heap_ptr; fill fields
+            emit_pool_alloc_x86(struct_size * 8)        // rax = heap_ptr
             let heap_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(heap_slot)                   // save heap_ptr
@@ -11795,6 +12023,179 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 // Legacy CPU fallback barrier aliases; no thread synchronization.
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            // Arena scoping intrinsics (compile-time recognized, like print):
+            // __arena_mark() -> i64 returns the Box-arena cursor;
+            // __arena_reset(m) restores it (with base/limit UNTOUCHED — only
+            // valid when every Box allocated after the mark is provably dead;
+            // used by the Madaros module pipeline to reclaim per-module
+            // parse/lower churn after the deep merge copy-out).
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_mark") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // __pool_mark() -> i64: read-only observation of the aggregate
+            // pool bump cursor (diagnostics; deliberately NO __pool_reset —
+            // pool blocks have arbitrary lifetime).
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__pool_mark") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AGG_POOL_CURSOR_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__rtmmap_count") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + RTMMAP_COUNT_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__rtmmap_bytes") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + RTMMAP_BYTES_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_refills") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ARENA_REFILL_COUNT_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_refill_bytes") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ARENA_REFILL_BYTES_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_unmaps") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ARENA_UNMAP_COUNT_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_unmap_bytes") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ARENA_UNMAP_BYTES_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__pool_refills") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + POOL_REFILL_COUNT_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__pool_refill_bytes") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + POOL_REFILL_BYTES_BSS_OFF)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_reset") {
+                EP = EP + 1
+                compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                // The arena is CHUNKED (refill mmaps a fresh chunk and repoints
+                // base/cursor/limit), so a mark taken before one or more refills
+                // addresses an OLDER chunk: restoring the raw cursor there would
+                // fail the next alloc's limit check and reserve yet another
+                // chunk (measured: VmSize GROWS vs no-reset). Instead, walk the
+                // per-chunk {prev_base, prev_limit} back-link headers (written
+                // at init/refill), munmapping every chunk younger than the
+                // mark's — all provably dead under the reset contract — until
+                // the chunk containing m is current again, then cursor = m.
+                // Chain-terminator guard (prev_base == 0, i.e. an invalid mark
+                // that matches no live chunk): recycle the initial chunk
+                // (cursor = base + 16) rather than munmapping it.
+                em(0x48); em(0x89); em(0xc2)                                          // mov rdx, rax (rdx = m; syscalls preserve rdx? no -- munmap clobbers rcx/r11 only, rdx survives)
+                let arst_loop = CL
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)  // rax = base
+                em(0x48); em(0x39); em(0xc2)                                          // cmp rdx, rax (m - base)
+                em(0x0f); em(0x82)                                                    // jb walk (m < base)
+                let arst_walk1 = CL
+                em32(0)
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF) // rax = limit
+                em(0x48); em(0x39); em(0xc2)                                          // cmp rdx, rax (m - limit)
+                em(0x0f); em(0x87)                                                    // ja walk (m > limit)
+                let arst_walk2 = CL
+                em32(0)
+                // in range: cursor = m; result 0
+                em(0x48); em(0x89); em(0xd0)                                          // mov rax, rdx
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+                em(0xe9)                                                              // jmp done
+                let arst_done1 = CL
+                em32(0)
+                patch32(arst_walk1, CL)
+                patch32(arst_walk2, CL)
+                // walk: current chunk does not contain m -> it is younger than
+                // the mark and fully dead. Follow its back-link, munmap it.
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)  // rax = base
+                em(0x48); em(0x89); em(0xc7)                                          // mov rdi, rax (munmap addr)
+                em(0x48); em(0x8b); em(0x0f)                                          // mov rcx, [rdi] (prev_base)
+                em(0x48); em(0x85); em(0xc9)                                          // test rcx, rcx
+                em(0x0f); em(0x85)                                                    // jnz do_unmap
+                let arst_do_unmap = CL
+                em32(0)
+                // terminator: invalid mark -- recycle initial chunk, keep it mapped
+                em(0x48); em(0x89); em(0xf8)                                          // mov rax, rdi (base)
+                em(0x48); em(0x83); em(0xc0); em(16)                                  // add rax, 16 (skip header)
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+                em(0xe9)                                                              // jmp done
+                let arst_done2 = CL
+                em32(0)
+                patch32(arst_do_unmap, CL)
+                em(0x4c); em(0x8b); em(0x07)                                          // mov r8, [rdi] (prev_base)
+                em(0x4c); em(0x8b); em(0x4f); em(8)                                   // mov r9, [rdi+8] (prev_limit)
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF) // rax = limit
+                em(0x48); em(0x89); em(0xc6)                                          // mov rsi, rax
+                em(0x48); em(0x29); em(0xfe)                                          // sub rsi, rdi (len = limit - base)
+                emit_bump_counter_rsi_x86(ARENA_UNMAP_COUNT_BSS_OFF, ARENA_UNMAP_BYTES_BSS_OFF)
+                em(0xb8); em32(11)                                                    // mov eax, 11 (SYS_munmap)
+                em(0x0f); em(0x05)                                                    // syscall (rdx/r8/r9 survive; rcx/r11 clobbered)
+                em(0x4c); em(0x89); em(0xc0)                                          // mov rax, r8 (prev_base)
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)
+                em(0x4c); em(0x89); em(0xc8)                                          // mov rax, r9 (prev_limit)
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)
+                em(0xe9); em32(arst_loop - (CL + 4))                                  // jmp loop
+                patch32(arst_done1, CL)
+                patch32(arst_done2, CL)
+                em(0x31); em(0xc0)                                                    // xor eax, eax
                 EXPR_IS_F64 = 0
                 EXPR_TY = 5
                 EXPR_TY_HASH = 0
@@ -20447,8 +20848,7 @@ fn materialize_aggregate_array_element_x86(array_hash: i64) with Mut, Panic, Div
     let dst_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     emit_store_var(src_slot)
-    emit_imm64(elem_nslots * 8)
-    emit_heap_alloc_x86()
+    emit_pool_alloc_x86(elem_nslots * 8)
     emit_store_var(dst_slot)
     emit_load_var(src_slot)
     em(0x48); em(0x89); em(0xc2)
@@ -21625,8 +22025,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // element cost a 4 KiB page each — >8 GiB vmem at Madaros
                 // scale, caught by the wrapper ulimit during the prebuilt
                 // refresh). Element i lives at block + i*stride.
-                emit_imm64(nslots * d_nsl * 8)
-                emit_heap_alloc_x86()
+                emit_pool_alloc_x86(nslots * d_nsl * 8)
                 let rl_blk = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 emit_store_var(rl_blk)
@@ -26641,6 +27040,7 @@ fn resolve_forward_struct_types() with Mut, Panic, Div {
 
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
+    POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
@@ -27353,6 +27753,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     AST_ARENA_BASE_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_CURSOR_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_LIMIT_BSS_OFF = bss_alloc_aligned(8)
+    AGG_POOL_BASE_BSS_OFF = bss_alloc_aligned(8)
+    AGG_POOL_CURSOR_BSS_OFF = bss_alloc_aligned(8)
+    AGG_POOL_LIMIT_BSS_OFF = bss_alloc_aligned(8)
+    RTMMAP_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    RTMMAP_BYTES_BSS_OFF = bss_alloc_aligned(8)
+    READFILE_SCRATCH_BSS_OFF = bss_alloc_aligned(8)
+    ARENA_REFILL_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    ARENA_REFILL_BYTES_BSS_OFF = bss_alloc_aligned(8)
+    ARENA_UNMAP_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    ARENA_UNMAP_BYTES_BSS_OFF = bss_alloc_aligned(8)
+    POOL_REFILL_COUNT_BSS_OFF = bss_alloc_aligned(8)
+    POOL_REFILL_BYTES_BSS_OFF = bss_alloc_aligned(8)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
     // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
