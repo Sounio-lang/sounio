@@ -3066,3 +3066,55 @@ notes: |
   TYPE-CHECKS CLEAN but does not yet RUN — blocked solely by the pre-existing
   cross-module `lower_array` native-lowering segfault (WP-A4/native-lowering
   territory), NOT by A7. No new gap introduced.
+
+---
+session: A8 (Opus) — cross-module large-struct forwarding lowering blocker
+timestamp: 2026-07-06
+action: CLAIM+RELEASE
+wp: A8 (FINAL A5) — cross-module large-struct SRET forwarding lowering segfault
+branch: fix/madaros-crossmod-sret-lowering (base fix/madaros-checker-intwidth)
+status: BLOCKED (root-caused, not fixed)
+finding: |
+  The original A8 hypothesis (compile-time SIGSEGV in the module_frontend
+  dep-lowering `while i < loaded` loop at `lower_array: dep_begin <i>`) is FALSE
+  for the minimal/non-generic cross-module case. Verified on Slurm-built madaros
+  (FALSE-GREEN guard: every ELF run, actual rc/stdout asserted):
+    - sret_forwarding_cross_module_min ([i64;256], 2 modules): BUILD rc=0, RUN rc=139
+    - sret_forwarding_cross_module_cd_mul ([f64;2048]):        BUILD rc=0, RUN rc=139
+    - a8_diag_single (SAME shape, single module):              BUILD rc=0, RUN rc=0  (OK)
+    - a8_diag_ctrl (imported scalar + direct-literal Small):   RUN rc=0  (OK)
+    - a8_diag_step: imported big_zero (direct) prints OK; big_basis (forward) SIGSEGV
+    - a8_diag_fwd (imported Small{[i64;4]} forward):           RUN rc=139  (SIZE-INDEPENDENT)
+    - sret_8_field_return / generic_struct_return (A4 guards): RUN rc=0  (no regression)
+    - cd_exact_generic_i64: BUILD rc=139 (SEPARATE compile-time crash at dep_begin 1 —
+      the A6-ledger generic/chain-import gap, NOT this bug)
+  ROOT CAUSE (Defect 1, the crasher): the Madaros imported-lane (summary+bodies)
+  body lowering miscompiles `var r = <inner same-module struct-returning call>`.
+  Post-finalize merged IR of small_basis_fwd:
+      i0 Call dst=3 arg=[2] fn=5 ; i1 LoadImm dst=3 imm=1 ; i4 FieldGet dst=5 s1=2 fi=0
+      i5 IndexSet s1=5 s2=1 imm=3 ; i6 Return s1=2
+  `r` is vreg2 (FieldGet base + Return) but the call result lands in vreg3 (then
+  clobbered by the literal 1); the call ARG is vreg2 (uninitialized — param k=vreg0
+  is never passed). So r is never assigned the result → `r.c[idx]`/`return r` deref
+  a garbage handle. Disasm of the ELF (small_basis_fwd @0x4012c4) confirms: field
+  base loaded from -0x18(=vreg2, uninitialized), `mov 0x0(%rax),%rax` faults.
+  Finalize passes only rewrite fn_id/name (never vregs) → the scramble is produced
+  by the body lowering itself; the single-module single-pass lowering is correct.
+  Defect 2 (independent, not the crash): compaction collapses distinct *_zero call
+  targets onto one fn_id (small_basis_fwd calls fn=5=big_zero).
+  Full evidence + fix entry points: docs/handoff/continuity/A8_CROSSMOD_FORWARDING_MISCOMPILE.md
+deliverables: |
+  - Minimal 2-module repro: stdlib/testmod/sret_min.sio + tests/run-pass/
+    sret_forwarding_cross_module_min.sio (+ a8_diag_{single,ctrl,step,fwd,sizes}.sio
+    bisection ladder; failing ones marked //@ known-failure with the diagnosis).
+  - Env-guarded merged-IR diagnostic in self-hosted/compiler/module_frontend.sio
+    (SOUNIO_DUMP_ALL_CALLS=1; inert by default; built clean).
+  - Root-cause doc (above).
+next: |
+  Diff the forwarding fn's IR through the single-pass lowering vs the summary+bodies
+  path (lower_program_bodies_from_summary_with_epistemic_boxed_ref). Single-pass
+  yields `call dst=2 arg=[0]`; imported yields `call dst=3 arg=[2]`. Fix the
+  param/let-binding desync in that path (lower_let_stmt_ref binding of
+  `var = <ExprCall>` + param-ident resolution). Then Defect 2 in
+  ir_module_compact_duplicate_fn_refs.
+lock: released
