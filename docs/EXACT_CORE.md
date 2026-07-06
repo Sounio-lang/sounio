@@ -205,10 +205,35 @@ i64-range coefficients; the unbounded-width integration is a compiler-capacity r
   minimal repros in `docs/handoff/souc_v0800_defects.md`; issues #637 (segfault), #638 (`<<`→i64),
   #639 (`match`).
 
-## The `<F>` migration target
+## The `<F>` migration target — UNBLOCKED for scalar `F`, struct-`F` still walled
 
-The generic `stdlib/algebra/cayley_dickson_exact.sio` (`CDElementExact<F: ExactRing>`) is a
-**design skeleton** — it needs four compiler features (generic-struct-return **#1**, bodyless
-trait-method-sig parsing **2a**, `impl Trait for Type` **2b**, trait-bounded dispatch **#3**), all
-commissioned in `docs/handoff/*`. The concrete-i64 engine is exactly what it monomorphizes to, so
-nothing is wasted; the science ships now on `i64`. See `docs/handoff/exact_engine_prereqs.md`.
+The four compiler features the generic engine needed (generic-struct-return **#1**, bodyless
+trait-method-sig parsing **2a**, `impl Trait for Type` **2b**, trait-bounded dispatch **#3**) **all
+landed 2026-07-06** on the fable5 compiler-generic-F lane (PR #650, merge commit `2adb8f061`,
+against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). The generic engine
+`stdlib/algebra/cayley_dickson_exact.sio` (`CDElementExact<F: ExactRing>`) now **compiles and runs**:
+
+- **`F = i64` — adopted and proven equivalent.** `tests/run-pass/cd_exact_generic_i64.sio` proves the
+  canonical ZD pair `(e₃+e₁₀)(e₆−e₁₅)=0` (16× `COMP 0`), and `cd_exact_generic_vs_concrete.sio`
+  shows the generic engine reproduces `cayley_dickson_exact_i64.sio` **byte-for-byte**
+  (`BYTECOMPARE PASS`). The concrete-i64 engine and the generic-at-i64 engine are now
+  cross-certified against each other; the concrete one is retained as the load-bearing i64 path.
+- **`F = Rational` / `F = BigInt` (struct coefficients) — blocked, but NOT by generics (issue #651).**
+  The engine over a *struct* coefficient type compiles and runs but is **wrong**: the `[Rational;N]`
+  multiply-accumulate loop miscompiles — a **deterministic garbage** value at N=16
+  (`c[0]=4206741/1`; correct `1/1`) and a **SIGSEGV** at N=2048. Crucially this reproduces with **no
+  generics at all** (a plain concrete `[Rational;16]` CD-multiply loop is equally wrong), and every
+  sub-operation in isolation is correct (single constant-index RMW, variable-index read, variable-indexed
+  by-value arg, one loop iteration) — only the full nested accumulation loop over array-of-struct
+  temporaries corrupts. So it is a `[struct;N]` **aggregate/struct-temporary codegen bug** (same family
+  as #643/D6 struct value-copy corruption; **distinct** from #637, which is a cross-module
+  arity-mismatch *compiler* SIGSEGV). Scalar arrays (`[i64;N]`) are unaffected. Repro + full isolation:
+  `docs/handoff/repros/d8_generic_struct_F_mul_segv.sio`.
+
+**Net:** the old `<F>` residual (no generics at all) is *closed* — generics work end-to-end for scalar
+`F`. The exact CD product over **unbounded ℚ for all 16 components** — which needs `F = BigInt`/`BigRational`,
+i.e. array-of-struct coefficients — remains open, blocked by the filed non-generic `[struct;N]`
+aggregate-loop codegen bug (#651), not by the math, the parser, or the generics. Until #651 lands,
+unbounded-ℚ work continues via the common-denominator **integer** representation
+(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected). See
+`docs/handoff/exact_engine_prereqs.md`.
