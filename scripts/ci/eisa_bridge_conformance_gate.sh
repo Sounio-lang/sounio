@@ -37,6 +37,7 @@ programs=(
   "v2-const-gate"
   "v2-add"
   "v2-sub"
+  "v2-mul"
 )
 
 for name in "${programs[@]}"; do
