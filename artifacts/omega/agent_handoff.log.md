@@ -2966,3 +2966,61 @@ notes: |
   pod (heavy); no-regression argued via the byte-identical battery + identical
   single-module guards + the spec_last_instantiated gate (non-instantiating
   multi-module code takes the unchanged per-module path).
+
+---
+
+agent: claude
+time_utc: 2026-07-06T20:50:00Z
+files:
+  - self-hosted/check/check.sio
+intent: |
+  CLAIM (WP-A6, Madaros imported-lane effect-annotation carry / E035). Scope is
+  the type-checker's impl-method signature resolution ONLY. NOTE: the fix does
+  NOT touch self-hosted/compiler/module_frontend.sio or module_loader.sio (the
+  originally-suspected merge site) — the annotations are never dropped; the merge
+  is innocent. Root cause is a name-collision in fn_sig_table_find_method: an
+  imported struct (bound via `use` to ty_unknown, empty name) and the i64 builtin
+  (also empty TypeEntry name) both register their trait-impl methods with an empty
+  self_type_name, so the name-only lookup resolves one impl's method body against
+  the OTHER impl's (effect-empty) sig. No shared-surface conflict with WP-B1.
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T21:20:00Z
+files:
+  - self-hosted/check/check.sio
+  - tests/probe/a6_frac_def.sio
+  - tests/probe/a6_ring_mod.sio
+  - tests/probe/a6_ring_main.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  RELEASE (WP-A6 DONE). Fix: checker_check_impl_method_inplace now resolves the
+  method signature by the FULL impl-type TypeEntry (kind + name) via
+  fn_sig_table_find_method_semantic instead of name-only fn_sig_table_find_method.
+  TyUnknown (imported Rational) vs TyI64 disambiguates the two `impl ExactRing`
+  blocks, so each method body sees ITS OWN declared effects. One-line change +
+  comment; no other lanes touched.
+checks (Slurm madaros build from main.sio; A6-fixed vs proven unmodified base, job 5504/5510):
+  - W1 cd_exact_generic_i64 compile: error[E035] count 3 (base) -> 0 (fixed)
+  - W2 tests/probe/{eff_inherent,eff_trait}.sio: rc=6, E035=0 (unchanged)
+  - W3 tests/probe/a6_ring_main.sio (3-module imported witness): E035 1 (base) -> 0
+    (fixed) at type-check; runtime blocked by a SEPARATE pre-existing cross-module
+    native-lowering segfault at `lower_array: dep_begin 1` (rc=139 on base too;
+    logged as new gap).
+  - W4 zero-regression: 10 impl/trait/multimodule tests EXACT rc + total-error
+    parity base<->fixed (impl_multiple_types/impl_trait_for_type_multi/
+    impl_inherent_method/impl_trait_for_type/trait_bounded_dispatch_struct/
+    import_basic_main all rc=0; method_receiver_correct rc=139, trait_basic 1/6err,
+    trait_bounded_dispatch 1/2err, import_chain_main rc=42 — all identical to base,
+    i.e. pre-existing Madaros run-pass gaps, NOT caused by this change).
+  - A6_WITNESS_PASS=14 A6_WITNESS_FAIL=0.
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A6): cd_exact still gates on E019/E007 (WP-A2 primitive-receiver
+  dispatch) — A6 removed ONLY the E035x3. New gap filed: imported chain-import
+  native lowering segfault (see SCOREBOARD new-gap ledger). Umbrella not run on the
+  pod (heavy); no-regression argued via the base-parity W4 battery + unchanged
+  single-module W2.
