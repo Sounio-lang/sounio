@@ -49,6 +49,24 @@ boundary. Everything else in this document is the honest comparison of that
 design point against five prior traditions, including where each of them is
 plainly stronger than EISA today.
 
+The bounded "first" claim is a *negative* result over that survey: no
+surveyed tradition meets the conjunction C1 ∧ C2 ∧ C3. The first criterion
+each fails (a per-tradition exclusion, so the claim is checkable rather than
+merely asserted):
+
+| Tradition (§) | First criterion failed | Why |
+|---|---|---|
+| DSA / CADNA (§2.1) | C1 | roundoff is a *statistical* significant-digit estimate from random-rounding samples, not a deterministic per-operation EFT-measured correction |
+| MCA — Verrou / Verificarlo (§2.2) | C1 | stochastic rounding yields a *distribution* over runs, not a per-operation deterministic correction lane |
+| Static — Herbie / FPTaylor (§2.3) | C1 | a-priori rewriting / Taylor-form bounds; nothing is carried per operation in the running executable (these are not executable formats) |
+| Interval / affine / ball (§2.4) | C2 | a single rigorous enclosure conflates rounding with input uncertainty — there is no *separate* first-order GUM lane |
+| Extended precision — dd / qd / MPFR (§2.5) | C1 | more working precision *replaces* the value; there is no roundoff-*correction* lane against a bit-exact IEEE `val`, nor a GUM lane |
+
+C3 (a receipt citing the program-hash provenance of the result) is met by
+none of the surveyed systems, so it is an independent second discriminator.
+The claim retires the moment a reader exhibits a system — surveyed or not —
+meeting all three.
+
 ## 2. The comparison landscape
 
 ### 2.1 Discrete Stochastic Arithmetic — CADNA
@@ -228,8 +246,10 @@ measured roundoff trail whether or not you thought to ask.
 
 What the libraries do better, plainly: performance and generality. qd and
 MPFR are optimised native code used in production scientific computing;
-EISA's interpreted qd steps are ~20–50× slower than its own v1 steps and
-the instruction set is nine arithmetic-relevant opcodes plus branches.
+EISA's interpreted qd steps are an *estimated* ~20–50× slower than its own
+v1 steps (an order-of-magnitude projection from the qd operation counts in
+`eisa-v2-arch-2026-07-05.md §8`, not a benchmarked figure) and the
+instruction set is nine arithmetic-relevant opcodes plus branches.
 
 ## 3. Comparison table
 
@@ -283,7 +303,11 @@ compares against the measurement.
 
 The v1 policy decision is deliberately minimal and stated as such: frail is
 **count-only** — `frail > 0` never forces `poisoned = 1`; the count is
-carried in every receipt (`frail=<n>`), making the instability visible to
+carried in every receipt (`frail=<n>`) and is therefore part of the
+byte-for-byte receipt identity the conformance harness enforces — the three
+executors must agree on `frail=<n>`, so the "frail == 1" observation on the
+fixed-point loop is reproducible across executors, not just within one. This
+makes the instability visible to
 the auditor without prejudging the escalation policy (warn versus poison),
 which is deferred until a corpus kernel shows which default is right. The
 witnessed case is the fixed-point loop of the V1e showcase: the loop exit
@@ -374,7 +398,8 @@ byte-identical agreement between the Metron VM and the x86-64 bridge.
    the full special-value algebra; EISA v2 does not have it.
 2. **Known compiler unsoundness in the validation lane.** The witnesses run
    on the `lean_single` engine, whose NaN-comparison unsoundness is
-   documented in the repository's compiler audits; receipts canonicalise
+   documented in the repository's compiler audits
+   (`docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md`); receipts canonicalise
    NaN (`s0e2047m1`) rather than relying on comparison semantics. The
    validation evidence is only as strong as the documented lane.
 3. **No production compiler path.** The Metron surface language is minimal
@@ -383,7 +408,8 @@ byte-identical agreement between the Metron VM and the x86-64 bridge.
    hand-lowered. EISA is a research VM plus a conformance corpus — nothing
    in this document should be read as a production toolchain claim.
 4. **Performance.** The Metron VM is interpreted Sounio; v2 qd steps cost
-   ~20–50× a v1 step. Acceptable at corpus scale (< 10³ steps per lane),
+   an estimated ~20–50× a v1 step (a projection from qd operation counts,
+   not a benchmark). Acceptable at corpus scale (< 10³ steps per lane),
    not at application scale. The x86-64 bridge exists so that conformant
    fast execution remains possible, not because it is fast today.
 5. **The Priest-renorm assumption.** Necessary conditions for Priest
@@ -590,7 +616,17 @@ val + roundoff0..3 = −0.827396059946821368141165095479816291999033115784 2…
       −54767/66192 = −0.827396059946821368141165095479816291999033115784 3…
 ```
 
-i.e. |Δ| ≈ 1.27 × 10⁻⁴⁹ ≈ 2⁻¹⁶² — about 163 significand bits of agreement. The `val` lane *alone* is −2⁷⁰ — wrong sign, ~21 orders of
+i.e. |Δ| ≈ 1.27 × 10⁻⁴⁹ ≈ 2⁻¹⁶² — about 163 significand bits of agreement.
+
+**Self-contained check (no binary needed).** The reconstruction above is
+verifiable from the printed receipt digits alone: each `s<σ>e<ε>m<μ>` field
+decodes to the IEEE-754 double `(−1)^σ · (1 + μ/2⁵²) · 2^(ε−1023)` for ε ≠ 0
+(and `s0e0m0 = 0`); sum the five decoded doubles of the `gate=3` line (`val`
++ `roundoff0..3`) as exact rationals and compare to −54767/66192. So the
+*central* claim — that val + err recovers the exact rational on derived bits
+— is checkable from this document's own numbers; only the byte-identity and
+SHA-256 lines require the repository artefact (`artifacts/eisa/`, regenerated
+by the replay commands above and pinned by the conformance gate). The `val` lane *alone* is −2⁷⁰ — wrong sign, ~21 orders of
 magnitude off — so the entire recovered result lives in the measured
 `roundoff` correction, on derived bits, exactly as the thesis claims. (The
 single-register anchor-limit caveat of §5 — x3 unreachable from one register
