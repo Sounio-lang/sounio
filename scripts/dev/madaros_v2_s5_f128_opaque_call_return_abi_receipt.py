@@ -149,9 +149,9 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
     {
         "case_id": "f128_arithmetic_still_blocked",
         "source": """fn main() -> i64 {
-  let x: f128 = 0.5 as f128
-  let y: f128 = 1.0 as f128
-  let z: f128 = x + y
+  let x: f128 = 1.5 as f128
+  let y: f128 = 0.5 as f128
+  let z: f128 = x * y
   0
 }
 """,

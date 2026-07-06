@@ -89,26 +89,52 @@ POSITIVE = [
         "expected_hex": "3fff0000000000000000000000000000",
         "expected_metadata": [1, 0, 10, 2, 1, 0],
     },
-]
-
-NEGATIVE = [
     {
-        "case_id": "f128_add_half_one_still_blocked",
+        "case_id": "f128_add_half_one_to_one_and_half",
         "source": """fn main() -> i64 {
   let x: f128 = 0.5 as f128
   let y: f128 = 1.0 as f128
   let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff8000000000000000000000000000",
+        "expected_metadata": [1, 0, 15, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_mul_half_half_to_quarter",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.5 as f128
+  let y: f128 = 0.5 as f128
+  let z: f128 = x * y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffd0000000000000000000000000000",
+        "expected_metadata": [1, 0, 25, 3, 2, 0],
+    },
+]
+
+NEGATIVE = [
+    {
+        "case_id": "f128_mul_one_and_half_half_still_blocked",
+        "source": """fn main() -> i64 {
+  let x: f128 = 1.5 as f128
+  let y: f128 = 0.5 as f128
+  let z: f128 = x * y
   0
 }
 """,
         "expected_detail": "f128_arithmetic_pending",
     },
     {
-        "case_id": "f128_mul_half_half_still_blocked",
+        "case_id": "f128_add_quarter_one_still_blocked",
         "source": """fn main() -> i64 {
-  let x: f128 = 0.5 as f128
-  let y: f128 = 0.5 as f128
-  let z: f128 = x * y
+  let x: f128 = 0.25 as f128
+  let y: f128 = 1.0 as f128
+  let z: f128 = x + y
   0
 }
 """,
@@ -306,7 +332,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_promoted": False,
         "contract_scope": [
             "finite exact binary128 value-contract arithmetic only",
-            "finite exact decimal-tenths matrix materializes as binary128 words",
+            "finite exact decimal-tenths plus quarter matrix materializes as binary128 words",
             "single-chain arithmetic preserves compiler value-kind metadata",
             "unsupported f128 arithmetic remains fail-closed",
         ],

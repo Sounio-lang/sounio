@@ -372,6 +372,40 @@ fn native_v2_slot_is_f128_byval(out: MachineFunction, slot: i64) -> bool {
     native_v2_slot_is_valid(slot) && out.slot_kind[slot as usize] == MIR_SLOT_KIND_F128_BINARY128
 }
 
+fn native_v2_f128_hundredths_from_slot(out: MachineFunction, slot: i64) -> i64 {
+    if !native_v2_slot_is_valid(slot) { return 0 - 1 }
+    if out.f128_literal_sign[slot as usize] != 1 { return 0 - 1 }
+    if out.f128_literal_sig_hi[slot as usize] != 0 { return 0 - 1 }
+    if out.f128_literal_truncated_digits[slot as usize] != 0 { return 0 - 1 }
+    if out.f128_literal_digit_count[slot as usize] == 2 && out.f128_literal_scale10[slot as usize] == 1 {
+        let tenths = out.f128_literal_sig_lo[slot as usize]
+        if tenths == 0 || tenths == 5 || tenths == 10 || tenths == 15 || tenths == 20 || tenths == 30 || tenths == 40 {
+            return tenths * 10
+        }
+    }
+    if out.f128_literal_digit_count[slot as usize] == 3 && out.f128_literal_scale10[slot as usize] == 2 {
+        let hundredths = out.f128_literal_sig_lo[slot as usize]
+        if hundredths == 25 { return 25 }
+    }
+    0 - 1
+}
+
+fn native_v2_f128_value_contract_hi_from_hundredths(v: i64) -> i64 {
+    if v == 0 { return 0 }
+    if v == 25 { return 4610841593497255936 }
+    if v == 50 { return 4611123068473966592 }
+    if v == 100 { return 4611404543450677248 }
+    if v == 150 { return 4611545280939032576 }
+    if v == 200 { return 4611686018427387904 }
+    if v == 300 { return 4611826755915743232 }
+    if v == 400 { return 4611967493404098560 }
+    0
+}
+
+fn native_v2_f128_value_contract_supported_hundredths(v: i64) -> bool {
+    v == 0 || v == 25 || v == 50 || v == 100 || v == 150 || v == 200 || v == 300 || v == 400
+}
+
 fn native_v2_f128_pow5(e: i64) -> i64 {
     if e == 0 { return 1 }
     if e == 1 { return 5 }
@@ -2142,25 +2176,21 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             let s2 = machine_instr_src2_value(instr)
             var f128_done: bool = false
             if native_v2_slot_is_f128_byval(out, s1) || native_v2_slot_is_f128_byval(out, s2) {
-                var a: i64 = 0 - 1
-                var b: i64 = 0 - 1
-                var result_lo: i64 = 0 - 1
-                if native_v2_slot_is_valid(s1) && out.f128_literal_sign[s1 as usize] == 1 && out.f128_literal_sig_hi[s1 as usize] == 0 && out.f128_literal_digit_count[s1 as usize] == 2 && out.f128_literal_scale10[s1 as usize] == 1 && out.f128_literal_truncated_digits[s1 as usize] == 0 { a = out.f128_literal_sig_lo[s1 as usize] }
-                if native_v2_slot_is_valid(s2) && out.f128_literal_sign[s2 as usize] == 1 && out.f128_literal_sig_hi[s2 as usize] == 0 && out.f128_literal_digit_count[s2 as usize] == 2 && out.f128_literal_scale10[s2 as usize] == 1 && out.f128_literal_truncated_digits[s2 as usize] == 0 { b = out.f128_literal_sig_lo[s2 as usize] }
-                if !(a == 0 || a == 5 || a == 10 || a == 20 || a == 30 || a == 40) { a = 0 - 1 }
-                if !(b == 0 || b == 5 || b == 10 || b == 20 || b == 30 || b == 40) { b = 0 - 1 }
+                let a = native_v2_f128_hundredths_from_slot(out, s1)
+                let b = native_v2_f128_hundredths_from_slot(out, s2)
+                var result_hundredths: i64 = 0 - 1
                 if a >= 0 && b >= 0 {
-                    if machine_instr_bin_op(instr) == BinaryOp::OpAdd { result_lo = a + b }
-                    if machine_instr_bin_op(instr) == BinaryOp::OpSub && a >= b { result_lo = a - b }
-                    if machine_instr_bin_op(instr) == BinaryOp::OpMul && ((a * b) % 10) == 0 { result_lo = (a * b) / 10 }
-                    if machine_instr_bin_op(instr) == BinaryOp::OpDiv && b != 0 && ((a * 10) % b) == 0 { result_lo = (a * 10) / b }
+                    if machine_instr_bin_op(instr) == BinaryOp::OpAdd { result_hundredths = a + b }
+                    if machine_instr_bin_op(instr) == BinaryOp::OpSub && a >= b { result_hundredths = a - b }
+                    if machine_instr_bin_op(instr) == BinaryOp::OpMul && ((a * b) % 100) == 0 { result_hundredths = (a * b) / 100 }
+                    if machine_instr_bin_op(instr) == BinaryOp::OpDiv && b != 0 && ((a * 100) % b) == 0 { result_hundredths = (a * 100) / b }
                 }
-                if !(result_lo == 0 || result_lo == 5 || result_lo == 10 || result_lo == 20 || result_lo == 30 || result_lo == 40) {
+                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
                     out.supported = false
                     out.unsupported_detail = "f128_arithmetic_pending"
                     return out
                 }
-                let result_hi = if result_lo == 0 { 0 } else if result_lo == 5 { 4611123068473966592 } else if result_lo == 10 { 4611404543450677248 } else if result_lo == 20 { 4611686018427387904 } else if result_lo == 30 { 4611826755915743232 } else { 4611967493404098560 }
+                let result_hi = native_v2_f128_value_contract_hi_from_hundredths(result_hundredths)
                 let hi_temp = out.temp_count
                 out.temp_count = hi_temp + 1
                 let lo_temp = out.temp_count
@@ -2170,7 +2200,11 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out = _emit_legal_byval(out, native_v2_make_mov_imm(lo_temp, 0))
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, lo_temp))
                 out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
-                out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, result_lo, 2, 1, 0)
+                if result_hundredths == 25 {
+                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, 25, 3, 2, 0)
+                } else {
+                    out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), 1, 0, result_hundredths / 10, 2, 1, 0)
+                }
                 f128_done = true
             }
             let s1f = if s1 >= 0 && s1 < 256 { out.is_float_slot[s1 as usize] } else { 0 }

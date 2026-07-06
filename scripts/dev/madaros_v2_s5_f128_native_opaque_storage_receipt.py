@@ -44,9 +44,9 @@ CASES: list[dict[str, Any]] = [
         "kind": "block",
         "expected_detail": "f128_arithmetic_pending",
         "source": """fn main() -> i64 {
-    let x: f128 = 0.5 as f128
-    let y: f128 = 1.0 as f128
-    let z: f128 = x + y
+    let x: f128 = 1.5 as f128
+    let y: f128 = 0.5 as f128
+    let z: f128 = x * y
     0
 }
 """,
