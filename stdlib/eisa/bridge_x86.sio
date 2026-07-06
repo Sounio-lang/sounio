@@ -2265,6 +2265,165 @@ fn em_sub_qd_div(
     pp
 }
 
+// qd_sqrt(QA=a) -> QR   (qd128.sio:396): inverse-root Newton, 3 iterations.
+// SQa 260..263 (a), SQx 264..267 (x), SQtmp 268..271, SQom 272..275,
+// SQprod 276..279, SQcorr 280..283.
+fn em_sub_qd_sqrt(
+    out: &![i8; 65536], p: i64, qmul_off: i64, qsub_off: i64, qmulf_off: i64,
+    qadd_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    // a.x0 == 0 or < 0 -> qd zero
+    var pp = ld(out, p, 0, v2q(0))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz0 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)          // je ZERO
+    pp = ld(out, pp, 0, v2q(0))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz1 = pp + 2
+    pp = jcc(out, pp, 0x82, 0)          // jb ZERO (a.x0 < 0)
+    pp = em_v2_qcopy(out, pp, 0, 260)   // a -> SQa
+    // seed: x = qd_from_f64(1.0 / sqrt(a.x0))
+    pp = ld(out, pp, 0, v2q(0))
+    pp = call32(out, pp, ns_off)        // xmm0 = sqrt(a.x0)
+    pp = setx(out, pp, 1, c_one())
+    pp = sse(out, pp, 0x5E, 1, 0)       // 1.0 / seed
+    pp = st(out, pp, 1, v2q(264))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(265))
+    pp = st(out, pp, 0, v2q(266))
+    pp = st(out, pp, 0, v2q(267))
+    var i = 0
+    while i < 3 {
+        // x2 = qd_mul(x, x)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 264, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 268)
+        // ax2 = qd_mul(a, x2)
+        pp = em_v2_qcopy(out, pp, 260, 0)
+        pp = em_v2_qcopy(out, pp, 268, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 268)
+        // one_minus = qd_sub(qd_from_f64(1.0), ax2)
+        pp = setx(out, pp, 0, c_one())
+        pp = st(out, pp, 0, v2q(0))
+        pp = pxor(out, pp, 0, 0)
+        pp = st(out, pp, 0, v2q(1))
+        pp = st(out, pp, 0, v2q(2))
+        pp = st(out, pp, 0, v2q(3))
+        pp = em_v2_qcopy(out, pp, 268, 4)
+        pp = call32(out, pp, qsub_off)
+        pp = em_v2_qcopy(out, pp, 8, 272)
+        // prod = qd_mul(x, one_minus)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 272, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 276)
+        // corr = qd_mul_f64(prod, 0.5)
+        pp = em_v2_qcopy(out, pp, 276, 224)
+        pp = setx(out, pp, 0, c_half())
+        pp = st(out, pp, 0, v2q(228))
+        pp = call32(out, pp, qmulf_off)
+        pp = em_v2_qcopy(out, pp, 8, 280)
+        // x = qd_add(x, corr)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 280, 4)
+        pp = call32(out, pp, qadd_off)
+        pp = em_v2_qcopy(out, pp, 8, 264)
+        i = i + 1
+    }
+    // result = qd_mul(a, x)
+    pp = em_v2_qcopy(out, pp, 260, 0)
+    pp = em_v2_qcopy(out, pp, 264, 4)
+    pp = call32(out, pp, qmul_off)
+    let jret = pp + 1
+    pp = jmp32(out, pp, 0)
+    let zero_lbl = pp
+    patch32(out, jz0, zero_lbl - (jz0 + 4))
+    patch32(out, jz1, zero_lbl - (jz1 + 4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(8))
+    pp = st(out, pp, 0, v2q(9))
+    pp = st(out, pp, 0, v2q(10))
+    pp = st(out, pp, 0, v2q(11))
+    let ret_lbl = pp
+    patch32(out, jret, ret_lbl - (jret + 4))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// esqrt on the v2 path. Mirrors evm_step op_esqrt (v2): normalize a; poison if
+// bad; esqrt2 (val<=0 -> exact zero); I3 write.
+fn em_v2_sqrt(
+    out: &![i8; 65536], p: i64, dst: i64, a: i64, qadd_off: i64, qsqrt_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // if a.val <= 0.0 -> exact zero
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jzero = pp + 2
+    pp = jcc(out, pp, 0x86, 0)          // jbe ZEROVAL
+    // z = sqrt(a.val)
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = call32(out, pp, ns_off)
+    pp = st(out, pp, 0, v2q(72))        // VALTMP = z
+    // t = qd_sqrt(true(a))
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)      // tx = true(a)
+    pp = em_v2_qcopy(out, pp, 8, 56)
+    pp = em_v2_qcopy(out, pp, 56, 0)
+    pp = call32(out, pp, qsqrt_off)     // t = qd_sqrt(tx)
+    pp = em_v2_qcopy(out, pp, 8, 64)
+    // err = qd_add(t, qd_neg(qd_from_f64(z)))
+    pp = em_v2_qcopy(out, pp, 64, 0)
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, v2q(4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)
+    // u = a.u / (2.0 * z)
+    pp = ld(out, pp, 0, v2q(72))
+    pp = setx(out, pp, 1, c_two())
+    pp = sse(out, pp, 0x59, 0, 1)       // 2*z  (== 2.0*z, commutative)
+    pp = ld(out, pp, 1, v2_reg_u_off(a))
+    pp = sse(out, pp, 0x5E, 1, 0)       // a.u / (2z)
+    pp = st(out, pp, 1, sc(11))
+    pp = em_v2_finish_result(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    // ZEROVAL: dst = exact zero
+    let zeroval_lbl = pp
+    patch32(out, jzero, zeroval_lbl - (jzero + 4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    let jdone2 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    patch32(out, jdone2, done_lbl - (jdone2 + 4))
+    pp
+}
+
 // Load a qd operand (val + 4 err comps as (val,0,0,0)+(e0..e3)... ) — helper to
 // stage QA = qd_from_f64(reg.val), QB = reg.err for a true() computation.
 fn em_v2_stage_true(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
@@ -3401,6 +3560,8 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with M
     p = em_sub_qd_sub(out, p, qadd_off)
     let qdiv_off = p
     p = em_sub_qd_div(out, p, qmulf_off, qsub_off, rn_off)
+    let qsqrt_off = p
+    p = em_sub_qd_sqrt(out, p, qmul_off, qsub_off, qmulf_off, qadd_off, ns_off)
 
     let main_off = p
     p = put8(out, p, 0x48)
@@ -3496,8 +3657,13 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with M
                                         p = em_v2_binop_div(out, p, dst, a, b, qadd_off, qdiv_off, ns_off)
                                         p = em_v2_set_last_written(out, p, dst)
                                     } else {
-                                        // v2 arithmetic / control-flow templates not yet landed
-                                        return BridgeMeta { len: 0, status: 42 }
+                                        if op == op_esqrt() {
+                                            p = em_v2_sqrt(out, p, dst, a, qadd_off, qsqrt_off, ns_off)
+                                            p = em_v2_set_last_written(out, p, dst)
+                                        } else {
+                                            // v2 control-flow templates not yet landed
+                                            return BridgeMeta { len: 0, status: 42 }
+                                        }
                                     }
                                 }
                             }
