@@ -2915,3 +2915,55 @@ checks:
   - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:20:00Z
+files:
+  - self-hosted/ir/lower.sio
+intent: |
+  CLAIM WP-A4 (Madaros SRET struct-by-value return). Own branch
+  fix/madaros-struct-return-runtime off origin/main; own PR. Target:
+  generic_struct_return.sio rc=139 -> rc=0 "6"/"spike PASS". Editing ONLY
+  self-hosted/ir/lower.sio per brief. Build/verify via Slurm offload driver.
+checks:
+  - Slurm: build madaros.elf from main.sio, run SRET ladder L0-L4 + regression sample
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:55:00Z
+files:
+  - self-hosted/ir/lower.sio
+  - tests/run-pass/sret_array4_return.sio
+  - tests/run-pass/sret_array4_generic_return.sio
+  - tests/run-pass/sret_array_args_return.sio
+  - tests/run-pass/println_int_array_field.sio
+  - docs/compiler/KNOWN_LIMITATIONS.md
+  - docs/handoff/continuity/SCOREBOARD.md
+  - artifacts/omega/agent_handoff.log.md
+intent: |
+  RELEASE WP-A4. Root cause was NOT missing SRET: struct-by-value return of an
+  array-field struct already works on Madaros (structs are handle-based; the
+  array field is a separate handle in a struct slot, so the returned handle
+  round-trips at any width — verified for [i64;2], [i64;4], generic <F>@i64,
+  a 3-arg wide-struct callee, and [i64;256]). The actual cause of
+  generic_struct_return.sio rc=139 was the `println` builtin dispatch:
+  `expr_result_scalar_kind_ref` in self-hosted/ir/lower.sio had no
+  ExprKind::ExprIndex case, so the i64 array element `r.c[0]` classified as
+  kind 0 and routed to the char* printer, which deref'd the integer as a
+  pointer and SIGSEGV'd. Monomorphized generic structs register fields from the
+  generic declaration `[F;N]`, so a declared-type i64 marker cannot fire — the
+  fix classifies the subscript element as float (existing index_base_elem_is_float_ref
+  path -> print_f64) else int (print_int). Zero corpus regression: every existing
+  println(array[i]) test is a float array (routes float-first, unchanged).
+checks:
+  - "Slurm madaros build (main.sio, rc=0, 378s): L0 sret_8_field_return rc=0 'OK'"
+  - "L2 sret_array4_return rc=13; L3 sret_array4_generic_return rc=13; ARGS sret_array_args_return rc=20"
+  - "println_int_array_field rc=0 stdout '30/7/elem PASS'"
+  - "generic_struct_return.sio rc=0 stdout '6'/'spike PASS' (was rc=139)"
+  - "regression: mc_struct_basic rc=0, array_elem_field_store rc=0 PASS, impl_inherent_method rc=0; pbpk28 float index-println prints floats intact"
+commit: pending
+status: lock-released
