@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.15 f128 native binary128 materialization receipt.
+"""Emit a Madaros v2 S5.16 f128 native binary128 materialization receipt.
 
 This promotes native-v2 materialization for the f128 binary128 value-contract
 case set plus an explicit bounded-decimal class: sig_hi=0, no truncation, and
 scale10<=18, with roundTiesToEven. It also promotes an algorithmic two-limb
-integer decimal class: sig_hi>0, digit_count<=36, scale10==0, no truncation,
-with binary128 roundTiesToEven. It still deliberately does not promote
-fractional multi-limb arbitrary decimals, f128 arithmetic, external ABI, or
-return ABI.
+decimal class: sig_hi>0, digit_count<=36, scale10<=18, no truncation, with
+binary128 roundTiesToEven. It still deliberately does not promote arbitrary
+large-scale decimals, f128 arithmetic, external ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.1"
-STAGE_CONTRACT_LEVEL = "S5_15_F128_NATIVE_TWO_LIMB_INTEGER_DECIMAL_BINARY128_MATERIALIZATION"
+STAGE_CONTRACT_LEVEL = "S5_16_F128_NATIVE_TWO_LIMB_DECIMAL_BINARY128_MATERIALIZATION"
 
 
 @dataclass(frozen=True)
@@ -67,6 +66,12 @@ CASES: list[Case] = [
     Case("two_limb_int_rounding_pair_even_low", "123456789012345678500000000000000000e0", "40737c6e3bfd70fdee55ac8bac02a000", [1, 500000000000000000, 123456789012345678, 36, 0, 0]),
     Case("two_limb_int_rounding_pair_even_high", "123456789012345678500000000000000001e0", "40737c6e3bfd70fdee55ac8bac02a000", [1, 500000000000000001, 123456789012345678, 36, 0, 0]),
     Case("two_limb_int_36_digit_negative", "-123456789012345678901234567890123456e0", "c0737c6e3bfd70fdeeaec417172dcbac", [-1, 901234567890123456, 123456789012345678, 36, 0, 0]),
+    Case("two_limb_dec_scale18_rounded", "123456789012345678.901234567890123456", "4037b69b4ba630f34ee6b74f031cdea0", [1, 901234567890123456, 123456789012345678, 36, 18, 0]),
+    Case("two_limb_dec_scale18_sticky_low", "123456789012345678.000000000000000001", "4037b69b4ba630f34e00000000000000", [1, 1, 123456789012345678, 36, 18, 0]),
+    Case("two_limb_dec_scale18_all_nines", "999999999999999999.999999999999999999", "403abc16d674ec800000000000000000", [1, 999999999999999999, 999999999999999999, 36, 18, 0]),
+    Case("two_limb_dec_scale17_rounded", "1234567890123456789.01234567890123456", "403b12210f47de981150329161f20b24", [1, 901234567890123456, 123456789012345678, 36, 17, 0]),
+    Case("two_limb_dec_scale16_rounded", "12345678901234567890.1234567890123456", "403e56a95319d63e15a43f35ba6e8ded", [1, 901234567890123456, 123456789012345678, 36, 16, 0]),
+    Case("two_limb_dec_scale18_negative", "-123456789012345678.901234567890123456", "c037b69b4ba630f34ee6b74f031cdea0", [-1, 901234567890123456, 123456789012345678, 36, 18, 0]),
     Case("quarter_exact", "0.25", "3ffd0000000000000000000000000000", [1, 0, 25, 3, 2, 0]),
     Case("eighth_exact", "0.125", "3ffc0000000000000000000000000000", [1, 0, 125, 4, 3, 0]),
     Case("one_and_half_exact", "1.5", "3fff8000000000000000000000000000", [1, 0, 15, 2, 1, 0]),
@@ -406,6 +411,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
             "f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted": True,
             "f128_native_two_limb_integer_decimal_binary128_materialization_promoted": True,
+            "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
@@ -421,6 +427,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_bounded_siglo_scale18_rounded_and_truncated_high_precision_decimals",
             "native_v2_emits_and_runs_generated_sig_hi_zero_no_truncation_scale10_le_18_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale0_integer_decimal_matrix",
+            "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
             "native_v2_materializes_explicit_value_contract_subnormal_underflow_and_finite_overflow_to_infinity_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
