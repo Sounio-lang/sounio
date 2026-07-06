@@ -64,7 +64,21 @@ echo "  src:   $SRC"
 echo "  out:   $OUT"
 
 # Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+#
+# REPRODUCIBILITY: the seed's own runtime picks up a mmap base address that
+# leaks into an emission decision (measured: two builds of the identical
+# commit+seed produce 97.3MB gate-green vs 104MB gate-failing binaries; both
+# builds are BYTE-IDENTICAL and always 97.3MB when ASLR is disabled). Until
+# the address leak is root-caused in lean_single.sio, pin the address-space
+# layout so every build is the reproducible, gate-validated instance.
+# setarch -R (ADDR_NO_RANDOMIZE) needs no privilege; fall back cleanly if the
+# tool is absent (build stays correct, just not guaranteed byte-reproducible).
+if command -v setarch >/dev/null 2>&1 && setarch "$(uname -m)" -R true >/dev/null 2>&1; then
+    setarch "$(uname -m)" -R scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+else
+    echo "  note: setarch -R unavailable; build not guaranteed byte-reproducible" >&2
+    scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+fi
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2
