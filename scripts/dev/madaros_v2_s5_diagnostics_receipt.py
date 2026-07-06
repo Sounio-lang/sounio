@@ -38,10 +38,10 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
     {
         "case_id": "reject_f128_overwide_arg_shape_native_v2",
         "class": "unsupported_f128_operation",
-        "source": "fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 9 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; too_many(x, x, x, x, x) }\n",
+        "source": "fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128, f: f128, g: f128, h: f128, i: f128) -> i64 { 9 }\nfn main() -> i64 { let x: f128 = 1.0 as f128; too_many(x, x, x, x, x, x, x, x, x) }\n",
         "unsupported_width": "f128",
-        "expected_detail": "f128_call_shape_pending",
-        "expected_fragment": "f128_call_shape_pending",
+        "expected_detail": "call_arity_gt_8",
+        "expected_fragment": "call_arity_gt_8",
         "expect_machine_module_json": True,
         "expected_machine_module_supported": False,
     },
@@ -315,7 +315,7 @@ def emit(args: argparse.Namespace) -> int:
         "f128_machine_module_supported": False,
         "f128_machine_module_unsupported_details": [
             "f128_arithmetic_pending",
-            "f128_call_shape_pending",
+            "call_arity_gt_8",
         ],
         "unsupported_widths_do_not_segfault": True,
         "legacy_fallback_for_unsupported_widths": False,

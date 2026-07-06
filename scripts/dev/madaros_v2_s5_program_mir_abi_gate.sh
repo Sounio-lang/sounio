@@ -1352,7 +1352,7 @@ if f128_native_cases["local_literal_copy_executes"].get("run_rc") != 0:
     raise SystemExit("f128 local literal/copy witness must execute with rc=0")
 for case_id, detail in {
     "f128_arithmetic_stays_blocked": "f128_arithmetic_pending",
-    "f128_overwide_arg_shape_stays_blocked": "f128_call_shape_pending",
+    "f128_overwide_arg_shape_stays_blocked": "call_arity_gt_8",
     "f128_arbitrary_decimal_materialization_stays_blocked": "f128_decimal_materialization_pending",
 }.items():
     row = f128_native_cases[case_id]
@@ -1371,10 +1371,10 @@ if f128_opaque_call_return_abi_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 opaque call-return ABI receipt")
 if f128_opaque_call_return_abi_receipt.get("stage_contract_level") != "S5_5_F128_OPAQUE_DIRECT_CALL_RETURN_ABI_PROMOTED":
     raise SystemExit("f128 opaque call-return ABI receipt must declare S5.5 stage contract")
-if f128_opaque_call_return_abi_receipt.get("case_count") != 11:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact eleven cases")
-if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 9:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact nine positive cases")
+if f128_opaque_call_return_abi_receipt.get("case_count") != 12:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact twelve cases")
+if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 10:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact ten positive cases")
 if f128_opaque_call_return_abi_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 opaque call-return ABI receipt must contain exact two negative cases")
 for field in [
@@ -1405,8 +1405,9 @@ required_f128_call_cases = {
     "local_two_f128_args_return",
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
+    "local_five_f128_args_deeper_stack_return",
     "f128_arithmetic_still_blocked",
-    "f128_five_arg_shape_still_blocked",
+    "f128_nine_arg_arity_still_blocked",
 }
 if set(f128_call_cases) != required_f128_call_cases:
     raise SystemExit(f"f128 opaque call-return ABI receipt cases mismatch: {sorted(f128_call_cases)}")
@@ -1420,6 +1421,7 @@ for case_id in [
     "local_two_f128_args_return",
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
+    "local_five_f128_args_deeper_stack_return",
 ]:
     row = f128_call_cases[case_id]
     if row.get("machine_module_supported") is not True:
@@ -1432,7 +1434,7 @@ for case_id in [
         raise SystemExit(f"{case_id} must record f128 slot rows")
 for case_id, detail in {
     "f128_arithmetic_still_blocked": "f128_arithmetic_pending",
-    "f128_five_arg_shape_still_blocked": "f128_call_shape_pending",
+    "f128_nine_arg_arity_still_blocked": "call_arity_gt_8",
 }.items():
     row = f128_call_cases[case_id]
     if row.get("machine_module_supported") is not False:
@@ -1684,7 +1686,7 @@ if diagnostics_receipt.get("f128_machine_module_supported") is not False:
     raise SystemExit("diagnostics receipt must keep f128 MachineModule unsupported")
 if diagnostics_receipt.get("f128_machine_module_unsupported_details") != [
     "f128_arithmetic_pending",
-    "f128_call_shape_pending",
+    "call_arity_gt_8",
 ]:
     raise SystemExit("diagnostics receipt must record specific f128 blocker details")
 for field in [
@@ -1700,7 +1702,7 @@ for field in [
 diagnostic_cases = {row.get("case_id"): row for row in diagnostics_receipt.get("cases", [])}
 required_diagnostic_negative = {
     "reject_f128_arithmetic_native_v2": {"width": "f128", "detail": "f128_arithmetic_pending", "fragment": "f128_arithmetic_pending", "machine_module": True},
-    "reject_f128_overwide_arg_shape_native_v2": {"width": "f128", "detail": "f128_call_shape_pending", "fragment": "f128_call_shape_pending", "machine_module": True},
+    "reject_f128_overwide_arg_shape_native_v2": {"width": "f128", "detail": "call_arity_gt_8", "fragment": "call_arity_gt_8", "machine_module": True},
     "reject_i512_let_annotation_native_v2": {"width": "i512", "detail": "let annotation"},
     "reject_u512_cast_native_v2": {"width": "u512", "detail": "cast"},
 }

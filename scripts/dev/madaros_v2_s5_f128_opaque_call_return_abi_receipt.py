@@ -132,6 +132,17 @@ fn main() -> i64 {
         "callee": "too_many",
         "expected_exit": 9,
     },
+    {
+        "case_id": "local_five_f128_args_deeper_stack_return",
+        "source": """fn five(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 10 }
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  five(x, x, x, x, x)
+}
+""",
+        "callee": "five",
+        "expected_exit": 10,
+    },
 ]
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
@@ -147,14 +158,14 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "expected_detail": "f128_arithmetic_pending",
     },
     {
-        "case_id": "f128_five_arg_shape_still_blocked",
-        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 9 }
+        "case_id": "f128_nine_arg_arity_still_blocked",
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128, f: f128, g: f128, h: f128, i: f128) -> i64 { 9 }
 fn main() -> i64 {
   let x: f128 = 1.0 as f128
-  too_many(x, x, x, x, x)
+  too_many(x, x, x, x, x, x, x, x, x)
 }
 """,
-        "expected_detail": "f128_call_shape_pending",
+        "expected_detail": "call_arity_gt_8",
     },
 ]
 

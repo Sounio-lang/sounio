@@ -54,14 +54,14 @@ CASES: list[dict[str, Any]] = [
     {
         "case_id": "f128_overwide_arg_shape_stays_blocked",
         "kind": "block",
-        "expected_detail": "f128_call_shape_pending",
-        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 {
+        "expected_detail": "call_arity_gt_8",
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128, f: f128, g: f128, h: f128, i: f128) -> i64 {
     9
 }
 
 fn main() -> i64 {
     let x: f128 = 1.0 as f128
-    too_many(x, x, x, x, x)
+    too_many(x, x, x, x, x, x, x, x, x)
 }
 """,
     },
