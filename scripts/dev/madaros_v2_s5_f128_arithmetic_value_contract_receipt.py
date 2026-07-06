@@ -4,9 +4,9 @@
 This promotes a finite, exact binary128 arithmetic value-contract matrix
 end-to-end for local literal-derived values. It deliberately does not promote
 generic IEEE helpers, NaN/Inf, arbitrary decimal arithmetic, external SysV f128
-ABI, SRET, f128 parameter-derived call returns, or arithmetic across call-return
-boundaries that have lost literal metadata and therefore require real binary128
-software helpers.
+ABI, SRET, or f128 callee-side arithmetic. Direct internal calls whose callee
+returns an f128 parameter preserve the caller argument's value contract when the
+argument still has exact finite literal metadata.
 """
 
 from __future__ import annotations
@@ -223,6 +223,48 @@ fn main() -> i64 {
         "expected_hex": "40008000000000000000000000000000",
         "expected_metadata": [1, 0, 30, 2, 1, 0],
     },
+    {
+        "case_id": "f128_call_identity_return_then_add_to_three",
+        "source": """fn id_f128(x: f128) -> f128 { x }
+fn main() -> i64 {
+  let a: f128 = id_f128(1.0 as f128)
+  let b: f128 = 2.0 as f128
+  let c: f128 = a + b
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": [1, 0, 30, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_call_pick_first_return_then_add_to_three",
+        "source": """fn pick_first(x: f128, y: i64) -> f128 { x }
+fn main() -> i64 {
+  let a: f128 = pick_first(1.0 as f128, 7)
+  let b: f128 = 2.0 as f128
+  let c: f128 = a + b
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": [1, 0, 30, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_call_pick_second_return_then_add_to_three",
+        "source": """fn pick_second(x: i64, y: f128) -> f128 { y }
+fn main() -> i64 {
+  let a: f128 = pick_second(7, 1.0 as f128)
+  let b: f128 = 2.0 as f128
+  let c: f128 = a + b
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": [1, 0, 30, 2, 1, 0],
+    },
 ]
 
 NEGATIVE = [
@@ -244,19 +286,6 @@ fn main() -> i64 {
   let a: f128 = 1.0 as f128
   let b: f128 = 2.0 as f128
   let c: f128 = add_f128(a, b)
-  let d: f128 = c
-  0
-}
-""",
-        "expected_detail": "f128_arithmetic_pending",
-    },
-    {
-        "case_id": "f128_call_return_then_add_still_requires_helper",
-        "source": """fn id_f128(x: f128) -> f128 { x }
-fn main() -> i64 {
-  let a: f128 = id_f128(1.0 as f128)
-  let b: f128 = 2.0 as f128
-  let c: f128 = a + b
   let d: f128 = c
   0
 }
@@ -458,8 +487,9 @@ def emit(args: argparse.Namespace) -> None:
             "finite exact signed decimal-tenths plus quarter matrix materializes as binary128 words",
             "single-chain arithmetic preserves compiler value-kind metadata",
             "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
+            "direct internal calls whose callee returns one f128 parameter preserve that argument's exact value-contract metadata into caller arithmetic",
             "unsupported f128 arithmetic remains fail-closed",
-            "f128 parameter-derived call-return arithmetic remains fail-closed until real binary128 software helpers or interprocedural value binding exist",
+            "f128 callee-side arithmetic remains fail-closed until real binary128 software helpers or broader interprocedural value reasoning exist",
         ],
         "cases": cases,
     }

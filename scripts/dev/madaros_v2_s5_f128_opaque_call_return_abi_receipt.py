@@ -308,6 +308,11 @@ def require_f128_return_word_flow(module: dict[str, Any], case: dict[str, Any]) 
     main_captures = instr_rows(main, MIR_OP_CAPTURE_RET)
     ret_words = sorted({row[INSTR_COND] for row in callee_rets if row[INSTR_COND] in (0, 1)})
     capture_words = sorted({row[INSTR_COND] for row in main_captures if row[INSTR_COND] in (0, 1)})
+    callee_index = int(callee.get("index", -1))
+    return_param_indices = module.get("f128_return_param_indices", [])
+    callee_return_param_index = -1
+    if 0 <= callee_index < len(return_param_indices):
+        callee_return_param_index = int(return_param_indices[callee_index])
     if 1 not in ret_words:
         raise SystemExit(f"{case['case_id']}: f128 callee return must expose high word via RET cond=1")
     if [0, 1] != capture_words:
@@ -322,6 +327,19 @@ def require_f128_return_word_flow(module: dict[str, Any], case: dict[str, Any]) 
                     "caller_capture_ret_rows": main_captures,
                     "caller_literal_return_metadata_rows": literal_rows,
                     "literal_return_metadata_propagated": True,
+                }
+        if callee_return_param_index >= 0:
+            main_index = int(main.get("index", -1))
+            literal_rows = f128_literal_rows_for_fn(module, main_index)
+            if literal_rows:
+                return {
+                    "callee_ret_word_selectors": ret_words,
+                    "caller_capture_ret_word_selectors": capture_words,
+                    "callee_ret_rows": callee_rets,
+                    "caller_capture_ret_rows": main_captures,
+                    "callee_return_param_index": callee_return_param_index,
+                    "caller_literal_return_metadata_rows": literal_rows,
+                    "param_return_literal_metadata_propagated": True,
                 }
         raise SystemExit(f"{case['case_id']}: f128 caller must capture low/high words separately, got {capture_words}")
     for row in callee_rets:

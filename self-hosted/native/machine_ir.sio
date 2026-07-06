@@ -172,6 +172,7 @@ pub struct MachineModule {
     pub target_count: i64,
     pub supported: bool,
     pub unsupported_detail: string,
+    pub f128_return_param_indices: [i64; 32],
 }
 
 pub fn machine_operand_none() -> MachineOperand with Mut, Panic, Div {
@@ -559,6 +560,65 @@ fn native_v2_ir_return_count(func: &IrFunction) -> i64 with Mut, Panic, Div {
     count
 }
 
+fn native_v2_ir_trace_copy_source(func: &IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
+    var target = reg
+    var guard: i64 = 0
+    while guard < 8 {
+        var changed = false
+        var i: i64 = 0
+        while i < (*func).instr_count && i < IR_MAX_INSTRS {
+            let instr = (*func).instrs[i as usize]
+            if instr.op == IrOpcode::IrCopy && instr.dst == target && instr.src1 >= 0 {
+                target = instr.src1
+                changed = true
+            }
+            i = i + 1
+        }
+        if !changed {
+            break
+        }
+        guard = guard + 1
+    }
+    target
+}
+
+fn native_v2_ir_f128_return_param_index(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    var seen: i64 = -1
+    var return_count: i64 = 0
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrReturn {
+            return_count = return_count + 1
+            let ret_src = native_v2_ir_trace_copy_source(func, instr.src1)
+            let ret_src_hi = native_v2_ir_trace_copy_source(func, instr.src2)
+            var pi: i64 = 0
+            var found: i64 = -1
+            while pi < (*func).param_count && pi < 64 {
+                let param_lo = (*func).param_regs[pi as usize]
+                let param_hi = if pi + 1 < (*func).param_count && pi + 1 < 64 { (*func).param_regs[(pi + 1) as usize] } else { -1 }
+                if param_lo == ret_src && (ret_src_hi < 0 || param_hi == ret_src_hi || param_lo + 1 == ret_src_hi) {
+                    found = pi
+                }
+                pi = pi + 1
+            }
+            if found < 0 {
+                return -1
+            }
+            if seen < 0 {
+                seen = found
+            } else if seen != found {
+                return -1
+            }
+        }
+        i = i + 1
+    }
+    if return_count == 1 {
+        return seen
+    }
+    -1
+}
+
 fn native_v2_machine_only_f128_literal_slot(func: MachineFunction) -> i64 with Mut, Panic, Div {
     var count: i64 = 0
     var slot: i64 = -1
@@ -575,6 +635,115 @@ fn native_v2_machine_only_f128_literal_slot(func: MachineFunction) -> i64 with M
         return slot
     }
     -1
+}
+
+fn native_v2_machine_load_stack_source(func: MachineFunction, temp: i64, before_index: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var found: i64 = -1
+    while i < before_index && i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_LOAD_STACK && machine_instr_dst_value(instr) == temp {
+            found = machine_instr_src1_value(instr)
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn native_v2_machine_f128_return_param_index(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var seen: i64 = -1
+    var return_count: i64 = 0
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_RET && instr.cond == 1 {
+            return_count = return_count + 1
+            let lo_slot = native_v2_machine_load_stack_source(func, machine_instr_src1_value(instr), i)
+            let hi_slot = native_v2_machine_load_stack_source(func, machine_instr_src2_value(instr), i)
+            if lo_slot < 0 || hi_slot != lo_slot + 1 {
+                return -1
+            }
+            if seen < 0 {
+                seen = lo_slot
+            } else if seen != lo_slot {
+                return -1
+            }
+        }
+        i = i + 1
+    }
+    if return_count == 1 {
+        return seen
+    }
+    -1
+}
+
+fn native_v2_machine_call_arg_source_slot(func: MachineFunction, call_index: i64, abi_arg_index: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var arg_temp: i64 = -1
+    while i < call_index && i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_ARG_MOVE && instr.arg_index == abi_arg_index {
+            arg_temp = machine_instr_src1_value(instr)
+        }
+        i = i + 1
+    }
+    if arg_temp < 0 {
+        return -1
+    }
+    native_v2_machine_load_stack_source(func, arg_temp, call_index)
+}
+
+fn native_v2_machine_f128_meta_before(func: MachineFunction, before_index: i64, slot: i64) -> MachineInstr with Mut, Panic, Div {
+    var out = machine_empty_instr()
+    var i: i64 = 0
+    while i < before_index && i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_PSEUDO_F128_META && machine_instr_dst_value(instr) == slot {
+            out = instr
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn native_v2_machine_capture_ret_store_slot(func: MachineFunction, call_index: i64) -> i64 with Mut, Panic, Div {
+    var i = call_index + 1
+    var ret_temp: i64 = -1
+    while i < func.blocks[0].instr_count && i < call_index + 8 {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_CAPTURE_RET && instr.cond == 0 {
+            ret_temp = machine_instr_dst_value(instr)
+        }
+        if ret_temp >= 0 && instr.opcode == MIR_OP_STORE_STACK && machine_instr_src1_value(instr) == ret_temp {
+            return machine_instr_dst_value(instr)
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn native_v2_attach_legalized_f128_param_call_metadata(func: MachineFunction, f128_ret_param_index: [i64; 32]) -> MachineFunction with Mut, Panic, Div {
+    var out = func
+    var i: i64 = 0
+    while i < out.blocks[0].instr_count {
+        let instr = out.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_CALL {
+            let fn_id = machine_instr_src1_value(instr)
+            if fn_id >= 0 && fn_id < 32 {
+                let param_idx = f128_ret_param_index[fn_id as usize]
+                if param_idx >= 0 {
+                    let arg_slot = native_v2_machine_call_arg_source_slot(out, i, param_idx)
+                    let dst_slot = native_v2_machine_capture_ret_store_slot(out, i)
+                    if arg_slot >= 0 && arg_slot < 256 && dst_slot >= 0 && dst_slot < 256 && out.f128_literal_digit_count[arg_slot as usize] > 0 {
+                        out = native_v2_mark_slot_byval(out, dst_slot, MIR_SLOT_KIND_F128_BINARY128, 2)
+                        out = native_v2_mark_f128_literal_byval(out, dst_slot, out.f128_literal_sign[arg_slot as usize], out.f128_literal_sig_hi[arg_slot as usize], out.f128_literal_sig_lo[arg_slot as usize], out.f128_literal_digit_count[arg_slot as usize], out.f128_literal_scale10[arg_slot as usize], out.f128_literal_truncated_digits[arg_slot as usize], out.f128_literal_truncated_tail_info[arg_slot as usize])
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    out
 }
 
 fn native_v2_attach_call_f128_literal_returns(func: MachineFunction, valid: [i64; 32], signs: [i64; 32], sig_his: [i64; 32], sig_los: [i64; 32], digit_counts: [i64; 32], scale10s: [i64; 32], truncated_digits: [i64; 32], truncated_tail_infos: [i64; 32]) -> MachineFunction with Mut, Panic, Div {
@@ -912,6 +1081,7 @@ pub fn machine_module_new() -> MachineModule with Mut, Panic, Div {
         target_count: 0,
         supported: true,
         unsupported_detail: "",
+        f128_return_param_indices: [-1; 32],
     }
 }
 
@@ -3190,6 +3360,7 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
     var f128_ret_scale10: [i64; 32] = [0; 32]
     var f128_ret_truncated_digits: [i64; 32] = [0; 32]
     var f128_ret_truncated_tail_info: [i64; 32] = [0; 32]
+    var f128_ret_param_index: [i64; 32] = [-1; 32]
     var si: i64 = 0
     while si < module.fn_count && si < 32 {
         let summary_base = native_v2_lower_function_to_machine(module.functions[si as usize])
@@ -3205,6 +3376,10 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
             f128_ret_truncated_digits[si as usize] = summary_legal.f128_literal_truncated_digits[literal_slot as usize]
             f128_ret_truncated_tail_info[si as usize] = summary_legal.f128_literal_truncated_tail_info[literal_slot as usize]
         }
+        let ir_param_index = native_v2_ir_f128_return_param_index(&module.functions[si as usize])
+        let machine_param_index = native_v2_machine_f128_return_param_index(summary_legal)
+        f128_ret_param_index[si as usize] = if ir_param_index >= 0 { ir_param_index } else { machine_param_index }
+        out.f128_return_param_indices[si as usize] = f128_ret_param_index[si as usize]
         si = si + 1
     }
 
@@ -3245,10 +3420,44 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
                         lowered.blocks[0].instr_count = lowered.blocks[0].instr_count + 1
                         ai = ai + 1
                     }
+                } else if fn_id >= 0 && fn_id < 32 && f128_ret_param_index[fn_id as usize] >= 0 && f128_ret_param_index[fn_id as usize] < machine_instr_call_arg_count(instr) {
+                    let param_idx = f128_ret_param_index[fn_id as usize]
+                    let arg_slot = machine_instr_call_arg_value(instr, param_idx)
+                    let arg_meta = native_v2_machine_f128_meta_before(lowered, ai, arg_slot)
+                    if arg_slot >= 0 && arg_slot < 256 && arg_meta.cond > 0 {
+                        instr.f128_literal_sign = machine_instr_src1_value(arg_meta)
+                        instr.f128_literal_sig_hi = machine_instr_src2_value(arg_meta)
+                        instr.f128_literal_sig_lo = machine_instr_aux_value(arg_meta)
+                        instr.f128_literal_digit_count = arg_meta.cond
+                        instr.f128_literal_scale10 = arg_meta.arg_index
+                        instr.f128_literal_truncated_digits = arg_meta.call_arg_count
+                        instr.f128_literal_truncated_tail_info = 0
+                        lowered.blocks[0].instrs[ai as usize] = instr
+                        if lowered.blocks[0].instr_count < MIR_MAX_INSTRS {
+                            var meta_arg = machine_empty_instr()
+                            meta_arg.opcode = MIR_OP_PSEUDO_F128_META
+                            meta_arg.dst = machine_operand_stack_slot(machine_instr_dst_value(instr))
+                            meta_arg.src1 = machine_operand_imm64(machine_instr_src1_value(arg_meta))
+                            meta_arg.src2 = machine_operand_imm64(machine_instr_src2_value(arg_meta))
+                            meta_arg.aux = machine_operand_imm64(machine_instr_aux_value(arg_meta))
+                            meta_arg.cond = arg_meta.cond
+                            meta_arg.arg_index = arg_meta.arg_index
+                            meta_arg.call_arg_count = arg_meta.call_arg_count
+                            var ak = lowered.blocks[0].instr_count
+                            while ak > ai + 1 {
+                                lowered.blocks[0].instrs[ak as usize] = lowered.blocks[0].instrs[(ak - 1) as usize]
+                                ak = ak - 1
+                            }
+                            lowered.blocks[0].instrs[(ai + 1) as usize] = meta_arg
+                            lowered.blocks[0].instr_count = lowered.blocks[0].instr_count + 1
+                            ai = ai + 1
+                        }
+                    }
                 }
             }
             ai = ai + 1
         }
+        lowered = native_v2_attach_legalized_f128_param_call_metadata(lowered, f128_ret_param_index)
         out.total_ir_instr_count = out.total_ir_instr_count + lowered.source_instr_count
         let legal = native_v2_legalize_function(lowered)
         out.functions[i as usize] = legal

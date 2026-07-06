@@ -34,6 +34,7 @@ var NV2_RELOC_OVERFLOW: bool = false
 var NATIVE_V2_ELF_FILE_BUF: [i8; 4194304] = [0; 4194304]
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
 var NV2_SRET_MAKE_FN: IrFunction = ir_empty_function()
+var NC_CORE_F128_SLOT_VALUE_KIND: [i64; 2048] = [0; 2048]
 
 fn ARCH_UNKNOWN() -> i64 { native_policy_arch_unknown() }
 pub fn ARCH_X86_64() -> i64 { native_policy_arch_x86_64() }
@@ -3996,6 +3997,11 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
     (*nc).fn_count = module.fn_count
     let machine_summary = native_v2_build_machine_module(module, true)
+    var fslot_reset: i64 = 0
+    while fslot_reset < 2048 {
+        NC_CORE_F128_SLOT_VALUE_KIND[fslot_reset as usize] = 0
+        fslot_reset = fslot_reset + 1
+    }
     var fmeta: i64 = 0
     while fmeta < module.fn_count && fmeta < 2048 {
         (*nc).fn_returns_float[fmeta as usize] = module.functions[fmeta as usize].returns_float
@@ -4005,6 +4011,23 @@ pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrMod
         }
         let f128_ir_kind = nc_core_func_f128_return_value_kind(&module.functions[fmeta as usize])
         (*nc).fn_f128_return_value_kind[fmeta as usize] = if f128_summary_kind > 0 { f128_summary_kind } else { f128_ir_kind }
+        let f128_machine_param_index = if fmeta < machine_summary.fn_count && fmeta < 32 {
+            machine_summary.f128_return_param_indices[fmeta as usize]
+        } else {
+            -1
+        }
+        let f128_ir_param_index = nc_core_func_f128_return_param_index(&module.functions[fmeta as usize])
+        (*nc).fn_f128_return_param_index[fmeta as usize] = if f128_machine_param_index >= 0 { f128_machine_param_index } else { f128_ir_param_index }
+        if fmeta < machine_summary.fn_count && fmeta < 32 {
+            var fslot: i64 = 0
+            while fslot < 64 {
+                let fslot_kind = nc_machine_func_f128_value_kind_at(machine_summary.functions[fmeta as usize], fslot)
+                if fslot_kind > 0 {
+                    NC_CORE_F128_SLOT_VALUE_KIND[(fmeta * 64 + fslot) as usize] = fslot_kind
+                }
+                fslot = fslot + 1
+            }
+        }
         fmeta = fmeta + 1
     }
     (*nc).runtime_context_slot_offset = 0
@@ -4029,6 +4052,7 @@ pub fn compile_module_streaming_begin_count_into(nc: &! NativeCompiler, fn_count
     while fmeta < fn_count && fmeta < 2048 {
         (*nc).fn_returns_float[fmeta as usize] = 0
         (*nc).fn_f128_return_value_kind[fmeta as usize] = 0
+        (*nc).fn_f128_return_param_index[fmeta as usize] = -1
         fmeta = fmeta + 1
     }
     (*nc).runtime_context_slot_offset = 0
@@ -6235,6 +6259,10 @@ fn nc_core_func_param_is_f128(func: &IrFunction, reg: i64) -> bool with Mut, Pan
         }
         i = i + 1
     }
+    let returned_param_index = nc_core_func_f128_return_param_index(func)
+    if returned_param_index >= 0 && returned_param_index < (*func).param_count && returned_param_index < 64 {
+        return (*func).param_regs[returned_param_index as usize] == reg
+    }
     false
 }
 
@@ -6272,6 +6300,13 @@ fn nc_core_func_f128_value_kind(func: &IrFunction, reg: i64) -> i64 with Mut, Pa
         i = i + 1
     }
     kind
+}
+
+fn nc_core_compiler_f128_value_kind(nc: &NativeCompiler, fn_index: i64, reg: i64) -> i64 {
+    if fn_index < 0 || fn_index >= 32 || reg < 0 || reg >= 64 {
+        return 0
+    }
+    NC_CORE_F128_SLOT_VALUE_KIND[(fn_index * 64 + reg) as usize]
 }
 
 fn nc_core_func_f128_return_value_kind(func: &IrFunction) -> i64 with Mut, Panic, Div {
@@ -6340,6 +6375,16 @@ fn nc_machine_func_single_f128_value_kind(func: MachineFunction) -> i64 with Mut
     0
 }
 
+fn nc_machine_func_f128_value_kind_at(func: MachineFunction, slot: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= 256 {
+        return 0
+    }
+    if func.f128_literal_digit_count[slot as usize] <= 0 {
+        return 0
+    }
+    nc_f128_vc_kind(func.f128_literal_sign[slot as usize], func.f128_literal_sig_hi[slot as usize], func.f128_literal_sig_lo[slot as usize], func.f128_literal_digit_count[slot as usize], func.f128_literal_scale10[slot as usize], func.f128_literal_truncated_digits[slot as usize])
+}
+
 fn nc_core_func_param_index(func: &IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
     var i = 0
     while i < (*func).param_count && i < 64 {
@@ -6347,6 +6392,65 @@ fn nc_core_func_param_index(func: &IrFunction, reg: i64) -> i64 with Mut, Panic,
             return i
         }
         i = i + 1
+    }
+    -1
+}
+
+fn nc_core_func_trace_copy_source(func: &IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
+    var target = reg
+    var guard: i64 = 0
+    while guard < 8 {
+        var changed = false
+        var i: i64 = 0
+        while i < (*func).instr_count && i < IR_MAX_INSTRS {
+            let instr = (*func).instrs[i as usize]
+            if instr.op == IrOpcode::IrCopy && instr.dst == target && instr.src1 >= 0 {
+                target = instr.src1
+                changed = true
+            }
+            i = i + 1
+        }
+        if !changed {
+            break
+        }
+        guard = guard + 1
+    }
+    target
+}
+
+fn nc_core_func_f128_return_param_index(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    var seen: i64 = -1
+    var return_count: i64 = 0
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrReturn {
+            return_count = return_count + 1
+            let src = nc_core_func_trace_copy_source(func, instr.src1)
+            let src_hi = nc_core_func_trace_copy_source(func, instr.src2)
+            var pidx: i64 = -1
+            var pi: i64 = 0
+            while pi < (*func).param_count && pi < 64 {
+                let param_lo = (*func).param_regs[pi as usize]
+                let param_hi = if pi + 1 < (*func).param_count && pi + 1 < 64 { (*func).param_regs[(pi + 1) as usize] } else { -1 }
+                if param_lo == src && (src_hi < 0 || param_hi == src_hi || param_lo + 1 == src_hi) {
+                    pidx = pi
+                }
+                pi = pi + 1
+            }
+            if pidx < 0 {
+                return -1
+            }
+            if seen < 0 {
+                seen = pidx
+            } else if seen != pidx {
+                return -1
+            }
+        }
+        i = i + 1
+    }
+    if return_count == 1 {
+        return seen
     }
     -1
 }
@@ -6384,6 +6488,24 @@ fn nc_core_call_has_f128_arg(nc: &! NativeCompiler, func: &IrFunction, instr_ind
         ai = ai + 1
     }
     false
+}
+
+fn nc_core_call_single_f128_arg_kind(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, argc: i64) -> i64 with Mut, Panic, Div {
+    var ai: i64 = 0
+    var seen: i64 = 0
+    var kind: i64 = 0
+    while ai < argc {
+        let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, ai)
+        if arg >= 0 && arg < 512 && nc_core_reg_is_f128(nc, arg) {
+            seen = seen + 1
+            kind = (*nc).f128_value_kind[arg as usize]
+        }
+        ai = ai + 1
+    }
+    if seen == 1 && kind > 0 {
+        return kind
+    }
+    0
 }
 
 fn nc_core_load_expanded_call_args(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, argc: i64) -> bool with Mut, Panic, Div {
@@ -6931,8 +7053,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             if nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src1) || nc_core_reg_is_f128(nc, (*func).instrs[i as usize].src2) {
                 let lhs_state_kind = if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 { (*nc).f128_value_kind[(*func).instrs[i as usize].src1 as usize] } else { 0 }
                 let rhs_state_kind = if (*func).instrs[i as usize].src2 >= 0 && (*func).instrs[i as usize].src2 < 512 { (*nc).f128_value_kind[(*func).instrs[i as usize].src2 as usize] } else { 0 }
-                let lhs_kind = if lhs_state_kind > 0 { lhs_state_kind } else { nc_core_func_f128_value_kind(func, (*func).instrs[i as usize].src1) }
-                let rhs_kind = if rhs_state_kind > 0 { rhs_state_kind } else { nc_core_func_f128_value_kind(func, (*func).instrs[i as usize].src2) }
+                let lhs_static_kind = nc_core_compiler_f128_value_kind(nc, fn_index, (*func).instrs[i as usize].src1)
+                let rhs_static_kind = nc_core_compiler_f128_value_kind(nc, fn_index, (*func).instrs[i as usize].src2)
+                let lhs_kind = if lhs_state_kind > 0 { lhs_state_kind } else if lhs_static_kind > 0 { lhs_static_kind } else { nc_core_func_f128_value_kind(func, (*func).instrs[i as usize].src1) }
+                let rhs_kind = if rhs_state_kind > 0 { rhs_state_kind } else if rhs_static_kind > 0 { rhs_static_kind } else { nc_core_func_f128_value_kind(func, (*func).instrs[i as usize].src2) }
                 let a = nc_f128_vc_hundredths(lhs_kind)
                 let b = nc_f128_vc_hundredths(rhs_kind)
                 var result_hundredths: i64 = 0 - 1
@@ -6942,7 +7066,9 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     if (*func).instrs[i as usize].bin_op == BinaryOp::OpMul && ((a * b) % 100) == 0 { result_hundredths = (a * b) / 100 }
                     if (*func).instrs[i as usize].bin_op == BinaryOp::OpDiv && b != 0 && ((a * 100) % b) == 0 { result_hundredths = (a * 100) / b }
                 }
-                let result_kind = nc_f128_vc_kind_from_hundredths(result_hundredths)
+                let computed_result_kind = nc_f128_vc_kind_from_hundredths(result_hundredths)
+                let static_result_kind = if computed_result_kind > 0 { 0 } else { nc_core_compiler_f128_value_kind(nc, fn_index, (*func).instrs[i as usize].dst) }
+                let result_kind = if computed_result_kind > 0 { computed_result_kind } else { static_result_kind }
                 if result_kind > 0 {
                     let result_hi = nc_f128_vc_hi(result_kind)
                     nc_core_store_f128_opaque_words(nc, (*func).instrs[i as usize].dst, result_hi, 0)
@@ -7098,16 +7224,33 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 } else {
                     false
                 }
-                if (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG {
+                let callee_f128_kind = if (*func).instrs[i as usize].fn_id >= 0 && (*func).instrs[i as usize].fn_id < 2048 {
+                    (*nc).fn_f128_return_value_kind[(*func).instrs[i as usize].fn_id as usize]
+                } else {
+                    0
+                }
+                let callee_f128_param_index = if (*func).instrs[i as usize].fn_id >= 0 && (*func).instrs[i as usize].fn_id < 2048 {
+                    (*nc).fn_f128_return_param_index[(*func).instrs[i as usize].fn_id as usize]
+                } else {
+                    -1
+                }
+                let call_returns_f128 = (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG || callee_f128_kind > 0 || callee_f128_param_index >= 0 || nc_core_reg_is_f128(nc, (*func).instrs[i as usize].dst)
+                if call_returns_f128 {
                     nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                     nc_emit_store_rbp_disp32_reg(nc, 2, ir_slot_offset((*func).instrs[i as usize].dst + 1))
-                    let callee_f128_kind = if (*func).instrs[i as usize].fn_id >= 0 && (*func).instrs[i as usize].fn_id < 2048 {
-                        (*nc).fn_f128_return_value_kind[(*func).instrs[i as usize].fn_id as usize]
-                    } else {
-                        0
+                    var call_arg_f128_kind: i64 = 0
+                    if callee_f128_param_index >= 0 && callee_f128_param_index < argc {
+                        let f128_return_arg = nc_core_call_arg_at((*func).instrs[i as usize].call_args, callee_f128_param_index)
+                        if f128_return_arg >= 0 && f128_return_arg < 512 {
+                            call_arg_f128_kind = (*nc).f128_value_kind[f128_return_arg as usize]
+                        }
                     }
-                    if callee_f128_kind > 0 {
-                        nc_core_mark_f128_kind(nc, (*func).instrs[i as usize].dst, callee_f128_kind)
+                    if call_arg_f128_kind <= 0 {
+                        call_arg_f128_kind = nc_core_call_single_f128_arg_kind(nc, func, i, argc)
+                    }
+                    let final_f128_kind = if callee_f128_kind > 0 { callee_f128_kind } else { call_arg_f128_kind }
+                    if final_f128_kind > 0 {
+                        nc_core_mark_f128_kind(nc, (*func).instrs[i as usize].dst, final_f128_kind)
                     } else {
                         nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
                     }
@@ -7884,7 +8027,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     (*nc).current_frame_size = frame_size
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
-    spill_ir_params_mut(nc, func)
+    spill_ir_params_mut(nc, func, machine_func)
     if !native_v2_scheduler_enabled() {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
@@ -8027,11 +8170,12 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
 }
 fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    spill_ir_params_mut(&! c, func)
+    let mf = native_v2_lower_function_to_machine(func)
+    spill_ir_params_mut(&! c, func, mf)
     c
 }
 
-fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic, Div {
+fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction) with Mut, Panic, Div {
     var i = 0
     let sret_shift = if func.is_sret == 1 { 1 } else { 0 }
     if sret_shift == 1 {
@@ -8040,22 +8184,35 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
             nc_emit_store_rbp_disp32_reg(nc, param_reg(0), ir_slot_offset(dest_reg))
         }
     }
-    while i < func.param_count && (i + sret_shift) < 6 {
-        let vreg = func.param_regs[i as usize]
-        if vreg >= 0 {
-            let preg = param_reg(i + sret_shift)
-            let offset = ir_slot_offset(vreg)
-            nc_emit_store_rbp_disp32_reg(nc, preg, offset)
-        }
-        i = i + 1
-    }
+    var abi_i: i64 = sret_shift
     while i < func.param_count {
         let vreg = func.param_regs[i as usize]
         if vreg >= 0 {
-            let in_offset = 16 + ((i + sret_shift - 6) * 8)
-            let out_offset = ir_slot_offset(vreg)
-            nc_emit_load_rbp_disp32_reg(nc, 0, in_offset)
-            nc_emit_store_rbp_disp32_reg(nc, 0, out_offset)
+            let machine_param_is_f128 = if vreg >= 0 && vreg < 256 { machine_func.slot_kind[vreg as usize] == MIR_SLOT_KIND_F128_BINARY128 } else { false }
+            if machine_param_is_f128 || nc_core_func_param_is_f128(&func, vreg) {
+                if abi_i < 6 {
+                    nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(vreg))
+                } else {
+                    nc_emit_load_rbp_disp32_reg(nc, 0, 16 + ((abi_i - 6) * 8))
+                    nc_emit_store_rbp_disp32_reg(nc, 0, ir_slot_offset(vreg))
+                }
+                if abi_i + 1 < 6 {
+                    nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i + 1), ir_slot_offset(vreg + 1))
+                } else {
+                    nc_emit_load_rbp_disp32_reg(nc, 0, 16 + (((abi_i + 1) - 6) * 8))
+                    nc_emit_store_rbp_disp32_reg(nc, 0, ir_slot_offset(vreg + 1))
+                }
+                nc_core_mark_f128_reg(nc, vreg)
+                abi_i = abi_i + 2
+            } else {
+                if abi_i < 6 {
+                    nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(vreg))
+                } else {
+                    nc_emit_load_rbp_disp32_reg(nc, 0, 16 + ((abi_i - 6) * 8))
+                    nc_emit_store_rbp_disp32_reg(nc, 0, ir_slot_offset(vreg))
+                }
+                abi_i = abi_i + 1
+            }
         }
         i = i + 1
     }
