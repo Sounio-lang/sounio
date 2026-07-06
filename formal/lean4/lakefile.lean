@@ -72,6 +72,11 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B: the associator side of the sedenion tower — 1848 = 11*168 ordered non-associative
+-- basis triples (confirms the ZD-geometry report conjecture). Mathlib-free native_decide, no sorry.
+@[default_target]
+lean_lib «SounioSedenionAssociator1848» where
+
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
 
