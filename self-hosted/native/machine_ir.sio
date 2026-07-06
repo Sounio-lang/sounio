@@ -1503,18 +1503,22 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
                 return out
             }
             var f128_sret_ai: i64 = 0
+            var f128_sret_count: i64 = 0
+            var sret_expanded_arg_count: i64 = 0
             while f128_sret_ai < machine_instr_call_arg_count(instr) {
                 let arg_slot = machine_instr_call_arg_value(instr, f128_sret_ai)
                 if arg_slot >= 0 && arg_slot < 256 && is_f128_slot[arg_slot as usize] == 1 {
-                    out.supported = false
-                    out.unsupported_detail = "f128_call_arg_pending"
-                    return out
+                    f128_sret_count = f128_sret_count + 1
+                    sret_expanded_arg_count = sret_expanded_arg_count + 2
+                } else {
+                    sret_expanded_arg_count = sret_expanded_arg_count + 1
                 }
                 f128_sret_ai = f128_sret_ai + 1
             }
-            out.legal_instr_count = out.legal_instr_count + 3 + (machine_instr_call_arg_count(instr) * 2)
-            if machine_instr_call_arg_count(instr) > 5 {
-                let stack_count = machine_instr_call_arg_count(instr) - 5
+            let sret_total_arg_words = if f128_sret_count > 0 { sret_expanded_arg_count + 1 } else { machine_instr_call_arg_count(instr) + 1 }
+            out.legal_instr_count = out.legal_instr_count + 3 + (sret_expanded_arg_count * 2)
+            if sret_total_arg_words > 6 {
+                let stack_count = sret_total_arg_words - 6
                 out.legal_instr_count = out.legal_instr_count + stack_count
                 if (stack_count % 2) != 0 {
                     out.legal_instr_count = out.legal_instr_count + 1
@@ -1709,18 +1713,25 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
             let f128_sret_args_pair = native_v2_collect_call_args(instr.call_args, [0; 8], 0)
             let f128_sret_args = f128_sret_args_pair.0
             var f128_sret_ai: i64 = 0
+            var f128_sret_count: i64 = 0
+            var sret_expanded_arg_count: i64 = 0
             while f128_sret_ai < f128_sret_args_pair.1 {
                 let arg_slot = f128_sret_args[f128_sret_ai as usize]
                 if arg_slot >= 0 && arg_slot < 256 && is_f128_slot[arg_slot as usize] == 1 {
-                    out.supported = false
-                    out.unsupported_detail = "f128_call_arg_pending"
-                    return out
+                    f128_sret_count = f128_sret_count + 1
+                    sret_expanded_arg_count = sret_expanded_arg_count + 2
+                } else {
+                    sret_expanded_arg_count = sret_expanded_arg_count + 1
                 }
                 f128_sret_ai = f128_sret_ai + 1
             }
-            out.legal_instr_count = out.legal_instr_count + 3 + (instr.arg_count * 2)
-            if instr.arg_count > 5 {
-                let stack_count = instr.arg_count - 5
+            if f128_sret_args_pair.1 <= 0 {
+                sret_expanded_arg_count = instr.arg_count
+            }
+            let sret_total_arg_words = if f128_sret_count > 0 { sret_expanded_arg_count + 1 } else { instr.arg_count + 1 }
+            out.legal_instr_count = out.legal_instr_count + 3 + (sret_expanded_arg_count * 2)
+            if sret_total_arg_words > 6 {
+                let stack_count = sret_total_arg_words - 6
                 out.legal_instr_count = out.legal_instr_count + stack_count
                 if (stack_count % 2) != 0 {
                     out.legal_instr_count = out.legal_instr_count + 1
@@ -1999,11 +2010,14 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 return
             }
             var f128_sret_ai: i64 = 0
+            var f128_sret_count: i64 = 0
+            var sret_expanded_arg_count: i64 = 0
             while f128_sret_ai < machine_instr_call_arg_count(instr) {
                 if native_v2_slot_is_f128_ref(out, machine_instr_call_arg_value(instr, f128_sret_ai)) {
-                    (*out).supported = false
-                    (*out).unsupported_detail = "f128_call_arg_pending"
-                    return
+                    f128_sret_count = f128_sret_count + 1
+                    sret_expanded_arg_count = sret_expanded_arg_count + 2
+                } else {
+                    sret_expanded_arg_count = sret_expanded_arg_count + 1
                 }
                 f128_sret_ai = f128_sret_ai + 1
             }
@@ -2011,28 +2025,76 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             (*out).temp_count = dest_temp + 1
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(0, dest_temp))
-            let sret_stack_count = if machine_instr_call_arg_count(instr) > 5 { machine_instr_call_arg_count(instr) - 5 } else { 0 }
+            let sret_total_arg_words = if f128_sret_count > 0 { sret_expanded_arg_count + 1 } else { machine_instr_call_arg_count(instr) + 1 }
+            let sret_stack_count = if sret_total_arg_words > 6 { sret_total_arg_words - 6 } else { 0 }
             if (sret_stack_count % 2) != 0 {
                 native_v2_emit_legal_instr_mut(out, native_v2_make_stack_adjust(-8))
             }
-            var sret_si = machine_instr_call_arg_count(instr) - 1
-            while sret_si >= 5 {
-                let temp = (*out).temp_count
-                (*out).temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
-                native_v2_emit_legal_instr_mut(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
-                sret_si = sret_si - 1
+            if f128_sret_count > 0 {
+                var sret_full_si = sret_total_arg_words - 1
+                while sret_full_si >= 6 {
+                    let temp = (*out).temp_count
+                    (*out).temp_count = temp + 1
+                    var scan_ai: i64 = 0
+                    var scan_abi: i64 = 0
+                    var found_slot: i64 = -1
+                    while scan_ai < machine_instr_call_arg_count(instr) {
+                        let arg_slot = machine_instr_call_arg_value(instr, scan_ai)
+                        if native_v2_slot_is_f128_ref(out, arg_slot) {
+                            if (sret_full_si - 1) == scan_abi { found_slot = arg_slot }
+                            if (sret_full_si - 1) == scan_abi + 1 { found_slot = arg_slot + 1 }
+                            scan_abi = scan_abi + 2
+                        } else {
+                            if (sret_full_si - 1) == scan_abi { found_slot = arg_slot }
+                            scan_abi = scan_abi + 1
+                        }
+                        scan_ai = scan_ai + 1
+                    }
+                    if found_slot < 0 {
+                        (*out).supported = false
+                        (*out).unsupported_detail = "f128_sret_call_arg_pending"
+                        return
+                    }
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, found_slot))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_stack_arg_push(sret_full_si, temp))
+                    sret_full_si = sret_full_si - 1
+                }
+            } else {
+                var sret_si = machine_instr_call_arg_count(instr) - 1
+                while sret_si >= 5 {
+                    let temp = (*out).temp_count
+                    (*out).temp_count = temp + 1
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
+                    sret_si = sret_si - 1
+                }
             }
             var sret_ai: i64 = 0
-            let sret_reg_argc = if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
-            while sret_ai < machine_instr_call_arg_count(instr) {
-                if sret_ai >= sret_reg_argc {
-                    break
-                }
+            var sret_abi_i: i64 = 1
+            let sret_reg_argc = if f128_sret_count > 0 { machine_instr_call_arg_count(instr) } else if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
+            while sret_ai < sret_reg_argc {
                 let temp = (*out).temp_count
                 (*out).temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_ai)))
-                native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(sret_ai + 1, temp))
+                let arg_slot = machine_instr_call_arg_value(instr, sret_ai)
+                if native_v2_slot_is_f128_ref(out, arg_slot) {
+                    if sret_abi_i < 6 {
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, arg_slot))
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(sret_abi_i, temp))
+                    }
+                    if sret_abi_i + 1 < 6 {
+                        let temp2 = (*out).temp_count
+                        (*out).temp_count = temp2 + 1
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp2, arg_slot + 1))
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(sret_abi_i + 1, temp2))
+                    }
+                    sret_abi_i = sret_abi_i + 2
+                } else {
+                    if sret_abi_i < 6 {
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, arg_slot))
+                        native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(sret_abi_i, temp))
+                    }
+                    sret_abi_i = sret_abi_i + 1
+                }
                 sret_ai = sret_ai + 1
             }
             native_v2_emit_legal_instr_mut(out, native_v2_make_call(machine_instr_src1_value(instr)))
@@ -2436,11 +2498,14 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 return out
             }
             var f128_sret_ai: i64 = 0
+            var f128_sret_count: i64 = 0
+            var sret_expanded_arg_count: i64 = 0
             while f128_sret_ai < machine_instr_call_arg_count(instr) {
                 if native_v2_slot_is_f128_byval(out, machine_instr_call_arg_value(instr, f128_sret_ai)) {
-                    out.supported = false
-                    out.unsupported_detail = "f128_call_arg_pending"
-                    return out
+                    f128_sret_count = f128_sret_count + 1
+                    sret_expanded_arg_count = sret_expanded_arg_count + 2
+                } else {
+                    sret_expanded_arg_count = sret_expanded_arg_count + 1
                 }
                 f128_sret_ai = f128_sret_ai + 1
             }
@@ -2448,28 +2513,76 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             out.temp_count = dest_temp + 1
             out = _emit_legal_byval(out, native_v2_make_load_stack(dest_temp, machine_instr_src2_value(instr)))
             out = _emit_legal_byval(out, native_v2_make_arg_move(0, dest_temp))
-            let sret_stack_count = if machine_instr_call_arg_count(instr) > 5 { machine_instr_call_arg_count(instr) - 5 } else { 0 }
+            let sret_total_arg_words = if f128_sret_count > 0 { sret_expanded_arg_count + 1 } else { machine_instr_call_arg_count(instr) + 1 }
+            let sret_stack_count = if sret_total_arg_words > 6 { sret_total_arg_words - 6 } else { 0 }
             if (sret_stack_count % 2) != 0 {
                 out = _emit_legal_byval(out, native_v2_make_stack_adjust(-8))
             }
-            var sret_si = machine_instr_call_arg_count(instr) - 1
-            while sret_si >= 5 {
-                let temp = out.temp_count
-                out.temp_count = temp + 1
-                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
-                out = _emit_legal_byval(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
-                sret_si = sret_si - 1
+            if f128_sret_count > 0 {
+                var sret_full_si = sret_total_arg_words - 1
+                while sret_full_si >= 6 {
+                    let temp = out.temp_count
+                    out.temp_count = temp + 1
+                    var scan_ai: i64 = 0
+                    var scan_abi: i64 = 0
+                    var found_slot: i64 = -1
+                    while scan_ai < machine_instr_call_arg_count(instr) {
+                        let arg_slot = machine_instr_call_arg_value(instr, scan_ai)
+                        if native_v2_slot_is_f128_byval(out, arg_slot) {
+                            if (sret_full_si - 1) == scan_abi { found_slot = arg_slot }
+                            if (sret_full_si - 1) == scan_abi + 1 { found_slot = arg_slot + 1 }
+                            scan_abi = scan_abi + 2
+                        } else {
+                            if (sret_full_si - 1) == scan_abi { found_slot = arg_slot }
+                            scan_abi = scan_abi + 1
+                        }
+                        scan_ai = scan_ai + 1
+                    }
+                    if found_slot < 0 {
+                        out.supported = false
+                        out.unsupported_detail = "f128_sret_call_arg_pending"
+                        return out
+                    }
+                    out = _emit_legal_byval(out, native_v2_make_load_stack(temp, found_slot))
+                    out = _emit_legal_byval(out, native_v2_make_stack_arg_push(sret_full_si, temp))
+                    sret_full_si = sret_full_si - 1
+                }
+            } else {
+                var sret_si = machine_instr_call_arg_count(instr) - 1
+                while sret_si >= 5 {
+                    let temp = out.temp_count
+                    out.temp_count = temp + 1
+                    out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_si)))
+                    out = _emit_legal_byval(out, native_v2_make_stack_arg_push(sret_si + 1, temp))
+                    sret_si = sret_si - 1
+                }
             }
             var sret_ai: i64 = 0
-            let sret_reg_argc = if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
-            while sret_ai < machine_instr_call_arg_count(instr) {
-                if sret_ai >= sret_reg_argc {
-                    break
-                }
+            var sret_abi_i: i64 = 1
+            let sret_reg_argc = if f128_sret_count > 0 { machine_instr_call_arg_count(instr) } else if machine_instr_call_arg_count(instr) > 5 { 5 } else { machine_instr_call_arg_count(instr) }
+            while sret_ai < sret_reg_argc {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
-                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_call_arg_value(instr, sret_ai)))
-                out = _emit_legal_byval(out, native_v2_make_arg_move(sret_ai + 1, temp))
+                let arg_slot = machine_instr_call_arg_value(instr, sret_ai)
+                if native_v2_slot_is_f128_byval(out, arg_slot) {
+                    if sret_abi_i < 6 {
+                        out = _emit_legal_byval(out, native_v2_make_load_stack(temp, arg_slot))
+                        out = _emit_legal_byval(out, native_v2_make_arg_move(sret_abi_i, temp))
+                    }
+                    if sret_abi_i + 1 < 6 {
+                        let temp2 = out.temp_count
+                        out.temp_count = temp2 + 1
+                        out = _emit_legal_byval(out, native_v2_make_load_stack(temp2, arg_slot + 1))
+                        out = _emit_legal_byval(out, native_v2_make_arg_move(sret_abi_i + 1, temp2))
+                    }
+                    sret_abi_i = sret_abi_i + 2
+                } else {
+                    if sret_abi_i < 6 {
+                        out = _emit_legal_byval(out, native_v2_make_load_stack(temp, arg_slot))
+                        out = _emit_legal_byval(out, native_v2_make_arg_move(sret_abi_i, temp))
+                    }
+                    sret_abi_i = sret_abi_i + 1
+                }
                 sret_ai = sret_ai + 1
             }
             out = _emit_legal_byval(out, native_v2_make_call(machine_instr_src1_value(instr)))

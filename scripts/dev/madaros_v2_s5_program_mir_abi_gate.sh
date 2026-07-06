@@ -28,6 +28,7 @@ MACHINE_SLOT_METADATA_RECEIPT_DIR="$OUT_DIR/machine_slot_metadata_receipt"
 F128_ABI_METADATA_RECEIPT_DIR="$OUT_DIR/f128_abi_metadata_receipt"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR="$OUT_DIR/f128_native_opaque_storage_receipt"
 F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR="$OUT_DIR/f128_opaque_call_return_abi_receipt"
+F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR="$OUT_DIR/f128_sret_internal_arg_boundary_receipt"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR="$OUT_DIR/f128_binary128_native_anchor_receipt"
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR="$OUT_DIR/f128_binary128_value_contract_native_receipt"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR="$OUT_DIR/f128_arithmetic_value_contract_receipt"
@@ -51,6 +52,7 @@ MACHINE_SLOT_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_machin
 F128_ABI_METADATA_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_abi_metadata_receipt.py"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_native_opaque_storage_receipt.py"
 F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_opaque_call_return_abi_receipt.py"
+F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_sret_internal_arg_boundary_receipt.py"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_native_anchor_receipt.py"
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_arithmetic_value_contract_receipt.py"
@@ -79,13 +81,14 @@ MACHINE_SLOT_METADATA_RECEIPT="$MACHINE_SLOT_METADATA_RECEIPT_DIR/madaros_v2_s5_
 F128_ABI_METADATA_RECEIPT="$F128_ABI_METADATA_RECEIPT_DIR/madaros_v2_s5_f128_abi_metadata.receipt.json"
 F128_NATIVE_OPAQUE_STORAGE_RECEIPT="$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR/madaros_v2_s5_f128_native_opaque_storage.receipt.json"
 F128_OPAQUE_CALL_RETURN_ABI_RECEIPT="$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR/madaros_v2_s5_f128_opaque_call_return_abi.receipt.json"
+F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT="$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR/madaros_v2_s5_f128_sret_internal_arg_boundary.receipt.json"
 F128_BINARY128_NATIVE_ANCHOR_RECEIPT="$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR/madaros_v2_s5_f128_binary128_native_anchor.receipt.json"
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT="$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR/madaros_v2_s5_f128_binary128_value_contract_native.receipt.json"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT="$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR/madaros_v2_s5_f128_arithmetic_value_contract.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -307,6 +310,15 @@ if [[ ! -f "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" ]]; then
   exit 1
 fi
 
+python3 "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR"
+
+if [[ ! -f "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 SRET internal arg-boundary receipt: $F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" >&2
+  exit 1
+fi
+
 python3 "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_TOOL" emit \
   --compiler "$COMPILER" \
   --root "$ROOT_DIR" \
@@ -336,7 +348,7 @@ if [[ ! -f "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -397,13 +409,14 @@ machine_slot_metadata_receipt_path = Path(sys.argv[16])
 f128_abi_metadata_receipt_path = Path(sys.argv[17])
 f128_native_opaque_storage_receipt_path = Path(sys.argv[18])
 f128_opaque_call_return_abi_receipt_path = Path(sys.argv[19])
-f128_binary128_native_anchor_receipt_path = Path(sys.argv[20])
-f128_binary128_value_contract_native_receipt_path = Path(sys.argv[21])
-f128_arithmetic_value_contract_receipt_path = Path(sys.argv[22])
-diagnostics_receipt_path = Path(sys.argv[23])
-differential_receipt_path = Path(sys.argv[24])
-module_path = Path(sys.argv[25])
-receipt_path = Path(sys.argv[26])
+f128_sret_internal_arg_boundary_receipt_path = Path(sys.argv[20])
+f128_binary128_native_anchor_receipt_path = Path(sys.argv[21])
+f128_binary128_value_contract_native_receipt_path = Path(sys.argv[22])
+f128_arithmetic_value_contract_receipt_path = Path(sys.argv[23])
+diagnostics_receipt_path = Path(sys.argv[24])
+differential_receipt_path = Path(sys.argv[25])
+module_path = Path(sys.argv[26])
+receipt_path = Path(sys.argv[27])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -426,6 +439,7 @@ machine_slot_metadata_receipt = load_json(machine_slot_metadata_receipt_path)
 f128_abi_metadata_receipt = load_json(f128_abi_metadata_receipt_path)
 f128_native_opaque_storage_receipt = load_json(f128_native_opaque_storage_receipt_path)
 f128_opaque_call_return_abi_receipt = load_json(f128_opaque_call_return_abi_receipt_path)
+f128_sret_internal_arg_boundary_receipt = load_json(f128_sret_internal_arg_boundary_receipt_path)
 f128_binary128_native_anchor_receipt = load_json(f128_binary128_native_anchor_receipt_path)
 f128_binary128_value_contract_native_receipt = load_json(f128_binary128_value_contract_native_receipt_path)
 f128_arithmetic_value_contract_receipt = load_json(f128_arithmetic_value_contract_receipt_path)
@@ -1477,6 +1491,64 @@ for case_id, detail in {
     if row.get("machine_module_unsupported_detail") != detail:
         raise SystemExit(f"{case_id} expected detail mismatch")
 
+if f128_sret_internal_arg_boundary_receipt.get("schema") != "madaros.v2.s5.f128_sret_internal_arg_boundary_receipt/0.1":
+    raise SystemExit("bad S5 f128 SRET internal arg-boundary receipt schema")
+if f128_sret_internal_arg_boundary_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 SRET internal arg-boundary receipt")
+if f128_sret_internal_arg_boundary_receipt.get("stage_contract_level") != "S5_5_F128_INTERNAL_SRET_ARG_BOUNDARY_PROMOTED":
+    raise SystemExit("f128 SRET internal arg-boundary receipt must declare S5.5 stage contract")
+if f128_sret_internal_arg_boundary_receipt.get("case_count") != 4:
+    raise SystemExit("f128 SRET internal arg-boundary receipt must contain exact four cases")
+if f128_sret_internal_arg_boundary_receipt.get("direct_control_case_count") != 1:
+    raise SystemExit("f128 SRET internal arg-boundary receipt must contain one direct classifier-control case")
+if f128_sret_internal_arg_boundary_receipt.get("sret_case_count") != 3:
+    raise SystemExit("f128 SRET internal arg-boundary receipt must contain three SRET cases")
+if f128_sret_internal_arg_boundary_receipt.get("sret_stack_case_count") != 1:
+    raise SystemExit("f128 SRET internal arg-boundary receipt must contain one stack-boundary SRET case")
+for field in [
+    "f128_internal_sret_arg_boundary_promoted",
+    "f128_internal_sret_arg_register_boundary_promoted",
+    "f128_internal_sret_arg_stack_boundary_promoted",
+    "f128_compact_vreg_classifier_base_only_promoted",
+]:
+    if f128_sret_internal_arg_boundary_receipt.get(field) is not True:
+        raise SystemExit(f"f128 SRET internal arg-boundary receipt missing required true flag: {field}")
+for field in [
+    "f128_external_sysv_abi_promoted",
+    "f128_sret_abi_promoted",
+    "f128_arithmetic_promoted",
+    "f128_software_helpers_promoted",
+    "f128_nan_inf_contract_promoted",
+]:
+    if f128_sret_internal_arg_boundary_receipt.get(field) is not False:
+        raise SystemExit(f"f128 SRET internal arg-boundary receipt must not overclaim {field}")
+f128_sret_boundary_cases = {row.get("case_id"): row for row in f128_sret_internal_arg_boundary_receipt.get("cases", [])}
+required_f128_sret_boundary_cases = {
+    "direct_f128_then_i64_arithmetic_classifier_guard",
+    "sret_f128_arg_then_i64_arithmetic",
+    "sret_f128_arg_copied_to_f128_field_payload",
+    "sret_three_f128_args_crosses_stack_boundary",
+}
+if set(f128_sret_boundary_cases) != required_f128_sret_boundary_cases:
+    raise SystemExit(f"f128 SRET internal arg-boundary receipt cases mismatch: {sorted(f128_sret_boundary_cases)}")
+for case_id in required_f128_sret_boundary_cases:
+    row = f128_sret_boundary_cases[case_id]
+    if row.get("machine_module_supported") is not True:
+        raise SystemExit(f"{case_id} must be MachineModule supported")
+    if int(row.get("run_rc", -1)) != int(row.get("expected_exit", -2)):
+        raise SystemExit(f"{case_id} run exit mismatch")
+    shape = row.get("machine_shape", {})
+    if shape.get("callee_internal_call_promoted") is not True:
+        raise SystemExit(f"{case_id} must carry internal call promotion flag")
+    if case_id != "direct_f128_then_i64_arithmetic_classifier_guard" and shape.get("callee_source_is_sret") is not True:
+        raise SystemExit(f"{case_id} must be an SRET callee")
+if f128_sret_boundary_cases["direct_f128_then_i64_arithmetic_classifier_guard"]["machine_shape"].get("main_arg_move_indices") != [0, 1, 2]:
+    raise SystemExit("direct f128 classifier guard must pass f128 low/high plus trailing i64")
+if f128_sret_boundary_cases["sret_f128_arg_then_i64_arithmetic"]["machine_shape"].get("main_arg_move_indices") != [0, 1, 2, 3]:
+    raise SystemExit("f128 SRET register case must pass hidden dest, f128 low/high, trailing i64")
+if f128_sret_boundary_cases["sret_three_f128_args_crosses_stack_boundary"]["machine_shape"].get("main_stack_arg_push_indices") != [7, 6]:
+    raise SystemExit("f128 SRET stack case must push expanded ABI words 7 then 6")
+
 if f128_binary128_native_anchor_receipt.get("schema") != "madaros.v2.s5.f128_binary128_native_anchor_receipt/0.1":
     raise SystemExit("bad S5 f128 binary128 native anchor receipt schema")
 if f128_binary128_native_anchor_receipt.get("status") != "pass":
@@ -2523,6 +2595,21 @@ module = {
         "f128_native_internal_return_abi_promoted": f128_opaque_call_return_abi_receipt["f128_native_internal_return_abi_promoted"],
         "cases": f128_opaque_call_return_abi_receipt["cases"],
     },
+    "f128_sret_internal_arg_boundary_receipt": {
+        "schema": f128_sret_internal_arg_boundary_receipt["schema"],
+        "path": f"{f128_sret_internal_arg_boundary_receipt_path.parent.name}/{f128_sret_internal_arg_boundary_receipt_path.name}",
+        "receipt_sha256": f128_sret_internal_arg_boundary_receipt["receipt_sha256"],
+        "stage_contract_level": f128_sret_internal_arg_boundary_receipt["stage_contract_level"],
+        "case_id": f128_sret_internal_arg_boundary_receipt["case_id"],
+        "case_count": f128_sret_internal_arg_boundary_receipt["case_count"],
+        "direct_control_case_count": f128_sret_internal_arg_boundary_receipt["direct_control_case_count"],
+        "sret_case_count": f128_sret_internal_arg_boundary_receipt["sret_case_count"],
+        "sret_stack_case_count": f128_sret_internal_arg_boundary_receipt["sret_stack_case_count"],
+        "f128_internal_sret_arg_boundary_promoted": f128_sret_internal_arg_boundary_receipt["f128_internal_sret_arg_boundary_promoted"],
+        "f128_internal_sret_arg_stack_boundary_promoted": f128_sret_internal_arg_boundary_receipt["f128_internal_sret_arg_stack_boundary_promoted"],
+        "f128_compact_vreg_classifier_base_only_promoted": f128_sret_internal_arg_boundary_receipt["f128_compact_vreg_classifier_base_only_promoted"],
+        "cases": f128_sret_internal_arg_boundary_receipt["cases"],
+    },
     "f128_binary128_native_anchor_receipt": {
         "schema": f128_binary128_native_anchor_receipt["schema"],
         "path": f"{f128_binary128_native_anchor_receipt_path.parent.name}/{f128_binary128_native_anchor_receipt_path.name}",
@@ -2605,6 +2692,9 @@ module = {
         "f128_native_internal_call_abi_promoted": True,
         "f128_native_internal_return_abi_promoted": True,
         "f128_machineir_return_high_word_capture_promoted": True,
+        "f128_internal_sret_arg_boundary_promoted": True,
+        "f128_internal_sret_arg_stack_boundary_promoted": True,
+        "f128_compact_vreg_classifier_base_only_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
         "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2718,6 +2808,7 @@ receipt = {
     "s5_f128_abi_metadata_complete": True,
     "s5_f128_native_opaque_storage_complete": True,
     "s5_f128_opaque_direct_call_return_abi_complete": True,
+    "s5_f128_internal_sret_arg_boundary_complete": True,
     "s5_f128_binary128_native_anchor_materialization_complete": True,
     "s5_f128_binary128_value_contract_native_materialization_complete": True,
     "s5_f128_arithmetic_value_contract_complete": True,
@@ -2763,6 +2854,9 @@ receipt = {
     "f128_native_internal_call_abi_promoted": True,
     "f128_native_internal_return_abi_promoted": True,
     "f128_machineir_return_high_word_capture_promoted": True,
+    "f128_internal_sret_arg_boundary_promoted": True,
+    "f128_internal_sret_arg_stack_boundary_promoted": True,
+    "f128_compact_vreg_classifier_base_only_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2808,6 +2902,7 @@ receipt = {
     "f128_abi_metadata_receipt_sha256": f128_abi_metadata_receipt["receipt_sha256"],
     "f128_native_opaque_storage_receipt_sha256": f128_native_opaque_storage_receipt["receipt_sha256"],
     "f128_opaque_call_return_abi_receipt_sha256": f128_opaque_call_return_abi_receipt["receipt_sha256"],
+    "f128_sret_internal_arg_boundary_receipt_sha256": f128_sret_internal_arg_boundary_receipt["receipt_sha256"],
     "f128_binary128_native_anchor_receipt_sha256": f128_binary128_native_anchor_receipt["receipt_sha256"],
     "f128_binary128_value_contract_native_receipt_sha256": f128_binary128_value_contract_native_receipt["receipt_sha256"],
     "f128_arithmetic_value_contract_receipt_sha256": f128_arithmetic_value_contract_receipt["receipt_sha256"],
@@ -2853,6 +2948,9 @@ receipt = {
     "f128_native_internal_call_abi_promoted": module["scalar_abi_receipts"]["f128_native_internal_call_abi_promoted"],
     "f128_native_internal_return_abi_promoted": module["scalar_abi_receipts"]["f128_native_internal_return_abi_promoted"],
     "f128_machineir_return_high_word_capture_promoted": module["scalar_abi_receipts"]["f128_machineir_return_high_word_capture_promoted"],
+    "f128_internal_sret_arg_boundary_promoted": module["scalar_abi_receipts"]["f128_internal_sret_arg_boundary_promoted"],
+    "f128_internal_sret_arg_stack_boundary_promoted": module["scalar_abi_receipts"]["f128_internal_sret_arg_stack_boundary_promoted"],
+    "f128_compact_vreg_classifier_base_only_promoted": module["scalar_abi_receipts"]["f128_compact_vreg_classifier_base_only_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
@@ -2892,7 +2990,7 @@ print(
 )
 PY
 
-echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
+echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
 echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
