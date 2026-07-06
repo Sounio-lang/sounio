@@ -23,6 +23,11 @@ from typing import Any
 SCHEMA = "madaros.v2.s5.f128_opaque_call_return_abi_receipt/0.1"
 STAGE = "S5_5_F128_OPAQUE_DIRECT_CALL_RETURN_ABI_PROMOTED"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
+MIR_OP_CAPTURE_RET = 114
+MIR_OP_RET = 115
+INSTR_OPCODE = 0
+INSTR_SRC2_KIND = 5
+INSTR_COND = 9
 
 
 POSITIVE_CASES: list[dict[str, Any]] = [
@@ -218,6 +223,36 @@ def f128_slot_rows(module: dict[str, Any]) -> list[list[int]]:
     return rows
 
 
+def instr_rows(fn: dict[str, Any], opcode: int) -> list[list[int]]:
+    rows: list[list[int]] = []
+    for raw in fn.get("instrs", []):
+        if isinstance(raw, list) and len(raw) >= 12 and int(raw[INSTR_OPCODE]) == opcode:
+            rows.append([int(v) for v in raw])
+    return rows
+
+
+def require_f128_return_word_flow(module: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+    callee = fn_by_name(module, str(case["callee"]))
+    main = fn_by_name(module, "main")
+    callee_rets = instr_rows(callee, MIR_OP_RET)
+    main_captures = instr_rows(main, MIR_OP_CAPTURE_RET)
+    ret_words = sorted({row[INSTR_COND] for row in callee_rets if row[INSTR_COND] in (0, 1)})
+    capture_words = sorted({row[INSTR_COND] for row in main_captures if row[INSTR_COND] in (0, 1)})
+    if 1 not in ret_words:
+        raise SystemExit(f"{case['case_id']}: f128 callee return must expose high word via RET cond=1")
+    if [0, 1] != capture_words:
+        raise SystemExit(f"{case['case_id']}: f128 caller must capture low/high words separately, got {capture_words}")
+    for row in callee_rets:
+        if row[INSTR_COND] == 1 and int(row[INSTR_SRC2_KIND]) != 1:
+            raise SystemExit(f"{case['case_id']}: RET cond=1 must carry a high-word GPR source")
+    return {
+        "callee_ret_word_selectors": ret_words,
+        "caller_capture_ret_word_selectors": capture_words,
+        "callee_ret_rows": callee_rets,
+        "caller_capture_ret_rows": main_captures,
+    }
+
+
 def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], timeout_s: int) -> dict[str, Any]:
     case_dir = out_dir / str(case["case_id"])
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -242,6 +277,9 @@ def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
         raise SystemExit(f"{case['case_id']}: callee must report f128 param or return")
     if callee.get("source_f128_opaque_direct_call_return_promoted") is not True:
         raise SystemExit(f"{case['case_id']}: direct f128 call/return promotion flag missing")
+    f128_return_word_flow = None
+    if callee.get("source_returns_f128") is True:
+        f128_return_word_flow = require_f128_return_word_flow(module, case)
     return {
         "case_id": case["case_id"],
         "kind": "positive",
@@ -253,6 +291,7 @@ def emit_positive(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any
         "callee_source_f128_param_count": callee.get("source_f128_param_count"),
         "callee_source_returns_f128": callee.get("source_returns_f128"),
         "callee_direct_promoted": callee.get("source_f128_opaque_direct_call_return_promoted"),
+        "f128_return_word_flow": f128_return_word_flow,
         "f128_slot_rows": f128_slot_rows(module),
         "machine_module_sha256": sha256_text(stable_json(module)),
         "source_sha256": sha256_text(str(case["source"])),
@@ -303,6 +342,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_opaque_direct_expanded_gpr_call_abi_promoted": True,
         "f128_opaque_direct_stack_call_abi_promoted": True,
+        "f128_machineir_return_high_word_capture_promoted": True,
         "f128_external_sysv_abi_promoted": False,
         "f128_sret_abi_promoted": False,
         "f128_arithmetic_promoted": False,

@@ -1376,6 +1376,7 @@ for field in [
     "f128_opaque_direct_call_return_abi_promoted",
     "f128_opaque_direct_expanded_gpr_call_abi_promoted",
     "f128_opaque_direct_stack_call_abi_promoted",
+    "f128_machineir_return_high_word_capture_promoted",
 ]:
     if f128_opaque_call_return_abi_receipt.get(field) is not True:
         raise SystemExit(f"f128 opaque call-return ABI receipt missing required true flag: {field}")
@@ -2502,6 +2503,7 @@ module = {
         "f128_native_opaque_storage_promoted": True,
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_opaque_direct_stack_call_abi_promoted": True,
+        "f128_machineir_return_high_word_capture_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
         "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2654,6 +2656,7 @@ receipt = {
     "f128_native_opaque_storage_promoted": True,
     "f128_opaque_direct_call_return_abi_promoted": True,
     "f128_opaque_direct_stack_call_abi_promoted": True,
+    "f128_machineir_return_high_word_capture_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
@@ -2738,6 +2741,7 @@ receipt = {
     "f128_native_opaque_storage_promoted": module["scalar_abi_receipts"]["f128_native_opaque_storage_promoted"],
     "f128_opaque_direct_call_return_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_call_return_abi_promoted"],
     "f128_opaque_direct_stack_call_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_stack_call_abi_promoted"],
+    "f128_machineir_return_high_word_capture_promoted": module["scalar_abi_receipts"]["f128_machineir_return_high_word_capture_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
