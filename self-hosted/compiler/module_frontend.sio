@@ -4189,6 +4189,125 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
     check_modules_verdict_boot4(&! programs, loaded)
 }
 
+// ============================================================================
+// Per-module arena-reset scratch (Box-arena churn reclaim, see docs/handoff).
+//
+// module_frontend_lower_programs_array_direct_box lowers each imported module
+// into a fresh Box<IrModule> (dep_box, ~hundreds of MB: [IrFunction; 2048])
+// purely as scratch to extract a handful of merged functions into the
+// running accumulator (acc_box). Everything in dep_box's Box-arena window
+// is dead once its functions/strings/epistemic/algebras are copied into
+// acc_box BY VALUE -- except IrInstr.call_args: Option<Box<IrRegList>>,
+// whose Box POINTER is copied shallow by struct assignment. Left alone,
+// that pointer would keep referencing dep_box's soon-to-be-reset memory.
+//
+// Fix: before resetting the arena, walk the newly-appended function range
+// [old_fn_count, new_fn_count) and extract every call_args chain (bounded
+// to 8 args/call-site, matching the existing native_v2_collect_call_args /
+// tco_extract_call_args convention) into this BSS scratch buffer -- plain
+// fixed arrays, NOT Box-arena memory, so __arena_reset never touches them.
+// After the reset, rebuild fresh Box<IrRegList> chains from the scratch
+// buffer (landing in the just-freed, now-reused window) and write them
+// back into acc_box's instrs. If a module's call-arg sites exceed the
+// bounded capacity, the reset is skipped for that module only (strictly
+// correctness-preserving fallback -- just reclaims less memory).
+// ============================================================================
+let MF_AREBOX_CAP: i64 = 8192
+var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
+var MF_AREBOX_II: [i64; 8192] = [0; 8192]
+var MF_AREBOX_ARGC: [i64; 8192] = [0; 8192]
+var MF_AREBOX_ARGS: [i64; 65536] = [0; 65536]
+var MF_AREBOX_COUNT: i64 = 0
+var MF_AREBOX_OVERFLOW: bool = false
+
+fn mf_arebox_reset_scratch() with Mut {
+    MF_AREBOX_COUNT = 0
+    MF_AREBOX_OVERFLOW = false
+}
+
+// Extract up to 8 regs from a call_args chain into MF_AREBOX_ARGS[slot*8 ..].
+// Extra args beyond 8 are truncated (existing convention elsewhere in the
+// codebase caps call-arg capture at 8/16; no observed call site needs more).
+fn mf_arebox_extract(slot: i64, args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = args
+    while n < 8 {
+        match cur {
+            Some(node) => {
+                MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
+                cur = (*node).tail
+                n = n + 1
+            }
+            _ => { return n }
+        }
+    }
+    n
+}
+
+// Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
+// args NOW while the source (pre-reset) memory is still valid.
+fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>) with Mut, Panic, Div {
+    if MF_AREBOX_COUNT >= MF_AREBOX_CAP {
+        MF_AREBOX_OVERFLOW = true
+        return
+    }
+    let slot = MF_AREBOX_COUNT
+    let n = mf_arebox_extract(slot, args)
+    MF_AREBOX_FI[slot as usize] = fi
+    MF_AREBOX_II[slot as usize] = ii
+    MF_AREBOX_ARGC[slot as usize] = n
+    MF_AREBOX_COUNT = slot + 1
+}
+
+// Rebuild a fresh Box<IrRegList> chain from scratch slot `slot`, preserving
+// original head-first arg order. Must only be called AFTER __arena_reset so
+// the Box::new allocations land in the freed (reused) window.
+fn mf_arebox_rebuild(slot: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic, Div {
+    let n = MF_AREBOX_ARGC[slot as usize]
+    var out: Option<Box<IrRegList>> = None
+    var k = n - 1
+    while k >= 0 {
+        out = Some(Box::new(ir_reg_list_cons(MF_AREBOX_ARGS[(slot * 8 + k) as usize], out)))
+        k = k - 1
+    }
+    out
+}
+
+// Scan functions [fn_lo, fn_hi) of `module` for instrs carrying a live
+// call_args chain, recording each for post-reset re-boxing. Returns false
+// (capacity exceeded, MF_AREBOX_OVERFLOW set) if the caller must skip the
+// arena reset for this module.
+fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, Panic, Div {
+    mf_arebox_reset_scratch()
+    var fi = fn_lo
+    while fi < fn_hi {
+        let ic = (*module).functions[fi as usize].instr_count
+        var ii: i64 = 0
+        while ii < ic {
+            match (*module).functions[fi as usize].instrs[ii as usize].call_args {
+                Some(_) => mf_arebox_record(fi, ii, (*module).functions[fi as usize].instrs[ii as usize].call_args)
+                _ => {}
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    !MF_AREBOX_OVERFLOW
+}
+
+// Write the rebuilt (post-reset) call_args chains back into `module`. Must be
+// called strictly after __arena_reset.
+fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
+    var s: i64 = 0
+    while s < MF_AREBOX_COUNT {
+        let fi = MF_AREBOX_FI[s as usize]
+        let ii = MF_AREBOX_II[s as usize]
+        let rebuilt = mf_arebox_rebuild(s)
+        (*module).functions[fi as usize].instrs[ii as usize].call_args = rebuilt
+        s = s + 1
+    }
+}
+
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
     loaded: i64,
@@ -4224,6 +4343,14 @@ fn module_frontend_lower_programs_array_direct_box(
                 print("lower_array: dep_begin ")
                 print_int(i)
                 print("\n")
+                // Mark the Box-arena BEFORE lowering module i. dep_items itself
+                // (programs[i].items) was already parsed earlier in the
+                // load/typecheck phase and must stay live for OTHER modules'
+                // extern resolution, so it is intentionally allocated before
+                // this mark and is untouched by the reset below -- only the
+                // per-module lowering scratch (dep_box and everything it
+                // pulls in) falls inside [mark, reset).
+                let dep_arena_mark = __arena_mark()
                 let dep_items = (*programs)[i as usize].items
                 let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
@@ -4238,6 +4365,10 @@ fn module_frontend_lower_programs_array_direct_box(
                         print_int(i)
                         print("\n")
                         let dep_fn_count = (*dep_box).fn_count
+                        // Snapshot before this module's functions are appended --
+                        // acc_box.fn_count only grows in the mfi loop below, so
+                        // this is the exact appended range [old_fn_count, ..).
+                        let dep_merge_old_fn_count = (*acc_box).fn_count
                         let string_offset = (*acc_box).string_count
                         let contest_offset = (*acc_box).epistemic.contest_count
                         let robust_offset = (*acc_box).epistemic.robust_proof_count
@@ -4333,6 +4464,24 @@ fn module_frontend_lower_programs_array_direct_box(
                         }
                         (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
                         (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
+                        // Every field copied into acc_box above (functions incl.
+                        // instrs, string_table entries, epistemic, algebras) is a
+                        // plain value copy with no Box field except IrInstr.call_args
+                        // (Option<Box<IrRegList>> -- audited: the only Box reachable
+                        // from IrModule/IrFunction/IrInstr). Re-box those chains
+                        // before reclaiming dep_box's arena window: extract now
+                        // (source still valid), reset, then rebuild fresh in the
+                        // freed window.
+                        let dep_merge_new_fn_count = (*acc_box).fn_count
+                        let dep_arena_can_reset = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                        if dep_arena_can_reset {
+                            __arena_reset(dep_arena_mark)
+                            mf_arebox_apply(&! (*acc_box))
+                        } else {
+                            print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                            print_int(i)
+                            print("\n")
+                        }
                         print("lower_array: merge_done ")
                         print_int(i)
                         print("\n")

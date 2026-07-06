@@ -9969,6 +9969,40 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     var compile_ok = true
     var bss_count: i64 = 0
     while fi < (*module).fn_count {
+        // Per-function Box-arena window: everything compile_ir_function_v2_
+        // from_ir_into Box-allocates (machine-IR scratch, reg lists, …) is
+        // dead once the function's bytes/relocs/symbols are recorded in nc —
+        // and nc's whole reachable graph is fixed arrays + scalars (audited:
+        // NativeCompiler, CodeBuffer, RelocationTable, ExternRelocTable,
+        // StringTable, SymbolData — no Box anywhere), living in pre-loop
+        // storage plus BSS side tables (NV2_RELOC_*). Reset reclaims the
+        // arena churn that previously accumulated unboundedly across the
+        // whole module (measured: +11.5 GiB VmSize during this loop on the
+        // eisa_evm merged compile).
+        let cg_arena_mark = __arena_mark()
+        if str_len(read_env("SOUNIO_NV2_ARENA_TRACE")) > 0 && fi % 25 == 0 {
+            print("nv2_arena_cursor ")
+            print_int(cg_arena_mark)
+            print("\n")
+            print("nv2_pool_cursor ")
+            print_int(__pool_mark())
+            print("\n")
+            print("nv2_rtmmap_count ")
+            print_int(__rtmmap_count())
+            print("\n")
+            print("nv2_rtmmap_bytes ")
+            print_int(__rtmmap_bytes())
+            print("\n")
+            print("nv2_arena_refill_bytes ")
+            print_int(__arena_refill_bytes())
+            print("\n")
+            print("nv2_arena_unmap_bytes ")
+            print_int(__arena_unmap_bytes())
+            print("\n")
+            print("nv2_pool_refill_bytes ")
+            print_int(__pool_refill_bytes())
+            print("\n")
+        }
         let fn_body = (*module).functions[fi as usize]
         if fn_body.compile_strategy == 99 {
             bss_count = bss_count + 1
@@ -9993,6 +10027,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
                 print("\n")
             }
         }
+        __arena_reset(cg_arena_mark)
         fi = fi + 1
     }
     if !compile_ok {
