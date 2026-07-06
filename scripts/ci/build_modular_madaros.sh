@@ -49,10 +49,56 @@ resolve_seed() {
 
 SEED="$(resolve_seed)"
 SRC="$ROOT_DIR/self-hosted/compiler/main.sio"
+EXPANDED_SEED_DIR=""
+
+cleanup_expanded_seed() {
+    if [[ -n "$EXPANDED_SEED_DIR" ]]; then
+        rm -rf "$EXPANDED_SEED_DIR"
+    fi
+}
+trap cleanup_expanded_seed EXIT
 
 if [[ ! -f "$SRC" ]]; then
     echo "error: modular compiler source not found: $SRC" >&2
     exit 1
+fi
+
+# The checked lean_single seed is still the bootstrap root, but the recovered
+# modular compiler now exceeds its 16 MiB concatenated SRC import buffer. Build a
+# temporary source-equivalent lean_single with a 32 MiB SRC buffer, then use that
+# as the actual Madaros seed. This keeps the bootstrap source-derived while
+# avoiding a checked-in binary refresh just to change a fixed buffer size.
+if [[ "${SOUNIO_MADAROS_BUILD_EXPANDED_LEAN_SEED:-1}" != "0" && "$(basename "$SEED")" == "souc-lean-single-x86_64" ]]; then
+    EXPANDED_SEED_DIR="$(mktemp -d /tmp/sounio-expanded-lean-seed.XXXXXX)"
+    EXPANDED_SEED_SRC="$EXPANDED_SEED_DIR/lean_single_32m.sio"
+    EXPANDED_SEED_BIN="$EXPANDED_SEED_DIR/souc-lean-single-32m"
+    cp "$ROOT_DIR/self-hosted/compiler/lean_single.sio" "$EXPANDED_SEED_SRC"
+    python3 - "$EXPANDED_SEED_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+replacements = [
+    (
+        "var SRC: [i8; 16777216] = [0; 16777216]",
+        "var SRC: [i8; 33554432] = [0; 33554432]",
+    ),
+    ("let SRC_CAP: i64 = 16777216", "let SRC_CAP: i64 = 33554432"),
+]
+for old, new in replacements:
+    if old not in text:
+        raise SystemExit(f"expanded lean_single seed pattern not found: {old}")
+    text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+    echo "Preparing expanded lean_single seed:"
+    echo "  root:  $SEED"
+    echo "  src:   $EXPANDED_SEED_SRC"
+    echo "  out:   $EXPANDED_SEED_BIN"
+    scripts/dev/souc-build-lock.sh "$SEED" "$EXPANDED_SEED_SRC" "$EXPANDED_SEED_BIN"
+    chmod +x "$EXPANDED_SEED_BIN"
+    SEED="$EXPANDED_SEED_BIN"
 fi
 
 mkdir -p "$(dirname "$OUT")"

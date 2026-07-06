@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.8 f128 arithmetic value-contract receipt.
+"""Emit a Madaros v2 S5.9 f128 arithmetic value-contract receipt.
 
 This promotes a finite, exact binary128 arithmetic value-contract matrix
-end-to-end for local literal-derived values plus a finite runtime add/sub helper
+end-to-end for local literal-derived values plus a finite runtime binop helper
 for callee-side f128 parameters that carry supported value-contract binary128
 words. It deliberately does not promote generic IEEE helpers, NaN/Inf, arbitrary
-decimal arithmetic, external SysV f128 ABI, SRET, or Mul/Div runtime helpers.
+decimal arithmetic, external SysV f128 ABI, SRET, or non-value-contract runtime helpers.
 Direct internal calls whose callee returns an f128 parameter preserve the caller
 argument's value contract when the argument still has exact finite literal
 metadata.
@@ -23,7 +23,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_arithmetic_value_contract_receipt/0.1"
-STAGE = "S5_8_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_HELPER"
+STAGE = "S5_9_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_HELPER"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 
 
@@ -297,6 +297,21 @@ fn main() -> i64 {
         "expected_metadata": None,
         "expected_machine_opcode": 131,
     },
+    {
+        "case_id": "f128_callee_mul_args_runtime_helper_to_three_quarters",
+        "source": """fn mul_f128(x: f128, y: f128) -> f128 { x * y }
+fn main() -> i64 {
+  let a: f128 = 1.5 as f128
+  let b: f128 = 0.5 as f128
+  let c: f128 = mul_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "3ffe8000000000000000000000000000",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
 ]
 
 NEGATIVE = [
@@ -533,13 +548,13 @@ def emit(args: argparse.Namespace) -> None:
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
-        "case_id": "s5_6_f128_arithmetic_value_contract",
+        "case_id": "s5_9_f128_arithmetic_value_contract",
         "case_count": len(cases),
         "positive_case_count": len(POSITIVE),
         "negative_case_count": len(NEGATIVE),
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_arithmetic_promoted": True,
-        "f128_runtime_callee_add_sub_value_contract_promoted": True,
+        "f128_runtime_callee_add_sub_mul_value_contract_promoted": True,
         "f128_native_ieee_binary128_materialization_promoted": False,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -556,9 +571,9 @@ def emit(args: argparse.Namespace) -> None:
             "single-chain arithmetic preserves compiler value-kind metadata",
             "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
             "direct internal calls whose callee returns one f128 parameter preserve that argument's exact value-contract metadata into caller arithmetic",
-            "callee-side f128 add/sub over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
+            "callee-side f128 add/sub/mul over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
             "unsupported f128 arithmetic remains fail-closed at compile time or through runtime rc=12 helper traps",
-            "f128 callee-side Mul/Div and non-value-contract runtime arithmetic remain fail-closed until real binary128 software helpers exist",
+            "callee-side f128 div and non-value-contract runtime arithmetic remain fail-closed until real binary128 software helpers exist",
         ],
         "cases": cases,
     }
