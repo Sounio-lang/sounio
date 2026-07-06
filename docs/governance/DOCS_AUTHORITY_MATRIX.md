@@ -337,6 +337,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.butterfly-handoff | repo_only | docs/handoff/butterfly-handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-generic-struct-return-fix-prompt | repo_only | docs/handoff/compiler_generic_struct_return_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-impl-trait-for-type-fix-prompt | repo_only | docs/handoff/compiler_impl_trait_for_type_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.compiler-struct-array-mul-loop-fix-prompt | repo_only | docs/handoff/compiler_struct_array_mul_loop_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-trait-bounded-dispatch-fix-prompt | repo_only | docs/handoff/compiler_trait_bounded_dispatch_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.bootstrap | repo_only | docs/handoff/continuity/BOOTSTRAP.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.scoreboard | repo_only | docs/handoff/continuity/SCOREBOARD.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -667,6 +668,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.runtime-abi-gate-blocker-2026-06-23 | historical | docs/research/runtime-abi-gate-blocker-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.runtime-abi-gate-blocker-query-envelope-2026-06-24 | historical | docs/research/runtime-abi-gate-blocker-query-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-associator-1848 | historical | docs/research/sedenion_associator_1848.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-e8-boundary | historical | docs/research/sedenion_e8_boundary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-quartet-fiber-incidence | historical | docs/research/sedenion_quartet_fiber_incidence.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-zd-fiber-identity | historical | docs/research/sedenion_zd_fiber_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-zd-fibers | historical | docs/research/sedenion_zd_fibers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-zd-quartets | historical | docs/research/sedenion_zd_quartets.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zero-divisor-geometry-report | historical | docs/research/SEDENION_ZERO_DIVISOR_GEOMETRY_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-hosted-hypercomplex | historical | docs/research/self_hosted_hypercomplex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.smt-farkas-microkernel-2026-06-23 | historical | docs/research/smt-farkas-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
