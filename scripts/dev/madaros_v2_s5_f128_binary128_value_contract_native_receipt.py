@@ -2,11 +2,11 @@
 """Emit a Madaros v2 S5.4 f128 native binary128 value-contract receipt.
 
 This promotes native-v2 materialization for the complete current
-f128_binary128_value_receipt case set, including exact dyadic decimal literals
-and bounded rounded decimal literals with sig_hi=0, scale10<=18, and
-roundTiesToEven. It deliberately does not promote arbitrary rounded
-decimal-to-binary128 materialization beyond that contract, f128 arithmetic,
-call ABI, or return ABI.
+f128_binary128_value_receipt case set, including exact dyadic decimal literals,
+bounded rounded decimal literals with sig_hi=0, scale10<=18, roundTiesToEven,
+and an explicit truncated high-precision decimal value-contract set. It
+deliberately does not promote arbitrary rounded decimal-to-binary128
+materialization beyond that contract, f128 arithmetic, call ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -79,6 +79,24 @@ CASES: list[Case] = [
     Case("negative_scale18_rounded", "-1e-18", "bfc32725dd1d243aba0e75fe645cc487", [-1, 0, 1, 1, 18, 0]),
     Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", [1, 0, 123456789012345678, 18, 6, 0]),
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", [1, 0, 999999999999999999, 18, 6, 0]),
+    Case(
+        "truncated_arbitrary_1p23456789012345678901234567890123456789",
+        "1.23456789012345678901234567890123456789",
+        "3fff3c0ca428c59fb71a7be16b6b6d5b",
+        [1, 901234567890123456, 123456789012345678, 39, 38, 3],
+    ),
+    Case(
+        "truncated_pi_40_digits",
+        "3.14159265358979323846264338327950288419",
+        "4000921fb54442d18469898cc51701b8",
+        [1, 846264338327950288, 314159265358979323, 39, 38, 3],
+    ),
+    Case(
+        "truncated_one_third_39_repeating",
+        "0.333333333333333333333333333333333333333",
+        "3ffd5555555555555555555555555555",
+        [1, 333333333333333333, 33333333333333333, 40, 39, 4],
+    ),
 ]
 
 
@@ -250,6 +268,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_binary128_value_contract_case_set_complete": True,
             "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
             "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
+            "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -259,7 +278,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "legacy_fallback_used": False,
         },
         "roundtrip_contract": [
-            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_and_bounded_rounded_decimals",
+            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_bounded_rounded_and_truncated_high_precision_decimals",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",

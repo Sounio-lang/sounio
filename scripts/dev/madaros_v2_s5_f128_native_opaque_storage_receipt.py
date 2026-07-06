@@ -66,10 +66,9 @@ fn main() -> i64 {
 """,
     },
     {
-        "case_id": "f128_arbitrary_decimal_materialization_stays_blocked",
-        "kind": "block",
-        "expected_detail": "f128_decimal_materialization_pending",
-        "expected_log_fragment": "native_v2_compile: FAIL",
+        "case_id": "truncated_arbitrary_decimal_materialization_executes",
+        "kind": "exec",
+        "expected_exit": 0,
         "expected_truncated_tail_info": 71,
         "source": """fn main() -> i64 {
     let x: f128 = 1.23456789012345678901234567890123456789 as f128
@@ -285,7 +284,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_opaque_local_storage_copy_promoted": True,
             "f128_native_executes_local_no_observe_program": True,
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
-            "f128_arbitrary_decimal_materialization_fails_closed": True,
+            "f128_truncated_arbitrary_decimal_materialization_promoted_elsewhere": True,
             "f128_native_ieee_binary128_materialization_promoted": False,
             "f128_native_arithmetic_promoted": False,
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
