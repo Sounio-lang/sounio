@@ -14,7 +14,7 @@
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
-         website-verified-snapshot
+	         website-verified-snapshot build-madaros-fresh-seed
 
 SOUC := ./bin/souc
 
@@ -69,6 +69,10 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 build-madaros:       ## Build the Stage1 modular compiler (Madaros)
 	@echo "→ Building Madaros (Stage1 modular compiler)"
 	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+
+build-madaros-fresh-seed: build ## Build fixed-point lean_single seed, then build Madaros from it
+	@echo "→ Building Madaros from freshly fixed-point-verified lean_single seed"
+	SOUC_BIN="$(CURDIR)/gen3.elf" bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
 
 madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-end gate
 	@echo "→ Running Madaros full-functioning gate"
