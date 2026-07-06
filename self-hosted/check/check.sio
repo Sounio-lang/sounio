@@ -3549,7 +3549,18 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             let saved_effect_count = (*c).current_effect_count
             let saved_multitest_count = (*c).multitest_count
             let saved_multitest_corrected = (*c).multitest_corrected
-            let sig_id = fn_sig_table_find_method((*c).fn_sigs, (*c).current_impl_type.name, (*fd).name)
+            // Resolve the method signature by the FULL impl-type ENTRY (kind + name),
+            // not by name alone. Imported types bound via `use` lower to ty_unknown()
+            // (empty name) and builtins (i64, ...) also carry an empty TypeEntry name,
+            // so two `impl Trait for {i64, ImportedType}` blocks both register their
+            // methods with an empty self_type_name. The name-only find_method then
+            // returned the FIRST empty-name match (e.g. the effect-empty `impl … for
+            // i64` er_add) when checking a DIFFERENT impl's body (e.g. `impl … for
+            // Rational` er_add, which carries `with Mut, Div, Panic`), leaving
+            // current_effects empty and firing a spurious E035 on the merged/imported
+            // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
+            // so each impl body sees ITS OWN declared effects.
+            let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -5746,6 +5757,27 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_i64()
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
+            ty_error()
+        }
+    } else if is_primitive_receiver_type(base_ty) {
+        // Primitive receiver (i64/f64/bool/…): `impl R for i64 { fn m(self,…) }`
+        // registers the method with self_type_entry = the primitive TypeEntry
+        // (empty name). The semantic lookup disambiguates on kind, so route the
+        // call here exactly like the struct (TyNamed) branch. On lookup miss keep
+        // the original E019 to preserve rejection of bogus primitive methods.
+        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
+        if sig_id >= 0 {
+            let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+            let call_start_borrows = (*c).borrows
+            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
+            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
+            sig.return_type
+        } else {
+            checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
+            let call_start_borrows = (*c).borrows
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             ty_error()
         }
     } else if is_error_or_unknown(base_ty) {
@@ -18960,6 +18992,26 @@ impl Checker {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 (c, ty_error())
             }
+        } else if is_primitive_receiver_type(base_ty) {
+            // Primitive receiver (i64/f64/bool/…): mirror the TyNamed (struct)
+            // branch — the method registered via `impl R for i64` is found by
+            // fn_sig_table_find_method_semantic (kind-disambiguated, empty name).
+            // Lookup miss keeps the original E019 so bogus primitive methods reject.
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            if sig_id >= 0 {
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+                let call_start_borrows = c.borrows
+                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
+                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                (c, sig.return_type)
+            } else {
+                c = c.report_error_at(e.span, 19, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, ty_error())
+            }
         } else if is_error_or_unknown(base_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
@@ -19066,6 +19118,26 @@ impl Checker {
                 (c, ty_i64())
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
+                (c, ty_error())
+            }
+        } else if is_primitive_receiver_type(base_ty) {
+            // Primitive receiver (i64/f64/bool/…): mirror the TyNamed (struct)
+            // branch — the method registered via `impl R for i64` is found by
+            // fn_sig_table_find_method_semantic (kind-disambiguated, empty name).
+            // Lookup miss keeps the original E019 so bogus primitive methods reject.
+            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            if sig_id >= 0 {
+                let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+                let call_start_borrows = c.borrows
+                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
+                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                (c, sig.return_type)
+            } else {
+                c = c.report_error_at(e.span, 19, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {

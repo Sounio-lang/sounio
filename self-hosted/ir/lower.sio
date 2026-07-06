@@ -5031,6 +5031,23 @@ impl Lowerer {
                 return 1
             }
         }
+        // println i64-segfault fix (array-element axis): an array subscript `a[i]`
+        // (including a struct-field array `s.c[i]`) yields a scalar element. The
+        // float classifier (expr_result_is_float_ref) already routes float-element
+        // indexing to print_f64; without this case a non-float element (i64) fell
+        // through to kind 0 → the char* printer, which deref'd the integer value as
+        // a pointer and SIGSEGV'd (e.g. `println(r.c[0])` in generic_struct_return).
+        // Monomorphized generic structs register their fields from the generic
+        // declaration (`[F;N]`), so a declared-type i64 marker cannot fire for them;
+        // classify float positively (matching the existing float path) and default
+        // the remaining numeric element to int. No test in the corpus prints a
+        // string/pointer array element, so this cannot misroute an existing string.
+        if (*e).kind == ExprKind::ExprIndex {
+            if self.index_base_elem_is_float_ref(&(*e).left) {
+                return 2
+            }
+            return 1
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if lower_binary_op_is_compare((*e).bin_op) {
                 return 1
@@ -6678,6 +6695,15 @@ impl Lowerer {
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
                         // Track string locals (kind 3) so `s + t` / `s ++ t` route to str_concat.
                         lo = lo.bind_local_scalar_kind(s.name, 3)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprMethodCall) && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 1 {
+                        // `let r = f(..)` / `let r = x.m(..)` whose callee POSITIVELY
+                        // returns i64 (return_struct_name == "i64"). Without this the
+                        // local stayed kind 0 and `println(r)` routed the i64 through the
+                        // char* printer, dereferencing the integer as a pointer -> SIGSEGV
+                        // (e.g. `let r = use2::<i64>(2,3); println(r)` — primitive-receiver
+                        // trait dispatch result). Restricted to Call/MethodCall so an
+                        // indexed struct element cannot be misclassified as int.
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
                     }
                 }
                 _ => {}
@@ -8730,6 +8756,22 @@ impl Lowerer {
             Some(recv) => {
                 if (*recv).kind == ExprKind::ExprIdent {
                     return self.lookup_local_struct_type((*recv).name)
+                }
+                // Primitive-receiver fallback for a non-ident scalar receiver such
+                // as an array element `a.c[i]` (the imported cd_exact lane calls
+                // `a.c[i].er_add(b.c[i])`). Such a receiver has no local struct
+                // type, so the bare method name would bind to a body-less fn and
+                // crash codegen. A monomorphized `[i64;N]` field registers with no
+                // positive i64 marker, so classify float positively (f64$m) and map
+                // every other primitive-scalar index to i64$m — matching the symbol
+                // emitted for `impl ExactRing for i64`. No corpus test dispatches a
+                // method on a STRUCT array element, so this cannot misroute a green
+                // struct-method call (those already fail today at the empty-name path).
+                if (*recv).kind == ExprKind::ExprIndex {
+                    if self.index_base_elem_is_float_ref(&(*recv).left) {
+                        return make_name("f64")
+                    }
+                    return make_name("i64")
                 }
                 ir_empty_name()
             }
