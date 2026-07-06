@@ -2,8 +2,10 @@
 """Emit a Madaros v2 S5.6 f128 arithmetic value-contract receipt.
 
 This promotes a finite, exact binary128 arithmetic value-contract matrix
-end-to-end. It deliberately does not promote generic IEEE helpers, NaN/Inf,
-arbitrary decimal arithmetic, external SysV f128 ABI, SRET, or multi-arg shapes.
+end-to-end for local literal-derived values. It deliberately does not promote
+generic IEEE helpers, NaN/Inf, arbitrary decimal arithmetic, external SysV f128
+ABI, SRET, or arithmetic across call-return boundaries that have lost literal
+metadata and therefore require real binary128 software helpers.
 """
 
 from __future__ import annotations
@@ -220,6 +222,32 @@ NEGATIVE = [
 """,
         "expected_detail": "f128_arithmetic_pending",
     },
+    {
+        "case_id": "f128_callee_add_args_still_requires_helper",
+        "source": """fn add_f128(x: f128, y: f128) -> f128 { x + y }
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 2.0 as f128
+  let c: f128 = add_f128(a, b)
+  let d: f128 = c
+  0
+}
+""",
+        "expected_detail": "f128_arithmetic_pending",
+    },
+    {
+        "case_id": "f128_call_return_then_add_still_requires_helper",
+        "source": """fn id_f128(x: f128) -> f128 { x }
+fn main() -> i64 {
+  let a: f128 = id_f128(1.0 as f128)
+  let b: f128 = 2.0 as f128
+  let c: f128 = a + b
+  let d: f128 = c
+  0
+}
+""",
+        "expected_detail": "f128_arithmetic_pending",
+    },
 ]
 
 
@@ -415,6 +443,7 @@ def emit(args: argparse.Namespace) -> None:
             "finite exact signed decimal-tenths plus quarter matrix materializes as binary128 words",
             "single-chain arithmetic preserves compiler value-kind metadata",
             "unsupported f128 arithmetic remains fail-closed",
+            "call-boundary f128 arithmetic remains fail-closed until real binary128 software helpers exist",
         ],
         "cases": cases,
     }

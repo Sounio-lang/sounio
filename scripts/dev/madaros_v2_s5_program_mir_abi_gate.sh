@@ -1728,12 +1728,12 @@ if f128_arithmetic_value_contract_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 arithmetic value-contract receipt")
 if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_6_F128_ARITHMETIC_VALUE_CONTRACT_NATIVE_MATERIALIZATION":
     raise SystemExit("f128 arithmetic value-contract receipt must declare S5.6 stage contract")
-if f128_arithmetic_value_contract_receipt.get("case_count") != 15:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain exact fifteen cases")
+if f128_arithmetic_value_contract_receipt.get("case_count") != 17:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain exact seventeen cases")
 if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 14:
     raise SystemExit("f128 arithmetic value-contract receipt must contain fourteen positive cases")
-if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 1:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain one negative case")
+if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 3:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain three negative cases")
 for field in [
     "f128_arithmetic_value_contract_promoted",
     "f128_native_arithmetic_promoted",
@@ -1771,6 +1771,8 @@ required_arith_cases = {
     "f128_mul_negative_half_half_to_negative_quarter",
     "f128_div_negative_one_two_to_negative_half",
     "f128_add_rounded_tenths_still_blocked",
+    "f128_callee_add_args_still_requires_helper",
+    "f128_call_return_then_add_still_requires_helper",
 }
 if set(arith_cases) != required_arith_cases:
     raise SystemExit(f"f128 arithmetic value-contract receipt cases mismatch: {sorted(arith_cases)}")
@@ -1804,7 +1806,11 @@ for case_id, expected in required_arith_positive.items():
         raise SystemExit(f"{case_id} must prove high-word immediate")
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
-for case_id in ["f128_add_rounded_tenths_still_blocked"]:
+for case_id in [
+    "f128_add_rounded_tenths_still_blocked",
+    "f128_callee_add_args_still_requires_helper",
+    "f128_call_return_then_add_still_requires_helper",
+]:
     row = arith_cases[case_id]
     if row.get("machine_module_supported") is not False:
         raise SystemExit(f"{case_id} must remain MachineModule unsupported")

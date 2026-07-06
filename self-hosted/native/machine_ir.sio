@@ -413,6 +413,47 @@ fn native_v2_f128_hundredths_from_slot(out: MachineFunction, slot: i64) -> i64 {
     0 - 1
 }
 
+fn native_v2_f128_hundredths_from_slot_ref(out: &MachineFunction, slot: i64) -> i64 {
+    if !native_v2_slot_is_valid(slot) { return 0 - 1 }
+    let sign = (*out).f128_literal_sign[slot as usize]
+    if !(sign == 1 || sign == (0 - 1)) { return 0 - 1 }
+    if (*out).f128_literal_sig_hi[slot as usize] != 0 { return 0 - 1 }
+    if (*out).f128_literal_truncated_digits[slot as usize] != 0 { return 0 - 1 }
+    if (*out).f128_literal_digit_count[slot as usize] == 2 && (*out).f128_literal_scale10[slot as usize] == 1 {
+        let tenths = (*out).f128_literal_sig_lo[slot as usize]
+        if tenths == 0 || tenths == 5 || tenths == 10 || tenths == 15 || tenths == 20 || tenths == 25 || tenths == 30 || tenths == 35 || tenths == 40 {
+            return sign * tenths * 10
+        }
+    }
+    if (*out).f128_literal_digit_count[slot as usize] == 3 && (*out).f128_literal_scale10[slot as usize] == 2 {
+        let hundredths = (*out).f128_literal_sig_lo[slot as usize]
+        if native_v2_f128_value_contract_supported_hundredths(hundredths) { return sign * hundredths }
+    }
+    0 - 1
+}
+
+fn native_v2_f128_binop_hundredths(op: BinaryOp, a: i64, b: i64) -> i64 {
+    var result_hundredths: i64 = 0 - 1
+    if a != (0 - 1) && b != (0 - 1) {
+        if op == BinaryOp::OpAdd { result_hundredths = a + b }
+        if op == BinaryOp::OpSub { result_hundredths = a - b }
+        if op == BinaryOp::OpMul && ((a * b) % 100) == 0 { result_hundredths = (a * b) / 100 }
+        if op == BinaryOp::OpDiv && b != 0 && ((a * 100) % b) == 0 { result_hundredths = (a * 100) / b }
+    }
+    result_hundredths
+}
+
+fn native_v2_mark_f128_result_ref(out: &! MachineFunction, slot: i64, result_hundredths: i64) with Mut, Panic, Div {
+    native_v2_mark_slot_ref(out, slot, MIR_SLOT_KIND_F128_BINARY128, 2)
+    let result_sign = if result_hundredths < 0 { 0 - 1 } else { 1 }
+    let result_abs = if result_hundredths < 0 { 0 - result_hundredths } else { result_hundredths }
+    if (result_abs % 10) == 0 {
+        native_v2_mark_f128_literal_ref(out, slot, result_sign, 0, result_abs / 10, 2, 1, 0, 0)
+    } else {
+        native_v2_mark_f128_literal_ref(out, slot, result_sign, 0, result_abs, 3, 2, 0, 0)
+    }
+}
+
 fn native_v2_f128_value_contract_hi_from_hundredths(v: i64) -> i64 {
     if v < 0 { return native_v2_f128_value_contract_hi_from_hundredths(0 - v) + (0 - 9223372036854775807 - 1) }
     if v == 0 { return 0 }
@@ -1448,9 +1489,19 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
             let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
             if s1q == 1 || s2q == 1 {
-                out.supported = false
-                out.unsupported_detail = "f128_arithmetic_pending"
-                return out
+                let a = native_v2_f128_hundredths_from_slot(func, s1)
+                let b = native_v2_f128_hundredths_from_slot(func, s2)
+                let result_hundredths = native_v2_f128_binop_hundredths(machine_instr_bin_op(instr), a, b)
+                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
+                    out.supported = false
+                    out.unsupported_detail = "f128_arithmetic_pending"
+                    return out
+                }
+                out.legal_instr_count = out.legal_instr_count + 4
+                let dslot = machine_instr_dst_value(instr)
+                if dslot >= 0 && dslot < 256 {
+                    is_f128_slot[dslot as usize] = 1
+                }
             } else if s1f == 1 || s2f == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
                 let dslot = machine_instr_dst_value(instr)
@@ -1601,6 +1652,12 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
 
     var is_float_slot: [i64; 256] = [0; 256]
     var is_f128_slot: [i64; 256] = [0; 256]
+    var f128_literal_sign: [i64; 256] = [0; 256]
+    var f128_literal_sig_hi: [i64; 256] = [0; 256]
+    var f128_literal_sig_lo: [i64; 256] = [0; 256]
+    var f128_literal_digit_count: [i64; 256] = [0; 256]
+    var f128_literal_scale10: [i64; 256] = [0; 256]
+    var f128_literal_truncated_digits: [i64; 256] = [0; 256]
     var i: i64 = 0
     while i < (*func).instr_count {
         let instr = (*func).instrs[i as usize]
@@ -1613,6 +1670,12 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                 }
                 if instr.dst >= 0 && instr.dst < 256 {
                     is_f128_slot[instr.dst as usize] = 1
+                    f128_literal_sign[instr.dst as usize] = instr.src1
+                    f128_literal_sig_hi[instr.dst as usize] = instr.src2
+                    f128_literal_sig_lo[instr.dst as usize] = instr.imm_i64
+                    f128_literal_digit_count[instr.dst as usize] = instr.label_id
+                    f128_literal_scale10[instr.dst as usize] = instr.field_idx
+                    f128_literal_truncated_digits[instr.dst as usize] = native_v2_f128_truncated_count(instr.arg_count)
                 }
             }
             i = i + 1
@@ -1638,6 +1701,12 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                 out.legal_instr_count = out.legal_instr_count + 4
                 if dst_slot >= 0 && dst_slot < 256 {
                     is_f128_slot[dst_slot as usize] = 1
+                    f128_literal_sign[dst_slot as usize] = f128_literal_sign[src_slot as usize]
+                    f128_literal_sig_hi[dst_slot as usize] = f128_literal_sig_hi[src_slot as usize]
+                    f128_literal_sig_lo[dst_slot as usize] = f128_literal_sig_lo[src_slot as usize]
+                    f128_literal_digit_count[dst_slot as usize] = f128_literal_digit_count[src_slot as usize]
+                    f128_literal_scale10[dst_slot as usize] = f128_literal_scale10[src_slot as usize]
+                    f128_literal_truncated_digits[dst_slot as usize] = f128_literal_truncated_digits[src_slot as usize]
                 }
             } else if src_is_float == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
@@ -1655,9 +1724,62 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
             let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
             if s1q == 1 || s2q == 1 {
-                out.supported = false
-                out.unsupported_detail = "f128_arithmetic_pending"
-                return out
+                var a: i64 = 0 - 1
+                var b: i64 = 0 - 1
+                if s1 >= 0 && s1 < 256 {
+                    let sign_a = f128_literal_sign[s1 as usize]
+                    if (sign_a == 1 || sign_a == (0 - 1)) && f128_literal_sig_hi[s1 as usize] == 0 && f128_literal_truncated_digits[s1 as usize] == 0 {
+                        if f128_literal_digit_count[s1 as usize] == 2 && f128_literal_scale10[s1 as usize] == 1 {
+                            let tenths_a = f128_literal_sig_lo[s1 as usize]
+                            if tenths_a == 0 || tenths_a == 5 || tenths_a == 10 || tenths_a == 15 || tenths_a == 20 || tenths_a == 25 || tenths_a == 30 || tenths_a == 35 || tenths_a == 40 {
+                                a = sign_a * tenths_a * 10
+                            }
+                        }
+                        if f128_literal_digit_count[s1 as usize] == 3 && f128_literal_scale10[s1 as usize] == 2 {
+                            let hundredths_a = f128_literal_sig_lo[s1 as usize]
+                            if native_v2_f128_value_contract_supported_hundredths(hundredths_a) { a = sign_a * hundredths_a }
+                        }
+                    }
+                }
+                if s2 >= 0 && s2 < 256 {
+                    let sign_b = f128_literal_sign[s2 as usize]
+                    if (sign_b == 1 || sign_b == (0 - 1)) && f128_literal_sig_hi[s2 as usize] == 0 && f128_literal_truncated_digits[s2 as usize] == 0 {
+                        if f128_literal_digit_count[s2 as usize] == 2 && f128_literal_scale10[s2 as usize] == 1 {
+                            let tenths_b = f128_literal_sig_lo[s2 as usize]
+                            if tenths_b == 0 || tenths_b == 5 || tenths_b == 10 || tenths_b == 15 || tenths_b == 20 || tenths_b == 25 || tenths_b == 30 || tenths_b == 35 || tenths_b == 40 {
+                                b = sign_b * tenths_b * 10
+                            }
+                        }
+                        if f128_literal_digit_count[s2 as usize] == 3 && f128_literal_scale10[s2 as usize] == 2 {
+                            let hundredths_b = f128_literal_sig_lo[s2 as usize]
+                            if native_v2_f128_value_contract_supported_hundredths(hundredths_b) { b = sign_b * hundredths_b }
+                        }
+                    }
+                }
+                let result_hundredths = native_v2_f128_binop_hundredths(instr.bin_op, a, b)
+                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
+                    out.supported = false
+                    out.unsupported_detail = "f128_arithmetic_pending"
+                    return out
+                }
+                out.legal_instr_count = out.legal_instr_count + 4
+                if instr.dst >= 0 && instr.dst < 256 {
+                    is_f128_slot[instr.dst as usize] = 1
+                    let result_sign = if result_hundredths < 0 { 0 - 1 } else { 1 }
+                    let result_abs = if result_hundredths < 0 { 0 - result_hundredths } else { result_hundredths }
+                    f128_literal_sign[instr.dst as usize] = result_sign
+                    f128_literal_sig_hi[instr.dst as usize] = 0
+                    if (result_abs % 10) == 0 {
+                        f128_literal_sig_lo[instr.dst as usize] = result_abs / 10
+                        f128_literal_digit_count[instr.dst as usize] = 2
+                        f128_literal_scale10[instr.dst as usize] = 1
+                    } else {
+                        f128_literal_sig_lo[instr.dst as usize] = result_abs
+                        f128_literal_digit_count[instr.dst as usize] = 3
+                        f128_literal_scale10[instr.dst as usize] = 2
+                    }
+                    f128_literal_truncated_digits[instr.dst as usize] = 0
+                }
             } else if s1f == 1 || s2f == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
                 if instr.dst >= 0 && instr.dst < 256 {
@@ -1911,9 +2033,26 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             let s1 = machine_instr_src1_value(instr)
             let s2 = machine_instr_src2_value(instr)
             if native_v2_slot_is_f128_ref(out, s1) || native_v2_slot_is_f128_ref(out, s2) {
-                (*out).supported = false
-                (*out).unsupported_detail = "f128_arithmetic_pending"
-                return
+                let a = native_v2_f128_hundredths_from_slot_ref(out, s1)
+                let b = native_v2_f128_hundredths_from_slot_ref(out, s2)
+                let result_hundredths = native_v2_f128_binop_hundredths(machine_instr_bin_op(instr), a, b)
+                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
+                    (*out).supported = false
+                    (*out).unsupported_detail = "f128_arithmetic_pending"
+                    return
+                }
+                let result_hi = native_v2_f128_value_contract_hi_from_hundredths(result_hundredths)
+                let hi_temp = (*out).temp_count
+                (*out).temp_count = hi_temp + 1
+                let lo_temp = (*out).temp_count
+                (*out).temp_count = lo_temp + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_mov_imm(hi_temp, result_hi))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), hi_temp))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_mov_imm(lo_temp, 0))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, lo_temp))
+                native_v2_mark_f128_result_ref(out, machine_instr_dst_value(instr), result_hundredths)
+                i = i + 1
+                continue
             }
             let s1f = if s1 >= 0 && s1 < 256 { (*out).is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { (*out).is_float_slot[s2 as usize] } else { 0 }
