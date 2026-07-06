@@ -753,6 +753,211 @@ application_plan["application_plan_sha256"] = hashlib.sha256(
 application_plan_path = out / "madaros_v2_s4_to_s5_application_plan.json"
 application_plan_path.write_text(json.dumps(application_plan, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
+applied_cases = []
+applied_selected_ids = []
+applied_rejected_ids = []
+applied_blocked_ids = []
+applied_effect_hashes = []
+for case in application_plan["cases"]:
+    selected_effects = []
+    rejected_effects = []
+    blocked_effects = []
+    for action in case["selected_actions"]:
+        rid = action["rewrite_id"]
+        if action.get("action") != "apply_to_s5_input":
+            raise SystemExit(f"selected applied action has wrong action: {rid}")
+        if action.get("selected_for_s5") is not True:
+            raise SystemExit(f"selected applied action must be selected_for_s5: {rid}")
+        if action.get("mir_abi_safe") is not True or action.get("abi_impact") != "none":
+            raise SystemExit(f"selected applied action must be MIR/ABI safe with no ABI impact: {rid}")
+        if action.get("extraction_applied_to_ir") is not False or action.get("ir_mutation_allowed") is not False:
+            raise SystemExit(f"selected applied action must not mutate compiler IR yet: {rid}")
+        effect = {
+            "rewrite_id": rid,
+            "case_id": case["case_id"],
+            "source": case["source"],
+            "pre_mutation_hlir_sha256": case["input_hlir_sha256"],
+            "pre_mutation_egraph_sha256": case["egraph_sha256"],
+            "function": action["function"],
+            "block": action["block"],
+            "instruction_result": action["instruction_result"],
+            "rewrite_kind": action["rewrite_kind"],
+            "proposal_kind": action["proposal_kind"],
+            "lowering_effect": action["lowering_effect"],
+            "input_enode_sha256": action["original_enode_sha256"],
+            "output_enode_sha256": action["rewritten_enode_sha256"],
+            "selected_enode_sha256": action["selected_enode_sha256"],
+            "replacement_enode_sha256": action["replacement_enode_sha256"],
+            "exact_fallback_expr_sha256": action["exact_fallback_expr_sha256"],
+            "validator_log_sha256": action["validator_log_sha256"],
+            "coefficient_sha256": action["coefficient_sha256"],
+            "basis_family": action["basis_family"],
+            "error_bound": action["error_bound"],
+            "domain": action["domain"],
+            "domain_bounds": action["domain_bounds"],
+            "cost_before": action["cost_before"],
+            "cost_after": action["cost_after"],
+            "cost_delta": action["cost_delta"],
+            "producer_evaluation_preservation": action["producer_evaluation_preservation"],
+            "producer_evaluation_policy": action["producer_evaluation_policy"],
+            "mir_abi_safe": True,
+            "abi_impact": "none",
+            "call_signature_effect": action["call_signature_effect"],
+            "stack_effect": action["stack_effect"],
+            "sret_effect": action["sret_effect"],
+            "aggregate_layout_effect": action["aggregate_layout_effect"],
+            "s5_input_materialization": "applied_s4_exact_rewrite_effect",
+            "application_applied_to_s5_input": True,
+            "application_applied_to_compiler_ir": False,
+            "ir_mutation_allowed": False,
+        }
+        effect["post_apply_selected_enode_sha256"] = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema": "madaros.v2.s4.post_apply_selected_enode/0.1",
+                    "rewrite_id": rid,
+                    "input_hlir_sha256": case["input_hlir_sha256"],
+                    "input_egraph_sha256": case["egraph_sha256"],
+                    "output_enode_sha256": effect["output_enode_sha256"],
+                    "lowering_effect": effect["lowering_effect"],
+                    "application_applied_to_s5_input": True,
+                    "application_applied_to_compiler_ir": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        effect["post_mutation_hlir_sha256"] = effect["post_apply_selected_enode_sha256"]
+        effect["post_mutation_egraph_sha256"] = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema": "madaros.v2.s4.post_apply_egraph/0.1",
+                    "rewrite_id": rid,
+                    "input_egraph_sha256": case["egraph_sha256"],
+                    "post_apply_selected_enode_sha256": effect["post_apply_selected_enode_sha256"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        effect["applied_effect_sha256"] = hashlib.sha256(
+            json.dumps(effect, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        selected_effects.append(effect)
+        applied_selected_ids.append(rid)
+        applied_effect_hashes.append(effect["applied_effect_sha256"])
+    for action in case["rejected_actions"]:
+        rid = action["rewrite_id"]
+        if action.get("action") != "reject_before_s5_input" or action.get("selected_for_s5") is not False:
+            raise SystemExit(f"rejected applied action must stay out of S5 input: {rid}")
+        if not action.get("counterexample_set_sha256"):
+            raise SystemExit(f"rejected applied action must carry counterexample set hash: {rid}")
+        rejected_effects.append({
+            "rewrite_id": rid,
+            "case_id": case["case_id"],
+            "source": case["source"],
+            "rewrite_kind": action["rewrite_kind"],
+            "proposal_kind": action["proposal_kind"],
+            "rejection_reason_code": action["rejection_reason_code"],
+            "counterexample_set_sha256": action["counterexample_set_sha256"],
+            "application_applied_to_s5_input": False,
+            "selected_for_s5": False,
+            "mir_abi_safe": False,
+        })
+        applied_rejected_ids.append(rid)
+    for action in case["blocked_actions"]:
+        rid = action["rewrite_id"]
+        if action.get("action") != "block_before_s5_input" or action.get("selected_for_s5") is not False:
+            raise SystemExit(f"blocked applied action must stay out of S5 input: {rid}")
+        blocked_effects.append({
+            "rewrite_id": rid,
+            "case_id": case["case_id"],
+            "source": case["source"],
+            "rewrite_kind": action["rewrite_kind"],
+            "proposal_kind": action["proposal_kind"],
+            "rejection_reason_code": action["rejection_reason_code"],
+            "proof_obligation": action["proof_obligation"],
+            "application_applied_to_s5_input": False,
+            "selected_for_s5": False,
+            "mir_abi_safe": False,
+        })
+        applied_blocked_ids.append(rid)
+    if len(selected_effects) != case["selected_action_count"]:
+        raise SystemExit(f"applied selected count mismatch for {case['case_id']}")
+    if len(rejected_effects) != case["rejected_action_count"]:
+        raise SystemExit(f"applied rejected count mismatch for {case['case_id']}")
+    if len(blocked_effects) != case["blocked_action_count"]:
+        raise SystemExit(f"applied blocked count mismatch for {case['case_id']}")
+    applied_cases.append({
+        "case_id": case["case_id"],
+        "source": case["source"],
+        "input_hlir_sha256": case["input_hlir_sha256"],
+        "input_egraph_sha256": case["egraph_sha256"],
+        "input_extraction_sha256": case["extraction_sha256"],
+        "post_apply_selected_enode_sha256": [effect["post_apply_selected_enode_sha256"] for effect in selected_effects],
+        "post_mutation_hlir_sha256": [effect["post_mutation_hlir_sha256"] for effect in selected_effects],
+        "post_mutation_egraph_sha256": [effect["post_mutation_egraph_sha256"] for effect in selected_effects],
+        "selected_effect_count": len(selected_effects),
+        "rejected_effect_count": len(rejected_effects),
+        "blocked_effect_count": len(blocked_effects),
+        "selected_effects": selected_effects,
+        "rejected_effects": rejected_effects,
+        "blocked_effects": blocked_effects,
+    })
+
+if set(applied_selected_ids) != set(selected_application_ids):
+    raise SystemExit("applied selected ids do not match S4->S5 selected application ids")
+if set(applied_rejected_ids) != set(rejected_application_ids):
+    raise SystemExit("applied rejected ids do not match S4->S5 rejected application ids")
+if set(applied_blocked_ids) != set(blocked_application_ids):
+    raise SystemExit("applied blocked ids do not match S4->S5 blocked application ids")
+if set(applied_selected_ids) & set(applied_rejected_ids) or set(applied_selected_ids) & set(applied_blocked_ids) or set(applied_rejected_ids) & set(applied_blocked_ids):
+    raise SystemExit("applied extraction action buckets overlap")
+
+applied_extraction = {
+    "schema": "madaros.v2.s4.applied_extraction/0.1",
+    "status": "pass",
+    "stage_contract_level": "S4_EXACT_EXTRACTION_APPLIED_TO_S5_INPUT_NOT_COMPILER_IR",
+    "input_application_plan_schema": application_plan["schema"],
+    "input_application_plan_sha256": application_plan["application_plan_sha256"],
+    "s4_downstream_integration_slice_complete": True,
+    "s4_full_complete": False,
+    "application_applied_to_s5_input": True,
+    "application_applied_to_compiler_ir": False,
+    "ir_mutation_allowed": False,
+    "mutation_plan": "materialize deterministic S5 input effects without mutating compiler IR",
+    "s5_input_contract_ready": bool(applied_selected_ids),
+    "selected_effect_count": len(applied_selected_ids),
+    "rejected_effect_count": len(applied_rejected_ids),
+    "blocked_effect_count": len(applied_blocked_ids),
+    "selected_rewrite_ids": applied_selected_ids,
+    "rejected_rewrite_ids": applied_rejected_ids,
+    "blocked_rewrite_ids": applied_blocked_ids,
+    "selected_effect_sha256": applied_effect_hashes,
+    "post_apply_selected_enode_sha256": [
+        effect["post_apply_selected_enode_sha256"]
+        for case in applied_cases
+        for effect in case["selected_effects"]
+    ],
+    "cross_stage_invariants": [
+        "applied_selected_ids_equal_application_plan_selected_ids",
+        "applied_rejected_ids_equal_application_plan_rejected_ids",
+        "applied_blocked_ids_equal_application_plan_blocked_ids",
+        "selected_effects_are_mir_abi_safe_and_have_no_abi_impact",
+        "selected_effects_materialize_exact_zero_error_translation_validated_rewrites",
+        "rejected_and_blocked_effects_are_never_materialized_for_s5",
+        "application_is_to_s5_input_not_compiler_ir",
+    ],
+    "cases": applied_cases,
+}
+applied_extraction["applied_extraction_sha256"] = hashlib.sha256(
+    json.dumps(applied_extraction, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+applied_extraction_path = out / "madaros_v2_s4_applied_extraction.json"
+applied_extraction_path.write_text(json.dumps(applied_extraction, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
 summary = {
     "schema": "madaros.v2.s4.gate/0.1",
     "status": "pass",
@@ -761,6 +966,10 @@ summary = {
     "s4_to_s5_application_plan_complete": True,
     "s4_to_s5_application_plan_path": application_plan_path.name,
     "s4_to_s5_application_plan_sha256": application_plan["application_plan_sha256"],
+    "s4_applied_extraction_complete": True,
+    "s4_applied_extraction_path": applied_extraction_path.name,
+    "s4_applied_extraction_sha256": applied_extraction["applied_extraction_sha256"],
+    "s4_downstream_integration_slice_complete": True,
     "s4_full_complete": False,
     "s_full_contract": "blocked_until_full_s4_obligations_are_gated",
     "missing_full_obligations": [
@@ -769,7 +978,7 @@ summary = {
         "broad counterexample search over accepted and tempting sibling rewrites",
         "producer purity and evaluation-preservation beyond the current local leaf subset",
         "broader non-constant algebraic identities beyond neutral-element, reflexive-comparison, and same-SSA subtraction identities",
-        "downstream optimizer integration beyond receipt-only extraction",
+        "downstream compiler IR mutation beyond applied S4->S5 input materialization",
         "full-domain translation validation for every selected rewrite family",
     ],
     "case_count": len(receipts),
@@ -782,6 +991,9 @@ summary = {
     "s4_to_s5_accepted_application_count": application_plan["accepted_application_count"],
     "s4_to_s5_rejected_application_count": application_plan["rejected_application_count"],
     "s4_to_s5_blocked_application_count": application_plan["blocked_application_count"],
+    "s4_applied_selected_effect_count": applied_extraction["selected_effect_count"],
+    "s4_applied_rejected_effect_count": applied_extraction["rejected_effect_count"],
+    "s4_applied_blocked_effect_count": applied_extraction["blocked_effect_count"],
     "input_hlir_sha256": [r["input_hlir_sha256"] for r in receipts],
     "receipt_sha256": [r["receipt_sha256"] for r in receipts],
     "extraction_sha256": [r["extraction_sha256"] for r in receipts],
@@ -808,10 +1020,12 @@ payload = json.dumps(summary, sort_keys=True, indent=2) + "\n"
 print(
     f"[madaros-v2-s4] summary_sha={summary['gate_sha256'][:12]} "
     f"accepted={summary['accepted_rewrite_count']} rejected={summary['rejected_rewrite_count']} blocked={summary['blocked_rewrite_count']} "
-    f"selected={summary['selected_rewrite_count']} app_plan={application_plan['application_plan_sha256'][:12]}"
+    f"selected={summary['selected_rewrite_count']} app_plan={application_plan['application_plan_sha256'][:12]} "
+    f"applied={applied_extraction['applied_extraction_sha256'][:12]}"
 )
 PY
 
 echo "[madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)"
 echo "[madaros-v2-s4] PASS: S4->S5 application plan emitted for selected exact rewrites without mutating IR"
+echo "[madaros-v2-s4] PASS: S4 applied extraction materialized as deterministic S5 input effects without mutating compiler IR"
 echo "[madaros-v2-s4] receipts=$OUT_DIR"

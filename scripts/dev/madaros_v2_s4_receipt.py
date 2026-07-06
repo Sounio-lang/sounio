@@ -860,6 +860,165 @@ def rejected_distinct_sub_self_receipt(
     }
 
 
+def rejected_distinct_reflexive_cmp_receipt(
+    case_id: str,
+    source: str,
+    hlir_sha: str,
+    func_name: str,
+    block_label: str,
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any],
+    rhs_info: dict[str, Any],
+    comparison_kind: str,
+    proposed_const: tuple[str, bool],
+) -> dict[str, Any]:
+    op_name = BIN_OPS.get(int(instr["bin_op"]), f"op{instr['bin_op']}")
+    fallback = {
+        "op": op_name,
+        "lhs": ["symbolic_value", int(instr["lhs"])],
+        "rhs": ["symbolic_value", int(instr["rhs"])],
+        "proposal": "distinct_symbolic_comparison_as_reflexive",
+        "comparison_kind": comparison_kind,
+    }
+    rewritten = make_const_enode(*proposed_const)
+    coefficients = {
+        "basis_family": "exact_symbolic",
+        "basis": ["reflexive_comparison"],
+        "comparison_kind": comparison_kind,
+        "proposal": "distinct_symbolic_comparison_as_reflexive",
+        "constant": proposed_const[1],
+    }
+    if comparison_kind == "eq_self_true":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 1,
+            "rhs_value": 2,
+            "original_behavior": "returns_false",
+            "rewritten_behavior": "returns_true",
+        }
+    elif comparison_kind == "ne_self_false":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 1,
+            "rhs_value": 2,
+            "original_behavior": "returns_true",
+            "rewritten_behavior": "returns_false",
+        }
+    elif comparison_kind == "le_self_true":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 2,
+            "rhs_value": 1,
+            "original_behavior": "returns_false",
+            "rewritten_behavior": "returns_true",
+        }
+    elif comparison_kind == "ge_self_true":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 1,
+            "rhs_value": 2,
+            "original_behavior": "returns_false",
+            "rewritten_behavior": "returns_true",
+        }
+    elif comparison_kind == "lt_self_false":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 1,
+            "rhs_value": 2,
+            "original_behavior": "returns_true",
+            "rewritten_behavior": "returns_false",
+        }
+    elif comparison_kind == "gt_self_false":
+        counterexample = {
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "lhs_value": 2,
+            "rhs_value": 1,
+            "original_behavior": "returns_true",
+            "rewritten_behavior": "returns_false",
+        }
+    else:
+        raise SystemExit(f"unsupported distinct comparison rejection kind: {comparison_kind}")
+    validator_log = {
+        "validator": "rejected",
+        "method": "counterexample-guided-translation-validation",
+        "accepted": False,
+        "rejection_reason": "counterexample_distinct_symbolic_comparison_not_reflexive",
+        "comparison_kind": comparison_kind,
+        "counterexamples": [counterexample],
+        "fallback": fallback,
+    }
+    rid_payload = {
+        "case_id": case_id,
+        "func": func_name,
+        "block": block_label,
+        "result": instr["result"],
+        "proposal": "distinct_symbolic_comparison_as_reflexive",
+        "comparison_kind": comparison_kind,
+        "counterexample": counterexample,
+    }
+    rid = "s4-reject-cmp-" + sha256_text(stable_json(rid_payload))[:16]
+    eclass_id = f"{func_name}:{block_label}:{instr['result']}"
+    return {
+        "schema_version": REWRITE_SCHEMA,
+        "case_id": case_id,
+        "source": source,
+        "input_ir_sha256": hlir_sha,
+        "eclass_id": eclass_id,
+        "proposed_rewrite_id": rid,
+        "rewrite_kind": "symbolic_reflexive_cmp_i64",
+        "comparison_kind": comparison_kind,
+        "proposal_kind": "rejected_symbolic_reflexive_comparison",
+        "proposal_origin": "madaros_v2_s4_receipt.counterexample-guided-distinct-comparison-negative-lane",
+        "proposal_config_sha256": sha256_text(stable_json({"pass": "reject_symbolic_reflexive_cmp_distinct_operands", "schema": REWRITE_SCHEMA})),
+        "ekan_receipt_kind": "ekan_rejected_counterexample",
+        "function": func_name,
+        "block": block_label,
+        "instruction_result": instr["result"],
+        "original_lhs": int(instr["lhs"]),
+        "original_rhs": int(instr["rhs"]),
+        "lhs_symbolic_producer": lhs_info,
+        "rhs_symbolic_producer": rhs_info,
+        "same_operand_id": False,
+        "result_const": proposed_const,
+        "original_enode_sha256": sha256_text(stable_json(instr)),
+        "proposed_enode_sha256": sha256_text(stable_json(rewritten)),
+        "rewritten_enode_sha256": sha256_text(stable_json(rewritten)),
+        "basis_family": "exact_symbolic",
+        "coefficient_sha256": sha256_text(stable_json(coefficients)),
+        "training_or_provenance_sha256": sha256_text(stable_json({"provenance": "hand-authored-symbolic-comparison-negative-proposal"})),
+        "domain": "all-i64-values-with-distinct-ssa-comparison",
+        "domain_bounds": {
+            "kind": "all-i64-values-with-distinct-ssa-comparison",
+            "lhs_symbolic_value": int(instr["lhs"]),
+            "rhs_symbolic_value": int(instr["rhs"]),
+            "comparison_kind": comparison_kind,
+            "preconditions": ["operands are distinct S3 HLIR SSA values"],
+        },
+        "error_bound": "unbounded: proposal rejected",
+        "error_bound_method": "counterexample",
+        "gum_covariance_assumptions": "not-applicable: rejected exact symbolic proposal",
+        "exact_fallback_expr_sha256": sha256_text(stable_json(fallback)),
+        "validator": "rejected",
+        "validator_attempted": ["translation-validation", "counterexample"],
+        "validator_log_sha256": sha256_text(stable_json(validator_log)),
+        "rejection_reason_code": "counterexample_found",
+        "rejection_reason": "counterexample_distinct_symbolic_comparison_not_reflexive",
+        "counterexample_sha256": sha256_text(stable_json(counterexample)),
+        "counterexample_set_sha256": sha256_text(stable_json([counterexample])),
+        "counterexample_count": 1,
+        "counterexamples": [counterexample],
+        "selected_for_extraction": False,
+        "ir_mutation_allowed": False,
+        "accepted": False,
+    }
+
+
 def blocked_operand_provenance_receipt(
     case_id: str,
     source: str,
@@ -1429,6 +1588,26 @@ def rejected_distinct_sub_candidate(
     return (lhs_info, rhs_info)
 
 
+def rejected_distinct_reflexive_cmp_candidate(
+    instr: dict[str, Any],
+    lhs_info: dict[str, Any] | None,
+    rhs_info: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, tuple[str, bool]] | None:
+    if int(instr.get("lhs", -1)) == int(instr.get("rhs", -2)):
+        return None
+    if not is_symbolic_value(lhs_info) or not is_symbolic_value(rhs_info):
+        return None
+    if lhs_info.get("value_id") == rhs_info.get("value_id"):
+        return None
+    if instr.get("ty", {}).get("kind") != "bool":
+        return None
+    result = reflexive_cmp_result(int(instr.get("bin_op", -1)))
+    if result is None:
+        return None
+    comparison_kind, proposed_const = result
+    return (lhs_info, rhs_info, comparison_kind, proposed_const)
+
+
 def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = json.loads(hlir_text)
     module = data["module"]
@@ -1688,6 +1867,30 @@ def analyze_hlir(case_id: str, source: str, hlir_text: str, hlir_sha: str) -> tu
                                     "op": "const",
                                     "rejection_reason": receipt["rejection_reason"],
                                 })
+                            else:
+                                rejected_cmp = rejected_distinct_reflexive_cmp_candidate(instr, lhs_info, rhs_info)
+                                if rejected_cmp is not None:
+                                    distinct_lhs_info, distinct_rhs_info, comparison_kind, proposed_const = rejected_cmp
+                                    receipt = rejected_distinct_reflexive_cmp_receipt(
+                                        case_id,
+                                        source,
+                                        hlir_sha,
+                                        func["name"],
+                                        block["label"],
+                                        instr,
+                                        distinct_lhs_info,
+                                        distinct_rhs_info,
+                                        comparison_kind,
+                                        proposed_const,
+                                    )
+                                    rewrites.append(receipt)
+                                    enodes.append({
+                                        "kind": "s4-rejected-rewrite",
+                                        "rewrite_id": receipt["proposed_rewrite_id"],
+                                        "sha256": receipt["rewritten_enode_sha256"],
+                                        "op": "const",
+                                        "rejection_reason": receipt["rejection_reason"],
+                                    })
                         identity = identity_candidate(instr, lhs_info, rhs_info)
                         if identity is not None:
                             identity_kind, symbolic_value_id, symbolic_producer, neutral_side, neutral_const = identity

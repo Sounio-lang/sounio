@@ -39,6 +39,8 @@ if summary.get("s4_full_complete") is not False:
     raise SystemExit("S5 preflight requires S4 full-complete=false")
 if summary.get("s4_to_s5_application_plan_complete") is not True:
     raise SystemExit("S5 preflight requires explicit S4->S5 application plan")
+if summary.get("s4_applied_extraction_complete") is not True:
+    raise SystemExit("S5 preflight requires explicit S4 applied extraction artifact")
 plan_path = s4_dir / summary.get("s4_to_s5_application_plan_path", "")
 if not plan_path.is_file():
     raise SystemExit("missing S4->S5 application plan")
@@ -63,6 +65,39 @@ computed_plan_hash = hashlib.sha256(
 ).hexdigest()
 if computed_plan_hash != plan_hash:
     raise SystemExit("S4->S5 application plan canonical hash mismatch")
+
+applied_path = s4_dir / summary.get("s4_applied_extraction_path", "")
+if not applied_path.is_file():
+    raise SystemExit("missing S4 applied extraction artifact")
+applied_extraction = json.loads(applied_path.read_text(encoding="utf-8"))
+if applied_extraction.get("schema") != "madaros.v2.s4.applied_extraction/0.1":
+    raise SystemExit("bad S4 applied extraction schema")
+if applied_extraction.get("status") != "pass":
+    raise SystemExit("S4 applied extraction did not pass")
+if applied_extraction.get("stage_contract_level") != "S4_EXACT_EXTRACTION_APPLIED_TO_S5_INPUT_NOT_COMPILER_IR":
+    raise SystemExit("S4 applied extraction has wrong stage contract")
+if applied_extraction.get("s4_downstream_integration_slice_complete") is not True:
+    raise SystemExit("S4 applied extraction must complete the downstream integration slice")
+if applied_extraction.get("s4_full_complete") is not False:
+    raise SystemExit("S4 applied extraction must not claim S4 FULL")
+if applied_extraction.get("input_application_plan_sha256") != application_plan["application_plan_sha256"]:
+    raise SystemExit("S4 applied extraction input plan hash mismatch")
+if applied_extraction.get("application_applied_to_s5_input") is not True:
+    raise SystemExit("S4 applied extraction must materialize S5 input effects")
+if applied_extraction.get("application_applied_to_compiler_ir") is not False:
+    raise SystemExit("S4 applied extraction must not claim compiler IR mutation")
+if applied_extraction.get("ir_mutation_allowed") is not False:
+    raise SystemExit("S4 applied extraction must remain non-mutating")
+applied_hash = applied_extraction.get("applied_extraction_sha256")
+if not applied_hash or applied_hash != summary.get("s4_applied_extraction_sha256"):
+    raise SystemExit("S4 applied extraction hash mismatch with S4 summary")
+applied_for_hash = dict(applied_extraction)
+applied_for_hash.pop("applied_extraction_sha256", None)
+computed_applied_hash = hashlib.sha256(
+    json.dumps(applied_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+if computed_applied_hash != applied_hash:
+    raise SystemExit("S4 applied extraction canonical hash mismatch")
 plan_selected_ids = set(application_plan.get("selected_rewrite_ids", []))
 plan_rejected_ids = set(application_plan.get("rejected_rewrite_ids", []))
 plan_blocked_ids = set(application_plan.get("blocked_rewrite_ids", []))
@@ -88,6 +123,81 @@ for case in application_plan.get("cases", []):
             if row.get("extraction_applied_to_ir") is not False or row.get("ir_mutation_allowed") is not False:
                 raise SystemExit(f"S4->S5 application action must be non-mutating: {rid}")
             plan_actions[rid] = row
+
+applied_selected_ids = set(applied_extraction.get("selected_rewrite_ids", []))
+applied_rejected_ids = set(applied_extraction.get("rejected_rewrite_ids", []))
+applied_blocked_ids = set(applied_extraction.get("blocked_rewrite_ids", []))
+if applied_selected_ids != plan_selected_ids:
+    raise SystemExit("S4 applied extraction selected IDs do not match application plan")
+if applied_rejected_ids != plan_rejected_ids:
+    raise SystemExit("S4 applied extraction rejected IDs do not match application plan")
+if applied_blocked_ids != plan_blocked_ids:
+    raise SystemExit("S4 applied extraction blocked IDs do not match application plan")
+if applied_selected_ids & applied_rejected_ids or applied_selected_ids & applied_blocked_ids or applied_rejected_ids & applied_blocked_ids:
+    raise SystemExit("S4 applied extraction action buckets overlap")
+
+applied_effects = {}
+applied_rejections = {}
+applied_blockers = {}
+for case in applied_extraction.get("cases", []):
+    if len(case.get("selected_effects", [])) != case.get("selected_effect_count"):
+        raise SystemExit(f"S4 applied extraction selected count mismatch for {case.get('case_id')}")
+    if len(case.get("rejected_effects", [])) != case.get("rejected_effect_count"):
+        raise SystemExit(f"S4 applied extraction rejected count mismatch for {case.get('case_id')}")
+    if len(case.get("blocked_effects", [])) != case.get("blocked_effect_count"):
+        raise SystemExit(f"S4 applied extraction blocked count mismatch for {case.get('case_id')}")
+    for effect in case.get("selected_effects", []):
+        rid = effect.get("rewrite_id")
+        if rid in applied_effects:
+            raise SystemExit(f"duplicate selected applied effect: {rid}")
+        if effect.get("application_applied_to_s5_input") is not True:
+            raise SystemExit(f"selected applied effect must be materialized for S5 input: {rid}")
+        if effect.get("application_applied_to_compiler_ir") is not False or effect.get("ir_mutation_allowed") is not False:
+            raise SystemExit(f"selected applied effect must not mutate compiler IR: {rid}")
+        if effect.get("mir_abi_safe") is not True or effect.get("abi_impact") != "none":
+            raise SystemExit(f"selected applied effect must be MIR/ABI safe: {rid}")
+        if not effect.get("post_apply_selected_enode_sha256"):
+            raise SystemExit(f"selected applied effect missing post-apply selected enode hash: {rid}")
+        if effect.get("post_mutation_hlir_sha256") != effect.get("post_apply_selected_enode_sha256"):
+            raise SystemExit(f"selected applied effect post HLIR hash must be the deterministic S5-input post-state hash: {rid}")
+        if not effect.get("post_mutation_egraph_sha256"):
+            raise SystemExit(f"selected applied effect missing post egraph hash: {rid}")
+        effect_hash = effect.get("applied_effect_sha256")
+        if not effect_hash:
+            raise SystemExit(f"selected applied effect missing hash: {rid}")
+        effect_for_hash = dict(effect)
+        effect_for_hash.pop("applied_effect_sha256", None)
+        computed_effect_hash = hashlib.sha256(
+            json.dumps(effect_for_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        if computed_effect_hash != effect_hash:
+            raise SystemExit(f"selected applied effect canonical hash mismatch: {rid}")
+        applied_effects[rid] = effect
+    for effect in case.get("rejected_effects", []):
+        rid = effect.get("rewrite_id")
+        if rid in applied_rejections:
+            raise SystemExit(f"duplicate rejected applied effect: {rid}")
+        if effect.get("application_applied_to_s5_input") is not False or effect.get("selected_for_s5") is not False:
+            raise SystemExit(f"rejected applied effect must not enter S5 input: {rid}")
+        if not effect.get("counterexample_set_sha256"):
+            raise SystemExit(f"rejected applied effect missing counterexample set hash: {rid}")
+        applied_rejections[rid] = effect
+    for effect in case.get("blocked_effects", []):
+        rid = effect.get("rewrite_id")
+        if rid in applied_blockers:
+            raise SystemExit(f"duplicate blocked applied effect: {rid}")
+        if effect.get("application_applied_to_s5_input") is not False or effect.get("selected_for_s5") is not False:
+            raise SystemExit(f"blocked applied effect must not enter S5 input: {rid}")
+        if not effect.get("proof_obligation"):
+            raise SystemExit(f"blocked applied effect missing proof obligation: {rid}")
+        applied_blockers[rid] = effect
+
+if set(applied_effects) != applied_selected_ids:
+    raise SystemExit("S4 applied extraction selected effect coverage mismatch")
+if set(applied_rejections) != applied_rejected_ids:
+    raise SystemExit("S4 applied extraction rejected effect coverage mismatch")
+if set(applied_blockers) != applied_blocked_ids:
+    raise SystemExit("S4 applied extraction blocked effect coverage mismatch")
 
 allowed_rewrites = {"constant_fold_i64", "symbolic_identity_i64", "symbolic_reflexive_cmp_i64", "symbolic_sub_self_i64"}
 allowed_basis = {"exact_symbolic"}
@@ -171,6 +281,9 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             continue
         if rid not in plan_selected_ids or plan_action.get("action") != "apply_to_s5_input":
             raise SystemExit("accepted S4 rewrite must be selected by the S4->S5 plan")
+        applied_effect = applied_effects.get(rid)
+        if applied_effect is None:
+            raise SystemExit(f"accepted S4 rewrite missing applied S5 input effect: {rid}")
         if rid not in selected_ids or decision.get("selected") is not True:
             raise SystemExit("S5 preflight consumes only extraction-selected accepted rewrites")
         if rewrite.get("rewrite_kind") not in allowed_rewrites:
@@ -229,6 +342,32 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
                     raise SystemExit("S5 preflight requires local leaf call producer for sub-self keep-producer lowering")
         if decision.get("selected_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
             raise SystemExit("S5 preflight selected enode must match rewrite")
+        for field in (
+            "rewrite_kind",
+            "proposal_kind",
+            "function",
+            "block",
+            "instruction_result",
+            "lowering_effect",
+            "exact_fallback_expr_sha256",
+            "validator_log_sha256",
+            "coefficient_sha256",
+            "basis_family",
+            "error_bound",
+            "domain",
+            "domain_bounds",
+            "mir_abi_safe",
+            "abi_impact",
+        ):
+            expected_value = decision.get(field, rewrite.get(field))
+            if applied_effect.get(field) != expected_value:
+                raise SystemExit(f"S4 applied extraction field {field} mismatch for {rid}")
+        if applied_effect.get("output_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
+            raise SystemExit("S4 applied extraction output enode must match rewrite")
+        if applied_effect.get("application_applied_to_s5_input") is not True:
+            raise SystemExit("S4 applied extraction must be applied to S5 input")
+        if not applied_effect.get("post_apply_selected_enode_sha256"):
+            raise SystemExit("S4 applied extraction must carry post-apply selected enode hash")
         all_rewrites.append(rewrite)
     consumed.append({
         "case_id": receipt["case_id"],
@@ -263,6 +402,10 @@ preflight = {
     "input_application_plan_contract": application_plan["schema"],
     "input_application_plan_sha256": application_plan["application_plan_sha256"],
     "s4_to_s5_application_plan_consumed": True,
+    "input_applied_extraction_contract": applied_extraction["schema"],
+    "input_applied_extraction_sha256": applied_extraction["applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
+    "s4_downstream_integration_slice_complete": True,
     "mir_abi_safe_subset": sorted(allowed_rewrites),
     "abi_impact": "none: S5 consumes only extraction-selected accepted rewrites",
     "numeric_semantics": "i64 exact rewrites only when zero-error translation-validation receipts survive operand-provenance guards",
