@@ -65,14 +65,17 @@ echo "  out:   $OUT"
 
 # Serialize heavy build via the global workspace lock.
 #
-# REPRODUCIBILITY: the seed's own runtime picks up a mmap base address that
-# leaks into an emission decision (measured: two builds of the identical
-# commit+seed produce 97.3MB gate-green vs 104MB gate-failing binaries; both
-# builds are BYTE-IDENTICAL and always 97.3MB when ASLR is disabled). Until
-# the address leak is root-caused in lean_single.sio, pin the address-space
-# layout so every build is the reproducible, gate-validated instance.
-# setarch -R (ADDR_NO_RANDOMIZE) needs no privilege; fall back cleanly if the
-# tool is absent (build stays correct, just not guaranteed byte-reproducible).
+# REPRODUCIBLE-BUILD HYGIENE: pin the address-space layout with setarch -R
+# (ADDR_NO_RANDOMIZE, no privilege) so builds are byte-reproducible by
+# construction — defensively immune to any future runtime-address leak into
+# emission. The current seed (2e595371) has NO such leak: 20 no-setarch
+# builds are byte-identical, and setarch vs no-setarch produce the SAME
+# binary (md5 8e0e4197). The one 104MB gate-failing binary once observed was
+# seed-VERSION drift (a pre-c647203a6 seed still emitting the rel8
+# inline-string jump eb 01 at code 0x1740 where the current seed emits
+# e9 01000000 rel32) from concurrent-build contamination, NOT an ASLR effect
+# — initially mis-diagnosed, disproven by byte-bisection. Kept as cheap
+# defensive hygiene; falls back cleanly if setarch is absent.
 if command -v setarch >/dev/null 2>&1 && setarch "$(uname -m)" -R true >/dev/null 2>&1; then
     setarch "$(uname -m)" -R scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
 else
