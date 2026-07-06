@@ -1143,6 +1143,63 @@ fn em_eload(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, P
     pp
 }
 
+// v2 (qd128) estore: copy all six lane words (val,e0,e1,e2,e3,u) + poison from
+// register `reg` into mem slot `slot`. Mirrors em_estore but on the deep lane.
+fn em_v2_estore(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2_reg_val_off(reg))
+    pp = st(out, pp, 0, v2_mem_val_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e0_off(reg))
+    pp = st(out, pp, 0, v2_mem_e0_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e1_off(reg))
+    pp = st(out, pp, 0, v2_mem_e1_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e2_off(reg))
+    pp = st(out, pp, 0, v2_mem_e2_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e3_off(reg))
+    pp = st(out, pp, 0, v2_mem_e3_off(slot))
+    pp = ld(out, pp, 0, v2_reg_u_off(reg))
+    pp = st(out, pp, 0, v2_mem_u_off(slot))
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(reg))
+    pp = mov_mem_rax(out, pp, v2_mem_poison_off(slot))
+    pp
+}
+
+// v2 (qd128) eload: copy all six lane words (val,e0,e1,e2,e3,u) + poison from
+// mem slot `slot` into register `reg`. Mirrors em_eload but on the deep lane.
+fn em_v2_eload(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2_mem_val_off(slot))
+    pp = st(out, pp, 0, v2_reg_val_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e0_off(slot))
+    pp = st(out, pp, 0, v2_reg_e0_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e1_off(slot))
+    pp = st(out, pp, 0, v2_reg_e1_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e2_off(slot))
+    pp = st(out, pp, 0, v2_reg_e2_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e3_off(slot))
+    pp = st(out, pp, 0, v2_reg_e3_off(reg))
+    pp = ld(out, pp, 0, v2_mem_u_off(slot))
+    pp = st(out, pp, 0, v2_reg_u_off(reg))
+    pp = mov_rax_mem(out, pp, v2_mem_poison_off(slot))
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(reg))
+    pp
+}
+
+// v2 (qd128) mem-lane poison canonical form — mirrors em_set_mem_poison but
+// writes all four err components + inf u + poison=1 into the 48-byte mem slot.
+fn em_v2_set_mem_poison(out: &![i8; 131072], p: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, v2_mem_val_off(s))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_mem_e0_off(s))
+    pp = st(out, pp, 0, v2_mem_e1_off(s))
+    pp = st(out, pp, 0, v2_mem_e2_off(s))
+    pp = st(out, pp, 0, v2_mem_e3_off(s))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, v2_mem_u_off(s))
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, v2_mem_poison_off(s))
+    pp
+}
+
 fn em_egate(
     out: &![i8; 131072], p: i64, dst: i64,
     pu_off: i64, dp_off: i64, s: &Strs, gi: i64
@@ -3661,8 +3718,29 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with 
                                             p = em_v2_sqrt(out, p, dst, a, qadd_off, qsqrt_off, ns_off)
                                             p = em_v2_set_last_written(out, p, dst)
                                         } else {
-                                            // v2 control-flow templates not yet landed
+                                        if op == op_eload() {
+                                            p = em_v2_eload(out, p, dst, a)
+                                            p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
+                                            p = em_v2_set_last_written(out, p, dst)
+                                        } else {
+                                        if op == op_estore() {
+                                            p = em_v2_estore(out, p, dst, a)
+                                            p = em_v1_normalize_u_lane(out, p, v2_mem_u_off(a))
+                                            // EVM: storing a poisoned register re-canonicalises it
+                                            // and refreshes last_written_reg = dst. Replicate
+                                            // conditionally (poison flag still original here).
+                                            p = mov_rax_mem(out, p, v2_reg_poison_off(dst))
+                                            p = test_rax(out, p)
+                                            let jskip_lw = p + 2
+                                            p = jcc(out, p, 0x84, 0)
+                                            p = em_v2_set_last_written(out, p, dst)
+                                            let skip_lw = p
+                                            patch32(out, jskip_lw, skip_lw - (jskip_lw + 4))
+                                        } else {
+                                            // remaining v2 control-flow templates not yet landed
                                             return BridgeMeta { len: 0, status: 42 }
+                                        }
+                                        }
                                         }
                                     }
                                 }
