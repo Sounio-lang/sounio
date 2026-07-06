@@ -95,13 +95,19 @@ findings of the 2026-07-06 adversarial review (commit `33305c96`):
   frail-in-conformance, and the lean_single audit pointer. A second funded
   provider (deepseek balance / a gemini key) would strengthen it further.
 
-## Remaining (operator-gated)
+## Reconciled + pushed
 
-**Branch reconciliation + push** — held for operator direction (branch is 8
-ahead / 8 behind origin; the shared checkout has concurrent agents, and the
-project forbids ad-hoc rebase/reset flows). The v2 AOT bridge is functionally
-complete at full v1 parity and the positioning doc is revised; nothing else is
-blocked. All work is committed locally.
+Branch reconciled and pushed on operator direction: `git merge` of
+`origin/gpu/epistemic-tensor-core-next` (16 madaros/compiler/parser/native
+commits) into the local branch — **zero conflicts** (disjoint from all
+`stdlib/eisa`, `tools/eisa`, `scripts/ci/eisa_*` files). The reconciled
+toolchain (new `bin/souc-lean-single-x86_64`) was re-verified: the EISA
+conformance gate stays fully green and `test_eisa_evm_v2` (W-A…W-H) +
+`test_eisa_bridge_v1` (Y1…Y9) pass. Merge commit `7f105dfde` pushed to
+`origin/gpu/epistemic-tensor-core-next` (branch now behind=0 ahead=0).
+
+W4 (v2 AOT bridge, full v1 parity) and W5 (positioning revision, external
+review adopted) are complete and on origin. Nothing is blocked.
 
 ## Verify
 ```
