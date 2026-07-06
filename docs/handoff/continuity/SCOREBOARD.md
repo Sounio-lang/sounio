@@ -15,7 +15,7 @@ Statuses: `TODO` | `CLAIMED(<session>)` | `IN-PROGRESS` | `DONE(<commit/PR>)` | 
 
 | WP | Title | Model | Deps | Status | Evidence (command → expected) |
 |---|---|---|---|---|---|
-| A0 | Phase-1 PR merge | Haiku | — | IN-PROGRESS (PR #654 open) | `gh pr checks 654` all green → squash-merge |
+| A0 | Phase-1 PR merge | Haiku | — | DONE(91ee4de77, PR #654) | merged 2026-07-07; A1/A2/A3 unblocked |
 | A1 | Skeleton E035 effects | Haiku | A0 | TODO | Madaros compile of cd_exact: E035×3 gone; lean_single BYTECOMPARE PASS intact |
 | A2 | Primitive-receiver dispatch (E019/E011) | Opus | A0 | TODO | dispatch witnesses rc=23/74 and rc=23/60; `trait_bounded_dispatch{,_multi_call}.sio` green on Madaros |
 | A3 | Specializer in multi-module lane | Opus | A0 | TODO | cd_exact compile: no `E008 ... CDElementExact__T` |
