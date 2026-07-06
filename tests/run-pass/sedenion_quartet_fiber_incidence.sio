@@ -1,0 +1,195 @@
+//@ run-pass
+//@ expect-stdout: INCIDENCE OK
+// FRENTE B — the quartet <-> fiber incidence of the sedenion ZD geometry, executed exactly.
+//
+// The two factorizations of the ZD 168 are 7 fibers x 24 edges (sedenion_zd_fibers.sio) and 42
+// quartets x 4 pairs (sedenion_zd_quartets.sio). This proves how they interlock: each support-
+// quartet's 4 pairs split across exactly 2 fibers (2 pairs each), and the 42 quartets, viewed as
+// edges on the 7 fibers {9..15}, form exactly the DOUBLED COMPLETE GRAPH 2*K_7:
+//   * every one of the C(7,2) = 21 fiber-pairs is joined by exactly 2 quartets  (2*21 = 42);
+//   * every fiber has incidence degree 12 (pairs with 6 others x 2 quartets).
+//
+// Decidable integer equality over Z, no float. SELF-CONTAINED (no #637). Cross-verified vs
+// scripts/research/sedenion_quartet_fiber_incidence_oracle.py by the matching gate + Lean file.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // participating vertices
+    var clo = [0; 112]
+    var chi = [0; 112]
+    var cneg = [0; 112]
+    var n = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            var neg = 0
+            while neg <= 1 {
+                clo[n as usize] = lo
+                chi[n as usize] = hi
+                cneg[n as usize] = neg
+                n = n + 1
+                neg = neg + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    var plo = [0; 84]
+    var phi = [0; 84]
+    var png = [0; 84]
+    var m = 0
+    var i = 0
+    while i < n {
+        var parti = 0
+        var j = 0
+        while j < n {
+            if is_zero_pair(clo[i as usize], chi[i as usize], cneg[i as usize], clo[j as usize], chi[j as usize], cneg[j as usize]) {
+                parti = 1
+            }
+            j = j + 1
+        }
+        if parti == 1 && m < 84 {
+            plo[m as usize] = clo[i as usize]
+            phi[m as usize] = chi[i as usize]
+            png[m as usize] = cneg[i as usize]
+            m = m + 1
+        }
+        i = i + 1
+    }
+
+    // collect the 168 pairs' quartet mask + fiber label (L = lo^hi; intra-fiber so both endpoints share L)
+    var qmask = [0; 200]
+    var qL = [0; 200]
+    var npair = 0
+    var a = 0
+    while a < m {
+        var b = a + 1
+        while b < m {
+            if is_zero_pair(plo[a as usize], phi[a as usize], png[a as usize], plo[b as usize], phi[b as usize], png[b as usize]) {
+                if npair < 200 {
+                    qmask[npair as usize] = (1 << plo[a as usize]) | (1 << phi[a as usize]) | (1 << plo[b as usize]) | (1 << phi[b as usize])
+                    qL[npair as usize] = plo[a as usize] ^ phi[a as usize]
+                    npair = npair + 1
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // fiber-pair incidence: for each distinct quartet, find its 2 fiber labels, bump fiberpair[L1*16+L2]
+    var fpcount = [0; 256]
+    var bad_fibers = 0
+    var p = 0
+    while p < npair {
+        var first = 1
+        var q = 0
+        while q < p {
+            if qmask[q as usize] == qmask[p as usize] { first = 0 }
+            q = q + 1
+        }
+        if first == 1 {
+            // distinct fiber labels among this quartet's pairs
+            var lmin = 99
+            var lmax = 0
+            var r = 0
+            while r < npair {
+                if qmask[r as usize] == qmask[p as usize] {
+                    if qL[r as usize] < lmin { lmin = qL[r as usize] }
+                    if qL[r as usize] > lmax { lmax = qL[r as usize] }
+                }
+                r = r + 1
+            }
+            if lmin == lmax { bad_fibers = bad_fibers + 1 }
+            let key = lmin * 16 + lmax
+            fpcount[key as usize] = fpcount[key as usize] + 1
+        }
+        p = p + 1
+    }
+
+    // count distinct fiber-pairs, each hosting exactly 2 quartets; fiber degrees
+    var fiberpairs = 0
+    var bad_pairct = 0
+    var deg = [0; 16]
+    var l1 = 9
+    while l1 <= 15 {
+        var l2 = l1 + 1
+        while l2 <= 15 {
+            let c = fpcount[(l1 * 16 + l2) as usize]
+            if c > 0 {
+                fiberpairs = fiberpairs + 1
+                if c != 2 { bad_pairct = bad_pairct + 1 }
+                deg[l1 as usize] = deg[l1 as usize] + c
+                deg[l2 as usize] = deg[l2 as usize] + c
+            }
+            l2 = l2 + 1
+        }
+        l1 = l1 + 1
+    }
+    var bad_deg = 0
+    var f = 9
+    while f <= 15 {
+        if deg[f as usize] != 12 { bad_deg = bad_deg + 1 }
+        f = f + 1
+    }
+
+    print("PAIRS ")
+    print_int(npair as i64)
+    print("\n")
+    print("FIBERPAIRS ")
+    print_int(fiberpairs as i64)
+    print("\n")
+    print("BAD_FIBERS ")
+    print_int(bad_fibers as i64)
+    print("\n")
+    print("BAD_PAIRCT ")
+    print_int(bad_pairct as i64)
+    print("\n")
+    print("BAD_DEG ")
+    print_int(bad_deg as i64)
+    print("\n")
+    // 168 pairs ; 21 fiber-pairs (all C(7,2)) ; each quartet spans 2 fibers ; each fiber-pair has 2
+    // quartets ; each fiber degree 12  =>  the 42 quartets form 2*K_7 on the 7 fibers.
+    if npair == 168 && fiberpairs == 21 && bad_fibers == 0 && bad_pairct == 0 && bad_deg == 0 {
+        println("INCIDENCE OK")
+    } else {
+        println("INCIDENCE FAIL")
+    }
+}
