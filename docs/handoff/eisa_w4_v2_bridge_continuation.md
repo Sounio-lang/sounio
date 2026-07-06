@@ -47,6 +47,15 @@ v2-rump-qd v1-rump-dd`. Unit tests also green: `test_eisa_bridge` (X1–X5),
   poison re-check (`em_v2_finish_result`). Divisor-zero + sqrt(≤0) guards match
   the VM.
 
+## Cluster-validated
+
+Full Slurm battery green on the pinned node `gpuorangefs-5860-proxmox`
+(run `eisa-battery-20260706T161842`, job 5360): **tests 18/18 PASS, gate PASS
+rc=0, 27 lanes** — every v0/v1/v2 lane, `v2-rump-qd`, `v1-rump-dd`, tamper and
+anti-vacuity, all byte-identical. The `strings → grep -a` portability patch
+(portability audit patch #1) landed in the gate (`ci(eisa): anti-vacuity uses
+grep -a`), clearing the sole environmental `strings`-missing FAIL.
+
 ## Remaining (optional parity + landing)
 
 1. **v2 control-flow lanes** — `ebrz`/`ebrn` (frail band = max(u,|e0|)), the
@@ -57,11 +66,9 @@ v2-rump-qd v1-rump-dd`. Unit tests also green: `test_eisa_bridge` (X1–X5),
    machinery when full v2 parity is wanted. `em_v1_normalize_u_lane` /
    `em_v2_set_last_written` / the v1 branch+fuel patch lists are the pieces to
    generalise to the 48-byte lane.
-2. **Full Slurm battery** — `bash slurm-jobs/eisa/submit-eisa-battery.sh` (then
-   `<run-id>`), the pinned-node OrangeFS-safe validation, before landing.
-3. **W5** — Rump receipt showcase in the positioning doc (now unblocked: the
-   real v2-rump-qd bridge receipt exists), the `strings → grep -a` gate
-   portability patch (W4 no longer collides), branch reconciliation + push.
+2. **W5** — Rump receipt showcase in the positioning doc (now unblocked: the
+   real v2-rump-qd bridge receipt exists), and branch reconciliation + push
+   (hold for operator direction; branch is 8 ahead / 8 behind origin).
 
 ## Verify
 ```
