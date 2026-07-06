@@ -1868,10 +1868,25 @@ fn em_v2_qcopy(out: &![i8; 65536], p: i64, src0: i64, dst0: i64) -> i64 with Mut
     pp
 }
 
-// eadd on the v2 path. Mirrors evm_step op_eadd (v2): normalize a,b; poison
-// combine; eadd2 closure contract; I3 write. Result val in VALTMP, err in QR.
-fn em_v2_binop_add(
-    out: &![i8; 65536], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, ns_off: i64
+// Negate a 4-slot qd block in place (0.0 - xi per word, matching qd_neg).
+fn em_v2_qneg(out: &![i8; 65536], p: i64, base: i64) -> i64 with Mut, Panic, Div {
+    var pp = p
+    var k = 0
+    while k < 4 {
+        pp = pxor(out, pp, 0, 0)
+        pp = ld(out, pp, 1, v2q(base + k))
+        pp = sse(out, pp, 0x5C, 0, 1)
+        pp = st(out, pp, 0, v2q(base + k))
+        k = k + 1
+    }
+    pp
+}
+
+// eadd/esub on the v2 path. Mirrors evm_step (v2): normalize a,b; poison
+// combine; eadd2/esub2 closure contract; I3 write. is_sub selects subtraction
+// (val = a-b; t = qd_add(true(a), qd_neg(true(b)))). err in QR, val in VALTMP.
+fn em_v2_binop_addsub(
+    out: &![i8; 65536], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, ns_off: i64, is_sub: i64
 ) -> i64 with Mut, Panic, Div {
     var pp = em_v2_normalize(out, p, a)
     pp = mov_mem_rax(out, pp, sc(38))
@@ -1880,10 +1895,11 @@ fn em_v2_binop_add(
     pp = test_rax(out, pp)
     let jp = pp + 2
     pp = jcc(out, pp, 0x85, 0)          // jne POISON
-    // val = a.val + b.val
+    // val = a.val +/- b.val
     pp = ld(out, pp, 0, v2_reg_val_off(a))
     pp = ld(out, pp, 1, v2_reg_val_off(b))
-    pp = sse(out, pp, 0x58, 0, 1)
+    let valop = if is_sub == 1 { 0x5C } else { 0x58 }
+    pp = sse(out, pp, valop, 0, 1)
     pp = st(out, pp, 0, v2q(72))        // VALTMP
     // tx = qd_add(qd_from_f64(a.val), a.err) -> TX
     pp = em_v2_stage_true(out, pp, a)
@@ -1893,9 +1909,12 @@ fn em_v2_binop_add(
     pp = em_v2_stage_true(out, pp, b)
     pp = call32(out, pp, qadd_off)
     pp = em_v2_qcopy(out, pp, 8, 60)    // QR -> TY
-    // t = qd_add(tx, ty) -> TT
+    // t = qd_add(tx, ty)  [sub: qd_add(tx, qd_neg(ty))] -> TT
     pp = em_v2_qcopy(out, pp, 56, 0)    // TX -> QA
     pp = em_v2_qcopy(out, pp, 60, 4)    // TY -> QB
+    if is_sub == 1 {
+        pp = em_v2_qneg(out, pp, 4)     // QB = qd_neg(ty)
+    }
     pp = call32(out, pp, qadd_off)
     pp = em_v2_qcopy(out, pp, 8, 64)    // QR -> TT
     // err = qd_add(t, qd_neg(qd_from_f64(val)))
@@ -2849,11 +2868,16 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with M
                         p = jmp32(out, p, 0)
                     } else {
                         if op == op_eadd() {
-                            p = em_v2_binop_add(out, p, dst, a, b, qadd_off, ns_off)
+                            p = em_v2_binop_addsub(out, p, dst, a, b, qadd_off, ns_off, 0)
                             p = em_v2_set_last_written(out, p, dst)
                         } else {
-                            // v2 arithmetic / control-flow templates not yet landed
-                            return BridgeMeta { len: 0, status: 42 }
+                            if op == op_esub() {
+                                p = em_v2_binop_addsub(out, p, dst, a, b, qadd_off, ns_off, 1)
+                                p = em_v2_set_last_written(out, p, dst)
+                            } else {
+                                // v2 arithmetic / control-flow templates not yet landed
+                                return BridgeMeta { len: 0, status: 42 }
+                            }
                         }
                     }
                 }
