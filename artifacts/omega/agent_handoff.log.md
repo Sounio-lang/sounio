@@ -4003,3 +4003,85 @@ status: lock-released
   - Next-Action: continue S5 FULL toward S6 readiness by promoting remaining
     f128 generic helper/IEEE/call-return ABI surfaces or explicitly carrying
     them as S6 blockers.
+
+## 2026-07-06 — Madaros S5 f128 expanded direct ABI call/return slice
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: make the S5 f128 ABI step a fuller family, not a singleton: promote
+  direct internal opaque f128 call/return across mixed argument orders and
+  two-f128-argument calls while still refusing external SysV, SRET f128, IEEE
+  helpers, NaN/Inf, arbitrary decimal materialization, and S5 FULL.
+- Files changed:
+  - `self-hosted/native/machine_ir.sio`
+  - `self-hosted/native/codegen_x86_linux.sio`
+  - `scripts/dev/madaros_v2_s5_f128_opaque_call_return_abi_receipt.py`
+  - `scripts/dev/madaros_v2_s5_f128_native_opaque_storage_receipt.py`
+  - `scripts/dev/madaros_v2_s5_diagnostics_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `docs/research/madaros-v2-s4-egraph-ekan-receipts-2026-07-05.md`
+- What changed:
+  - x86 native-v2 direct calls now lower f128 arguments as two opaque 64-bit
+    words in the integer-register ABI. The direct f128 path is accepted when
+    the expanded argument word count fits the six-GPR call window.
+  - Callee parameter spill now handles f128 parameters in any direct position,
+    not only the first parameter.
+  - MachineIR legalization mirrors the expanded argument count and records
+    expanded `ARG_MOVE` operations for promoted f128 direct calls.
+  - The f128 opaque call/return ABI receipt now covers 10 cases: 8 positives
+    (return-only, local/imported identity, f128->i64, `(f128,i64)->i64`,
+    `(i64,f128)->i64`, `(f128,f128)->i64`, `(f128,i64)->f128`) and 2 negatives
+    (`f128_arithmetic_pending`, over-wide 4xf128 `f128_call_shape_pending`).
+  - Storage and diagnostics receipts now use the over-wide 4xf128 shape as the
+    fail-closed call-shape control instead of treating all multi-arg f128 calls
+    as blocked.
+- Local proof completed:
+  - `timeout 900 make build-madaros` passed and rebuilt
+    `artifacts/self-hosted/madaros` from the current S-next source.
+  - Direct probes passed with the rebuilt artifact:
+    `(f128,i64)->i64 rc=3`, `(i64,f128)->i64 rc=4`,
+    `(f128,f128)->i64 rc=5`, `(f128,i64)->f128 rc=0`;
+    `4xf128` remains fail-closed with `f128_call_shape_pending`.
+  - `python3 -m py_compile` passed for the touched Python receipt scripts.
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - f128 expanded ABI receipt passed with sha256
+    `1fe874342cdd1d381431f2b7d3abe35ad4c373a8918b8a04e1ea3612de03f995`.
+  - Aggregate S5 program MIR/ABI gate passed with sha256
+    `f2979eefd30fd13442ae9f9d6a03d2629bad03e7eabda311db5d4b094b3d2dd9`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260706-madaros-snext-f128-direct-expanded-abi`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: compiler-abi
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 f128 direct internal ABI
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: f128 expanded ABI receipt, aggregate S5 gate, full gate,
+    source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; external SysV f128 ABI and SRET f128 remain unpromoted
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane
+  - Next-Action: remaining S5 FULL blockers are f128 software helpers with IEEE
+    rounding/NaN/Inf, arbitrary decimal-to-binary128 native materialization, and
+    f128 execution differentials beyond the finite value-contract matrix.
+
+### TODO / Cross-Lane GPU Note
+
+- Documented and pushed: `docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md`,
+  commit `8ea996fe3` on branch `gpu/epistemic-tensor-core-next`.
+- Registered symptom: reproducible `335 E175 + 18 E177 + 5 E046`, even with an
+  empty `main`.
+- Why it escaped: `mod.sio` does not import `lower_to_ptx.sio`, so that
+  combination was never validated.
+- Ruled out: not `IR_MAX_INSTRS`, not the codegen segfault, not a stale binary.
+- Impact: blocks any new PTX driver outside `bin/kretikos`.
+- Suggested next steps: pairwise bisection, `pub` audit across
+  `self-hosted/gpu/`, and a CI gate for this import combination.
+- Cross-reference: linked with the two existing sibling audit docs.

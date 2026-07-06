@@ -2,9 +2,9 @@
 """Emit a Madaros v2 S5.2 f128 native opaque-storage receipt.
 
 S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
-words in native-v2 x86 ELF output. Later S5 receipts may promote narrow direct
-f128 call/return shapes; this receipt still guards that arithmetic and
-multi-argument f128 call shapes fail closed.
+words in native-v2 x86 ELF output. Later S5 receipts promote direct f128
+call/return shapes; this receipt still guards arithmetic and over-wide f128
+call shapes that exceed the promoted expanded-register window.
 """
 
 from __future__ import annotations
@@ -52,16 +52,16 @@ CASES: list[dict[str, Any]] = [
 """,
     },
     {
-        "case_id": "f128_multi_arg_shape_stays_blocked",
+        "case_id": "f128_overwide_arg_shape_stays_blocked",
         "kind": "block",
         "expected_detail": "f128_call_shape_pending",
-        "source": """fn mix(x: f128, y: i64) -> i64 {
-    y
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 {
+    9
 }
 
 fn main() -> i64 {
     let x: f128 = 1.0 as f128
-    mix(x, 3)
+    too_many(x, x, x, x)
 }
 """,
     },
@@ -267,7 +267,8 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
             "f128_external_sysv_abi_promoted": False,
             "f128_sret_abi_promoted": False,
-            "f128_multi_arg_call_shape_promoted": False,
+            "f128_direct_expanded_gpr_call_shape_promoted_elsewhere": True,
+            "f128_overwide_call_shape_promoted": False,
             "legacy_fallback_used": False,
         },
         "cases": case_results,

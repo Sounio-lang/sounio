@@ -388,7 +388,7 @@ add, multiply, divide, and a one-chain `add -> sub` metadata propagation witness
 while unsupported fractional products and out-of-matrix sums remain fail-closed
 with `f128_arithmetic_pending`. This still does not promote generic IEEE f128
 helpers, arbitrary decimal materialization, NaN/Inf behavior, external SysV
-f128 ABI, f128 call ABI, or f128 return ABI.
+f128 ABI, or SRET f128 ABI.
 The rebuilt S-next compiler on 2026-07-06 produced S5.6 receipt sha
 `349eedae3f35ecf4969a13699d98e43427bd1ec30c0ad912e7f0091144f05bd1`
 (`case_count=7`, `positive_case_count=5`, `negative_case_count=2`) and
@@ -397,6 +397,18 @@ aggregate S5 program MIR/ABI receipt sha
 The same rebuilt `artifacts/self-hosted/madaros` also passed
 `scripts/ci/madaros_full_gate.sh` (including imported-SMT `6/6`) and
 `scripts/ci/madaros_source_to_elf_gate.sh`.
+The next S5 f128 ABI slice on 2026-07-06 promotes the direct internal opaque
+f128 call/return convention beyond the former one-arg shape. An f128 argument
+is lowered as two opaque 64-bit words in the integer-register ABI, so direct
+calls are now accepted when the expanded argument word count fits the six-GPR
+window. The receipt covers return-only f128, local/imported f128 identity,
+`(f128, i64) -> i64`, `(i64, f128) -> i64`, `(f128, f128) -> i64`, and
+`(f128, i64) -> f128`; `4 * f128` remains fail-closed with
+`f128_call_shape_pending`. The f128 ABI receipt sha is
+`1fe874342cdd1d381431f2b7d3abe35ad4c373a8918b8a04e1ea3612de03f995`
+(`case_count=10`, `positive_case_count=8`, `negative_case_count=2`) and the
+updated aggregate S5 program MIR/ABI receipt sha is
+`f2979eefd30fd13442ae9f9d6a03d2629bad03e7eabda311db5d4b094b3d2dd9`.
 The final program receipt now records `input_applied_extraction_sha256 =
 4527e90ac399de5ce6f746d328a95dfd8c85d819d908aaf2f5bfb94a81b35f8d` and
 `s4_applied_extraction_consumed = true`, matching the preflight, MIR/ABI

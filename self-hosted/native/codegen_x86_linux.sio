@@ -5854,6 +5854,53 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
     true
 }
 
+fn nc_core_call_expanded_arg_slots(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, argc: i64) -> i64 with Mut, Panic, Div {
+    var slots: i64 = 0
+    var ai: i64 = 0
+    while ai < argc {
+        let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, ai)
+        if arg < 0 { return 99 }
+        if nc_core_reg_is_f128(nc, arg) {
+            slots = slots + 2
+        } else {
+            slots = slots + 1
+        }
+        ai = ai + 1
+    }
+    slots
+}
+
+fn nc_core_call_has_f128_arg(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, argc: i64) -> bool with Mut, Panic, Div {
+    var ai: i64 = 0
+    while ai < argc {
+        let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, ai)
+        if nc_core_reg_is_f128(nc, arg) { return true }
+        ai = ai + 1
+    }
+    false
+}
+
+fn nc_core_load_expanded_call_args(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, argc: i64) -> bool with Mut, Panic, Div {
+    var ai: i64 = 0
+    var abi_i: i64 = 0
+    while ai < argc {
+        let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, ai)
+        if arg < 0 { return false }
+        if nc_core_reg_is_f128(nc, arg) {
+            if abi_i + 1 >= 6 { return false }
+            nc_emit_load_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(arg))
+            nc_emit_load_rbp_disp32_reg(nc, param_reg(abi_i + 1), ir_slot_offset(arg + 1))
+            abi_i = abi_i + 2
+        } else {
+            if abi_i >= 6 { return false }
+            nc_emit_load_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(arg))
+            abi_i = abi_i + 1
+        }
+        ai = ai + 1
+    }
+    true
+}
+
 fn nc_core_load_call_arg_to_rax(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, arg_index: i64) -> bool with Mut, Panic, Div {
     let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, arg_index)
     if arg < 0 {
@@ -6323,12 +6370,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
-            let arg0 = nc_core_call_arg_at((*func).instrs[i as usize].call_args, 0)
-            let arg0_f128 = nc_core_reg_is_f128(nc, arg0)
-            if arg0_f128 {
-                if argc != 1 { return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_call_shape_pending") }
-                nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0))
-                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg0 + 1))
+            let has_f128_arg = nc_core_call_has_f128_arg(nc, func, i, argc)
+            if has_f128_arg {
+                if nc_core_call_expanded_arg_slots(nc, func, i, argc) > 6 { return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_call_shape_pending") }
+                if !nc_core_load_expanded_call_args(nc, func, i, argc) { return native_v2_core_ir_trace_fail(func, fn_index, i, "f128_call_arg_failed") }
             } else {
                 if !nc_core_push_call_stack_args(nc, func, i, argc) { return native_v2_core_ir_trace_fail(func, fn_index, i, "call_stack_args_failed") }
                 if argc > 0 {
@@ -6357,7 +6402,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
             nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
-            if !arg0_f128 {
+            if !has_f128_arg {
                 let cleanup_bytes = nc_core_stack_call_cleanup_bytes(argc, 6)
                 if cleanup_bytes > 0 {
                     nc_emit_add_rsp_imm32(nc, cleanup_bytes)
@@ -7322,21 +7367,20 @@ fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, P
             nc_emit_store_rbp_disp32_reg(nc, param_reg(0), ir_slot_offset(dest_reg))
         }
     }
-    if (*func).param_count > 0 && sret_shift == 0 {
-        let v0 = (*func).param_regs[0]
-        if nc_core_func_param_is_f128(func, v0) {
-            nc_emit_store_rbp_disp32_reg(nc, 7, ir_slot_offset(v0))
-            nc_emit_store_rbp_disp32_reg(nc, 6, ir_slot_offset(v0 + 1))
-            nc_core_mark_f128_reg(nc, v0)
-            i = 1
-        }
-    }
-    while i < (*func).param_count && (i + sret_shift) < 6 {
+    var abi_i: i64 = sret_shift
+    while i < (*func).param_count && abi_i < 6 {
         let vreg = (*func).param_regs[i as usize]
         if vreg >= 0 {
-            let preg = param_reg(i + sret_shift)
-            let offset = ir_slot_offset(vreg)
-            nc_emit_store_rbp_disp32_reg(nc, preg, offset)
+            if sret_shift == 0 && nc_core_func_param_is_f128(func, vreg) {
+                if abi_i + 1 >= 6 { return }
+                nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(vreg))
+                nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i + 1), ir_slot_offset(vreg + 1))
+                nc_core_mark_f128_reg(nc, vreg)
+                abi_i = abi_i + 2
+            } else {
+                nc_emit_store_rbp_disp32_reg(nc, param_reg(abi_i), ir_slot_offset(vreg))
+                abi_i = abi_i + 1
+            }
         }
         i = i + 1
     }

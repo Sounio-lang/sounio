@@ -2,9 +2,11 @@
 """Emit the S5.5 f128 opaque direct call/return ABI receipt.
 
 This promotes an internal native-v2 contract only: f128 moves across direct
-Madaros calls as two opaque binary128 words for return-only and one-arg
-identity-style calls. It does not promote external SysV ABI, SRET, arithmetic,
-IEEE helpers, NaN/Inf handling, or full f128 execution.
+Madaros calls as two opaque binary128 words in the integer-register ABI,
+including mixed i64/f128 orders and two-f128-arg shapes when the expanded
+argument word count fits the six-register direct-call window. It does not
+promote external SysV ABI, SRET, IEEE helpers, NaN/Inf handling, or full f128
+execution.
 """
 
 from __future__ import annotations
@@ -69,6 +71,51 @@ fn main() -> i64 {
 """,
         "callee": "id_f128_imported",
     },
+    {
+        "case_id": "local_f128_plus_i64_arg_return",
+        "source": """fn mix(x: f128, y: i64) -> i64 { y }
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  mix(x, 3)
+}
+""",
+        "callee": "mix",
+        "expected_exit": 3,
+    },
+    {
+        "case_id": "local_i64_plus_f128_arg_return",
+        "source": """fn mix(y: i64, x: f128) -> i64 { y }
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  mix(4, x)
+}
+""",
+        "callee": "mix",
+        "expected_exit": 4,
+    },
+    {
+        "case_id": "local_two_f128_args_return",
+        "source": """fn first(x: f128, y: f128) -> i64 { 5 }
+fn main() -> i64 {
+  let a: f128 = 1.0 as f128
+  let b: f128 = 0.5 as f128
+  first(a, b)
+}
+""",
+        "callee": "first",
+        "expected_exit": 5,
+    },
+    {
+        "case_id": "local_mixed_arg_f128_return",
+        "source": """fn pick(x: f128, y: i64) -> f128 { x }
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let z: f128 = pick(x, 3)
+  0
+}
+""",
+        "callee": "pick",
+    },
 ]
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
@@ -84,11 +131,11 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
         "expected_detail": "f128_arithmetic_pending",
     },
     {
-        "case_id": "f128_plus_i64_arg_shape_still_blocked",
-        "source": """fn mix(x: f128, y: i64) -> i64 { y }
+        "case_id": "f128_four_arg_shape_still_blocked",
+        "source": """fn too_many(a: f128, b: f128, c: f128, d: f128) -> i64 { 9 }
 fn main() -> i64 {
   let x: f128 = 1.0 as f128
-  mix(x, 3)
+  too_many(x, x, x, x)
 }
 """,
         "expected_detail": "f128_call_shape_pending",
@@ -243,6 +290,7 @@ def emit(args: argparse.Namespace) -> None:
         "positive_case_count": len(POSITIVE_CASES),
         "negative_case_count": len(NEGATIVE_CASES),
         "f128_opaque_direct_call_return_abi_promoted": True,
+        "f128_opaque_direct_expanded_gpr_call_abi_promoted": True,
         "f128_external_sysv_abi_promoted": False,
         "f128_sret_abi_promoted": False,
         "f128_arithmetic_promoted": False,
