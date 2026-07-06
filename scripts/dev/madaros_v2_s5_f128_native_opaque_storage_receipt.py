@@ -68,7 +68,7 @@ fn main() -> i64 {
     {
         "case_id": "f128_arbitrary_decimal_materialization_stays_blocked",
         "kind": "block",
-        "expected_detail": "",
+        "expected_detail": "f128_decimal_materialization_pending",
         "expected_log_fragment": "native_v2_compile: FAIL",
         "source": """fn main() -> i64 {
     let x: f128 = 1.23456789012345678901234567890123456789 as f128

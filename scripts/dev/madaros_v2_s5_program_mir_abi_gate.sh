@@ -1353,7 +1353,7 @@ if f128_native_cases["local_literal_copy_executes"].get("run_rc") != 0:
 for case_id, detail in {
     "f128_arithmetic_stays_blocked": "f128_arithmetic_pending",
     "f128_overwide_arg_shape_stays_blocked": "f128_call_shape_pending",
-    "f128_arbitrary_decimal_materialization_stays_blocked": "",
+    "f128_arbitrary_decimal_materialization_stays_blocked": "f128_decimal_materialization_pending",
 }.items():
     row = f128_native_cases[case_id]
     if row.get("native_v2_emitted") is not False:
@@ -1362,6 +1362,8 @@ for case_id, detail in {
         raise SystemExit(f"{case_id} must fail closed")
     if row.get("expected_detail") != detail:
         raise SystemExit(f"{case_id} expected detail mismatch")
+    if row.get("machine_unsupported_detail") != detail:
+        raise SystemExit(f"{case_id} machine unsupported detail mismatch")
 
 if f128_opaque_call_return_abi_receipt.get("schema") != "madaros.v2.s5.f128_opaque_call_return_abi_receipt/0.1":
     raise SystemExit("bad S5 f128 opaque call-return ABI receipt schema")
