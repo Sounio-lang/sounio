@@ -1343,7 +1343,7 @@ if claims.get("f128_native_payload_words") != ["binary128_hi64", "binary128_lo64
 f128_native_cases = {row.get("case_id"): row for row in f128_native_opaque_storage_receipt.get("cases", [])}
 required_f128_native_cases = {
     "local_literal_copy_executes",
-    "f128_arithmetic_stays_blocked",
+    "f128_rounded_decimal_arithmetic_stays_blocked",
     "f128_overwide_arg_shape_stays_blocked",
     "truncated_arbitrary_decimal_materialization_executes",
 }
@@ -1358,7 +1358,7 @@ if f128_native_cases["truncated_arbitrary_decimal_materialization_executes"].get
 if f128_native_cases["truncated_arbitrary_decimal_materialization_executes"].get("run_rc") != 0:
     raise SystemExit("f128 truncated arbitrary decimal witness must execute with rc=0")
 for case_id, detail in {
-    "f128_arithmetic_stays_blocked": "f128_arithmetic_pending",
+    "f128_rounded_decimal_arithmetic_stays_blocked": "f128_arithmetic_pending",
     "f128_overwide_arg_shape_stays_blocked": "call_arity_gt_8",
 }.items():
     row = f128_native_cases[case_id]
@@ -1416,7 +1416,7 @@ required_f128_call_cases = {
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
     "local_five_f128_args_deeper_stack_return",
-    "f128_arithmetic_still_blocked",
+    "f128_rounded_decimal_arithmetic_still_blocked",
     "f128_nine_arg_arity_still_blocked",
 }
 if set(f128_call_cases) != required_f128_call_cases:
@@ -1443,7 +1443,7 @@ for case_id in [
     if not row.get("f128_slot_rows"):
         raise SystemExit(f"{case_id} must record f128 slot rows")
 for case_id, detail in {
-    "f128_arithmetic_still_blocked": "f128_arithmetic_pending",
+    "f128_rounded_decimal_arithmetic_still_blocked": "f128_arithmetic_pending",
     "f128_nine_arg_arity_still_blocked": "call_arity_gt_8",
 }.items():
     row = f128_call_cases[case_id]
@@ -1601,12 +1601,12 @@ if f128_arithmetic_value_contract_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 arithmetic value-contract receipt")
 if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_6_F128_ARITHMETIC_VALUE_CONTRACT_NATIVE_MATERIALIZATION":
     raise SystemExit("f128 arithmetic value-contract receipt must declare S5.6 stage contract")
-if f128_arithmetic_value_contract_receipt.get("case_count") != 9:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain exact nine cases")
-if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 7:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain seven positive cases")
-if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 2:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain two negative cases")
+if f128_arithmetic_value_contract_receipt.get("case_count") != 10:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain exact ten cases")
+if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 9:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain nine positive cases")
+if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 1:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain one negative case")
 for field in [
     "f128_arithmetic_value_contract_promoted",
     "f128_native_arithmetic_promoted",
@@ -1636,8 +1636,9 @@ required_arith_cases = {
     "f128_chain_add_sub_to_one",
     "f128_add_half_one_to_one_and_half",
     "f128_mul_half_half_to_quarter",
-    "f128_mul_one_and_half_half_still_blocked",
-    "f128_add_quarter_one_still_blocked",
+    "f128_mul_one_and_half_half_to_three_quarters",
+    "f128_add_quarter_one_to_one_and_quarter",
+    "f128_add_rounded_tenths_still_blocked",
 }
 if set(arith_cases) != required_arith_cases:
     raise SystemExit(f"f128 arithmetic value-contract receipt cases mismatch: {sorted(arith_cases)}")
@@ -1649,6 +1650,8 @@ required_arith_positive = {
     "f128_chain_add_sub_to_one": {"hex": "3fff0000000000000000000000000000", "metadata": [1, 0, 10, 2, 1, 0]},
     "f128_add_half_one_to_one_and_half": {"hex": "3fff8000000000000000000000000000", "metadata": [1, 0, 15, 2, 1, 0]},
     "f128_mul_half_half_to_quarter": {"hex": "3ffd0000000000000000000000000000", "metadata": [1, 0, 25, 3, 2, 0]},
+    "f128_mul_one_and_half_half_to_three_quarters": {"hex": "3ffe8000000000000000000000000000", "metadata": [1, 0, 75, 3, 2, 0]},
+    "f128_add_quarter_one_to_one_and_quarter": {"hex": "3fff4000000000000000000000000000", "metadata": [1, 0, 125, 3, 2, 0]},
 }
 for case_id, expected in required_arith_positive.items():
     row = arith_cases[case_id]
@@ -1664,7 +1667,7 @@ for case_id, expected in required_arith_positive.items():
         raise SystemExit(f"{case_id} must prove high-word immediate")
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
-for case_id in ["f128_mul_one_and_half_half_still_blocked", "f128_add_quarter_one_still_blocked"]:
+for case_id in ["f128_add_rounded_tenths_still_blocked"]:
     row = arith_cases[case_id]
     if row.get("machine_module_supported") is not False:
         raise SystemExit(f"{case_id} must remain MachineModule unsupported")
@@ -1719,7 +1722,7 @@ for field in [
         raise SystemExit(f"diagnostics receipt must not overclaim {field}")
 diagnostic_cases = {row.get("case_id"): row for row in diagnostics_receipt.get("cases", [])}
 required_diagnostic_negative = {
-    "reject_f128_arithmetic_native_v2": {"width": "f128", "detail": "f128_arithmetic_pending", "fragment": "f128_arithmetic_pending", "machine_module": True},
+    "reject_f128_rounded_decimal_arithmetic_native_v2": {"width": "f128", "detail": "f128_arithmetic_pending", "fragment": "f128_arithmetic_pending", "machine_module": True},
     "reject_f128_overwide_arg_shape_native_v2": {"width": "f128", "detail": "call_arity_gt_8", "fragment": "call_arity_gt_8", "machine_module": True},
     "reject_i512_let_annotation_native_v2": {"width": "i512", "detail": "let annotation"},
     "reject_u512_cast_native_v2": {"width": "u512", "detail": "cast"},

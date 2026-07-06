@@ -115,25 +115,40 @@ POSITIVE = [
         "expected_hex": "3ffd0000000000000000000000000000",
         "expected_metadata": [1, 0, 25, 3, 2, 0],
     },
-]
-
-NEGATIVE = [
     {
-        "case_id": "f128_mul_one_and_half_half_still_blocked",
+        "case_id": "f128_mul_one_and_half_half_to_three_quarters",
         "source": """fn main() -> i64 {
   let x: f128 = 1.5 as f128
   let y: f128 = 0.5 as f128
   let z: f128 = x * y
+  let w: f128 = z
   0
 }
 """,
-        "expected_detail": "f128_arithmetic_pending",
+        "expected_hex": "3ffe8000000000000000000000000000",
+        "expected_metadata": [1, 0, 75, 3, 2, 0],
     },
     {
-        "case_id": "f128_add_quarter_one_still_blocked",
+        "case_id": "f128_add_quarter_one_to_one_and_quarter",
         "source": """fn main() -> i64 {
   let x: f128 = 0.25 as f128
   let y: f128 = 1.0 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff4000000000000000000000000000",
+        "expected_metadata": [1, 0, 125, 3, 2, 0],
+    },
+]
+
+NEGATIVE = [
+    {
+        "case_id": "f128_add_rounded_tenths_still_blocked",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.1 as f128
+  let y: f128 = 0.2 as f128
   let z: f128 = x + y
   0
 }

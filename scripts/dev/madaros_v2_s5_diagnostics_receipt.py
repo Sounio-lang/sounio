@@ -26,9 +26,9 @@ DIAGNOSTIC_FRAGMENT = "native-v2 S5 unsupported numeric width"
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
     {
-        "case_id": "reject_f128_arithmetic_native_v2",
+        "case_id": "reject_f128_rounded_decimal_arithmetic_native_v2",
         "class": "unsupported_f128_operation",
-        "source": "fn main() -> i64 { let x: f128 = 1.5 as f128; let y: f128 = 0.5 as f128; let z = x * y; 0 }\n",
+        "source": "fn main() -> i64 { let x: f128 = 0.1 as f128; let y: f128 = 0.2 as f128; let z = x + y; 0 }\n",
         "unsupported_width": "f128",
         "expected_detail": "f128_arithmetic_pending",
         "expected_fragment": "f128_arithmetic_pending",
@@ -331,7 +331,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_arithmetic_fails_closed_after_MachineModule_metadata_export",
+            "f128_native_v2_rounded_decimal_arithmetic_fails_closed_after_MachineModule_metadata_export",
             "f128_native_v2_overwide_arg_shape_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",
