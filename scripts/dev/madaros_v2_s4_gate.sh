@@ -269,6 +269,9 @@ if receipt["blocked_from_extraction_count"] != len(blocked_ids):
 observed_accepted = set()
 observed_rejected = set()
 observed_blocked = set()
+accepted_reflexive_cmp_kinds = set()
+rejected_reflexive_cmp_kinds = set()
+blocked_reflexive_cmp_kinds = set()
 for rewrite in rewrites:
     if rewrite["schema_version"] != "madaros.v2.ekan.rewrite/0.1":
         raise SystemExit("bad rewrite receipt schema")
@@ -368,6 +371,7 @@ for rewrite in rewrites:
                 raise SystemExit("reflexive comparison proposed enode is not expected bool const")
             if rewrite.get("rewritten_enode_sha256") != expected_hash:
                 raise SystemExit("reflexive comparison rewritten enode is not expected bool const")
+            accepted_reflexive_cmp_kinds.add(comparison_kind)
         if rewrite["rewrite_kind"] == "symbolic_sub_self_i64":
             subtraction_kind = rewrite.get("subtraction_kind")
             if subtraction_kind not in SUB_SELF_KINDS:
@@ -421,6 +425,11 @@ for rewrite in rewrites:
                 raise SystemExit("producer evaluation blocker policy mismatch")
             if rewrite.get("same_operand_id") is not True:
                 raise SystemExit("producer evaluation blocker must assert same_operand_id")
+            if rewrite.get("rewrite_kind") == "symbolic_reflexive_cmp_i64":
+                comparison_kind = rewrite.get("comparison_kind")
+                if comparison_kind not in REFLEXIVE_CMP_KINDS:
+                    raise SystemExit(f"unexpected blocked reflexive comparison kind: {comparison_kind}")
+                blocked_reflexive_cmp_kinds.add(comparison_kind)
         observed_blocked.add(rewrite["rewrite_kind"])
         observed_blocked.add(rewrite["ekan_receipt_kind"])
         observed_blocked.add(rewrite["rejection_reason_code"])
@@ -437,6 +446,11 @@ for rewrite in rewrites:
             raise SystemExit("semantic rejected rewrite must carry a counterexample")
         if not rewrite.get("counterexample_set_sha256") or not rewrite.get("counterexample_sha256"):
             raise SystemExit("rejected rewrite missing counterexample hashes")
+        if rewrite.get("rewrite_kind") == "symbolic_reflexive_cmp_i64":
+            comparison_kind = rewrite.get("comparison_kind")
+            if comparison_kind not in REFLEXIVE_CMP_KINDS:
+                raise SystemExit(f"unexpected rejected reflexive comparison kind: {comparison_kind}")
+            rejected_reflexive_cmp_kinds.add(comparison_kind)
         observed_rejected.add(rewrite["rewrite_kind"])
         observed_rejected.add(rewrite["ekan_receipt_kind"])
         observed_rejected.add(rewrite["rejection_reason_code"])
@@ -541,6 +555,26 @@ if missing_rejected:
 missing_blocked = [item for item in required_blocked.split(",") if item and item != "-" and item not in observed_blocked]
 if missing_blocked:
     raise SystemExit(f"missing required blocked markers: {missing_blocked}; observed={sorted(observed_blocked)}")
+required_reflexive_cmp_kinds = set(REFLEXIVE_CMP_KINDS)
+case_id = receipt.get("case_id")
+if case_id in {"symbolic_reflexive_cmp_i64", "symbolic_reflexive_cmp_pure_call_i64"}:
+    if accepted_reflexive_cmp_kinds != required_reflexive_cmp_kinds:
+        raise SystemExit(
+            f"{case_id} must accept the complete reflexive comparison matrix; "
+            f"observed={sorted(accepted_reflexive_cmp_kinds)}"
+        )
+if case_id == "reject_distinct_symbolic_cmp_i64":
+    if rejected_reflexive_cmp_kinds != required_reflexive_cmp_kinds:
+        raise SystemExit(
+            f"{case_id} must reject the complete distinct comparison matrix; "
+            f"observed={sorted(rejected_reflexive_cmp_kinds)}"
+        )
+if case_id == "reject_call_result_self_cmp_i64":
+    if blocked_reflexive_cmp_kinds != required_reflexive_cmp_kinds:
+        raise SystemExit(
+            f"{case_id} must block the complete effectful-call comparison matrix; "
+            f"observed={sorted(blocked_reflexive_cmp_kinds)}"
+        )
 print(
     f"[madaros-v2-s4] ok receipt={Path(receipt_path).name} "
     f"accepted={receipt['accepted_rewrite_count']} rejected={receipt['rejected_rewrite_count']} blocked={receipt['blocked_rewrite_count']} "

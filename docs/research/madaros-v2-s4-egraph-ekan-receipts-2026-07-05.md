@@ -27,8 +27,10 @@ params/block params and local leaf call results, keeps counterexample-backed
 rejected proposals out of extraction, and selects no blocked rewrites for
 extraction. The current fixture set has nine classified counterexample
 rejections (including a six-case distinct-comparison sibling-law matrix) and
-three classified producer-evaluation blockers, all excluded from extraction and
-from the applied S5-input bundle. Global S4
+seven classified producer-evaluation blockers, all excluded from extraction and
+from the applied S5-input bundle. The reflexive-comparison family now gates the
+full six-operator matrix for param/block-param positives, local-leaf pure-call
+positives, distinct-operand negatives, and effectful-call blockers. Global S4
 optimization is not complete:
 equality saturation, approximate learned E-KAN proposals, broad counterexample
 search beyond the current family matrix, and real compiler-IR mutation remain
@@ -36,8 +38,9 @@ future work. S5 has an executable preflight from the S4 extraction receipts and
 the applied bundle and now reports `status = pass` with
 `s5_input_contract_ready = true`. S5 now also has an
 input-boundary MIR/ABI classification receipt for the current selected exact S4
-subset, but real MIR serialization and ABI layout/call/return receipts remain
-future work.
+subset, and the applied-extraction bundle hash is propagated through S5
+preflight, MIR/ABI input-boundary, MIR-effect, and final program-MIR/ABI
+receipts. Real compiler-IR mutation by S4 and full S5 remain future work.
 
 ## Implemented surface
 
@@ -160,9 +163,10 @@ proven evaluation-preserving policy:
 - `selected_for_extraction = false`
 - `ir_mutation_allowed = false`
 
-The current local gate has `blocked=3`: operand-fidelity blockers remain
+The current local gate has `blocked=7`: operand-fidelity blockers remain
 available but are not triggered by the current fixtures; the current blockers
-come from non-leaf/effectful call-result self-comparisons and sub-self
+come from the six-operator non-leaf/effectful call-result self-comparison
+matrix and sub-self
 arithmetic where producer evaluation is not yet proven.
 
 This is a real receipt boundary for one exact optimizer subset, not an
@@ -238,16 +242,16 @@ counterexample matrix, and applied-extraction bundle:
 [madaros-v2-s4] ok receipt=extract_cost_chain_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=667d12c57234 extraction_sha=a85cc30506a4
 [madaros-v2-s4] ok receipt=symbolic_identity_i64.s4.receipt.json accepted=8 rejected=0 blocked=0 selected=8 egraph_sha=6ed268e74dde extraction_sha=3ec34adcde81
 [madaros-v2-s4] ok receipt=symbolic_reflexive_cmp_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=77655d13e1c3 extraction_sha=e692c0eefd87
-[madaros-v2-s4] ok receipt=symbolic_reflexive_cmp_pure_call_i64.s4.receipt.json accepted=2 rejected=0 blocked=0 selected=2 egraph_sha=8ae383c0b9ff extraction_sha=c632174764cf
+[madaros-v2-s4] ok receipt=symbolic_reflexive_cmp_pure_call_i64.s4.receipt.json accepted=6 rejected=0 blocked=0 selected=6 egraph_sha=f7b7b085706d extraction_sha=bd369f4cff40
 [madaros-v2-s4] ok receipt=symbolic_sub_self_i64.s4.receipt.json accepted=2 rejected=0 blocked=0 selected=2 egraph_sha=e56621dd4c50 extraction_sha=1ca05ce54edf
 [madaros-v2-s4] ok receipt=reject_distinct_symbolic_cmp_i64.s4.receipt.json accepted=0 rejected=6 blocked=0 selected=0 egraph_sha=6e20317c0bb8 extraction_sha=2fffd6c4414e
-[madaros-v2-s4] ok receipt=reject_call_result_self_cmp_i64.s4.receipt.json accepted=0 rejected=0 blocked=2 selected=0 egraph_sha=2064c04e1415 extraction_sha=a366624a9561
+[madaros-v2-s4] ok receipt=reject_call_result_self_cmp_i64.s4.receipt.json accepted=0 rejected=0 blocked=6 selected=0 egraph_sha=e213f9bc70ba extraction_sha=cf12ef393ec9
 [madaros-v2-s4] ok receipt=reject_distinct_symbolic_sub_i64.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=209d7fe5794e extraction_sha=859286dba635
-[madaros-v2-s4] ok receipt=reject_call_result_sub_self_i64.s4.receipt.json accepted=0 rejected=0 blocked=1 selected=0 egraph_sha=b59dfffefce7 extraction_sha=f3192d747032
+[madaros-v2-s4] ok receipt=reject_call_result_sub_self_i64.s4.receipt.json accepted=0 rejected=0 blocked=1 selected=0 egraph_sha=824c38d53989 extraction_sha=9c9e1d092790
 [madaros-v2-s4] ok receipt=recursion_fact.s4.receipt.json accepted=0 rejected=0 blocked=0 selected=0 egraph_sha=31532e5b09e4 extraction_sha=496e7ccf7342
 [madaros-v2-s4] ok receipt=reject_div_self_zero.s4.receipt.json accepted=0 rejected=1 blocked=0 selected=0 egraph_sha=34a7c2129d00 extraction_sha=54e83fe3c2d0
 [madaros-v2-s4] ok receipt=reject_div_self_mixed_with_accepted.s4.receipt.json accepted=1 rejected=1 blocked=0 selected=1 egraph_sha=08a67da48631 extraction_sha=a34f4ab3e0b8
-[madaros-v2-s4] summary_sha=b356cc4602fb accepted=28 rejected=9 blocked=3 selected=28 app_plan=f1057234c97b applied=cb3410e24521
+[madaros-v2-s4] summary_sha=925be91f67f1 accepted=32 rejected=9 blocked=7 selected=32 app_plan=ba8fc0f3d8ad applied=0f7f2dff38c6
 [madaros-v2-s4] PASS: S4 boundary receipts are deterministic and validated (S4 FULL remains blocked by listed obligations)
 [madaros-v2-s4] PASS: S4->S5 application plan emitted for selected exact rewrites without mutating IR
 [madaros-v2-s4] PASS: S4 applied extraction materialized as deterministic S5 input effects without mutating compiler IR
@@ -267,10 +271,11 @@ The S5 input-contract preflight is executable through:
 bash scripts/dev/madaros_v2_s5_preflight_gate.sh
 ```
 
-Observed local result on 2026-07-06 after the applied-extraction bundle:
+Observed local result on 2026-07-06 after the applied-extraction bundle and
+six-operator reflexive-comparison producer matrix:
 
 ```text
-[madaros-v2-s5-preflight] ok cases=13 rewrites=28 blocked=3 status=pass sha=e45dcaa541dc
+[madaros-v2-s5-preflight] ok cases=13 rewrites=32 blocked=7 status=pass sha=73c7190a1179
 [madaros-v2-s5-preflight] PASS: S5 preflight classified current S4 extraction input without overclaiming readiness
 ```
 
@@ -280,6 +285,8 @@ The preflight receipt uses schema `madaros.v2.s5.preflight/0.1` and records
 `input_applied_extraction_contract = madaros.v2.s4.applied_extraction/0.1`.
 It verifies that every accepted S4 rewrite has a matching applied S5-input
 effect and that rejected/blocked rewrites remain outside the materialized input.
+The applied bundle hash for this run is
+`0f7f2dff38c63edf46b179a89443aba5e01fbdfc8dcc3105aee86e82883c07eb`.
 
 The S5 MIR/ABI input-boundary gate is executable through:
 
@@ -287,10 +294,10 @@ The S5 MIR/ABI input-boundary gate is executable through:
 bash scripts/dev/madaros_v2_s5_mir_abi_gate.sh
 ```
 
-Observed local result on 2026-07-05:
+Observed local result on 2026-07-06:
 
 ```text
-[madaros-v2-s5-mir-abi] ok rewrites=28 blocked=3 abi_classes=scalar_bool,scalar_i64 sha=bc24ae6a1bda
+[madaros-v2-s5-mir-abi] ok rewrites=32 blocked=7 abi_classes=scalar_bool,scalar_i64 sha=7b0095a07c6d
 [madaros-v2-s5-mir-abi] PASS: S5 MIR/ABI input-boundary receipts classify the current S4 selected subset without claiming real MIR/ABI or S5 FULL
 ```
 
@@ -301,7 +308,9 @@ The input-boundary receipt uses schema
 `real_abi_layout_emitted = false`, `s5_ready = false`,
 `s5_implemented = false`, and `s5_full_complete = false`. It classifies the
 current selected S4 subset as scalar input only (`scalar_i64`/`scalar_bool`) and
-records no call-signature, stack, SRET, aggregate-layout, or ABI impact.
+records no call-signature, stack, SRET, aggregate-layout, or ABI impact. Each
+input-boundary witness carries the S4 applied-extraction hash and its source
+`applied_effect_sha256`.
 
 The S5 scalar MIR-effect and direct-call/return slice is executable through:
 
@@ -309,10 +318,10 @@ The S5 scalar MIR-effect and direct-call/return slice is executable through:
 bash scripts/dev/madaros_v2_s5_mir_effect_gate.sh
 ```
 
-Observed local result on 2026-07-05:
+Observed local result on 2026-07-06:
 
 ```text
-[madaros-v2-s5-mir-effect] ok effects=28 native_witnesses=3 opcodes=mir.alias.i64,mir.const.bool,mir.const.i64 sha=0c53f7750ec4
+[madaros-v2-s5-mir-effect] ok effects=32 native_witnesses=3 opcodes=mir.alias.i64,mir.const.bool,mir.const.i64 sha=91e27fdb00eb
 [madaros-v2-s5-mir-effect] PASS: S5 MIR-effect module roundtrips for the current selected subset without claiming full program MIR/ABI or S5 FULL
 ```
 
@@ -327,8 +336,13 @@ exact-cardinality gated to the three scalar native-v2 witnesses in
 direct-call return. The gate compiles and runs those witnesses, verifies their
 exit codes, hashes their ELFs/logs, and inspects the executable ELF segment for
 the expected internal-call shape before recording the Machine-IR contract
-`ARG_MOVE,CALL,CAPTURE_RET,STORE_STACK,RET`. Aggregate, SRET, imported-call,
-stack-arg, f64, f128, and i256 promotion remain blocked.
+`ARG_MOVE,CALL,CAPTURE_RET,STORE_STACK,RET`. Full S5 remains blocked by the
+explicit program-gate obligations, especially f128 generic helper/execution
+differentials and broader full-program MIR/ABI proof beyond the promoted
+receipt surfaces.
+Each MIR-effect carries `input_applied_extraction_sha256`,
+`source_applied_effect_sha256`, and the post-apply S5-input hashes propagated
+from the MIR/ABI boundary.
 
 The scalar compiler-MachineModule + ABI-shadow gate is executable through:
 
@@ -344,11 +358,11 @@ Each scalar source also has a canonical compiler-facing receipt path:
   --case-id scalar_i64_direct_call_return_42
 ```
 
-Observed deterministic local result on 2026-07-05:
+Observed deterministic local result on 2026-07-06:
 
 ```text
-[madaros-v2-s5-program-mir-abi] ok programs=3 target=x86_64-linux sha=84752dd8800d
-[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool compiler MachineModule + ABI-shadow receipt is deterministic without claiming S5 FULL
+[madaros-v2-s5-program-mir-abi] ok programs=3 target=x86_64-linux sha=3a9b00003bc2
+[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL
 ```
 
 That receipt uses schema `madaros.v2.s5.program_mir_abi_scalar_shadow/0.1`.
@@ -363,6 +377,10 @@ MIR call-return contract anchored to `self-hosted/native/machine_ir.sio` and
 It also records S4 semantic negatives and producer-evaluation blockers as
 not-selected/not-promoted controls, so rejected or blocked rewrites cannot leak
 into the scalar S5 slice.
+The final program receipt now records `input_applied_extraction_sha256 =
+0f7f2dff38c63edf46b179a89443aba5e01fbdfc8dcc3105aee86e82883c07eb` and
+`s4_applied_extraction_consumed = true`, matching the preflight, MIR/ABI
+boundary, and MIR-effect receipts.
 The gate now also calls `madaros s5-receipt` for each scalar witness and
 requires three `madaros.v2.s5.receipt/0.1` per-source receipts to match the
 aggregate witness shape (`canonical_s5_source_receipt_count = 3`,

@@ -639,6 +639,7 @@ def blocked_producer_evaluation_receipt(
         "symbolic_producer": symbolic_producer,
         "same_operand_id": True,
         "blocked_kind": blocked_kind,
+        "comparison_kind": blocked_kind if rewrite_kind == "symbolic_reflexive_cmp_i64" else None,
         "producer_evaluation_policy": "blocked: producer evaluation is not proven",
         "result_const": result_const,
         "original_enode_sha256": sha256_text(stable_json(instr)),

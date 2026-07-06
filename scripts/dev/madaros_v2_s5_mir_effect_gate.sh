@@ -226,6 +226,12 @@ if boundary.get("status") != "pass":
     raise SystemExit("S5 MIR-effect gate requires a passing input-boundary receipt")
 if boundary.get("s5_mir_abi_input_boundary_complete") is not True:
     raise SystemExit("S5 MIR-effect gate requires completed input-boundary receipt")
+if boundary.get("s4_applied_extraction_consumed") is not True:
+    raise SystemExit("S5 MIR-effect gate requires S4 applied extraction to be consumed by the input-boundary")
+if boundary.get("input_applied_extraction_contract") != "madaros.v2.s4.applied_extraction/0.1":
+    raise SystemExit("S5 MIR-effect gate requires the S4 applied-extraction input contract")
+if not boundary.get("input_applied_extraction_sha256"):
+    raise SystemExit("S5 MIR-effect gate requires the S4 applied-extraction hash")
 for false_field in [
     "s5_mir_abi_boundary_complete",
     "s5_ready",
@@ -348,6 +354,14 @@ for index, witness in enumerate(witnesses):
         raise SystemExit("MIR-effect serialization must start from non-mutating input-boundary witnesses")
     if not witness.get("exact_fallback_expr_sha256") or not witness.get("validator_log_sha256"):
         raise SystemExit("MIR-effect serialization requires fallback and validator hashes")
+    if witness.get("input_applied_extraction_sha256") != boundary["input_applied_extraction_sha256"]:
+        raise SystemExit("MIR-effect witness applied-extraction hash mismatch")
+    if not witness.get("source_applied_effect_sha256"):
+        raise SystemExit("MIR-effect witness missing source S4 applied-effect hash")
+    if not witness.get("post_apply_selected_enode_sha256"):
+        raise SystemExit("MIR-effect witness missing post-apply selected enode hash")
+    if not witness.get("post_apply_s5_input_hlir_sha256") or not witness.get("post_apply_s5_input_egraph_sha256"):
+        raise SystemExit("MIR-effect witness missing post-apply S5 input hashes")
 
     effect_kind = classify_mir_effect(witness)
     effect = {
@@ -364,6 +378,11 @@ for index, witness in enumerate(witnesses):
         "input_hlir_sha256": witness["input_hlir_sha256"],
         "input_egraph_sha256": witness["input_egraph_sha256"],
         "input_extraction_sha256": witness["input_extraction_sha256"],
+        "input_applied_extraction_sha256": witness["input_applied_extraction_sha256"],
+        "source_applied_effect_sha256": witness["source_applied_effect_sha256"],
+        "post_apply_selected_enode_sha256": witness["post_apply_selected_enode_sha256"],
+        "post_apply_s5_input_hlir_sha256": witness["post_apply_s5_input_hlir_sha256"],
+        "post_apply_s5_input_egraph_sha256": witness["post_apply_s5_input_egraph_sha256"],
         "original_enode_sha256": witness["original_enode_sha256"],
         "rewritten_enode_sha256": witness["rewritten_enode_sha256"],
         "lowering_effect": witness["lowering_effect"],
@@ -393,6 +412,9 @@ module = {
     "input_boundary_sha256": boundary["boundary_sha256"],
     "input_preflight_sha256": boundary["input_preflight_sha256"],
     "input_s4_gate_sha256": boundary["input_s4_gate_sha256"],
+    "input_applied_extraction_contract": boundary["input_applied_extraction_contract"],
+    "input_applied_extraction_sha256": boundary["input_applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
     "effect_count": len(effects),
     "semantic_rejected_rewrite_count": boundary["semantic_rejected_rewrite_count"],
     "blocked_rewrite_count": boundary["blocked_rewrite_count"],
@@ -418,6 +440,8 @@ module = {
     "roundtrip_contract": [
         "canonical_json_stable_after_parse_dump",
         "effect_count_equals_selected_s4_rewrites",
+        "each_mir_effect_carries_s4_applied_effect_hash",
+        "input_applied_extraction_hash_matches_mir_abi_boundary",
         "semantic_rejected_and_blocked_rewrites_excluded",
         "scalar_native_witnesses_exit_with_expected_codes",
         "scalar_native_elf_contains_expected_internal_call_shape",
@@ -454,6 +478,9 @@ receipt = {
     "real_abi_layout_emitted": False,
     "program_ir_mutation": False,
     "input_boundary_sha256": boundary["boundary_sha256"],
+    "input_applied_extraction_contract": boundary["input_applied_extraction_contract"],
+    "input_applied_extraction_sha256": boundary["input_applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
     "mir_effect_module_path": module_path.name,
     "mir_effect_module_sha256": module_sha,
     "mir_effect_module_with_hash_sha256": module_with_hash_sha,
@@ -472,6 +499,8 @@ receipt = {
         "input_s4_gate_double_emits_each_case",
         "canonical_json_roundtrip_stable",
         "effect_count_equals_selected_rewrite_count",
+        "each_effect_is_bound_to_a_source_s4_applied_effect_hash",
+        "input_applied_extraction_hash_propagates_from_s4_to_mir_effect_receipt",
         "scalar_native_witnesses_exit_with_expected_codes",
         "scalar_native_elf_contains_expected_internal_call_shape",
         "scalar_direct_call_return_contract_requires_arg_move_call_capture_ret_store_ret",

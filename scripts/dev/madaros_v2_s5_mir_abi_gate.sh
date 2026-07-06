@@ -123,8 +123,30 @@ if preflight.get("s5_input_contract_ready") is not True:
     raise SystemExit("S5 preflight input contract is not ready")
 if preflight.get("s5_full_complete") is not False:
     raise SystemExit("S5 preflight must not claim S5 FULL completion")
+if preflight.get("s4_applied_extraction_consumed") is not True:
+    raise SystemExit("S5 MIR/ABI boundary requires preflight to consume S4 applied extraction")
+if preflight.get("input_applied_extraction_contract") != "madaros.v2.s4.applied_extraction/0.1":
+    raise SystemExit("S5 MIR/ABI boundary requires the S4 applied-extraction contract")
 if s4_summary.get("schema") != "madaros.v2.s4.gate/0.1" or s4_summary.get("status") != "pass":
     raise SystemExit("missing passing S4 gate summary")
+applied_path = s4_dir / s4_summary.get("s4_applied_extraction_path", "")
+applied_extraction = load_json(applied_path)
+if applied_extraction.get("schema") != "madaros.v2.s4.applied_extraction/0.1":
+    raise SystemExit("bad S4 applied extraction schema for S5 MIR/ABI boundary")
+if applied_extraction.get("applied_extraction_sha256") != preflight.get("input_applied_extraction_sha256"):
+    raise SystemExit("S5 MIR/ABI boundary applied-extraction hash mismatch")
+if applied_extraction.get("application_applied_to_s5_input") is not True:
+    raise SystemExit("S5 MIR/ABI boundary requires applied S5-input materialization")
+if applied_extraction.get("application_applied_to_compiler_ir") is not False:
+    raise SystemExit("S5 MIR/ABI boundary rejects compiler-IR mutation from S4")
+
+applied_effects = {}
+for case in applied_extraction.get("cases", []):
+    for effect in case.get("selected_effects", []):
+        rid = effect.get("rewrite_id")
+        if rid in applied_effects:
+            raise SystemExit(f"duplicate S4 applied effect in MIR/ABI boundary: {rid}")
+        applied_effects[rid] = effect
 
 rewrite_witnesses = []
 rejected_ids = set()
@@ -157,6 +179,19 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             raise SystemExit(f"S5 boundary rejects already-applied extraction: {rid}")
         if rewrite.get("validator") != "translation-validation" or rewrite.get("error_bound") != "0":
             raise SystemExit(f"S5 boundary requires exact translation validation: {rid}")
+        applied_effect = applied_effects.get(rid)
+        if applied_effect is None:
+            raise SystemExit(f"S5 MIR/ABI boundary missing applied S5-input effect: {rid}")
+        if applied_effect.get("application_applied_to_s5_input") is not True:
+            raise SystemExit(f"S5 MIR/ABI boundary requires materialized applied effect: {rid}")
+        if applied_effect.get("application_applied_to_compiler_ir") is not False:
+            raise SystemExit(f"S5 MIR/ABI boundary rejects compiler-IR-mutating applied effect: {rid}")
+        if applied_effect.get("mir_abi_safe") is not True or applied_effect.get("abi_impact") != "none":
+            raise SystemExit(f"S5 MIR/ABI boundary requires ABI-safe applied effect: {rid}")
+        if applied_effect.get("output_enode_sha256") != rewrite.get("rewritten_enode_sha256"):
+            raise SystemExit(f"S5 MIR/ABI boundary applied effect output mismatch: {rid}")
+        if not applied_effect.get("applied_effect_sha256"):
+            raise SystemExit(f"S5 MIR/ABI boundary missing applied effect hash: {rid}")
         abi = classify_rewrite_abi(rewrite, decision)
         keep_producer = str(decision.get("lowering_effect", "")).endswith("_keep_producer_evaluated")
         producer_policy = rewrite.get("producer_evaluation_policy", "not-required")
@@ -172,6 +207,11 @@ for receipt_file in sorted(s4_dir.glob("*/*/*.s4.receipt.json")):
             "input_hlir_sha256": receipt["input_hlir_sha256"],
             "input_egraph_sha256": receipt["egraph_sha256"],
             "input_extraction_sha256": receipt["extraction_sha256"],
+            "input_applied_extraction_sha256": applied_extraction["applied_extraction_sha256"],
+            "source_applied_effect_sha256": applied_effect["applied_effect_sha256"],
+            "post_apply_selected_enode_sha256": applied_effect["post_apply_selected_enode_sha256"],
+            "post_apply_s5_input_hlir_sha256": applied_effect["post_mutation_hlir_sha256"],
+            "post_apply_s5_input_egraph_sha256": applied_effect["post_mutation_egraph_sha256"],
             "original_enode_sha256": rewrite["original_enode_sha256"],
             "rewritten_enode_sha256": rewrite["rewritten_enode_sha256"],
             "lowering_effect": decision["lowering_effect"],
@@ -226,6 +266,9 @@ receipt = {
     "abi_schema": "madaros.v2.s5.abi_input_classification/0.1",
     "input_preflight_sha256": preflight["preflight_sha256"],
     "input_s4_gate_sha256": s4_summary["gate_sha256"],
+    "input_applied_extraction_contract": applied_extraction["schema"],
+    "input_applied_extraction_sha256": applied_extraction["applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
     "input_contract": preflight["schema"],
     "selected_rewrite_count": len(rewrite_witnesses),
     "semantic_rejected_rewrite_count": len(rejected_ids),
@@ -237,6 +280,8 @@ receipt = {
     "producer_evaluation_preservation_modes": sorted({w["producer_evaluation_preservation"] for w in rewrite_witnesses}),
     "input_boundary_invariants": [
         "selected_ids_equal_s4_accepted_selected_ids",
+        "each_witness_carries_s4_applied_effect_hash",
+        "input_applied_extraction_hash_matches_s5_preflight",
         "abi_impact_none_for_every_selected_rewrite",
         "no_call_signature_effect",
         "no_stack_effect",

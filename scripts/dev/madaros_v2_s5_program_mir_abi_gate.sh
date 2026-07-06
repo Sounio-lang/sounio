@@ -432,6 +432,24 @@ f128_arithmetic_value_contract_receipt = load_json(f128_arithmetic_value_contrac
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
 
+if effect_receipt.get("s4_applied_extraction_consumed") is not True:
+    raise SystemExit("program MIR/ABI gate requires MIR-effect receipt to consume S4 applied extraction")
+if effect_receipt.get("input_applied_extraction_contract") != "madaros.v2.s4.applied_extraction/0.1":
+    raise SystemExit("program MIR/ABI gate requires S4 applied-extraction input contract")
+if not effect_receipt.get("input_applied_extraction_sha256"):
+    raise SystemExit("program MIR/ABI gate requires S4 applied-extraction hash")
+if effect_module.get("s4_applied_extraction_consumed") is not True:
+    raise SystemExit("program MIR/ABI gate requires MIR-effect module to carry S4 applied extraction")
+if effect_module.get("input_applied_extraction_sha256") != effect_receipt.get("input_applied_extraction_sha256"):
+    raise SystemExit("program MIR/ABI gate MIR-effect applied-extraction hash mismatch")
+for effect in effect_module.get("mir_effects", []):
+    if effect.get("input_applied_extraction_sha256") != effect_receipt["input_applied_extraction_sha256"]:
+        raise SystemExit(f"program MIR/ABI gate effect applied-extraction hash mismatch: {effect.get('rewrite_id')}")
+    if not effect.get("source_applied_effect_sha256"):
+        raise SystemExit(f"program MIR/ABI gate effect missing source applied-effect hash: {effect.get('rewrite_id')}")
+    if not effect.get("post_apply_s5_input_hlir_sha256") or not effect.get("post_apply_s5_input_egraph_sha256"):
+        raise SystemExit(f"program MIR/ABI gate effect missing post-apply S5 input hashes: {effect.get('rewrite_id')}")
+
 if sret_receipt.get("schema") != "madaros.v2.s5.sret_abi_receipt/0.1":
     raise SystemExit("bad S5 SRET ABI receipt schema")
 if sret_receipt.get("status") != "pass":
@@ -2072,6 +2090,9 @@ module = {
     "input_mir_effect_schema": effect_receipt["schema"],
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
     "input_boundary_sha256": effect_receipt["input_boundary_sha256"],
+    "input_applied_extraction_contract": effect_receipt["input_applied_extraction_contract"],
+    "input_applied_extraction_sha256": effect_receipt["input_applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
     "input_effect_count": effect_receipt["effect_count"],
     "input_selected_rewrite_count": effect_receipt["selected_rewrite_count"],
     "program_count": len(programs),
@@ -2443,6 +2464,8 @@ module = {
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
         "f128_ieee_arithmetic_and_abi_surfaces_not_promoted",
         "s4_negative_and_blocked_controls_not_promoted",
+        "s4_applied_extraction_hash_propagates_to_program_receipt",
+        "each_mir_effect_is_bound_to_a_source_s4_applied_effect_hash",
         "f128_ieee_helpers_and_abi_differentials_still_required_before_s5_ready",
     ],
 }
@@ -2553,6 +2576,10 @@ receipt = {
     "i512_u512_rejected_not_promoted": True,
     "f128_promoted": False,
     "input_mir_effect_sha256": effect_receipt["receipt_sha256"],
+    "input_boundary_sha256": effect_receipt["input_boundary_sha256"],
+    "input_applied_extraction_contract": effect_receipt["input_applied_extraction_contract"],
+    "input_applied_extraction_sha256": effect_receipt["input_applied_extraction_sha256"],
+    "s4_applied_extraction_consumed": True,
     "sret_abi_receipt_sha256": sret_receipt["receipt_sha256"],
     "source_sret_receipt_sha256": source_sret_receipt["receipt_sha256"],
     "stack_call_receipt_sha256": stack_call_receipt["receipt_sha256"],
