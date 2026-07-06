@@ -3822,15 +3822,53 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c
 }
 
+// Returns a scratch copy of (*nc) with code.len and relocs.count reset to 0, so that a
+// legacy by-value emit_builtin_X(NativeCompiler) -> NativeCompiler helper — which appends
+// to `code` via the old CodeBuffer-by-value chain (buf.bytes[buf.len] = ..., no bounds
+// check, no NATIVE_V2_TEXT_BUF mirror update) — always writes starting at offset 0. That
+// keeps every write inside the fixed [i8; 131072] CodeBuffer array regardless of how large
+// the REAL merged code offset in (*nc) has grown (builtin bodies are a few dozen to a few
+// hundred bytes, always well under the cap). Without this, calling emit_builtin_X((*nc))
+// directly once (*nc).code.len has passed 131072 would silently drop instruction bytes
+// (or overrun the array) before native_v2_persist_builtin_emit_into is even reached — the
+// same 128KB CodeBuffer exposure fixed for str_len/str_char_at in 639094a00, now closed
+// architecturally for every remaining persist-builtin call site instead of per-builtin.
+fn native_v2_builtin_scratch(nc: &! NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var scratch = (*nc)
+    scratch.code.len = 0
+    scratch.relocs.count = 0
+    scratch
+}
+
+// Persists a builtin body emitted into a scratch NativeCompiler (see
+// native_v2_builtin_scratch) onto the real (*nc). `updated` was built from a copy whose
+// code.len started at 0, so `updated.code.len` is just the builtin's own body size (always
+// << 131072) and `updated.code.bytes[0..updated.code.len]` holds the real instruction
+// bytes. Byte-copy them one at a time through nc_emit_byte — the mutable-pointer helper
+// that keeps the real 4MB NATIVE_V2_TEXT_BUF mirror (and the narrow 131072 CodeBuffer,
+// while it still fits) correctly in sync at ANY offset in (*nc), unlike the old
+// `(*nc).code = updated.code` by-value replacement this used to do (which both clobbered
+// (*nc).code.len down to the tiny scratch size and inherited the scratch's own 131072
+// bound at the REAL, potentially much larger, offset).
+//
+// Because emission happened in the scratch at offset 0, any reloc recorded by the builtin
+// is relative to that scratch, not to the real merged code — `entry.offset` must be
+// shifted by `old_len` (the real offset the builtin's body actually starts at) before it
+// is registered against (*nc). The old code never added this shift because it emitted
+// directly into (*nc)'s real (already-absolute) offset, so `entry.offset` was already
+// correct as-is; scratch changes that invariant.
 fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCompiler) with Mut, Panic, Div {
     let old_len = (*nc).code.len
-    (*nc).code = updated.code
-    native_v2_text_sync_from_narrow(nc, old_len)
+    var bi = 0
+    while bi < updated.code.len && bi < 131072 {
+        nc_emit_byte(nc, updated.code.bytes[bi as usize] as i64)
+        bi = bi + 1
+    }
     var ri = 0
     while ri < updated.relocs.count && ri < 4096 {
         let entry = updated.relocs.entries[ri as usize]
         if entry.kind.kind_code == 3 {
-            nc_add_data_section_reloc(nc, entry.offset, entry.target.target_index)
+            nc_add_data_section_reloc(nc, entry.offset + old_len, entry.target.target_index)
         }
         ri = ri + 1
     }
@@ -5744,22 +5782,22 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     // corrupts fn_offsets, so the function's recorded offset was wrong and every call to it
     // jumped to a bad address (str_slice/sqrt/print_f64/… all crashed). Same root + fix as
     // str_concat/str_eq.
-    if builtin_id == 6 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_len((*nc))); return }
-    if builtin_id == 20 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_char_at((*nc))); return }
-    if builtin_id == 7 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq((*nc))); return }
-    if builtin_id == 8 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_slice((*nc))); return }
-    if builtin_id == 9 { native_v2_persist_builtin_emit_into(nc, emit_builtin_starts_with((*nc))); return }
-    if builtin_id == 10 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat((*nc))); return }
-    if builtin_id == 11 { native_v2_persist_builtin_emit_into(nc, emit_builtin_read_file((*nc))); return }
-    if builtin_id == 12 { native_v2_persist_builtin_emit_into(nc, emit_builtin_write_file((*nc))); return }
-    if builtin_id == 13 { native_v2_persist_builtin_emit_into(nc, emit_builtin_file_size((*nc))); return }
-    if builtin_id == 14 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sqrt((*nc))); return }
-    if builtin_id == 15 { native_v2_persist_builtin_emit_into(nc, emit_builtin_print_f64((*nc))); return }
-    if builtin_id == 16 { native_v2_persist_builtin_emit_into(nc, emit_builtin_exp((*nc))); return }
-    if builtin_id == 17 { native_v2_persist_builtin_emit_into(nc, emit_builtin_log((*nc))); return }
-    if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
-    if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
-    if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_agg_copy_words((*nc))); return }
+    if builtin_id == 6 { let scratch6 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_str_len(scratch6)); return }
+    if builtin_id == 20 { let scratch20 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_str_char_at(scratch20)); return }
+    if builtin_id == 7 { let scratch7 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq(scratch7)); return }
+    if builtin_id == 8 { let scratch8 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_str_slice(scratch8)); return }
+    if builtin_id == 9 { let scratch9 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_starts_with(scratch9)); return }
+    if builtin_id == 10 { let scratch10 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat(scratch10)); return }
+    if builtin_id == 11 { let scratch11 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_read_file(scratch11)); return }
+    if builtin_id == 12 { let scratch12 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_write_file(scratch12)); return }
+    if builtin_id == 13 { let scratch13 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_file_size(scratch13)); return }
+    if builtin_id == 14 { let scratch14 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_sqrt(scratch14)); return }
+    if builtin_id == 15 { let scratch15 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_print_f64(scratch15)); return }
+    if builtin_id == 16 { let scratch16 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_exp(scratch16)); return }
+    if builtin_id == 17 { let scratch17 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_log(scratch17)); return }
+    if builtin_id == 18 { let scratch18 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_sin(scratch18)); return }
+    if builtin_id == 19 { let scratch19 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_cos(scratch19)); return }
+    if builtin_id == 22 { let scratch22 = native_v2_builtin_scratch(nc); native_v2_persist_builtin_emit_into(nc, emit_builtin_agg_copy_words(scratch22)); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -7433,7 +7471,8 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
             return true
         }
         if builtin_id == 7 {
-            native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq((*nc)))
+            let scratch_str_eq = native_v2_builtin_scratch(nc)
+            native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq(scratch_str_eq))
             return true
         }
         if builtin_id == 10 {
@@ -7441,7 +7480,8 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // str_eq, instead of `(*nc) = emit_builtin_str_concat((*nc))` — the full
             // by-value NativeCompiler replacement is hit by the large-aggregate miscompile
             // and corrupts fn_offsets, so the call to str_concat resolved to a bad address.
-            native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat((*nc)))
+            let scratch_str_concat = native_v2_builtin_scratch(nc)
+            native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat(scratch_str_concat))
             return true
         }
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
