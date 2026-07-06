@@ -3864,11 +3864,62 @@ fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCom
         nc_emit_byte(nc, updated.code.bytes[bi as usize] as i64)
         bi = bi + 1
     }
+    // Adopt the emitter's rodata additions (f64 constants of exp/log/sin/cos/
+    // print_f64/sqrt: these builtins are legacy by-value emitters that append
+    // constants via data_section_add_f64 into the StringTable-based (*nc).rodata,
+    // not the flat rodata array string literals use).
+    //
+    // The scratch copy (native_v2_builtin_scratch) started from (*nc)'s rodata
+    // as-is (only code.len/relocs.count were reset), so `updated.rodata` is
+    // strictly old-bytes + this builtin's newly appended constants; the slice
+    // beyond `pre_rodata_len` is exactly what this call contributed.
+    //
+    // The final ELF writer (native_v2_build_elf_image_into / the ~10230 twin)
+    // picks ONE rodata source for the whole binary: `(*nc).flat_rodata_bytes`
+    // whenever `flat_rodata_len > 0` (i.e. whenever any string literal has been
+    // recorded via nc_rodata_add_name_value/nc_rodata_add_ir_instr_name), else
+    // `(*nc).rodata.bytes`. It never concatenates both. So a program that prints
+    // ANY string (virtually all of them) has flat_rodata_len > 0, and everything
+    // this function used to leave in `(*nc).rodata` was silently dropped from the
+    // written file — the relocations pointed at "valid" StringTable offsets that
+    // were simply never copied into the ELF, so the f64 loads read whatever
+    // (usually string) bytes happened to land at that file offset instead.
+    // Migrating the newly appended constants into the SAME flat array the writer
+    // actually emits from (and remapping their reloc targets to the new flat
+    // offsets) is what gets the constant bytes into the binary for real.
+    let pre_rodata_len = (*nc).rodata.len
+    let appended_rodata_len = updated.rodata.len - pre_rodata_len
+    let flat_base = (*nc).flat_rodata_len
+    var fri = 0
+    while fri < appended_rodata_len && (flat_base + fri) < 8192 && (pre_rodata_len + fri) < 8192 {
+        (*nc).flat_rodata_bytes[(flat_base + fri) as usize] = updated.rodata.bytes[(pre_rodata_len + fri) as usize]
+        fri = fri + 1
+    }
+    (*nc).flat_rodata_len = flat_base + fri
+    // Keep the legacy field in sync too — some rodata-length computations still
+    // fall back to `(*nc).rodata.len` when `flat_rodata_len == 0`.
+    (*nc).rodata = updated.rodata
     var ri = 0
     while ri < updated.relocs.count && ri < 4096 {
         let entry = updated.relocs.entries[ri as usize]
         if entry.kind.kind_code == 3 {
             nc_add_data_section_reloc(nc, entry.offset + old_len, entry.target.target_index)
+        }
+        if entry.kind.kind_code == 2 {
+            // RIP-relative rodata loads: scratch-relative code offset needs the
+            // +old_len shift. The rodata target offset was recorded against the
+            // StringTable numbering (updated.rodata); remap any offset that falls
+            // within this call's newly appended region to its new flat-array
+            // offset. (Offsets below pre_rodata_len would refer to pre-existing
+            // StringTable content — not expected from these single-shot builtin
+            // emitters, which always append fresh constants — but are left
+            // untranslated rather than silently mishandled if it ever occurs.)
+            let old_target = entry.target.target_index
+            var new_target = old_target
+            if old_target >= pre_rodata_len {
+                new_target = flat_base + (old_target - pre_rodata_len)
+            }
+            nc_add_rodata_reloc(nc, entry.offset + old_len, new_target)
         }
         ri = ri + 1
     }
@@ -4085,7 +4136,10 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = n_f64 * ln2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -16) // save n*ln2 to [rbp-16] temporarily
+    // BUGFIX: n*ln2 is in xmm0 (product), not xmm1 (=ln2). The original stored
+    // xmm1, so r became x - ln2 instead of x - n*ln2 and exp(x) was wrong for
+    // every x (exp(0) returned exp(-ln2)=0.5). Save xmm0.
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16) // save n*ln2 to [rbp-16] temporarily
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)  // xmm0 = x
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16) // xmm1 = n*ln2
     c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = r = x - n*ln2
@@ -4163,6 +4217,11 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mov_reg_reg(c.code, 3, 0)        // mov rbx, rax
     c.code = emit_load_rbp_disp32_rax(c.code, -48)  // rax = result bits
     c.code = emit_add_rax_rbx(c.code)              // rax = result + (n<<52)
+    // BUGFIX: the scaled result was left only in RAX, but the f64 ABI returns
+    // in XMM0. exp's last XMM0 write was the pre-scaling Horner value, so the
+    // caller (which reads XMM0) got exp(r) unscaled — correct only when n==0.
+    // Move the scaled bits into XMM0 for the return.
+    c.code = emit_movq_xmm0_rax(c.code)            // xmm0 = scaled result bits
     c.code = emit_add_rsp_imm32(c.code, 64)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
@@ -4256,8 +4315,10 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
 
     // f = (m-1) / (m+1)
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -48) // save (m-1) to xmm1 via stack? No, swap:
-    // xmm1 = m+1, xmm0 = m-1
+    // BUGFIX: removed a spurious `movsd [rbp-48], xmm1` here — at this point
+    // xmm1 = 1.0 (from the m+1 load) and [rbp-48] already holds m-1 (saved
+    // above), so the store clobbered m-1 with 1.0 and f became 1/(m+1).
+    // xmm0 = m+1
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = m+1
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = m-1
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)  // xmm1 = m+1
@@ -4265,7 +4326,9 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)  // [rbp-24] = f
 
     // Step 4: f^2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -24) // xmm1 = f (via store/load trick)
+    // BUGFIX: removed a spurious `movsd [rbp-24], xmm1` here — xmm1 = m+1
+    // (leftover divisor) at this point, so it clobbered f in [rbp-24] and f^2
+    // became (m+1)^2. [rbp-24] already holds f from the store above.
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = f
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24) // xmm1 = f
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2
@@ -4290,7 +4353,9 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
 
     // + f^4 / 5
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -40)  // save partial to [rbp-40]
+    // BUGFIX: the partial to save is f^6/7 (= xmm0), not xmm1 (= 1/7). The
+    // original stored xmm1, so the later `+ f^6/7` added 1/7 instead.
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // save partial (f^6/7) to [rbp-40]
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
     let load_fifth_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
@@ -4538,7 +4603,12 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     var c = nc
 
     // Store 1e6 constant in .rodata
-    c.rodata = data_section_add_f64(c.rodata, 0x4124680000000000)
+    // BUGFIX: 0x4124680000000000 is 668672.0, NOT 1e6 — a wrong bit pattern that
+    // was masked while the RIP-relative constant load itself was broken (the load
+    // read stale bytes, so nobody could see the fraction was scaled by the wrong
+    // factor). With the load fixed, the fraction digits came out as value*668672
+    // (e.g. 3.141593 -> "3.094679"). 1000000.0 = 0x412E848000000000.
+    c.rodata = data_section_add_f64(c.rodata, 0x412E848000000000)
     let rodata_1e6_offset = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
@@ -4572,7 +4642,12 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
     // Clear sign bit
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    // BUGFIX: recover the original f64 bits from XMM0, not RDI. The '-' write
+    // syscall just above overwrote RDI with the stdout fd, so `mov rax, rdi`
+    // read the fd (=1) instead of the value bits — abs+cvttsd2si then yielded 0,
+    // printing "-0.000000" for every negative. XMM0 still holds the original
+    // bits (set at entry, untouched by syscalls).
+    c.code = emit_movq_rax_xmm0(c.code)               // rax = original f64 bits
     c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
     c.code = emit_and_rax_rbx(c.code)
     c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax
@@ -4850,12 +4925,36 @@ fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool
 
 fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     if !(patch_offset >= 3 && patch_offset + 4 <= (*nc).code.len) { return false }
-    if native_v2_text_byte_at(patch_offset - 3) != (0x48 as i8) { return false }
-    let op = native_v2_text_byte_at(patch_offset - 2)
-    let modrm = native_v2_text_byte_at(patch_offset - 1)
-    (op == (0x8d as i8) && modrm == (0x05 as i8))
-        || (op == (0x8b as i8) && modrm == (0x1d as i8))
-        || (op == (0x89 as i8) && modrm == (0x05 as i8))
+    if native_v2_text_byte_at(patch_offset - 3) == (0x48 as i8) {
+        let op = native_v2_text_byte_at(patch_offset - 2)
+        let modrm = native_v2_text_byte_at(patch_offset - 1)
+        if (op == (0x8d as i8) && modrm == (0x05 as i8))
+            || (op == (0x8b as i8) && modrm == (0x1d as i8))
+            || (op == (0x89 as i8) && modrm == (0x05 as i8)) {
+            return true
+        }
+    }
+    // SSE2 scalar-double RIP-relative load/store: F2 0F 10|11 05|0D <disp32>
+    // (movsd xmm0/xmm1, [rip+disp32] and the reverse store form). This is the
+    // encoding emit_movsd_xmm0_rip_disp32/emit_movsd_xmm1_rip_disp32 (encode.sio)
+    // produce for every f64 constant load in the math builtins (exp/log/sin/cos/
+    // print_f64/sqrt). It has NO REX.W prefix — F2 (mandatory SSE prefix), 0F 10/11
+    // (opcode), 05|0D (ModRM: mod=00, reg=xmm0|xmm1, rm=101/RIP) — so the GPR
+    // lea/mov check above (which requires a leading 0x48) never matches it, and
+    // every RIP-relative rodata reference emitted by these builtins was silently
+    // left unpatched (disp32 stayed 0) at ELF-write time.
+    if patch_offset >= 4 {
+        let p4 = native_v2_text_byte_at(patch_offset - 4)
+        let p3 = native_v2_text_byte_at(patch_offset - 3)
+        let p2 = native_v2_text_byte_at(patch_offset - 2)
+        let p1 = native_v2_text_byte_at(patch_offset - 1)
+        if p4 == (0xF2 as i8) && p3 == (0x0F as i8)
+            && (p2 == (0x10 as i8) || p2 == (0x11 as i8))
+            && (p1 == (0x05 as i8) || p1 == (0x0D as i8)) {
+            return true
+        }
+    }
+    false
 }
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
