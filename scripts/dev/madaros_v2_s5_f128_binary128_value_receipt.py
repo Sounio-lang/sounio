@@ -67,6 +67,13 @@ CASES: list[Case] = [
     Case("one_point_2345_rounded", "1.2345", "3fff3c083126e978d4fdf3b645a1cac1", "normal", False),
     Case("twelve_point_345_rounded", "12.345", "40028b0a3d70a3d70a3d70a3d70a3d71", "normal", False),
     Case("one_twenty_three_point_456_rounded", "123.456", "4005edd2f1a9fbe76c8b4395810624dd", "normal", False),
+    Case("pi_scale10_rounded", "3.1415926535", "4000921fb54411743e0ccd6545767925", "normal", False),
+    Case("one_seventeenth_prefix_scale16_rounded", "0.0588235294117647", "3ffae1e1e1e1e1e1d4518dd6a9289864", "normal", False),
+    Case("scale17_rounded", "0.12345678901234567", "3ffbf9add3746f65e780cb23f138e780", "normal", False),
+    Case("scale18_rounded", "1e-18", "3fc32725dd1d243aba0e75fe645cc487", "normal", False),
+    Case("negative_scale18_rounded", "-1e-18", "bfc32725dd1d243aba0e75fe645cc487", "normal", False),
+    Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", "normal", False),
+    Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", "normal", False),
 ]
 
 PROBE_SOURCE = (

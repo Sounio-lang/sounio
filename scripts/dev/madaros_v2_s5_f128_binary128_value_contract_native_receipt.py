@@ -3,7 +3,7 @@
 
 This promotes native-v2 materialization for the complete current
 f128_binary128_value_receipt case set, including exact dyadic decimal literals
-and bounded rounded decimal literals with sig_hi=0, scale10<=6, and
+and bounded rounded decimal literals with sig_hi=0, scale10<=18, and
 roundTiesToEven. It deliberately does not promote arbitrary rounded
 decimal-to-binary128 materialization beyond that contract, f128 arithmetic,
 call ABI, or return ABI.
@@ -72,6 +72,13 @@ CASES: list[Case] = [
     Case("one_point_2345_rounded", "1.2345", "3fff3c083126e978d4fdf3b645a1cac1", [1, 0, 12345, 5, 4, 0]),
     Case("twelve_point_345_rounded", "12.345", "40028b0a3d70a3d70a3d70a3d70a3d71", [1, 0, 12345, 5, 3, 0]),
     Case("one_twenty_three_point_456_rounded", "123.456", "4005edd2f1a9fbe76c8b4395810624dd", [1, 0, 123456, 6, 3, 0]),
+    Case("pi_scale10_rounded", "3.1415926535", "4000921fb54411743e0ccd6545767925", [1, 0, 31415926535, 11, 10, 0]),
+    Case("one_seventeenth_prefix_scale16_rounded", "0.0588235294117647", "3ffae1e1e1e1e1e1d4518dd6a9289864", [1, 0, 588235294117647, 17, 16, 0]),
+    Case("scale17_rounded", "0.12345678901234567", "3ffbf9add3746f65e780cb23f138e780", [1, 0, 12345678901234567, 18, 17, 0]),
+    Case("scale18_rounded", "1e-18", "3fc32725dd1d243aba0e75fe645cc487", [1, 0, 1, 1, 18, 0]),
+    Case("negative_scale18_rounded", "-1e-18", "bfc32725dd1d243aba0e75fe645cc487", [-1, 0, 1, 1, 18, 0]),
+    Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", [1, 0, 123456789012345678, 18, 6, 0]),
+    Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", [1, 0, 999999999999999999, 18, 6, 0]),
 ]
 
 

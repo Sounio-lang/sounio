@@ -1031,8 +1031,8 @@ if f128_binary128_value_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
 if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
     raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
-if f128_binary128_value_receipt.get("case_count") != 28:
-    raise SystemExit("f128 binary128 value receipt must contain exact twenty-eight cases")
+if f128_binary128_value_receipt.get("case_count") != 35:
+    raise SystemExit("f128 binary128 value receipt must contain exact thirty-five cases")
 for field in [
     "f128_binary128_value_contract_complete",
     "f128_binary128_round_ties_to_even_recorded",
@@ -1080,6 +1080,13 @@ required_f128_value_hex = {
     "one_point_2345_rounded": "3fff3c083126e978d4fdf3b645a1cac1",
     "twelve_point_345_rounded": "40028b0a3d70a3d70a3d70a3d70a3d71",
     "one_twenty_three_point_456_rounded": "4005edd2f1a9fbe76c8b4395810624dd",
+    "pi_scale10_rounded": "4000921fb54411743e0ccd6545767925",
+    "one_seventeenth_prefix_scale16_rounded": "3ffae1e1e1e1e1e1d4518dd6a9289864",
+    "scale17_rounded": "3ffbf9add3746f65e780cb23f138e780",
+    "scale18_rounded": "3fc32725dd1d243aba0e75fe645cc487",
+    "negative_scale18_rounded": "bfc32725dd1d243aba0e75fe645cc487",
+    "large_scale6_rounded": "4023cbe991a14587e5a78f25a250f840",
+    "large_all_nines_scale6_rounded": "4026d1a94a1fffffffde7210be9424e6",
 }
 if set(f128_value_cases) != set(required_f128_value_hex):
     raise SystemExit(f"f128 binary128 value receipt cases mismatch: {sorted(f128_value_cases)}")
@@ -1097,6 +1104,8 @@ if f128_value_cases.get("one_e3_exact", {}).get("decimal_scale10") != -3:
     raise SystemExit("one_e3_exact must preserve decimal scale10=-3 in the binary128 value receipt")
 if f128_value_cases.get("one_twenty_three_point_456_rounded", {}).get("decimal_scale10") != 3:
     raise SystemExit("one_twenty_three_point_456_rounded must preserve decimal scale10=3 in the binary128 value receipt")
+if f128_value_cases.get("scale18_rounded", {}).get("decimal_scale10") != 18:
+    raise SystemExit("scale18_rounded must preserve decimal scale10=18 in the binary128 value receipt")
 
 if f128_literal_value_bridge_receipt.get("schema") != "madaros.v2.s5.f128_literal_value_bridge_receipt/0.3":
     raise SystemExit("bad S5 f128 literal value bridge receipt schema")
@@ -1482,8 +1491,8 @@ if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
 if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 28:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact twenty-eight cases")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 35:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact thirty-five cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
 for field in [
     "f128_binary128_value_contract_native_materialization_promoted",
@@ -1532,6 +1541,13 @@ required_value_native_cases = {
     "one_point_2345_rounded": {"literal": "1.2345", "hex": "3fff3c083126e978d4fdf3b645a1cac1", "metadata": [1, 0, 12345, 5, 4, 0]},
     "twelve_point_345_rounded": {"literal": "12.345", "hex": "40028b0a3d70a3d70a3d70a3d70a3d71", "metadata": [1, 0, 12345, 5, 3, 0]},
     "one_twenty_three_point_456_rounded": {"literal": "123.456", "hex": "4005edd2f1a9fbe76c8b4395810624dd", "metadata": [1, 0, 123456, 6, 3, 0]},
+    "pi_scale10_rounded": {"literal": "3.1415926535", "hex": "4000921fb54411743e0ccd6545767925", "metadata": [1, 0, 31415926535, 11, 10, 0]},
+    "one_seventeenth_prefix_scale16_rounded": {"literal": "0.0588235294117647", "hex": "3ffae1e1e1e1e1e1d4518dd6a9289864", "metadata": [1, 0, 588235294117647, 17, 16, 0]},
+    "scale17_rounded": {"literal": "0.12345678901234567", "hex": "3ffbf9add3746f65e780cb23f138e780", "metadata": [1, 0, 12345678901234567, 18, 17, 0]},
+    "scale18_rounded": {"literal": "1e-18", "hex": "3fc32725dd1d243aba0e75fe645cc487", "metadata": [1, 0, 1, 1, 18, 0]},
+    "negative_scale18_rounded": {"literal": "-1e-18", "hex": "bfc32725dd1d243aba0e75fe645cc487", "metadata": [-1, 0, 1, 1, 18, 0]},
+    "large_scale6_rounded": {"literal": "123456789012.345678", "hex": "4023cbe991a14587e5a78f25a250f840", "metadata": [1, 0, 123456789012345678, 18, 6, 0]},
+    "large_all_nines_scale6_rounded": {"literal": "999999999999.999999", "hex": "4026d1a94a1fffffffde7210be9424e6", "metadata": [1, 0, 999999999999999999, 18, 6, 0]},
 }
 if set(value_native_cases) != set(required_value_native_cases):
     raise SystemExit(f"f128 binary128 value-contract native receipt cases mismatch: {sorted(value_native_cases)}")
