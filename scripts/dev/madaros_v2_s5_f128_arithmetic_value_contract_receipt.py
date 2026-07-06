@@ -141,6 +141,71 @@ POSITIVE = [
         "expected_hex": "3fff4000000000000000000000000000",
         "expected_metadata": [1, 0, 125, 3, 2, 0],
     },
+    {
+        "case_id": "f128_sub_half_one_to_negative_half",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.5 as f128
+  let y: f128 = 1.0 as f128
+  let z: f128 = x - y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "bffe0000000000000000000000000000",
+        "expected_metadata": [-1, 0, 5, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_add_negative_half_one_to_half",
+        "source": """fn main() -> i64 {
+  let x: f128 = -0.5 as f128
+  let y: f128 = 1.0 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffe0000000000000000000000000000",
+        "expected_metadata": [1, 0, 5, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_add_negative_half_negative_half_to_negative_one",
+        "source": """fn main() -> i64 {
+  let x: f128 = -0.5 as f128
+  let y: f128 = -0.5 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "bfff0000000000000000000000000000",
+        "expected_metadata": [-1, 0, 10, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_mul_negative_half_half_to_negative_quarter",
+        "source": """fn main() -> i64 {
+  let x: f128 = -0.5 as f128
+  let y: f128 = 0.5 as f128
+  let z: f128 = x * y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "bffd0000000000000000000000000000",
+        "expected_metadata": [-1, 0, 25, 3, 2, 0],
+    },
+    {
+        "case_id": "f128_div_negative_one_two_to_negative_half",
+        "source": """fn main() -> i64 {
+  let x: f128 = -1.0 as f128
+  let y: f128 = 2.0 as f128
+  let z: f128 = x / y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "bffe0000000000000000000000000000",
+        "expected_metadata": [-1, 0, 5, 2, 1, 0],
+    },
 ]
 
 NEGATIVE = [
@@ -347,7 +412,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_promoted": False,
         "contract_scope": [
             "finite exact binary128 value-contract arithmetic only",
-            "finite exact decimal-tenths plus quarter matrix materializes as binary128 words",
+            "finite exact signed decimal-tenths plus quarter matrix materializes as binary128 words",
             "single-chain arithmetic preserves compiler value-kind metadata",
             "unsupported f128 arithmetic remains fail-closed",
         ],
