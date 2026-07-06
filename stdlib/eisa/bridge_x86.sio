@@ -3757,8 +3757,58 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with 
                                             p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
                                             p = em_v2_set_last_written(out, p, dst)
                                         } else {
+                                        if op == op_ebrz() || op == op_ebrn() {
+                                            p = em_v2_normalize(out, p, a)
+                                            p = mov_rax_mem(out, p, v2_reg_poison_off(a))
+                                            p = test_rax(out, p)
+                                            let jpoison = p + 2
+                                            p = jcc(out, p, 0x85, 0)
+
+                                            // frail band = max(u, |e0|); count iff
+                                            // band > 0 AND |val| <= band (e0 = deep
+                                            // leading err term, ehi position).
+                                            p = em_v1_abs_copy(out, p, v2_reg_e0_off(a), sc(40))
+                                            p = em_v1_abs_copy(out, p, v2_reg_val_off(a), sc(41))
+                                            p = ld(out, p, 0, v2_reg_u_off(a))
+                                            p = ld(out, p, 1, sc(40))
+                                            p = sse(out, p, 0x5F, 0, 1)
+                                            p = st(out, p, 0, sc(42))
+                                            p = pxor(out, p, 1, 1)
+                                            p = ucomi(out, p, 0, 1)
+                                            let jnofrail1 = p + 2
+                                            p = jcc(out, p, 0x86, 0)
+                                            p = ld(out, p, 2, sc(41))
+                                            p = ucomi(out, p, 2, 0)
+                                            let jnofrail2 = p + 2
+                                            p = jcc(out, p, 0x87, 0)
+                                            p = inc_mem64(out, p, sc(34))
+                                            let frail_done = p
+                                            patch32(out, jnofrail1, frail_done - (jnofrail1 + 4))
+                                            patch32(out, jnofrail2, frail_done - (jnofrail2 + 4))
+
+                                            p = ld(out, p, 0, v2_reg_val_off(a))
+                                            p = pxor(out, p, 1, 1)
+                                            p = ucomi(out, p, 0, 1)
+                                            let ccode = if op == op_ebrz() { 0x84 } else { 0x82 }
+                                            br_at[br_n as usize] = p + 2
+                                            br_tgt[br_n as usize] = b
+                                            br_n = br_n + 1
+                                            p = jcc(out, p, ccode, 0)
+                                            let jskip_poison = p + 1
+                                            p = jmp32(out, p, 0)
+                                            let poison_lbl = p
+                                            p = mov_rax_imm64(out, p, 1)
+                                            p = mov_mem_rax(out, p, sc(35))
+                                            // EVM: normalising a poisoned branch register
+                                            // refreshes last_written_reg = a. Replicate.
+                                            p = em_v2_set_last_written(out, p, a)
+                                            let after_poison = p
+                                            patch32(out, jpoison, poison_lbl - (jpoison + 4))
+                                            patch32(out, jskip_poison, after_poison - (jskip_poison + 4))
+                                        } else {
                                             // remaining v2 control-flow templates not yet landed
                                             return BridgeMeta { len: 0, status: 42 }
+                                        }
                                         }
                                         }
                                         }
