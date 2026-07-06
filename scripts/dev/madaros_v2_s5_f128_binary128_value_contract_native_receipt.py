@@ -87,6 +87,10 @@ CASES: list[Case] = [
     Case("negative_scale18_rounded", "-1e-18", "bfc32725dd1d243aba0e75fe645cc487", [-1, 0, 1, 1, 18, 0]),
     Case("large_scale6_rounded", "123456789012.345678", "4023cbe991a14587e5a78f25a250f840", [1, 0, 123456789012345678, 18, 6, 0]),
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", [1, 0, 999999999999999999, 18, 6, 0]),
+    Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", [1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
+    Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", [1, 0, 1, 1, 5000, 0]),
+    Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", [1, 0, 1, 1, -5000, 0]),
+    Case("overflow_to_negative_infinity", "-1e5000", "ffff0000000000000000000000000000", [-1, 0, 1, 1, -5000, 0]),
     Case(
         "truncated_arbitrary_1p23456789012345678901234567890123456789",
         "1.23456789012345678901234567890123456789",
@@ -116,10 +120,10 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "multi-limb decimal not present in the explicit truncated high-precision value-contract set",
     ),
     NegativeCase(
-        "overflow_decimal_literal_fails_closed",
-        "1e5000",
+        "uncontracted_near_half_min_subnormal_fails_closed",
+        "3.23758755971901255546221947911382327624978466901734e-4966",
         "f128_decimal_materialization_pending",
-        "finite decimal exponent outside the promoted binary128 materialization contract",
+        "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
 ]
 
@@ -174,6 +178,14 @@ def signed_i64(value: int) -> int:
 
 def mov_rax_imm64_pattern(value: int) -> bytes:
     return b"\x48\xb8" + int(value & ((1 << 64) - 1)).to_bytes(8, "little", signed=False)
+
+
+def mov_rax_imm_patterns(value: int) -> list[bytes]:
+    patterns = [mov_rax_imm64_pattern(value)]
+    signed = signed_i64(value)
+    if -(1 << 31) <= signed <= (1 << 31) - 1:
+        patterns.append(b"\x48\xc7\xc0" + int(signed & ((1 << 32) - 1)).to_bytes(4, "little", signed=False))
+    return patterns
 
 
 def extract_f128_metadata_rows(module: dict[str, Any]) -> list[list[int]]:
@@ -242,10 +254,10 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: Case, timeout_
 
     elf = elf_path.read_bytes()
     hi, lo = u64_words_from_hex(case.expected_hex)
-    hi_pattern = mov_rax_imm64_pattern(hi)
-    lo_pattern = mov_rax_imm64_pattern(lo)
-    hi_found = hi_pattern in elf
-    lo_found = lo_pattern in elf
+    hi_patterns = mov_rax_imm_patterns(hi)
+    lo_patterns = mov_rax_imm_patterns(lo)
+    hi_found = any(pattern in elf for pattern in hi_patterns)
+    lo_found = any(pattern in elf for pattern in lo_patterns)
     if hi != 0 and not hi_found:
         raise SystemExit(f"{case.case_id}: missing binary128 high-word mov immediate 0x{hi:016x}")
     if lo != 0 and not lo_found:
@@ -267,8 +279,8 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: Case, timeout_
         "expected_lo_i64": signed_i64(lo),
         "expected_decimal_metadata": expected_row_tail,
         "machine_module_metadata_rows": metadata_rows,
-        "hi_mov_imm64_pattern_hex": hi_pattern.hex(),
-        "lo_mov_imm64_pattern_hex": lo_pattern.hex(),
+        "hi_mov_imm_pattern_hex": [pattern.hex() for pattern in hi_patterns],
+        "lo_mov_imm_pattern_hex": [pattern.hex() for pattern in lo_patterns],
         "hi_mov_imm64_pattern_found": hi_found,
         "lo_mov_imm64_pattern_found": lo_found,
     }
@@ -356,6 +368,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
             "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+            "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -367,6 +380,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
         },
         "roundtrip_contract": [
             "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_bounded_rounded_and_truncated_high_precision_decimals",
+            "native_v2_materializes_explicit_value_contract_subnormal_underflow_and_finite_overflow_to_infinity_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",

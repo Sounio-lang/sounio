@@ -1539,8 +1539,8 @@ if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
 if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 38:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact thirty-eight cases")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 42:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact forty-two cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact two negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1550,6 +1550,7 @@ for field in [
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted",
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted",
     "f128_native_truncated_decimal_binary128_value_contract_promoted",
+    "f128_native_subnormal_underflow_overflow_value_contract_promoted",
     "uncontracted_f128_decimal_materialization_fails_closed",
 ]:
     if value_native_claims.get(field) is not True:
@@ -1600,6 +1601,10 @@ required_value_native_cases = {
     "negative_scale18_rounded": {"literal": "-1e-18", "hex": "bfc32725dd1d243aba0e75fe645cc487", "metadata": [-1, 0, 1, 1, 18, 0]},
     "large_scale6_rounded": {"literal": "123456789012.345678", "hex": "4023cbe991a14587e5a78f25a250f840", "metadata": [1, 0, 123456789012345678, 18, 6, 0]},
     "large_all_nines_scale6_rounded": {"literal": "999999999999.999999", "hex": "4026d1a94a1fffffffde7210be9424e6", "metadata": [1, 0, 999999999999999999, 18, 6, 0]},
+    "minimum_subnormal_rounded": {"literal": "6.475175119438025110924438958227646552499569338034681e-4966", "hex": "00000000000000000000000000000001", "metadata": [1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
+    "underflow_to_positive_zero": {"literal": "1e-5000", "hex": "00000000000000000000000000000000", "metadata": [1, 0, 1, 1, 5000, 0]},
+    "overflow_to_positive_infinity": {"literal": "1e5000", "hex": "7fff0000000000000000000000000000", "metadata": [1, 0, 1, 1, -5000, 0]},
+    "overflow_to_negative_infinity": {"literal": "-1e5000", "hex": "ffff0000000000000000000000000000", "metadata": [-1, 0, 1, 1, -5000, 0]},
     "truncated_arbitrary_1p23456789012345678901234567890123456789": {"literal": "1.23456789012345678901234567890123456789", "hex": "3fff3c0ca428c59fb71a7be16b6b6d5b", "metadata": [1, 901234567890123456, 123456789012345678, 39, 38, 3]},
     "truncated_pi_40_digits": {"literal": "3.14159265358979323846264338327950288419", "hex": "4000921fb54442d18469898cc51701b8", "metadata": [1, 846264338327950288, 314159265358979323, 39, 38, 3]},
     "truncated_one_third_39_repeating": {"literal": "0.333333333333333333333333333333333333333", "hex": "3ffd5555555555555555555555555555", "metadata": [1, 333333333333333333, 33333333333333333, 40, 39, 4]},
@@ -1625,7 +1630,7 @@ for case_id, expected in required_value_native_cases.items():
 value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("negative_cases", [])}
 required_value_native_negative = {
     "uncontracted_multilimb_decimal_fails_closed": "f128_decimal_materialization_pending",
-    "overflow_decimal_literal_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
 }
 if set(value_native_negative_cases) != set(required_value_native_negative):
     raise SystemExit(f"f128 binary128 value-contract native negative cases mismatch: {sorted(value_native_negative_cases)}")
@@ -2223,7 +2228,7 @@ not_promoted = [
     {
         "surface": "f128_binary128_value_contract_native_materialization",
         "status": "promoted_for_complete_current_value_contract_case_set",
-        "reason": "native-v2 emits and runs every current f128 binary128 value-contract case, including signed zero, 0.1 roundTiesToEven, smallest-normal, and high-precision decimal probes; arbitrary decimal support beyond that finite contract is still not promoted",
+        "reason": "native-v2 emits and runs every current f128 binary128 value-contract case, including signed zero, 0.1 roundTiesToEven, smallest-normal, minimum-subnormal, underflow-to-zero, overflow-to-infinity, and high-precision decimal probes; arbitrary decimal support beyond that finite contract is still not promoted",
     },
     {
         "surface": "unsupported_numeric_diagnostics",
@@ -2602,6 +2607,7 @@ module = {
         "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
         "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
         "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+        "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2759,6 +2765,7 @@ receipt = {
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
     "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+    "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2848,6 +2855,7 @@ receipt = {
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_bounded_rounded_decimal_binary128_materialization_promoted"],
     "f128_native_truncated_decimal_binary128_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_truncated_decimal_binary128_value_contract_promoted"],
+    "f128_native_subnormal_underflow_overflow_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_subnormal_underflow_overflow_value_contract_promoted"],
     "f128_arithmetic_value_contract_promoted": module["scalar_abi_receipts"]["f128_arithmetic_value_contract_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],
