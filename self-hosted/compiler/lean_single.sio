@@ -8920,6 +8920,19 @@ fn emit_arena_alloc_x86(alloc_size: i64) with Mut, Panic, Div {
     em(0x48); em(0x89); em(0xc6)                     // mov rsi, rax
     emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)
     em(0x48); em(0x29); em(0xc6)                     // sub rsi, rax (rsi = chunk size)
+    // Oversized allocations: a Box larger than the negotiated chunk (e.g.
+    // the multi-GB IrModule mega-struct during 300+-fn merged compiles)
+    // must size the NEW chunk by the REQUEST — otherwise the fresh chunk
+    // is immediately overrun, every subsequent alloc re-reserves another
+    // chunk (VmPeak piles up in 2 GiB steps, ~24 GiB observed) and an
+    // incidental mmap failure aborts with 42 despite ample free memory.
+    em(0x48); em(0xb9); em64(sz + 4096)              // movabs rcx, sz + slack
+    em(0x48); em(0x39); em(0xce)                     // cmp rsi, rcx
+    em(0x0f); em(0x83)                               // jae keep (chunk >= need)
+    let ovr_keep = CL
+    em32(0)
+    em(0x48); em(0x89); em(0xce)                     // mov rsi, rcx (grow to need)
+    patch32(ovr_keep, CL)
     let slow_retry = CL
     em(0x48); em(0x31); em(0xff)                     // xor rdi, rdi
     em(0xba); em32(3)                                // mov edx, 3
