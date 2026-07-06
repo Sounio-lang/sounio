@@ -232,9 +232,9 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
     }
     let idx = t.count
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0 }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0 }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0 }
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, is_array: 0, array_len: 0 }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, is_array: 0, array_len: 0 }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, is_array: 0, array_len: 0 }
     t.entries[idx as usize] = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
@@ -793,6 +793,8 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 name: (*flist).head.name,
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else { 0 },
+                                                is_array: if lower_type_expr_is_array(&(*flist).head.ty) { 1 } else { 0 },
+                                                array_len: lower_type_expr_array_len(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -859,6 +861,8 @@ fn lowerer_register_struct_fields_mut(
                         name: (*list).head.name,
                         index: field_idx,
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                        is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
+                        array_len: lower_type_expr_array_len(&(*list).head.ty),
                     }
                     lay_entry.field_count = fc + 1
                     struct_layouts.entries[layout_idx as usize] = lay_entry
@@ -1361,6 +1365,8 @@ fn ir_fast_summary_register_struct_fields_owned(
                     name: (*list).head.name,
                     index: idx,
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                    is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
+                    array_len: lower_type_expr_array_len(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -2195,6 +2201,32 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     }
 }
 
+// Aggregate-copy support: does this field's declared type denote a
+// fixed-size array (`[T; N]`)? Struct fields of array type are stored as a
+// handle to a separately-allocated N-word object (see aggregate_storage_bytes
+// / lower_struct_fields_ref), so a struct-level deep copy must recurse into
+// such fields rather than copying the handle by value.
+fn lower_type_expr_is_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    (*te).kind == TypeExprKind::TypeArray
+}
+
+// Statically-known element/word count for an array type (`[T; N]` -> N), or
+// 0 if not an array or the size isn't a literal int (dynamic/unknown size:
+// callers must then fall back to the old alias-preserving copy for safety).
+fn lower_type_expr_array_len(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeArray { return 0 }
+    match (*te).array_size {
+        Some(sz_expr) => {
+            if (*sz_expr).kind == ExprKind::ExprIntLit && (*sz_expr).int_val > 0 {
+                (*sz_expr).int_val
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 fn lower_opt_type_is_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match *opt {
         Some(te) => lower_type_expr_is_f64(&(*te)),
@@ -2239,6 +2271,13 @@ fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool wit
 // (a number is printed instead of crashing). Mirrors the NV2_RELOC_* global-table pattern.
 var LOWER_EXTERN_FN_RET_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_CODES: [i64; 8192] = [0; 8192]
+// Parallel array (copy-aliasing fix): when an imported function returns a
+// STRUCT (code 3), this holds lower_name_hash(<struct type name>) so the
+// let-binding can recover the struct type of a local bound from an imported
+// call (`let img = eisax_encode(...)`) by matching the hash against the
+// preseeded struct-layout table. i64 hash only — same "no Name aggregate in
+// globals" constraint as the two arrays above.
+var LOWER_EXTERN_FN_RET_STRUCT_HASHES: [i64; 8192] = [0; 8192]
 var LOWER_EXTERN_FN_RET_COUNT: i64 = 0
 
 fn lower_name_hash(n: Name) -> i64 with Panic, Div {
@@ -2260,7 +2299,56 @@ fn lower_extern_fn_ret_record(name: Name, code: i64) with Mut, Panic, Div {
     if idx >= 0 && idx < 8192 {
         LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
         LOWER_EXTERN_FN_RET_CODES[idx as usize] = code
+        LOWER_EXTERN_FN_RET_STRUCT_HASHES[idx as usize] = 0
         LOWER_EXTERN_FN_RET_COUNT = idx + 1
+    }
+}
+
+// Record an imported function returning a struct: code 3 + the hash of the
+// struct type's name (recovered against the struct-layout table at use).
+fn lower_extern_fn_ret_record_struct(name: Name, struct_type_name: Name) with Mut, Panic, Div {
+    let idx = LOWER_EXTERN_FN_RET_COUNT
+    if idx >= 0 && idx < 8192 {
+        LOWER_EXTERN_FN_RET_HASHES[idx as usize] = lower_name_hash(name)
+        LOWER_EXTERN_FN_RET_CODES[idx as usize] = 3
+        LOWER_EXTERN_FN_RET_STRUCT_HASHES[idx as usize] = lower_name_hash(struct_type_name)
+        LOWER_EXTERN_FN_RET_COUNT = idx + 1
+    }
+}
+
+fn lower_extern_fn_ret_struct_hash_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = lower_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_EXTERN_FN_RET_COUNT && i < 8192 {
+        if LOWER_EXTERN_FN_RET_HASHES[i as usize] == h {
+            if LOWER_EXTERN_FN_RET_CODES[i as usize] == 3 {
+                return LOWER_EXTERN_FN_RET_STRUCT_HASHES[i as usize]
+            }
+            return 0
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Struct-name hash for an ExprCall whose callee is an imported struct-returning
+// function (0 if unknown / not a struct return). Mirrors
+// lower_extern_fn_ret_code_for_call's callee extraction.
+fn lower_extern_fn_ret_struct_hash_for_call(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall { return 0 }
+    match (*e).left {
+        Some(callee) => {
+            var nm = ir_empty_name()
+            if (*callee).kind == ExprKind::ExprIdent {
+                nm = (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath {
+                nm = ir_path_first_name((*callee).path)
+            } else {
+                return 0
+            }
+            lower_extern_fn_ret_struct_hash_lookup(nm)
+        }
+        None => 0,
     }
 }
 
@@ -2314,6 +2402,24 @@ fn lower_preseed_external_fn_rets(items: &Option<Box<ItemList>>) with Mut, Panic
                             }
                             if code != 0 {
                                 lower_extern_fn_ret_record(head_owned.name, code)
+                            } else {
+                                // Copy-aliasing fix: record plain named struct returns
+                                // (code 3 + struct-name hash) so `let x = imported_fn(...)`
+                                // can bind x's struct type and aggregate ident-copies of x
+                                // get real value-copy semantics. Generic types (Option,
+                                // Box, Vec, ...) are skipped: they are not plain layouts
+                                // and Box in particular has special deref lowering.
+                                let ret_struct_name = lower_opt_type_plain_struct_name(&(*fd).return_type)
+                                if ret_struct_name.len > 0 {
+                                    lower_extern_fn_ret_record_struct(head_owned.name, ret_struct_name)
+                                    if lower_aggregate_diag_enabled() {
+                                        print("lower_agg: ext_ret_struct fn=")
+                                        print(str_from_bytes(head_owned.name.buf, head_owned.name.len))
+                                        print(" ty=")
+                                        print(str_from_bytes(ret_struct_name.buf, ret_struct_name.len))
+                                        print("\n")
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -2349,6 +2455,31 @@ fn lower_opt_type_is_int_scalar(opt: &Option<Box<TypeExpr>>) -> bool with Mut, P
             lower_name_is_int_scalar(ir_path_first_name((*te).path))
         }
         None => false,
+    }
+}
+
+// The plain (non-generic) named-struct type name of a return type, or an
+// empty Name when the type is not a plain user struct. Used by the extern
+// fn-return preseed (copy-aliasing fix) to track imported struct returns.
+// Conservative: requires TypeNamed, no generic args, and an uppercase first
+// letter (user structs by convention), excluding scalar/builtin names.
+fn lower_opt_type_plain_struct_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
+            match (*te).type_args {
+                Some(_targs) => { return ir_empty_name() }
+                _ => {}
+            }
+            let nm = ir_path_first_name((*te).path)
+            if nm.len <= 0 { return ir_empty_name() }
+            let c0 = nm.buf[0] as i64
+            if c0 < 65 || c0 > 90 { return ir_empty_name() }   // require 'A'..'Z'
+            // Exclude generic-ish runtime handles with special lowering.
+            if ir_name_is_box(nm) { return ir_empty_name() }
+            nm
+        }
+        None => ir_empty_name(),
     }
 }
 
@@ -2887,6 +3018,204 @@ impl Lowerer {
     fn aggregate_storage_bytes(self, elem_count: i64) -> i64 {
         let _lo = self
         if elem_count <= 0 { 8 } else { elem_count * 8 }
+    }
+
+    // Copy-aliasing fix: emit fresh storage + a real value copy of a
+    // struct-typed aggregate, instead of the plain register/handle copy that
+    // `var bad = img` / `bad = img` used to emit for a bare ExprIdent
+    // source. Returns (lowerer, -1) when the struct's layout/size isn't
+    // statically known, signalling callers to fall back to the old
+    // alias-preserving `ir_copy` (scalars, unknown types — no regression).
+    //
+    // Fields whose declared type is a fixed-size array (`w: [i64; N]`) are
+    // themselves stored as a handle to a separately-allocated N-word object
+    // (see aggregate_storage_bytes / lower_struct_fields_ref), so a flat
+    // word-for-word copy of the outer struct would only copy that handle by
+    // value — leaving the copy's array field aliased to the source's array
+    // storage. We recurse one level into every such field: allocate a fresh
+    // N-word object, copy its contents, and repoint the copy's field at the
+    // new object.
+    fn emit_struct_deep_copy(self, src_reg: i64, struct_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: deep_copy_begin src=")
+            print_int(src_reg)
+            print("\n")
+        }
+        let layout_idx = lo.find_struct_layout_idx(struct_name)
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: deep_copy_layout=")
+            print_int(layout_idx)
+            print("\n")
+        }
+        if layout_idx < 0 {
+            return (lo, -1)
+        }
+        let field_count = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: deep_copy_fields=")
+            print_int(field_count)
+            print("\n")
+        }
+        if field_count <= 0 {
+            return (lo, -1)
+        }
+
+        let pair_dst = lo.fresh_reg()
+        lo = pair_dst.0
+        let dst = pair_dst.1
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(field_count)))
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: deep_copy_alloc dst=")
+            print_int(dst)
+            print("\n")
+        }
+
+        let ok_pair = lo.emit_struct_copy_into(dst, src_reg, layout_idx, field_count)
+        lo = ok_pair.0
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: deep_copy_done\n")
+        }
+
+        (lo, dst)
+    }
+
+    // Assignment-path counterpart of emit_struct_deep_copy: `bad = img` (an
+    // ExprIdent-to-ExprIdent assignment of a struct/array local) must copy
+    // VALUES into `bad`'s already-allocated storage, not repoint `bad`'s
+    // handle at `img` (that would just be the same aliasing ir_copy bug,
+    // one statement later, and would orphan bad's existing storage).
+    // Returns (lowerer, 0) when the layout isn't known, so the caller can
+    // fall back to the old ir_copy(dst, rhs) handle-copy; (lowerer, 1) on
+    // success. (i64 flag, not bool — this file's established convention for
+    // status returns from Lowerer methods.)
+    fn emit_struct_copy_assign(self, dst: i64, src_reg: i64, struct_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let layout_idx = lo.find_struct_layout_idx(struct_name)
+        if layout_idx < 0 {
+            return (lo, 0)
+        }
+        let field_count = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+        if field_count <= 0 {
+            return (lo, 0)
+        }
+        let ok_pair = lo.emit_struct_copy_into(dst, src_reg, layout_idx, field_count)
+        lo = ok_pair.0
+        (lo, 1)
+    }
+
+    fn find_struct_layout_idx(self, struct_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var layout_idx: i64 = -1
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
+                layout_idx = si
+            }
+            si = si + 1
+        }
+        layout_idx
+    }
+
+    // Recover a registered struct layout's type name from its name hash
+    // (extern-fn-return side table stores hashes only — no Name aggregates in
+    // globals). Empty Name when no layout matches.
+    fn find_struct_layout_name_by_hash(self, type_hash: i64) -> Name with Mut, Panic, Div, Alloc {
+        if type_hash == 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if lower_name_hash((*self.struct_layouts).entries[si as usize].type_name) == type_hash {
+                return (*self.struct_layouts).entries[si as usize].type_name
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
+    // Copies `field_count` words from `src_reg` into the already-allocated
+    // `dst` handle (flat word copy of the outer struct's slots), then
+    // recurses one level into every array-typed field: array fields are
+    // themselves handles to a separately-allocated N-word object, so the
+    // flat copy above only copied that handle by value (aliasing the
+    // source's backing array). For each such field we allocate a fresh
+    // array object, copy its contents, and repoint `dst`'s field at the
+    // fresh copy so the two aggregates no longer share array storage.
+    fn emit_struct_copy_into(self, dst: i64, src_reg: i64, layout_idx: i64, field_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let pair_copy = lo.emit_agg_copy_call(dst, src_reg, field_count)
+        lo = pair_copy.0
+
+        var fi: i64 = 0
+        while fi < field_count {
+            let is_arr = (*lo.struct_layouts).entries[layout_idx as usize].fields[fi as usize].is_array
+            let arr_len = (*lo.struct_layouts).entries[layout_idx as usize].fields[fi as usize].array_len
+            if is_arr == 1 && arr_len > 0 {
+                let field_index = (*lo.struct_layouts).entries[layout_idx as usize].fields[fi as usize].index
+                let field_name = (*lo.struct_layouts).entries[layout_idx as usize].fields[fi as usize].name
+
+                let pair_src_arr = lo.fresh_reg()
+                lo = pair_src_arr.0
+                let src_arr_reg = pair_src_arr.1
+                lo = lo.emit(ir_field_get(src_arr_reg, src_reg, field_index, field_name))
+
+                let pair_dst_arr = lo.fresh_reg()
+                lo = pair_dst_arr.0
+                let dst_arr_reg = pair_dst_arr.1
+                lo = lo.emit(ir_alloc(dst_arr_reg, lo.aggregate_storage_bytes(arr_len)))
+
+                let pair_arr_copy = lo.emit_agg_copy_call(dst_arr_reg, src_arr_reg, arr_len)
+                lo = pair_arr_copy.0
+
+                lo = lo.emit(ir_field_set(dst, field_index, dst_arr_reg, field_name))
+            }
+            fi = fi + 1
+        }
+
+        (lo, 1)
+    }
+
+    // Emit a call to the `agg_copy_words(dst, src, nwords)` native builtin
+    // (self-hosted/native/codegen_x86_linux.sio), which deep-copies `nwords`
+    // 8-byte words from the aggregate referenced by `src` into the one
+    // referenced by `dst`. The call's own return-value register is a fresh
+    // throwaway (the builtin's result is not meaningful; the copy already
+    // landed in the caller-supplied `dst` handle).
+    fn emit_agg_copy_call(self, dst: i64, src: i64, nwords: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: copy_call_begin\n")
+        }
+        // NOTE: use the &! mut variant of find-or-add (the same idiom the
+        // str_eq/str_concat lowering at lower_expr_ref uses), not the
+        // by-value tuple-returning method.
+        let cp_fn = lowerer_find_or_add_fn_id_mut(&! lo, make_name("agg_copy_words"))
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: copy_call_fn=")
+            print_int(cp_fn)
+            print("\n")
+        }
+        let pair_nwords = lo.emit_i64_const(nwords)
+        lo = pair_nwords.0
+        let nwords_reg = pair_nwords.1
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: copy_call_nwords_reg=")
+            print_int(nwords_reg)
+            print("\n")
+        }
+        let tail_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(src, Some(Box::new(ir_reg_list_single(nwords_reg))))))
+        let cp_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(dst, tail_args)))
+        let pair_cpdst = lo.fresh_reg()
+        lo = pair_cpdst.0
+        let cp_dst_reg = pair_cpdst.1
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: copy_call_emit dst=")
+            print_int(cp_dst_reg)
+            print("\n")
+        }
+        lo = lo.emit(ir_call(cp_dst_reg, cp_fn, make_name("agg_copy_words"), cp_args, 3))
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: copy_call_done\n")
+        }
+        (lo, cp_dst_reg)
     }
 
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
@@ -4330,6 +4659,13 @@ impl Lowerer {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
+                            // No declared FieldDef type is available from a struct-literal's
+                            // field VALUE list (this path only runs when the type wasn't
+                            // already registered from its declaration) — fall back to
+                            // is_array=0 so aggregate-copy skips recursing into this field
+                            // (safe: preserves the old handle-copy for it, no crash).
+                            is_array: 0,
+                            array_len: 0,
                         }
                         (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                     }
@@ -4429,6 +4765,8 @@ impl Lowerer {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                            is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
+                            array_len: lower_type_expr_array_len(&(*list).head.ty),
                         }
                         (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                     }
@@ -5864,6 +6202,40 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         var reg = pair.1
+        // Copy-aliasing fix: `let/var bad = img` where the RHS is a bare
+        // ExprIdent naming a struct/array-typed local must deep-copy the
+        // aggregate's contents, not just alias its handle (the plain
+        // ir_copy below is a register/pointer copy). Only bare-ident inits
+        // of a local with a statically-known struct layout are affected;
+        // scalars, call-results (already fresh storage), and literal inits
+        // (already allocated) are untouched. Falls back to the old
+        // handle-copy when the layout/size isn't known (emit_struct_deep_copy
+        // returns -1).
+        match s.expr {
+            Some(expr_box_aggcp) => {
+                if (*expr_box_aggcp).kind == ExprKind::ExprIdent {
+                    let src_struct_name = lo.lookup_local_struct_type((*expr_box_aggcp).name)
+                    if lower_aggregate_diag_enabled() {
+                        print("lower_agg: let_ident_init src_ty_len=")
+                        print_int(src_struct_name.len)
+                        print("\n")
+                    }
+                    if src_struct_name.len > 0 {
+                        let copy_pair = lo.emit_struct_deep_copy(reg, src_struct_name)
+                        lo = copy_pair.0
+                        if copy_pair.1 >= 0 {
+                            reg = copy_pair.1
+                        }
+                        if lower_aggregate_diag_enabled() {
+                            print("lower_agg: let_ident_init_done reg=")
+                            print_int(reg)
+                            print("\n")
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if is_mut {
             let pair_dst = lo.fresh_reg()
             lo = pair_dst.0
@@ -5971,6 +6343,30 @@ impl Lowerer {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
+                        } else {
+                            // Imported callee (cross-module fn signatures aren't in
+                            // module.functions at body lowering): recover the return
+                            // struct type from the EXTERN_FN_RET side table (code 3 +
+                            // struct-name hash resolved against the preseeded layout
+                            // table) so ident-copies of this local get real value-copy
+                            // semantics (copy-aliasing fix).
+                            let ext_hash = lower_extern_fn_ret_struct_hash_for_call(&(*expr_box))
+                            if lower_aggregate_diag_enabled() {
+                                print("lower_agg: let_call_ext hash=")
+                                print_int(ext_hash)
+                                print("\n")
+                            }
+                            if ext_hash != 0 {
+                                let ext_name = lo.find_struct_layout_name_by_hash(ext_hash)
+                                if lower_aggregate_diag_enabled() {
+                                    print("lower_agg: let_call_ext resolved_len=")
+                                    print_int(ext_name.len)
+                                    print("\n")
+                                }
+                                if ext_name.len > 0 {
+                                    lo = lo.bind_local_struct_type(s.name, ext_name)
+                                }
+                            }
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
@@ -6045,7 +6441,39 @@ impl Lowerer {
                                 let bss_off_local = lo.lookup_local_global_bss_offset((*target_expr).name)
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
-                            lo = lo.emit(ir_copy(dst, rhs))
+                            // Copy-aliasing fix: `bad = img` where the RHS is a bare
+                            // ExprIdent naming a struct/array-typed local must deep-copy
+                            // values into `bad`'s existing storage, not repoint its handle
+                            // at `img` (see emit_struct_copy_assign / lower_let_stmt_ref).
+                            // Falls back to the plain ir_copy handle-copy when the source
+                            // isn't a bare ident with a known struct layout.
+                            var handled_agg_assign: i64 = 0
+                            match s.expr {
+                                Some(expr_box_aggassign) => {
+                                    if lower_aggregate_diag_enabled() {
+                                        print("lower_agg: assign_ident rhs_kind_is_ident=")
+                                        if (*expr_box_aggassign).kind == ExprKind::ExprIdent { print_int(1) } else { print_int(0) }
+                                        print("\n")
+                                    }
+                                    if (*expr_box_aggassign).kind == ExprKind::ExprIdent {
+                                        let src_struct_name = lo.lookup_local_struct_type((*expr_box_aggassign).name)
+                                        if lower_aggregate_diag_enabled() {
+                                            print("lower_agg: assign_ident src_ty_len=")
+                                            print_int(src_struct_name.len)
+                                            print("\n")
+                                        }
+                                        if src_struct_name.len > 0 {
+                                            let assign_pair = lo.emit_struct_copy_assign(dst, rhs, src_struct_name)
+                                            lo = assign_pair.0
+                                            handled_agg_assign = assign_pair.1
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if handled_agg_assign == 0 {
+                                lo = lo.emit(ir_copy(dst, rhs))
+                            }
                             (lo, dst)
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
@@ -7784,6 +8212,30 @@ impl Lowerer {
                 let sc_fn = lowerer_find_or_add_fn_id_mut(&! lo_sc, make_name("str_concat"))
                 let sc_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(rhs))))))
                 let lo_call = lo_sc.emit(ir_call(dst, sc_fn, make_name("str_concat"), sc_args, 2))
+                return (lo_call, dst)
+            }
+        }
+        // String (in)equality: `s == t` / `s != t` must compare byte content, not the
+        // pointer values of interned literals / heap strings — route to the (already
+        // codegen-wired, builtin id 7) str_eq runtime helper instead of an integer
+        // compare of the string pointers.
+        if e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe {
+            if lo3.opt_expr_result_is_string_ref(&e.left) || lo3.opt_expr_result_is_string_ref(&e.right) {
+                var lo_eq = lo3
+                let eq_fn = lowerer_find_or_add_fn_id_mut(&! lo_eq, make_name("str_eq"))
+                let eq_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(rhs))))))
+                var lo_call = lo_eq.emit(ir_call(dst, eq_fn, make_name("str_eq"), eq_args, 2))
+                if e.bin_op == BinaryOp::OpNe {
+                    let pair_one_eq = lo_call.fresh_reg()
+                    lo_call = pair_one_eq.0
+                    let one_eq_reg = pair_one_eq.1
+                    lo_call = lo_call.emit(ir_load_imm(one_eq_reg, 1))
+                    let pair_ne_dst = lo_call.fresh_reg()
+                    lo_call = pair_ne_dst.0
+                    let ne_dst = pair_ne_dst.1
+                    lo_call = lo_call.emit(ir_binop(ne_dst, one_eq_reg, BinaryOp::OpSub, dst))
+                    return (lo_call, ne_dst)
+                }
                 return (lo_call, dst)
             }
         }

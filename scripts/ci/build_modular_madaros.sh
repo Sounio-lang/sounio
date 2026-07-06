@@ -64,7 +64,24 @@ echo "  src:   $SRC"
 echo "  out:   $OUT"
 
 # Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+#
+# REPRODUCIBLE-BUILD HYGIENE: pin the address-space layout with setarch -R
+# (ADDR_NO_RANDOMIZE, no privilege) so builds are byte-reproducible by
+# construction — defensively immune to any future runtime-address leak into
+# emission. The current seed (2e595371) has NO such leak: 20 no-setarch
+# builds are byte-identical, and setarch vs no-setarch produce the SAME
+# binary (md5 8e0e4197). The one 104MB gate-failing binary once observed was
+# seed-VERSION drift (a pre-c647203a6 seed still emitting the rel8
+# inline-string jump eb 01 at code 0x1740 where the current seed emits
+# e9 01000000 rel32) from concurrent-build contamination, NOT an ASLR effect
+# — initially mis-diagnosed, disproven by byte-bisection. Kept as cheap
+# defensive hygiene; falls back cleanly if setarch is absent.
+if command -v setarch >/dev/null 2>&1 && setarch "$(uname -m)" -R true >/dev/null 2>&1; then
+    setarch "$(uname -m)" -R scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+else
+    echo "  note: setarch -R unavailable; build not guaranteed byte-reproducible" >&2
+    scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+fi
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2

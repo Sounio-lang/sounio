@@ -24,17 +24,40 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
         if parser_at_eof(p) { break }
 
         let before_pos = p.pos
-        let result = p.parse_item()
-        let p2 = result.0
-        let item = result.1
 
-        // Hard progress guard: a parser error must never stall the top-level loop.
-        if p2.pos <= before_pos {
-            p = p2.advance()
-        } else {
-            p = p2
+        // extern "C" { fn a(...); fn b(...); ... } blocks can declare more than
+        // one fn; special-case them here so every declaration survives (the
+        // generic parse_item() dispatcher can only hand back a single Item).
+        var vis_p = p
+        var extern_visibility = visibility_private()
+        if parser_peek(vis_p) == TokenKind::Pub {
+            let vis_pair = vis_p.parse_pub_visibility()
+            vis_p = vis_pair.0
+            extern_visibility = vis_pair.1
         }
-        rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
+        if parser_peek(vis_p) == TokenKind::Extern {
+            let pair = vis_p.parse_extern_fn_item_list(extern_visibility, rev_items_opt)
+            let p2 = pair.0
+            rev_items_opt = pair.1
+            // Hard progress guard: a parser error must never stall the top-level loop.
+            if p2.pos <= before_pos {
+                p = p2.advance()
+            } else {
+                p = p2
+            }
+        } else {
+            let result = p.parse_item()
+            let p2 = result.0
+            let item = result.1
+
+            // Hard progress guard: a parser error must never stall the top-level loop.
+            if p2.pos <= before_pos {
+                p = p2.advance()
+            } else {
+                p = p2
+            }
+            rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
+        }
     }
 
     parser_set_last_errors(p.had_error, p.error_count)
@@ -69,11 +92,28 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         while tk_is_doc_comment(parser_peek(p)) { p = p.advance() }
         if parser_at_eof(p) { break }
         let before_pos = p.pos
-        let result = p.parse_item()
-        let p2 = result.0
-        let item = result.1
-        if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
-        rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
+
+        // See parse_program_loop above: extern "C" { ... } brace blocks can
+        // declare multiple fns, so they are special-cased to preserve all of them.
+        var vis_p = p
+        var extern_visibility = visibility_private()
+        if parser_peek(vis_p) == TokenKind::Pub {
+            let vis_pair = vis_p.parse_pub_visibility()
+            vis_p = vis_pair.0
+            extern_visibility = vis_pair.1
+        }
+        if parser_peek(vis_p) == TokenKind::Extern {
+            let pair = vis_p.parse_extern_fn_item_list(extern_visibility, rev_items_opt)
+            let p2 = pair.0
+            rev_items_opt = pair.1
+            if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
+        } else {
+            let result = p.parse_item()
+            let p2 = result.0
+            let item = result.1
+            if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
+            rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
+        }
     }
     parser_set_last_errors(p.had_error, p.error_count)
     reverse_item_list_opt(rev_items_opt)
