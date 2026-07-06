@@ -2484,49 +2484,24 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
 
 not_promoted = [
     {
-        "surface": "normal_call_stack_args_gt6",
-        "status": "promoted_by_normal_stack_call_receipt",
-        "reason": "normal scalar calls with one and two outgoing stack args now have source-to-MachineModule receipts",
+        "surface": "f128_arbitrary_decimal_binary128_materialization",
+        "status": "not_promoted_beyond_bounded_siglo_scale18_and_explicit_truncated_value_contract_cases",
+        "reason": "native-v2 now emits exact dyadic, bounded sig_hi=0/no-truncation/scale10<=18 rounded decimals, explicit truncated high-precision value-contract cases, and explicit subnormal/underflow/overflow anchors; general multi-limb arbitrary decimal-to-binary128 materialization remains fail-closed",
     },
     {
-        "surface": "aggregate_return",
-        "status": "promoted_by_local_imported_method_and_generic_layout_receipts",
-        "reason": "local, imported, method, non-Big field names, Pair/Quad small shapes, and Wide9 72-byte SRET layouts now have source-to-MachineModule receipts",
+        "surface": "f128_generic_ieee_software_helper_semantics",
+        "status": "not_promoted",
+        "reason": "finite value-contract arithmetic and callee-side exact add/sub/mul/div helper execution are promoted for the current matrix; generic IEEE NaN/Inf/rounding-mode helper semantics and differentials remain blockers",
     },
     {
-        "surface": "imported_call",
-        "status": "promoted_for_imported_aggregate_sret_module_boundary",
-        "reason": "imported aggregate-return calls now export MachineModule JSON and execute one-arg, register multi-arg, and stack-arg SRET witnesses",
+        "surface": "f128_external_sysv_abi_and_sret",
+        "status": "not_promoted",
+        "reason": "internal native-v2 f128 direct call/return and SRET-arg-boundary receipts are promoted; external SysV f128 ABI/SRET compatibility remains outside the promoted S5 surface",
     },
     {
-        "surface": "f128_numeric_width",
-        "status": "opaque_storage_value_contract_arithmetic_and_internal_call_return_abi_promoted_generic_ieee_not_promoted",
-        "reason": "i128/i256/u128/u256 wide integers are promoted by receipt; f128 source literals now carry AST decimal metadata, checker TypeKind::TyF128 awareness, an exact binary128 value contract, a parser-to-IR-to-MachineModule value bridge, native-v2 local opaque storage/copy execution, native binary128 value-contract materialization, internal native-v2 local/imported direct call-return ABI, and finite exact decimal-tenths plus quarter value-contract arithmetic with one-chain metadata propagation and callee-side add/sub/mul/div runtime helper execution. Arbitrary decimal binary128 materialization, generic IEEE arithmetic, external SysV f128 ABI, and f128 SRET remain fail-closed.",
-    },
-    {
-        "surface": "f128_literal_decimal_metadata_and_type",
-        "status": "promoted_by_parser_decimal_metadata_and_checker_type_receipt_not_execution",
-        "reason": "ExprFloatLit now preserves original source spelling and bounded decimal sign/significand/scale metadata, and the checker recognizes f128 as TypeKind::TyF128 instead of a generic named type; S5.2 promotes native-v2 local opaque storage/copy only",
-    },
-    {
-        "surface": "f128_binary128_value_contract",
-        "status": "promoted_by_exact_decimal_to_binary128_value_receipt_not_execution",
-        "reason": "finite f128 decimal literals now have a deterministic IEEE-754 binary128 sign/exponent/fraction contract with roundTiesToEven anchors; native-v2 S5.4 materializes binary128 bits for the complete current value-contract case set, while arbitrary decimal literal materialization remains unpromoted",
-    },
-    {
-        "surface": "f128_binary128_native_anchor_materialization",
-        "status": "promoted_for_exact_0_5_and_1_0_anchors_only",
-        "reason": "native-v2 emits and runs local f128 literal/copy programs for exact 0.5 and 1.0, and the emitted ELF contains the expected IEEE-754 binary128 high-word mov immediates; no general decimal, generic IEEE arithmetic, external SysV ABI, or SRET promotion is claimed",
-    },
-    {
-        "surface": "f128_binary128_value_contract_native_materialization",
-        "status": "promoted_for_complete_current_value_contract_case_set",
-        "reason": "native-v2 emits and runs every current f128 binary128 value-contract case, including signed zero, 0.1 roundTiesToEven, smallest-normal, minimum-subnormal, underflow-to-zero, overflow-to-infinity, and high-precision decimal probes; arbitrary decimal support beyond that finite contract is still not promoted",
-    },
-    {
-        "surface": "unsupported_numeric_diagnostics",
-        "status": "promoted_by_diagnostics_receipt",
-        "reason": "i512/u512 native-v2 numeric widths fail closed before MachineModule export; unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or legacy fallback",
+        "surface": "s4_negative_and_producer_dependent_rewrites",
+        "status": "not_promoted",
+        "reason": "S4 negative and producer-dependent blocked controls remain explicitly unselected by the S5 application plan",
     },
 ]
 
