@@ -1031,8 +1031,8 @@ if f128_binary128_value_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value receipt")
 if f128_binary128_value_receipt.get("stage_contract_level") != "S5_F128_BINARY128_VALUE_CONTRACT_PROMOTED_NOT_EXECUTION":
     raise SystemExit("f128 binary128 value receipt must declare value-contract stage contract")
-if f128_binary128_value_receipt.get("case_count") != 8:
-    raise SystemExit("f128 binary128 value receipt must contain exact eight cases")
+if f128_binary128_value_receipt.get("case_count") != 16:
+    raise SystemExit("f128 binary128 value receipt must contain exact sixteen cases")
 for field in [
     "f128_binary128_value_contract_complete",
     "f128_binary128_round_ties_to_even_recorded",
@@ -1057,10 +1057,20 @@ required_f128_value_hex = {
     "one": "3fff0000000000000000000000000000",
     "half": "3ffe0000000000000000000000000000",
     "two": "40000000000000000000000000000000",
+    "smallest_normal": "00010000000000000000000000000000",
     "one_tenth_rounded": "3ffb999999999999999999999999999a",
+    "high_precision_probe": "3fff3c0ca428c59fb71a7be16b6b6d5b",
+    "quarter_exact": "3ffd0000000000000000000000000000",
+    "eighth_exact": "3ffc0000000000000000000000000000",
+    "one_and_half_exact": "3fff8000000000000000000000000000",
+    "twelve_and_three_quarters_exact": "40029800000000000000000000000000",
+    "negative_two_and_half_exact": "c0004000000000000000000000000000",
+    "thirty_two_exact": "40040000000000000000000000000000",
+    "ten_twenty_four_exact": "40090000000000000000000000000000",
+    "one_e3_exact": "4008f400000000000000000000000000",
 }
-if not set(required_f128_value_hex).issubset(set(f128_value_cases)):
-    raise SystemExit(f"f128 binary128 value receipt missing required cases: {sorted(set(required_f128_value_hex) - set(f128_value_cases))}")
+if set(f128_value_cases) != set(required_f128_value_hex):
+    raise SystemExit(f"f128 binary128 value receipt cases mismatch: {sorted(f128_value_cases)}")
 for case_id, expected_hex in required_f128_value_hex.items():
     row = f128_value_cases[case_id]
     if row.get("hex") != expected_hex:
@@ -1071,6 +1081,8 @@ if f128_value_cases.get("high_precision_probe", {}).get("decimal_digit_count") !
     raise SystemExit("high_precision_probe must preserve 35 decimal digits in the binary128 value receipt")
 if f128_value_cases.get("high_precision_probe", {}).get("decimal_scale10") != 34:
     raise SystemExit("high_precision_probe must preserve decimal scale10=34 in the binary128 value receipt")
+if f128_value_cases.get("one_e3_exact", {}).get("decimal_scale10") != -3:
+    raise SystemExit("one_e3_exact must preserve decimal scale10=-3 in the binary128 value receipt")
 
 if f128_literal_value_bridge_receipt.get("schema") != "madaros.v2.s5.f128_literal_value_bridge_receipt/0.3":
     raise SystemExit("bad S5 f128 literal value bridge receipt schema")
@@ -1456,12 +1468,13 @@ if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
 if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 8:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eight cases")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 16:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact sixteen cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
 for field in [
     "f128_binary128_value_contract_native_materialization_promoted",
     "f128_binary128_value_contract_case_set_complete",
+    "f128_native_exact_dyadic_decimal_binary128_materialization_promoted",
 ]:
     if value_native_claims.get(field) is not True:
         raise SystemExit(f"f128 binary128 value-contract native receipt missing required true claim: {field}")
@@ -1484,6 +1497,14 @@ required_value_native_cases = {
     "smallest_normal": {"literal": "3.36210314311209350626267781732175260259807934484647e-4932", "hex": "00010000000000000000000000000000", "metadata": [1, 626267781732175260, 336210314311209350, 51, 4982, 15]},
     "one_tenth_rounded": {"literal": "0.1", "hex": "3ffb999999999999999999999999999a", "metadata": [1, 0, 1, 2, 1, 0]},
     "high_precision_probe": {"literal": "1.2345678901234567890123456789012345", "hex": "3fff3c0ca428c59fb71a7be16b6b6d5b", "metadata": [1, 90123456789012345, 123456789012345678, 35, 34, 0]},
+    "quarter_exact": {"literal": "0.25", "hex": "3ffd0000000000000000000000000000", "metadata": [1, 0, 25, 3, 2, 0]},
+    "eighth_exact": {"literal": "0.125", "hex": "3ffc0000000000000000000000000000", "metadata": [1, 0, 125, 4, 3, 0]},
+    "one_and_half_exact": {"literal": "1.5", "hex": "3fff8000000000000000000000000000", "metadata": [1, 0, 15, 2, 1, 0]},
+    "twelve_and_three_quarters_exact": {"literal": "12.75", "hex": "40029800000000000000000000000000", "metadata": [1, 0, 1275, 4, 2, 0]},
+    "negative_two_and_half_exact": {"literal": "-2.5", "hex": "c0004000000000000000000000000000", "metadata": [-1, 0, 25, 2, 1, 0]},
+    "thirty_two_exact": {"literal": "32.0", "hex": "40040000000000000000000000000000", "metadata": [1, 0, 320, 3, 1, 0]},
+    "ten_twenty_four_exact": {"literal": "1024.0", "hex": "40090000000000000000000000000000", "metadata": [1, 0, 10240, 5, 1, 0]},
+    "one_e3_exact": {"literal": "1e3", "hex": "4008f400000000000000000000000000", "metadata": [1, 0, 1, 1, -3, 0]},
 }
 if set(value_native_cases) != set(required_value_native_cases):
     raise SystemExit(f"f128 binary128 value-contract native receipt cases mismatch: {sorted(value_native_cases)}")
@@ -2433,6 +2454,7 @@ module = {
         "f128_opaque_direct_call_return_abi_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
         "f128_binary128_value_contract_native_materialization_promoted": True,
+        "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2582,6 +2604,7 @@ receipt = {
     "f128_opaque_direct_call_return_abi_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
     "f128_binary128_value_contract_native_materialization_promoted": True,
+    "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -2663,6 +2686,7 @@ receipt = {
     "f128_opaque_direct_call_return_abi_promoted": module["scalar_abi_receipts"]["f128_opaque_direct_call_return_abi_promoted"],
     "f128_binary128_native_anchor_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_native_anchor_materialization_promoted"],
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
+    "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
     "f128_arithmetic_value_contract_promoted": module["scalar_abi_receipts"]["f128_arithmetic_value_contract_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],

@@ -2,9 +2,10 @@
 """Emit a Madaros v2 S5.4 f128 native binary128 value-contract receipt.
 
 This promotes native-v2 materialization for the complete current
-f128_binary128_value_receipt case set. It deliberately does not promote
-arbitrary decimal-to-binary128 materialization beyond that contract, f128
-arithmetic, call ABI, or return ABI.
+f128_binary128_value_receipt case set, including exact dyadic decimal literals
+that can be represented without rounding. It deliberately does not promote
+arbitrary rounded decimal-to-binary128 materialization beyond that contract,
+f128 arithmetic, call ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -50,6 +51,14 @@ CASES: list[Case] = [
         "3fff3c0ca428c59fb71a7be16b6b6d5b",
         [1, 90123456789012345, 123456789012345678, 35, 34, 0],
     ),
+    Case("quarter_exact", "0.25", "3ffd0000000000000000000000000000", [1, 0, 25, 3, 2, 0]),
+    Case("eighth_exact", "0.125", "3ffc0000000000000000000000000000", [1, 0, 125, 4, 3, 0]),
+    Case("one_and_half_exact", "1.5", "3fff8000000000000000000000000000", [1, 0, 15, 2, 1, 0]),
+    Case("twelve_and_three_quarters_exact", "12.75", "40029800000000000000000000000000", [1, 0, 1275, 4, 2, 0]),
+    Case("negative_two_and_half_exact", "-2.5", "c0004000000000000000000000000000", [-1, 0, 25, 2, 1, 0]),
+    Case("thirty_two_exact", "32.0", "40040000000000000000000000000000", [1, 0, 320, 3, 1, 0]),
+    Case("ten_twenty_four_exact", "1024.0", "40090000000000000000000000000000", [1, 0, 10240, 5, 1, 0]),
+    Case("one_e3_exact", "1e3", "4008f400000000000000000000000000", [1, 0, 1, 1, -3, 0]),
 ]
 
 
@@ -219,6 +228,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
         "claims": {
             "f128_binary128_value_contract_native_materialization_promoted": True,
             "f128_binary128_value_contract_case_set_complete": True,
+            "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -228,7 +238,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "legacy_fallback_used": False,
         },
         "roundtrip_contract": [
-            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case",
+            "native_v2_emits_and_runs_every_current_f128_binary128_value_contract_case_including_exact_dyadic_decimals",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",

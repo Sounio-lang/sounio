@@ -47,6 +47,14 @@ CASES: list[Case] = [
     Case("smallest_normal", "3.36210314311209350626267781732175260259807934484647e-4932", None, "normal", False),
     Case("one_tenth_rounded", "0.1", None, "normal", False),
     Case("high_precision_probe", "1.2345678901234567890123456789012345", None, "normal", False),
+    Case("quarter_exact", "0.25", "3ffd0000000000000000000000000000", "normal", True),
+    Case("eighth_exact", "0.125", "3ffc0000000000000000000000000000", "normal", True),
+    Case("one_and_half_exact", "1.5", "3fff8000000000000000000000000000", "normal", True),
+    Case("twelve_and_three_quarters_exact", "12.75", "40029800000000000000000000000000", "normal", True),
+    Case("negative_two_and_half_exact", "-2.5", "c0004000000000000000000000000000", "normal", True),
+    Case("thirty_two_exact", "32.0", "40040000000000000000000000000000", "normal", True),
+    Case("ten_twenty_four_exact", "1024.0", "40090000000000000000000000000000", "normal", True),
+    Case("one_e3_exact", "1e3", "4008f400000000000000000000000000", "normal", True),
 ]
 
 PROBE_SOURCE = (
