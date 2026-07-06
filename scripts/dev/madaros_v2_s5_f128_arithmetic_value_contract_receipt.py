@@ -4,8 +4,9 @@
 This promotes a finite, exact binary128 arithmetic value-contract matrix
 end-to-end for local literal-derived values. It deliberately does not promote
 generic IEEE helpers, NaN/Inf, arbitrary decimal arithmetic, external SysV f128
-ABI, SRET, or arithmetic across call-return boundaries that have lost literal
-metadata and therefore require real binary128 software helpers.
+ABI, SRET, f128 parameter-derived call returns, or arithmetic across call-return
+boundaries that have lost literal metadata and therefore require real binary128
+software helpers.
 """
 
 from __future__ import annotations
@@ -207,6 +208,20 @@ POSITIVE = [
 """,
         "expected_hex": "bffe0000000000000000000000000000",
         "expected_metadata": [-1, 0, 5, 2, 1, 0],
+    },
+    {
+        "case_id": "f128_call_literal_return_then_add_to_three",
+        "source": """fn ret_f128_one() -> f128 { 1.0 as f128 }
+fn main() -> i64 {
+  let a: f128 = ret_f128_one()
+  let b: f128 = 2.0 as f128
+  let c: f128 = a + b
+  let d: f128 = c
+  0
+}
+""",
+        "expected_hex": "40008000000000000000000000000000",
+        "expected_metadata": [1, 0, 30, 2, 1, 0],
     },
 ]
 
@@ -442,8 +457,9 @@ def emit(args: argparse.Namespace) -> None:
             "finite exact binary128 value-contract arithmetic only",
             "finite exact signed decimal-tenths plus quarter matrix materializes as binary128 words",
             "single-chain arithmetic preserves compiler value-kind metadata",
+            "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
             "unsupported f128 arithmetic remains fail-closed",
-            "call-boundary f128 arithmetic remains fail-closed until real binary128 software helpers exist",
+            "f128 parameter-derived call-return arithmetic remains fail-closed until real binary128 software helpers or interprocedural value binding exist",
         ],
         "cases": cases,
     }

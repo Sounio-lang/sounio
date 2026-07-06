@@ -3995,9 +3995,16 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
 pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
     (*nc).fn_count = module.fn_count
+    let machine_summary = native_v2_build_machine_module(module, true)
     var fmeta: i64 = 0
     while fmeta < module.fn_count && fmeta < 2048 {
         (*nc).fn_returns_float[fmeta as usize] = module.functions[fmeta as usize].returns_float
+        var f128_summary_kind: i64 = 0
+        if fmeta < machine_summary.fn_count && fmeta < 32 && module.functions[fmeta as usize].param_count == 0 {
+            f128_summary_kind = nc_machine_func_single_f128_value_kind(machine_summary.functions[fmeta as usize])
+        }
+        let f128_ir_kind = nc_core_func_f128_return_value_kind(&module.functions[fmeta as usize])
+        (*nc).fn_f128_return_value_kind[fmeta as usize] = if f128_summary_kind > 0 { f128_summary_kind } else { f128_ir_kind }
         fmeta = fmeta + 1
     }
     (*nc).runtime_context_slot_offset = 0
@@ -4021,6 +4028,7 @@ pub fn compile_module_streaming_begin_count_into(nc: &! NativeCompiler, fn_count
     var fmeta: i64 = 0
     while fmeta < fn_count && fmeta < 2048 {
         (*nc).fn_returns_float[fmeta as usize] = 0
+        (*nc).fn_f128_return_value_kind[fmeta as usize] = 0
         fmeta = fmeta + 1
     }
     (*nc).runtime_context_slot_offset = 0
@@ -6242,6 +6250,10 @@ fn nc_core_func_f128_value_kind(func: &IrFunction, reg: i64) -> i64 with Mut, Pa
             let candidate_kind = nc_f128_vc_kind(instr.src1, instr.src2, instr.imm_i64, instr.label_id, instr.field_idx, instr.arg_count)
             kind = if candidate_kind > 0 && nc_f128_vc_name_ok(instr.name, instr.src1, instr.src2, instr.imm_i64, instr.label_id, instr.field_idx, instr.arg_count) { candidate_kind } else { 0 }
         }
+        if instr.op == IrOpcode::IrCopy && instr.dst == reg {
+            let copy_kind = nc_core_func_f128_value_kind(func, instr.src1)
+            if copy_kind > 0 { kind = copy_kind }
+        }
         if instr.op == IrOpcode::IrBinOp && instr.dst == reg {
             let lhs_kind = nc_core_func_f128_value_kind(func, instr.src1)
             let rhs_kind = nc_core_func_f128_value_kind(func, instr.src2)
@@ -6260,6 +6272,72 @@ fn nc_core_func_f128_value_kind(func: &IrFunction, reg: i64) -> i64 with Mut, Pa
         i = i + 1
     }
     kind
+}
+
+fn nc_core_func_f128_return_value_kind(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var kind: i64 = 0
+    var seen: i64 = 0
+    var return_count: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrReturn {
+            return_count = return_count + 1
+            let ret_kind = nc_core_func_f128_value_kind(func, instr.src1)
+            if ret_kind > 0 {
+                if seen == 0 {
+                    kind = ret_kind
+                    seen = 1
+                } else if kind != ret_kind {
+                    return 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    if seen == 0 {
+        if (*func).param_count == 0 {
+            var lit_count: i64 = 0
+            var li: i64 = 0
+            while li < (*func).instr_count && li < IR_MAX_INSTRS {
+                let linstr = (*func).instrs[li as usize]
+                if linstr.op == IrOpcode::IrNop && linstr.imm_flags == IR_F128_REG_MARKER_FLAG && linstr.label_id > 0 {
+                    let candidate_kind = nc_f128_vc_kind(linstr.src1, linstr.src2, linstr.imm_i64, linstr.label_id, linstr.field_idx, linstr.arg_count)
+                    if candidate_kind > 0 {
+                        kind = candidate_kind
+                        lit_count = lit_count + 1
+                    }
+                }
+                li = li + 1
+            }
+            if lit_count == 1 {
+                return kind
+            }
+        }
+        return 0
+    }
+    kind
+}
+
+fn nc_machine_func_single_f128_value_kind(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var kind: i64 = 0
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            let candidate_kind = nc_f128_vc_kind(func.f128_literal_sign[i as usize], func.f128_literal_sig_hi[i as usize], func.f128_literal_sig_lo[i as usize], func.f128_literal_digit_count[i as usize], func.f128_literal_scale10[i as usize], func.f128_literal_truncated_digits[i as usize])
+            if candidate_kind > 0 {
+                kind = candidate_kind
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if count == 1 {
+        return kind
+    }
+    0
 }
 
 fn nc_core_func_param_index(func: &IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
@@ -7023,7 +7101,16 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 if (*func).instrs[i as usize].imm_flags == IR_F128_REG_MARKER_FLAG {
                     nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
                     nc_emit_store_rbp_disp32_reg(nc, 2, ir_slot_offset((*func).instrs[i as usize].dst + 1))
-                    nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+                    let callee_f128_kind = if (*func).instrs[i as usize].fn_id >= 0 && (*func).instrs[i as usize].fn_id < 2048 {
+                        (*nc).fn_f128_return_value_kind[(*func).instrs[i as usize].fn_id as usize]
+                    } else {
+                        0
+                    }
+                    if callee_f128_kind > 0 {
+                        nc_core_mark_f128_kind(nc, (*func).instrs[i as usize].dst, callee_f128_kind)
+                    } else {
+                        nc_core_mark_f128_reg(nc, (*func).instrs[i as usize].dst)
+                    }
                     i = i + 1
                     continue
                 }

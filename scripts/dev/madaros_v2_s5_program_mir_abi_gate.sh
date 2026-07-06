@@ -1728,10 +1728,10 @@ if f128_arithmetic_value_contract_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 arithmetic value-contract receipt")
 if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_6_F128_ARITHMETIC_VALUE_CONTRACT_NATIVE_MATERIALIZATION":
     raise SystemExit("f128 arithmetic value-contract receipt must declare S5.6 stage contract")
-if f128_arithmetic_value_contract_receipt.get("case_count") != 17:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain exact seventeen cases")
-if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 14:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain fourteen positive cases")
+if f128_arithmetic_value_contract_receipt.get("case_count") != 18:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain exact eighteen cases")
+if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 15:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain fifteen positive cases")
 if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 3:
     raise SystemExit("f128 arithmetic value-contract receipt must contain three negative cases")
 for field in [
@@ -1770,6 +1770,7 @@ required_arith_cases = {
     "f128_add_negative_half_negative_half_to_negative_one",
     "f128_mul_negative_half_half_to_negative_quarter",
     "f128_div_negative_one_two_to_negative_half",
+    "f128_call_literal_return_then_add_to_three",
     "f128_add_rounded_tenths_still_blocked",
     "f128_callee_add_args_still_requires_helper",
     "f128_call_return_then_add_still_requires_helper",
@@ -1791,6 +1792,7 @@ required_arith_positive = {
     "f128_add_negative_half_negative_half_to_negative_one": {"hex": "bfff0000000000000000000000000000", "metadata": [-1, 0, 10, 2, 1, 0]},
     "f128_mul_negative_half_half_to_negative_quarter": {"hex": "bffd0000000000000000000000000000", "metadata": [-1, 0, 25, 3, 2, 0]},
     "f128_div_negative_one_two_to_negative_half": {"hex": "bffe0000000000000000000000000000", "metadata": [-1, 0, 5, 2, 1, 0]},
+    "f128_call_literal_return_then_add_to_three": {"hex": "40008000000000000000000000000000", "metadata": [1, 0, 30, 2, 1, 0]},
 }
 for case_id, expected in required_arith_positive.items():
     row = arith_cases[case_id]
@@ -2314,7 +2316,7 @@ not_promoted = [
     {
         "surface": "unsupported_numeric_diagnostics",
         "status": "promoted_by_diagnostics_receipt",
-        "reason": "i512/u512 native-v2 numeric widths fail closed before MachineModule export; f128 arithmetic outside the finite signed decimal-tenths plus quarter value-contract matrix, f128 call shapes, and f128 return shapes still fail closed without ELF, segfault, or legacy fallback",
+        "reason": "i512/u512 native-v2 numeric widths fail closed before MachineModule export; f128 arithmetic outside the finite signed decimal-tenths plus quarter value-contract matrix and direct literal-return call propagation, f128 parameter-derived call shapes, and f128 return shapes still fail closed without ELF, segfault, or legacy fallback",
     },
 ]
 
@@ -2985,7 +2987,7 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 software helper lowering with IEEE rounding and NaN/Inf contract",
-        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix, external SysV f128 ABI/SRET, full IEEE helper lowering, and f128 differential receipts",
+        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal-return call propagation, external SysV f128 ABI/SRET, full IEEE helper lowering, and f128 differential receipts",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -2997,7 +2999,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, and truncated high-precision value-contract binary128 materialization, plus finite signed decimal-tenths and quarter value-contract arithmetic with direct literal-return call propagation, while unsupported f128 operations fail closed without ELF, segfault, or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces; f128 generic helper/execution differentials remain the explicit full blocker"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

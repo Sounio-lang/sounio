@@ -116,6 +116,13 @@ pub struct MachineInstr {
     pub name: Name,
     pub call_arg_values: [i64; 8],
     pub call_arg_count: i64,
+    pub f128_literal_sign: i64,
+    pub f128_literal_sig_hi: i64,
+    pub f128_literal_sig_lo: i64,
+    pub f128_literal_digit_count: i64,
+    pub f128_literal_scale10: i64,
+    pub f128_literal_truncated_digits: i64,
+    pub f128_literal_truncated_tail_info: i64,
 }
 
 pub struct MachineBlock {
@@ -257,6 +264,13 @@ pub fn machine_empty_instr() -> MachineInstr with Mut, Panic, Div {
         name: empty_name(),
         call_arg_values: [0; 8],
         call_arg_count: 0,
+        f128_literal_sign: 0,
+        f128_literal_sig_hi: 0,
+        f128_literal_sig_lo: 0,
+        f128_literal_digit_count: 0,
+        f128_literal_scale10: 0,
+        f128_literal_truncated_digits: 0,
+        f128_literal_truncated_tail_info: 0,
     }
 }
 
@@ -452,6 +466,157 @@ fn native_v2_mark_f128_result_ref(out: &! MachineFunction, slot: i64, result_hun
     } else {
         native_v2_mark_f128_literal_ref(out, slot, result_sign, 0, result_abs, 3, 2, 0, 0)
     }
+}
+
+fn native_v2_f128_literal_instr_for_slot(func: &IrFunction, slot: i64) -> IrInstr with Mut, Panic, Div {
+    var out = (*func).instrs[0]
+    out.label_id = 0
+    var target = slot
+    var guard: i64 = 0
+    while guard < 8 {
+        var changed = false
+        var ci: i64 = 0
+        while ci < (*func).instr_count && ci < IR_MAX_INSTRS {
+            let cinstr = (*func).instrs[ci as usize]
+            if cinstr.op == IrOpcode::IrCopy && cinstr.dst == target && cinstr.src1 >= 0 {
+                target = cinstr.src1
+                changed = true
+            }
+            ci = ci + 1
+        }
+        if !changed {
+            break
+        }
+        guard = guard + 1
+    }
+    if target < 0 {
+        return out
+    }
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrNop && instr.imm_flags == IR_F128_REG_MARKER_FLAG && instr.dst == target && instr.label_id > 0 {
+            return instr
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn native_v2_direct_f128_literal_return_instr(func: &IrFunction) -> IrInstr with Mut, Panic, Div {
+    var out = (*func).instrs[0]
+    out.label_id = 0
+    var seen: i64 = 0
+    var return_count: i64 = 0
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrReturn {
+            return_count = return_count + 1
+            let lit = native_v2_f128_literal_instr_for_slot(func, instr.src1)
+            if lit.label_id > 0 {
+                if seen == 0 {
+                    out = lit
+                    seen = 1
+                } else if out.src1 != lit.src1 || out.src2 != lit.src2 || out.imm_i64 != lit.imm_i64 || out.label_id != lit.label_id || out.field_idx != lit.field_idx || out.arg_count != lit.arg_count {
+                    out.label_id = 0
+                    return out
+                }
+            }
+        }
+        i = i + 1
+    }
+    if seen == 0 {
+        if (*func).param_count == 0 && return_count == 1 {
+            var lit_count: i64 = 0
+            var li: i64 = 0
+            while li < (*func).instr_count && li < IR_MAX_INSTRS {
+                let linstr = (*func).instrs[li as usize]
+                if linstr.op == IrOpcode::IrNop && linstr.imm_flags == IR_F128_REG_MARKER_FLAG && linstr.label_id > 0 {
+                    out = linstr
+                    lit_count = lit_count + 1
+                }
+                li = li + 1
+            }
+            if lit_count == 1 {
+                return out
+            }
+        }
+        out.label_id = 0
+    }
+    out
+}
+
+fn native_v2_ir_return_count(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        if (*func).instrs[i as usize].op == IrOpcode::IrReturn {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn native_v2_machine_only_f128_literal_slot(func: MachineFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var slot: i64 = -1
+    var i: i64 = 0
+    let limit = if func.temp_count < 256 { func.temp_count } else { 256 }
+    while i < limit {
+        if func.f128_literal_digit_count[i as usize] > 0 {
+            count = count + 1
+            slot = i
+        }
+        i = i + 1
+    }
+    if count == 1 {
+        return slot
+    }
+    -1
+}
+
+fn native_v2_attach_call_f128_literal_returns(func: MachineFunction, valid: [i64; 32], signs: [i64; 32], sig_his: [i64; 32], sig_los: [i64; 32], digit_counts: [i64; 32], scale10s: [i64; 32], truncated_digits: [i64; 32], truncated_tail_infos: [i64; 32]) -> MachineFunction with Mut, Panic, Div {
+    var out = func
+    var i: i64 = 0
+    while i < out.blocks[0].instr_count {
+        var instr = out.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_PSEUDO_CALL && instr.cond == 1 {
+            let fn_id = machine_instr_src1_value(instr)
+            if fn_id >= 0 && fn_id < 32 && valid[fn_id as usize] == 1 {
+                    instr.f128_literal_sign = signs[fn_id as usize]
+                    instr.f128_literal_sig_hi = sig_his[fn_id as usize]
+                    instr.f128_literal_sig_lo = sig_los[fn_id as usize]
+                    instr.f128_literal_digit_count = digit_counts[fn_id as usize]
+                    instr.f128_literal_scale10 = scale10s[fn_id as usize]
+                    instr.f128_literal_truncated_digits = truncated_digits[fn_id as usize]
+                    instr.f128_literal_truncated_tail_info = truncated_tail_infos[fn_id as usize]
+                    out.blocks[0].instrs[i as usize] = instr
+                    if out.blocks[0].instr_count < MIR_MAX_INSTRS {
+                        var meta = machine_empty_instr()
+                        meta.opcode = MIR_OP_PSEUDO_F128_META
+                        meta.dst = machine_operand_stack_slot(machine_instr_dst_value(instr))
+                        meta.src1 = machine_operand_imm64(signs[fn_id as usize])
+                        meta.src2 = machine_operand_imm64(sig_his[fn_id as usize])
+                        meta.aux = machine_operand_imm64(sig_los[fn_id as usize])
+                        meta.cond = digit_counts[fn_id as usize]
+                        meta.arg_index = scale10s[fn_id as usize]
+                        meta.call_arg_count = truncated_digits[fn_id as usize]
+                        var j = out.blocks[0].instr_count
+                        while j > i + 1 {
+                            out.blocks[0].instrs[j as usize] = out.blocks[0].instrs[(j - 1) as usize]
+                            j = j - 1
+                        }
+                        out.blocks[0].instrs[(i + 1) as usize] = meta
+                        out.blocks[0].instr_count = out.blocks[0].instr_count + 1
+                        i = i + 1
+                    }
+            }
+        }
+        i = i + 1
+    }
+    out
 }
 
 fn native_v2_f128_value_contract_hi_from_hundredths(v: i64) -> i64 {
@@ -2138,9 +2303,22 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             if machine_instr_dst_value(instr) >= 0 {
                 let temp = (*out).temp_count
                 (*out).temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret(temp))
-                native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
-                native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                if instr.cond == 1 {
+                    let temp_hi = (*out).temp_count
+                    (*out).temp_count = temp_hi + 1
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret_word(temp, 0))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret_word(temp_hi, 1))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, temp_hi))
+                    native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+                    if instr.f128_literal_digit_count > 0 {
+                        native_v2_mark_f128_literal_ref(out, machine_instr_dst_value(instr), instr.f128_literal_sign, instr.f128_literal_sig_hi, instr.f128_literal_sig_lo, instr.f128_literal_digit_count, instr.f128_literal_scale10, instr.f128_literal_truncated_digits, instr.f128_literal_truncated_tail_info)
+                    }
+                } else {
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_capture_ret(temp))
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
+                    native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                }
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
             if machine_instr_call_arg_count(instr) > MIR_MAX_CALL_ARGS {
@@ -2624,6 +2802,9 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                     out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
                     out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, temp_hi))
                     out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+                    if instr.f128_literal_digit_count > 0 {
+                        out = native_v2_mark_f128_literal_byval(out, machine_instr_dst_value(instr), instr.f128_literal_sign, instr.f128_literal_sig_hi, instr.f128_literal_sig_lo, instr.f128_literal_digit_count, instr.f128_literal_scale10, instr.f128_literal_truncated_digits, instr.f128_literal_truncated_tail_info)
+                    }
                 } else {
                     out = _emit_legal_byval(out, native_v2_make_capture_ret(temp))
                     out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
@@ -3001,9 +3182,73 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
         out.target_count = 1
     }
 
+    var f128_ret_valid: [i64; 32] = [0; 32]
+    var f128_ret_sign: [i64; 32] = [0; 32]
+    var f128_ret_sig_hi: [i64; 32] = [0; 32]
+    var f128_ret_sig_lo: [i64; 32] = [0; 32]
+    var f128_ret_digit_count: [i64; 32] = [0; 32]
+    var f128_ret_scale10: [i64; 32] = [0; 32]
+    var f128_ret_truncated_digits: [i64; 32] = [0; 32]
+    var f128_ret_truncated_tail_info: [i64; 32] = [0; 32]
+    var si: i64 = 0
+    while si < module.fn_count && si < 32 {
+        let summary_base = native_v2_lower_function_to_machine(module.functions[si as usize])
+        let summary_legal = native_v2_legalize_function(summary_base)
+        let literal_slot = native_v2_machine_only_f128_literal_slot(summary_legal)
+        if summary_legal.supported && module.functions[si as usize].param_count == 0 && literal_slot >= 0 {
+            f128_ret_valid[si as usize] = 1
+            f128_ret_sign[si as usize] = summary_legal.f128_literal_sign[literal_slot as usize]
+            f128_ret_sig_hi[si as usize] = summary_legal.f128_literal_sig_hi[literal_slot as usize]
+            f128_ret_sig_lo[si as usize] = summary_legal.f128_literal_sig_lo[literal_slot as usize]
+            f128_ret_digit_count[si as usize] = summary_legal.f128_literal_digit_count[literal_slot as usize]
+            f128_ret_scale10[si as usize] = summary_legal.f128_literal_scale10[literal_slot as usize]
+            f128_ret_truncated_digits[si as usize] = summary_legal.f128_literal_truncated_digits[literal_slot as usize]
+            f128_ret_truncated_tail_info[si as usize] = summary_legal.f128_literal_truncated_tail_info[literal_slot as usize]
+        }
+        si = si + 1
+    }
+
     var i: i64 = 0
     while i < module.fn_count {
-        let lowered = native_v2_lower_function_to_machine(module.functions[i as usize])
+        let lowered_base = native_v2_lower_function_to_machine(module.functions[i as usize])
+        var lowered = lowered_base
+        var ai: i64 = 0
+        while ai < lowered.blocks[0].instr_count {
+            var instr = lowered.blocks[0].instrs[ai as usize]
+            if instr.opcode == MIR_OP_PSEUDO_CALL && instr.cond == 1 {
+                let fn_id = machine_instr_src1_value(instr)
+                if fn_id >= 0 && fn_id < 32 && f128_ret_valid[fn_id as usize] == 1 {
+                    instr.f128_literal_sign = f128_ret_sign[fn_id as usize]
+                    instr.f128_literal_sig_hi = f128_ret_sig_hi[fn_id as usize]
+                    instr.f128_literal_sig_lo = f128_ret_sig_lo[fn_id as usize]
+                    instr.f128_literal_digit_count = f128_ret_digit_count[fn_id as usize]
+                    instr.f128_literal_scale10 = f128_ret_scale10[fn_id as usize]
+                    instr.f128_literal_truncated_digits = f128_ret_truncated_digits[fn_id as usize]
+                    instr.f128_literal_truncated_tail_info = f128_ret_truncated_tail_info[fn_id as usize]
+                    lowered.blocks[0].instrs[ai as usize] = instr
+                    if lowered.blocks[0].instr_count < MIR_MAX_INSTRS {
+                        var meta = machine_empty_instr()
+                        meta.opcode = MIR_OP_PSEUDO_F128_META
+                        meta.dst = machine_operand_stack_slot(machine_instr_dst_value(instr))
+                        meta.src1 = machine_operand_imm64(f128_ret_sign[fn_id as usize])
+                        meta.src2 = machine_operand_imm64(f128_ret_sig_hi[fn_id as usize])
+                        meta.aux = machine_operand_imm64(f128_ret_sig_lo[fn_id as usize])
+                        meta.cond = f128_ret_digit_count[fn_id as usize]
+                        meta.arg_index = f128_ret_scale10[fn_id as usize]
+                        meta.call_arg_count = f128_ret_truncated_digits[fn_id as usize]
+                        var mj = lowered.blocks[0].instr_count
+                        while mj > ai + 1 {
+                            lowered.blocks[0].instrs[mj as usize] = lowered.blocks[0].instrs[(mj - 1) as usize]
+                            mj = mj - 1
+                        }
+                        lowered.blocks[0].instrs[(ai + 1) as usize] = meta
+                        lowered.blocks[0].instr_count = lowered.blocks[0].instr_count + 1
+                        ai = ai + 1
+                    }
+                }
+            }
+            ai = ai + 1
+        }
         out.total_ir_instr_count = out.total_ir_instr_count + lowered.source_instr_count
         let legal = native_v2_legalize_function(lowered)
         out.functions[i as usize] = legal

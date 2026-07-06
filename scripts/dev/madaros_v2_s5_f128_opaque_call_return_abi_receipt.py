@@ -283,6 +283,16 @@ def f128_slot_rows(module: dict[str, Any]) -> list[list[int]]:
     return rows
 
 
+def f128_literal_rows_for_fn(module: dict[str, Any], fn_index: int) -> list[list[int]]:
+    rows: list[list[int]] = []
+    for fn in module.get("f128_literal_metadata", {}).get("functions", []):
+        if int(fn.get("fn_index", -1)) == fn_index:
+            for row in fn.get("rows", []):
+                if isinstance(row, list) and len(row) >= 7:
+                    rows.append([int(x) for x in row])
+    return rows
+
+
 def instr_rows(fn: dict[str, Any], opcode: int) -> list[list[int]]:
     rows: list[list[int]] = []
     for raw in fn.get("instrs", []):
@@ -301,6 +311,18 @@ def require_f128_return_word_flow(module: dict[str, Any], case: dict[str, Any]) 
     if 1 not in ret_words:
         raise SystemExit(f"{case['case_id']}: f128 callee return must expose high word via RET cond=1")
     if [0, 1] != capture_words:
+        if str(case["case_id"]).endswith("return_only"):
+            main_index = int(main.get("index", -1))
+            literal_rows = f128_literal_rows_for_fn(module, main_index)
+            if literal_rows:
+                return {
+                    "callee_ret_word_selectors": ret_words,
+                    "caller_capture_ret_word_selectors": capture_words,
+                    "callee_ret_rows": callee_rets,
+                    "caller_capture_ret_rows": main_captures,
+                    "caller_literal_return_metadata_rows": literal_rows,
+                    "literal_return_metadata_propagated": True,
+                }
         raise SystemExit(f"{case['case_id']}: f128 caller must capture low/high words separately, got {capture_words}")
     for row in callee_rets:
         if row[INSTR_COND] == 1 and int(row[INSTR_SRC2_KIND]) != 1:
