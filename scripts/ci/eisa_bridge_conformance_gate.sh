@@ -40,6 +40,8 @@ programs=(
   "v2-mul"
   "v2-div"
   "v2-sqrt"
+  "v2-rump-qd"
+  "v1-rump-dd"
 )
 
 for name in "${programs[@]}"; do
