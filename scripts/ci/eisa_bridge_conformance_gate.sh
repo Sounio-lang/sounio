@@ -115,15 +115,19 @@ for name in "${programs[@]}"; do
     v1-*|v1e-*) expected_prefix="v=2 prog=" ;;
     v2-*) expected_prefix="v=3 prog=" ;;
   esac
-  if ! strings -a "$elf" | grep -q "$expected_prefix"; then
-    echo "FAIL anti-vacuity ${name}: label prefix not found in ELF (strings check broken)"
+  # grep -a (not `strings`): binutils `strings` is absent on the pinned compute
+  # node; grep -a scans the raw ELF bytes as text, which is a strict superset of
+  # the printable-run extraction for these ASCII patterns (portability audit
+  # 2026-07-06, docs/audit/CI_GATE_PORTABILITY_2026-07-06.md).
+  if ! grep -aq "$expected_prefix" "$elf"; then
+    echo "FAIL anti-vacuity ${name}: label prefix not found in ELF bytes"
     exit 1
   fi
   # Mantissa digit runs (>= 8 digits) from val/roundoff/u fields must not
   # appear as literal bytes in the ELF.
   mapfile -t digit_runs < <(grep -o 'm[0-9]\{8,\}' "$per_prog_out" | sed 's/^m//' | sort -u)
   for run in "${digit_runs[@]}"; do
-    if strings -a "$elf" | grep -q "$run"; then
+    if grep -aq "$run" "$elf"; then
       echo "FAIL anti-vacuity ${name}: receipt digits '${run}' baked into ELF bytes"
       exit 1
     fi
