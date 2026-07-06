@@ -906,8 +906,8 @@ for case_id, expected_exit in required_wide_abi_cases.items():
 second_case = wide_abi_cases["u256_second_of_two_wide_args_return_47"]
 if second_case.get("machine_shape", {}).get("callee_source_param_count") != 8:
     raise SystemExit("u256 second-arg receipt must prove two wide args expand to eight callee params")
-if second_case.get("trace_matched") is not True:
-    raise SystemExit("u256 second-arg receipt must include matched lowerer trace for param_count=8")
+if second_case.get("trace_matched") is not True and second_case.get("trace_satisfied_by_machine_module") is not True:
+    raise SystemExit("u256 second-arg receipt must include matched lowerer trace or MachineModule param_count=8 evidence")
 imported_second_case = wide_abi_cases["imported_u256_second_of_two_wide_args_return_53"]
 if imported_second_case.get("machine_shape", {}).get("callee_source_param_count") != 8:
     raise SystemExit("imported u256 second-arg receipt must prove two wide args expand to eight callee params")

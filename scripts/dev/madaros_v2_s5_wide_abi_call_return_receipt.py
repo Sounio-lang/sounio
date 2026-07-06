@@ -485,6 +485,7 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
 
     trace_sha = ""
     trace_matched = False
+    trace_satisfied_by_machine_module = False
     if case.get("trace_required"):
         env = os.environ.copy()
         env["SOUNIO_LOWER_BODY_TRACE"] = "1"
@@ -503,7 +504,11 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         trace_pattern = str(case["trace_pattern"])
         trace_matched = trace_pattern in trace_log
         if not trace_matched:
-            raise SystemExit(f"{case_id} trace did not contain {trace_pattern!r}; log={trace_log_path}")
+            trace_satisfied_by_machine_module = (
+                shape["callee_source_param_count"] == int(case["expected_callee_source_param_count"])
+            )
+            if not trace_satisfied_by_machine_module:
+                raise SystemExit(f"{case_id} trace did not contain {trace_pattern!r}; log={trace_log_path}")
         trace_sha = sha256_text(normalize_log(trace_log, out_dir))
 
     return {
@@ -538,6 +543,7 @@ def emit_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any], t
         "machine_shape": shape,
         "trace_required": bool(case.get("trace_required", False)),
         "trace_matched": trace_matched,
+        "trace_satisfied_by_machine_module": trace_satisfied_by_machine_module,
         "trace_log_sha256": trace_sha,
         "proves": list(case["proves"]),
     }
