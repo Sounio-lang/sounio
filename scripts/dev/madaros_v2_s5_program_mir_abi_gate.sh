@@ -1649,10 +1649,10 @@ if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.
     raise SystemExit("bad S5 f128 binary128 value-contract native receipt schema")
 if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
-if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_4_F128_NATIVE_BINARY128_VALUE_CONTRACT_MATERIALIZATION":
-    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 42:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact forty-two cases")
+if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_12_F128_NATIVE_BOUNDED_DECIMAL_BINARY128_MATERIALIZATION":
+    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.12 bounded-decimal stage contract")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 60:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact sixty cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 5:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact five negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1661,6 +1661,7 @@ for field in [
     "f128_binary128_value_contract_case_set_complete",
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted",
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted",
+    "f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted",
     "f128_native_truncated_decimal_binary128_value_contract_promoted",
     "f128_native_subnormal_underflow_overflow_value_contract_promoted",
     "uncontracted_f128_decimal_materialization_fails_closed",
@@ -1711,6 +1712,24 @@ required_value_native_cases = {
     "scale17_rounded": {"literal": "0.12345678901234567", "hex": "3ffbf9add3746f65e780cb23f138e780", "metadata": [1, 0, 12345678901234567, 18, 17, 0]},
     "scale18_rounded": {"literal": "1e-18", "hex": "3fc32725dd1d243aba0e75fe645cc487", "metadata": [1, 0, 1, 1, 18, 0]},
     "negative_scale18_rounded": {"literal": "-1e-18", "hex": "bfc32725dd1d243aba0e75fe645cc487", "metadata": [-1, 0, 1, 1, 18, 0]},
+    "bounded_1e_minus_4": {"literal": "1e-4", "hex": "3ff1a36e2eb1c432ca57a786c226809d", "metadata": [1, 0, 1, 1, 4, 0]},
+    "bounded_1e_minus_5": {"literal": "1e-5", "hex": "3fee4f8b588e368f08461f9f01b866e4", "metadata": [1, 0, 1, 1, 5, 0]},
+    "bounded_1e_minus_6": {"literal": "1e-6", "hex": "3feb0c6f7a0b5ed8d36b4c7f34938583", "metadata": [1, 0, 1, 1, 6, 0]},
+    "bounded_1e_minus_7": {"literal": "1e-7", "hex": "3fe7ad7f29abcaf485787a6520ec08d2", "metadata": [1, 0, 1, 1, 7, 0]},
+    "bounded_1e_minus_8": {"literal": "1e-8", "hex": "3fe45798ee2308c39df9fb841a566d75", "metadata": [1, 0, 1, 1, 8, 0]},
+    "bounded_1e_minus_9": {"literal": "1e-9", "hex": "3fe112e0be826d694b2e62d01511f12a", "metadata": [1, 0, 1, 1, 9, 0]},
+    "bounded_1e_minus_10": {"literal": "1e-10", "hex": "3fddb7cdfd9d7bdbab7d6ae6881cb511", "metadata": [1, 0, 1, 1, 10, 0]},
+    "bounded_1e_minus_11": {"literal": "1e-11", "hex": "3fda5fd7fe17964955fdef1ed34a2a74", "metadata": [1, 0, 1, 1, 11, 0]},
+    "bounded_1e_minus_12": {"literal": "1e-12", "hex": "3fd719799812dea11197f27f0f6e885d", "metadata": [1, 0, 1, 1, 12, 0]},
+    "bounded_1e_minus_13": {"literal": "1e-13", "hex": "3fd3c25c268497681c2650cb4be40d61", "metadata": [1, 0, 1, 1, 13, 0]},
+    "bounded_1e_minus_14": {"literal": "1e-14", "hex": "3fd06849b86a12b9b01ea70909833de7", "metadata": [1, 0, 1, 1, 14, 0]},
+    "bounded_1e_minus_15": {"literal": "1e-15", "hex": "3fcd203af9ee756159b21f3a6e0297ec", "metadata": [1, 0, 1, 1, 15, 0]},
+    "bounded_1e_minus_16": {"literal": "1e-16", "hex": "3fc9cd2b297d889bc2b6985d7cd0f313", "metadata": [1, 0, 1, 1, 16, 0]},
+    "bounded_1e_minus_17": {"literal": "1e-17", "hex": "3fc670ef54646d496892137dfd73f5a9", "metadata": [1, 0, 1, 1, 17, 0]},
+    "bounded_7_8125": {"literal": "7.8125", "hex": "4001f400000000000000000000000000", "metadata": [1, 0, 78125, 5, 4, 0]},
+    "bounded_42_0625": {"literal": "42.0625", "hex": "40045080000000000000000000000000", "metadata": [1, 0, 420625, 6, 4, 0]},
+    "bounded_large_pi_prefix_scale1": {"literal": "314159265358979.3", "hex": "402f1db9e76a24834ccccccccccccccd", "metadata": [1, 0, 3141592653589793, 16, 1, 0]},
+    "bounded_large_e_prefix_scale1": {"literal": "271828182845904.5", "hex": "402eee73dc8e93a10000000000000000", "metadata": [1, 0, 2718281828459045, 16, 1, 0]},
     "large_scale6_rounded": {"literal": "123456789012.345678", "hex": "4023cbe991a14587e5a78f25a250f840", "metadata": [1, 0, 123456789012345678, 18, 6, 0]},
     "large_all_nines_scale6_rounded": {"literal": "999999999999.999999", "hex": "4026d1a94a1fffffffde7210be9424e6", "metadata": [1, 0, 999999999999999999, 18, 6, 0]},
     "minimum_subnormal_rounded": {"literal": "6.475175119438025110924438958227646552499569338034681e-4966", "hex": "00000000000000000000000000000001", "metadata": [1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
@@ -2907,10 +2926,11 @@ module = {
         "f128_internal_sret_arg_stack_boundary_promoted": True,
         "f128_compact_vreg_classifier_base_only_promoted": True,
         "f128_binary128_native_anchor_materialization_promoted": True,
-        "f128_binary128_value_contract_native_materialization_promoted": True,
-        "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
-        "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
-        "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+    "f128_binary128_value_contract_native_materialization_promoted": True,
+    "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
+    "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
+    "f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted": True,
+    "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
         "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
         "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
@@ -3075,10 +3095,11 @@ receipt = {
     "f128_internal_sret_arg_stack_boundary_promoted": True,
     "f128_compact_vreg_classifier_base_only_promoted": True,
     "f128_binary128_native_anchor_materialization_promoted": True,
-    "f128_binary128_value_contract_native_materialization_promoted": True,
-    "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
-    "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
-    "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+        "f128_binary128_value_contract_native_materialization_promoted": True,
+        "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": True,
+        "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": True,
+        "f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted": True,
+        "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
     "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
     "f128_param_slot_layout_promoted": True,
@@ -3175,6 +3196,7 @@ receipt = {
     "f128_binary128_value_contract_native_materialization_promoted": module["scalar_abi_receipts"]["f128_binary128_value_contract_native_materialization_promoted"],
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_exact_dyadic_decimal_binary128_materialization_promoted"],
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_bounded_rounded_decimal_binary128_materialization_promoted"],
+    "f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_bounded_decimal_siglo_scale18_materialization_promoted"],
     "f128_native_truncated_decimal_binary128_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_truncated_decimal_binary128_value_contract_promoted"],
     "f128_native_subnormal_underflow_overflow_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_subnormal_underflow_overflow_value_contract_promoted"],
     "f128_arithmetic_value_contract_promoted": module["scalar_abi_receipts"]["f128_arithmetic_value_contract_promoted"],
