@@ -3049,8 +3049,13 @@ impl Parser {
     }
 
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
-    // Also accept brace-form extern blocks and conservatively retain only the
-    // first parsed declaration in the returned Item.
+    // Also accepts brace-form extern blocks, but this variant is constrained by
+    // the single-Item return contract of the generic parse_item() dispatcher
+    // (line ~155) and conservatively retains only the first parsed declaration
+    // when reached through that path (e.g. via parse_export_fn_item, or a
+    // nested parse_item() call). The top-level item loops (parser::mod)
+    // special-case TokenKind::Extern and call parse_extern_fn_item_list
+    // instead, which returns every declared fn in a brace block.
     fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
@@ -3129,6 +3134,84 @@ impl Parser {
         let span = p.span_from(start)
         let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false , is_extern: true }
         (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+    }
+
+    // extern "C" { fn a(...); fn b(...); ... } — brace-form multi-decl variant.
+    // Threads the caller's reverse-order ItemList accumulator (`acc`) directly,
+    // so every declared fn is retained (not just the first). Also handles the
+    // braceless single-fn form so callers can dispatch on TokenKind::Extern
+    // once and get a list back either way.
+    fn parse_extern_fn_item_list(self, visibility: Visibility, acc: Option<Box<ItemList>>) -> (Parser, Option<Box<ItemList>>) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'extern'
+        if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        var rev_out = acc
+
+        if parser_peek(p) == TokenKind::LBrace {
+            p = p.advance()
+            while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                while parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+                    p = p.advance()
+                }
+                if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
+                    break
+                }
+                if parser_peek(p) != TokenKind::Fn {
+                    p.had_error = true
+                    p.error_count = p.error_count + 1
+                    p = p.advance()
+                } else {
+                    let fn_start = p.current_span()
+                    p = p.advance()  // skip 'fn'
+                    let name = p.current_name()
+                    p = p.expect_ident()
+                    p = p.expect(TokenKind::LParen)
+                    let pair = p.parse_param_list()
+                    p = pair.0
+                    let params_opt = pair.1
+                    p = p.expect(TokenKind::RParen)
+                    let pair2 = p.parse_optional_return_type()
+                    p = pair2.0
+                    let ret_ty = pair2.1
+                    while parser_peek(p) == TokenKind::Semi {
+                        p = p.advance()
+                    }
+                    let fn_span = p.span_from(fn_start)
+                    let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: fn_span }, span: fn_span, is_kernel: false , is_extern: true }
+                    let item = Item { kind: ItemKind::ItemFn, span: fn_span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None }
+                    rev_out = Some(Box::new(ItemList { head: item, tail: rev_out }))
+                }
+            }
+            p = p.expect(TokenKind::RBrace)
+            return (p, rev_out)
+        }
+
+        // Braceless single-fn form: extern "C" fn name(params) -> RetType
+        if parser_peek(p) != TokenKind::Fn {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            p = p.advance()
+            return (p, rev_out)
+        }
+        p = p.advance()  // skip 'fn'
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+        while parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
+        let span = p.span_from(start)
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false , is_extern: true }
+        let item = Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None }
+        rev_out = Some(Box::new(ItemList { head: item, tail: rev_out }))
+        (p, rev_out)
     }
 
     // Sprint 109: export "C" fn
