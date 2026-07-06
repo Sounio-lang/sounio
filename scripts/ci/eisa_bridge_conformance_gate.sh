@@ -44,6 +44,7 @@ programs=(
   "v1-rump-dd"
   "v2-fuel"
   "v2-mem"
+  "v2-emov"
 )
 
 for name in "${programs[@]}"; do
