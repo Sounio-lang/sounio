@@ -1,6 +1,36 @@
 # A8 — Madaros imported-lane cross-module forwarding miscompile (SIGSEGV)
 
-Status: **BLOCKED / diagnosed** (2026-07-06). This is the last A5 blocker
+## RESOLUTION (2026-07-06) — FIXED in `ir_module_finalize_merged_calls`
+
+**The runtime miscompile is FIXED.** The earlier diagnosis below (Defect 1 = "body lowering
+desyncs the `var=<call>` binding") was **falsified** by a pre/post-finalize IR differential on the
+current base branch: the merged-IR body lowering is *correct* pre-finalize
+(`small_basis_fwd i0: Call dst=2 arg=[0] fn=9(small_zero)`), and the exact corruption the doc
+described (`dst=3 arg=[2] fn=5`) is introduced by the **finalize** step — specifically the
+two-pass call-target-resolution loop at the end of `ir_module_finalize_merged_calls`
+(`self-hosted/compiler/module_frontend.sio`). A per-step probe pinned it to the transition
+`after_promote2` (correct) → `after_2pass` (corrupt).
+
+Real root cause: that loop called `ir_module_resolve_one_call_target(&out, ins)` passing the whole
+`IrInstr` **by value**. `IrInstr` carries a `Box` (`call_args`); lean_single miscompiles the
+by-value large-struct copy and scrambles the *caller's* `ins` local (dst/src1/call_args/fn_id) before
+the unconditional write-back. (`ir_module_compact_duplicate_fn_refs` uses the same read/writeback but
+passes only `ins.name` — never the whole `IrInstr` — which is why it was safe.)
+
+Fix: resolve from scalar fields only — `ir_module_resolve_call_target_fields(module, old_id, name)` —
+and write the slot back only when `fn_id` actually changes. Witnesses (Slurm, actual rc): min → rc=0
+`CROSS_SRET_MIN_OK`; cd_mul → rc=0 `CD_MUL_CROSS_SRET_OK`; a8_diag_fwd/sizes/step/ctrl → rc=0;
+`fano_basics` FAIL→PASS; zero regressions across a ~20-test base-vs-fix differential. Repro tests
+flipped known-failure → run-pass.
+
+Still OPEN (separate, pre-existing — reproduce on base): `cd_exact_generic_i64` SIGSEGVs at
+**compile time** inside `lower_program_to_ir_summary_box_with_externs_ref` for its generic dependency
+module (`lower_array: dep_begin 1`, between `module_frontend_lower: summary_begin`/`summary_done`);
+EISA `test_eisa_isa/evm` fail earlier at "multimodule native thin-link compilation failed".
+
+---
+
+Status: ~~**BLOCKED / diagnosed**~~ **FIXED (see resolution above)** (2026-07-06). This is the last A5 blocker
 (`cd_exact_generic_i64.sio`). It is NOT the compile-time dep-lowering segfault the
 original A8 prompt described — that hypothesis was falsified. The real defect is a
 **runtime** miscompile in the Madaros *imported-lane* (multi-module) IR lowering.

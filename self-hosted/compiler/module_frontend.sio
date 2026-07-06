@@ -1333,12 +1333,19 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
-// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id.
+// Resolve a call's canonical target from its (fn_id, name) fields only.
 // Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
-// callee symbol at the current fn_id when instr.name is empty.
-fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
-    let old_id = instr.fn_id
-    var resolve_name = instr.name
+// callee symbol at the current fn_id when the call's name is empty.
+//
+// A8 fix: the previous entry point (`ir_module_resolve_one_call_target`) took
+// `instr: IrInstr` BY VALUE. IrInstr is a
+// large struct carrying a `Box` (call_args); under lean_single, passing it by value
+// miscompiles the copy and corrupts the CALLER's `ins` local (dst/src1/call_args all
+// scramble), which was then written back — SIGSEGV in cross-module forwarding fns
+// (`var r = zero(k); r.c[i]=1; return r`). Passing only the scalar fn_id + fixed-size
+// Name avoids the large-struct/Box by-value copy entirely.
+fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
+    var resolve_name = instr_name
     if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
         resolve_name = (*module).functions[old_id as usize].name
     }
@@ -1371,9 +1378,12 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
         while ii < (*module).functions[fi as usize].instr_count {
             let op = (*module).functions[fi as usize].instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(
+                let cur_fn = (*module).functions[fi as usize].instrs[ii as usize].fn_id
+                let cur_nm = (*module).functions[fi as usize].instrs[ii as usize].name
+                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_call_target_fields(
                     module,
-                    (*module).functions[fi as usize].instrs[ii as usize]
+                    cur_fn,
+                    cur_nm
                 )
             }
             ii = ii + 1
@@ -1794,9 +1804,20 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
             while ii < out.functions[fi as usize].instr_count {
                 let op = out.functions[fi as usize].instrs[ii as usize].op
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
-                    ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
-                    out.functions[fi as usize].instrs[ii as usize] = ins
+                    // A8 fix: resolve from scalar fields (no IrInstr by-value copy) and
+                    // only write back the whole slot when the fn_id actually changes.
+                    // The prior code passed the whole IrInstr by value into the resolver,
+                    // which lean_single miscompiled — corrupting the caller's `ins`
+                    // (dst/src1/call_args) before the unconditional write-back, crashing
+                    // cross-module struct-forwarding fns at runtime.
+                    let cur_fn = out.functions[fi as usize].instrs[ii as usize].fn_id
+                    let cur_nm = out.functions[fi as usize].instrs[ii as usize].name
+                    let new_id = ir_module_resolve_call_target_fields(&out, cur_fn, cur_nm)
+                    if new_id != cur_fn {
+                        var ins = out.functions[fi as usize].instrs[ii as usize]
+                        ins.fn_id = new_id
+                        out.functions[fi as usize].instrs[ii as usize] = ins
+                    }
                 }
                 ii = ii + 1
             }
