@@ -72,6 +72,10 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B: quartet<->fiber incidence of the sedenion ZD geometry (42 quartets = 2*K_7 on 7 fibers).
+@[default_target]
+lean_lib «SounioSedenionIncidence» where
+
 @[default_target]
 lean_lib «SounioSedenionQuartets» where
 
