@@ -277,9 +277,9 @@ fn v2_l_u() -> i64 { 40 }
 fn v2_rp2(r: i64) -> i64 { 5120 + r * 8 }
 fn v2_mlanes(s: i64) -> i64 { 5632 + s * 48 }
 fn v2_mp2(s: i64) -> i64 { 7168 + s * 8 }
-fn v2q(i: i64) -> i64 { 7424 + i * 8 }
-fn v2_state_size() -> i64 { 9216 }
-fn v2_strings_off() -> i64 { 9472 }
+fn v2q(i: i64) -> i64 { 7424 + i * 8 }        // qd scratch, 384 slots -> top 10496
+fn v2_state_size() -> i64 { 10496 }
+fn v2_strings_off() -> i64 { 10752 }          // 128 + 10496 + 128 slack (> state top)
 
 fn v2_reg_val_off(r: i64) -> i64 { v2_lanes(r) + v2_l_val() }
 fn v2_reg_e0_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e0() }
@@ -2187,6 +2187,84 @@ fn em_sub_qd_mul(
     pp
 }
 
+// qd_mul_f64(QMFa[224..227], QMFb[228]) -> QR   (qd128.sio:273)
+fn em_sub_qd_mul_f64(out: &![i8; 65536], p: i64, tp_off: i64, qaddf_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, tp_off, v2q(224), v2q(228), v2q(229), v2q(230))  // p0
+    pp = em_call_binf(out, pp, tp_off, v2q(225), v2q(228), v2q(231), v2q(232))     // p1
+    pp = em_call_binf(out, pp, tp_off, v2q(226), v2q(228), v2q(233), v2q(234))     // p2
+    pp = ld(out, pp, 0, v2q(227))
+    pp = ld(out, pp, 1, v2q(228))
+    pp = sse(out, pp, 0x59, 0, 1)          // p3 = a.x3 * b
+    pp = st(out, pp, 0, v2q(235))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(236))
+    pp = st(out, pp, 0, v2q(237))
+    pp = st(out, pp, 0, v2q(238))
+    pp = st(out, pp, 0, v2q(239))
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 229)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 230)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 231)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 232)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 233)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 234)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 235)
+    pp = em_v2_qcopy(out, pp, 236, 8)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_sub(QA, QB) -> QR = qd_add(QA, qd_neg(QB))   (qd128.sio:269). Mutates QB.
+fn em_sub_qd_sub(out: &![i8; 65536], p: i64, qadd_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_qneg(out, p, 4)
+    pp = call32(out, pp, qadd_off)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_div(QA=a, QB=b) -> QR   (qd128.sio:364): 5-term quotient with full qd
+// remainder updates, then renorm5.
+fn em_sub_qd_div(
+    out: &![i8; 65536], p: i64, qmulf_off: i64, qsub_off: i64, rn_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_qcopy(out, p, 0, 244)     // a -> DVr
+    pp = em_v2_qcopy(out, pp, 4, 240)        // b -> DVb
+    var i = 0
+    while i < 5 {
+        pp = ld(out, pp, 0, v2q(244))
+        pp = ld(out, pp, 1, v2q(240))
+        pp = sse(out, pp, 0x5E, 0, 1)        // q_i = DVr0 / DVb0
+        pp = st(out, pp, 0, v2q(248 + i))
+        if i < 4 {
+            // rmf = qd_mul_f64(DVb, q_i)
+            pp = em_v2_qcopy(out, pp, 240, 224)      // DVb -> QMFa
+            pp = ld(out, pp, 0, v2q(248 + i))
+            pp = st(out, pp, 0, v2q(228))            // QMFb = q_i
+            pp = call32(out, pp, qmulf_off)
+            // r = qd_sub(DVr, rmf)
+            pp = em_v2_qcopy(out, pp, 244, 0)        // DVr -> QA
+            pp = em_v2_qcopy(out, pp, 8, 4)          // rmf(QR) -> QB
+            pp = call32(out, pp, qsub_off)
+            pp = em_v2_qcopy(out, pp, 8, 244)        // QR -> DVr
+        }
+        i = i + 1
+    }
+    // renorm5(q0..q4)
+    pp = ld(out, pp, 0, v2q(248))
+    pp = st(out, pp, 0, v2q(13))
+    pp = ld(out, pp, 0, v2q(249))
+    pp = st(out, pp, 0, v2q(14))
+    pp = ld(out, pp, 0, v2q(250))
+    pp = st(out, pp, 0, v2q(15))
+    pp = ld(out, pp, 0, v2q(251))
+    pp = st(out, pp, 0, v2q(16))
+    pp = ld(out, pp, 0, v2q(252))
+    pp = st(out, pp, 0, v2q(17))
+    pp = call32(out, pp, rn_off)
+    pp = em_v2_qcopy(out, pp, 18, 8)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
 // Load a qd operand (val + 4 err comps as (val,0,0,0)+(e0..e3)... ) — helper to
 // stage QA = qd_from_f64(reg.val), QB = reg.err for a true() computation.
 fn em_v2_stage_true(out: &![i8; 65536], p: i64, r: i64) -> i64 with Mut, Panic, Div {
@@ -2387,6 +2465,81 @@ fn em_v2_binop_mul(
     pp = jmp32(out, pp, 0)
     let poison_lbl = pp
     patch32(out, jp, poison_lbl - (jp + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    pp
+}
+
+// ediv on the v2 path. Mirrors evm_step op_ediv (v2): normalize a,b; poison
+// combine; divisor-zero poison; ediv2 closure contract; I3 write.
+fn em_v2_binop_div(
+    out: &![i8; 65536], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, qdiv_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = mov_mem_rax(out, pp, sc(38))
+    pp = em_v2_normalize(out, pp, b)
+    pp = or_rax_mem(out, pp, sc(38))
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // divisor-zero guard: b.val == 0 -> poison
+    pp = ld(out, pp, 0, v2_reg_val_off(b))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz = pp + 2
+    pp = jcc(out, pp, 0x84, 0)          // je POISON (divisor == 0)
+    // q = a.val / b.val
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = ld(out, pp, 1, v2_reg_val_off(b))
+    pp = sse(out, pp, 0x5E, 0, 1)
+    pp = st(out, pp, 0, v2q(72))
+    // tx, ty
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 56)
+    pp = em_v2_stage_true(out, pp, b)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 60)
+    // t = qd_div(tx, ty)
+    pp = em_v2_qcopy(out, pp, 56, 0)
+    pp = em_v2_qcopy(out, pp, 60, 4)
+    pp = call32(out, pp, qdiv_off)
+    pp = em_v2_qcopy(out, pp, 8, 64)
+    // err = qd_add(t, qd_neg(qd_from_f64(q)))
+    pp = em_v2_qcopy(out, pp, 64, 0)
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, v2q(4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)
+    // u = (1/|b.val|) * sqrt(a.u^2 + (q*b.u)^2)
+    pp = ld(out, pp, 0, v2_reg_u_off(a))
+    pp = st(out, pp, 0, v2q(253))
+    pp = ld(out, pp, 0, v2q(72))
+    pp = ld(out, pp, 1, v2_reg_u_off(b))
+    pp = sse(out, pp, 0x59, 0, 1)       // q * b.u
+    pp = st(out, pp, 0, v2q(254))
+    pp = em_u_from_two(out, pp, v2q(253), v2q(254), ns_off)
+    pp = ld(out, pp, 0, v2_reg_val_off(b))
+    pp = setx(out, pp, 1, 9223372036854775807)
+    pp = andpd(out, pp, 0, 1)           // |b.val|
+    pp = setx(out, pp, 1, c_one())
+    pp = sse(out, pp, 0x5E, 1, 0)       // 1.0 / |b.val|
+    pp = ld(out, pp, 0, sc(11))
+    pp = sse(out, pp, 0x59, 0, 1)       // sqrt(inner) * (1/|b.val|)
+    pp = st(out, pp, 0, sc(11))
+    // finish
+    pp = em_v2_finish_result(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    patch32(out, jz, poison_lbl - (jz + 4))
     pp = em_v2_set_poison(out, pp, dst)
     let done_lbl = pp
     patch32(out, jdone, done_lbl - (jdone + 4))
@@ -3242,6 +3395,12 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with M
     p = em_sub_nine_one_sum(out, p)
     let qmul_off = p
     p = em_sub_qd_mul(out, p, tp_off, three_off, six_off, ntwo_off, none_off, qaddf_off)
+    let qmulf_off = p
+    p = em_sub_qd_mul_f64(out, p, tp_off, qaddf_off)
+    let qsub_off = p
+    p = em_sub_qd_sub(out, p, qadd_off)
+    let qdiv_off = p
+    p = em_sub_qd_div(out, p, qmulf_off, qsub_off, rn_off)
 
     let main_off = p
     p = put8(out, p, 0x48)
@@ -3333,8 +3492,13 @@ fn bridge_translate_v2(img: EisaxImage, out: &![i8; 65536]) -> BridgeMeta with M
                                     p = em_v2_binop_mul(out, p, dst, a, b, qadd_off, qmul_off, ns_off)
                                     p = em_v2_set_last_written(out, p, dst)
                                 } else {
-                                    // v2 arithmetic / control-flow templates not yet landed
-                                    return BridgeMeta { len: 0, status: 42 }
+                                    if op == op_ediv() {
+                                        p = em_v2_binop_div(out, p, dst, a, b, qadd_off, qdiv_off, ns_off)
+                                        p = em_v2_set_last_written(out, p, dst)
+                                    } else {
+                                        // v2 arithmetic / control-flow templates not yet landed
+                                        return BridgeMeta { len: 0, status: 42 }
+                                    }
                                 }
                             }
                         }
