@@ -1527,6 +1527,8 @@ if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
 if f128_binary128_value_contract_native_receipt.get("case_count") != 38:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact thirty-eight cases")
+if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 2:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact two negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
 for field in [
     "f128_binary128_value_contract_native_materialization_promoted",
@@ -1534,6 +1536,7 @@ for field in [
     "f128_native_exact_dyadic_decimal_binary128_materialization_promoted",
     "f128_native_bounded_rounded_decimal_binary128_materialization_promoted",
     "f128_native_truncated_decimal_binary128_value_contract_promoted",
+    "uncontracted_f128_decimal_materialization_fails_closed",
 ]:
     if value_native_claims.get(field) is not True:
         raise SystemExit(f"f128 binary128 value-contract native receipt missing required true claim: {field}")
@@ -1605,6 +1608,25 @@ for case_id, expected in required_value_native_cases.items():
         raise SystemExit(f"{case_id} value-contract native must prove nonzero low-word immediate")
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} value-contract native missing ELF or MachineModule hash")
+value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("negative_cases", [])}
+required_value_native_negative = {
+    "uncontracted_multilimb_decimal_fails_closed": "f128_decimal_materialization_pending",
+    "overflow_decimal_literal_fails_closed": "f128_decimal_materialization_pending",
+}
+if set(value_native_negative_cases) != set(required_value_native_negative):
+    raise SystemExit(f"f128 binary128 value-contract native negative cases mismatch: {sorted(value_native_negative_cases)}")
+for case_id, expected_detail in required_value_native_negative.items():
+    row = value_native_negative_cases[case_id]
+    if row.get("kind") != "negative":
+        raise SystemExit(f"{case_id} must be marked as a negative case")
+    if row.get("elf_emitted") is not False:
+        raise SystemExit(f"{case_id} must not emit an ELF")
+    if row.get("machine_module_supported") is not False:
+        raise SystemExit(f"{case_id} must be MachineModule unsupported")
+    if row.get("machine_module_unsupported_detail") != expected_detail:
+        raise SystemExit(f"{case_id} unsupported detail mismatch")
+    if not row.get("machine_module_sha256"):
+        raise SystemExit(f"{case_id} missing MachineModule hash")
 
 if f128_arithmetic_value_contract_receipt.get("schema") != "madaros.v2.s5.f128_arithmetic_value_contract_receipt/0.1":
     raise SystemExit("bad S5 f128 arithmetic value-contract receipt schema")
@@ -2496,8 +2518,10 @@ module = {
         "stage_contract_level": f128_binary128_value_contract_native_receipt["stage_contract_level"],
         "case_id": f128_binary128_value_contract_native_receipt["case_id"],
         "case_count": f128_binary128_value_contract_native_receipt["case_count"],
+        "negative_case_count": f128_binary128_value_contract_native_receipt["negative_case_count"],
         "claims": f128_binary128_value_contract_native_receipt["claims"],
         "cases": f128_binary128_value_contract_native_receipt["cases"],
+        "negative_cases": f128_binary128_value_contract_native_receipt["negative_cases"],
     },
     "f128_arithmetic_value_contract_receipt": {
         "schema": f128_arithmetic_value_contract_receipt["schema"],

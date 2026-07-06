@@ -33,6 +33,14 @@ class Case:
     expected_metadata: list[int]
 
 
+@dataclass(frozen=True)
+class NegativeCase:
+    case_id: str
+    literal: str
+    expected_unsupported_detail: str
+    contract_reason: str
+
+
 CASES: list[Case] = [
     Case("positive_zero", "0.0", "00000000000000000000000000000000", [1, 0, 0, 2, 1, 0]),
     Case("negative_zero", "-0.0", "80000000000000000000000000000000", [-1, 0, 0, 2, 1, 0]),
@@ -96,6 +104,22 @@ CASES: list[Case] = [
         "0.333333333333333333333333333333333333333",
         "3ffd5555555555555555555555555555",
         [1, 333333333333333333, 33333333333333333, 40, 39, 4],
+    ),
+]
+
+
+NEGATIVE_CASES: list[NegativeCase] = [
+    NegativeCase(
+        "uncontracted_multilimb_decimal_fails_closed",
+        "1.2345678901234567890123456789012346",
+        "f128_decimal_materialization_pending",
+        "multi-limb decimal not present in the explicit truncated high-precision value-contract set",
+    ),
+    NegativeCase(
+        "overflow_decimal_literal_fails_closed",
+        "1e5000",
+        "f128_decimal_materialization_pending",
+        "finite decimal exponent outside the promoted binary128 materialization contract",
     ),
 ]
 
@@ -250,19 +274,82 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: Case, timeout_
     }
 
 
+def compile_negative_case(root: Path, compiler: Path, out_dir: Path, case: NegativeCase, timeout_s: int) -> dict[str, Any]:
+    source = f"""fn main() -> i64 {{
+    let x: f128 = {case.literal} as f128
+    let y: f128 = x
+    0
+}}
+"""
+    source_path = out_dir / f"{case.case_id}.sio"
+    elf_path = out_dir / f"{case.case_id}.native_v2"
+    mm_path = out_dir / f"{case.case_id}.machine_module.json"
+    log_path = out_dir / f"{case.case_id}.native_v2.log"
+    source_path.write_text(source, encoding="utf-8")
+    rc, stdout, stderr = run_command(
+        [
+            str(compiler),
+            "--native-v2-compile",
+            str(source_path),
+            "-o",
+            str(elf_path),
+            "--machine-module-json",
+            str(mm_path),
+        ],
+        root,
+        timeout_s,
+    )
+    log = stdout + stderr
+    log_path.write_text(log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case.case_id}: wrapper command must return rc=0 while reporting native-v2 failure; log={log_path}")
+    if "native_v2_compile: FAIL to_file rc=12" not in log:
+        raise SystemExit(f"{case.case_id}: expected native-v2 fail-closed rc=12; log={log_path}")
+    if "Segmentation fault" in log or "SIGSEGV" in log or "legacy fallback" in log:
+        raise SystemExit(f"{case.case_id}: crash or fallback detected; log={log_path}")
+    if elf_path.exists():
+        raise SystemExit(f"{case.case_id}: fail-closed f128 decimal must not emit an ELF")
+    if not mm_path.exists() or mm_path.stat().st_size <= 0:
+        raise SystemExit(f"{case.case_id}: expected MachineModule JSON for unsupported diagnostic")
+
+    module = json.loads(mm_path.read_text(encoding="utf-8"))
+    if module.get("legacy_fallback") is not False:
+        raise SystemExit(f"{case.case_id}: MachineModule used fallback")
+    if module.get("supported") is not False:
+        raise SystemExit(f"{case.case_id}: MachineModule must be unsupported")
+    if module.get("unsupported_detail") != case.expected_unsupported_detail:
+        raise SystemExit(f"{case.case_id}: expected unsupported detail {case.expected_unsupported_detail!r}, got {module.get('unsupported_detail')!r}")
+    return {
+        "case_id": case.case_id,
+        "kind": "negative",
+        "literal": case.literal,
+        "contract_reason": case.contract_reason,
+        "expected_unsupported_detail": case.expected_unsupported_detail,
+        "compile_rc": rc,
+        "compile_log_sha256": sha256_text(normalize_log(log, out_dir)),
+        "elf_emitted": False,
+        "machine_module_supported": module.get("supported"),
+        "machine_module_unsupported_detail": module.get("unsupported_detail"),
+        "machine_module_sha256": sha256_text(stable_json(module)),
+    }
+
+
 def emit_receipt(args: argparse.Namespace) -> Path:
     root = Path(args.root).resolve() if args.root else repo_root_from_script()
     compiler = Path(args.compiler).resolve()
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     case_rows = [compile_case(root, compiler, out_dir, case, int(args.timeout_s)) for case in CASES]
+    negative_rows = [compile_negative_case(root, compiler, out_dir, case, int(args.timeout_s)) for case in NEGATIVE_CASES]
     payload: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE_CONTRACT_LEVEL,
         "case_id": "f128_binary128_value_contract_native_materialization",
         "case_count": len(case_rows),
+        "negative_case_count": len(negative_rows),
         "cases": case_rows,
+        "negative_cases": negative_rows,
         "claims": {
             "f128_binary128_value_contract_native_materialization_promoted": True,
             "f128_binary128_value_contract_case_set_complete": True,
@@ -275,6 +362,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_arithmetic_promoted": False,
             "f128_native_call_abi_promoted": False,
             "f128_native_return_abi_promoted": False,
+            "uncontracted_f128_decimal_materialization_fails_closed": True,
             "legacy_fallback_used": False,
         },
         "roundtrip_contract": [
@@ -282,6 +370,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",
+            "uncontracted_f128_decimal_literals_fail_closed_without_elf_or_opaque_word_payload_fallback",
             "receipt_does_not_promote_arbitrary_decimal_binary128_or_f128_arithmetic_or_abi",
         ],
     }
