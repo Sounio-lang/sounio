@@ -65,6 +65,18 @@ fn main() -> i64 {
 }
 """,
     },
+    {
+        "case_id": "f128_arbitrary_decimal_materialization_stays_blocked",
+        "kind": "block",
+        "expected_detail": "",
+        "expected_log_fragment": "native_v2_compile: FAIL",
+        "source": """fn main() -> i64 {
+    let x: f128 = 1.23456789012345678901234567890123456789 as f128
+    let y: f128 = x
+    0
+}
+""",
+    },
 ]
 
 
@@ -231,11 +243,15 @@ def compile_case(root: Path, compiler: Path, out_dir: Path, case: dict[str, Any]
         if rc == 0 and elf_path.exists() and elf_path.stat().st_size > 0:
             raise SystemExit(f"{case_id}: unexpectedly emitted ELF for pending f128 operation")
         observed_detail = str(module.get("unsupported_detail") or "")
-        if "native_v2_compile: FAIL" not in log or observed_detail != detail:
+        log_fragment = str(case.get("expected_log_fragment", "native_v2_compile: FAIL"))
+        if log_fragment not in log:
+            raise SystemExit(f"{case_id}: expected fail-closed log fragment {log_fragment!r}; log={log_path}")
+        if detail and observed_detail != detail:
             raise SystemExit(f"{case_id}: expected fail-closed detail {detail!r}; log={log_path}")
         result.update(
             {
                 "expected_detail": detail,
+                "expected_log_fragment": log_fragment,
                 "machine_unsupported_detail": observed_detail,
                 "native_v2_emitted": False,
                 "blocked_fail_closed": True,
@@ -261,7 +277,8 @@ def emit_receipt(args: argparse.Namespace) -> Path:
         "claims": {
             "f128_native_opaque_local_storage_copy_promoted": True,
             "f128_native_executes_local_no_observe_program": True,
-            "f128_native_payload_words": ["decimal_sig_hi", "decimal_sig_lo"],
+            "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
+            "f128_arbitrary_decimal_materialization_fails_closed": True,
             "f128_native_ieee_binary128_materialization_promoted": False,
             "f128_native_arithmetic_promoted": False,
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,

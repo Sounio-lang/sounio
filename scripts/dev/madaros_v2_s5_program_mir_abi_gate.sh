@@ -1315,6 +1315,7 @@ claims = f128_native_opaque_storage_receipt.get("claims", {})
 for field in [
     "f128_native_opaque_local_storage_copy_promoted",
     "f128_native_executes_local_no_observe_program",
+    "f128_arbitrary_decimal_materialization_fails_closed",
 ]:
     if claims.get(field) is not True:
         raise SystemExit(f"f128 native opaque storage receipt missing required true claim: {field}")
@@ -1334,13 +1335,14 @@ if claims.get("f128_direct_expanded_gpr_call_shape_promoted_elsewhere") is not T
     raise SystemExit("f128 native opaque storage receipt must acknowledge expanded-GPR direct call promotion")
 if claims.get("f128_direct_stack_call_shape_promoted_elsewhere") is not True:
     raise SystemExit("f128 native opaque storage receipt must acknowledge stack direct call promotion")
-if claims.get("f128_native_payload_words") != ["decimal_sig_hi", "decimal_sig_lo"]:
-    raise SystemExit("f128 native opaque storage receipt must use decimal metadata words as opaque payload")
+if claims.get("f128_native_payload_words") != ["binary128_hi64", "binary128_lo64"]:
+    raise SystemExit("f128 native opaque storage receipt must use binary128 payload words for supported literals")
 f128_native_cases = {row.get("case_id"): row for row in f128_native_opaque_storage_receipt.get("cases", [])}
 required_f128_native_cases = {
     "local_literal_copy_executes",
     "f128_arithmetic_stays_blocked",
     "f128_overwide_arg_shape_stays_blocked",
+    "f128_arbitrary_decimal_materialization_stays_blocked",
 }
 if set(f128_native_cases) != required_f128_native_cases:
     raise SystemExit(f"f128 native opaque storage receipt cases mismatch: {sorted(f128_native_cases)}")
@@ -1351,6 +1353,7 @@ if f128_native_cases["local_literal_copy_executes"].get("run_rc") != 0:
 for case_id, detail in {
     "f128_arithmetic_stays_blocked": "f128_arithmetic_pending",
     "f128_overwide_arg_shape_stays_blocked": "f128_call_shape_pending",
+    "f128_arbitrary_decimal_materialization_stays_blocked": "",
 }.items():
     row = f128_native_cases[case_id]
     if row.get("native_v2_emitted") is not False:
