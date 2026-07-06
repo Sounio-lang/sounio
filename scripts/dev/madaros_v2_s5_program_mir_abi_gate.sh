@@ -1541,8 +1541,8 @@ if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.4 stage contract")
 if f128_binary128_value_contract_native_receipt.get("case_count") != 42:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact forty-two cases")
-if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 2:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact two negative fail-closed cases")
+if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 5:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact five negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
 for field in [
     "f128_binary128_value_contract_native_materialization_promoted",
@@ -1631,6 +1631,9 @@ value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128
 required_value_native_negative = {
     "uncontracted_multilimb_decimal_fails_closed": "f128_decimal_materialization_pending",
     "uncontracted_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_truncated_pi_tail_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_positive_overflow_boundary_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_positive_underflow_boundary_fails_closed": "f128_decimal_materialization_pending",
 }
 if set(value_native_negative_cases) != set(required_value_native_negative):
     raise SystemExit(f"f128 binary128 value-contract native negative cases mismatch: {sorted(value_native_negative_cases)}")

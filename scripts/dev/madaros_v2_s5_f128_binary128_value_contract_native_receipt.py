@@ -125,6 +125,24 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "f128_decimal_materialization_pending",
         "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
+    NegativeCase(
+        "uncontracted_truncated_pi_tail_fails_closed",
+        "3.14159265358979323846264338327950288420",
+        "f128_decimal_materialization_pending",
+        "same prefix/count as the contracted pi probe but a different truncated-tail contract",
+    ),
+    NegativeCase(
+        "uncontracted_positive_overflow_boundary_fails_closed",
+        "1e5001",
+        "f128_decimal_materialization_pending",
+        "overflow-to-infinity is contracted for 1e5000 only, not arbitrary overflow spellings",
+    ),
+    NegativeCase(
+        "uncontracted_positive_underflow_boundary_fails_closed",
+        "1e-6000",
+        "f128_decimal_materialization_pending",
+        "underflow-to-zero is contracted for 1e-5000 only, not arbitrary underflow spellings",
+    ),
 ]
 
 
