@@ -2966,3 +2966,49 @@ notes: |
   pod (heavy); no-regression argued via the byte-identical battery + identical
   single-module guards + the spec_last_instantiated gate (non-instantiating
   multi-module code takes the unchanged per-module path).
+
+---
+agent: claude-opus (continuity WP-B1)
+lane: continuity-campaign (EISA default-lane)
+time_utc: 2026-07-06T21:00:00Z
+branch: fix/madaros-imported-depclosure-eisa
+files:
+  - docs/handoff/continuity/wp-b1-witness/ (NEW — W1 repro + README root-cause)
+  - docs/handoff/continuity/SCOREBOARD.md (B1 -> BLOCKED, premise falsified; new-gap entry)
+intent: |
+  >>> CLAIM WP-B1 (reassigned from Codex per continuity campaign). <<<
+  >>> RESULT: BLOCKED — the WP-B1 premise is FALSIFIED. <<<
+  The brief said EISA fails because eisa::isa -> str_to_string -> str_from_bytes
+  is "absent from the dep closure" and emitted as ud2 -> SIGILL, fixable in
+  module_loader.sio/module_frontend.sio. Build-verified on TWO freshly-built
+  Madaros (origin/main a08a0a737 AND base integration/continuity-mtrack) via the
+  Slurm driver: NOT a ud2, NOT a SIGILL, NOT a codegen/closure bug.
+    * The file dep-closure works: imported_compile BFS loads+merges str::lib
+      (repro "loaded 4 modules"; isa loads str::lib too). No ELF is ever emitted.
+    * The failure is PRE-CODEGEN, in the merged type-checker
+      check::mod::check_modules_verdict_boot4. On any str::lib importer it emits
+      E004x48 (i32/i64 width mismatch on Str.len: i32 vs i64 loop vars) plus
+      E007x3/E008x3/E009x3/E012x10. test_eisa_isa ALSO gets E137x37 (merged
+      checker does not resolve transitively-imported math::dd64 / eisa::core
+      symbols) + E015x2. The shipped prebuilt bin/madaros gives E175 (visibility)
+      on the same repro instead — a recent enforce_visibility=false flip
+      suppressed E175 and exposed the E004 int-width flood underneath.
+    * Madaros native is MULTI-MODULE ONLY (use-free source => "native compile
+      disabled for single-module streaming lane"), so str::lib is only ever
+      checked by this merged pass; there is no single-module path that already
+      accepts it => no narrow make-multi-match-single fix. EISA has always been
+      pinned to lean_single (lenient) for exactly this reason.
+  The real fix is a self-hosted/check/ WP: (a) compat.sio binary-op integer-width
+  widening for is_integer_type operands under arith/cmp; (b) merged-checker
+  transitive symbol/field/visibility resolution for E137/E012/E015. This is OUT
+  of the module_loader/module_frontend scope the WP named and SHARES the merged
+  check_modules_verdict_boot4 path with WP-A6 — recommend folding into / adjacent
+  to A6, or a new WP-B1' scoped to check/. NOT chased here (new-gap discipline).
+  Repro committed: docs/handoff/continuity/wp-b1-witness/ (lean_single rc0,
+  default lane E004x48). No compiler change made — a speculative broad checker
+  rewrite under a mis-scoped WP would risk the shared merged-check path.
+checks:
+  - W1 lean_single rc=0 (verified locally, prebuilt souc-lean-single)
+  - W1 default Madaros: E004x48 typecheck fail (Slurm, main a08a0a737 + base)
+  - isa/evm default Madaros: same E004 family + E137x37 (Slurm)
+status: lock-released (no module_loader/module_frontend edit; check/ untouched)
