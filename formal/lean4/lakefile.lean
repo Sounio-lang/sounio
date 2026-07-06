@@ -72,6 +72,10 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B: the 42 support-quartets of the sedenion ZD geometry (168 = 42*4). Mathlib-free native_decide.
+@[default_target]
+lean_lib «SounioSedenionQuartets» where
+
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
 

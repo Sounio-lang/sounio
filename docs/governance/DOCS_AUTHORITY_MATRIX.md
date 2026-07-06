@@ -667,6 +667,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.runtime-abi-gate-blocker-2026-06-23 | historical | docs/research/runtime-abi-gate-blocker-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.runtime-abi-gate-blocker-query-envelope-2026-06-24 | historical | docs/research/runtime-abi-gate-blocker-query-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-zd-quartets | historical | docs/research/sedenion_zd_quartets.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zero-divisor-geometry-report | historical | docs/research/SEDENION_ZERO_DIVISOR_GEOMETRY_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-hosted-hypercomplex | historical | docs/research/self_hosted_hypercomplex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.smt-farkas-microkernel-2026-06-23 | historical | docs/research/smt-farkas-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
