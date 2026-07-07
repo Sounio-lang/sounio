@@ -72,6 +72,10 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B vector 4/1: emergent metric — integral spectra of the ZD-geometry graphs.
+@[default_target]
+lean_lib «SounioSedenionSpectra» where
+
 -- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
