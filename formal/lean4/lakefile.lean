@@ -72,6 +72,12 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B vector 4/3 Part A: Sounio reproduces Furey's octonion -> one Standard-Model generation.
+-- Fermionic ladder algebra {A_i,A_j}=0, {A_i,A_j^dag}=4 delta_ij I over Z[i] (native_decide) + the
+-- one-generation charge multiplicities C(3,n)=[1,3,3,1]. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioFureyOctonion» where
+
 -- Frente B vector 4/1: emergent metric — integral spectra of the ZD-geometry graphs.
 @[default_target]
 lean_lib «SounioSedenionSpectra» where
