@@ -1713,8 +1713,8 @@ if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
 if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_17_F128_NATIVE_SIGNED_EXTREME_BINARY128_MATERIALIZATION":
     raise SystemExit("f128 binary128 value-contract native receipt must declare S5.17 signed extreme binary128 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 80:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty cases")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 83:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty-three cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 3:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact three negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1727,6 +1727,7 @@ for field in [
     "f128_native_two_limb_integer_decimal_binary128_materialization_promoted",
     "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted",
     "f128_native_truncated_decimal_binary128_value_contract_promoted",
+    "f128_native_bounded_truncated_two_limb_decimal_binary128_materialization_promoted",
     "f128_native_subnormal_underflow_overflow_value_contract_promoted",
     "f128_native_extreme_decimal_saturation_promoted",
     "f128_native_signed_minimum_subnormal_binary128_materialization_promoted",
@@ -1824,6 +1825,9 @@ required_value_native_cases = {
     "underflow_to_negative_zero_scale6000": {"literal": "-1e-6000", "hex": "80000000000000000000000000000000", "metadata": [-1, 0, 1, 1, 6000, 0]},
     "truncated_arbitrary_1p23456789012345678901234567890123456789": {"literal": "1.23456789012345678901234567890123456789", "hex": "3fff3c0ca428c59fb71a7be16b6b6d5b", "metadata": [1, 901234567890123456, 123456789012345678, 39, 38, 3]},
     "truncated_pi_40_digits": {"literal": "3.14159265358979323846264338327950288419", "hex": "4000921fb54442d18469898cc51701b8", "metadata": [1, 846264338327950288, 314159265358979323, 39, 38, 3]},
+    "truncated_pi_tail20_algorithmic": {"literal": "3.14159265358979323846264338327950288420", "hex": "4000921fb54442d18469898cc51701b8", "metadata": [1, 846264338327950288, 314159265358979323, 39, 38, 3]},
+    "negative_truncated_pi_tail20_algorithmic": {"literal": "-3.14159265358979323846264338327950288420", "hex": "c000921fb54442d18469898cc51701b8", "metadata": [-1, 846264338327950288, 314159265358979323, 39, 38, 3]},
+    "truncated_euler_39_digits_algorithmic": {"literal": "2.71828182845904523536028747135266249775", "hex": "40005bf0a8b1457695355fb8ac404e7a", "metadata": [1, 536028747135266249, 271828182845904523, 39, 38, 3]},
     "truncated_one_third_39_repeating": {"literal": "0.333333333333333333333333333333333333333", "hex": "3ffd5555555555555555555555555555", "metadata": [1, 333333333333333333, 33333333333333333, 40, 39, 4]},
 }
 if set(value_native_cases) != set(required_value_native_cases):
@@ -1847,7 +1851,7 @@ for case_id, expected in required_value_native_cases.items():
 value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("negative_cases", [])}
 required_value_native_negative = {
     "uncontracted_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
-    "uncontracted_truncated_pi_tail_fails_closed": "f128_decimal_materialization_pending",
+    "truncated_decimal_below_one_outside_bounded_class_fails_closed": "f128_decimal_materialization_pending",
     "uncontracted_large_significand_underflow_boundary_fails_closed": "f128_decimal_materialization_pending",
 }
 if set(value_native_negative_cases) != set(required_value_native_negative):
@@ -2866,8 +2870,8 @@ for row in sorted(native_rows, key=lambda item: item["case_id"]):
 not_promoted = [
     {
         "surface": "f128_arbitrary_decimal_binary128_materialization",
-        "status": "not_promoted_beyond_bounded_siglo_scale18_two_limb_scale0_to_18_explicit_truncated_value_contract_and_extreme_saturation_cases",
-        "reason": "native-v2 now emits exact dyadic, bounded sig_hi=0/no-truncation/scale10<=18 rounded decimals, algorithmic two-limb no-truncation scale0..18 decimals, explicit truncated high-precision value-contract cases, explicit subnormal anchors, and extreme decimal overflow-to-infinity/power10-underflow-to-zero saturation cases; arbitrary rounded decimal-to-binary128 materialization remains fail-closed",
+        "status": "not_promoted_beyond_bounded_siglo_scale18_two_limb_scale0_to_18_bounded_truncated_retained_scale35_and_extreme_saturation_cases",
+        "reason": "native-v2 now emits exact dyadic, bounded sig_hi=0/no-truncation/scale10<=18 rounded decimals, algorithmic two-limb no-truncation scale0..18 decimals, bounded truncated two-limb retained-scale-35 decimals using parser tail-info as rounding sticky, explicit subnormal anchors, and extreme decimal overflow-to-infinity/power10-underflow-to-zero saturation cases; arbitrary rounded decimal-to-binary128 materialization remains fail-closed",
     },
     {
         "surface": "f128_generic_ieee_software_helper_semantics",
@@ -3339,6 +3343,7 @@ module = {
         "f128_native_two_limb_integer_decimal_binary128_materialization_promoted": True,
         "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
         "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+        "f128_native_bounded_truncated_two_limb_decimal_binary128_materialization_promoted": True,
         "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
         "f128_native_extreme_decimal_saturation_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
@@ -3550,6 +3555,7 @@ receipt = {
     "f128_native_two_limb_integer_decimal_binary128_materialization_promoted": True,
     "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
     "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+    "f128_native_bounded_truncated_two_limb_decimal_binary128_materialization_promoted": True,
     "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
     "f128_native_extreme_decimal_saturation_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
@@ -3727,7 +3733,7 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
+        "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract, bounded two-limb, bounded truncated retained-scale-35, and saturation case set",
         "f128 generic IEEE arithmetic helpers beyond the class-code and ordered-comparison helpers, including rounding-mode-sensitive operations",
         "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix, the bounded rounded-decimal add matrix, direct literal/parameter-return call propagation, callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper differentials",
     ],
@@ -3741,7 +3747,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, truncated high-precision value-contract, and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, bounded truncated retained-scale35 decimal, and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier/ordered-comparison cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

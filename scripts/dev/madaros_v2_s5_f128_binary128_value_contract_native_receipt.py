@@ -5,10 +5,12 @@ This promotes native-v2 materialization for the f128 binary128 value-contract
 case set plus an explicit bounded-decimal class: sig_hi=0, no truncation, and
 scale10<=18, with roundTiesToEven. It also promotes an algorithmic two-limb
 decimal class: sig_hi>0, digit_count<=36, scale10<=18, no truncation, with
-binary128 roundTiesToEven. It also promotes an explicit native saturation class
-for decimal overflow-to-infinity and exact power-of-ten underflow-to-zero. It
-still deliberately does not promote arbitrary large-scale rounded decimals,
-f128 arithmetic, external ABI, or return ABI.
+binary128 roundTiesToEven. It now promotes a bounded truncated two-limb class:
+37..40 total digits, 1..4 truncated digits, retained scale 35, and parser
+tail-info used as the binary128 rounding sticky bit. It also promotes an
+explicit native saturation class for decimal overflow-to-infinity and exact
+power-of-ten underflow-to-zero. It still deliberately does not promote arbitrary
+large-scale rounded decimals, f128 arithmetic, external ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -126,6 +128,24 @@ CASES: list[Case] = [
         [1, 846264338327950288, 314159265358979323, 39, 38, 3],
     ),
     Case(
+        "truncated_pi_tail20_algorithmic",
+        "3.14159265358979323846264338327950288420",
+        "4000921fb54442d18469898cc51701b8",
+        [1, 846264338327950288, 314159265358979323, 39, 38, 3],
+    ),
+    Case(
+        "negative_truncated_pi_tail20_algorithmic",
+        "-3.14159265358979323846264338327950288420",
+        "c000921fb54442d18469898cc51701b8",
+        [-1, 846264338327950288, 314159265358979323, 39, 38, 3],
+    ),
+    Case(
+        "truncated_euler_39_digits_algorithmic",
+        "2.71828182845904523536028747135266249775",
+        "40005bf0a8b1457695355fb8ac404e7a",
+        [1, 536028747135266249, 271828182845904523, 39, 38, 3],
+    ),
+    Case(
         "truncated_one_third_39_repeating",
         "0.333333333333333333333333333333333333333",
         "3ffd5555555555555555555555555555",
@@ -160,10 +180,10 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
     NegativeCase(
-        "uncontracted_truncated_pi_tail_fails_closed",
-        "3.14159265358979323846264338327950288420",
+        "truncated_decimal_below_one_outside_bounded_class_fails_closed",
+        "0.142857142857142857142857142857142857142",
         "f128_decimal_materialization_pending",
-        "same prefix/count as the contracted pi probe but a different truncated-tail contract",
+        "bounded truncated two-limb decimal class is normalized to retained-scale-35 values >= 1",
     ),
     NegativeCase(
         "uncontracted_large_significand_underflow_boundary_fails_closed",
@@ -417,6 +437,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_two_limb_integer_decimal_binary128_materialization_promoted": True,
             "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
+            "f128_native_bounded_truncated_two_limb_decimal_binary128_materialization_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
             "f128_native_extreme_decimal_saturation_promoted": True,
             "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
@@ -434,6 +455,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_generated_sig_hi_zero_no_truncation_scale10_le_18_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale0_integer_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
+            "native_v2_emits_and_runs_algorithmic_bounded_truncated_two_limb_retained_scale35_decimal_cases_with_tail_sticky_rounding",
             "native_v2_materializes_explicit_value_contract_signed_subnormal_underflow_and_finite_overflow_to_infinity_cases",
             "native_v2_materializes_decimal_overflow_to_signed_infinity_and_power10_underflow_to_signed_zero_saturation_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
