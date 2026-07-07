@@ -1,7 +1,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name, make_name, name_eq}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_F128_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_F128_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, IR_STRATEGY_EXTERN}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -276,7 +276,7 @@ fn native_v2_count_ir_instrs(module: &IrModule) -> i64 with Mut, Panic, Div {
 }
 
 fn native_v2_machine_instr_is_safepoint(instr: MachineInstr) -> bool {
-    instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_RET
+    instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 || instr.opcode == MIR_OP_RET
 }
 
 fn native_v2_count_machine_function_safepoints(func: MachineFunction) -> i64 with Mut, Panic, Div {
@@ -1672,6 +1672,12 @@ fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, i
 
 fn nc_add_call_reloc(nc: &! NativeCompiler, patch_offset: i64, target_func: i64) with Mut, Panic, Div {
     nc_add_flat_reloc(nc, patch_offset, 1, 1, target_func)
+}
+
+fn nc_add_extern_call_reloc(nc: &! NativeCompiler, patch_offset: i64, name: Name) with Mut, Panic, Div {
+    var externs = (*nc).extern_relocs
+    add_extern_reloc(&! externs, patch_offset, name.buf, name.len)
+    (*nc).extern_relocs = externs
 }
 
 fn nc_add_rodata_reloc(nc: &! NativeCompiler, patch_offset: i64, rodata_offset: i64) with Mut, Panic, Div {
@@ -4672,6 +4678,28 @@ fn native_compiler_add_symbol_func_ref(nc: &! NativeCompiler, fn_index: i64, fun
     }
 }
 
+fn native_compiler_add_extern_symbol_names_ref(nc: &! NativeCompiler) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let sym_index = (*nc).fn_count + i
+        if sym_index >= 0 && sym_index < 2048 {
+            let er = (*nc).extern_relocs.entries[i as usize]
+            (*nc).symbols.name_offsets[sym_index as usize] = (*nc).symbols.strtab_len
+            var ni: i64 = 0
+            while ni < er.sym_len && (*nc).symbols.strtab_len < 65535 {
+                (*nc).symbols.strtab[(*nc).symbols.strtab_len as usize] = er.sym_buf[ni as usize]
+                (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
+                ni = ni + 1
+            }
+            if (*nc).symbols.strtab_len < 65535 {
+                (*nc).symbols.strtab[(*nc).symbols.strtab_len as usize] = 0
+                (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if op == UnaryOp::OpNeg {
@@ -4861,6 +4889,15 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         if instr.src1.value >= 0 {
             c.relocs = add_call_reloc(c.relocs, call_pos + 1, instr.src1.value)
         }
+        return c
+    }
+
+    if instr.opcode == MIR_OP_CALL_EXTERN_F128 {
+        nc_emit_movdqu_xmm0_rbp_disp32(&! c, ir_slot_offset(instr.src1.value))
+        let call_pos = c.code.len
+        c.code = emit_call_rel32_placeholder(c.code)
+        nc_add_extern_call_reloc(&! c, call_pos + 1, instr.name)
+        nc_emit_movdqu_rbp_disp32_xmm0(&! c, ir_slot_offset(instr.dst.value))
         return c
     }
 
@@ -5122,7 +5159,7 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
         if native_v2_machine_instr_is_safepoint(instr) {
-            let kind = if instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             native_v2_record_safepoint_mut(nc, fn_index, kind, i, (*nc).code.len - fn_offset, func.temp_count, (*nc).current_machine_spill_count)
         }
         (*nc) = native_v2_emit_machine_instr((*nc), instr)
@@ -5135,12 +5172,23 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
         if native_v2_machine_instr_is_safepoint(instr) {
-            let kind = if instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             native_v2_record_safepoint_mut(nc, fn_index, kind, i, (*nc).code.len - fn_offset, (*func).temp_count, (*nc).current_machine_spill_count)
         }
         (*nc) = native_v2_emit_machine_instr((*nc), instr)
         i = i + 1
     }
+}
+
+fn native_v2_machine_function_has_extern_f128_call(func: MachineFunction) -> bool {
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        if func.blocks[0].instrs[i as usize].opcode == MIR_OP_CALL_EXTERN_F128 {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
@@ -5307,7 +5355,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     while mi < machine_func.blocks[0].instr_count {
         let em_instr = machine_func.blocks[0].instrs[mi as usize]
         if native_v2_machine_instr_is_safepoint(em_instr) {
-            let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let sp_kind = if em_instr.opcode == MIR_OP_CALL || em_instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             c = native_v2_record_safepoint(c, fn_index, sp_kind, mi, c.code.len - fn_offset, machine_func.temp_count, c.current_machine_spill_count)
         }
         c = native_v2_emit_machine_instr(c, em_instr)
@@ -7225,6 +7273,24 @@ fn nc_emit_cvtsi2sd_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
 fn nc_emit_cvttsd2si_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
     nc_emit_byte(nc, 0x2C); nc_emit_byte(nc, 0xC0)
+}
+
+fn nc_emit_movdqu_xmm0_rbp_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF3); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x6F)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_movdqu_rbp_disp32_xmm0(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF3); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x7F)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_pinsrq_xmm0_rax_1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x3A); nc_emit_byte(nc, 0x22); nc_emit_byte(nc, 0xC0)
+    nc_emit_byte(nc, 0x01)
 }
 
 fn nc_emit_load_rax_mem_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -9464,7 +9530,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { CGOP_STORE }
     else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { CGOP_MUL }
-    else if opcode == MIR_OP_CALL { CGOP_CALL }
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 { CGOP_CALL }
     else if opcode == MIR_OP_RET { CGOP_RET }
     else if opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { CGOP_BRANCH }
     else { CGOP_MOV }
@@ -9475,7 +9541,7 @@ fn mir_opcode_latency(opcode: i64) -> i64 {
        || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 4 }
     else if opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 5 }
     else if opcode == MIR_OP_BINOP { 3 }
-    else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET { 5 }
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_RET { 5 }
     else { 1 }
 }
 fn mir_opcode_port_mask(opcode: i64) -> i64 {
@@ -9484,7 +9550,7 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { 144 }                                // P4,P7
     else if opcode == MIR_OP_FLOAT_BINOP { 1 }                                    // P0 (FP MUL)
-    else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_RET
             || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 64 }                // P6
     else { 99 }                                                                    // P0,P1,P5,P6
 }
@@ -9528,7 +9594,15 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
     spill_ir_params_mut(nc, func, machine_func)
-    if !native_v2_scheduler_enabled() {
+    var has_extern_f128_call: bool = false
+    var scan_extern_f128_call: i64 = 0
+    while scan_extern_f128_call < machine_func.blocks[0].instr_count {
+        if machine_func.blocks[0].instrs[scan_extern_f128_call as usize].opcode == MIR_OP_CALL_EXTERN_F128 {
+            has_extern_f128_call = true
+        }
+        scan_extern_f128_call = scan_extern_f128_call + 1
+    }
+    if !native_v2_scheduler_enabled() || has_extern_f128_call {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
         let n = machine_func.blocks[0].instr_count
@@ -9577,7 +9651,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
                 if is_terminator {
                     let term_instr = machine_func.blocks[0].instrs[mi as usize]
                     if native_v2_machine_instr_is_safepoint(term_instr) {
-                        let sp_kind = if term_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+                        let sp_kind = if term_instr.opcode == MIR_OP_CALL || term_instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
                         native_v2_record_safepoint_mut(nc, fn_index, sp_kind, mi, (*nc).code.len - function_offset, machine_func.temp_count, (*nc).current_machine_spill_count)
                     }
                     (*nc) = native_v2_emit_machine_instr((*nc), term_instr)
@@ -9627,6 +9701,9 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     while fi < module.fn_count {
         compile_ir_function_v2_mut(nc, module.functions[fi as usize], built.functions[fi as usize], fi)
         fi = fi + 1
+    }
+    if (*nc).extern_relocs.count > 0 {
+        return "external_sysv_requires_relocatable_link"
     }
 
     if module.prof_counter_count > 0 {
@@ -11884,7 +11961,9 @@ fn finalize_elf64_relocatable(
     rela: RelaSection,
     symbols: SymbolData,
     fn_offsets: [i64; 2048],
-    fn_count: i64
+    fn_count: i64,
+    extern_count: i64,
+    extern_fn_flags: [i64; 2048]
 ) -> Elf64Binary with Mut, Panic, Div {
     var bin = elf_binary_new()
 
@@ -11937,12 +12016,23 @@ fn finalize_elf64_relocatable(
         emit_symtab_entry_ref(&! bin, 0, 3, 0, sec_data_idx, 0, 0)
     }
     let sym_first_fn = 1 + 1 + (if has_rodata { 1 } else { 0 }) + (if has_data { 1 } else { 0 })
+    let fn_sym_info = if extern_count > 0 { 18 } else { 2 }
     var fi = 0
     while fi < fn_count {
         let fn_name_off = symbols.name_offsets[fi as usize]
         let fn_off = fn_offsets[fi as usize]
-        emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, sec_text, fn_off, 0)
+        if extern_fn_flags[fi as usize] == 1 {
+            emit_symtab_entry_ref(&! bin, fn_name_off, 18, 0, 0, 0, 0)
+        } else {
+            emit_symtab_entry_ref(&! bin, fn_name_off, fn_sym_info, 1, sec_text, fn_off, 0)
+        }
         fi = fi + 1
+    }
+    var ei: i64 = 0
+    while ei < extern_count {
+        let ext_name_off = symbols.name_offsets[(fn_count + ei) as usize]
+        emit_symtab_entry_ref(&! bin, ext_name_off, 18, 0, 0, 0, 0)
+        ei = ei + 1
     }
     let symtab_size = bin.len - symtab_offset
     while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
@@ -11996,8 +12086,9 @@ fn finalize_elf64_relocatable(
         emit_section_header_ref(&! bin, 15, sht_progbits, shf_alloc + shf_write,
             0, data_file_offset, data.len, 0, 0, 8, 0)
     }
+    let symtab_local_count = if extern_count > 0 { sym_first_fn } else { sym_first_fn }
     emit_section_header_ref(&! bin, 21, sht_symtab, 0,
-        0, symtab_offset, symtab_size, sec_strtab, sym_first_fn, 8, 24)
+        0, symtab_offset, symtab_size, sec_strtab, symtab_local_count, 8, 24)
     emit_section_header_ref(&! bin, 29, sht_strtab, 0,
         0, strtab_offset, strtab_size, 0, 0, 1, 0)
     emit_section_header_ref(&! bin, 37, sht_rela, 0,
@@ -12036,7 +12127,144 @@ fn compile_to_obj(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc 
     } else { 0 }
 
     let rela = collect_rela_section(nc.relocs, sym_first_fn, sym_rodata, sym_data)
-    finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count)
+    finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count, 0, [0; 2048])
+}
+
+fn native_v2_machine_function_extern_f128_name(func: MachineFunction) -> Name {
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_CALL_EXTERN_F128 {
+            return instr.name
+        }
+        i = i + 1
+    }
+    empty_name()
+}
+
+fn compile_ir_function_v2_obj_extern_f128_oracle_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div {
+    reset_function_state_mut(nc)
+    let function_offset = (*nc).code.len
+    native_compiler_set_fn_offset(nc, fn_index, function_offset)
+    (*nc).symbols = symbol_data_add_name((*nc).symbols, fn_index, func.name.buf, func.name.len)
+
+    let fail_label = nc_next_cmp_label()
+    let done_label = nc_next_cmp_label()
+    let extern_name = native_v2_machine_function_extern_f128_name(machine_func)
+    let f128_1_25_hi: i64 = 4611474912194854912
+
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 32)
+
+    nc_emit_mov_rax_imm(nc, 0)
+    nc_emit_movq_xmm0_rax(nc)
+    nc_emit_mov_rax_imm(nc, f128_1_25_hi)
+    nc_emit_pinsrq_xmm0_rax_1(nc)
+
+    let call_pos = (*nc).code.len
+    nc_emit_call_rel32_placeholder(nc)
+    nc_add_extern_call_reloc(nc, call_pos + 1, extern_name)
+
+    nc_emit_movdqu_rbp_disp32_xmm0(nc, -16)
+    nc_emit_load_rbp_disp32_rax(nc, -16)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, fail_label)
+    nc_emit_load_rbp_disp32_rax(nc, -8)
+    nc_emit_mov_reg_imm(nc, 3, f128_1_25_hi)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jnz_to_label(nc, fail_label)
+
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, fail_label)
+    nc_emit_mov_rax_imm(nc, 7)
+
+    nc_define_label(nc, done_label)
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
+    patch_label_forwards_mut(nc)
+    native_v2_patch_label_forwards_text_mirror(nc)
+}
+
+fn compile_module_v2_obj_mut(nc: &! NativeCompiler, module: &IrModule) -> string with Mut, Panic, Div, Alloc {
+    (*nc).fn_count = module.fn_count
+    (*nc).runtime_context_slot_offset = 0
+    (*nc).prof_counter_data_base = runtime_context_global_slot_size()
+    (*nc).descriptor_data_offset = -1
+    (*nc).descriptor_count = 0
+    (*nc).gc_state_data_offset = -1
+    (*nc).stack_map_data_offset = -1
+    (*nc).deopt_state_data_offset = -1
+    (*nc).stack_map_record_count = 0
+    (*nc).safepoint_count = 0
+    (*nc).deopt_point_count = 0
+    var module_data = (*nc).data
+    module_data.len = runtime_context_global_slot_size() + (module.prof_counter_count * 8)
+    (*nc).data = module_data
+
+    let built = native_v2_build_machine_module(module, true)
+    if !built.supported {
+        return built.unsupported_detail
+    }
+
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        if module.functions[fi as usize].compile_strategy != IR_STRATEGY_EXTERN {
+            if native_v2_machine_function_has_extern_f128_call(built.functions[fi as usize]) {
+                compile_ir_function_v2_obj_extern_f128_oracle_mut(nc, module.functions[fi as usize], built.functions[fi as usize], fi)
+            } else {
+                compile_ir_function_v2_mut(nc, module.functions[fi as usize], built.functions[fi as usize], fi)
+            }
+        }
+        fi = fi + 1
+    }
+    ""
+}
+
+pub fn compile_to_obj_v2(module: &IrModule) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    if ir_module_has_overflow(module) {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_max_instrs_overflow: refusing to emit truncated code")
+    }
+    native_v2_text_reset()
+    var nc = compiler_new()
+    let err = compile_module_v2_obj_mut(&! nc, module)
+    if str_len(err) > 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
+    }
+    var sfi: i64 = 0
+    while sfi < module.fn_count && sfi < 2048 {
+        if module.functions[sfi as usize].compile_strategy == IR_STRATEGY_EXTERN {
+            native_compiler_add_symbol_func_ref(&! nc, sfi, module.functions[sfi as usize].name)
+        }
+        sfi = sfi + 1
+    }
+    native_compiler_add_extern_symbol_names_ref(&! nc)
+
+    let has_rodata = nc.rodata.len > 0
+    let has_data = nc.data.len > 0
+    let sym_first_fn = 1 + 1
+        + (if has_rodata { 1 } else { 0 })
+        + (if has_data { 1 } else { 0 })
+    let sym_rodata: i64 = if has_rodata { 2 } else { 0 }
+    let sym_data: i64 = if has_data {
+        (if has_rodata { 3 } else { 2 })
+    } else { 0 }
+    let sym_first_extern = sym_first_fn + nc.fn_count
+    var extern_fn_flags: [i64; 2048] = [0; 2048]
+    var efi: i64 = 0
+    while efi < module.fn_count && efi < 2048 {
+        if module.functions[efi as usize].compile_strategy == IR_STRATEGY_EXTERN {
+            extern_fn_flags[efi as usize] = 1
+        }
+        efi = efi + 1
+    }
+
+    let rela = collect_rela_section_with_externs(nc.relocs, nc.extern_relocs, sym_first_fn, sym_rodata, sym_data, sym_first_extern)
+    let obj = finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count, nc.extern_relocs.count, extern_fn_flags)
+    native_compile_result_ok_elf(obj.bytes, obj.len, FORMAT_ELF64())
 }
 fn so_emit_dyn_elf_hdr(bin: &! Elf64Binary, phnum: i64) with Mut, Panic, Div {
     elf_emit_byte_ref(bin, elf_magic_0())

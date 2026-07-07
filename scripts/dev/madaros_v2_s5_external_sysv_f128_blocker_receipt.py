@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Emit the S5 external SysV f128 blocker receipt.
+"""Emit the S5 external SysV f128 boundary receipt.
 
-This receipt makes the f128 extern boundary explicit without promoting it.
+This receipt makes the f128 extern boundary explicit and promotes the narrow
+scalar binary128 relocatable-object oracle.
 It proves that the parser/checker/lowerer front half accepts an extern C
-binary128 signature, and records the precise remaining blocker: native-v2
-still has no external-symbol MachineIR call shape, external relocation/link
-path, or SysV binary128 runtime oracle.
+binary128 signature, that native-v2 executable emission fails closed when an
+external relocation would be required, and that native-v2 ET_REL output can be
+linked with a C _Float128 passthrough helper and executed successfully.
 """
 
 from __future__ import annotations
@@ -14,13 +15,14 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.1"
-STAGE = "S5_23_EXTERNAL_SYSV_F128_BLOCKED_WITH_CONCRETE_REASONS"
+SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.2"
+STAGE = "S5_24_EXTERNAL_SYSV_F128_RELOCATABLE_SCALAR_ORACLE"
 CASE_ID = "external_sysv_f128_abi_blocked_front_half_received"
 
 PASSTHRU_SOURCE = """extern "C" {
@@ -33,9 +35,14 @@ PASSTHRU_CALL_SOURCE = """extern "C" {
   fn passthru_f128(x: f128) -> f128;
 }
 fn main() -> i64 {
-  let x: f128 = 1.0 as f128
+  let x: f128 = 1.25 as f128
   let y: f128 = passthru_f128(x)
-  0
+  if y == x { 0 } else { 7 }
+}
+"""
+
+PASSTHRU_HELPER_C = """_Float128 passthru_f128(_Float128 x) {
+  return x;
 }
 """
 
@@ -77,6 +84,19 @@ def run_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, str, st
         cmd,
         cwd=str(cwd),
         env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_s,
+        check=False,
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def run_host_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -153,8 +173,18 @@ def collect_source_evidence(root: Path) -> list[dict[str, Any]]:
         ),
         require_fragment(
             root / "self-hosted" / "native" / "machine_ir.sio",
-            "external_sysv_abi_pending",
-            "native_v2_external_sysv_boundary_fails_closed_with_named_detail",
+            "MIR_OP_CALL_EXTERN_F128",
+            "native_v2_has_scalar_external_f128_call_shape",
+        ),
+        require_fragment(
+            root / "self-hosted" / "native" / "codegen_x86_linux.sio",
+            "external_sysv_requires_relocatable_link",
+            "native_v2_executable_emission_fails_closed_when_external_relocs_exist",
+        ),
+        require_fragment(
+            root / "self-hosted" / "compiler" / "main.sio",
+            "--native-v2-emit-obj",
+            "native_v2_exposes_relocatable_object_mode",
         ),
         require_fragment(
             root / "self-hosted" / "compiler" / "main.sio",
@@ -232,11 +262,11 @@ def emit_passthru_call_boundary_case(root: Path, compiler: Path, out_dir: Path, 
         raise SystemExit(f"{case_id}: bad MachineModule schema")
     if module.get("legacy_fallback") is not False:
         raise SystemExit(f"{case_id}: MachineModule used fallback")
-    if module.get("supported") is not False:
-        raise SystemExit(f"{case_id}: MachineModule must remain unsupported until external SysV ABI is implemented")
-    if module.get("unsupported_detail") != "external_sysv_abi_pending":
+    if module.get("supported") is not True:
+        raise SystemExit(f"{case_id}: MachineModule should now legalize the narrow scalar external f128 call")
+    if module.get("unsupported_detail") not in ("", None):
         raise SystemExit(
-            f"{case_id}: expected unsupported_detail external_sysv_abi_pending, "
+            f"{case_id}: expected no MachineModule unsupported_detail after narrow external f128 legalization, "
             f"got {module.get('unsupported_detail')!r}"
         )
     external_symbols: list[str] = []
@@ -265,7 +295,101 @@ def emit_passthru_call_boundary_case(root: Path, compiler: Path, out_dir: Path, 
         "segfault": False,
         "native_v2_machineir_external_call_symbol_classified": True,
         "native_v2_machine_module_external_call_symbol_exported": True,
+        "native_v2_executable_external_reloc_fail_closed": True,
         "native_v2_external_sysv_f128_promoted": False,
+    }
+
+
+def emit_passthru_relocatable_oracle_case(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
+    case_id = "extern_c_passthru_f128_native_v2_relocatable_oracle"
+    source_path = out_dir / f"{case_id}.sio"
+    helper_path = out_dir / f"{case_id}.c"
+    obj_path = out_dir / f"{case_id}.o"
+    helper_obj_path = out_dir / f"{case_id}.helper.o"
+    exe_path = out_dir / f"{case_id}.linked"
+    compile_log_path = out_dir / f"{case_id}.native_v2_emit_obj.log"
+    helper_log_path = out_dir / f"{case_id}.helper_compile.log"
+    link_log_path = out_dir / f"{case_id}.link.log"
+    run_log_path = out_dir / f"{case_id}.run.log"
+    readelf_reloc_path = out_dir / f"{case_id}.readelf_reloc.txt"
+    readelf_sym_path = out_dir / f"{case_id}.readelf_sym.txt"
+    source_path.write_text(PASSTHRU_CALL_SOURCE, encoding="utf-8")
+    helper_path.write_text(PASSTHRU_HELPER_C, encoding="utf-8")
+
+    cc = shutil.which("gcc") or shutil.which("cc")
+    readelf = shutil.which("readelf")
+    if cc is None:
+        raise SystemExit(f"{case_id}: gcc/cc is required for the host SysV f128 oracle")
+    if readelf is None:
+        raise SystemExit(f"{case_id}: readelf is required for relocation assertions")
+
+    rc, stdout, stderr = run_command(
+        [str(compiler), "--native-v2-emit-obj", str(source_path), "-o", str(obj_path)],
+        root,
+        timeout_s,
+    )
+    compile_log = stdout + stderr
+    compile_log_path.write_text(compile_log, encoding="utf-8")
+    if rc != 0 or not obj_path.exists() or obj_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: native-v2 object emission failed rc={rc}; log={compile_log_path}")
+
+    rc, stdout, stderr = run_host_command([readelf, "-r", str(obj_path)], root, timeout_s)
+    reloc_text = stdout + stderr
+    readelf_reloc_path.write_text(reloc_text, encoding="utf-8")
+    if rc != 0 or "R_X86_64_PLT32" not in reloc_text or "passthru_f128" not in reloc_text:
+        raise SystemExit(f"{case_id}: expected R_X86_64_PLT32 relocation to passthru_f128; see {readelf_reloc_path}")
+
+    rc, stdout, stderr = run_host_command([readelf, "-s", str(obj_path)], root, timeout_s)
+    sym_text = stdout + stderr
+    readelf_sym_path.write_text(sym_text, encoding="utf-8")
+    if rc != 0 or "UND" not in sym_text or "passthru_f128" not in sym_text or " main" not in sym_text:
+        raise SystemExit(f"{case_id}: expected undefined passthru_f128 and exported main symbols; see {readelf_sym_path}")
+
+    rc, stdout, stderr = run_host_command([cc, "-std=gnu11", "-c", str(helper_path), "-o", str(helper_obj_path)], root, timeout_s)
+    helper_log = stdout + stderr
+    helper_log_path.write_text(helper_log, encoding="utf-8")
+    if rc != 0 or not helper_obj_path.exists() or helper_obj_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: helper _Float128 object compile failed rc={rc}; log={helper_log_path}")
+
+    rc, stdout, stderr = run_host_command([cc, "-no-pie", str(obj_path), str(helper_obj_path), "-o", str(exe_path)], root, timeout_s)
+    link_log = stdout + stderr
+    link_log_path.write_text(link_log, encoding="utf-8")
+    if rc != 0 or not exe_path.exists() or exe_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: host link failed rc={rc}; log={link_log_path}")
+
+    rc, stdout, stderr = run_host_command([str(exe_path)], root, timeout_s)
+    run_log = stdout + stderr
+    run_log_path.write_text(run_log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: linked SysV f128 oracle returned rc={rc}; log={run_log_path}")
+
+    return {
+        "case_id": case_id,
+        "class": "positive_native_v2_relocatable_sysv_f128_oracle",
+        "symbol": "passthru_f128",
+        "signature": "(f128)->f128",
+        "source_sha256": sha256_text(PASSTHRU_CALL_SOURCE),
+        "helper_c_sha256": sha256_text(PASSTHRU_HELPER_C),
+        "native_v2_emit_obj_rc": 0,
+        "object_emitted": True,
+        "object_sha256": sha256_bytes(obj_path.read_bytes()),
+        "object_size": obj_path.stat().st_size,
+        "readelf_reloc_sha256": sha256_text(reloc_text),
+        "readelf_sym_sha256": sha256_text(sym_text),
+        "relocation_kind": "R_X86_64_PLT32",
+        "undefined_external_symbol": "passthru_f128",
+        "exported_entry_symbol": "main",
+        "host_c_compiler": cc,
+        "host_helper_compile_rc": 0,
+        "host_link_rc": 0,
+        "linked_executable_sha256": sha256_bytes(exe_path.read_bytes()),
+        "linked_executable_exit_code": 0,
+        "f128_external_sysv_scalar_passthru_oracle_promoted": True,
+        "f128_external_sysv_argument_oracle_promoted": True,
+        "f128_external_sysv_return_oracle_promoted": True,
+        "native_v2_external_relocatable_object_promoted": True,
+        "native_v2_external_relocation_promoted": True,
+        "external_aggregate_sret_abi_covered": False,
     }
 
 
@@ -279,16 +403,17 @@ def emit(args: argparse.Namespace) -> int:
     source_evidence = collect_source_evidence(root)
     passthru_case = emit_passthru_case(root, compiler, out_dir, int(args.timeout))
     passthru_call_case = emit_passthru_call_boundary_case(root, compiler, out_dir, int(args.timeout))
+    relocatable_oracle_case = emit_passthru_relocatable_oracle_case(root, compiler, out_dir, int(args.timeout))
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
         "target": "x86_64-linux",
         "case_id": CASE_ID,
-        "case_count": 2,
-        "positive_case_count": 1,
+        "case_count": 3,
+        "positive_case_count": 2,
         "negative_boundary_case_count": 1,
-        "cases": [passthru_case, passthru_call_case],
+        "cases": [passthru_case, passthru_call_case, relocatable_oracle_case],
         "source_evidence": source_evidence,
         "extern_decl_f128_typecheck_promoted": True,
         "parser_has_explicit_is_extern_bit": True,
@@ -296,28 +421,30 @@ def emit(args: argparse.Namespace) -> int:
         "ir_call_extern_symbol_receipt_promoted": True,
         "native_v2_machineir_external_call_symbol_classified": True,
         "native_v2_machine_module_external_call_symbol_exported": True,
-        "native_v2_machineir_external_call_symbol_promoted": False,
-        "native_v2_external_relocation_promoted": False,
+        "native_v2_machineir_external_call_symbol_promoted": True,
+        "native_v2_external_relocation_promoted": True,
+        "native_v2_external_relocatable_object_promoted": True,
+        "f128_external_sysv_scalar_passthru_oracle_promoted": True,
         "f128_external_sysv_abi_promoted": False,
-        "f128_external_sysv_runtime_promoted": False,
-        "f128_external_sysv_argument_oracle_promoted": False,
-        "f128_external_sysv_return_oracle_promoted": False,
+        "f128_external_sysv_runtime_promoted": True,
+        "f128_external_sysv_argument_oracle_promoted": True,
+        "f128_external_sysv_return_oracle_promoted": True,
         "f128_internal_opaque_direct_call_abi_promoted_elsewhere": True,
         "f128_internal_opaque_return_abi_promoted_elsewhere": True,
         "f128_sysv_classes_recorded_as_metadata_only": True,
         "blocked": True,
-        "blocked_reason": "extern_f128_declaration_reaches_IR_but_native_v2_has_no_external_symbol_call_shape_or_sysv_binary128_runtime_oracle",
+        "blocked_reason": "narrow_scalar_f128_relocatable_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open",
         "roundtrip_contract": [
             "extern_C_f128_declaration_typechecks_without_kernel_diagnostics",
             "lowerer_has_IR_STRATEGY_EXTERN_and_IrCallExtern_symbol_path",
-            "native_v2_external_symbol_call_shape_is_classified_as_external_sysv_abi_pending",
+            "native_v2_executable_mode_fails_closed_when_external_relocatable_link_is_required",
             "MachineModule_JSON_exports_external_call_symbol_name_for_relocation_followup",
-            "external_SysV_binary128_argument_and_return_oracle_not_promoted",
+            "native_v2_emit_obj_exports_an_ET_REL_object_with_R_X86_64_PLT32_to_passthru_f128",
+            "linked_C__Float128_passthrough_oracle_exits_zero",
         ],
         "missing_full_obligations": [
-            "external SysV relocation/link path for C functions in native-v2 using the exported MachineModule symbol",
-            "f128 SysV argument placement oracle against a C binary128 function",
-            "f128 SysV return capture oracle against a C binary128 function",
+            "native-v2 executable mode still requires an external linker path for unresolved externs",
+            "general external SysV ABI classification beyond exact scalar f128 passthrough",
             "external aggregate/SRET ABI oracle coverage",
         ],
     }

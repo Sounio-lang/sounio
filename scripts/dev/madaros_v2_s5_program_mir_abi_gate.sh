@@ -2331,21 +2331,21 @@ for case_id in [
     if row.get("return_mismatch_e008_absent") is not True:
         raise SystemExit(f"{case_id} must prove E008 absent")
 
-if external_sysv_f128_blocker_receipt.get("schema") != "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.1":
+if external_sysv_f128_blocker_receipt.get("schema") != "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.2":
     raise SystemExit("bad S5 external SysV f128 blocker receipt schema")
 if external_sysv_f128_blocker_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing external SysV f128 blocker receipt")
-if external_sysv_f128_blocker_receipt.get("stage_contract_level") != "S5_23_EXTERNAL_SYSV_F128_BLOCKED_WITH_CONCRETE_REASONS":
-    raise SystemExit("external SysV f128 blocker receipt must declare S5.23 blocker stage contract")
-if external_sysv_f128_blocker_receipt.get("case_count") != 2:
-    raise SystemExit("external SysV f128 blocker receipt must contain exactly two passthru_f128 boundary cases")
-if external_sysv_f128_blocker_receipt.get("positive_case_count") != 1:
-    raise SystemExit("external SysV f128 blocker receipt must contain one positive declaration case")
+if external_sysv_f128_blocker_receipt.get("stage_contract_level") != "S5_24_EXTERNAL_SYSV_F128_RELOCATABLE_SCALAR_ORACLE":
+    raise SystemExit("external SysV f128 blocker receipt must declare S5.24 relocatable scalar oracle stage contract")
+if external_sysv_f128_blocker_receipt.get("case_count") != 3:
+    raise SystemExit("external SysV f128 blocker receipt must contain exactly three passthru_f128 boundary/oracle cases")
+if external_sysv_f128_blocker_receipt.get("positive_case_count") != 2:
+    raise SystemExit("external SysV f128 blocker receipt must contain declaration plus relocatable oracle positive cases")
 if external_sysv_f128_blocker_receipt.get("negative_boundary_case_count") != 1:
     raise SystemExit("external SysV f128 blocker receipt must contain one native-v2 boundary case")
 if external_sysv_f128_blocker_receipt.get("blocked") is not True:
     raise SystemExit("external SysV f128 blocker receipt must be a blocker receipt")
-if external_sysv_f128_blocker_receipt.get("blocked_reason") != "extern_f128_declaration_reaches_IR_but_native_v2_has_no_external_symbol_call_shape_or_sysv_binary128_runtime_oracle":
+if external_sysv_f128_blocker_receipt.get("blocked_reason") != "narrow_scalar_f128_relocatable_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open":
     raise SystemExit("external SysV f128 blocker receipt blocked_reason mismatch")
 for field in [
     "extern_decl_f128_typecheck_promoted",
@@ -2354,6 +2354,13 @@ for field in [
     "ir_call_extern_symbol_receipt_promoted",
     "native_v2_machineir_external_call_symbol_classified",
     "native_v2_machine_module_external_call_symbol_exported",
+    "native_v2_machineir_external_call_symbol_promoted",
+    "native_v2_external_relocation_promoted",
+    "native_v2_external_relocatable_object_promoted",
+    "f128_external_sysv_runtime_promoted",
+    "f128_external_sysv_scalar_passthru_oracle_promoted",
+    "f128_external_sysv_argument_oracle_promoted",
+    "f128_external_sysv_return_oracle_promoted",
     "f128_internal_opaque_direct_call_abi_promoted_elsewhere",
     "f128_internal_opaque_return_abi_promoted_elsewhere",
     "f128_sysv_classes_recorded_as_metadata_only",
@@ -2361,12 +2368,7 @@ for field in [
     if external_sysv_f128_blocker_receipt.get(field) is not True:
         raise SystemExit(f"external SysV f128 blocker receipt missing required true flag: {field}")
 for field in [
-    "native_v2_machineir_external_call_symbol_promoted",
-    "native_v2_external_relocation_promoted",
     "f128_external_sysv_abi_promoted",
-    "f128_external_sysv_runtime_promoted",
-    "f128_external_sysv_argument_oracle_promoted",
-    "f128_external_sysv_return_oracle_promoted",
 ]:
     if external_sysv_f128_blocker_receipt.get(field) is not False:
         raise SystemExit(f"external SysV f128 blocker receipt must not overclaim {field}")
@@ -2374,6 +2376,7 @@ external_sysv_cases = {row.get("case_id"): row for row in external_sysv_f128_blo
 if set(external_sysv_cases) != {
     "extern_c_passthru_f128_decl_received",
     "extern_c_passthru_f128_call_reaches_machineir_boundary",
+    "extern_c_passthru_f128_native_v2_relocatable_oracle",
 }:
     raise SystemExit(f"external SysV f128 blocker receipt cases mismatch: {sorted(external_sysv_cases)}")
 passthru_f128 = external_sysv_cases["extern_c_passthru_f128_decl_received"]
@@ -2386,10 +2389,10 @@ if passthru_f128.get("ir_opcode_expected_if_called") != "IrCallExtern":
 if passthru_f128.get("native_v2_execution_attempted") is not False:
     raise SystemExit("external SysV f128 blocker must not attempt unpromoted native-v2 execution")
 passthru_boundary = external_sysv_cases["extern_c_passthru_f128_call_reaches_machineir_boundary"]
-if passthru_boundary.get("machine_module_supported") is not False:
-    raise SystemExit("external SysV f128 boundary case must produce unsupported MachineModule")
-if passthru_boundary.get("machine_module_unsupported_detail") != "external_sysv_abi_pending":
-    raise SystemExit("external SysV f128 boundary case must fail closed with external_sysv_abi_pending")
+if passthru_boundary.get("machine_module_supported") is not True:
+    raise SystemExit("external SysV f128 boundary case must produce supported narrow scalar MachineModule")
+if passthru_boundary.get("machine_module_unsupported_detail") not in ("", None):
+    raise SystemExit("external SysV f128 boundary case must not retain external_sysv_abi_pending after narrow legalization")
 if passthru_boundary.get("native_v2_machineir_external_call_symbol_classified") is not True:
     raise SystemExit("external SysV f128 boundary case must classify external-symbol MachineIR call")
 if passthru_boundary.get("native_v2_machine_module_external_call_symbol_exported") is not True:
@@ -2398,6 +2401,28 @@ if passthru_boundary.get("machine_module_external_call_symbols") != ["passthru_f
     raise SystemExit("external SysV f128 boundary case must export passthru_f128 as MachineModule external_call_symbols")
 if passthru_boundary.get("elf_emitted") is not False or passthru_boundary.get("legacy_fallback") is not False or passthru_boundary.get("segfault") is not False:
     raise SystemExit("external SysV f128 boundary case must not emit ELF, fallback, or segfault")
+if passthru_boundary.get("native_v2_executable_external_reloc_fail_closed") is not True:
+    raise SystemExit("external SysV f128 executable boundary must fail closed to relocatable-link mode")
+passthru_oracle = external_sysv_cases["extern_c_passthru_f128_native_v2_relocatable_oracle"]
+if passthru_oracle.get("object_emitted") is not True or passthru_oracle.get("native_v2_emit_obj_rc") != 0:
+    raise SystemExit("external SysV f128 relocatable oracle must emit object successfully")
+if passthru_oracle.get("relocation_kind") != "R_X86_64_PLT32":
+    raise SystemExit("external SysV f128 relocatable oracle must record PLT32 relocation")
+if passthru_oracle.get("undefined_external_symbol") != "passthru_f128":
+    raise SystemExit("external SysV f128 relocatable oracle must leave passthru_f128 undefined for host linker")
+if passthru_oracle.get("exported_entry_symbol") != "main":
+    raise SystemExit("external SysV f128 relocatable oracle must export main")
+if passthru_oracle.get("linked_executable_exit_code") != 0:
+    raise SystemExit("external SysV f128 relocatable oracle linked executable must exit zero")
+for field in [
+    "f128_external_sysv_scalar_passthru_oracle_promoted",
+    "f128_external_sysv_argument_oracle_promoted",
+    "f128_external_sysv_return_oracle_promoted",
+    "native_v2_external_relocatable_object_promoted",
+    "native_v2_external_relocation_promoted",
+]:
+    if passthru_oracle.get(field) is not True:
+        raise SystemExit(f"external SysV f128 relocatable oracle missing true flag: {field}")
 if extern_cases["kernel_nonunit_return_still_rejected"].get("real_kernel_still_rejected") is not True:
     raise SystemExit("extern declaration receipt must preserve real kernel E072 rejection")
 
@@ -3381,6 +3406,8 @@ module = {
         "native_v2_machine_module_external_call_symbol_exported": external_sysv_f128_blocker_receipt["native_v2_machine_module_external_call_symbol_exported"],
         "native_v2_machineir_external_call_symbol_promoted": external_sysv_f128_blocker_receipt["native_v2_machineir_external_call_symbol_promoted"],
         "native_v2_external_relocation_promoted": external_sysv_f128_blocker_receipt["native_v2_external_relocation_promoted"],
+        "native_v2_external_relocatable_object_promoted": external_sysv_f128_blocker_receipt["native_v2_external_relocatable_object_promoted"],
+        "f128_external_sysv_scalar_passthru_oracle_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_scalar_passthru_oracle_promoted"],
         "f128_external_sysv_abi_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_abi_promoted"],
         "f128_external_sysv_runtime_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_runtime_promoted"],
         "f128_external_sysv_argument_oracle_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_argument_oracle_promoted"],
@@ -3478,12 +3505,14 @@ module = {
         "external_sysv_f128_blocker_recorded": True,
         "native_v2_machineir_external_call_symbol_classified": True,
         "native_v2_machine_module_external_call_symbol_exported": True,
-        "native_v2_machineir_external_call_symbol_promoted": False,
+        "native_v2_machineir_external_call_symbol_promoted": True,
+        "native_v2_external_relocatable_object_promoted": True,
+        "f128_external_sysv_scalar_passthru_oracle_promoted": True,
         "f128_external_sysv_abi_promoted": False,
-        "f128_external_sysv_runtime_promoted": False,
-        "f128_external_sysv_argument_oracle_promoted": False,
-        "f128_external_sysv_return_oracle_promoted": False,
-        "native_v2_external_relocation_promoted": False,
+        "f128_external_sysv_runtime_promoted": True,
+        "f128_external_sysv_argument_oracle_promoted": True,
+        "f128_external_sysv_return_oracle_promoted": True,
+        "native_v2_external_relocation_promoted": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
         "f128_native_ieee_binary128_materialization_promoted": False,
@@ -3694,8 +3723,12 @@ receipt = {
     "extern_decl_f128_typecheck_promoted": True,
     "extern_decl_real_kernel_e072_preserved": True,
     "f128_external_sysv_abi_promoted": False,
-    "f128_external_sysv_runtime_promoted": False,
-    "native_v2_external_relocation_promoted": False,
+    "f128_external_sysv_runtime_promoted": True,
+    "f128_external_sysv_scalar_passthru_oracle_promoted": True,
+    "f128_external_sysv_argument_oracle_promoted": True,
+    "f128_external_sysv_return_oracle_promoted": True,
+    "native_v2_external_relocatable_object_promoted": True,
+    "native_v2_external_relocation_promoted": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
     "f128_native_ieee_binary128_materialization_promoted": False,
@@ -3828,8 +3861,10 @@ receipt = {
     "native_v2_machineir_external_call_symbol_promoted": module["scalar_abi_receipts"]["native_v2_machineir_external_call_symbol_promoted"],
     "f128_external_sysv_abi_promoted": module["scalar_abi_receipts"]["f128_external_sysv_abi_promoted"],
     "f128_external_sysv_runtime_promoted": module["scalar_abi_receipts"]["f128_external_sysv_runtime_promoted"],
+    "f128_external_sysv_scalar_passthru_oracle_promoted": module["scalar_abi_receipts"]["f128_external_sysv_scalar_passthru_oracle_promoted"],
     "f128_external_sysv_argument_oracle_promoted": module["scalar_abi_receipts"]["f128_external_sysv_argument_oracle_promoted"],
     "f128_external_sysv_return_oracle_promoted": module["scalar_abi_receipts"]["f128_external_sysv_return_oracle_promoted"],
+    "native_v2_external_relocatable_object_promoted": module["scalar_abi_receipts"]["native_v2_external_relocatable_object_promoted"],
     "native_v2_external_relocation_promoted": module["scalar_abi_receipts"]["native_v2_external_relocation_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],

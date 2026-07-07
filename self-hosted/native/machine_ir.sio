@@ -73,6 +73,7 @@ pub let MIR_OP_STACK_ADJUST: i64 = 129       // signed rsp adjustment around sta
 pub let MIR_OP_STACK_ARG_PUSH: i64 = 130     // push one already-loaded stack argument
 pub let MIR_OP_F128_VC_BINOP: i64 = 131      // finite value-contract f128 runtime binop
 pub let MIR_OP_F128_ORDERED_CMP: i64 = 132   // ordered binary128 f128 comparison -> i64 bool
+pub let MIR_OP_CALL_EXTERN_F128: i64 = 133   // scalar SysV binary128 extern call (xmm0)
 
 pub let MIR_SLOT_KIND_UNKNOWN: i64 = 0
 pub let MIR_SLOT_KIND_I64: i64 = 1
@@ -1816,6 +1817,16 @@ pub fn native_v2_make_call(fn_id: i64) -> MachineInstr with Mut, Panic, Div {
     mi
 }
 
+pub fn native_v2_make_call_extern_f128(dst_slot: i64, arg_slot: i64, name: Name) -> MachineInstr with Mut, Panic, Div {
+    var mi = machine_empty_instr()
+    mi.opcode = MIR_OP_CALL_EXTERN_F128
+    mi.dst = machine_operand_stack_slot(dst_slot)
+    mi.src1 = machine_operand_stack_slot(arg_slot)
+    mi.name = name
+    mi.cond = 1
+    mi
+}
+
 pub fn native_v2_make_capture_ret(temp: i64) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_CAPTURE_RET
@@ -2080,6 +2091,13 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
                 out.legal_instr_count = out.legal_instr_count + 2
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
+            if instr.cond == 1 && machine_instr_call_arg_count(instr) == 1 {
+                let arg_slot = machine_instr_call_arg_value(instr, 0)
+                if arg_slot >= 0 && arg_slot < 256 && is_f128_slot[arg_slot as usize] == 1 && machine_instr_dst_value(instr) >= 0 {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                    continue
+                }
+            }
             out.supported = false
             out.unsupported_detail = "external_sysv_abi_pending"
             return out
@@ -2369,6 +2387,18 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                 out.legal_instr_count = out.legal_instr_count + 2
             }
         } else if instr.op == IrOpcode::IrCallExtern {
+            if instr.arg_count == 1 && instr.dst >= 0 {
+                let ext_args_pair = native_v2_collect_call_args(instr.call_args, [0; 8], 0)
+                let ext_args = ext_args_pair.0
+                let arg_slot = ext_args[0]
+                if arg_slot >= 0 && arg_slot < 256 && is_f128_slot[arg_slot as usize] == 1 {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        is_f128_slot[instr.dst as usize] = 1
+                    }
+                    continue
+                }
+            }
             out.supported = false
             out.unsupported_detail = "external_sysv_abi_pending"
             return out
@@ -2737,6 +2767,16 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 }
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
+            if instr.cond == 1 && machine_instr_call_arg_count(instr) == 1 {
+                let arg_slot = machine_instr_call_arg_value(instr, 0)
+                if native_v2_slot_is_f128_ref(out, arg_slot) && machine_instr_dst_value(instr) >= 0 {
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_call_extern_f128(machine_instr_dst_value(instr), arg_slot, instr.name))
+                    native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+                    (*out).supported = true
+                    (*out).unsupported_detail = ""
+                    return
+                }
+            }
             (*out).supported = false
             (*out).unsupported_detail = "external_sysv_abi_pending"
             return
@@ -3262,6 +3302,17 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
             out = native_v2_record_external_call_symbol_byval(out, instr.name)
+            if instr.cond == 1 && machine_instr_call_arg_count(instr) == 1 {
+                let arg_slot = machine_instr_call_arg_value(instr, 0)
+                if native_v2_slot_is_f128_byval(out, arg_slot) && machine_instr_dst_value(instr) >= 0 {
+                    out = _emit_legal_byval(out, native_v2_make_call_extern_f128(machine_instr_dst_value(instr), arg_slot, instr.name))
+                    out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+                    out.supported = true
+                    out.unsupported_detail = ""
+                    i = i + 1
+                    continue
+                }
+            }
             out.supported = false
             out.unsupported_detail = "external_sysv_abi_pending"
             return out
