@@ -10,6 +10,7 @@ use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX,
 pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 512
 pub let MIR_MAX_CALL_ARGS: i64 = 8
+pub let MIR_MAX_EXTERNAL_CALL_SYMBOLS: i64 = 16
 
 pub let MIR_OPERAND_NONE: i64 = 0
 pub let MIR_OPERAND_GPR64: i64 = 1
@@ -153,6 +154,8 @@ pub struct MachineFunction {
     pub source_instr_count: i64,
     pub legal_instr_count: i64,
     pub base_slot_count: i64,
+    pub external_call_symbols: [Name; 16],
+    pub external_call_symbol_count: i64,
     pub supported: bool,
     pub unsupported_detail: string,
     pub is_float_slot: [i64; 256],
@@ -306,6 +309,8 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
         source_instr_count: 0,
         legal_instr_count: 0,
         base_slot_count: 0,
+        external_call_symbols: [empty_name(); 16],
+        external_call_symbol_count: 0,
         supported: true,
         unsupported_detail: "",
         is_float_slot: [0; 256],
@@ -323,6 +328,39 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
 
 fn native_v2_slot_is_valid(slot: i64) -> bool {
     slot >= 0 && slot < 256
+}
+
+fn native_v2_record_external_call_symbol_ref(out: &! MachineFunction, name: Name) with Mut, Panic, Div {
+    if name.len <= 0 { return }
+    var i: i64 = 0
+    while i < (*out).external_call_symbol_count {
+        if name_eq((*out).external_call_symbols[i as usize], name) {
+            return
+        }
+        i = i + 1
+    }
+    if (*out).external_call_symbol_count < MIR_MAX_EXTERNAL_CALL_SYMBOLS {
+        let idx = (*out).external_call_symbol_count
+        (*out).external_call_symbols[idx as usize] = name
+        (*out).external_call_symbol_count = idx + 1
+    }
+}
+
+fn native_v2_record_external_call_symbol_byval(out: MachineFunction, name: Name) -> MachineFunction with Mut, Panic, Div {
+    var f = out
+    native_v2_record_external_call_symbol_ref(&! f, name)
+    f
+}
+
+fn native_v2_copy_external_call_symbols_byval(out: MachineFunction, src: MachineFunction) -> MachineFunction with Mut, Panic, Div {
+    var f = out
+    f.external_call_symbol_count = src.external_call_symbol_count
+    var i: i64 = 0
+    while i < MIR_MAX_EXTERNAL_CALL_SYMBOLS {
+        f.external_call_symbols[i as usize] = src.external_call_symbols[i as usize]
+        i = i + 1
+    }
+    f
 }
 
 fn native_v2_mark_slot_ref(out: &! MachineFunction, slot: i64, kind: i64, width_words: i64) with Mut, Panic, Div {
@@ -1196,6 +1234,9 @@ pub fn machine_module_new() -> MachineModule with Mut, Panic, Div {
 }
 
 pub fn machine_function_add_instr_mut(func: &! MachineFunction, instr: MachineInstr) with Mut, Panic, Div {
+    if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
+        native_v2_record_external_call_symbol_ref(func, instr.name)
+    }
     if (*func).blocks[0].instr_count < MIR_MAX_INSTRS {
         var block = (*func).blocks[0]
         let idx = block.instr_count
@@ -2446,8 +2487,14 @@ fn native_v2_reset_machine_function_out(out: &! MachineFunction, base_slots: i64
     (*out).source_instr_count = source_count
     (*out).legal_instr_count = 0
     (*out).base_slot_count = base_slots
+    (*out).external_call_symbol_count = 0
     (*out).supported = true
     (*out).unsupported_detail = ""
+    var sym_i: i64 = 0
+    while sym_i < MIR_MAX_EXTERNAL_CALL_SYMBOLS {
+        (*out).external_call_symbols[sym_i as usize] = empty_name()
+        sym_i = sym_i + 1
+    }
     var i: i64 = 0
     while i < 256 {
         (*out).is_float_slot[i as usize] = 0
@@ -2491,6 +2538,9 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             return
         }
         let instr = native_v2_pseudo_from_ir(ir_instr)
+        if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
+            native_v2_record_external_call_symbol_ref(out, instr.name)
+        }
 
         if instr.opcode == MIR_OP_PSEUDO_WIDE_META {
             let limbs = machine_instr_aux_value(instr)
@@ -2932,6 +2982,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
     out.base_slot_count = func.base_slot_count
     out.temp_count = func.base_slot_count
     out.source_instr_count = func.source_instr_count
+    out = native_v2_copy_external_call_symbols_byval(out, func)
     if !func.supported {
         out.supported = false
         out.unsupported_detail = func.unsupported_detail
@@ -3210,6 +3261,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 }
             }
         } else if instr.opcode == MIR_OP_PSEUDO_CALL_EXTERN {
+            out = native_v2_record_external_call_symbol_byval(out, instr.name)
             out.supported = false
             out.unsupported_detail = "external_sysv_abi_pending"
             return out

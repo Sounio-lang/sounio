@@ -156,6 +156,11 @@ def collect_source_evidence(root: Path) -> list[dict[str, Any]]:
             "external_sysv_abi_pending",
             "native_v2_external_sysv_boundary_fails_closed_with_named_detail",
         ),
+        require_fragment(
+            root / "self-hosted" / "compiler" / "main.sio",
+            "external_call_symbols",
+            "machine_module_json_exports_external_call_symbols",
+        ),
     ]
 
 
@@ -234,6 +239,13 @@ def emit_passthru_call_boundary_case(root: Path, compiler: Path, out_dir: Path, 
             f"{case_id}: expected unsupported_detail external_sysv_abi_pending, "
             f"got {module.get('unsupported_detail')!r}"
         )
+    external_symbols: list[str] = []
+    for fn in module.get("functions", []):
+        symbols = fn.get("external_call_symbols", [])
+        if isinstance(symbols, list):
+            external_symbols.extend(str(sym) for sym in symbols)
+    if external_symbols != ["passthru_f128"]:
+        raise SystemExit(f"{case_id}: expected MachineModule external_call_symbols ['passthru_f128'], got {external_symbols!r}")
     return {
         "case_id": case_id,
         "class": "negative_native_v2_external_sysv_call_boundary",
@@ -247,9 +259,12 @@ def emit_passthru_call_boundary_case(root: Path, compiler: Path, out_dir: Path, 
         "machine_module_json_sha256": sha256_text(stable_json(module)),
         "machine_module_supported": module.get("supported"),
         "machine_module_unsupported_detail": module.get("unsupported_detail"),
+        "machine_module_external_call_symbols": external_symbols,
+        "machine_module_external_call_symbol_count": len(external_symbols),
         "legacy_fallback": False,
         "segfault": False,
         "native_v2_machineir_external_call_symbol_classified": True,
+        "native_v2_machine_module_external_call_symbol_exported": True,
         "native_v2_external_sysv_f128_promoted": False,
     }
 
@@ -280,6 +295,7 @@ def emit(args: argparse.Namespace) -> int:
         "ir_extern_strategy_promoted": True,
         "ir_call_extern_symbol_receipt_promoted": True,
         "native_v2_machineir_external_call_symbol_classified": True,
+        "native_v2_machine_module_external_call_symbol_exported": True,
         "native_v2_machineir_external_call_symbol_promoted": False,
         "native_v2_external_relocation_promoted": False,
         "f128_external_sysv_abi_promoted": False,
@@ -295,10 +311,11 @@ def emit(args: argparse.Namespace) -> int:
             "extern_C_f128_declaration_typechecks_without_kernel_diagnostics",
             "lowerer_has_IR_STRATEGY_EXTERN_and_IrCallExtern_symbol_path",
             "native_v2_external_symbol_call_shape_is_classified_as_external_sysv_abi_pending",
+            "MachineModule_JSON_exports_external_call_symbol_name_for_relocation_followup",
             "external_SysV_binary128_argument_and_return_oracle_not_promoted",
         ],
         "missing_full_obligations": [
-            "external SysV relocation/link path for C functions in native-v2",
+            "external SysV relocation/link path for C functions in native-v2 using the exported MachineModule symbol",
             "f128 SysV argument placement oracle against a C binary128 function",
             "f128 SysV return capture oracle against a C binary128 function",
             "external aggregate/SRET ABI oracle coverage",

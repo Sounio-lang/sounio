@@ -2353,6 +2353,7 @@ for field in [
     "ir_extern_strategy_promoted",
     "ir_call_extern_symbol_receipt_promoted",
     "native_v2_machineir_external_call_symbol_classified",
+    "native_v2_machine_module_external_call_symbol_exported",
     "f128_internal_opaque_direct_call_abi_promoted_elsewhere",
     "f128_internal_opaque_return_abi_promoted_elsewhere",
     "f128_sysv_classes_recorded_as_metadata_only",
@@ -2391,6 +2392,10 @@ if passthru_boundary.get("machine_module_unsupported_detail") != "external_sysv_
     raise SystemExit("external SysV f128 boundary case must fail closed with external_sysv_abi_pending")
 if passthru_boundary.get("native_v2_machineir_external_call_symbol_classified") is not True:
     raise SystemExit("external SysV f128 boundary case must classify external-symbol MachineIR call")
+if passthru_boundary.get("native_v2_machine_module_external_call_symbol_exported") is not True:
+    raise SystemExit("external SysV f128 boundary case must export external-symbol MachineModule metadata")
+if passthru_boundary.get("machine_module_external_call_symbols") != ["passthru_f128"]:
+    raise SystemExit("external SysV f128 boundary case must export passthru_f128 as MachineModule external_call_symbols")
 if passthru_boundary.get("elf_emitted") is not False or passthru_boundary.get("legacy_fallback") is not False or passthru_boundary.get("segfault") is not False:
     raise SystemExit("external SysV f128 boundary case must not emit ELF, fallback, or segfault")
 if extern_cases["kernel_nonunit_return_still_rejected"].get("real_kernel_still_rejected") is not True:
@@ -3373,6 +3378,7 @@ module = {
         "blocked": external_sysv_f128_blocker_receipt["blocked"],
         "blocked_reason": external_sysv_f128_blocker_receipt["blocked_reason"],
         "native_v2_machineir_external_call_symbol_classified": external_sysv_f128_blocker_receipt["native_v2_machineir_external_call_symbol_classified"],
+        "native_v2_machine_module_external_call_symbol_exported": external_sysv_f128_blocker_receipt["native_v2_machine_module_external_call_symbol_exported"],
         "native_v2_machineir_external_call_symbol_promoted": external_sysv_f128_blocker_receipt["native_v2_machineir_external_call_symbol_promoted"],
         "native_v2_external_relocation_promoted": external_sysv_f128_blocker_receipt["native_v2_external_relocation_promoted"],
         "f128_external_sysv_abi_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_abi_promoted"],
@@ -3471,6 +3477,7 @@ module = {
         "extern_decl_real_kernel_e072_preserved": True,
         "external_sysv_f128_blocker_recorded": True,
         "native_v2_machineir_external_call_symbol_classified": True,
+        "native_v2_machine_module_external_call_symbol_exported": True,
         "native_v2_machineir_external_call_symbol_promoted": False,
         "f128_external_sysv_abi_promoted": False,
         "f128_external_sysv_runtime_promoted": False,
@@ -3817,6 +3824,7 @@ receipt = {
     "extern_decl_real_kernel_e072_preserved": module["scalar_abi_receipts"]["extern_decl_real_kernel_e072_preserved"],
     "external_sysv_f128_blocker_recorded": module["scalar_abi_receipts"]["external_sysv_f128_blocker_recorded"],
     "native_v2_machineir_external_call_symbol_classified": module["scalar_abi_receipts"]["native_v2_machineir_external_call_symbol_classified"],
+    "native_v2_machine_module_external_call_symbol_exported": module["scalar_abi_receipts"]["native_v2_machine_module_external_call_symbol_exported"],
     "native_v2_machineir_external_call_symbol_promoted": module["scalar_abi_receipts"]["native_v2_machineir_external_call_symbol_promoted"],
     "f128_external_sysv_abi_promoted": module["scalar_abi_receipts"]["f128_external_sysv_abi_promoted"],
     "f128_external_sysv_runtime_promoted": module["scalar_abi_receipts"]["f128_external_sysv_runtime_promoted"],
