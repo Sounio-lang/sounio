@@ -91,6 +91,12 @@ lean_lib «SounioSedenionDynamics» where
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
 
+-- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
+-- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
+-- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
+@[default_target]
+lean_lib «SounioSedenionLadderExtension» where
+
 -- Frente B vector 1: the 7 fibers = Fano plane PG(2,2), Aut = PGL(3,2). Corollary of the
 -- automorphism sweep; NON-default_target (~1 min): `lake build SounioSedenionFano`.
 lean_lib «SounioSedenionFano» where
