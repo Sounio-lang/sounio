@@ -1180,9 +1180,7 @@ fn ir_merge_prepare_function_with_remap_from_func(
                 if mapped_id >= 0 {
                     let dep_name = (*src).functions[old_id as usize].name
                     let current_name = ir_merge_function_name_at(dst, old_id)
-                    // Cross-module calls are name-resolved into dst index space first;
-                    // skip fn_remap when old_id no longer denotes the same symbol.
-                    if ir_name_eq(dep_name, current_name) {
+                    if ir_name_eq(dep_name, current_name) || ir_merge_find_function_name_index(dst, dep_name) < 0 {
                         func.instrs[ii as usize].fn_id = mapped_id
                     }
                 }
@@ -1712,15 +1710,7 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
     fn_id
 }
 
-// Post-finalize compaction: rewrite every direct fn-ref opcode to the canonical
-// body index for the callee symbol. Whole IrInstr slot writes avoid the
-// &!Box<IrModule> in-place fn_id mutation drop.
-// A14: rebind stale fn_ids per WHOLE FUNCTION (by-value IrFunction copy, 2-level
-// owned fn_id write, 1-level writeback — the merge-append idiom). A nested 3-level
-// store (`out.functions[fi].instrs[ii].fn_id=v`, direct OR via &! pointer) is silently
-// DROPPED by lean_single, and a whole-IrInstr writeback drags the Box and zeroes the
-// slot — either way a cross-module IrCall from a non-first fn to a transitive target
-// is miscompiled (call elided / wrong target -> null-deref SIGSEGV or result 0).
+// Rewrite fn refs via whole-function writeback; nested instr writes are dropped by lean_single.
 fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, Div, Panic {
     var out = module
     var pass: i64 = 0
@@ -1867,7 +1857,13 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
     }
     var ii: i64 = 0
     while ii < user_main.instr_count && ii < IR_MAX_INSTRS {
-        slot.instrs[ii as usize] = user_main.instrs[ii as usize]
+        var ins = user_main.instrs[ii as usize]
+        if (ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret) && ins.fn_id >= 0 && ins.fn_id < out.fn_count {
+            if out.functions[ins.fn_id as usize].returns_float == 1 {
+                ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            }
+        }
+        slot.instrs[ii as usize] = ins
         ii = ii + 1
     }
     out.functions[0 as usize] = slot
@@ -4186,9 +4182,6 @@ fn module_frontend_lower_program_items_box_traced(
     module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
-// Multi-module variant: preseeds struct layouts from every program at index
-// != module_index into this program's lowerer so cross-module `use lib::Type`
-// then `s.field` lowers to the right field_idx.
 fn module_frontend_lower_program_box_traced_with_externs(
     program: &Program,
     programs: &! [Program; 256],

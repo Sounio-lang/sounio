@@ -161,11 +161,14 @@ if backend_probe.get("status") == "blocked":
         min_import = backend_probe.get("minimal_import_runtime_probe", {})
         require(min_import.get("classification") == "diagnostic_not_backend_contract", "backend segfault missing minimal import diagnostic classification")
         require("diagnoses_minimal_modular_import_runtime_only" in min_import.get("boundaries", []), "minimal import diagnostic missing boundary")
-        require(min_import.get("reason") == "minimal_imported_elf_segfault_after_compile", "minimal import diagnostic reason mismatch")
+        require(min_import.get("reason") in {"minimal_imported_elf_segfault_after_compile", "minimal_imported_elf_pass"}, "minimal import diagnostic reason mismatch")
         require(min_import.get("no_import", {}).get("check_exit_code") == 0, "minimal no-import check must pass")
         require(min_import.get("no_import", {}).get("run_exit_code") == 0, "minimal no-import run must pass")
         require(min_import.get("imported", {}).get("check_exit_code") == 0, "minimal imported check must pass")
-        require(min_import.get("imported", {}).get("run_exit_code") == 139, "minimal imported run must segfault")
+        if min_import.get("reason") == "minimal_imported_elf_segfault_after_compile":
+            require(min_import.get("imported", {}).get("run_exit_code") == 139, "minimal imported run must segfault")
+        else:
+            require(min_import.get("imported", {}).get("run_exit_code") == 0, "minimal imported run must pass")
         require("Compilation successful!" in min_import.get("imported", {}).get("run_log_tail", ""), "minimal imported diagnostic missing compile-success evidence")
 else:
     require(backend_contract.get("status") == "proved", "backend pass did not prove contract")
