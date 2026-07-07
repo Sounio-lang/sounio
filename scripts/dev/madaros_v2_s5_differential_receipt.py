@@ -16,13 +16,14 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.differential_receipt/0.1"
+SCHEMA_VERSION = "madaros.v2.s5.differential_receipt/0.2"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_11_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES"
+STAGE_CONTRACT_LEVEL = "S5_27_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES"
 
 UNAVAILABLE_REFERENCE_CASES = {
     "f64_println_call_stdout_4_5": "lean_single prints f64 println without the trailing newline emitted by native-v2 print_char",
@@ -49,10 +50,13 @@ REQUIRED_CATEGORIES = {
     "f128_opaque_call_return_abi",
     "f128_sret_internal_arg_boundary",
     "f128_param_slot_layout",
+    "f128_binary128_native_materialization",
+    "f128_ieee_class_helper",
+    "f128_ieee_predicate_helper",
 }
 
-EXPECTED_CASE_COUNT = 87
-EXPECTED_MATCHED_CASE_COUNT = 79
+EXPECTED_CASE_COUNT = 257
+EXPECTED_MATCHED_CASE_COUNT = 219
 
 F128_PARAM_EXPECTED_EXITS = {
     "local_two_f128_params_non_overlapping": 5,
@@ -124,6 +128,7 @@ def load_module(root: Path, name: str) -> Any:
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot import receipt helper: {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -176,6 +181,8 @@ def case_source_rows(root: Path) -> list[dict[str, Any]]:
     f128_call = load_module(root, "madaros_v2_s5_f128_opaque_call_return_abi_receipt")
     f128_sret = load_module(root, "madaros_v2_s5_f128_sret_internal_arg_boundary_receipt")
     f128_param = load_module(root, "madaros_v2_s5_f128_param_slot_layout_receipt")
+    f128_binary128 = load_module(root, "madaros_v2_s5_f128_binary128_value_contract_native_receipt")
+    f128_class = load_module(root, "madaros_v2_s5_f128_ieee_class_helper_receipt")
 
     rows: list[dict[str, Any]] = []
     for case_id, source_path, expected_exit, category in [
@@ -344,6 +351,78 @@ def case_source_rows(root: Path) -> list[dict[str, Any]]:
                 "expected_f128_slot_rows": list(case["expected_f128_rows"]),
             }
         )
+    for case in f128_binary128.CASES:
+        value_expr = f"{case.literal} as f128"
+        rows.append(
+            {
+                "case_id": f"f128_binary128_materialize_{case.case_id}",
+                "category": "f128_binary128_native_materialization",
+                "source": f"""fn main() -> i64 {{
+    let x: f128 = {value_expr}
+    let y: f128 = x
+    0
+}}
+""",
+                "expected_exit": 0,
+                "support_files": {},
+                "expected_binary128_hex": case.expected_hex,
+                "expected_f128_metadata": case.expected_metadata,
+                "f128_literal": case.literal,
+            }
+        )
+    for case in f128_class.CASES:
+        case_id = f"f128_class_code_{case.case_id}"
+        nan_decl = "fn f128_nan() -> f128 { 0.0 as f128 }\n" if case.literal == "f128_nan()" else ""
+        value_expr = case.literal if case.literal == "f128_nan()" else f"{case.literal} as f128"
+        if int(case.expected_class_code) != 0:
+            UNAVAILABLE_REFERENCE_CASES[case_id] = (
+                "lean_single executes the source stub for f128_class_code while native-v2 executes "
+                "the promoted compiler-owned IEEE class-code builtin"
+            )
+        rows.append(
+            {
+                "case_id": case_id,
+                "category": "f128_ieee_class_helper",
+                "source": f"""{nan_decl}fn f128_class_code(x: f128) -> i64 {{ 0 }}
+fn main() -> i64 {{
+    let x: f128 = {value_expr}
+    f128_class_code(x)
+}}
+""",
+                "expected_exit": int(case.expected_class_code),
+                "support_files": {},
+                "expected_class_name": case.expected_class_name,
+                "f128_literal": case.literal,
+            }
+        )
+    for case in f128_class.CASES:
+        for predicate_name, helper_name in f128_class.PREDICATE_HELPERS:
+            expected_exit = int(f128_class.expected_predicate_value(case.expected_class_name, predicate_name))
+            case_id = f"f128_predicate_{case.case_id}_{helper_name}"
+            nan_decl = "fn f128_nan() -> f128 { 0.0 as f128 }\n" if case.literal == "f128_nan()" else ""
+            value_expr = case.literal if case.literal == "f128_nan()" else f"{case.literal} as f128"
+            if expected_exit != 0:
+                UNAVAILABLE_REFERENCE_CASES[case_id] = (
+                    "lean_single executes the source stub for IEEE f128 predicate helpers while "
+                    "native-v2 executes the promoted compiler-owned predicate builtin"
+                )
+            rows.append(
+                {
+                    "case_id": case_id,
+                    "category": "f128_ieee_predicate_helper",
+                    "source": f"""{nan_decl}fn {helper_name}(x: f128) -> i64 {{ 0 }}
+fn main() -> i64 {{
+    let x: f128 = {value_expr}
+    {helper_name}(x)
+}}
+""",
+                    "expected_exit": expected_exit,
+                    "support_files": {},
+                    "expected_predicate": predicate_name,
+                    "expected_class_name": case.expected_class_name,
+                    "f128_literal": case.literal,
+                }
+            )
 
     seen: set[str] = set()
     for row in rows:
@@ -597,6 +676,9 @@ def emit(args: argparse.Namespace) -> int:
         "f128_opaque_call_return_abi_differential_complete": True,
         "f128_sret_internal_arg_boundary_differential_complete": True,
         "f128_param_slot_layout_differential_complete": True,
+        "f128_binary128_native_materialization_differential_complete": True,
+        "f128_ieee_class_helper_differential_recorded": True,
+        "f128_ieee_predicate_helper_differential_recorded": True,
         "s5_ready": False,
         "s5_implemented": False,
         "s5_full_complete": False,

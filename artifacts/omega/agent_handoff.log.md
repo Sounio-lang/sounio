@@ -4205,3 +4205,66 @@ status: lock-released
   - Next-Action: continue S5 FULL toward S6 readiness by targeting broader
     f128 differential coverage or the remaining near-half/min-subnormal decimal
     rounding boundary.
+
+## 2026-07-07 — Madaros S-next S5.27 expanded f128 differential receipt (Codex)
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: make the S5 differential contract catch up with the promoted S5.25
+  IEEE class/predicate helper surface and S5.26 binary128 native
+  materialization surface, instead of leaving them as isolated receipts outside
+  native-v2 vs `lean_single` comparison.
+- Files changed:
+  - `scripts/dev/madaros_v2_s5_differential_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Bumped the differential receipt schema to
+    `madaros.v2.s5.differential_receipt/0.2` and stage contract to
+    `S5_27_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES`.
+  - Expanded the differential receipt from 87 cases / 79 matched to
+    257 cases / 219 matched / 38 reference-unavailable.
+  - Added 86 matched `f128_binary128_native_materialization` cases generated
+    from the S5.26 value-contract native case set.
+  - Added 12 `f128_ieee_class_helper` cases and 72
+    `f128_ieee_predicate_helper` cases generated from the S5.25 class-helper
+    receipt. Positive helper cases that `lean_single` cannot execute because it
+    sees only source stubs are recorded as reference-unavailable rather than
+    counted as equivalence evidence.
+  - Hardened the aggregate S5 gate to require the new schema, stage contract,
+    total/matched/unavailable counts, new flags, new categories, exact
+    reference-unavailable helper cases, and per-category counts.
+- Local proof completed:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_differential_receipt.py`
+    passed.
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - `python3 scripts/dev/madaros_v2_s5_differential_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --reference-souc "$PWD/bin/souc" --out-dir /tmp/sounio-s5-diff-expanded --timeout 120`
+    passed: `matched=219/257 unavailable=38`.
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed with the S5.27
+    differential receipt and aggregate receipt sha `ee994672edd2`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260707-madaros-snext-f128-differential-coverage`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: compiler-differential-coverage
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 f128 differential contract
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: S5.27 differential receipt, aggregate S5 gate, full gate,
+    source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; positive IEEE helper comparisons remain
+    reference-unavailable under `lean_single`, and generic IEEE arithmetic,
+    external SysV f128 ABI/SRET, arbitrary decimal materialization beyond the
+    bounded promoted set, and S5 FULL remain unpromoted.
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane.
+  - Next-Action: continue S5 FULL toward S6 readiness by targeting the next
+    remaining blocker: external SysV f128 ABI/SRET or the near-half/min-subnormal
+    arbitrary decimal rounding boundary.
