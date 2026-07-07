@@ -10,7 +10,7 @@ use ir::ir::*
 use io::env::{read_env}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata}
 use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
-use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target}
+use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
@@ -1787,6 +1787,54 @@ fn ir_module_promote_canonical_into_stub_slots(module: IrModule) -> IrModule wit
 
 // Materialize merged IR, resolve call targets on an owned IrModule (not through
 // &! Box<IrModule> — lean_single drops those writes), and return the finalized module.
+// Ensure every call to a BUILTIN name (str_char_at, str_len, str_from_bytes, ...)
+// points at a slot bearing that name so codegen emits the builtin body. Builtins
+// carry no IR body (instr_count==0, synthesized at codegen), so the normal name
+// resolver — which only accepts targets with instr_count>0 — never binds them. A
+// builtin referenced ONLY transitively (an imported fn's body calls it, the root
+// module never does) is also absent from the merged module entirely. Append a
+// named stub when missing and rebind the call. Whole-function writeback per A14.
+fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var out = module
+    var fi: i64 = 0
+    while fi < out.fn_count {
+        var f = out.functions[fi as usize]
+        var changed: bool = false
+        var ii: i64 = 0
+        while ii < f.instr_count {
+            let op = f.instrs[ii as usize].op
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                let cn = f.instrs[ii as usize].name
+                if cn.len > 0 && native_v2_builtin_id_for_name(cn) != 0 {
+                    let cur = f.instrs[ii as usize].fn_id
+                    var ok: bool = false
+                    if cur >= 0 && cur < out.fn_count {
+                        if ir_name_eq(out.functions[cur as usize].name, cn) { ok = true }
+                    }
+                    if !ok {
+                        var target = ir_merge_find_function_name_index(&out, cn)
+                        if target < 0 && out.fn_count < IR_MAX_FUNCS {
+                            var stub = ir_empty_function()
+                            stub.name = cn
+                            out.functions[out.fn_count as usize] = stub
+                            target = out.fn_count
+                            out.fn_count = out.fn_count + 1
+                        }
+                        if target >= 0 {
+                            f.instrs[ii as usize].fn_id = target
+                            changed = true
+                        }
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        if changed { out.functions[fi as usize] = f }
+        fi = fi + 1
+    }
+    out
+}
+
 fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, Panic {
     var out = module
     ir_module_resolve_named_calls(&! out)
@@ -1826,6 +1874,7 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
         }
         pass = pass + 1
     }
+    out = ir_module_ensure_builtin_call_targets(out)
     out
 }
 
