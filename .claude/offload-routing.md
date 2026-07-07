@@ -19,7 +19,9 @@ The wrapper prepends a task-specific system prompt from `.claude/offload-tasks/<
 | `scaffold` | `deepseek` | `qwen`, `grok-code` | Spec → boilerplate (.sio, SQL, ETL, LaTeX) |
 | `review` | `deepseek` | `xai`, `qwen` | Devil's-advocate code/paper review |
 | `paraphrase` | `minimax` (needs key) | `qwen`, `deepseek` | Cover letters, abstract polishing |
-| `math-review` | `xai` (Grok 4.1) | `qwen`, `mistral` | PK / GUM / p-box / Lean theorem audit |
+| `math-review` | `xai zai` fan-out (Grok 4.3 + Z.AI GLM) | `xai-fast`, `qwen`, `mistral` | Math / algebra / stats audit — **default is now a two-provider fan-out for every agent** |
+
+> **Default math review (2026-07-07):** `bin/llm-offload -t math-review` fans out to **xai (grok-4.3)** and **zai (Z.AI GLM-4.6)** automatically — an independent second opinion is the standard, not opt-in. Z.AI needs `ZAI_API_KEY` (or `ZHIPU_API_KEY`); without it the tool runs xai alone and prints a SKIPPED notice for Z.AI. Run `bin/llm-offload --status` to see loaded keys.
 
 ```bash
 # Outline -> prose

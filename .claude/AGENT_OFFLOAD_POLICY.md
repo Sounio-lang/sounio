@@ -28,10 +28,10 @@ The following checkpoints are **MANDATORY** for any agent before commit / PR ope
 **Action**: run
 
 ```bash
-bin/llm-offload -t math-review -p xai -i <file_or_diff>
+bin/llm-offload -t math-review -i <file_or_diff>
 ```
 
-before commit. If `xai` rejects a claim, EITHER fix the claim OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning.
+before commit. **As of 2026-07-07 this fans out by default to two independent providers — xai (grok-4.3) and zai (Z.AI GLM) — for every agent.** A single-vendor pass is no longer the standard for math claims; the independent second opinion is mandatory. (Z.AI requires `ZAI_API_KEY`/`ZHIPU_API_KEY`; if absent, the run degrades to xai-only and logs a SKIPPED notice — treat a Z.AI skip as an incomplete review, not a pass.) If any provider rejects a claim, EITHER fix it OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning. Precedent for this rule: on 2026-07-07 grok-4.3 + grok-4.20-reasoning caught a sign error making the NeuroDyn "octonion" product non-normed/non-alternative that had passed all prior review.
 
 For high-stakes math (theorem published / referee-bound), fan out:
 
