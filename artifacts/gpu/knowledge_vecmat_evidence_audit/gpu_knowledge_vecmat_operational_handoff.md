@@ -1,8 +1,8 @@
 # GPU Knowledge Vec/Mat Operational Handoff
 
-Current-SHA: 42dea4082b003a48162d39f8bee54843a33b9cb7
-Current-Branch: <detached>
-Current-Worktree: /tmp/sounio-pr691-merge
+Current-SHA: 2ae682854059dd38ffc410516297dd60671fcefa
+Current-Branch: work/vecmat-imported-runtime-codex
+Current-Worktree: /tmp/sounio-vecmat-imported-runtime
 Dirty-Status: see `git status --short -- scripts/dev/gpu_knowledge_vec* scripts/ci/gpu_knowledge_vecmat_evidence_gate.sh scripts/dev/dgx_spark_public_gpu_gate.sh artifacts/gpu/knowledge_vecmat_evidence_audit artifacts/gpu/dgx_spark_public_gpu_package artifacts/gpu/dgx_spark_public_gpu_gate.v1.json`
 Current-Goal-Status: not_complete
 Completion-Blockers: automatic_backend_pack_unpack, imported_runtime_fixture
