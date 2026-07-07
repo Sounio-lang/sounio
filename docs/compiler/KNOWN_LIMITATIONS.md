@@ -99,6 +99,31 @@ See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1 and memory `[[project_
 
 **Array-field struct by-value return (SRET) — NOT a limitation; the residual was `println` dispatch.** 2026-07-06 investigation (WP-A4): returning a struct that contains an array field *by value* on the default Madaros engine works — structs are handle-based (one heap object; the array field is a separate handle stored in a slot), so the returned handle round-trips correctly at any width. Verified across `struct{c:[i64;2],x}`, `struct{c:[i64;4],bits}`, the generic `struct G4<F>{c:[F;4],bits}` @`i64`, a 3-arg callee (asymmetric args), and `[i64;256]`. The actual cause of `tests/run-pass/generic_struct_return.sio` rc=139 was the **`println` builtin dispatch**: `expr_result_scalar_kind_ref` (in `self-hosted/ir/lower.sio`) had no `ExprKind::ExprIndex` case, so an i64 array element such as `r.c[0]` classified as kind 0 → routed to the char\* printer, which dereferenced the integer value as a pointer and SIGSEGV'd. (Monomorphized generic structs register fields from the generic declaration `[F;N]`, so a declared-type i64 marker cannot fire for them.) Fix: classify a subscript's element positively as float (matching the existing `index_base_elem_is_float_ref` path → `print_f64`) and default the remaining numeric element to int (`print_int`); float-element index-println tests (`bdf_stiff`, `dissertation_pbpk28_*`, `hof_mut_struct_min`, `ode_generic_solver`) are unaffected. Regression tests: `tests/run-pass/generic_struct_return.sio`, `tests/run-pass/println_int_array_field.sio`, `tests/run-pass/sret_array4_return.sio`, `tests/run-pass/sret_array4_generic_return.sio`, `tests/run-pass/sret_array_args_return.sio`. Residual (tracked in the continuity new-gap ledger, NOT this fix): `println(<computed local>)` where the local is bound from a bare arithmetic/index initializer without an int scalar-kind marker still routes to the char\* printer.
 
+**Cross-module large-struct SRET forwarding (A8) — FIXED (2026-07-06).** A dependency-module
+function that forwards through an inner same-module struct-returning call — the shape
+`var r = zero(k); r.c[i] = 1; return r` — used to RUN-segfault (rc=139) when reached across a
+module boundary (`tests/run-pass/sret_forwarding_cross_module_min.sio`, `a8_diag_fwd/sizes/step.sio`),
+while the byte-identical single-module source ran clean. **Root cause (corrects the earlier
+body-lowering hypothesis):** the merged-IR body lowering is *correct* (verified pre-finalize:
+`Call dst=2 arg=[0] fn=<zero>`). The corruption was introduced in `ir_module_finalize_merged_calls`
+(`self-hosted/compiler/module_frontend.sio`): its final call-target-resolution pass called
+`ir_module_resolve_one_call_target(&out, ins)` passing the whole `IrInstr` **by value**. `IrInstr`
+carries a `Box` (`call_args`); under lean_single the by-value large-struct copy is miscompiled and
+scrambles the *caller's* `ins` local (`dst 2→3`, `src1 0→2`, `call_args [0]→[2]`, `fn_id`→wrong),
+which was then written back unconditionally — so `r.c[i]` / `return r` dereferenced a garbage handle.
+(`ir_module_compact_duplicate_fn_refs` used the same read/writeback but never passed `ins` by value,
+which is exactly why it was safe.) **Fix:** resolve from scalar fields only —
+`ir_module_resolve_call_target_fields(module, old_id: i64, name: Name)` (Name is a small fixed struct,
+passed by value safely throughout) — and write the slot back only when `fn_id` actually changes.
+Witnesses (Slurm, actual rc): min → rc=0 `CROSS_SRET_MIN_OK`; cd_mul → rc=0 `CD_MUL_CROSS_SRET_OK`;
+a8_diag_fwd/sizes/step/ctrl → rc=0; `fano_basics` FAIL→PASS. Zero regressions (base-vs-fix
+differential across ~20 multi-module tests: identical-or-better). **Still open (separate, pre-existing —
+NOT this fix):** `cd_exact_generic_i64` (A5 headline) SIGSEGVs at *compile time* in
+`lower_program_to_ir_summary_box_with_externs_ref` for its generic dependency module (trace stops
+between `module_frontend_lower: summary_begin` and `summary_done` on `lower_array: dep_begin 1`);
+EISA `test_eisa_isa/evm` fail earlier at "multimodule native thin-link compilation failed" (brc=1).
+Both reproduce identically on the base branch.
+
 ### Reconciliation notes (2026-05-27)
 
 This file previously claimed several rows as "Production" that the public-claim registry already had downgraded. The PL adoption audit (`docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §2) catalogued the diff. Changes made here:
