@@ -3119,3 +3119,48 @@ notes: |
   A10_PARTIAL: summary-lowering impl-preseed SIGSEGV FIXED + verified, non-regressing.
   Headline (WP-A5: cd_exact runs ZD PROVED/SQ PASS/NONZERO PASS/16xCOMP 0) NOT reached
   — blocked by the memory/body-lowering wall above. PR opened (base main), NOT merged.
+
+---
+
+agent: claude
+time_utc: 2026-07-07T05:40:00Z
+files:
+  - stdlib/algebra/cayley_dickson_exact.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+  - docs/compiler/KNOWN_LIMITATIONS.md
+  - docs/handoff/repros/a13_crossmod_nonfirst_fn_drop_ctrlA.sio
+  - docs/handoff/repros/a13_crossmod_nonfirst_fn_drop_ctrlC.sio
+  - docs/handoff/repros/a13_crossmod_mainfirst_ok_ctrlE.sio
+  - artifacts/omega/agent_handoff.log.md
+intent: |
+  WP-A5 CLAIM+RELEASE. cd_exact_generic_i64 now runs GREEN on the default Madaros
+  engine. The final runtime blocker was NOT the "by-value aggregate param in a nested
+  loop" codegen bug the prompt described (that repro, _a12_t3, actually hit a SEPARATE
+  bug — see gap below). The real blocker: generic cd_mul_exact calls cd_sigma via a
+  cross-module import (algebra::cayley_dickson), and a call into a transitively-imported
+  module is DROPPED by the Madaros imported-lane merge -> the IrCall is elided, its
+  result vreg defaults to 0, clobbering param slot 0 (a) -> a.c[i] null-handle deref ->
+  SIGSEGV inside the nested accumulation loop. Fix = same-module cd_sigma_x (verbatim),
+  mirroring the concrete sibling cayley_dickson_exact_i64.sio which already inlines
+  cd_sigma for this exact "HARD BLOCKER". Stdlib-only; compiler untouched.
+checks:
+  - "Slurm madaros build BUILD_RC=0 (8MB import budget intact)"
+  - "MAD build+run tests/run-pass/cd_exact_generic_i64.sio => rc=0, stdout: ZD PROVED / SQ PASS / NONZERO PASS / 16x 'COMP i 0'"
+  - "W4 regression: sret_8_field_return OK; generic_struct_return '6'/'spike PASS'; sret_forwarding_cross_module_min CROSS_SRET_MIN_OK; turbofish 3/3; for_in_loops/for_range_loop rc=0 — no green->red"
+new_gap: |
+  RESIDUAL COMPILER BUG (transitive cross-module call drop) — NOT fixed, stdlib-worked-around.
+  On the Madaros imported-lane, a direct call whose target lives in a transitively-imported
+  module is silently dropped at codegen (IrCall elided; result vreg -> 0 clobbers param slot 0).
+  Isolation (all Slurm, actual rc): a generic/cross-module call from a NON-FIRST user fn is
+  dropped (put main 2nd -> its cd_basis_exact call vanishes -> SIGSEGV), while the identical
+  call from the FIRST fn works (main 1st -> fine); same-module callee calls resolve, only
+  different-module ones drop. Repros: docs/handoff/repros/a13_crossmod_*.sio (ctrlA/ctrlC crash,
+  ctrlE ok). Likely a fn_id-resolution hole in ir_module_finalize_merged_calls / the transitive
+  -dep merge in module_frontend.sio (adjacent to the A8 fix, which only covered same-module
+  var=<inner call> finalize scramble). A real fix belongs in module_frontend.sio.
+commit: pending
+status: lock-released
+notes: |
+  WP-A5 HEADLINE REACHED: cd_exact green on Madaros. cd_exact_generic_vs_concrete still
+  shows MUL_AB DIFF (the concrete engine hits its own multi-term madaros issue when both
+  engines coexist — separate, was already red pre-fix). PR opened (base main), NOT merged.
