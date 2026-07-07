@@ -4516,7 +4516,7 @@ fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpl
                    let src2 = if instr.opcode == MIR_OP_RET && instr.cond == 1 { machine_instr_src2_value(instr) } else { 0 - 1 }
                    out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_src1_value(instr), src2)
                    count = count + 1
-        } else if instr.opcode == MIR_OP_F128_VC_BINOP {
+        } else if instr.opcode == MIR_OP_F128_VC_BINOP || instr.opcode == MIR_OP_F128_ORDERED_CMP {
             out[count as usize] = native_v2_ra_simple(0 - 1, 0 - 1, 0 - 1)
             count = count + 1
         } else if instr.opcode == MIR_OP_MOVE || instr.opcode == MIR_OP_UNARY || instr.opcode == MIR_OP_LOAD_ABS {
@@ -4742,6 +4742,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_F128_VC_BINOP {
         nc_core_emit_f128_vc_binop(&! c, instr.dst.value, instr.src1.value, instr.src2.value, instr.bin_op)
+        return c
+    }
+
+    if instr.opcode == MIR_OP_F128_ORDERED_CMP {
+        nc_core_emit_f128_ordered_compare_to_bool(&! c, instr.dst.value, instr.src1.value, instr.src2.value, instr.bin_op)
         return c
     }
 
@@ -5661,6 +5666,209 @@ fn nc_core_emit_f128_slot_words_or_jump(nc: &! NativeCompiler, src_slot: i64, ex
     nc_emit_mov_reg_imm(nc, 3, expected_lo)
     nc_emit_cmp_rax_rbx(nc)
     nc_emit_jnz_to_label(nc, fail_label)
+}
+
+fn nc_core_emit_f128_abs_or_to_rax(nc: &! NativeCompiler, src_slot: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, src_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223372036854775807)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, src_slot + 1)
+    nc_emit_pop_rbx(nc)
+    nc_emit_or_rax_rbx(nc)
+}
+
+fn nc_core_emit_f128_jump_if_nan(nc: &! NativeCompiler, src_slot: i64, nan_label: i64) with Mut, Panic, Div {
+    let not_nan_label = nc_next_cmp_label()
+    nc_core_load_temp_to_rax(nc, src_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223090561878065152)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 9223090561878065152)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jnz_to_label(nc, not_nan_label)
+    nc_core_load_temp_to_rax(nc, src_slot)
+    nc_emit_mov_reg_imm(nc, 3, 281474976710655)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, src_slot + 1)
+    nc_emit_pop_rbx(nc)
+    nc_emit_or_rax_rbx(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, nan_label)
+    nc_define_label(nc, not_nan_label)
+}
+
+fn nc_core_emit_bool_result(nc: &! NativeCompiler, value: i64, done_label: i64) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, value)
+    nc_emit_jmp_to_label(nc, done_label)
+}
+
+fn nc_core_emit_f128_ordered_equal_to_rax(nc: &! NativeCompiler, lhs_slot: i64, rhs_slot: i64) with Mut, Panic, Div {
+    let false_label = nc_next_cmp_label()
+    let true_label = nc_next_cmp_label()
+    let raw_eq_label = nc_next_cmp_label()
+    let done_label = nc_next_cmp_label()
+    nc_core_emit_f128_jump_if_nan(nc, lhs_slot, false_label)
+    nc_core_emit_f128_jump_if_nan(nc, rhs_slot, false_label)
+
+    nc_core_emit_f128_abs_or_to_rax(nc, lhs_slot)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, raw_eq_label)
+    nc_core_emit_f128_abs_or_to_rax(nc, rhs_slot)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jz_to_label(nc, true_label)
+    nc_emit_jmp_to_label(nc, false_label)
+
+    nc_define_label(nc, raw_eq_label)
+    nc_core_load_temp_to_rax(nc, rhs_slot)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, lhs_slot)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jnz_to_label(nc, false_label)
+    nc_core_load_temp_to_rax(nc, rhs_slot + 1)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, lhs_slot + 1)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jz_to_label(nc, true_label)
+
+    nc_define_label(nc, false_label)
+    nc_core_emit_bool_result(nc, 0, done_label)
+    nc_define_label(nc, true_label)
+    nc_core_emit_bool_result(nc, 1, done_label)
+    nc_define_label(nc, done_label)
+}
+
+fn nc_core_emit_f128_ordered_less_to_rax(nc: &! NativeCompiler, lhs_slot: i64, rhs_slot: i64) with Mut, Panic, Div {
+    let false_label = nc_next_cmp_label()
+    let true_label = nc_next_cmp_label()
+    let done_label = nc_next_cmp_label()
+    let lhs_nonzero_label = nc_next_cmp_label()
+    let same_sign_label = nc_next_cmp_label()
+    let lhs_negative_label = nc_next_cmp_label()
+    let both_negative_label = nc_next_cmp_label()
+    let high_equal_positive_label = nc_next_cmp_label()
+    let high_equal_negative_label = nc_next_cmp_label()
+
+    nc_core_emit_f128_jump_if_nan(nc, lhs_slot, false_label)
+    nc_core_emit_f128_jump_if_nan(nc, rhs_slot, false_label)
+    nc_core_emit_f128_abs_or_to_rax(nc, lhs_slot)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, lhs_nonzero_label)
+    nc_core_emit_f128_abs_or_to_rax(nc, rhs_slot)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jz_to_label(nc, false_label)
+    nc_define_label(nc, lhs_nonzero_label)
+
+    nc_core_load_temp_to_rax(nc, lhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 0 - 9223372036854775807 - 1)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, rhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 0 - 9223372036854775807 - 1)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jz_to_label(nc, same_sign_label)
+    nc_emit_mov_reg_reg(nc, 0, 3)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, lhs_negative_label)
+    nc_emit_jmp_to_label(nc, false_label)
+    nc_define_label(nc, lhs_negative_label)
+    nc_emit_jmp_to_label(nc, true_label)
+
+    nc_define_label(nc, same_sign_label)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_to_label(nc, both_negative_label)
+
+    nc_core_load_temp_to_rax(nc, lhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223372036854775807)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, rhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223372036854775807)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jz_to_label(nc, high_equal_positive_label)
+    nc_emit_seta_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, both_negative_label)
+    nc_core_load_temp_to_rax(nc, lhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223372036854775807)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, rhs_slot)
+    nc_emit_mov_reg_imm(nc, 3, 9223372036854775807)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_jz_to_label(nc, high_equal_negative_label)
+    nc_emit_setb_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, high_equal_positive_label)
+    nc_core_load_temp_to_rax(nc, rhs_slot + 1)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, lhs_slot + 1)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_seta_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, high_equal_negative_label)
+    nc_core_load_temp_to_rax(nc, rhs_slot + 1)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, lhs_slot + 1)
+    nc_emit_pop_rbx(nc)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_setb_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_jmp_to_label(nc, done_label)
+
+    nc_define_label(nc, false_label)
+    nc_core_emit_bool_result(nc, 0, done_label)
+    nc_define_label(nc, true_label)
+    nc_core_emit_bool_result(nc, 1, done_label)
+    nc_define_label(nc, done_label)
+}
+
+fn nc_core_emit_f128_ordered_compare_to_bool(nc: &! NativeCompiler, dst_slot: i64, lhs_slot: i64, rhs_slot: i64, op: BinaryOp) with Mut, Panic, Div {
+    if op == BinaryOp::OpEq {
+        nc_core_emit_f128_ordered_equal_to_rax(nc, lhs_slot, rhs_slot)
+    } else if op == BinaryOp::OpNe {
+        nc_core_emit_f128_ordered_equal_to_rax(nc, lhs_slot, rhs_slot)
+        nc_emit_test_rax_rax(nc)
+        nc_emit_sete_al(nc)
+        nc_emit_movzx_rax_al(nc)
+    } else if op == BinaryOp::OpLt {
+        nc_core_emit_f128_ordered_less_to_rax(nc, lhs_slot, rhs_slot)
+    } else if op == BinaryOp::OpGt {
+        nc_core_emit_f128_ordered_less_to_rax(nc, rhs_slot, lhs_slot)
+    } else if op == BinaryOp::OpLe {
+        let done_label = nc_next_cmp_label()
+        nc_core_emit_f128_ordered_less_to_rax(nc, lhs_slot, rhs_slot)
+        nc_emit_test_rax_rax(nc)
+        nc_emit_jnz_to_label(nc, done_label)
+        nc_core_emit_f128_ordered_equal_to_rax(nc, lhs_slot, rhs_slot)
+        nc_define_label(nc, done_label)
+    } else if op == BinaryOp::OpGe {
+        let done_label = nc_next_cmp_label()
+        nc_core_emit_f128_ordered_less_to_rax(nc, rhs_slot, lhs_slot)
+        nc_emit_test_rax_rax(nc)
+        nc_emit_jnz_to_label(nc, done_label)
+        nc_core_emit_f128_ordered_equal_to_rax(nc, lhs_slot, rhs_slot)
+        nc_define_label(nc, done_label)
+    } else {
+        nc_emit_exit_code(nc, 12)
+    }
+    nc_core_store_rax_to_temp(nc, dst_slot)
+    nc_core_mark_int_reg(nc, dst_slot)
 }
 
 fn nc_core_emit_f128_add_exact_pair_case(nc: &! NativeCompiler, dst_slot: i64, lhs_slot: i64, rhs_slot: i64, lhs_hi: i64, lhs_lo: i64, rhs_hi: i64, rhs_lo: i64, result_hi: i64, result_lo: i64, next_label: i64, done_label: i64) with Mut, Panic, Div {
@@ -7962,6 +8170,16 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     nc_core_mark_f128_kind(nc, (*func).instrs[i as usize].dst, result_kind)
                     i = i + 1
                     continue
+                } else if (*func).instrs[i as usize].bin_op == BinaryOp::OpEq || (*func).instrs[i as usize].bin_op == BinaryOp::OpNe || (*func).instrs[i as usize].bin_op == BinaryOp::OpLt || (*func).instrs[i as usize].bin_op == BinaryOp::OpLe || (*func).instrs[i as usize].bin_op == BinaryOp::OpGt || (*func).instrs[i as usize].bin_op == BinaryOp::OpGe {
+                    nc_core_emit_f128_ordered_compare_to_bool(
+                        nc,
+                        (*func).instrs[i as usize].dst,
+                        (*func).instrs[i as usize].src1,
+                        (*func).instrs[i as usize].src2,
+                        (*func).instrs[i as usize].bin_op,
+                    )
+                    i = i + 1
+                    continue
                 } else if (*func).instrs[i as usize].bin_op == BinaryOp::OpAdd || (*func).instrs[i as usize].bin_op == BinaryOp::OpSub || (*func).instrs[i as usize].bin_op == BinaryOp::OpMul || (*func).instrs[i as usize].bin_op == BinaryOp::OpDiv {
                     nc_core_emit_f128_vc_binop(
                         nc,
@@ -8863,7 +9081,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
        || opcode == MIR_OP_LOAD_FLOAT_RIP { CGOP_LOAD }
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { CGOP_STORE }
-    else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP { CGOP_MUL }
+    else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { CGOP_MUL }
     else if opcode == MIR_OP_CALL { CGOP_CALL }
     else if opcode == MIR_OP_RET { CGOP_RET }
     else if opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { CGOP_BRANCH }
@@ -8873,7 +9091,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
 fn mir_opcode_latency(opcode: i64) -> i64 {
     if opcode == MIR_OP_LOAD_STACK || opcode == MIR_OP_FIELD_LOAD
        || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 4 }
-    else if opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP { 5 }
+    else if opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 5 }
     else if opcode == MIR_OP_BINOP { 3 }
     else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET { 5 }
     else { 1 }
@@ -8885,7 +9103,7 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
             || opcode == MIR_OP_INDEX_STORE { 144 }                                // P4,P7
     else if opcode == MIR_OP_FLOAT_BINOP { 1 }                                    // P0 (FP MUL)
     else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET
-            || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC || opcode == MIR_OP_F128_VC_BINOP { 64 }                // P6
+            || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 64 }                // P6
     else { 99 }                                                                    // P0,P1,P5,P6
 }
 fn native_v2_scheduler_enabled() -> bool { true }

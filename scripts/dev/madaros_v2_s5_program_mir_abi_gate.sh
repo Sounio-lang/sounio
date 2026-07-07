@@ -33,6 +33,7 @@ F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR="$OUT_DIR/f128_binary128_native_anchor_
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR="$OUT_DIR/f128_binary128_value_contract_native_receipt"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR="$OUT_DIR/f128_arithmetic_value_contract_receipt"
 F128_IEEE_CLASS_HELPER_RECEIPT_DIR="$OUT_DIR/f128_ieee_class_helper_receipt"
+F128_ORDERED_COMPARE_RECEIPT_DIR="$OUT_DIR/f128_ordered_compare_receipt"
 F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR="$OUT_DIR/f128_param_slot_layout_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
@@ -59,6 +60,7 @@ F128_BINARY128_NATIVE_ANCHOR_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_arithmetic_value_contract_receipt.py"
 F128_IEEE_CLASS_HELPER_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_ieee_class_helper_receipt.py"
+F128_ORDERED_COMPARE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_ordered_compare_receipt.py"
 F128_PARAM_SLOT_LAYOUT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_param_slot_layout_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
@@ -90,11 +92,12 @@ F128_BINARY128_NATIVE_ANCHOR_RECEIPT="$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR/
 F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT="$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR/madaros_v2_s5_f128_binary128_value_contract_native.receipt.json"
 F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT="$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR/madaros_v2_s5_f128_arithmetic_value_contract.receipt.json"
 F128_IEEE_CLASS_HELPER_RECEIPT="$F128_IEEE_CLASS_HELPER_RECEIPT_DIR/madaros_v2_s5_f128_ieee_class_helper.receipt.json"
+F128_ORDERED_COMPARE_RECEIPT="$F128_ORDERED_COMPARE_RECEIPT_DIR/madaros_v2_s5_f128_ordered_compare.receipt.json"
 F128_PARAM_SLOT_LAYOUT_RECEIPT="$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR/madaros_v2_s5_f128_param_slot_layout.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$F128_IEEE_CLASS_HELPER_RECEIPT_DIR" "$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$F128_IEEE_CLASS_HELPER_RECEIPT_DIR" "$F128_ORDERED_COMPARE_RECEIPT_DIR" "$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -363,6 +366,15 @@ if [[ ! -f "$F128_IEEE_CLASS_HELPER_RECEIPT" ]]; then
   exit 1
 fi
 
+python3 "$F128_ORDERED_COMPARE_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --out-dir "$F128_ORDERED_COMPARE_RECEIPT_DIR"
+
+if [[ ! -f "$F128_ORDERED_COMPARE_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing f128 ordered compare receipt: $F128_ORDERED_COMPARE_RECEIPT" >&2
+  exit 1
+fi
+
 python3 "$F128_PARAM_SLOT_LAYOUT_RECEIPT_TOOL" emit \
   --compiler "$COMPILER" \
   --root "$ROOT_DIR" \
@@ -373,7 +385,7 @@ if [[ ! -f "$F128_PARAM_SLOT_LAYOUT_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$F128_IEEE_CLASS_HELPER_RECEIPT" "$F128_PARAM_SLOT_LAYOUT_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$F128_IEEE_CLASS_HELPER_RECEIPT" "$F128_ORDERED_COMPARE_RECEIPT" "$F128_PARAM_SLOT_LAYOUT_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -439,11 +451,12 @@ f128_binary128_native_anchor_receipt_path = Path(sys.argv[21])
 f128_binary128_value_contract_native_receipt_path = Path(sys.argv[22])
 f128_arithmetic_value_contract_receipt_path = Path(sys.argv[23])
 f128_ieee_class_helper_receipt_path = Path(sys.argv[24])
-f128_param_slot_layout_receipt_path = Path(sys.argv[25])
-diagnostics_receipt_path = Path(sys.argv[26])
-differential_receipt_path = Path(sys.argv[27])
-module_path = Path(sys.argv[28])
-receipt_path = Path(sys.argv[29])
+f128_ordered_compare_receipt_path = Path(sys.argv[25])
+f128_param_slot_layout_receipt_path = Path(sys.argv[26])
+diagnostics_receipt_path = Path(sys.argv[27])
+differential_receipt_path = Path(sys.argv[28])
+module_path = Path(sys.argv[29])
+receipt_path = Path(sys.argv[30])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -471,6 +484,7 @@ f128_binary128_native_anchor_receipt = load_json(f128_binary128_native_anchor_re
 f128_binary128_value_contract_native_receipt = load_json(f128_binary128_value_contract_native_receipt_path)
 f128_arithmetic_value_contract_receipt = load_json(f128_arithmetic_value_contract_receipt_path)
 f128_ieee_class_helper_receipt = load_json(f128_ieee_class_helper_receipt_path)
+f128_ordered_compare_receipt = load_json(f128_ordered_compare_receipt_path)
 f128_param_slot_layout_receipt = load_json(f128_param_slot_layout_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
@@ -2029,6 +2043,89 @@ class_helper_negative_cases = {
 if class_helper_negative_cases:
     raise SystemExit(f"f128 IEEE class-code helper negative cases must be empty: {sorted(class_helper_negative_cases)}")
 
+if f128_ordered_compare_receipt.get("schema") != "madaros.v2.s5.f128_ordered_compare_receipt/0.1":
+    raise SystemExit("bad S5 f128 ordered binary128 comparison receipt schema")
+if f128_ordered_compare_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing f128 ordered comparison receipt")
+if f128_ordered_compare_receipt.get("stage_contract_level") != "S5_20_F128_ORDERED_BINARY128_COMPARE":
+    raise SystemExit("f128 ordered comparison receipt must declare S5.20 stage contract")
+if f128_ordered_compare_receipt.get("case_count") != 17:
+    raise SystemExit("f128 ordered comparison receipt must contain exact seventeen cases")
+if f128_ordered_compare_receipt.get("operators_covered") != ["!=", "<", "<=", "==", ">", ">="]:
+    raise SystemExit("f128 ordered comparison receipt must cover all six comparison operators")
+if f128_ordered_compare_receipt.get("ordered_compare_contract") != {
+    "finite_sign_magnitude_ordered": True,
+    "infinities_ordered": True,
+    "nan_not_equal": True,
+    "nan_ordered_predicates": False,
+    "signed_zero_equal": True,
+}:
+    raise SystemExit("f128 ordered comparison contract changed")
+ordered_compare_claims = f128_ordered_compare_receipt.get("claims", {})
+for field in [
+    "f128_ordered_binary128_compare_promoted",
+    "f128_ordered_binary128_compare_source_observable_promoted",
+    "f128_ordered_binary128_compare_nan_unordered_promoted",
+    "f128_ordered_binary128_compare_signed_zero_promoted",
+    "f128_ordered_binary128_compare_infinity_promoted",
+    "f128_ordered_binary128_compare_subnormal_promoted",
+]:
+    if ordered_compare_claims.get(field) is not True:
+        raise SystemExit(f"f128 ordered comparison receipt missing required true claim: {field}")
+for field in [
+    "f128_native_generic_ieee_arithmetic_promoted",
+    "f128_software_helpers_promoted",
+    "f128_external_sysv_abi_promoted",
+    "f128_native_arbitrary_decimal_binary128_materialization_promoted",
+    "f128_promoted",
+    "legacy_fallback_used",
+]:
+    if ordered_compare_claims.get(field) is not False:
+        raise SystemExit(f"f128 ordered comparison receipt must not overclaim {field}")
+ordered_compare_cases = {row.get("case_id"): row for row in f128_ordered_compare_receipt.get("cases", [])}
+required_ordered_compare_cases = {
+    "f128_cmp_eq_one_one_true": {"expected": True, "op": "=="},
+    "f128_cmp_ne_one_two_true": {"expected": True, "op": "!="},
+    "f128_cmp_lt_one_two_true": {"expected": True, "op": "<"},
+    "f128_cmp_le_one_one_true": {"expected": True, "op": "<="},
+    "f128_cmp_gt_two_one_true": {"expected": True, "op": ">"},
+    "f128_cmp_ge_two_two_true": {"expected": True, "op": ">="},
+    "f128_cmp_signed_zero_eq_true": {"expected": True, "op": "=="},
+    "f128_cmp_signed_zero_ne_false": {"expected": False, "op": "!="},
+    "f128_cmp_negative_order_true": {"expected": True, "op": "<"},
+    "f128_cmp_negative_reverse_false": {"expected": False, "op": "<"},
+    "f128_cmp_subnormal_less_normal_true": {"expected": True, "op": "<"},
+    "f128_cmp_positive_infinity_gt_true": {"expected": True, "op": ">"},
+    "f128_cmp_negative_infinity_lt_true": {"expected": True, "op": "<"},
+    "f128_cmp_nan_eq_false": {"expected": False, "op": "=="},
+    "f128_cmp_nan_ne_true": {"expected": True, "op": "!="},
+    "f128_cmp_nan_lt_false": {"expected": False, "op": "<"},
+    "f128_cmp_nan_le_false": {"expected": False, "op": "<="},
+}
+if set(ordered_compare_cases) != set(required_ordered_compare_cases):
+    raise SystemExit(f"f128 ordered comparison cases mismatch: {sorted(ordered_compare_cases)}")
+for case_id, expected in required_ordered_compare_cases.items():
+    row = ordered_compare_cases[case_id]
+    expected_rc = 0 if expected["expected"] else 1
+    if row.get("op") != expected["op"]:
+        raise SystemExit(f"{case_id} comparison operator mismatch")
+    if row.get("expected_bool") is not expected["expected"]:
+        raise SystemExit(f"{case_id} expected bool mismatch")
+    if row.get("run_rc") != expected_rc or row.get("expected_exit") != expected_rc:
+        raise SystemExit(f"{case_id} expected exit {expected_rc}, got {row.get('run_rc')}")
+    if row.get("machine_module_supported") is not True:
+        raise SystemExit(f"{case_id} MachineModule must be supported")
+    if row.get("machine_module_legacy_fallback") is not False:
+        raise SystemExit(f"{case_id} must not use legacy fallback")
+    if row.get("contains_binary128_exponent_mask") is not True:
+        raise SystemExit(f"{case_id} must prove binary128 exponent-mask immediate in emitted ELF")
+    if not row.get("elf_sha256") or not row.get("machine_module_json_sha256"):
+        raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
+if not any(row.get("contains_binary128_sign_mask") is True for row in ordered_compare_cases.values()):
+    raise SystemExit("f128 ordered comparison receipt must prove binary128 sign-mask immediate")
+if not any(row.get("contains_binary128_abs_mask") is True for row in ordered_compare_cases.values()):
+    raise SystemExit("f128 ordered comparison receipt must prove binary128 abs-mask immediate")
+
 if f128_param_slot_layout_receipt.get("schema") != "madaros.v2.s5.f128_param_slot_layout_receipt/0.1":
     raise SystemExit("bad S5 f128 parameter slot-layout receipt schema")
 if f128_param_slot_layout_receipt.get("status") != "pass":
@@ -2985,6 +3082,18 @@ module = {
         "cases": f128_ieee_class_helper_receipt["cases"],
         "negative_cases": f128_ieee_class_helper_receipt["negative_cases"],
     },
+    "f128_ordered_compare_receipt": {
+        "schema": f128_ordered_compare_receipt["schema"],
+        "path": f"{f128_ordered_compare_receipt_path.parent.name}/{f128_ordered_compare_receipt_path.name}",
+        "receipt_sha256": f128_ordered_compare_receipt["receipt_sha256"],
+        "stage_contract_level": f128_ordered_compare_receipt["stage_contract_level"],
+        "case_id": f128_ordered_compare_receipt["case_id"],
+        "case_count": f128_ordered_compare_receipt["case_count"],
+        "operators_covered": f128_ordered_compare_receipt["operators_covered"],
+        "ordered_compare_contract": f128_ordered_compare_receipt["ordered_compare_contract"],
+        "claims": f128_ordered_compare_receipt["claims"],
+        "cases": f128_ordered_compare_receipt["cases"],
+    },
     "f128_param_slot_layout_receipt": {
         "schema": f128_param_slot_layout_receipt["schema"],
         "path": f"{f128_param_slot_layout_receipt_path.parent.name}/{f128_param_slot_layout_receipt_path.name}",
@@ -3065,6 +3174,12 @@ module = {
         "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
         "f128_native_ieee_class_code_nan_source_surface_promoted": True,
         "f128_native_canonical_quiet_nan_constructor_promoted": True,
+        "f128_ordered_binary128_compare_promoted": True,
+        "f128_ordered_binary128_compare_source_observable_promoted": True,
+        "f128_ordered_binary128_compare_nan_unordered_promoted": True,
+        "f128_ordered_binary128_compare_signed_zero_promoted": True,
+        "f128_ordered_binary128_compare_infinity_promoted": True,
+        "f128_ordered_binary128_compare_subnormal_promoted": True,
         "f128_param_slot_layout_promoted": True,
         "f128_param_slots_non_overlapping": True,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
@@ -3123,6 +3238,8 @@ module = {
         "f128_runtime_positive_rounded_tenths_add_helper_promoted_for_0_1_plus_0_2_to_binary128_sum",
         "f128_runtime_positive_rounded_decimal_add_matrix_promoted_for_selected_binary128_source_sums",
         "f128_ieee_class_code_helper_promoted_for_source_observable_zero_subnormal_normal_infinity",
+        "f128_ordered_compare_receipt_recorded",
+        "f128_ordered_binary128_compare_promoted_for_finite_zero_subnormal_infinity_and_nan_unordered_cases",
         "f128_parameter_slots_non_overlapping_for_local_imported_and_mixed_shapes",
         "f128_opaque_direct_call_return_abi_promoted_for_local_and_imported_return_only_mixed_order_two_f128_direct_and_stack_shapes",
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
@@ -3184,6 +3301,7 @@ receipt = {
     "s5_f128_binary128_value_contract_native_materialization_complete": True,
     "s5_f128_arithmetic_value_contract_complete": True,
     "s5_f128_ieee_class_code_helper_complete": True,
+    "s5_f128_ordered_binary128_compare_complete": True,
     "s5_f128_param_slot_layout_complete": True,
     "s5_differential_native_v2_lean_single_complete": True,
     "source_frontend_lowers_local_aggregate_return_to_IrCallSret": True,
@@ -3246,6 +3364,12 @@ receipt = {
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
     "f128_native_ieee_class_code_nan_source_surface_promoted": True,
     "f128_native_canonical_quiet_nan_constructor_promoted": True,
+    "f128_ordered_binary128_compare_promoted": True,
+    "f128_ordered_binary128_compare_source_observable_promoted": True,
+    "f128_ordered_binary128_compare_nan_unordered_promoted": True,
+    "f128_ordered_binary128_compare_signed_zero_promoted": True,
+    "f128_ordered_binary128_compare_infinity_promoted": True,
+    "f128_ordered_binary128_compare_subnormal_promoted": True,
     "f128_param_slot_layout_promoted": True,
     "f128_param_slots_non_overlapping": True,
     "f128_native_general_decimal_binary128_materialization_promoted": False,
@@ -3291,6 +3415,7 @@ receipt = {
     "f128_binary128_value_contract_native_receipt_sha256": f128_binary128_value_contract_native_receipt["receipt_sha256"],
     "f128_arithmetic_value_contract_receipt_sha256": f128_arithmetic_value_contract_receipt["receipt_sha256"],
     "f128_ieee_class_helper_receipt_sha256": f128_ieee_class_helper_receipt["receipt_sha256"],
+    "f128_ordered_compare_receipt_sha256": f128_ordered_compare_receipt["receipt_sha256"],
     "f128_param_slot_layout_receipt_sha256": f128_param_slot_layout_receipt["receipt_sha256"],
     "diagnostics_receipt_sha256": diagnostics_receipt["receipt_sha256"],
     "differential_receipt_sha256": differential_receipt["receipt_sha256"],
@@ -3353,6 +3478,12 @@ receipt = {
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted"],
     "f128_native_ieee_class_code_nan_source_surface_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_nan_source_surface_promoted"],
     "f128_native_canonical_quiet_nan_constructor_promoted": module["scalar_abi_receipts"]["f128_native_canonical_quiet_nan_constructor_promoted"],
+    "f128_ordered_binary128_compare_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_promoted"],
+    "f128_ordered_binary128_compare_source_observable_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_source_observable_promoted"],
+    "f128_ordered_binary128_compare_nan_unordered_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_nan_unordered_promoted"],
+    "f128_ordered_binary128_compare_signed_zero_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_signed_zero_promoted"],
+    "f128_ordered_binary128_compare_infinity_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_infinity_promoted"],
+    "f128_ordered_binary128_compare_subnormal_promoted": module["scalar_abi_receipts"]["f128_ordered_binary128_compare_subnormal_promoted"],
     "f128_param_slot_layout_promoted": module["scalar_abi_receipts"]["f128_param_slot_layout_promoted"],
     "f128_param_slots_non_overlapping": module["scalar_abi_receipts"]["f128_param_slots_non_overlapping"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
@@ -3375,7 +3506,7 @@ receipt = {
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
-        "f128 generic IEEE arithmetic helpers beyond the class-code helper, including rounding-mode-sensitive operations",
+        "f128 generic IEEE arithmetic helpers beyond the class-code and ordered-comparison helpers, including rounding-mode-sensitive operations",
         "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix, the bounded rounded-decimal add matrix, direct literal/parameter-return call propagation, callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper differentials",
     ],
 }
@@ -3388,7 +3519,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, and callee-side add/sub/mul/div runtime helper execution, plus source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
-echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier/ordered-comparison cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

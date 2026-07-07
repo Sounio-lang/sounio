@@ -71,6 +71,7 @@ pub let MIR_OP_STORE_ABS: i64 = 128          // mov [rbx],rax — store to absol
 pub let MIR_OP_STACK_ADJUST: i64 = 129       // signed rsp adjustment around stack-arg calls
 pub let MIR_OP_STACK_ARG_PUSH: i64 = 130     // push one already-loaded stack argument
 pub let MIR_OP_F128_VC_BINOP: i64 = 131      // finite value-contract f128 runtime binop
+pub let MIR_OP_F128_ORDERED_CMP: i64 = 132   // ordered binary128 f128 comparison -> i64 bool
 
 pub let MIR_SLOT_KIND_UNKNOWN: i64 = 0
 pub let MIR_SLOT_KIND_I64: i64 = 1
@@ -470,6 +471,14 @@ fn native_v2_f128_binop_hundredths(op: BinaryOp, a: i64, b: i64) -> i64 {
         if op == BinaryOp::OpDiv && b != 0 && ((a * 100) % b) == 0 { result_hundredths = (a * 100) / b }
     }
     result_hundredths
+}
+
+fn native_v2_binop_is_compare(op: BinaryOp) -> bool {
+    op == BinaryOp::OpEq || op == BinaryOp::OpNe || op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe
+}
+
+fn native_v2_binop_is_f128_arith(op: BinaryOp) -> bool {
+    op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv
 }
 
 fn native_v2_mark_f128_result_ref(out: &! MachineFunction, slot: i64, result_hundredths: i64) with Mut, Panic, Div {
@@ -1643,6 +1652,16 @@ pub fn native_v2_make_f128_vc_binop(dst: i64, lhs: i64, rhs: i64, op: BinaryOp) 
     mi
 }
 
+pub fn native_v2_make_f128_ordered_cmp(dst: i64, lhs: i64, rhs: i64, op: BinaryOp) -> MachineInstr with Mut, Panic, Div {
+    var mi = machine_empty_instr()
+    mi.opcode = MIR_OP_F128_ORDERED_CMP
+    mi.dst = machine_operand_stack_slot(dst)
+    mi.src1 = machine_operand_stack_slot(lhs)
+    mi.src2 = machine_operand_stack_slot(rhs)
+    mi.bin_op = op
+    mi
+}
+
 pub fn native_v2_make_unary(dst: i64, src: i64, op: UnaryOp) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_UNARY
@@ -1900,10 +1919,19 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
             let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
             if s1q == 1 || s2q == 1 {
+                if native_v2_binop_is_compare(machine_instr_bin_op(instr)) {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                    let dslot_cmp = machine_instr_dst_value(instr)
+                    if dslot_cmp >= 0 && dslot_cmp < 256 {
+                        is_f128_slot[dslot_cmp as usize] = 0
+                    }
+                    i = i + 1
+                    continue
+                }
                 let a = native_v2_f128_hundredths_from_slot(func, s1)
                 let b = native_v2_f128_hundredths_from_slot(func, s2)
                 let result_hundredths = native_v2_f128_binop_hundredths(machine_instr_bin_op(instr), a, b)
-                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) && !(machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv) {
+                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) && !native_v2_binop_is_f128_arith(machine_instr_bin_op(instr)) {
                     out.supported = false
                     out.unsupported_detail = "f128_arithmetic_pending"
                     return out
@@ -2168,7 +2196,12 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                     }
                 }
                 let result_hundredths = native_v2_f128_binop_hundredths(instr.bin_op, a, b)
-                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) && !(instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv) {
+                if native_v2_binop_is_compare(instr.bin_op) {
+                    out.legal_instr_count = out.legal_instr_count + 1
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        is_f128_slot[instr.dst as usize] = 0
+                    }
+                } else if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) && !native_v2_binop_is_f128_arith(instr.bin_op) {
                     out.supported = false
                     out.unsupported_detail = "f128_arithmetic_pending"
                     return out
@@ -2445,11 +2478,17 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             let s1 = machine_instr_src1_value(instr)
             let s2 = machine_instr_src2_value(instr)
             if native_v2_slot_is_f128_ref(out, s1) || native_v2_slot_is_f128_ref(out, s2) {
+                if native_v2_binop_is_compare(machine_instr_bin_op(instr)) {
+                    native_v2_emit_legal_instr_mut(out, native_v2_make_f128_ordered_cmp(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr)))
+                    native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                    i = i + 1
+                    continue
+                }
                 let a = native_v2_f128_hundredths_from_slot_ref(out, s1)
                 let b = native_v2_f128_hundredths_from_slot_ref(out, s2)
                 let result_hundredths = native_v2_f128_binop_hundredths(machine_instr_bin_op(instr), a, b)
                 if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
-                    if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
+                    if native_v2_binop_is_f128_arith(machine_instr_bin_op(instr)) {
                         native_v2_emit_legal_instr_mut(out, native_v2_make_f128_vc_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr)))
                         native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
                         i = i + 1
@@ -2881,6 +2920,11 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             let s2 = machine_instr_src2_value(instr)
             var f128_done: bool = false
             if native_v2_slot_is_f128_byval(out, s1) || native_v2_slot_is_f128_byval(out, s2) {
+                if native_v2_binop_is_compare(machine_instr_bin_op(instr)) {
+                    out = _emit_legal_byval(out, native_v2_make_f128_ordered_cmp(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr)))
+                    out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+                    f128_done = true
+                }
                 let a = native_v2_f128_hundredths_from_slot(out, s1)
                 let b = native_v2_f128_hundredths_from_slot(out, s2)
                 var result_hundredths: i64 = 0 - 1
@@ -2890,8 +2934,8 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                     if machine_instr_bin_op(instr) == BinaryOp::OpMul && ((a * b) % 100) == 0 { result_hundredths = (a * b) / 100 }
                     if machine_instr_bin_op(instr) == BinaryOp::OpDiv && b != 0 && ((a * 100) % b) == 0 { result_hundredths = (a * 100) / b }
                 }
-                if !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
-                    if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
+                if f128_done == false && !native_v2_f128_value_contract_supported_hundredths(result_hundredths) {
+                    if native_v2_binop_is_f128_arith(machine_instr_bin_op(instr)) {
                         out = _emit_legal_byval(out, native_v2_make_f128_vc_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr)))
                         out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
                         f128_done = true
@@ -3340,7 +3384,7 @@ pub fn native_v2_machine_instr_is_legal(instr: MachineInstr) -> bool with Mut, P
     if instr.opcode == MIR_OP_BINOP {
         return instr.dst.kind == MIR_OPERAND_GPR64 && instr.src1.kind == MIR_OPERAND_GPR64
     }
-    if instr.opcode == MIR_OP_F128_VC_BINOP {
+    if instr.opcode == MIR_OP_F128_VC_BINOP || instr.opcode == MIR_OP_F128_ORDERED_CMP {
         return instr.dst.kind == MIR_OPERAND_STACK_SLOT && instr.src1.kind == MIR_OPERAND_STACK_SLOT && instr.src2.kind == MIR_OPERAND_STACK_SLOT
     }
     if instr.opcode == MIR_OP_UNARY {
