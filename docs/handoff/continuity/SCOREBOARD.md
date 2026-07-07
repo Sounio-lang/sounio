@@ -13,6 +13,46 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.contin
 
 Statuses: `TODO` | `CLAIMED(<session>)` | `IN-PROGRESS` | `DONE(<commit/PR>)` | `BLOCKED(<reason>)`
 
+## ★ PHASE 2 FINAL SUMMARY (2026-07-07) — A-track COMPLETE; EISA one native-emit bug away
+
+**A5 ACHIEVED & LANDED + CI-verified:** `cd_exact_generic_i64` runs GREEN on the default Madaros engine
+→ `ZD PROVED` / `SQ PASS` / `NONZERO PASS` / 16× `COMP i 0`, rc=0. `cd_exact_generic_vs_concrete` = real
+`BYTECOMPARE PASS`. Landed on `main` via a stack of PRs (squash commits): A4 `#659`, test-fix `#662`,
+A3 `#658`, **A2+A6+A1 bundle `#667`**, A7 `#669`, A9 `#671`, A8 `#678`, A10 `#679`, A5 `#684`, A14 `#685`.
+
+The original 4-gap framing was incomplete — the Madaros imported/multi-module pipeline had a **layered
+stack of ~10 independent defects**, peeled in order. Several runtime crashes were the SAME lean_single
+by-value-`Box`-copy miscompile family (A8 IrInstr-by-value, A10 nested aggregate store, A14 whole-IrInstr
+fn_id writeback). What looked like an "18 GB memory wall" was a single `ulimit -v` artifact (lean_single
+Box arena reserves 8 GB chunks, never frees → ~24 GB VIRTUAL, ~1.5 GB resident); fixed by raising the
+`bin/madaros` vmem guard 16→48 GB. All builds ran off-pod on Slurm (see reference_slurm_madaros_offload).
+
+| WP | What it closed | Landed |
+|----|----------------|--------|
+| A4 | println `ExprIndex` dispatch (the "SRET rc=139" was really this) | #659 |
+| A3 | multi-module AST specializer (E008) | #658 |
+| A2 | primitive-receiver method dispatch (E019) | #667 |
+| A6 | impl-method effect sig-resolution — empty-name collision (E035) | #667 |
+| A1 | ExactRing trait+Rational-impl effect decls | #667 |
+| A7 | merged-checker i32/i64 int-width coercion (E007/E004) | #669 |
+| A9 | merged-checker struct-ref exact-field lookup (E012/E137) | #671 |
+| A8 | cross-module SRET forwarding SIGSEGV (IrInstr by-value copy) | #678 |
+| A10 | impl-method summary preseed nested-store SIGSEGV | #679 |
+| A5 | transitive cd_sigma → same-module cd_sigma_x + vmem raise | #684 |
+| A14 | transitive cross-module call drop (removes A5 workaround; fixes vs_concrete) | #685 |
+
+**EISA default-lane:** type-checks clean AND lowers fully (`test_eisa_isa`: 142 fns merged) after A7+A9+A14
++ deps + vmem — then fails ONLY at the final native ELF-emit: `Failed to write native binary rc=13` /
+`multimodule native thin-link compilation failed`. B1's original "str_from_bytes ud2/dep-closure" premise
+was FALSIFIED. Remaining EISA work is scoped in **`WP-EISA-THINLINK.md`** (native ELF-emit/thin-link) + B2.
+
+**Open residual gaps (handed off):** (1) EISA native thin-link ELF-write rc=13 — see WP-EISA-THINLINK.
+(2) Octonion multi-module native-lowering / memory wall (`algebra_g2_invariants_import`) — pre-existing.
+(3) A11 `#681` (in-place finalize IrModule refactor) — memory-neutral, correct, zero-regression, UNMERGED
+(optional cleanup). (4) lean_single 4-module generic closure limitation (cross-engine parity via output).
+
+_Rows below are the raw per-WP CLAIM logs (some pre-date the bundle/A14 landing); the summary above is authoritative._
+
 | WP | Title | Model | Deps | Status | Evidence (command → expected) |
 |---|---|---|---|---|---|
 | A0 | Phase-1 PR merge | Haiku | — | DONE(91ee4de77, PR #654) | merged 2026-07-07; A1/A2/A3 unblocked |
