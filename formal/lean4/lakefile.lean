@@ -72,6 +72,12 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B vector 4/3 Part A: Sounio reproduces Furey's octonion -> one Standard-Model generation.
+-- Fermionic ladder algebra {A_i,A_j}=0, {A_i,A_j^dag}=4 delta_ij I over Z[i] (native_decide) + the
+-- one-generation charge multiplicities C(3,n)=[1,3,3,1]. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioFureyOctonion» where
+
 -- Frente B vector 4/1: emergent metric — integral spectra of the ZD-geometry graphs.
 @[default_target]
 lean_lib «SounioSedenionSpectra» where
@@ -84,6 +90,12 @@ lean_lib «SounioSedenionDynamics» where
 -- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
+
+-- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
+-- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
+-- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
+@[default_target]
+lean_lib «SounioSedenionLadderExtension» where
 
 -- Frente B vector 1: the 7 fibers = Fano plane PG(2,2), Aut = PGL(3,2). Corollary of the
 -- automorphism sweep; NON-default_target (~1 min): `lake build SounioSedenionFano`.
