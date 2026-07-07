@@ -6,8 +6,9 @@ case set plus an explicit bounded-decimal class: sig_hi=0, no truncation, and
 scale10<=18, with roundTiesToEven. It also promotes an algorithmic two-limb
 decimal class: sig_hi>0, digit_count<=36, scale10<=18, no truncation, with
 binary128 roundTiesToEven. It now promotes a bounded truncated two-limb class:
-37..40 total digits, 1..4 truncated digits, retained scale 35, and parser
-tail-info used as the binary128 rounding sticky bit. It also promotes an
+37..40 total digits, 1..4 truncated digits, retained scale 35, a bounded
+normalized range [1/8, 10), and parser tail-info used as the binary128
+rounding sticky bit. It also promotes an
 explicit native saturation class for decimal overflow-to-infinity and exact
 power-of-ten underflow-to-zero. It still deliberately does not promote arbitrary
 large-scale rounded decimals, f128 arithmetic, external ABI, or return ABI.
@@ -151,6 +152,12 @@ CASES: list[Case] = [
         "3ffd5555555555555555555555555555",
         [1, 333333333333333333, 33333333333333333, 40, 39, 4],
     ),
+    Case(
+        "truncated_one_seventh_39_repeating_below_one_algorithmic",
+        "0.142857142857142857142857142857142857142",
+        "3ffc2492492492492492492492492492",
+        [1, 714285714285714285, 14285714285714285, 40, 39, 4],
+    ),
     Case("bounded_1e_minus_4", "1e-4", "3ff1a36e2eb1c432ca57a786c226809d", [1, 0, 1, 1, 4, 0]),
     Case("bounded_1e_minus_5", "1e-5", "3fee4f8b588e368f08461f9f01b866e4", [1, 0, 1, 1, 5, 0]),
     Case("bounded_1e_minus_6", "1e-6", "3feb0c6f7a0b5ed8d36b4c7f34938583", [1, 0, 1, 1, 6, 0]),
@@ -178,12 +185,6 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "3.23758755971901255546221947911382327624978466901734e-4966",
         "f128_decimal_materialization_pending",
         "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
-    ),
-    NegativeCase(
-        "truncated_decimal_below_one_outside_bounded_class_fails_closed",
-        "0.142857142857142857142857142857142857142",
-        "f128_decimal_materialization_pending",
-        "bounded truncated two-limb decimal class is normalized to retained-scale-35 values >= 1",
     ),
     NegativeCase(
         "uncontracted_large_significand_underflow_boundary_fails_closed",
@@ -438,6 +439,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
             "f128_native_bounded_truncated_two_limb_decimal_binary128_materialization_promoted": True,
+            "f128_native_bounded_truncated_below_one_decimal_binary128_materialization_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
             "f128_native_extreme_decimal_saturation_promoted": True,
             "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
@@ -455,7 +457,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_generated_sig_hi_zero_no_truncation_scale10_le_18_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale0_integer_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
-            "native_v2_emits_and_runs_algorithmic_bounded_truncated_two_limb_retained_scale35_decimal_cases_with_tail_sticky_rounding",
+            "native_v2_emits_and_runs_algorithmic_bounded_truncated_two_limb_retained_scale35_decimal_cases_including_below_one_with_tail_sticky_rounding",
             "native_v2_materializes_explicit_value_contract_signed_subnormal_underflow_and_finite_overflow_to_infinity_cases",
             "native_v2_materializes_decimal_overflow_to_signed_infinity_and_power10_underflow_to_signed_zero_saturation_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
