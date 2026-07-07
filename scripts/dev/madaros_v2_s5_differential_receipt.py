@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "madaros.v2.s5.differential_receipt/0.2"
+SCHEMA_VERSION = "madaros.v2.s5.differential_receipt/0.3"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
-STAGE_CONTRACT_LEVEL = "S5_27_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES"
+STAGE_CONTRACT_LEVEL = "S5_28_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES"
 
 UNAVAILABLE_REFERENCE_CASES = {
     "f64_println_call_stdout_4_5": "lean_single prints f64 println without the trailing newline emitted by native-v2 print_char",
@@ -55,8 +55,8 @@ REQUIRED_CATEGORIES = {
     "f128_ieee_predicate_helper",
 }
 
-EXPECTED_CASE_COUNT = 257
-EXPECTED_MATCHED_CASE_COUNT = 219
+EXPECTED_CASE_COUNT = 259
+EXPECTED_MATCHED_CASE_COUNT = 221
 
 F128_PARAM_EXPECTED_EXITS = {
     "local_two_f128_params_non_overlapping": 5,

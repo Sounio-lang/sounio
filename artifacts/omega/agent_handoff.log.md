@@ -4265,6 +4265,73 @@ status: lock-released
     bounded promoted set, and S5 FULL remain unpromoted.
   - LLM-Offload: not-required for local compiler mechanics; required before
     external-facing SOTA/novelty claims based on this lane.
-  - Next-Action: continue S5 FULL toward S6 readiness by targeting the next
-    remaining blocker: external SysV f128 ABI/SRET or the near-half/min-subnormal
-    arbitrary decimal rounding boundary.
+- Next-Action: continue S5 FULL toward S6 readiness by targeting the next
+  remaining blocker: external SysV f128 ABI/SRET or the near-half/min-subnormal
+  arbitrary decimal rounding boundary.
+
+## 2026-07-07T07:49:08Z - Madaros S-next S5.28 near-half min-subnormal signed-zero boundary
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: promote the explicit near-half minimum-subnormal f128 decimal boundary
+  into native-v2 binary128 materialization while keeping extended/adjoining
+  arbitrary decimals fail-closed.
+- Files changed:
+  - `self-hosted/native/machine_ir.sio`
+  - `self-hosted/native/codegen_x86_linux.sio`
+  - `scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py`
+  - `scripts/dev/madaros_v2_s5_differential_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Bumped the f128 binary128 native value-contract receipt to schema `0.3`
+    and stage `S5_28_F128_NATIVE_NEAR_HALF_MIN_SUBNORMAL_ROUNDS_TO_ZERO`.
+  - Added exact positive and negative native materialization cases for
+    `3.23758755971901255546221947911382327624978466901734e-4966`, producing
+    binary128 positive zero and negative zero respectively.
+  - Kept extended variants ending in `...0173401e-4966` as negative controls
+    that fail closed with `f128_decimal_materialization_pending`.
+  - Bumped the S5 differential receipt to schema `0.3`, stage
+    `S5_28_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES`,
+    and counts `matched=221/259`, `unavailable=38`.
+  - Fixed object symbol registration in `compile_to_obj_v2` by routing extern
+    function names through `native_compiler_add_symbol_name_ref`.
+  - Hardened the external SysV f128 blocker receipt host-command decoder so
+    non-UTF8 `readelf` bytes are recorded instead of crashing the harness.
+- Local proof completed:
+  - `make build-madaros` passed after the symbol-name fix.
+  - `python3 scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --root "$PWD" --out-dir /tmp/sounio-s5-f128-binary128-value-contract-native-s528 --timeout-s 120`
+    passed.
+  - `python3 scripts/dev/madaros_v2_s5_differential_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --reference-souc "$PWD/bin/souc" --out-dir /tmp/sounio-s5-diff-s528 --timeout 120`
+    passed: `matched=221/259 unavailable=38`.
+  - `python3 scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --root "$PWD" --out-dir /tmp/sounio-s5-external-sysv-f128-blocker-s528 --timeout 120`
+    passed with `blocked=True`.
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed with the S5.28
+    native value-contract and differential receipts.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260707-madaros-snext-f128-near-half-min-subnormal`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: compiler-f128-decimal-materialization
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 f128 native binary128 value-contract
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: S5.28 value-contract receipt, S5.28 differential receipt,
+    aggregate S5 gate, full gate, source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; S5 FULL and S6 readiness remain unclaimed. Generic IEEE
+    f128 arithmetic, external SysV f128 ABI/SRET, and arbitrary decimal
+    binary128 materialization beyond the explicit value-contract/bounded sets
+    remain open blockers.
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane.
+  - Next-Action: pursue the next S5 FULL blocker as a full slice, preferably
+    external SysV f128 executable link/SRET promotion or the next arbitrary
+    decimal rounding family with differential coverage.

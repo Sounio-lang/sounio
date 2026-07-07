@@ -1722,14 +1722,14 @@ for case_id, expected in required_anchor_cases.items():
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
 
-if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.2":
+if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.3":
     raise SystemExit("bad S5 f128 binary128 value-contract native receipt schema")
 if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
-if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_26_F128_NATIVE_LARGE_SIGNIFICAND_EXTREME_UNDERFLOW":
-    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.26 large-significand extreme underflow stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 86:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty-six cases")
+if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_28_F128_NATIVE_NEAR_HALF_MIN_SUBNORMAL_ROUNDS_TO_ZERO":
+    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.28 near-half-min-subnormal stage contract")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 88:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty-eight cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact two negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1748,6 +1748,7 @@ for field in [
     "f128_native_extreme_decimal_saturation_promoted",
     "f128_native_large_significand_extreme_underflow_to_signed_zero_promoted",
     "f128_native_signed_minimum_subnormal_binary128_materialization_promoted",
+    "f128_native_near_half_min_subnormal_rounds_to_signed_zero_promoted",
     "uncontracted_f128_decimal_materialization_fails_closed",
 ]:
     if value_native_claims.get(field) is not True:
@@ -1830,6 +1831,8 @@ required_value_native_cases = {
     "large_all_nines_scale6_rounded": {"literal": "999999999999.999999", "hex": "4026d1a94a1fffffffde7210be9424e6", "metadata": [1, 0, 999999999999999999, 18, 6, 0]},
     "minimum_subnormal_rounded": {"literal": "6.475175119438025110924438958227646552499569338034681e-4966", "hex": "00000000000000000000000000000001", "metadata": [1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
     "negative_minimum_subnormal_rounded": {"literal": "-6.475175119438025110924438958227646552499569338034681e-4966", "hex": "80000000000000000000000000000001", "metadata": [-1, 92443895822764655, 647517511943802511, 52, 5017, 16]},
+    "near_half_min_subnormal_rounds_to_positive_zero": {"literal": "3.23758755971901255546221947911382327624978466901734e-4966", "hex": "00000000000000000000000000000000", "metadata": [1, 546221947911382327, 323758755971901255, 51, 5016, 15]},
+    "near_half_min_subnormal_rounds_to_negative_zero": {"literal": "-3.23758755971901255546221947911382327624978466901734e-4966", "hex": "80000000000000000000000000000000", "metadata": [-1, 546221947911382327, 323758755971901255, 51, 5016, 15]},
     "underflow_to_positive_zero": {"literal": "1e-5000", "hex": "00000000000000000000000000000000", "metadata": [1, 0, 1, 1, 5000, 0]},
     "underflow_to_negative_zero": {"literal": "-1e-5000", "hex": "80000000000000000000000000000000", "metadata": [-1, 0, 1, 1, 5000, 0]},
     "overflow_to_positive_infinity": {"literal": "1e5000", "hex": "7fff0000000000000000000000000000", "metadata": [1, 0, 1, 1, -5000, 0]},
@@ -1870,8 +1873,8 @@ for case_id, expected in required_value_native_cases.items():
         raise SystemExit(f"{case_id} value-contract native missing ELF or MachineModule hash")
 value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("negative_cases", [])}
 required_value_native_negative = {
-    "uncontracted_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
-    "uncontracted_near_half_min_subnormal_negative_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_extended_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_extended_near_half_min_subnormal_negative_fails_closed": "f128_decimal_materialization_pending",
 }
 if set(value_native_negative_cases) != set(required_value_native_negative):
     raise SystemExit(f"f128 binary128 value-contract native negative cases mismatch: {sorted(value_native_negative_cases)}")
@@ -2594,16 +2597,16 @@ for case_id, expected in required_diagnostic_positive.items():
     if not row.get("machine_module_json_sha256") or not row.get("elf_sha256"):
         raise SystemExit(f"{case_id} missing MachineModule or ELF hashes")
 
-if differential_receipt.get("schema") != "madaros.v2.s5.differential_receipt/0.2":
+if differential_receipt.get("schema") != "madaros.v2.s5.differential_receipt/0.3":
     raise SystemExit("bad S5 differential receipt schema")
 if differential_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing differential receipt")
-if differential_receipt.get("stage_contract_level") != "S5_27_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES":
-    raise SystemExit("differential receipt must declare S5.27 promoted native-v2/lean_single stage contract")
-if differential_receipt.get("case_count") != 257:
-    raise SystemExit("differential receipt must contain exact 257 cases")
-if differential_receipt.get("matched_case_count") != 219:
-    raise SystemExit("differential receipt must contain exact 219 matched comparable cases")
+if differential_receipt.get("stage_contract_level") != "S5_28_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES":
+    raise SystemExit("differential receipt must declare S5.28 promoted native-v2/lean_single stage contract")
+if differential_receipt.get("case_count") != 259:
+    raise SystemExit("differential receipt must contain exact 259 cases")
+if differential_receipt.get("matched_case_count") != 221:
+    raise SystemExit("differential receipt must contain exact 221 matched comparable cases")
 if differential_receipt.get("reference_unavailable_case_count") != 38:
     raise SystemExit("differential receipt must contain exact 38 reference-unavailable cases")
 required_differential_flags = [
@@ -2652,7 +2655,7 @@ if set(differential_receipt.get("categories_compared", [])) != required_differen
     raise SystemExit("differential receipt categories mismatch")
 differential_cases = {row.get("case_id"): row for row in differential_receipt.get("cases", [])}
 required_differential_category_counts = {
-    "f128_binary128_native_materialization": {"total": 86, "matched": 86, "reference_unavailable": 0},
+    "f128_binary128_native_materialization": {"total": 88, "matched": 88, "reference_unavailable": 0},
     "f128_ieee_class_helper": {"total": 12, "matched": 3, "reference_unavailable": 9},
     "f128_ieee_predicate_helper": {"total": 72, "matched": 51, "reference_unavailable": 21},
 }
@@ -4000,7 +4003,7 @@ receipt = {
     ],
     "gate_invariants": module["roundtrip_contract"],
     "missing_full_obligations": [
-        "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract, bounded two-limb, bounded truncated retained-scale-35 range [1/8, 10), and saturation case set",
+        "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract, bounded two-limb, bounded truncated retained-scale-35 range [1/8, 10), near-half-min-subnormal signed-zero boundary, and saturation case set",
         "f128 generic IEEE arithmetic helpers beyond the class-code and ordered-comparison helpers, including rounding-mode-sensitive operations",
         "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix, the bounded rounded-decimal add matrix, direct literal/parameter-return call propagation, callee-side exact add/sub/mul/div runtime helper, and external SysV f128 ABI/SRET differentials",
     ],
@@ -4014,7 +4017,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, bounded truncated retained-scale35 decimal in [1/8, 10), and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification plus zero/subnormal/normal/infinite/nan/finite predicate helpers for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, bounded truncated retained-scale35 decimal in [1/8, 10), near-half-min-subnormal signed-zero boundary, and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification plus zero/subnormal/normal/infinite/nan/finite predicate helpers for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 arithmetic value-contract, binary128 native materialization, local ABI/SRET-boundary/layout, and IEEE class/predicate helpers; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

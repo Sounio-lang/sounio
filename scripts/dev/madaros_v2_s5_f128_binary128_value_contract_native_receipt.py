@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.2"
-STAGE_CONTRACT_LEVEL = "S5_26_F128_NATIVE_LARGE_SIGNIFICAND_EXTREME_UNDERFLOW"
+SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.3"
+STAGE_CONTRACT_LEVEL = "S5_28_F128_NATIVE_NEAR_HALF_MIN_SUBNORMAL_ROUNDS_TO_ZERO"
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,18 @@ CASES: list[Case] = [
     Case("large_all_nines_scale6_rounded", "999999999999.999999", "4026d1a94a1fffffffde7210be9424e6", [1, 0, 999999999999999999, 18, 6, 0]),
     Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", [1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
     Case("negative_minimum_subnormal_rounded", "-6.475175119438025110924438958227646552499569338034681e-4966", "80000000000000000000000000000001", [-1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
+    Case(
+        "near_half_min_subnormal_rounds_to_positive_zero",
+        "3.23758755971901255546221947911382327624978466901734e-4966",
+        "00000000000000000000000000000000",
+        [1, 546221947911382327, 323758755971901255, 51, 5016, 15],
+    ),
+    Case(
+        "near_half_min_subnormal_rounds_to_negative_zero",
+        "-3.23758755971901255546221947911382327624978466901734e-4966",
+        "80000000000000000000000000000000",
+        [-1, 546221947911382327, 323758755971901255, 51, 5016, 15],
+    ),
     Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", [1, 0, 1, 1, 5000, 0]),
     Case("underflow_to_negative_zero", "-1e-5000", "80000000000000000000000000000000", [-1, 0, 1, 1, 5000, 0]),
     Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", [1, 0, 1, 1, -5000, 0]),
@@ -183,16 +195,16 @@ CASES: list[Case] = [
 
 NEGATIVE_CASES: list[NegativeCase] = [
     NegativeCase(
-        "uncontracted_near_half_min_subnormal_fails_closed",
-        "3.23758755971901255546221947911382327624978466901734e-4966",
+        "uncontracted_extended_near_half_min_subnormal_fails_closed",
+        "3.2375875597190125554622194791138232762497846690173401e-4966",
         "f128_decimal_materialization_pending",
-        "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
+        "extended near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
     NegativeCase(
-        "uncontracted_near_half_min_subnormal_negative_fails_closed",
-        "-3.23758755971901255546221947911382327624978466901734e-4966",
+        "uncontracted_extended_near_half_min_subnormal_negative_fails_closed",
+        "-3.2375875597190125554622194791138232762497846690173401e-4966",
         "f128_decimal_materialization_pending",
-        "signed near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
+        "signed extended near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
 ]
 
@@ -446,6 +458,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_extreme_decimal_saturation_promoted": True,
             "f128_native_large_significand_extreme_underflow_to_signed_zero_promoted": True,
             "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
+            "f128_native_near_half_min_subnormal_rounds_to_signed_zero_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
             "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -462,6 +475,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_bounded_truncated_two_limb_retained_scale35_decimal_cases_including_below_one_with_tail_sticky_rounding",
             "native_v2_materializes_explicit_value_contract_signed_subnormal_underflow_and_finite_overflow_to_infinity_cases",
+            "native_v2_materializes_near_half_min_subnormal_boundary_to_signed_zero_for_the_explicit_value_contract_case",
             "native_v2_materializes_decimal_overflow_to_signed_infinity_and_power10_underflow_to_signed_zero_saturation_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",

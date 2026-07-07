@@ -98,6 +98,8 @@ def run_host_command(cmd: list[str], cwd: Path, timeout_s: int) -> tuple[int, st
         cmd,
         cwd=str(cwd),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout_s,
