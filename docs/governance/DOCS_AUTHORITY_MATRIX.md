@@ -572,6 +572,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.erdos-sat-smt-unsat-scope-2026-06-23 | historical | docs/research/erdos-sat-smt-unsat-scope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.furey-octonion-generation | historical | docs/research/furey_octonion_generation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gradual-epistemic-positioning | historical | docs/research/gradual_epistemic_positioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyper-uncertainty-parenthesization-report | historical | docs/research/HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyperbolic-semantic-networks-run | historical | docs/research/hyperbolic_semantic_networks_run.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -676,6 +677,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.sedenion-dynamics | historical | docs/research/sedenion_dynamics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-e8-boundary | historical | docs/research/sedenion_e8_boundary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-fano-fibers | historical | docs/research/sedenion_fano_fibers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-ladder-extension | historical | docs/research/sedenion_ladder_extension.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-quartet-fiber-incidence | historical | docs/research/sedenion_quartet_fiber_incidence.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-spectra | historical | docs/research/sedenion_spectra.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zd-fiber-identity | historical | docs/research/sedenion_zd_fiber_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
