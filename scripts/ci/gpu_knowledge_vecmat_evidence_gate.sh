@@ -34,9 +34,26 @@ BLOCKERS_JSON="$AUDIT_DIR/gpu_knowledge_vecmat_open_blockers.v1.json"
 OPERATIONAL_HANDOFF="$AUDIT_DIR/gpu_knowledge_vecmat_operational_handoff.md"
 
 scripts/dev/gpu_knowledge_vecmat_evidence_audit.sh >/dev/null
-"$RUNTIME_RUNBOOK" all-local >/dev/null
-"$PACKAGE_VERIFY" "$DGX_PACKAGE_DIR/gpu_knowledge_vec4_package_manifest.v1.json" >/dev/null
-"$RUNTIME_RECEIPT_VERIFY" --mode not-run "$DGX_JSON" >/dev/null
+if python3 - "$DGX_JSON" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+receipt = json.loads(path.read_text(encoding="utf-8"))
+marker = receipt.get("gpu_knowledge_vec4_marker", {})
+raise SystemExit(0 if receipt.get("status") == "pass" and marker.get("status") == "runtime_pass" else 1)
+PY
+then
+  "$PACKAGE_VERIFY" "$DGX_PACKAGE_DIR/gpu_knowledge_vec4_package_manifest.v1.json" >/dev/null
+  "$RUNTIME_RECEIPT_VERIFY" --mode runtime-pass "$DGX_JSON" >/dev/null
+else
+  "$RUNTIME_RUNBOOK" all-local >/dev/null
+  "$PACKAGE_VERIFY" "$DGX_PACKAGE_DIR/gpu_knowledge_vec4_package_manifest.v1.json" >/dev/null
+  "$RUNTIME_RECEIPT_VERIFY" --mode not-run "$DGX_JSON" >/dev/null
+fi
 "$COMPLETION_AUDIT" >/dev/null
 
 python3 - "$AUDIT_JSON" "$QUEUE_JSON" "$DISPATCH_JSON" "$PROBE_JSON" "$PROBE_PTX" "$PROBE_RUNNER" "$BACKEND_PROBE_JSON" "$BACKEND_HARNESS" "$SLURM_RUNTIME_PROBE" "$SLURM_RUNTIME_JSON" "$IMPORTED_RUNTIME_PROBE" "$IMPORTED_RUNTIME_JSON" "$DGX_GATE" "$DGX_JSON" "$DGX_PACKAGE_DIR" "$PACKAGE_VERIFY" "$RUNTIME_RECEIPT_VERIFY" "$RUNTIME_RUNBOOK" "$COMPLETION_AUDIT" "$COMPLETION_JSON" "$BLOCKERS_JSON" "$OPERATIONAL_HANDOFF" <<'PY'
@@ -246,15 +263,25 @@ require("gpu_knowledge_vecmat_completion_audit" in completion_audit, "completion
 require("do_not_mark_goal_complete_from_package_only_or_ptxas_only_evidence" in completion_audit, "completion auditor missing package-only noncompletion boundary")
 
 require(dgx_json.get("schema") == "sounio.dgx-spark-public-gpu-gate.v1", "bad DGX JSON schema")
-require(dgx_json.get("status") == "pass", "DGX package-only report did not pass")
-require(dgx_json.get("reason") == "dgx_spark_package_only_prepared", "DGX package-only reason mismatch")
-require(dgx_json.get("package_only") is True, "DGX report must be package-only")
-require(dgx_json.get("package_manifest", "").endswith("gpu_knowledge_vec4_package_manifest.v1.json"), "DGX JSON missing package manifest path")
-require(dgx_json.get("public_kernels_enabled") is False, "DGX package-only marker test must disable public kernels")
-require(dgx_json.get("gpu_knowledge_vec4_marker", {}).get("status") == "local_ptxas_only_not_remote_not_launched", "DGX marker package status mismatch")
-require("package_only_no_remote_ssh" in dgx_json.get("boundaries", []), "DGX JSON missing package-only no-ssh boundary")
-require("package_only_does_not_claim_dgx_toolchain_or_runtime" in dgx_json.get("boundaries", []), "DGX JSON missing package-only nonclaim")
-require("dgx_spark_is_cuda_toolchain_and_runtime_authority" not in dgx_json.get("boundaries", []), "DGX package-only JSON overclaims remote authority")
+require(dgx_json.get("status") == "pass", "DGX report did not pass")
+require(dgx_json.get("public_kernels_enabled") is False, "DGX marker test must disable public kernels")
+marker_status = dgx_json.get("gpu_knowledge_vec4_marker", {}).get("status")
+if marker_status == "runtime_pass":
+    require(dgx_json.get("reason") == "dgx_spark_public_gpu_validated", "DGX runtime reason mismatch")
+    require(dgx_json.get("package_only") is False, "runtime DGX report cannot be package-only")
+    require("PASS gpu_knowledge_vec4_aggregate_marker" in dgx_json.get("gpu_knowledge_vec4_marker", {}).get("runtime_output", ""), "DGX runtime missing PASS marker")
+    for key in ("hostname", "uname_m", "ptxas_version", "nvcc_version"):
+        require(dgx_json.get("remote", {}).get(key), f"DGX runtime missing remote {key}")
+    require("dgx_spark_is_cuda_toolchain_and_runtime_authority" in dgx_json.get("boundaries", []), "DGX runtime JSON missing authority boundary")
+    require("package_only_does_not_claim_dgx_toolchain_or_runtime" not in dgx_json.get("boundaries", []), "DGX runtime JSON still has package-only nonclaim")
+else:
+    require(dgx_json.get("reason") == "dgx_spark_package_only_prepared", "DGX package-only reason mismatch")
+    require(dgx_json.get("package_only") is True, "DGX package-only report must be package-only")
+    require(dgx_json.get("package_manifest", "").endswith("gpu_knowledge_vec4_package_manifest.v1.json"), "DGX JSON missing package manifest path")
+    require(marker_status == "local_ptxas_only_not_remote_not_launched", "DGX marker package status mismatch")
+    require("package_only_no_remote_ssh" in dgx_json.get("boundaries", []), "DGX JSON missing package-only no-ssh boundary")
+    require("package_only_does_not_claim_dgx_toolchain_or_runtime" in dgx_json.get("boundaries", []), "DGX JSON missing package-only nonclaim")
+    require("dgx_spark_is_cuda_toolchain_and_runtime_authority" not in dgx_json.get("boundaries", []), "DGX package-only JSON overclaims remote authority")
 require((dgx_package_dir / "gpu_knowledge_vec4_aggregate_marker.ptx").exists(), "DGX package missing marker PTX")
 require((dgx_package_dir / "gpu_knowledge_vec4_aggregate_marker_cuda_runner.cu").exists(), "DGX package missing marker runner")
 require((dgx_package_dir / "gpu_knowledge_vec4_aggregate_marker.local-ptxas.cubin").exists(), "DGX package missing local ptxas cubin")

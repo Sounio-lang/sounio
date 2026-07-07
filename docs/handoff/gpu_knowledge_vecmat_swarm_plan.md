@@ -92,6 +92,16 @@ The local package route is also opt-in. With `DGX_SPARK_PACKAGE_ONLY=1` and
 local ptxas/package proof only; it does not claim DGX toolchain authority or CUDA
 device runtime.
 
+The DGX Spark marker route also passed on `demetrios@192.168.3.43`
+(`spark-8e54`, `aarch64`, NVIDIA GB10, CUDA 13.0, `sm_121`). The runtime receipt
+is `artifacts/gpu/dgx_spark_public_gpu_gate.v1.json` with marker status
+`runtime_pass` and output `PASS gpu_knowledge_vec4_aggregate_marker on NVIDIA
+GB10 cc 12.1 copyback offsets=0,32,64,96 values=1,2,3,4`.
+
+The same marker route also passed on `demetrios@192.168.3.24` (`spark-3c59`,
+`aarch64`, NVIDIA GB10, CUDA 13.0, `sm_121`). That secondary receipt is
+`artifacts/gpu/knowledge_vecmat_evidence_audit/dgx_runtime_attempt/dgx_spark_public_gpu_gate.192-168-3-24.runtime_pass.v1.json`.
+
 The package includes `gpu_knowledge_vec4_package_manifest.v1.json`, which records
 the PTX, runner, local-ptxas cubin, SHA256s, sizes, and launch contract. That
 manifest is the portable handoff for a later DGX/device run.

@@ -1,6 +1,6 @@
 # GPU Knowledge Vec/Mat Operational Handoff
 
-Current-SHA: a12f973c50d53d9ae969fc25c98baa32637888bc
+Current-SHA: 9e0a9f0923232c730caa25e8330bcd96cbc62abe
 Current-Branch: coord/lane-8c-dossier
 Current-Worktree: /workspace/sounio
 Dirty-Status: see `git status --short -- scripts/dev/gpu_knowledge_vec* scripts/ci/gpu_knowledge_vecmat_evidence_gate.sh scripts/dev/dgx_spark_public_gpu_gate.sh artifacts/gpu/knowledge_vecmat_evidence_audit artifacts/gpu/dgx_spark_public_gpu_package artifacts/gpu/dgx_spark_public_gpu_gate.v1.json`
