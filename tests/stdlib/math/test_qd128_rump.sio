@@ -1,0 +1,203 @@
+//@ run-pass
+// validated_lane: lean_single
+// Rump (1988) witness for stdlib/math/qd128.sio (EISA v2 phase W1).
+//
+//   f(x,y) = 333.75 y^6 + x^2 (11 x^2 y^2 - y^6 - 121 y^4 - 2) + 5.5 y^8
+//            + x / (2y),  at x = 77617, y = 33096.
+//
+// Exact value: -54767/66192 = -0.827396059946821368141165095479816...
+// Structure that drives every bound below: the polynomial part (everything
+// except x/(2y)) is EXACTLY -2, hidden under intermediates of magnitude
+// ~7.9e36 ~ 2^122.6. Recovering it needs ~122 significand bits of
+// cancellation. dd64 carries ~106 bits -> the "-2" term is annihilated and
+// dd64 lands on truth + 2 = +1.17260... (the famous WRONG-SIGN value).
+// qd128 carries ~212 bits: every intermediate here fits EXACTLY (largest
+// needs ~127 bits), so qd128 computes the polynomial part with zero error.
+// See tests/stdlib/math/test_dd64_cancellation.sio for the dd64-side framing
+// of this same boundary; this file is its qd128 complement.
+
+use math::dd64::*
+use math::qd128::*
+
+struct F64Fields {
+    sign: i64,
+    exp: i64,
+    mant: i64,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qd_abs_err(a: Qd128, b: Qd128) -> f64 with Mut, Panic {
+    abs_f64(qd_to_f64(qd_sub(a, b)))
+}
+
+// IEEE-754 field extraction for finite normal doubles by pure arithmetic
+// (no eisa::format import in stdlib/math tests; biased exponent as stored).
+fn f64_fields_normal(x: f64) -> F64Fields with Mut, Div {
+    var s = 0
+    var ax = x
+    if x < 0.0 {
+        s = 1
+        ax = 0.0 - x
+    }
+    if ax == 0.0 { return F64Fields { sign: s, exp: 0, mant: 0 } }
+
+    var y = ax
+    var e = 1023
+    while y >= 2.0 {
+        y = y * 0.5
+        e = e + 1
+    }
+    while y < 1.0 {
+        y = y * 2.0
+        e = e - 1
+    }
+    var frac = y - 1.0
+    var mant = 0
+    var i = 0
+    while i < 52 {
+        frac = frac * 2.0
+        mant = mant * 2
+        if frac >= 1.0 {
+            mant = mant + 1
+            frac = frac - 1.0
+        }
+        i = i + 1
+    }
+    F64Fields { sign: s, exp: e, mant: mant }
+}
+
+// Rump entirely in qd128 (powers via qd_mul chains; every coefficient —
+// 333.75, 11, 121, 2, 5.5 — is exactly representable in f64).
+fn rump_qd() -> Qd128 with Mut, Div, Panic {
+    let x = qd_from_f64(77617.0)
+    let y = qd_from_f64(33096.0)
+
+    let y2 = qd_mul(y, y)
+    let y4 = qd_mul(y2, y2)
+    let y6 = qd_mul(y4, y2)
+    let y8 = qd_mul(y4, y4)
+    let x2 = qd_mul(x, x)
+
+    let t1 = qd_mul_f64(y6, 333.75)
+    let i1 = qd_mul_f64(qd_mul(x2, y2), 11.0)
+    let i2 = qd_sub(i1, y6)
+    let i3 = qd_sub(i2, qd_mul_f64(y4, 121.0))
+    let i4 = qd_sub(i3, qd_from_f64(2.0))
+    let t2 = qd_mul(x2, i4)
+    let t3 = qd_mul_f64(y8, 5.5)
+    let t4 = qd_div(x, qd_mul_f64(y, 2.0))
+    qd_add(qd_add(qd_add(t1, t2), t3), t4)
+}
+
+// Same polynomial in dd64 (mirrors test_dd64_cancellation.sio Part B).
+fn rump_dd() -> Dd64 with Div {
+    let a = dd_from_f64(77617.0)
+    let b = dd_from_f64(33096.0)
+    let b2 = dd_mul(b, b)
+    let b4 = dd_mul(b2, b2)
+    let b6 = dd_mul(b4, b2)
+    let b8 = dd_mul(b4, b4)
+    let a2 = dd_mul(a, a)
+    let t1 = dd_mul_f64(b6, 333.75)
+    let inner1 = dd_mul_f64(dd_mul(a2, b2), 11.0)
+    let inner2 = dd_sub(inner1, b6)
+    let inner3 = dd_sub(inner2, dd_mul_f64(b4, 121.0))
+    let inner4 = dd_sub(inner3, dd_from_f64(2.0))
+    let t2 = dd_mul(a2, inner4)
+    let t3 = dd_mul_f64(b8, 5.5)
+    let t4 = dd_div(a, dd_mul_f64(b, 2.0))
+    dd_add(dd_add(dd_add(t1, t2), t3), t4)
+}
+
+// Same polynomial in plain f64.
+fn rump_f64() -> f64 with Div {
+    let x = 77617.0
+    let y = 33096.0
+    let y2 = y * y
+    let y4 = y2 * y2
+    let y6 = y4 * y2
+    let y8 = y4 * y4
+    let x2 = x * x
+    333.75 * y6 + x2 * (11.0 * x2 * y2 - y6 - 121.0 * y4 - 2.0) + 5.5 * y8 + x / (2.0 * y)
+}
+
+fn main() with Mut, Div, Panic, IO {
+    var fails = 0
+
+    let rq = rump_qd()
+    // Truth side computed IN qd as well: -54767/66192 (both integers exact
+    // in f64), so both sides carry the same ~212-bit resolution.
+    let truth = qd_div(qd_from_f64(0.0 - 54767.0), qd_from_f64(66192.0))
+
+    // R1: qd polynomial == exact rational.
+    // Derivation of the bound: the polynomial part of rump_qd is EXACT
+    // (every intermediate is an integer or quarter-integer needing <= ~127
+    // significand bits < 212). Rounding enters only through qd_div(x, 2y)
+    // on the rq side [<= 3*eps_qd relative; HLB's division constant is
+    // ~2.5-3*eps_qd, worse than mul — math-review 2026-07-05],
+    // qd_div(-54767, 66192) on the truth side [<= 3*eps_qd], the three
+    // final qd_adds [<= 2*eps_qd each], and the qd_sub inside qd_abs_err
+    // [<= 2*eps_qd]. Total <= 14*eps_qd*|truth| with eps_qd = 2^-211
+    // ~ 3.11e-64  =>  <= 4.4e-63. Bound used: 5e-63 absolute.
+    // Bit-identity is in fact DERIVABLE, not lucky (review confirmed):
+    // x/(2y) = 77617/66192 and truth = 77617/66192 - 2 exactly, and
+    // subtracting the exact integer 2 from a 4-term expansion with
+    // leading component ~1.17 is error-free in qd (the borrow stays
+    // within the expansion width).
+    // (Measured: 0.0 — both sides produce bit-identical components.)
+    if qd_abs_err(rq, truth) > 0.000000000000000000000000000000000000000000000000000000000000005 { fails = fails + 1 }
+
+    // R2: pin the correctly-rounded f64 of -54767/66192 by IEEE fields.
+    // Measured first (host + lean_single agree): sign=1, biased exp=1022,
+    // mantissa=2948921547158147 (bits 0xBFEA7A664B2949A3, value
+    // -0.8273960599468214). qd_to_f64 of BOTH sides must land on it.
+    let rf = qd_to_f64(rq)
+    let fp = f64_fields_normal(rf)
+    if fp.sign != 1 { fails = fails + 1 }
+    if fp.exp != 1022 { fails = fails + 1 }
+    if fp.mant != 2948921547158147 { fails = fails + 1 }
+    let ft = f64_fields_normal(qd_to_f64(truth))
+    if ft.sign != 1 { fails = fails + 1 }
+    if ft.exp != 1022 { fails = fails + 1 }
+    if ft.mant != 2948921547158147 { fails = fails + 1 }
+
+    // R3: honest boundary — dd64 does NOT reach the true value.
+    // Derivation of the floor: dd64's intermediates reach M ~ 7.9e36;
+    // its precision window is ~106 bits, so terms below ~M*2^-107 ~ 5e4
+    // are annihilated. The exact "-2" polynomial residue lies 2^~121 below
+    // M and is lost entirely, while all OTHER polynomial terms are exactly
+    // representable in dd64 and cancel to 0. Expected dd64 result is thus
+    // truth + 2 = +1.17260... (error exactly 2 = 2.417*|truth|).
+    // Non-vacuous floor asserted: dd_err >= |truth| (>100% relative error;
+    // slack factor 2.4 below the derived point value to tolerate low-order
+    // noise). This is the measured boundary that motivates qd128 —
+    // 106 bits < 122-bit cancellation requirement < 212 bits.
+    let rd = rump_dd()
+    let truth_f = qd_to_f64(truth)
+    let dd_err = abs_f64(dd_to_f64(rd) - truth_f)
+    if dd_err < abs_f64(truth_f) { fails = fails + 1 }
+    // The dd64 value is the FAMOUS wrong-sign answer (~ +1.1726): positive
+    // while the true value is negative. This is the headline sign witness.
+    if dd_to_f64(rd) <= 0.0 { fails = fails + 1 }
+    if truth_f >= 0.0 { fails = fails + 1 }
+
+    // R4: plain f64 is catastrophically wrong.
+    // Measured on this lane (strict IEEE double, this evaluation order):
+    // rf64 ~ -1.18e21 — wrong by ~21 orders of magnitude (|truth| < 1).
+    // (The textbook "+1.1726" appears at other precisions/orders — here it
+    // is carried by the dd64 lane above; across precisions the sign is
+    // unstable, which is exactly Rump's point.) Floor: the f64 error must
+    // exceed 1e15, i.e. ~15 orders of magnitude above |truth| — same floor
+    // used by test_dd64_cancellation.sio Part B.
+    let rf64 = rump_f64()
+    if abs_f64(rf64 - truth_f) < 1000000000000000.0 { fails = fails + 1 }
+    // And f64 vs dd64 disagree even in SIGN on the same expression:
+    if rf64 > 0.0 { fails = fails + 1 }
+    if dd_to_f64(rd) < 0.0 { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: qd128 Rump witness — exact rational recovered, dd64 wrong-sign boundary, f64 catastrophic")
+}

@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.eisa-metron-madaros-v2-canonicalization-2026-07-06
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -258,6 +259,13 @@ Initial write set:
 
 - `docs/research/eisa-*`
 - `docs/handoff/eisa_w4_v2_bridge_continuation.md`
+- `stdlib/math/dd64.sio`
+- `stdlib/math/qd128.sio`
+- `tests/stdlib/math/test_dd64_*.sio`
+- `tests/stdlib/math/test_qd128_*.sio`
+- `bin/souc-lean-single-x86_64` only when required to reproduce the pushed
+  EISA lean_single validation lane; this is a bootstrap seed artifact, not a
+  Madaros checker semantic change.
 - `stdlib/eisa/**`
 - `tests/stdlib/eisa/**`
 - `tools/eisa/**`
@@ -271,6 +279,8 @@ documentation cleanup only; it must not be used to claim new behavior.
 Required gates:
 
 ```bash
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/math/test_qd128_core.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/math/test_qd128_rump.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/eisa/test_eisa_core.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/eisa/test_eisa_evm_v2.sio
 bash scripts/ci/eisa_bridge_conformance_gate.sh

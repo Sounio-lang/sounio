@@ -325,6 +325,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.butterfly-handoff | repo_only | docs/handoff/butterfly-handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.eisa-w4-v2-bridge-continuation | repo_only | docs/handoff/eisa_w4_v2_bridge_continuation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.codex-claude-parallel-contract | historical | docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.completed-mega-project | historical | docs/implementation/COMPLETED_MEGA_PROJECT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -534,6 +535,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.eisa-metron-madaros-v2-canonicalization-2026-07-06 | historical | docs/research/eisa-metron-madaros-v2-canonicalization-2026-07-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-precision-track-2026-07-05 | historical | docs/research/eisa-precision-track-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-stack-architecture-2026-07-05 | historical | docs/research/eisa-stack-architecture-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-v0-spec-2026-07-05 | historical | docs/research/eisa-v0-spec-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-v1-asbuilt-2026-07-06 | historical | docs/research/eisa-v1-asbuilt-2026-07-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-v1-plan-2026-07-05 | historical | docs/research/eisa-v1-plan-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-v2-arch-2026-07-05 | historical | docs/research/eisa-v2-arch-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.eisa-v2-positioning-2026-07-05 | historical | docs/research/eisa-v2-positioning-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-calculus-value-carrying-redesign | historical | docs/research/epistemic_calculus_value_carrying_redesign.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-self-reference-design | historical | docs/research/epistemic_self_reference_design.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
