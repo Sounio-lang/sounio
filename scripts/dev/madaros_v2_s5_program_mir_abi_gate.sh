@@ -37,6 +37,7 @@ F128_ORDERED_COMPARE_RECEIPT_DIR="$OUT_DIR/f128_ordered_compare_receipt"
 F128_SRET_FIELD_PAYLOAD_RECEIPT_DIR="$OUT_DIR/f128_sret_field_payload_receipt"
 F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR="$OUT_DIR/f128_param_slot_layout_receipt"
 EXTERN_DECL_FRONT_HALF_RECEIPT_DIR="$OUT_DIR/extern_declaration_front_half_receipt"
+EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_DIR="$OUT_DIR/external_sysv_f128_blocker_receipt"
 DIAGNOSTICS_RECEIPT_DIR="$OUT_DIR/diagnostics_receipt"
 DIFFERENTIAL_RECEIPT_DIR="$OUT_DIR/differential_receipt"
 EFFECT_GATE="${ROOT_DIR}/scripts/dev/madaros_v2_s5_mir_effect_gate.sh"
@@ -66,6 +67,7 @@ F128_ORDERED_COMPARE_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_or
 F128_SRET_FIELD_PAYLOAD_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_sret_field_payload_receipt.py"
 F128_PARAM_SLOT_LAYOUT_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_f128_param_slot_layout_receipt.py"
 EXTERN_DECL_FRONT_HALF_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_extern_declaration_front_half_receipt.py"
+EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py"
 DIAGNOSTICS_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_diagnostics_receipt.py"
 DIFFERENTIAL_RECEIPT_TOOL="${ROOT_DIR}/scripts/dev/madaros_v2_s5_differential_receipt.py"
 COMPILER="${MADAROS_BIN:-${ROOT_DIR}/bin/madaros}"
@@ -100,10 +102,11 @@ F128_ORDERED_COMPARE_RECEIPT="$F128_ORDERED_COMPARE_RECEIPT_DIR/madaros_v2_s5_f1
 F128_SRET_FIELD_PAYLOAD_RECEIPT="$F128_SRET_FIELD_PAYLOAD_RECEIPT_DIR/madaros_v2_s5_f128_sret_field_payload.receipt.json"
 F128_PARAM_SLOT_LAYOUT_RECEIPT="$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR/madaros_v2_s5_f128_param_slot_layout.receipt.json"
 EXTERN_DECL_FRONT_HALF_RECEIPT="$EXTERN_DECL_FRONT_HALF_RECEIPT_DIR/madaros_v2_s5_extern_declaration_front_half.receipt.json"
+EXTERNAL_SYSV_F128_BLOCKER_RECEIPT="$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_DIR/madaros_v2_s5_external_sysv_f128_blocker.receipt.json"
 DIAGNOSTICS_RECEIPT="$DIAGNOSTICS_RECEIPT_DIR/madaros_v2_s5_diagnostics.receipt.json"
 DIFFERENTIAL_RECEIPT="$DIFFERENTIAL_RECEIPT_DIR/madaros_v2_s5_differential.receipt.json"
 
-mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$F128_IEEE_CLASS_HELPER_RECEIPT_DIR" "$F128_ORDERED_COMPARE_RECEIPT_DIR" "$F128_SRET_FIELD_PAYLOAD_RECEIPT_DIR" "$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR" "$EXTERN_DECL_FRONT_HALF_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
+mkdir -p "$EFFECT_DIR" "$S5_RECEIPT_DIR" "$SRET_RECEIPT_DIR" "$SOURCE_SRET_RECEIPT_DIR" "$STACK_CALL_RECEIPT_DIR" "$IMPORTED_SRET_RECEIPT_DIR" "$METHOD_SRET_RECEIPT_DIR" "$F64_XMM0_RECEIPT_DIR" "$WIDE_INT_RECEIPT_DIR" "$WIDE_MACHINE_SLOT_RECEIPT_DIR" "$WIDE_ABI_CALL_RETURN_RECEIPT_DIR" "$GENERIC_AGG_RECEIPT_DIR" "$F128_LITERAL_PROVENANCE_RECEIPT_DIR" "$F128_BINARY128_VALUE_RECEIPT_DIR" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT_DIR" "$MACHINE_SLOT_METADATA_RECEIPT_DIR" "$F128_ABI_METADATA_RECEIPT_DIR" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT_DIR" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT_DIR" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT_DIR" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT_DIR" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT_DIR" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT_DIR" "$F128_IEEE_CLASS_HELPER_RECEIPT_DIR" "$F128_ORDERED_COMPARE_RECEIPT_DIR" "$F128_SRET_FIELD_PAYLOAD_RECEIPT_DIR" "$F128_PARAM_SLOT_LAYOUT_RECEIPT_DIR" "$EXTERN_DECL_FRONT_HALF_RECEIPT_DIR" "$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_DIR" "$DIAGNOSTICS_RECEIPT_DIR" "$DIFFERENTIAL_RECEIPT_DIR"
 
 echo "[madaros-v2-s5-program-mir-abi] START"
 echo "[madaros-v2-s5-program-mir-abi] out=$OUT_DIR"
@@ -410,7 +413,17 @@ if [[ ! -f "$EXTERN_DECL_FRONT_HALF_RECEIPT" ]]; then
   exit 1
 fi
 
-python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$F128_IEEE_CLASS_HELPER_RECEIPT" "$F128_ORDERED_COMPARE_RECEIPT" "$F128_SRET_FIELD_PAYLOAD_RECEIPT" "$F128_PARAM_SLOT_LAYOUT_RECEIPT" "$EXTERN_DECL_FRONT_HALF_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
+python3 "$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_TOOL" emit \
+  --compiler "$COMPILER" \
+  --root "$ROOT_DIR" \
+  --out-dir "$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT_DIR"
+
+if [[ ! -f "$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT" ]]; then
+  echo "[madaros-v2-s5-program-mir-abi] FAIL: missing external SysV f128 blocker receipt: $EXTERNAL_SYSV_F128_BLOCKER_RECEIPT" >&2
+  exit 1
+fi
+
+python3 - "$EFFECT_DIR" "$S5_RECEIPT_RESULTS" "$SRET_RECEIPT" "$SOURCE_SRET_RECEIPT" "$STACK_CALL_RECEIPT" "$IMPORTED_SRET_RECEIPT" "$METHOD_SRET_RECEIPT" "$F64_XMM0_RECEIPT" "$WIDE_INT_RECEIPT" "$WIDE_MACHINE_SLOT_RECEIPT" "$WIDE_ABI_CALL_RETURN_RECEIPT" "$GENERIC_AGG_RECEIPT" "$F128_LITERAL_PROVENANCE_RECEIPT" "$F128_BINARY128_VALUE_RECEIPT" "$F128_LITERAL_VALUE_BRIDGE_RECEIPT" "$MACHINE_SLOT_METADATA_RECEIPT" "$F128_ABI_METADATA_RECEIPT" "$F128_NATIVE_OPAQUE_STORAGE_RECEIPT" "$F128_OPAQUE_CALL_RETURN_ABI_RECEIPT" "$F128_SRET_INTERNAL_ARG_BOUNDARY_RECEIPT" "$F128_BINARY128_NATIVE_ANCHOR_RECEIPT" "$F128_BINARY128_VALUE_CONTRACT_NATIVE_RECEIPT" "$F128_ARITHMETIC_VALUE_CONTRACT_RECEIPT" "$F128_IEEE_CLASS_HELPER_RECEIPT" "$F128_ORDERED_COMPARE_RECEIPT" "$F128_SRET_FIELD_PAYLOAD_RECEIPT" "$F128_PARAM_SLOT_LAYOUT_RECEIPT" "$EXTERN_DECL_FRONT_HALF_RECEIPT" "$EXTERNAL_SYSV_F128_BLOCKER_RECEIPT" "$DIAGNOSTICS_RECEIPT" "$DIFFERENTIAL_RECEIPT" "$MODULE" "$RECEIPT" <<'PY'
 import hashlib
 import json
 import re
@@ -480,10 +493,11 @@ f128_ordered_compare_receipt_path = Path(sys.argv[25])
 f128_sret_field_payload_receipt_path = Path(sys.argv[26])
 f128_param_slot_layout_receipt_path = Path(sys.argv[27])
 extern_decl_front_half_receipt_path = Path(sys.argv[28])
-diagnostics_receipt_path = Path(sys.argv[29])
-differential_receipt_path = Path(sys.argv[30])
-module_path = Path(sys.argv[31])
-receipt_path = Path(sys.argv[32])
+external_sysv_f128_blocker_receipt_path = Path(sys.argv[29])
+diagnostics_receipt_path = Path(sys.argv[30])
+differential_receipt_path = Path(sys.argv[31])
+module_path = Path(sys.argv[32])
+receipt_path = Path(sys.argv[33])
 
 effect_receipt_path = effect_dir / "madaros_v2_s5_mir_effect.receipt.json"
 effect_module_path = effect_dir / "madaros_v2_s5_mir_effect.module.json"
@@ -515,6 +529,7 @@ f128_ordered_compare_receipt = load_json(f128_ordered_compare_receipt_path)
 f128_sret_field_payload_receipt = load_json(f128_sret_field_payload_receipt_path)
 f128_param_slot_layout_receipt = load_json(f128_param_slot_layout_receipt_path)
 extern_decl_front_half_receipt = load_json(extern_decl_front_half_receipt_path)
+external_sysv_f128_blocker_receipt = load_json(external_sysv_f128_blocker_receipt_path)
 diagnostics_receipt = load_json(diagnostics_receipt_path)
 differential_receipt = load_json(differential_receipt_path)
 
@@ -2315,6 +2330,52 @@ for case_id in [
         raise SystemExit(f"{case_id} must prove E072 absent")
     if row.get("return_mismatch_e008_absent") is not True:
         raise SystemExit(f"{case_id} must prove E008 absent")
+
+if external_sysv_f128_blocker_receipt.get("schema") != "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.1":
+    raise SystemExit("bad S5 external SysV f128 blocker receipt schema")
+if external_sysv_f128_blocker_receipt.get("status") != "pass":
+    raise SystemExit("program MIR/ABI gate requires passing external SysV f128 blocker receipt")
+if external_sysv_f128_blocker_receipt.get("stage_contract_level") != "S5_23_EXTERNAL_SYSV_F128_BLOCKED_WITH_CONCRETE_REASONS":
+    raise SystemExit("external SysV f128 blocker receipt must declare S5.23 blocker stage contract")
+if external_sysv_f128_blocker_receipt.get("case_count") != 1:
+    raise SystemExit("external SysV f128 blocker receipt must contain exactly one passthru_f128 case")
+if external_sysv_f128_blocker_receipt.get("blocked") is not True:
+    raise SystemExit("external SysV f128 blocker receipt must be a blocker receipt")
+if external_sysv_f128_blocker_receipt.get("blocked_reason") != "extern_f128_declaration_reaches_IR_but_native_v2_has_no_external_symbol_call_shape_or_sysv_binary128_runtime_oracle":
+    raise SystemExit("external SysV f128 blocker receipt blocked_reason mismatch")
+for field in [
+    "extern_decl_f128_typecheck_promoted",
+    "parser_has_explicit_is_extern_bit",
+    "ir_extern_strategy_promoted",
+    "ir_call_extern_symbol_receipt_promoted",
+    "f128_internal_opaque_direct_call_abi_promoted_elsewhere",
+    "f128_internal_opaque_return_abi_promoted_elsewhere",
+    "f128_sysv_classes_recorded_as_metadata_only",
+]:
+    if external_sysv_f128_blocker_receipt.get(field) is not True:
+        raise SystemExit(f"external SysV f128 blocker receipt missing required true flag: {field}")
+for field in [
+    "native_v2_machineir_external_call_symbol_promoted",
+    "native_v2_external_relocation_promoted",
+    "f128_external_sysv_abi_promoted",
+    "f128_external_sysv_runtime_promoted",
+    "f128_external_sysv_argument_oracle_promoted",
+    "f128_external_sysv_return_oracle_promoted",
+]:
+    if external_sysv_f128_blocker_receipt.get(field) is not False:
+        raise SystemExit(f"external SysV f128 blocker receipt must not overclaim {field}")
+external_sysv_cases = {row.get("case_id"): row for row in external_sysv_f128_blocker_receipt.get("cases", [])}
+if set(external_sysv_cases) != {"extern_c_passthru_f128_decl_received"}:
+    raise SystemExit(f"external SysV f128 blocker receipt cases mismatch: {sorted(external_sysv_cases)}")
+passthru_f128 = external_sysv_cases["extern_c_passthru_f128_decl_received"]
+if passthru_f128.get("symbol") != "passthru_f128" or passthru_f128.get("signature") != "(f128)->f128":
+    raise SystemExit("external SysV f128 blocker receipt must identify passthru_f128 (f128)->f128")
+if passthru_f128.get("check_rc") != 0:
+    raise SystemExit("external SysV f128 blocker passthru case must check successfully")
+if passthru_f128.get("ir_opcode_expected_if_called") != "IrCallExtern":
+    raise SystemExit("external SysV f128 blocker passthru case must point at IrCallExtern")
+if passthru_f128.get("native_v2_execution_attempted") is not False:
+    raise SystemExit("external SysV f128 blocker must not attempt unpromoted native-v2 execution")
 if extern_cases["kernel_nonunit_return_still_rejected"].get("real_kernel_still_rejected") is not True:
     raise SystemExit("extern declaration receipt must preserve real kernel E072 rejection")
 
@@ -2882,7 +2943,7 @@ not_promoted = [
     {
         "surface": "f128_external_sysv_abi_and_sret",
         "status": "not_promoted",
-        "reason": "extern declarations are no longer misclassified as kernel functions, and internal native-v2 f128 direct call/return plus SRET-arg-boundary receipts are promoted; external SysV f128 ABI/SRET compatibility remains outside the promoted S5 surface",
+        "reason": "extern declarations are no longer misclassified as kernel functions, the external SysV f128 blocker receipt proves passthru_f128 reaches the front half, and internal native-v2 f128 direct call/return plus SRET-arg-boundary receipts are promoted; external symbol MachineIR, relocation/linking, and SysV binary128 runtime oracles remain outside the promoted S5 surface",
     },
     {
         "surface": "s4_negative_and_producer_dependent_rewrites",
@@ -3285,6 +3346,24 @@ module = {
         "f128_external_sysv_abi_promoted": extern_decl_front_half_receipt["f128_external_sysv_abi_promoted"],
         "cases": extern_decl_front_half_receipt["cases"],
     },
+    "external_sysv_f128_blocker_receipt": {
+        "schema": external_sysv_f128_blocker_receipt["schema"],
+        "path": f"{external_sysv_f128_blocker_receipt_path.parent.name}/{external_sysv_f128_blocker_receipt_path.name}",
+        "receipt_sha256": external_sysv_f128_blocker_receipt["receipt_sha256"],
+        "stage_contract_level": external_sysv_f128_blocker_receipt["stage_contract_level"],
+        "case_id": external_sysv_f128_blocker_receipt["case_id"],
+        "case_count": external_sysv_f128_blocker_receipt["case_count"],
+        "blocked": external_sysv_f128_blocker_receipt["blocked"],
+        "blocked_reason": external_sysv_f128_blocker_receipt["blocked_reason"],
+        "native_v2_machineir_external_call_symbol_promoted": external_sysv_f128_blocker_receipt["native_v2_machineir_external_call_symbol_promoted"],
+        "native_v2_external_relocation_promoted": external_sysv_f128_blocker_receipt["native_v2_external_relocation_promoted"],
+        "f128_external_sysv_abi_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_abi_promoted"],
+        "f128_external_sysv_runtime_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_runtime_promoted"],
+        "f128_external_sysv_argument_oracle_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_argument_oracle_promoted"],
+        "f128_external_sysv_return_oracle_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_return_oracle_promoted"],
+        "missing_full_obligations": external_sysv_f128_blocker_receipt["missing_full_obligations"],
+        "cases": external_sysv_f128_blocker_receipt["cases"],
+    },
     "differential_receipt": {
         "schema": differential_receipt["schema"],
         "path": f"{differential_receipt_path.parent.name}/{differential_receipt_path.name}",
@@ -3372,8 +3451,12 @@ module = {
         "extern_decl_is_kernel_split_promoted": True,
         "extern_decl_f128_typecheck_promoted": True,
         "extern_decl_real_kernel_e072_preserved": True,
+        "external_sysv_f128_blocker_recorded": True,
+        "native_v2_machineir_external_call_symbol_promoted": False,
         "f128_external_sysv_abi_promoted": False,
         "f128_external_sysv_runtime_promoted": False,
+        "f128_external_sysv_argument_oracle_promoted": False,
+        "f128_external_sysv_return_oracle_promoted": False,
         "native_v2_external_relocation_promoted": False,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -3437,8 +3520,9 @@ module = {
         "f128_aggregate_field_payload_width2_promoted_for_local_and_internal_sret_structs",
         "f128_parameter_slots_non_overlapping_for_local_imported_and_mixed_shapes",
         "extern_declaration_front_half_receipt_recorded",
+        "external_sysv_f128_blocker_receipt_recorded",
         "extern_C_declarations_are_not_kernel_functions_and_preserve_real_kernel_E072",
-        "external_SysV_runtime_ABI_remains_not_promoted",
+        "external_SysV_f128_runtime_ABI_remains_not_promoted_with_concrete_blocker_reason",
         "f128_opaque_direct_call_return_abi_promoted_for_local_and_imported_return_only_mixed_order_two_f128_direct_and_stack_shapes",
         "f128_arbitrary_decimal_binary128_materialization_not_promoted",
         "f128_generic_ieee_arithmetic_nan_source_and_external_abi_surfaces_not_promoted",
@@ -3712,8 +3796,12 @@ receipt = {
     "extern_decl_is_kernel_split_promoted": module["scalar_abi_receipts"]["extern_decl_is_kernel_split_promoted"],
     "extern_decl_f128_typecheck_promoted": module["scalar_abi_receipts"]["extern_decl_f128_typecheck_promoted"],
     "extern_decl_real_kernel_e072_preserved": module["scalar_abi_receipts"]["extern_decl_real_kernel_e072_preserved"],
+    "external_sysv_f128_blocker_recorded": module["scalar_abi_receipts"]["external_sysv_f128_blocker_recorded"],
+    "native_v2_machineir_external_call_symbol_promoted": module["scalar_abi_receipts"]["native_v2_machineir_external_call_symbol_promoted"],
     "f128_external_sysv_abi_promoted": module["scalar_abi_receipts"]["f128_external_sysv_abi_promoted"],
     "f128_external_sysv_runtime_promoted": module["scalar_abi_receipts"]["f128_external_sysv_runtime_promoted"],
+    "f128_external_sysv_argument_oracle_promoted": module["scalar_abi_receipts"]["f128_external_sysv_argument_oracle_promoted"],
+    "f128_external_sysv_return_oracle_promoted": module["scalar_abi_receipts"]["f128_external_sysv_return_oracle_promoted"],
     "native_v2_external_relocation_promoted": module["scalar_abi_receipts"]["native_v2_external_relocation_promoted"],
     "f128_native_general_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_general_decimal_binary128_materialization_promoted"],
     "f128_native_arbitrary_decimal_binary128_materialization_promoted": module["scalar_abi_receipts"]["f128_native_arbitrary_decimal_binary128_materialization_promoted"],
