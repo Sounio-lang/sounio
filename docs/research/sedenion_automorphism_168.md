@@ -13,13 +13,23 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.seden
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
-# The 168 IS a group: the sedenion signed-automorphism group ≅ PSL(2,7), fixing e₈ (executed)
+# The 168 IS a group: the sedenion monomial-automorphism subgroup ≅ PSL(2,7), fixing e₈ (executed)
+
+> **Correction (2026-07-07, Erratum E1 of `docs/papers/sedenion-fano-geometry.md`).** This document
+> originally called the order-168 group "`Aut(𝕊)`". That is imprecise: 168 is the **signed-permutation
+> (monomial) automorphism subgroup** that fixes e₈ — a *finite subgroup* of the full automorphism group,
+> which by Brown's theorem is `Aut(𝕊) ≅ Aut(𝕆) × S₃ = G₂ × S₃` (a 14-dim continuous `G₂` times the
+> triality `S₃`). The monomial-168 sits inside the `G₂` factor; the fermion-generation structure lives in
+> the *disjoint* `S₃` (triality) factor, so it cannot be realised as a signed permutation of basis units.
+> Read every "`Aut(𝕊)`" below as "the monomial-automorphism subgroup". The executed facts (order 168,
+> `≅ PSL(2,7)`, fixes e₈, Fano collineations) are unchanged and correct.
 
 **One line.** The `168 = |PSL(2,7)|` that pervades the sedenion geometry (the ZD census, the non-Fano
 count, the 7 fibers, the 42 quartets, the `1848 = 11·168` associator side) **is a genuine group**: the
-sedenion **signed-automorphism group** `Aut(𝕊)`, of order **168**, sitting inside `GL(4,2) ≅ A₈` (order
-20160) at index 120. And it **fixes e₈** — the octonion→sedenion doubling seam is the *unique fixed
-point* of the whole symmetry group. Consequently **`1848 = 11·168` is NOT a group order**: the 168 is a
+sedenion **signed-permutation (monomial) automorphism subgroup** (fixing e₈), of order **168**, sitting
+inside `GL(4,2) ≅ A₈` (order 20160) at index 120 — a finite subgroup of `Aut(𝕊) ≅ G₂ × S₃`, not the full
+group (see the Correction above). And it **fixes e₈** — the octonion→sedenion doubling seam is the
+*unique fixed point* of this group. Consequently **`1848 = 11·168` is NOT a group order**: the 168 is a
 group, but the 11 is combinatorial (the e₈-grade factor), not a group index.
 
 ## Definition
