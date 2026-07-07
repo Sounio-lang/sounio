@@ -514,6 +514,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.preregistrations.2026-04-21-ossm-168-depression-v3 | repo_only | docs/papers/preregistrations/2026-04-21_ossm_168_depression_v3.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.preregistrations.deviations | repo_only | docs/papers/preregistrations/DEVIATIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.readme | repo_only | docs/papers/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.sedenion-fano-geometry | repo_only | docs/papers/sedenion-fano-geometry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sounio-arxiv-draft | repo_only | docs/papers/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.submission-checklist | repo_only | docs/papers/submission_checklist.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.techrxiv-submission | repo_only | docs/papers/TECHRXIV_SUBMISSION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
