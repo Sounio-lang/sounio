@@ -1442,6 +1442,9 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.dst = machine_operand_stack_slot(instr.dst)
         mi.src1 = machine_operand_stack_slot(instr.src1)
         mi.aux = machine_operand_imm64(instr.field_idx)
+        if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+            mi.cond = 1
+        }
         return mi
     }
     if instr.op == IrOpcode::IrFieldSet {
@@ -2329,9 +2332,22 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
         } else if instr.op == IrOpcode::IrAlloc {
             out.legal_instr_count = out.legal_instr_count + 2
         } else if instr.op == IrOpcode::IrFieldGet {
-            out.legal_instr_count = out.legal_instr_count + 3
+            if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+                out.legal_instr_count = out.legal_instr_count + 5
+                if instr.dst >= 0 && instr.dst < 255 {
+                    is_f128_slot[instr.dst as usize] = 1
+                }
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 3
+            }
         } else if instr.op == IrOpcode::IrFieldSet {
-            out.legal_instr_count = out.legal_instr_count + 3
+            let src_slot = instr.src2
+            let src_is_f128 = if src_slot >= 0 && src_slot < 256 { is_f128_slot[src_slot as usize] } else { 0 }
+            if src_is_f128 == 1 {
+                out.legal_instr_count = out.legal_instr_count + 5
+            } else {
+                out.legal_instr_count = out.legal_instr_count + 3
+            }
         } else if instr.op == IrOpcode::IrIndexGet {
             out.legal_instr_count = out.legal_instr_count + 4
         } else if instr.op == IrOpcode::IrIndexSet {
@@ -2785,15 +2801,30 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), dst))
-            native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            if instr.cond == 1 {
+                let dst_hi = (*out).temp_count
+                (*out).temp_count = dst_hi + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_field_load(dst_hi, base, machine_instr_aux_value(instr) + 1))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, dst_hi))
+                native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+            } else {
+                native_v2_mark_slot_ref(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
             let base = (*out).temp_count
             (*out).temp_count = base + 1
             let src = (*out).temp_count
             (*out).temp_count = src + 1
+            let src_slot = machine_instr_src2_value(instr)
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
-            native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(src, machine_instr_src2_value(instr)))
+            native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(src, src_slot))
             native_v2_emit_legal_instr_mut(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr)))
+            if native_v2_slot_is_f128_ref(out, src_slot) {
+                let src_hi = (*out).temp_count
+                (*out).temp_count = src_hi + 1
+                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(src_hi, src_slot + 1))
+                native_v2_emit_legal_instr_mut(out, native_v2_make_field_store(base, src_hi, machine_instr_aux_value(instr) + 1))
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
             let base = (*out).temp_count
             (*out).temp_count = base + 1
@@ -3289,15 +3320,30 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             out = _emit_legal_byval(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
             out = _emit_legal_byval(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr)))
             out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), dst))
-            out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            if instr.cond == 1 {
+                let dst_hi = out.temp_count
+                out.temp_count = dst_hi + 1
+                out = _emit_legal_byval(out, native_v2_make_field_load(dst_hi, base, machine_instr_aux_value(instr) + 1))
+                out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr) + 1, dst_hi))
+                out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_F128_BINARY128, 2)
+            } else {
+                out = native_v2_mark_slot_byval(out, machine_instr_dst_value(instr), MIR_SLOT_KIND_I64, 1)
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
             let base = out.temp_count
             out.temp_count = base + 1
             let src = out.temp_count
             out.temp_count = src + 1
+            let src_slot = machine_instr_src2_value(instr)
             out = _emit_legal_byval(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
-            out = _emit_legal_byval(out, native_v2_make_load_stack(src, machine_instr_src2_value(instr)))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(src, src_slot))
             out = _emit_legal_byval(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr)))
+            if native_v2_slot_is_f128_byval(out, src_slot) {
+                let src_hi = out.temp_count
+                out.temp_count = src_hi + 1
+                out = _emit_legal_byval(out, native_v2_make_load_stack(src_hi, src_slot + 1))
+                out = _emit_legal_byval(out, native_v2_make_field_store(base, src_hi, machine_instr_aux_value(instr) + 1))
+            }
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
             let base = out.temp_count
             out.temp_count = base + 1

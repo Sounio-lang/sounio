@@ -787,6 +787,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                 var entry = empty_struct_layout_entry()
                                 entry.type_name = head_owned.name
                                 var fc: i64 = 0
+                                var field_offset: i64 = 0
                                 var fcur = (*sd).fields
                                 var keep_going = true
                                 while keep_going && fc < 64 {
@@ -794,9 +795,10 @@ fn lowerer_preseed_external_struct_items_mut(
                                         Some(flist) => {
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name: (*flist).head.name,
-                                                index: fc,
-                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else { 0 },
+                                                index: field_offset,
+                                                is_float: lower_type_expr_field_float_kind(&(*flist).head.ty),
                                             }
+                                            field_offset = field_offset + lower_type_expr_field_width_words(&(*flist).head.ty)
                                             fc = fc + 1
                                             fcur = (*flist).tail
                                         }
@@ -862,7 +864,7 @@ fn lowerer_register_struct_fields_mut(
                     lay_entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
-                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                        is_float: lower_type_expr_field_float_kind(&(*list).head.ty),
                     }
                     lay_entry.field_count = fc + 1
                     struct_layouts.entries[layout_idx as usize] = lay_entry
@@ -871,7 +873,7 @@ fn lowerer_register_struct_fields_mut(
                     lo.had_error = true
                 }
                 current = &(*list).tail
-                field_idx = field_idx + 1
+                field_idx = field_idx + lower_type_expr_field_width_words(&(*list).head.ty)
             }
             _ => break
         }
@@ -1364,12 +1366,12 @@ fn ir_fast_summary_register_struct_fields_owned(
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
-                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                    is_float: lower_type_expr_field_float_kind(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
             }
-            ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
+            ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + lower_type_expr_field_width_words(&(*list).head.ty))
         }
         None => table,
     }
@@ -2240,6 +2242,18 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
         Some(te) => lower_type_expr_is_array_of_f64(&(*te)),
         None => false,
     }
+}
+
+fn lower_type_expr_field_float_kind(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if lower_type_expr_is_f128(te) { return 3 }
+    if lower_type_expr_is_f64(te) { return 1 }
+    if lower_type_expr_is_array_of_f64(te) { return 2 }
+    0
+}
+
+fn lower_type_expr_field_width_words(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if lower_type_expr_is_f128(te) { return 2 }
+    1
 }
 
 // True iff the first call argument is an integer LITERAL (ExprIntLit). This is the
@@ -4490,6 +4504,41 @@ impl Lowerer {
         false
     }
 
+    fn field_is_f128_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            var fi: i64 = 0
+            while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
+                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+                }
+                fi = fi + 1
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    fn field_is_f128_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 {
+            return false
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        false
+    }
+
     fn field_array_elem_is_float_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
         if type_name.len <= 0 {
             return false
@@ -4533,6 +4582,21 @@ impl Lowerer {
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     let type_name = self.lookup_local_struct_type((*base_expr).name)
                     if self.field_is_float_for_struct(type_name, field_name) {
+                        return true
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn field_is_f128_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    if self.field_is_f128_for_struct(type_name, field_name) {
                         return true
                     }
                 }
@@ -4851,13 +4915,13 @@ impl Lowerer {
                         lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
-                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
+                            is_float: lower_type_expr_field_float_kind(&(*list).head.ty),
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
-                    field_idx = field_idx + 1
+                    field_idx = field_idx + lower_type_expr_field_width_words(&(*list).head.ty)
                 }
                 _ => break
             }
@@ -5537,10 +5601,17 @@ impl Lowerer {
                 var fi: i64 = 0
                 while fi < (*lo.struct_layouts).entries[si as usize].field_count {
                     let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
-                    let pair_tmp = lo.fresh_reg()
+                    let pair_tmp = if field.is_float == 3 { lo.fresh_wide_reg(2) } else { lo.fresh_reg() }
                     lo = pair_tmp.0
                     let tmp = pair_tmp.1
-                    lo = lo.emit(ir_field_get(tmp, src_reg, field.index, field.name))
+                    var get_instr = ir_field_get(tmp, src_reg, field.index, field.name)
+                    if field.is_float == 3 {
+                        get_instr.imm_flags = IR_F128_REG_MARKER_FLAG
+                    }
+                    lo = lo.emit(get_instr)
+                    if field.is_float == 3 {
+                        lo = lo.emit(ir_mark_f128_reg(tmp))
+                    }
                     lo = lo.emit(ir_field_set(dest_reg, field.index, tmp, field.name))
                     fi = fi + 1
                 }
@@ -8463,7 +8534,8 @@ impl Lowerer {
             return (lo_await, base_await)
         }
         let fidx = self.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = self.field_is_float_for_base_ref(&e.left, e.name) || self.field_is_float_by_name_simple(e.name)
+        let field_is_f128 = self.field_is_f128_for_base_ref(&e.left, e.name) || self.field_is_f128_by_name_simple(e.name)
+        let field_is_float = !field_is_f128 && (self.field_is_float_for_base_ref(&e.left, e.name) || self.field_is_float_by_name_simple(e.name))
         let field_array_elem_is_float = self.field_array_elem_is_float_for_base_ref(&e.left, e.name)
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
@@ -8482,6 +8554,8 @@ impl Lowerer {
             print_int(fidx)
             print(" field_float=")
             print_int(if field_is_float { 1 } else { 0 })
+            print(" field_f128=")
+            print_int(if field_is_f128 { 1 } else { 0 })
             print(" field_array_float=")
             print_int(if field_array_elem_is_float { 1 } else { 0 })
             print("\n")
@@ -8517,18 +8591,22 @@ impl Lowerer {
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base = pair_b.1
-        let pair_d = lo1.fresh_reg()
+        let pair_d = if field_is_f128 { lo1.fresh_wide_reg(2) } else { lo1.fresh_reg() }
         let lo2 = pair_d.0
         let dst = pair_d.1
         var instr = ir_field_get(dst, base, fidx, e.name)
         if base_is_ref {
             instr.label_id = 1
         }
-        if field_is_float {
+        if field_is_f128 {
+            instr.imm_flags = IR_F128_REG_MARKER_FLAG
+        } else if field_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
         }
         var lo3 = lo2.emit(instr)
-        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+        if instr.imm_flags == IR_F128_REG_MARKER_FLAG {
+            lo3 = lo3.emit(ir_mark_f128_reg(dst))
+        } else if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
         }
         if field_array_elem_is_float {
