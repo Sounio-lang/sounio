@@ -495,6 +495,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_arithmetic_promoted": False,
         "f128_runtime_add_sub_helper_promoted_elsewhere": True,
         "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
+        "f128_runtime_positive_rounded_decimal_add_matrix_promoted_elsewhere": True,
         "f128_software_helpers_promoted": False,
         "f128_nan_inf_contract_promoted": False,
         "cases": cases,

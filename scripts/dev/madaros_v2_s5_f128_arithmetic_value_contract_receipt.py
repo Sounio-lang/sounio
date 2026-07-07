@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Emit a Madaros v2 S5.18 f128 arithmetic value-contract receipt.
+"""Emit a Madaros v2 S5.19 f128 arithmetic value-contract receipt.
 
 This promotes a finite, exact binary128 arithmetic value-contract matrix
 end-to-end for local literal-derived values plus a finite runtime binop helper
 for callee-side f128 parameters that carry supported value-contract binary128
-words plus a bounded positive rounded-tenths add helper for the canonical
-binary128(0.1) + binary128(0.2) != literal 0.3 distinction. It deliberately
+words plus a bounded positive rounded-decimal add matrix for canonical
+binary128 sums that differ from their source decimal spellings. It deliberately
 does not promote generic IEEE helpers, NaN/Inf, arbitrary
 decimal arithmetic, external SysV f128 ABI, SRET, or non-value-contract runtime helpers.
 Runtime division is promoted only for exact quotient cases; divide-by-zero and
@@ -27,7 +27,7 @@ from typing import Any
 
 
 SCHEMA = "madaros.v2.s5.f128_arithmetic_value_contract_receipt/0.1"
-STAGE = "S5_18_F128_RUNTIME_ROUNDED_TENTHS_ADD_HELPER"
+STAGE = "S5_19_F128_RUNTIME_ROUNDED_DECIMAL_ADD_MATRIX"
 MACHINE_SCHEMA = "madaros.v2.s5.machine_module/0.1"
 
 
@@ -282,6 +282,104 @@ fn main() -> i64 {
 }
 """,
         "expected_hex": "3ffd3333333333333333333333333334",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_one_tenth_seven_tenths_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.1 as f128
+  let y: f128 = 0.7 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffe9999999999999999999999999999",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_two_tenths_seven_tenths_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.2 as f128
+  let y: f128 = 0.7 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffecccccccccccccccccccccccccccc",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_three_tenths_six_tenths_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.3 as f128
+  let y: f128 = 0.6 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ffecccccccccccccccccccccccccccc",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_six_tenths_seven_tenths_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.6 as f128
+  let y: f128 = 0.7 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff4ccccccccccccccccccccccccccc",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_nine_tenths_two_tenths_runtime_helper_to_literal_equivalent_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.9 as f128
+  let y: f128 = 0.2 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff199999999999999999999999999a",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_hundredth_thousandth_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 0.01 as f128
+  let y: f128 = 0.001 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3ff86872b020c49ba5e353f7ced91687",
+        "expected_metadata": None,
+        "expected_machine_opcode": 131,
+    },
+    {
+        "case_id": "f128_add_one_point_2345_thousandth_runtime_helper_to_binary_sum",
+        "source": """fn main() -> i64 {
+  let x: f128 = 1.2345 as f128
+  let y: f128 = 0.001 as f128
+  let z: f128 = x + y
+  let w: f128 = z
+  0
+}
+""",
+        "expected_hex": "3fff3c49ba5e353f7ced916872b020c5",
         "expected_metadata": None,
         "expected_machine_opcode": 131,
     },
@@ -620,6 +718,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_native_arithmetic_promoted": True,
         "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
         "f128_runtime_positive_rounded_tenths_add_helper_promoted": True,
+        "f128_runtime_positive_rounded_decimal_add_matrix_promoted": True,
         "f128_native_ieee_binary128_materialization_promoted": False,
         "f128_native_general_decimal_binary128_materialization_promoted": False,
         "f128_native_arbitrary_decimal_binary128_materialization_promoted": False,
@@ -637,7 +736,7 @@ def emit(args: argparse.Namespace) -> None:
             "direct internal calls whose callee returns a literal f128 value-contract preserve metadata into caller arithmetic",
             "direct internal calls whose callee returns one f128 parameter preserve that argument's exact value-contract metadata into caller arithmetic",
             "callee-side f128 add/sub/mul/div over finite supported binary128 value-contract words executes through a fail-closed runtime helper",
-            "positive rounded-tenths runtime add helper distinguishes binary128(0.1)+binary128(0.2) from literal 0.3",
+            "positive rounded-decimal runtime add matrix distinguishes binary128 sums from source decimal spellings",
             "unsupported f128 arithmetic remains fail-closed at compile time or through runtime rc=12 helper traps",
             "callee-side f128 div is exact-quotient-only; divide-by-zero and non-exact quotients fail closed with rc=12",
             "non-value-contract runtime arithmetic remains fail-closed until real binary128 software helpers exist",

@@ -4,7 +4,7 @@
 This receipt closes the S5 unsupported-width and remaining f128 blocker
 diagnostic slice. It deliberately does not promote full f128 execution. Instead
 it proves that numeric widths outside the promoted native-v2 S5 set fail closed,
-that the S5.18 bounded rounded-tenths add helper remains promoted, and that f128
+that the S5.19 bounded rounded-decimal add matrix remains promoted, and that f128
 operations beyond the current contract fail with specific MachineModule details
 instead of silently emitting an ELF or falling through legacy code.
 """
@@ -363,6 +363,7 @@ def emit(args: argparse.Namespace) -> int:
         "f128_machine_module_supported": "mixed",
         "f128_runtime_fail_closed_rc12": False,
         "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
+        "f128_runtime_positive_rounded_decimal_add_matrix_promoted_elsewhere": True,
         "f128_machine_module_unsupported_details": [
             "call_arity_gt_8",
         ],
@@ -380,7 +381,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_rounded_decimal_arithmetic_promoted_by_S5_18_helper",
+            "f128_native_v2_rounded_decimal_arithmetic_promoted_by_S5_19_add_matrix",
             "f128_native_v2_overwide_arg_shape_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",

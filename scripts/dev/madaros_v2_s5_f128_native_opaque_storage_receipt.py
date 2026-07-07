@@ -4,8 +4,8 @@
 S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
 words in native-v2 x86 ELF output. Later S5 receipts promote direct f128
     call/return shapes and S5.8 promotes a finite runtime add/sub helper. This
-    receipt still guards over-wide f128 call shapes and records that S5.18
-    promotes bounded rounded-tenths add while full IEEE arithmetic remains
+    receipt still guards over-wide f128 call shapes and records that S5.19
+    promotes a bounded rounded-decimal add matrix while full IEEE arithmetic remains
     outside this receipt.
 """
 
@@ -317,6 +317,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_arithmetic_promoted": False,
             "f128_runtime_add_sub_helper_promoted_elsewhere": True,
             "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
+            "f128_runtime_positive_rounded_decimal_add_matrix_promoted_elsewhere": True,
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
             "f128_external_sysv_abi_promoted": False,
             "f128_sret_abi_promoted": False,
