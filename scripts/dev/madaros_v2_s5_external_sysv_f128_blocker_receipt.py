@@ -29,6 +29,16 @@ PASSTHRU_SOURCE = """extern "C" {
 fn main() -> i64 { 0 }
 """
 
+PASSTHRU_CALL_SOURCE = """extern "C" {
+  fn passthru_f128(x: f128) -> f128;
+}
+fn main() -> i64 {
+  let x: f128 = 1.0 as f128
+  let y: f128 = passthru_f128(x)
+  0
+}
+"""
+
 
 def repo_root_from_script() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -136,6 +146,16 @@ def collect_source_evidence(root: Path) -> list[dict[str, Any]]:
             "MIR_OP_PSEUDO_CALL",
             "native_v2_internal_call_path_is_fn_id_shape",
         ),
+        require_fragment(
+            root / "self-hosted" / "native" / "machine_ir.sio",
+            "MIR_OP_PSEUDO_CALL_EXTERN",
+            "native_v2_has_explicit_external_call_pseudo_shape",
+        ),
+        require_fragment(
+            root / "self-hosted" / "native" / "machine_ir.sio",
+            "external_sysv_abi_pending",
+            "native_v2_external_sysv_boundary_fails_closed_with_named_detail",
+        ),
     ]
 
 
@@ -169,6 +189,71 @@ def emit_passthru_case(root: Path, compiler: Path, out_dir: Path, timeout_s: int
     }
 
 
+def emit_passthru_call_boundary_case(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
+    case_id = "extern_c_passthru_f128_call_reaches_machineir_boundary"
+    source_path = out_dir / f"{case_id}.sio"
+    elf_path = out_dir / f"{case_id}.native_v2"
+    mm_path = out_dir / f"{case_id}.machine_module.json"
+    log_path = out_dir / f"{case_id}.native_v2.log"
+    source_path.write_text(PASSTHRU_CALL_SOURCE, encoding="utf-8")
+    rc, stdout, stderr = run_command(
+        [
+            str(compiler),
+            "--native-v2-compile",
+            str(source_path),
+            "-o",
+            str(elf_path),
+            "--machine-module-json",
+            str(mm_path),
+        ],
+        root,
+        timeout_s,
+    )
+    log = stdout + stderr
+    log_path.write_text(log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: wrapper command must return rc=0 while reporting native-v2 failure; log={log_path}")
+    if "native_v2_compile: FAIL to_file rc=12" not in log:
+        raise SystemExit(f"{case_id}: expected native-v2 fail-closed rc=12; log={log_path}")
+    if "Segmentation fault" in log or "SIGSEGV" in log or "legacy fallback" in log:
+        raise SystemExit(f"{case_id}: crash or fallback detected; log={log_path}")
+    if elf_path.exists() and elf_path.stat().st_size > 0:
+        raise SystemExit(f"{case_id}: external SysV f128 blocker must not emit an ELF")
+    if not mm_path.exists() or mm_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: expected MachineModule JSON for classified external SysV blocker")
+
+    module = json.loads(mm_path.read_text(encoding="utf-8"))
+    if module.get("schema") != "madaros.v2.s5.machine_module/0.1":
+        raise SystemExit(f"{case_id}: bad MachineModule schema")
+    if module.get("legacy_fallback") is not False:
+        raise SystemExit(f"{case_id}: MachineModule used fallback")
+    if module.get("supported") is not False:
+        raise SystemExit(f"{case_id}: MachineModule must remain unsupported until external SysV ABI is implemented")
+    if module.get("unsupported_detail") != "external_sysv_abi_pending":
+        raise SystemExit(
+            f"{case_id}: expected unsupported_detail external_sysv_abi_pending, "
+            f"got {module.get('unsupported_detail')!r}"
+        )
+    return {
+        "case_id": case_id,
+        "class": "negative_native_v2_external_sysv_call_boundary",
+        "symbol": "passthru_f128",
+        "signature": "(f128)->f128",
+        "source_sha256": sha256_text(PASSTHRU_CALL_SOURCE),
+        "native_v2_compile_rc": rc,
+        "native_v2_compile_log_sha256": sha256_text(log),
+        "elf_emitted": False,
+        "machine_module_json_emitted": True,
+        "machine_module_json_sha256": sha256_text(stable_json(module)),
+        "machine_module_supported": module.get("supported"),
+        "machine_module_unsupported_detail": module.get("unsupported_detail"),
+        "legacy_fallback": False,
+        "segfault": False,
+        "native_v2_machineir_external_call_symbol_classified": True,
+        "native_v2_external_sysv_f128_promoted": False,
+    }
+
+
 def emit(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     compiler = Path(args.compiler).resolve()
@@ -178,19 +263,23 @@ def emit(args: argparse.Namespace) -> int:
 
     source_evidence = collect_source_evidence(root)
     passthru_case = emit_passthru_case(root, compiler, out_dir, int(args.timeout))
+    passthru_call_case = emit_passthru_call_boundary_case(root, compiler, out_dir, int(args.timeout))
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
         "target": "x86_64-linux",
         "case_id": CASE_ID,
-        "case_count": 1,
-        "cases": [passthru_case],
+        "case_count": 2,
+        "positive_case_count": 1,
+        "negative_boundary_case_count": 1,
+        "cases": [passthru_case, passthru_call_case],
         "source_evidence": source_evidence,
         "extern_decl_f128_typecheck_promoted": True,
         "parser_has_explicit_is_extern_bit": True,
         "ir_extern_strategy_promoted": True,
         "ir_call_extern_symbol_receipt_promoted": True,
+        "native_v2_machineir_external_call_symbol_classified": True,
         "native_v2_machineir_external_call_symbol_promoted": False,
         "native_v2_external_relocation_promoted": False,
         "f128_external_sysv_abi_promoted": False,
@@ -205,11 +294,10 @@ def emit(args: argparse.Namespace) -> int:
         "roundtrip_contract": [
             "extern_C_f128_declaration_typechecks_without_kernel_diagnostics",
             "lowerer_has_IR_STRATEGY_EXTERN_and_IrCallExtern_symbol_path",
-            "native_v2_external_symbol_call_shape_not_promoted",
+            "native_v2_external_symbol_call_shape_is_classified_as_external_sysv_abi_pending",
             "external_SysV_binary128_argument_and_return_oracle_not_promoted",
         ],
         "missing_full_obligations": [
-            "native-v2 MachineIR representation for external symbol calls",
             "external SysV relocation/link path for C functions in native-v2",
             "f128 SysV argument placement oracle against a C binary128 function",
             "f128 SysV return capture oracle against a C binary128 function",
