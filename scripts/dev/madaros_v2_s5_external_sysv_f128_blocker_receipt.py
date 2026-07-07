@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.3"
-STAGE = "S5_29_EXTERNAL_SYSV_F128_WRAPPER_LINK_SCALAR_ORACLE"
+SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.4"
+STAGE = "S5_30_EXTERNAL_SYSV_F128_AGGREGATE_SRET_BLOCKER_CLASSIFIED"
 CASE_ID = "external_sysv_f128_abi_blocked_front_half_received"
 
 PASSTHRU_SOURCE = """extern "C" {
@@ -43,6 +43,24 @@ fn main() -> i64 {
 
 PASSTHRU_HELPER_C = """_Float128 passthru_f128(_Float128 x) {
   return x;
+}
+"""
+
+AGGREGATE_SRET_SOURCE = """struct BoxF128 { tag: i64, x: f128, tail: i64 }
+extern "C" { fn make_box(x: f128, n: i64) -> BoxF128; }
+fn main() -> i64 {
+  let b = make_box(1.0 as f128, 40)
+  b.tag + b.tail
+}
+"""
+
+AGGREGATE_SRET_HELPER_C = """struct BoxF128 { long tag; _Float128 x; long tail; };
+struct BoxF128 make_box(_Float128 x, long n) {
+  struct BoxF128 b;
+  b.tag = n;
+  b.x = x;
+  b.tail = n + 1;
+  return b;
 }
 """
 
@@ -469,6 +487,122 @@ def emit_passthru_wrapper_link_case(root: Path, out_dir: Path, timeout_s: int) -
     }
 
 
+def emit_aggregate_sret_blocker_case(root: Path, compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
+    case_id = "extern_c_f128_aggregate_sret_remains_fail_closed"
+    source_path = out_dir / f"{case_id}.sio"
+    helper_path = out_dir / f"{case_id}.c"
+    helper_obj_path = out_dir / f"{case_id}.helper.o"
+    elf_path = out_dir / f"{case_id}.native_v2"
+    linked_path = out_dir / f"{case_id}.linked"
+    mm_path = out_dir / f"{case_id}.machine_module.json"
+    check_log_path = out_dir / f"{case_id}.check.log"
+    compile_log_path = out_dir / f"{case_id}.native_v2_compile.log"
+    helper_log_path = out_dir / f"{case_id}.helper_compile.log"
+    link_log_path = out_dir / f"{case_id}.native_v2_link.log"
+    source_path.write_text(AGGREGATE_SRET_SOURCE, encoding="utf-8")
+    helper_path.write_text(AGGREGATE_SRET_HELPER_C, encoding="utf-8")
+
+    rc, stdout, stderr = run_command([str(compiler), "check", str(source_path)], root, timeout_s)
+    check_log = stdout + stderr
+    check_log_path.write_text(check_log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: aggregate extern SRET front-half must typecheck, got rc={rc}; log={check_log_path}")
+
+    rc, stdout, stderr = run_command(
+        [
+            str(compiler),
+            "--native-v2-compile",
+            str(source_path),
+            "-o",
+            str(elf_path),
+            "--machine-module-json",
+            str(mm_path),
+        ],
+        root,
+        timeout_s,
+    )
+    compile_log = stdout + stderr
+    compile_log_path.write_text(compile_log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: wrapper command must return rc=0 while reporting fail-closed native-v2 status")
+    if "native_v2_compile: FAIL to_file rc=12" not in compile_log:
+        raise SystemExit(f"{case_id}: expected fail-closed native-v2 rc=12; log={compile_log_path}")
+    if "Segmentation fault" in compile_log or "SIGSEGV" in compile_log or "legacy fallback" in compile_log:
+        raise SystemExit(f"{case_id}: crash or fallback detected; log={compile_log_path}")
+    if elf_path.exists() and elf_path.stat().st_size > 0:
+        raise SystemExit(f"{case_id}: aggregate extern SRET blocker must not emit an executable")
+    if not mm_path.exists() or mm_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: expected MachineModule JSON for aggregate extern SRET blocker")
+
+    module = json.loads(mm_path.read_text(encoding="utf-8"))
+    if module.get("supported") is not False or module.get("unsupported_detail") != "external_sysv_abi_pending":
+        raise SystemExit(f"{case_id}: expected unsupported external_sysv_abi_pending MachineModule")
+    external_symbols: list[str] = []
+    for fn in module.get("functions", []):
+        symbols = fn.get("external_call_symbols", [])
+        if isinstance(symbols, list):
+            external_symbols.extend(str(sym) for sym in symbols)
+    if external_symbols != ["make_box"]:
+        raise SystemExit(f"{case_id}: expected MachineModule external_call_symbols ['make_box'], got {external_symbols!r}")
+
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if cc is None:
+        raise SystemExit(f"{case_id}: gcc/cc is required for aggregate SRET linker blocker assertion")
+    rc, stdout, stderr = run_host_command([cc, "-std=gnu11", "-c", str(helper_path), "-o", str(helper_obj_path)], root, timeout_s)
+    helper_log = stdout + stderr
+    helper_log_path.write_text(helper_log, encoding="utf-8")
+    if rc != 0 or not helper_obj_path.exists() or helper_obj_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: helper aggregate SRET object compile failed rc={rc}; log={helper_log_path}")
+    rc, stdout, stderr = run_command(
+        [
+            str(root / "bin" / "madaros"),
+            "native-v2-link",
+            str(source_path),
+            "-o",
+            str(linked_path),
+            "--link-object",
+            str(helper_obj_path),
+            "--cc",
+            cc,
+        ],
+        root,
+        timeout_s,
+    )
+    link_log = stdout + stderr
+    link_log_path.write_text(link_log, encoding="utf-8")
+    if rc == 0 or linked_path.exists():
+        raise SystemExit(f"{case_id}: aggregate extern SRET wrapper-link must remain blocked until ABI is promoted")
+    if "external_sysv_abi_pending" not in link_log or "compiler produced no object" not in link_log:
+        raise SystemExit(f"{case_id}: wrapper-link blocker reason changed; log={link_log_path}")
+
+    return {
+        "case_id": case_id,
+        "class": "negative_external_aggregate_sret_f128_blocker_boundary",
+        "symbol": "make_box",
+        "signature": "(f128,i64)->BoxF128",
+        "source_sha256": sha256_text(AGGREGATE_SRET_SOURCE),
+        "helper_c_sha256": sha256_text(AGGREGATE_SRET_HELPER_C),
+        "front_half_check_rc": 0,
+        "native_v2_compile_rc": 0,
+        "native_v2_compile_log_sha256": sha256_text(compile_log),
+        "elf_emitted": False,
+        "machine_module_json_emitted": True,
+        "machine_module_supported": False,
+        "machine_module_unsupported_detail": "external_sysv_abi_pending",
+        "machine_module_external_call_symbols": external_symbols,
+        "machine_module_external_call_symbol_count": len(external_symbols),
+        "native_v2_link_rc": rc,
+        "native_v2_link_log_sha256": sha256_text(link_log),
+        "legacy_fallback": False,
+        "segfault": False,
+        "external_aggregate_sret_front_half_typechecks": True,
+        "external_aggregate_sret_machineir_symbol_classified": True,
+        "external_aggregate_sret_wrapper_link_fail_closed": True,
+        "external_aggregate_sret_abi_promoted": False,
+        "f128_external_sysv_abi_promoted": False,
+    }
+
+
 def emit(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     compiler = Path(args.compiler).resolve()
@@ -481,16 +615,17 @@ def emit(args: argparse.Namespace) -> int:
     passthru_call_case = emit_passthru_call_boundary_case(root, compiler, out_dir, int(args.timeout))
     relocatable_oracle_case = emit_passthru_relocatable_oracle_case(root, compiler, out_dir, int(args.timeout))
     wrapper_link_case = emit_passthru_wrapper_link_case(root, out_dir, int(args.timeout))
+    aggregate_sret_blocker_case = emit_aggregate_sret_blocker_case(root, compiler, out_dir, int(args.timeout))
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
         "target": "x86_64-linux",
         "case_id": CASE_ID,
-        "case_count": 4,
+        "case_count": 5,
         "positive_case_count": 3,
-        "negative_boundary_case_count": 1,
-        "cases": [passthru_case, passthru_call_case, relocatable_oracle_case, wrapper_link_case],
+        "negative_boundary_case_count": 2,
+        "cases": [passthru_case, passthru_call_case, relocatable_oracle_case, wrapper_link_case, aggregate_sret_blocker_case],
         "source_evidence": source_evidence,
         "extern_decl_f128_typecheck_promoted": True,
         "parser_has_explicit_is_extern_bit": True,
@@ -510,11 +645,15 @@ def emit(args: argparse.Namespace) -> int:
         "f128_external_sysv_return_oracle_promoted": True,
         "f128_external_sysv_argument_wrapper_link_promoted": True,
         "f128_external_sysv_return_wrapper_link_promoted": True,
+        "external_aggregate_sret_front_half_typechecks": True,
+        "external_aggregate_sret_machineir_symbol_classified": True,
+        "external_aggregate_sret_wrapper_link_fail_closed": True,
+        "external_aggregate_sret_abi_promoted": False,
         "f128_internal_opaque_direct_call_abi_promoted_elsewhere": True,
         "f128_internal_opaque_return_abi_promoted_elsewhere": True,
         "f128_sysv_classes_recorded_as_metadata_only": True,
         "blocked": True,
-        "blocked_reason": "narrow_scalar_f128_wrapper_link_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open",
+        "blocked_reason": "narrow_scalar_f128_wrapper_link_oracle_promoted_but_external_aggregate_sret_f128_remains_fail_closed_at_external_sysv_abi_pending",
         "roundtrip_contract": [
             "extern_C_f128_declaration_typechecks_without_kernel_diagnostics",
             "lowerer_has_IR_STRATEGY_EXTERN_and_IrCallExtern_symbol_path",
@@ -523,6 +662,8 @@ def emit(args: argparse.Namespace) -> int:
             "native_v2_emit_obj_exports_an_ET_REL_object_with_R_X86_64_PLT32_to_passthru_f128",
             "linked_C__Float128_passthrough_oracle_exits_zero",
             "madaros_wrapper_native_v2_link_emits_a_linked_executable_for_the_scalar_passthrough_oracle",
+            "extern_C_f128_aggregate_sret_front_half_typechecks_but_native_v2_fails_closed_without_crash_or_elf",
+            "madaros_wrapper_native_v2_link_refuses_aggregate_sret_until_external_sysv_abi_is_promoted",
         ],
         "missing_full_obligations": [
             "self-hosted native-v2 direct executable mode still requires an internal/external linker path for unresolved externs",

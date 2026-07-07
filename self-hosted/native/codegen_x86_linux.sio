@@ -276,7 +276,7 @@ fn native_v2_count_ir_instrs(module: &IrModule) -> i64 with Mut, Panic, Div {
 }
 
 fn native_v2_machine_instr_is_safepoint(instr: MachineInstr) -> bool {
-    instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 || instr.opcode == MIR_OP_RET
+    instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 || instr.opcode == MIR_OP_CALL_EXTERN_SRET || instr.opcode == MIR_OP_RET
 }
 
 fn native_v2_count_machine_function_safepoints(func: MachineFunction) -> i64 with Mut, Panic, Div {
@@ -5083,6 +5083,13 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         return c
     }
 
+    if instr.opcode == MIR_OP_CALL_EXTERN_SRET {
+        let call_pos = c.code.len
+        c.code = emit_call_rel32_placeholder(c.code)
+        nc_add_extern_call_reloc(&! c, call_pos + 1, instr.name)
+        return c
+    }
+
     if instr.opcode == MIR_OP_CALL_EXTERN_F128 {
         nc_emit_movdqu_xmm0_rbp_disp32(&! c, ir_slot_offset(instr.src1.value))
         let call_pos = c.code.len
@@ -5350,7 +5357,7 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
         if native_v2_machine_instr_is_safepoint(instr) {
-            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 || instr.opcode == MIR_OP_CALL_EXTERN_SRET { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             native_v2_record_safepoint_mut(nc, fn_index, kind, i, (*nc).code.len - fn_offset, func.temp_count, (*nc).current_machine_spill_count)
         }
         (*nc) = native_v2_emit_machine_instr((*nc), instr)
@@ -5363,7 +5370,7 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
         if native_v2_machine_instr_is_safepoint(instr) {
-            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let kind = if instr.opcode == MIR_OP_CALL || instr.opcode == MIR_OP_CALL_EXTERN_F128 || instr.opcode == MIR_OP_CALL_EXTERN_SRET { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             native_v2_record_safepoint_mut(nc, fn_index, kind, i, (*nc).code.len - fn_offset, (*func).temp_count, (*nc).current_machine_spill_count)
         }
         (*nc) = native_v2_emit_machine_instr((*nc), instr)
@@ -5375,6 +5382,17 @@ fn native_v2_machine_function_has_extern_f128_call(func: MachineFunction) -> boo
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         if func.blocks[0].instrs[i as usize].opcode == MIR_OP_CALL_EXTERN_F128 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn native_v2_machine_function_has_extern_sret_call(func: MachineFunction) -> bool {
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        if func.blocks[0].instrs[i as usize].opcode == MIR_OP_CALL_EXTERN_SRET {
             return true
         }
         i = i + 1
@@ -5558,7 +5576,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     while mi < machine_func.blocks[0].instr_count {
         let em_instr = machine_func.blocks[0].instrs[mi as usize]
         if native_v2_machine_instr_is_safepoint(em_instr) {
-            let sp_kind = if em_instr.opcode == MIR_OP_CALL || em_instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let sp_kind = if em_instr.opcode == MIR_OP_CALL || em_instr.opcode == MIR_OP_CALL_EXTERN_F128 || em_instr.opcode == MIR_OP_CALL_EXTERN_SRET { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
             c = native_v2_record_safepoint(c, fn_index, sp_kind, mi, c.code.len - fn_offset, machine_func.temp_count, c.current_machine_spill_count)
         }
         c = native_v2_emit_machine_instr(c, em_instr)
@@ -9743,7 +9761,7 @@ fn mir_opcode_to_cgop(opcode: i64) -> i64 {
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { CGOP_STORE }
     else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { CGOP_MUL }
-    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 { CGOP_CALL }
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_CALL_EXTERN_SRET { CGOP_CALL }
     else if opcode == MIR_OP_RET { CGOP_RET }
     else if opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { CGOP_BRANCH }
     else { CGOP_MOV }
@@ -9754,7 +9772,7 @@ fn mir_opcode_latency(opcode: i64) -> i64 {
        || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 4 }
     else if opcode == MIR_OP_FLOAT_BINOP || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 5 }
     else if opcode == MIR_OP_BINOP { 3 }
-    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_RET { 5 }
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_CALL_EXTERN_SRET || opcode == MIR_OP_RET { 5 }
     else { 1 }
 }
 fn mir_opcode_port_mask(opcode: i64) -> i64 {
@@ -9763,7 +9781,7 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
     else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
             || opcode == MIR_OP_INDEX_STORE { 144 }                                // P4,P7
     else if opcode == MIR_OP_FLOAT_BINOP { 1 }                                    // P0 (FP MUL)
-    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_RET
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_CALL_EXTERN_F128 || opcode == MIR_OP_CALL_EXTERN_SRET || opcode == MIR_OP_RET
             || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC || opcode == MIR_OP_F128_VC_BINOP || opcode == MIR_OP_F128_ORDERED_CMP { 64 }                // P6
     else { 99 }                                                                    // P0,P1,P5,P6
 }
@@ -9821,7 +9839,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         }
         scan_extern_f128_call = scan_extern_f128_call + 1
     }
-    if !native_v2_scheduler_enabled() || has_extern_f128_call {
+    let has_extern_sret_call = native_v2_machine_function_has_extern_sret_call(machine_func)
+    if !native_v2_scheduler_enabled() || has_extern_f128_call || has_extern_sret_call {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
         let n = machine_func.blocks[0].instr_count
@@ -9832,7 +9851,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
             if mi < n {
                 let op = machine_func.blocks[0].instrs[mi as usize].opcode
                 if op == MIR_OP_LABEL || op == MIR_OP_JMP || op == MIR_OP_JCC
-                   || op == MIR_OP_RET || op == MIR_OP_CALL {
+                   || op == MIR_OP_RET || op == MIR_OP_CALL || op == MIR_OP_CALL_EXTERN_SRET {
                     is_terminator = true
                 }
             }
@@ -9870,7 +9889,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
                 if is_terminator {
                     let term_instr = machine_func.blocks[0].instrs[mi as usize]
                     if native_v2_machine_instr_is_safepoint(term_instr) {
-                        let sp_kind = if term_instr.opcode == MIR_OP_CALL || term_instr.opcode == MIR_OP_CALL_EXTERN_F128 { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            let sp_kind = if term_instr.opcode == MIR_OP_CALL || term_instr.opcode == MIR_OP_CALL_EXTERN_F128 || term_instr.opcode == MIR_OP_CALL_EXTERN_SRET { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
                         native_v2_record_safepoint_mut(nc, fn_index, sp_kind, mi, (*nc).code.len - function_offset, machine_func.temp_count, (*nc).current_machine_spill_count)
                     }
                     (*nc) = native_v2_emit_machine_instr((*nc), term_instr)
@@ -11363,6 +11382,9 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         out.code = a64_emit_bl(out.code, 0)
         out = a64_preview_record_call_patch(out, patch_offset, instr.src1.value)
         return (out, "")
+    }
+    if instr.opcode == MIR_OP_CALL_EXTERN_SRET {
+        return (out, "aarch64_extern_sret_pending")
     }
     if instr.opcode == MIR_OP_CAPTURE_RET {
         let ret_reg = if instr.cond == 1 { A64_X1 } else { A64_X0 }

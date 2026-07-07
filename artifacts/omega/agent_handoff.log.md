@@ -4396,3 +4396,44 @@ status: lock-released
   - Next-Action: promote the next external ABI slice: either direct backend
     linker integration for unresolved externs or external aggregate/SRET f128
     oracle coverage.
+
+## 2026-07-07 — Codex S5.30 External SysV f128 Aggregate/SRET Blocker Classified
+
+- Branch/worktree: `work/madaros-s-next-codex` in `/tmp/sounio-madaros-s-next-codex`
+- Scope: S5 external SysV f128 ABI, aggregate/SRET boundary.
+- What changed:
+  - Added `MIR_OP_CALL_EXTERN_SRET` and x86 ET_REL external-call emission support
+    as backend infrastructure, but did **not** promote source-level aggregate/SRET
+    extern lowering after the attempted promotion exposed a false executable path.
+  - Upgraded `scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py`
+    to schema `0.4`, stage
+    `S5_30_EXTERNAL_SYSV_F128_AGGREGATE_SRET_BLOCKER_CLASSIFIED`.
+  - Added a fifth receipt case,
+    `extern_c_f128_aggregate_sret_remains_fail_closed`, proving:
+    front-half accepts `extern "C" fn make_box(f128, i64) -> BoxF128`,
+    MachineModule exports `external_call_symbols=["make_box"]`, native-v2 fails
+    closed at `external_sysv_abi_pending`, no ELF/fallback/SIGSEGV occurs, and
+    `madaros native-v2-link` refuses the case until the ABI is actually promoted.
+  - Updated `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` to require the
+    0.4 schema, five cases, two negative boundary cases, and the aggregate/SRET
+    blocker flags.
+- Validation completed:
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py`
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `make build-madaros`
+  - isolated external SysV receipt: `cases=5 blocked=True`
+  - aggregate S5 gate: PASS, external SysV f128 blocker `cases=5 blocked=True`
+- Blocker status:
+  - Blocker-ID: `BLK-20260707-madaros-snext-external-sysv-f128-aggregate-sret`
+  - Status: open / classified
+  - Severity: B1 for S5 FULL/S6 readiness
+  - Class: compiler-external-abi-sret
+  - Owner: Codex / next compiler-lane agent
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: promote `extern "C" -> aggregate containing f128` through
+    source lowering, MachineModule, ET_REL, host link, and executable oracle
+    without internal stub shadowing; keep SMT 6/6 and aggregate S5 gate green.
+  - Evidence-Level: E3
+  - Next-Action: implement a real extern-SRET IR/MIR path rather than reusing
+    local `IrCallSret` in a way that lets optimization erase the external call.

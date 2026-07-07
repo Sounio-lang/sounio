@@ -2387,21 +2387,21 @@ for case_id in [
     if row.get("return_mismatch_e008_absent") is not True:
         raise SystemExit(f"{case_id} must prove E008 absent")
 
-if external_sysv_f128_blocker_receipt.get("schema") != "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.3":
+if external_sysv_f128_blocker_receipt.get("schema") != "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.4":
     raise SystemExit("bad S5 external SysV f128 blocker receipt schema")
 if external_sysv_f128_blocker_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing external SysV f128 blocker receipt")
-if external_sysv_f128_blocker_receipt.get("stage_contract_level") != "S5_29_EXTERNAL_SYSV_F128_WRAPPER_LINK_SCALAR_ORACLE":
-    raise SystemExit("external SysV f128 blocker receipt must declare S5.29 wrapper-link scalar oracle stage contract")
-if external_sysv_f128_blocker_receipt.get("case_count") != 4:
-    raise SystemExit("external SysV f128 blocker receipt must contain exactly four passthru_f128 boundary/oracle cases")
+if external_sysv_f128_blocker_receipt.get("stage_contract_level") != "S5_30_EXTERNAL_SYSV_F128_AGGREGATE_SRET_BLOCKER_CLASSIFIED":
+    raise SystemExit("external SysV f128 blocker receipt must declare S5.30 aggregate SRET blocker stage contract")
+if external_sysv_f128_blocker_receipt.get("case_count") != 5:
+    raise SystemExit("external SysV f128 blocker receipt must contain exactly five scalar/oracle/aggregate-SRET cases")
 if external_sysv_f128_blocker_receipt.get("positive_case_count") != 3:
     raise SystemExit("external SysV f128 blocker receipt must contain declaration, relocatable oracle, and wrapper-link oracle positive cases")
-if external_sysv_f128_blocker_receipt.get("negative_boundary_case_count") != 1:
-    raise SystemExit("external SysV f128 blocker receipt must contain one native-v2 boundary case")
+if external_sysv_f128_blocker_receipt.get("negative_boundary_case_count") != 2:
+    raise SystemExit("external SysV f128 blocker receipt must contain two native-v2 boundary cases")
 if external_sysv_f128_blocker_receipt.get("blocked") is not True:
     raise SystemExit("external SysV f128 blocker receipt must be a blocker receipt")
-if external_sysv_f128_blocker_receipt.get("blocked_reason") != "narrow_scalar_f128_wrapper_link_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open":
+if external_sysv_f128_blocker_receipt.get("blocked_reason") != "narrow_scalar_f128_wrapper_link_oracle_promoted_but_external_aggregate_sret_f128_remains_fail_closed_at_external_sysv_abi_pending":
     raise SystemExit("external SysV f128 blocker receipt blocked_reason mismatch")
 for field in [
     "extern_decl_f128_typecheck_promoted",
@@ -2424,11 +2424,15 @@ for field in [
     "f128_internal_opaque_direct_call_abi_promoted_elsewhere",
     "f128_internal_opaque_return_abi_promoted_elsewhere",
     "f128_sysv_classes_recorded_as_metadata_only",
+    "external_aggregate_sret_front_half_typechecks",
+    "external_aggregate_sret_machineir_symbol_classified",
+    "external_aggregate_sret_wrapper_link_fail_closed",
 ]:
     if external_sysv_f128_blocker_receipt.get(field) is not True:
         raise SystemExit(f"external SysV f128 blocker receipt missing required true flag: {field}")
 for field in [
     "f128_external_sysv_abi_promoted",
+    "external_aggregate_sret_abi_promoted",
 ]:
     if external_sysv_f128_blocker_receipt.get(field) is not False:
         raise SystemExit(f"external SysV f128 blocker receipt must not overclaim {field}")
@@ -2438,6 +2442,7 @@ if set(external_sysv_cases) != {
     "extern_c_passthru_f128_call_reaches_machineir_boundary",
     "extern_c_passthru_f128_native_v2_relocatable_oracle",
     "extern_c_passthru_f128_native_v2_wrapper_link_oracle",
+    "extern_c_f128_aggregate_sret_remains_fail_closed",
 }:
     raise SystemExit(f"external SysV f128 blocker receipt cases mismatch: {sorted(external_sysv_cases)}")
 passthru_f128 = external_sysv_cases["extern_c_passthru_f128_decl_received"]
@@ -2499,6 +2504,30 @@ for field in [
 ]:
     if passthru_wrapper_link.get(field) is not True:
         raise SystemExit(f"external SysV f128 wrapper-link oracle missing true flag: {field}")
+aggregate_sret_blocker = external_sysv_cases["extern_c_f128_aggregate_sret_remains_fail_closed"]
+if aggregate_sret_blocker.get("symbol") != "make_box" or aggregate_sret_blocker.get("signature") != "(f128,i64)->BoxF128":
+    raise SystemExit("external aggregate SRET blocker must identify make_box (f128,i64)->BoxF128")
+if aggregate_sret_blocker.get("front_half_check_rc") != 0:
+    raise SystemExit("external aggregate SRET blocker front-half must typecheck")
+if aggregate_sret_blocker.get("machine_module_supported") is not False:
+    raise SystemExit("external aggregate SRET MachineModule must remain unsupported")
+if aggregate_sret_blocker.get("machine_module_unsupported_detail") != "external_sysv_abi_pending":
+    raise SystemExit("external aggregate SRET blocker reason must remain external_sysv_abi_pending")
+if aggregate_sret_blocker.get("machine_module_external_call_symbols") != ["make_box"]:
+    raise SystemExit("external aggregate SRET blocker must export make_box as MachineModule external_call_symbols")
+if aggregate_sret_blocker.get("elf_emitted") is not False or aggregate_sret_blocker.get("legacy_fallback") is not False or aggregate_sret_blocker.get("segfault") is not False:
+    raise SystemExit("external aggregate SRET blocker must not emit ELF, fallback, or segfault")
+if aggregate_sret_blocker.get("native_v2_link_rc") == 0:
+    raise SystemExit("external aggregate SRET wrapper-link must remain blocked")
+for field in [
+    "external_aggregate_sret_front_half_typechecks",
+    "external_aggregate_sret_machineir_symbol_classified",
+    "external_aggregate_sret_wrapper_link_fail_closed",
+]:
+    if aggregate_sret_blocker.get(field) is not True:
+        raise SystemExit(f"external aggregate SRET blocker missing true flag: {field}")
+if aggregate_sret_blocker.get("external_aggregate_sret_abi_promoted") is not False:
+    raise SystemExit("external aggregate SRET blocker must not overclaim ABI promotion")
 if extern_cases["kernel_nonunit_return_still_rejected"].get("real_kernel_still_rejected") is not True:
     raise SystemExit("extern declaration receipt must preserve real kernel E072 rejection")
 
@@ -3554,6 +3583,10 @@ module = {
         "f128_external_sysv_return_oracle_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_return_oracle_promoted"],
         "f128_external_sysv_argument_wrapper_link_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_argument_wrapper_link_promoted"],
         "f128_external_sysv_return_wrapper_link_promoted": external_sysv_f128_blocker_receipt["f128_external_sysv_return_wrapper_link_promoted"],
+        "external_aggregate_sret_front_half_typechecks": external_sysv_f128_blocker_receipt["external_aggregate_sret_front_half_typechecks"],
+        "external_aggregate_sret_machineir_symbol_classified": external_sysv_f128_blocker_receipt["external_aggregate_sret_machineir_symbol_classified"],
+        "external_aggregate_sret_wrapper_link_fail_closed": external_sysv_f128_blocker_receipt["external_aggregate_sret_wrapper_link_fail_closed"],
+        "external_aggregate_sret_abi_promoted": external_sysv_f128_blocker_receipt["external_aggregate_sret_abi_promoted"],
         "missing_full_obligations": external_sysv_f128_blocker_receipt["missing_full_obligations"],
         "cases": external_sysv_f128_blocker_receipt["cases"],
     },

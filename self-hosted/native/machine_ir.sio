@@ -5,7 +5,7 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name, make_name, name_eq}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_F128_REG_MARKER_FLAG}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_F128_REG_MARKER_FLAG, IR_STRATEGY_EXTERN}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 512
@@ -74,6 +74,7 @@ pub let MIR_OP_STACK_ARG_PUSH: i64 = 130     // push one already-loaded stack ar
 pub let MIR_OP_F128_VC_BINOP: i64 = 131      // finite value-contract f128 runtime binop
 pub let MIR_OP_F128_ORDERED_CMP: i64 = 132   // ordered binary128 f128 comparison -> i64 bool
 pub let MIR_OP_CALL_EXTERN_F128: i64 = 133   // scalar SysV binary128 extern call (xmm0)
+pub let MIR_OP_CALL_EXTERN_SRET: i64 = 134   // SysV extern aggregate return via hidden sret pointer
 
 pub let MIR_SLOT_KIND_UNKNOWN: i64 = 0
 pub let MIR_SLOT_KIND_I64: i64 = 1
@@ -1835,6 +1836,13 @@ pub fn native_v2_make_call_extern_f128(dst_slot: i64, arg_slot: i64, name: Name)
     mi
 }
 
+pub fn native_v2_make_call_extern_sret(name: Name) -> MachineInstr with Mut, Panic, Div {
+    var mi = machine_empty_instr()
+    mi.opcode = MIR_OP_CALL_EXTERN_SRET
+    mi.name = name
+    mi
+}
+
 pub fn native_v2_make_capture_ret(temp: i64) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_CAPTURE_RET
@@ -2746,7 +2754,11 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 native_v2_emit_legal_instr_mut(out, native_v2_make_arg_move(ai, temp))
                 ai = ai + 1
             }
-            native_v2_emit_legal_instr_mut(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if instr.cond == 2 {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_call_extern_sret(instr.name))
+            } else {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            }
             if stack_count > 0 {
                 var cleanup = stack_count * 8
                 if (stack_count % 2) != 0 {
@@ -3280,7 +3292,11 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 }
                 ai = ai + 1
             }
-            out = _emit_legal_byval(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            if instr.cond == 2 {
+                out = _emit_legal_byval(out, native_v2_make_call_extern_sret(instr.name))
+            } else {
+                out = _emit_legal_byval(out, native_v2_make_call(machine_instr_src1_value(instr)))
+            }
             if stack_count > 0 {
                 var cleanup = stack_count * 8
                 if (stack_count % 2) != 0 {
@@ -3639,6 +3655,9 @@ pub fn native_v2_machine_instr_is_legal(instr: MachineInstr) -> bool with Mut, P
     if instr.opcode == MIR_OP_CALL {
         return instr.src1.kind == MIR_OPERAND_CALL_TARGET
     }
+    if instr.opcode == MIR_OP_CALL_EXTERN_SRET {
+        return instr.name.len > 0
+    }
     if instr.opcode == MIR_OP_CAPTURE_RET {
         return instr.dst.kind == MIR_OPERAND_GPR64 && instr.cond >= 0 && instr.cond <= 1
     }
@@ -3751,6 +3770,13 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
         var ai: i64 = 0
         while ai < lowered.blocks[0].instr_count {
             var instr = lowered.blocks[0].instrs[ai as usize]
+            if instr.opcode == MIR_OP_PSEUDO_CALL_SRET {
+                let sret_fn_id = machine_instr_src1_value(instr)
+                if sret_fn_id >= 0 && sret_fn_id < module.fn_count && module.functions[sret_fn_id as usize].compile_strategy == IR_STRATEGY_EXTERN {
+                    instr.cond = 2
+                    lowered.blocks[0].instrs[ai as usize] = instr
+                }
+            }
             if instr.opcode == MIR_OP_PSEUDO_CALL && instr.cond == 1 {
                 let fn_id = machine_instr_src1_value(instr)
                 if fn_id >= 0 && fn_id < 32 && f128_ret_valid[fn_id as usize] == 1 {
