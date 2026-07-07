@@ -158,6 +158,15 @@ if backend_probe.get("status") == "blocked":
         require(compiled_before_failure in {True, False}, "backend segfault blocker missing compile-before-failure classification")
         if compiled_before_failure is False:
             require("imported_compile:" in run_log_tail or "Native compilation failed" in run_log_tail, "backend compile-path segfault missing imported-lower evidence")
+        min_import = backend_probe.get("minimal_import_runtime_probe", {})
+        require(min_import.get("classification") == "diagnostic_not_backend_contract", "backend segfault missing minimal import diagnostic classification")
+        require("diagnoses_minimal_modular_import_runtime_only" in min_import.get("boundaries", []), "minimal import diagnostic missing boundary")
+        require(min_import.get("reason") == "minimal_imported_elf_segfault_after_compile", "minimal import diagnostic reason mismatch")
+        require(min_import.get("no_import", {}).get("check_exit_code") == 0, "minimal no-import check must pass")
+        require(min_import.get("no_import", {}).get("run_exit_code") == 0, "minimal no-import run must pass")
+        require(min_import.get("imported", {}).get("check_exit_code") == 0, "minimal imported check must pass")
+        require(min_import.get("imported", {}).get("run_exit_code") == 139, "minimal imported run must segfault")
+        require("Compilation successful!" in min_import.get("imported", {}).get("run_log_tail", ""), "minimal imported diagnostic missing compile-success evidence")
 else:
     require(backend_contract.get("status") == "proved", "backend pass did not prove contract")
     require(backend_probe.get("artifacts", {}).get("ptx", {}).get("present") is True, "backend pass missing PTX")

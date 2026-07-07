@@ -187,7 +187,7 @@ def main() -> int:
                 "Files-Read-Only": "self-hosted/gpu/kernel_ir.sio; self-hosted/gpu/lower_to_ptx.sio; self-hosted/gpu/ptx.sio; scripts/dev/gpu_knowledge_vec4_ptxas_probe.sh",
                 "Do-Not-Touch": "self-hosted/compiler/module_frontend.sio; self-hosted/ir/lower.sio",
                 "Repro": "scripts/dev/gpu_knowledge_vec4_backend_pack_unpack_probe.sh",
-                "Observed": f"backend probe status {backend_probe.get('status', 'missing')} reason {backend_probe.get('reason', 'missing')}; check_exit={backend_probe.get('souc', {}).get('check_exit_code', 'n/a')} run_exit={backend_probe.get('souc', {}).get('run_exit_code', 'n/a')} ptxas_exit={backend_probe.get('ptxas', {}).get('exit_code', 'n/a')}; contract={backend_probe.get('backend_ir_contract', {}).get('status', 'n/a')}; lean_extract_fallback={backend_probe.get('lean_extract_fallback', {}).get('status', 'n/a')}:{backend_probe.get('lean_extract_fallback', {}).get('reason', 'n/a')}",
+                "Observed": f"backend probe status {backend_probe.get('status', 'missing')} reason {backend_probe.get('reason', 'missing')}; check_exit={backend_probe.get('souc', {}).get('check_exit_code', 'n/a')} run_exit={backend_probe.get('souc', {}).get('run_exit_code', 'n/a')} ptxas_exit={backend_probe.get('ptxas', {}).get('exit_code', 'n/a')}; contract={backend_probe.get('backend_ir_contract', {}).get('status', 'n/a')}; lean_extract_fallback={backend_probe.get('lean_extract_fallback', {}).get('status', 'n/a')}:{backend_probe.get('lean_extract_fallback', {}).get('reason', 'n/a')}; minimal_import_runtime={backend_probe.get('minimal_import_runtime_probe', {}).get('reason', 'n/a')}",
                 "Expected": "automatic Vec/Mat aggregate backend pack/unpack proof across relevant emitters without imported-lower fallback",
                 "Acceptance-Gate": "scripts/dev/gpu_knowledge_vec4_backend_pack_unpack_probe.sh reports status pass plus scripts/ci/gpu_knowledge_vecmat_evidence_gate.sh",
                 "Evidence-Level": "E3" if backend_closed else "E2",
@@ -195,7 +195,7 @@ def main() -> int:
                 "Fallback-Path": "direct backend Vec4 emitter; lean extract retained as reference fallback" if backend_closed else "local ptxas/package witness only",
                 "Legacy-Kept": "yes",
                 "LLM-Offload": "not-required",
-                "Next-Action": "Closed for the direct backend Vec4 emitter; keep the GpuKernelIr.ops modular ABI issue as a separate compiler/runtime hardening note." if backend_closed else "Unblock the lean backend harness runtime segfault around GpuKernelIr.ops access, then rerun the Vec4 backend-IR/PTX probe until it emits PTX and passes ptxas.",
+                "Next-Action": "Closed for the direct backend Vec4 emitter; keep the GpuKernelIr.ops modular ABI issue as a separate compiler/runtime hardening note." if backend_closed else "Transfer the minimal imported-module ELF segfault to the modular compiler/runtime owner, then rerun the Vec4 backend-IR/PTX probe until it emits PTX and passes ptxas.",
             },
             {
                 "Blocker-ID": "BLK-20260706-gpu-knowledge-vecmat-imported-runtime",
