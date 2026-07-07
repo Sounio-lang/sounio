@@ -76,6 +76,10 @@ lean_lib «SounioSedenionMeasurement» where
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
 
+-- Frente B vector 1: the 7 fibers = Fano plane PG(2,2), Aut = PGL(3,2). Corollary of the
+-- automorphism sweep; NON-default_target (~1 min): `lake build SounioSedenionFano`.
+lean_lib «SounioSedenionFano» where
+
 -- Frente B: quartet<->fiber incidence of the sedenion ZD geometry (42 quartets = 2*K_7 on 7 fibers).
 @[default_target]
 lean_lib «SounioSedenionIncidence» where
