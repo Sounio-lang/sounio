@@ -677,6 +677,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-associator-1848 | historical | docs/research/sedenion_associator_1848.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-automorphism-168 | historical | docs/research/sedenion_automorphism_168.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-cd-qbig | historical | docs/research/sedenion_cd_qbig.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-clifford8 | historical | docs/research/sedenion_clifford8.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-dynamics | historical | docs/research/sedenion_dynamics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-e8-boundary | historical | docs/research/sedenion_e8_boundary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
