@@ -2025,19 +2025,25 @@ for case_id in [
     if row.get("expected_machine_opcode_found") is not True:
         raise SystemExit(f"{case_id} must prove runtime helper opcode")
 
-if f128_ieee_class_helper_receipt.get("schema") != "madaros.v2.s5.f128_ieee_class_helper_receipt/0.2":
+if f128_ieee_class_helper_receipt.get("schema") != "madaros.v2.s5.f128_ieee_class_helper_receipt/0.3":
     raise SystemExit("bad S5 f128 IEEE class-code helper receipt schema")
 if f128_ieee_class_helper_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 IEEE class-code helper receipt")
-if f128_ieee_class_helper_receipt.get("stage_contract_level") != "S5_14_F128_NATIVE_IEEE_CLASS_CODE_HELPER_WITH_NAN_SOURCE":
-    raise SystemExit("f128 IEEE class-code helper receipt must declare S5.14 NaN-source stage contract")
+if f128_ieee_class_helper_receipt.get("stage_contract_level") != "S5_25_F128_NATIVE_IEEE_CLASS_PREDICATE_HELPERS":
+    raise SystemExit("f128 IEEE class helper receipt must declare S5.25 class-predicate stage contract")
 if f128_ieee_class_helper_receipt.get("case_count") != 12:
     raise SystemExit("f128 IEEE class-code helper receipt must contain exact twelve positive cases")
+if f128_ieee_class_helper_receipt.get("predicate_helper_count") != 6:
+    raise SystemExit("f128 IEEE class helper receipt must contain six predicate helpers")
+if f128_ieee_class_helper_receipt.get("predicate_case_count") != 72:
+    raise SystemExit("f128 IEEE class helper receipt must contain 72 predicate cases")
 if f128_ieee_class_helper_receipt.get("negative_case_count") != 0:
     raise SystemExit("f128 IEEE class-code helper receipt must contain zero negative fail-closed cases")
 class_helper_claims = f128_ieee_class_helper_receipt.get("claims", {})
 for field in [
     "f128_native_ieee_class_code_helper_promoted",
+    "f128_native_ieee_class_predicate_helpers_promoted",
+    "f128_native_ieee_class_predicate_source_observable_all_classes_promoted",
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted",
     "f128_native_ieee_class_code_source_observable_signed_subnormal_promoted",
     "f128_native_ieee_class_code_nan_branch_emitted",
@@ -2062,6 +2068,10 @@ if f128_ieee_class_helper_receipt.get("class_code_contract") != {
     "nan": 4,
 }:
     raise SystemExit("f128 IEEE class-code helper contract changed")
+if set(f128_ieee_class_helper_receipt.get("predicate_helper_contract", {}).keys()) != {
+    "zero", "subnormal", "normal", "infinity", "nan", "finite"
+}:
+    raise SystemExit("f128 IEEE predicate helper contract changed")
 class_helper_cases = {row.get("case_id"): row for row in f128_ieee_class_helper_receipt.get("cases", [])}
 required_class_helper_cases = {
     "zero_positive": 0,
@@ -2098,6 +2108,46 @@ class_helper_negative_cases = {
 }
 if class_helper_negative_cases:
     raise SystemExit(f"f128 IEEE class-code helper negative cases must be empty: {sorted(class_helper_negative_cases)}")
+predicate_cases = f128_ieee_class_helper_receipt.get("predicate_cases", [])
+if len(predicate_cases) != 72:
+    raise SystemExit("f128 IEEE class predicate helper matrix must contain 72 cases")
+predicate_expected = {}
+for source_case_id, expected_rc in required_class_helper_cases.items():
+    class_name = class_helper_cases[source_case_id].get("expected_class_name")
+    for pred in ["zero", "subnormal", "normal", "infinity", "nan", "finite"]:
+        expected = 0
+        if pred == "zero":
+            expected = 1 if class_name == "zero" else 0
+        elif pred == "subnormal":
+            expected = 1 if class_name == "subnormal" else 0
+        elif pred == "normal":
+            expected = 1 if class_name == "normal" else 0
+        elif pred == "infinity":
+            expected = 1 if class_name == "infinity" else 0
+        elif pred == "nan":
+            expected = 1 if class_name == "nan" else 0
+        elif pred == "finite":
+            expected = 1 if class_name in ("zero", "subnormal", "normal") else 0
+        predicate_expected[(source_case_id, pred)] = expected
+seen_predicates = set()
+for row in predicate_cases:
+    key = (row.get("source_case_id"), row.get("predicate"))
+    if key not in predicate_expected:
+        raise SystemExit(f"unexpected f128 IEEE predicate helper case: {key}")
+    seen_predicates.add(key)
+    expected = predicate_expected[key]
+    if row.get("expected_predicate_result") != expected or row.get("run_rc") != expected:
+        raise SystemExit(f"f128 IEEE predicate helper {key} expected {expected}, got {row.get('run_rc')}")
+    if row.get("machine_module_supported") is not True:
+        raise SystemExit(f"f128 IEEE predicate helper {key} MachineModule must be supported")
+    if row.get("machine_module_legacy_fallback") is not False:
+        raise SystemExit(f"f128 IEEE predicate helper {key} must not use legacy fallback")
+    if row.get("contains_exponent_mask_imm64") is not True:
+        raise SystemExit(f"f128 IEEE predicate helper {key} must prove exponent mask immediate")
+    if row.get("requires_fraction_high_mask_imm64") is True and row.get("contains_fraction_high_mask_imm64") is not True:
+        raise SystemExit(f"f128 IEEE predicate helper {key} must prove fraction mask immediate")
+if seen_predicates != set(predicate_expected):
+    raise SystemExit("f128 IEEE predicate helper matrix missing expected cases")
 
 if f128_ordered_compare_receipt.get("schema") != "madaros.v2.s5.f128_ordered_compare_receipt/0.1":
     raise SystemExit("bad S5 f128 ordered binary128 comparison receipt schema")
@@ -3899,7 +3949,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, bounded truncated retained-scale35 decimal in [1/8, 10), and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, bounded truncated retained-scale35 decimal in [1/8, 10), and extreme decimal saturation binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-decimal add matrix for selected binary128 source sums, callee-side add/sub/mul/div runtime helper execution, source-observable IEEE class-code helper classification plus zero/subnormal/normal/infinite/nan/finite predicate helpers for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, and ordered binary128 comparisons for finite/zero/subnormal/infinity/NaN-unordered cases, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier/ordered-comparison cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

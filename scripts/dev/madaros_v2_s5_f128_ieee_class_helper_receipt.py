@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.f128_ieee_class_helper_receipt/0.2"
-STAGE_CONTRACT_LEVEL = "S5_14_F128_NATIVE_IEEE_CLASS_CODE_HELPER_WITH_NAN_SOURCE"
+SCHEMA = "madaros.v2.s5.f128_ieee_class_helper_receipt/0.3"
+STAGE_CONTRACT_LEVEL = "S5_25_F128_NATIVE_IEEE_CLASS_PREDICATE_HELPERS"
 CASE_ID = "f128_ieee_class_code_source_observable_binary128_payloads"
 EXPONENT_MASK = 0x7FFF000000000000
 FRACTION_HIGH_MASK = 0x0000FFFFFFFFFFFF
@@ -73,6 +73,31 @@ CASES: list[Case] = [
 ]
 
 NEGATIVE_CASES: list[Case] = []
+
+PREDICATE_HELPERS: list[tuple[str, str]] = [
+    ("zero", "f128_is_zero"),
+    ("subnormal", "f128_is_subnormal"),
+    ("normal", "f128_is_normal"),
+    ("infinity", "f128_is_infinite"),
+    ("nan", "f128_is_nan"),
+    ("finite", "f128_is_finite"),
+]
+
+
+def expected_predicate_value(class_name: str, pred_name: str) -> int:
+    if pred_name == "zero":
+        return 1 if class_name == "zero" else 0
+    if pred_name == "subnormal":
+        return 1 if class_name == "subnormal" else 0
+    if pred_name == "normal":
+        return 1 if class_name == "normal" else 0
+    if pred_name == "infinity":
+        return 1 if class_name == "infinity" else 0
+    if pred_name == "nan":
+        return 1 if class_name == "nan" else 0
+    if pred_name == "finite":
+        return 1 if class_name in ("zero", "subnormal", "normal") else 0
+    return 0
 
 
 def repo_root_from_script() -> Path:
@@ -235,6 +260,98 @@ fn main() -> i64 {{
     return row
 
 
+def compile_predicate_case(
+    root: Path,
+    compiler: Path,
+    out_dir: Path,
+    case: Case,
+    pred_name: str,
+    helper_name: str,
+    timeout_s: int,
+) -> dict[str, Any]:
+    case_id = f"{case.case_id}_{helper_name}"
+    nan_decl = "fn f128_nan() -> f128 { 0.0 as f128 }\n" if case.literal == "f128_nan()" else ""
+    value_expr = case.literal if case.literal == "f128_nan()" else f"{case.literal} as f128"
+    source = f"""{nan_decl}fn {helper_name}(x: f128) -> i64 {{ 0 }}
+fn main() -> i64 {{
+    let x: f128 = {value_expr}
+    {helper_name}(x)
+}}
+"""
+    source_path = out_dir / f"{case_id}.sio"
+    elf_path = out_dir / f"{case_id}.native_v2"
+    mm_path = out_dir / f"{case_id}.machine_module.json"
+    compile_log_path = out_dir / f"{case_id}.native_v2.log"
+    run_log_path = out_dir / f"{case_id}.run.log"
+
+    source_path.write_text(source, encoding="utf-8")
+    rc, stdout, stderr = run_command(
+        [
+            str(compiler),
+            "--native-v2-compile",
+            str(source_path),
+            "-o",
+            str(elf_path),
+            "--machine-module-json",
+            str(mm_path),
+        ],
+        root,
+        timeout_s,
+    )
+    compile_log = stdout + stderr
+    compile_log_path.write_text(compile_log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: native-v2 predicate compile failed rc={rc}\n{compile_log}")
+    if not elf_path.exists():
+        raise SystemExit(f"{case_id}: native-v2 predicate compile did not emit ELF")
+    if "Segmentation fault" in compile_log or "SIGSEGV" in compile_log or "legacy fallback" in compile_log:
+        raise SystemExit(f"{case_id}: crash or fallback detected")
+    module = json.loads(mm_path.read_text(encoding="utf-8"))
+    if module.get("supported") is not True:
+        raise SystemExit(f"{case_id}: MachineModule must be supported")
+    if module.get("legacy_fallback") is not False:
+        raise SystemExit(f"{case_id}: MachineModule must not use legacy fallback")
+    if module.get("unsupported_detail") not in ("", None):
+        raise SystemExit(f"{case_id}: unexpected unsupported detail {module.get('unsupported_detail')!r}")
+    os.chmod(elf_path, 0o755)
+    run_rc, run_stdout, run_stderr = run_command([str(elf_path)], root, timeout_s)
+    run_log_path.write_text(run_stdout + run_stderr, encoding="utf-8")
+    expected = expected_predicate_value(case.expected_class_name, pred_name)
+    if run_rc != expected:
+        raise SystemExit(f"{case_id}: expected predicate rc={expected}, got {run_rc}")
+    elf_bytes = elf_path.read_bytes()
+    contains_exp_mask = EXPONENT_MASK.to_bytes(8, "little") in elf_bytes
+    contains_frac_mask = FRACTION_HIGH_MASK.to_bytes(8, "little") in elf_bytes
+    if contains_exp_mask is not True:
+        raise SystemExit(f"{case_id}: emitted ELF missing binary128 exponent mask immediate")
+    requires_fraction_mask = pred_name in ("zero", "subnormal", "infinity", "nan")
+    if requires_fraction_mask and contains_frac_mask is not True:
+        raise SystemExit(f"{case_id}: emitted ELF missing binary128 fraction-high mask immediate")
+    return {
+        "case_id": case_id,
+        "source_case_id": case.case_id,
+        "literal": case.literal,
+        "expected_class_name": case.expected_class_name,
+        "predicate": pred_name,
+        "helper_name": helper_name,
+        "expected_predicate_result": expected,
+        "run_rc": run_rc,
+        "source_sha256": sha256_text(source),
+        "compile_rc": rc,
+        "compile_log_sha256": sha256_text(normalize_log(compile_log, out_dir)),
+        "machine_module_json_sha256": sha256_bytes(mm_path.read_bytes()),
+        "machine_module_supported": module.get("supported"),
+        "machine_module_legacy_fallback": module.get("legacy_fallback"),
+        "machine_module_unsupported_detail": module.get("unsupported_detail", ""),
+        "run_stdout": run_stdout,
+        "run_stderr_sha256": sha256_text(normalize_log(run_stderr, out_dir)),
+        "elf_sha256": sha256_bytes(elf_bytes),
+        "contains_exponent_mask_imm64": contains_exp_mask,
+        "contains_fraction_high_mask_imm64": contains_frac_mask,
+        "requires_fraction_high_mask_imm64": requires_fraction_mask,
+    }
+
+
 def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
     root = repo_root_from_script()
     compiler_path = compiler if compiler.is_absolute() else root / compiler
@@ -242,6 +359,10 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
 
     cases = [compile_case(root, compiler_path, out_dir, case, timeout_s) for case in CASES]
     negative_cases = [compile_case(root, compiler_path, out_dir, case, timeout_s) for case in NEGATIVE_CASES]
+    predicate_cases: list[dict[str, Any]] = []
+    for case in CASES:
+        for pred_name, helper_name in PREDICATE_HELPERS:
+            predicate_cases.append(compile_predicate_case(root, compiler_path, out_dir, case, pred_name, helper_name, timeout_s))
 
     class_codes_seen = sorted({int(row["run_rc"]) for row in cases})
     expected_class_codes = sorted({case.expected_class_code for case in CASES})
@@ -256,6 +377,8 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
         "compiler": str(compiler),
         "case_count": len(cases),
         "negative_case_count": len(negative_cases),
+        "predicate_helper_count": len(PREDICATE_HELPERS),
+        "predicate_case_count": len(predicate_cases),
         "class_code_contract": {
             "zero": 0,
             "subnormal": 1,
@@ -263,8 +386,18 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
             "infinity": 3,
             "nan": 4,
         },
+        "predicate_helper_contract": {
+            "zero": "f128_is_zero(x) returns 1 iff x is positive or negative zero",
+            "subnormal": "f128_is_subnormal(x) returns 1 iff x has zero exponent and nonzero fraction",
+            "normal": "f128_is_normal(x) returns 1 iff x has nonzero/non-all-ones exponent",
+            "infinity": "f128_is_infinite(x) returns 1 iff x has all-ones exponent and zero fraction",
+            "nan": "f128_is_nan(x) returns 1 iff x has all-ones exponent and nonzero fraction",
+            "finite": "f128_is_finite(x) returns 1 iff x is zero, subnormal, or normal",
+        },
         "claims": {
             "f128_native_ieee_class_code_helper_promoted": True,
+            "f128_native_ieee_class_predicate_helpers_promoted": True,
+            "f128_native_ieee_class_predicate_source_observable_all_classes_promoted": True,
             "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
             "f128_native_ieee_class_code_source_observable_signed_subnormal_promoted": True,
             "f128_native_ieee_class_code_nan_branch_emitted": True,
@@ -277,6 +410,7 @@ def emit_receipt(compiler: Path, out_dir: Path, timeout_s: int) -> dict[str, Any
         },
         "observed_class_codes": class_codes_seen,
         "cases": cases,
+        "predicate_cases": predicate_cases,
         "negative_cases": negative_cases,
     }
     stable = stable_json(payload)
@@ -299,7 +433,7 @@ def main() -> int:
         payload = emit_receipt(args.compiler, args.out_dir, args.timeout_s)
         print(
             f"madaros-v2-s5-f128-ieee-class-helper: PASS "
-            f"cases={payload['case_count']} negative={payload['negative_case_count']} "
+            f"cases={payload['case_count']} predicates={payload['predicate_case_count']} negative={payload['negative_case_count']} "
             f"receipt_sha256={payload['receipt_sha256']}"
         )
         return 0

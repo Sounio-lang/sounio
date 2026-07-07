@@ -4085,3 +4085,64 @@ status: lock-released
 - Suggested next steps: pairwise bisection, `pub` audit across
   `self-hosted/gpu/`, and a CI gate for this import combination.
 - Cross-reference: linked with the two existing sibling audit docs.
+
+## 2026-07-07 — Madaros S-next S5.25 f128 IEEE predicate helper slice (Codex)
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: advance the S5 f128 software-helper blocker by promoting a full
+  source-observable class-predicate helper family, while still refusing to
+  claim generic IEEE arithmetic, arbitrary decimal materialization, external
+  SysV f128 ABI, or S5 FULL.
+- Files changed:
+  - `self-hosted/native/codegen_x86_linux.sio`
+  - `scripts/dev/madaros_v2_s5_f128_ieee_class_helper_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+- What changed:
+  - Added native-v2 builtin recognition/emission for
+    `f128_is_zero`, `f128_is_subnormal`, `f128_is_normal`,
+    `f128_is_infinite`, `f128_is_nan`, and `f128_is_finite`.
+  - Upgraded the IEEE helper receipt to
+    `madaros.v2.s5.f128_ieee_class_helper_receipt/0.3` /
+    `S5_25_F128_NATIVE_IEEE_CLASS_PREDICATE_HELPERS`.
+  - The receipt now requires 12 existing class-code witnesses plus 72 predicate
+    witnesses (12 source cases × 6 helpers), all native-v2 emitted/executed
+    without fallback.
+  - The aggregate S5 program MIR/ABI gate now checks the predicate matrix and
+    continues to leave generic IEEE arithmetic, arbitrary decimal materialization,
+    external SysV f128 ABI, and S5 FULL unpromoted.
+- Local proof completed:
+  - `make build-madaros` passed and rebuilt `artifacts/self-hosted/madaros`.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_f128_ieee_class_helper_receipt.py`
+    passed.
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - `python3 scripts/dev/madaros_v2_s5_f128_ieee_class_helper_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --out-dir /tmp/sounio-s5-f128-ieee-class-helper --timeout-s 120`
+    passed: `cases=12 predicates=72 negative=0`, receipt sha256
+    `801a1b6f027d0cdb2cc3068e2b1e7e5ca0adad1791637a26be736fed8a9d6847`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    passed: aggregate sha `d0f070ad93cf`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260707-madaros-snext-f128-ieee-predicate-helpers`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: compiler-runtime-helper
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 f128 software-helper surface
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: S5.25 IEEE helper receipt, aggregate S5 gate, full gate,
+    source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; generic IEEE arithmetic, arbitrary decimal materialization,
+    external SysV f128 ABI, and S5 FULL remain unpromoted
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane
+  - Next-Action: continue S5 FULL toward S6 readiness by targeting either
+    arbitrary decimal-to-binary128 materialization or broader f128 differential
+    coverage; keep external SysV ABI generalization separate unless the linker
+    path is the explicit next lane.
