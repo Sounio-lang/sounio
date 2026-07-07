@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Emit a Madaros v2 S5 diagnostics/fallback receipt.
 
-This receipt closes the S5 unsupported-width and f128 blocker diagnostic slice.
-It deliberately does not promote full f128 execution. Instead it proves that
-numeric widths outside the promoted native-v2 S5 set fail closed, and that f128
-operations beyond the S5 opaque/direct-call contract fail with specific
-MachineModule details instead of silently emitting an ELF or falling through
-legacy code.
+This receipt closes the S5 unsupported-width and remaining f128 blocker
+diagnostic slice. It deliberately does not promote full f128 execution. Instead
+it proves that numeric widths outside the promoted native-v2 S5 set fail closed,
+that the S5.18 bounded rounded-tenths add helper remains promoted, and that f128
+operations beyond the current contract fail with specific MachineModule details
+instead of silently emitting an ELF or falling through legacy code.
 """
 
 from __future__ import annotations
@@ -25,18 +25,6 @@ STAGE_CONTRACT_LEVEL = "S5_1_UNSUPPORTED_NUMERIC_AND_F128_BLOCKER_DIAGNOSTICS_PR
 DIAGNOSTIC_FRAGMENT = "native-v2 S5 unsupported numeric width"
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
-    {
-        "case_id": "reject_f128_rounded_decimal_arithmetic_native_v2",
-        "class": "unsupported_f128_operation",
-        "source": "fn main() -> i64 { let x: f128 = 0.1 as f128; let y: f128 = 0.2 as f128; let z = x + y; 0 }\n",
-        "unsupported_width": "f128",
-        "expected_detail": "runtime_rc_12",
-        "expected_fragment": "native_v2_compile: emitted",
-        "expect_machine_module_json": True,
-        "expected_machine_module_supported": True,
-        "expected_runtime_rc": 12,
-        "expected_machine_opcode": 131,
-    },
     {
         "case_id": "reject_f128_overwide_arg_shape_native_v2",
         "class": "unsupported_f128_operation",
@@ -64,6 +52,13 @@ NEGATIVE_CASES: list[dict[str, Any]] = [
 ]
 
 POSITIVE_CASES: list[dict[str, Any]] = [
+    {
+        "case_id": "preserve_f128_rounded_tenths_add_helper_native_v2",
+        "class": "promoted_f128_helper_guard",
+        "source": "fn main() -> i64 { let x: f128 = 0.1 as f128; let y: f128 = 0.2 as f128; let z: f128 = x + y; let w: f128 = z; 0 }\n",
+        "expected_exit": 0,
+        "promoted_width": "f128",
+    },
     {
         "case_id": "preserve_i256_promoted_width_native_v2",
         "class": "promoted_integer_width_guard",
@@ -366,7 +361,8 @@ def emit(args: argparse.Namespace) -> int:
         "front_half_unsupported_widths_do_not_emit_machine_module_json": True,
         "f128_blockers_emit_machine_module_json": True,
         "f128_machine_module_supported": "mixed",
-        "f128_runtime_fail_closed_rc12": True,
+        "f128_runtime_fail_closed_rc12": False,
+        "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
         "f128_machine_module_unsupported_details": [
             "call_arity_gt_8",
         ],
@@ -384,7 +380,7 @@ def emit(args: argparse.Namespace) -> int:
         "s5_implemented": False,
         "s5_full_complete": False,
         "roundtrip_contract": [
-            "f128_native_v2_rounded_decimal_arithmetic_emits_runtime_helper_and_traps_rc12",
+            "f128_native_v2_rounded_decimal_arithmetic_promoted_by_S5_18_helper",
             "f128_native_v2_overwide_arg_shape_fails_closed_after_MachineModule_metadata_export",
             "i512_native_v2_let_annotation_fails_closed_with_stable_diagnostic",
             "u512_native_v2_cast_fails_closed_with_stable_diagnostic",

@@ -182,6 +182,20 @@ fn main() -> i64 {
         "expected_exit": 9,
     },
     {
+        "case_id": "f128_rounded_decimal_arithmetic_runtime_helper_return",
+        "source": """fn add_dec(x: f128, y: f128) -> f128 { x + y }
+fn main() -> i64 {
+  let x: f128 = 0.1 as f128
+  let y: f128 = 0.2 as f128
+  let z: f128 = add_dec(x, y)
+  let w: f128 = z
+  0
+}
+""",
+        "callee": "add_dec",
+        "expected_exit": 0,
+    },
+    {
         "case_id": "local_five_f128_args_deeper_stack_return",
         "source": """fn five(a: f128, b: f128, c: f128, d: f128, e: f128) -> i64 { 10 }
 fn main() -> i64 {
@@ -195,18 +209,6 @@ fn main() -> i64 {
 ]
 
 NEGATIVE_CASES: list[dict[str, Any]] = [
-    {
-        "case_id": "f128_rounded_decimal_arithmetic_runtime_traps",
-        "source": """fn main() -> i64 {
-  let x: f128 = 0.1 as f128
-  let y: f128 = 0.2 as f128
-  let z: f128 = x + y
-  0
-}
-""",
-        "expected_runtime_rc": 12,
-        "expected_machine_opcode": 131,
-    },
     {
         "case_id": "f128_nine_arg_arity_still_blocked",
         "source": """fn too_many(a: f128, b: f128, c: f128, d: f128, e: f128, f: f128, g: f128, h: f128, i: f128) -> i64 { 9 }
@@ -492,6 +494,7 @@ def emit(args: argparse.Namespace) -> None:
         "f128_sret_abi_promoted": False,
         "f128_arithmetic_promoted": False,
         "f128_runtime_add_sub_helper_promoted_elsewhere": True,
+        "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
         "f128_software_helpers_promoted": False,
         "f128_nan_inf_contract_promoted": False,
         "cases": cases,

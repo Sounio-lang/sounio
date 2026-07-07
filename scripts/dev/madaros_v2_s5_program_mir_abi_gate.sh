@@ -1395,6 +1395,8 @@ if claims.get("f128_opaque_direct_call_return_abi_promoted_elsewhere") is not Tr
     raise SystemExit("f128 native opaque storage receipt must acknowledge S5.5 direct call/return promotion")
 if claims.get("f128_runtime_add_sub_helper_promoted_elsewhere") is not True:
     raise SystemExit("f128 native opaque storage receipt must acknowledge S5.8 runtime add/sub helper promotion")
+if claims.get("f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere") is not True:
+    raise SystemExit("f128 native opaque storage receipt must acknowledge S5.18 rounded-tenths add helper promotion")
 if claims.get("f128_direct_expanded_gpr_call_shape_promoted_elsewhere") is not True:
     raise SystemExit("f128 native opaque storage receipt must acknowledge expanded-GPR direct call promotion")
 if claims.get("f128_direct_stack_call_shape_promoted_elsewhere") is not True:
@@ -1404,7 +1406,7 @@ if claims.get("f128_native_payload_words") != ["binary128_hi64", "binary128_lo64
 f128_native_cases = {row.get("case_id"): row for row in f128_native_opaque_storage_receipt.get("cases", [])}
 required_f128_native_cases = {
     "local_literal_copy_executes",
-    "f128_rounded_decimal_arithmetic_runtime_traps",
+    "f128_rounded_decimal_arithmetic_runtime_helper_executes",
     "f128_overwide_arg_shape_stays_blocked",
     "truncated_arbitrary_decimal_materialization_executes",
 }
@@ -1418,13 +1420,11 @@ if f128_native_cases["truncated_arbitrary_decimal_materialization_executes"].get
     raise SystemExit("f128 truncated arbitrary decimal witness must emit native-v2 ELF")
 if f128_native_cases["truncated_arbitrary_decimal_materialization_executes"].get("run_rc") != 0:
     raise SystemExit("f128 truncated arbitrary decimal witness must execute with rc=0")
-rounded_row = f128_native_cases["f128_rounded_decimal_arithmetic_runtime_traps"]
+rounded_row = f128_native_cases["f128_rounded_decimal_arithmetic_runtime_helper_executes"]
 if rounded_row.get("native_v2_emitted") is not True:
-    raise SystemExit("rounded f128 arithmetic control must emit runtime helper ELF")
-if rounded_row.get("runtime_fail_closed") is not True or rounded_row.get("run_rc") != 12:
-    raise SystemExit("rounded f128 arithmetic control must trap with rc=12")
-if rounded_row.get("blocked_fail_closed") is not True:
-    raise SystemExit("rounded f128 arithmetic control must remain fail closed")
+    raise SystemExit("rounded f128 arithmetic helper witness must emit native-v2 ELF")
+if rounded_row.get("run_rc") != 0:
+    raise SystemExit("rounded f128 arithmetic helper witness must execute with rc=0")
 row = f128_native_cases["f128_overwide_arg_shape_stays_blocked"]
 if row.get("native_v2_emitted") is not False:
     raise SystemExit("f128_overwide_arg_shape_stays_blocked must not emit native-v2 ELF")
@@ -1447,10 +1447,10 @@ if f128_opaque_call_return_abi_receipt.get("stage_contract_level") != "S5_5_F128
     raise SystemExit("f128 opaque call-return ABI receipt must declare S5.5 stage contract")
 if f128_opaque_call_return_abi_receipt.get("case_count") != 16:
     raise SystemExit("f128 opaque call-return ABI receipt must contain exact sixteen cases")
-if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 14:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact fourteen positive cases")
-if f128_opaque_call_return_abi_receipt.get("negative_case_count") != 2:
-    raise SystemExit("f128 opaque call-return ABI receipt must contain exact two negative cases")
+if f128_opaque_call_return_abi_receipt.get("positive_case_count") != 15:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact fifteen positive cases")
+if f128_opaque_call_return_abi_receipt.get("negative_case_count") != 1:
+    raise SystemExit("f128 opaque call-return ABI receipt must contain exact one negative case")
 for field in [
     "f128_opaque_direct_call_return_abi_promoted",
     "f128_opaque_direct_expanded_gpr_call_abi_promoted",
@@ -1464,6 +1464,8 @@ for field in [
         raise SystemExit(f"f128 opaque call-return ABI receipt missing required true flag: {field}")
 if f128_opaque_call_return_abi_receipt.get("f128_runtime_add_sub_helper_promoted_elsewhere") is not True:
     raise SystemExit("f128 opaque call-return ABI receipt must acknowledge S5.8 runtime add/sub helper promotion")
+if f128_opaque_call_return_abi_receipt.get("f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere") is not True:
+    raise SystemExit("f128 opaque call-return ABI receipt must acknowledge S5.18 rounded-tenths add helper promotion")
 for field in [
     "f128_external_sysv_abi_promoted",
     "f128_sret_abi_promoted",
@@ -1489,7 +1491,7 @@ required_f128_call_cases = {
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
     "local_five_f128_args_deeper_stack_return",
-    "f128_rounded_decimal_arithmetic_runtime_traps",
+    "f128_rounded_decimal_arithmetic_runtime_helper_return",
     "f128_nine_arg_arity_still_blocked",
 }
 if set(f128_call_cases) != required_f128_call_cases:
@@ -1509,6 +1511,7 @@ for case_id in [
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
     "local_five_f128_args_deeper_stack_return",
+    "f128_rounded_decimal_arithmetic_runtime_helper_return",
 ]:
     row = f128_call_cases[case_id]
     if row.get("machine_module_supported") is not True:
@@ -1532,15 +1535,11 @@ if explicit_f128_capture_cases < 1:
     raise SystemExit("f128 opaque call-return ABI receipt must retain at least one explicit low/high capture witness")
 if param_return_metadata_cases < 1:
     raise SystemExit("f128 opaque call-return ABI receipt must record at least one param-return metadata propagation witness")
-rounded_call_row = f128_call_cases["f128_rounded_decimal_arithmetic_runtime_traps"]
-if rounded_call_row.get("negative_mode") != "runtime_fail_closed":
-    raise SystemExit("f128 rounded decimal arithmetic call receipt control must be runtime fail-closed")
+rounded_call_row = f128_call_cases["f128_rounded_decimal_arithmetic_runtime_helper_return"]
 if rounded_call_row.get("machine_module_supported") is not True:
-    raise SystemExit("f128 rounded decimal arithmetic call receipt control must emit supported runtime helper MachineModule")
-if rounded_call_row.get("run_rc") != 12 or rounded_call_row.get("expected_runtime_rc") != 12:
-    raise SystemExit("f128 rounded decimal arithmetic call receipt control must trap with rc=12")
-if rounded_call_row.get("expected_machine_opcode_found") is not True:
-    raise SystemExit("f128 rounded decimal arithmetic call receipt control must prove runtime helper opcode")
+    raise SystemExit("f128 rounded decimal arithmetic call receipt helper must emit supported MachineModule")
+if rounded_call_row.get("run_rc") != 0:
+    raise SystemExit("f128 rounded decimal arithmetic call receipt helper must run rc=0")
 row = f128_call_cases["f128_nine_arg_arity_still_blocked"]
 if row.get("machine_module_supported") is not False:
     raise SystemExit("f128_nine_arg_arity_still_blocked must remain MachineModule unsupported")
@@ -1816,18 +1815,19 @@ if f128_arithmetic_value_contract_receipt.get("schema") != "madaros.v2.s5.f128_a
     raise SystemExit("bad S5 f128 arithmetic value-contract receipt schema")
 if f128_arithmetic_value_contract_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 arithmetic value-contract receipt")
-if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_10_F128_RUNTIME_VALUE_CONTRACT_ADD_SUB_MUL_DIV_HELPER":
-    raise SystemExit("f128 arithmetic value-contract receipt must declare S5.10 runtime add/sub/mul/div helper stage contract")
+if f128_arithmetic_value_contract_receipt.get("stage_contract_level") != "S5_18_F128_RUNTIME_ROUNDED_TENTHS_ADD_HELPER":
+    raise SystemExit("f128 arithmetic value-contract receipt must declare S5.18 rounded-tenths add helper stage contract")
 if f128_arithmetic_value_contract_receipt.get("case_count") != 26:
     raise SystemExit("f128 arithmetic value-contract receipt must contain exact twenty-six cases")
-if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 23:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain twenty-three positive cases")
-if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 3:
-    raise SystemExit("f128 arithmetic value-contract receipt must contain three negative cases")
+if f128_arithmetic_value_contract_receipt.get("positive_case_count") != 24:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain twenty-four positive cases")
+if f128_arithmetic_value_contract_receipt.get("negative_case_count") != 2:
+    raise SystemExit("f128 arithmetic value-contract receipt must contain two negative cases")
 for field in [
     "f128_arithmetic_value_contract_promoted",
     "f128_native_arithmetic_promoted",
     "f128_runtime_callee_add_sub_mul_div_value_contract_promoted",
+    "f128_runtime_positive_rounded_tenths_add_helper_promoted",
 ]:
     if f128_arithmetic_value_contract_receipt.get(field) is not True:
         raise SystemExit(f"f128 arithmetic value-contract receipt missing required true flag: {field}")
@@ -1865,12 +1865,12 @@ required_arith_cases = {
     "f128_call_identity_return_then_add_to_three",
     "f128_call_pick_first_return_then_add_to_three",
     "f128_call_pick_second_return_then_add_to_three",
+    "f128_add_rounded_tenths_runtime_helper_to_sum",
     "f128_callee_add_args_runtime_helper_to_three",
     "f128_callee_sub_args_runtime_helper_to_one",
     "f128_callee_mul_args_runtime_helper_to_three_quarters",
     "f128_callee_div_args_runtime_helper_to_half",
     "f128_callee_div_negative_args_runtime_helper_to_negative_half",
-    "f128_add_rounded_tenths_runtime_fail_closed",
     "f128_callee_div_one_three_runtime_fail_closed",
     "f128_callee_div_by_zero_runtime_fail_closed",
 }
@@ -1895,6 +1895,7 @@ required_arith_positive = {
     "f128_call_identity_return_then_add_to_three": {"hex": "40008000000000000000000000000000", "metadata": [1, 0, 30, 2, 1, 0]},
     "f128_call_pick_first_return_then_add_to_three": {"hex": "40008000000000000000000000000000", "metadata": [1, 0, 30, 2, 1, 0]},
     "f128_call_pick_second_return_then_add_to_three": {"hex": "40008000000000000000000000000000", "metadata": [1, 0, 30, 2, 1, 0]},
+    "f128_add_rounded_tenths_runtime_helper_to_sum": {"hex": "3ffd3333333333333333333333333334", "metadata": None, "opcode": 131},
     "f128_callee_add_args_runtime_helper_to_three": {"hex": "40008000000000000000000000000000", "metadata": None, "opcode": 131},
     "f128_callee_sub_args_runtime_helper_to_one": {"hex": "3fff0000000000000000000000000000", "metadata": None, "opcode": 131},
     "f128_callee_mul_args_runtime_helper_to_three_quarters": {"hex": "3ffe8000000000000000000000000000", "metadata": None, "opcode": 131},
@@ -1922,7 +1923,6 @@ for case_id, expected in required_arith_positive.items():
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
 for case_id in [
-    "f128_add_rounded_tenths_runtime_fail_closed",
     "f128_callee_div_one_three_runtime_fail_closed",
     "f128_callee_div_by_zero_runtime_fail_closed",
 ]:
@@ -2056,10 +2056,10 @@ if diagnostics_receipt.get("stage_contract_level") != "S5_1_UNSUPPORTED_NUMERIC_
     raise SystemExit("diagnostics receipt must declare unsupported numeric diagnostic stage contract")
 if diagnostics_receipt.get("case_count") != 5:
     raise SystemExit("diagnostics receipt must contain exact five cases")
-if diagnostics_receipt.get("negative_case_count") != 4:
-    raise SystemExit("diagnostics receipt must contain exact four negative cases")
-if diagnostics_receipt.get("positive_guard_case_count") != 1:
-    raise SystemExit("diagnostics receipt must contain exact one positive guard case")
+if diagnostics_receipt.get("negative_case_count") != 3:
+    raise SystemExit("diagnostics receipt must contain exact three negative cases")
+if diagnostics_receipt.get("positive_guard_case_count") != 2:
+    raise SystemExit("diagnostics receipt must contain exact two positive guard cases")
 required_diagnostics_true_flags = [
     "s5_diagnostics_unsupported_numeric_complete",
     "unsupported_numeric_widths_fail_closed",
@@ -2071,6 +2071,7 @@ required_diagnostics_true_flags = [
     "f128_opaque_direct_call_return_abi_promoted_elsewhere",
     "f128_direct_expanded_gpr_call_shape_promoted_elsewhere",
     "f128_direct_stack_call_shape_promoted_elsewhere",
+    "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere",
     "i512_u512_rejected_not_promoted",
     "promoted_i256_width_preserved",
 ]
@@ -2079,8 +2080,8 @@ for field in required_diagnostics_true_flags:
         raise SystemExit(f"diagnostics receipt missing required true flag: {field}")
 if diagnostics_receipt.get("f128_machine_module_supported") != "mixed":
     raise SystemExit("diagnostics receipt must record mixed f128 MachineModule support after runtime helper promotion")
-if diagnostics_receipt.get("f128_runtime_fail_closed_rc12") is not True:
-    raise SystemExit("diagnostics receipt must record rounded f128 runtime fail-closed rc=12")
+if diagnostics_receipt.get("f128_runtime_fail_closed_rc12") is not False:
+    raise SystemExit("diagnostics receipt must record that rounded f128 runtime rc=12 is no longer the active S5.18 guard")
 if diagnostics_receipt.get("f128_machine_module_unsupported_details") != [
     "call_arity_gt_8",
 ]:
@@ -2097,12 +2098,12 @@ for field in [
         raise SystemExit(f"diagnostics receipt must not overclaim {field}")
 diagnostic_cases = {row.get("case_id"): row for row in diagnostics_receipt.get("cases", [])}
 required_diagnostic_negative = {
-    "reject_f128_rounded_decimal_arithmetic_native_v2": {"width": "f128", "detail": "runtime_rc_12", "fragment": "native_v2_compile: emitted", "machine_module": True, "status": "runtime_fail_closed", "run_rc": 12},
     "reject_f128_overwide_arg_shape_native_v2": {"width": "f128", "detail": "call_arity_gt_8", "fragment": "call_arity_gt_8", "machine_module": True},
     "reject_i512_let_annotation_native_v2": {"width": "i512", "detail": "let annotation"},
     "reject_u512_cast_native_v2": {"width": "u512", "detail": "cast"},
 }
 required_diagnostic_positive = {
+    "preserve_f128_rounded_tenths_add_helper_native_v2": {"width": "f128", "exit": 0},
     "preserve_i256_promoted_width_native_v2": {"width": "i256", "exit": 7},
 }
 if set(diagnostic_cases) != set(required_diagnostic_negative) | set(required_diagnostic_positive):
@@ -2167,10 +2168,10 @@ if differential_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing differential receipt")
 if differential_receipt.get("stage_contract_level") != "S5_11_NATIVE_V2_LEAN_SINGLE_DIFFERENTIAL_WITH_F128_PROMOTED_SURFACES":
     raise SystemExit("differential receipt must declare S5.11 promoted native-v2/lean_single stage contract")
-if differential_receipt.get("case_count") != 78:
-    raise SystemExit("differential receipt must contain exact 78 cases")
-if differential_receipt.get("matched_case_count") != 70:
-    raise SystemExit("differential receipt must contain exact 70 matched comparable cases")
+if differential_receipt.get("case_count") != 80:
+    raise SystemExit("differential receipt must contain exact 80 cases")
+if differential_receipt.get("matched_case_count") != 72:
+    raise SystemExit("differential receipt must contain exact 72 matched comparable cases")
 if differential_receipt.get("reference_unavailable_case_count") != 8:
     raise SystemExit("differential receipt must contain exact eight reference-unavailable cases")
 required_differential_flags = [
@@ -2256,6 +2257,7 @@ required_f128_arithmetic_differential_cases = {
     "f128_call_identity_return_then_add_to_three",
     "f128_call_pick_first_return_then_add_to_three",
     "f128_call_pick_second_return_then_add_to_three",
+    "f128_add_rounded_tenths_runtime_helper_to_sum",
     "f128_callee_add_args_runtime_helper_to_three",
     "f128_callee_sub_args_runtime_helper_to_one",
     "f128_callee_mul_args_runtime_helper_to_three_quarters",
@@ -2277,6 +2279,7 @@ required_f128_abi_differential_cases = {
     "local_mixed_arg_f128_return",
     "local_four_f128_args_stack_return",
     "local_five_f128_args_deeper_stack_return",
+    "f128_rounded_decimal_arithmetic_runtime_helper_return",
 }
 required_f128_sret_differential_cases = {
     "direct_f128_then_i64_arithmetic_classifier_guard",
@@ -3028,6 +3031,7 @@ module = {
     "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
         "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
         "f128_arithmetic_value_contract_promoted": True,
+        "f128_runtime_positive_rounded_tenths_add_helper_promoted": True,
         "f128_runtime_callee_add_sub_mul_div_value_contract_promoted": True,
         "f128_native_ieee_class_code_helper_promoted": True,
         "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
@@ -3088,6 +3092,7 @@ module = {
         "f128_binary128_native_anchor_materialization_promoted_for_exact_0_5_and_1_0_only",
         "f128_binary128_value_contract_native_materialization_promoted_for_current_case_set_including_truncated_high_precision_decimals",
         "f128_arithmetic_value_contract_promoted_for_finite_decimal_tenths_matrix_with_one_chain_and_callee_add_sub_mul_div_helper",
+        "f128_runtime_positive_rounded_tenths_add_helper_promoted_for_0_1_plus_0_2_to_binary128_sum",
         "f128_ieee_class_code_helper_promoted_for_source_observable_zero_subnormal_normal_infinity",
         "f128_parameter_slots_non_overlapping_for_local_imported_and_mixed_shapes",
         "f128_opaque_direct_call_return_abi_promoted_for_local_and_imported_return_only_mixed_order_two_f128_direct_and_stack_shapes",
@@ -3206,6 +3211,7 @@ receipt = {
     "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
     "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
     "f128_arithmetic_value_contract_promoted": True,
+    "f128_runtime_positive_rounded_tenths_add_helper_promoted": True,
     "f128_native_ieee_class_code_helper_promoted": True,
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": True,
     "f128_native_ieee_class_code_nan_source_surface_promoted": True,
@@ -3311,6 +3317,7 @@ receipt = {
     "f128_native_truncated_decimal_binary128_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_truncated_decimal_binary128_value_contract_promoted"],
     "f128_native_subnormal_underflow_overflow_value_contract_promoted": module["scalar_abi_receipts"]["f128_native_subnormal_underflow_overflow_value_contract_promoted"],
     "f128_arithmetic_value_contract_promoted": module["scalar_abi_receipts"]["f128_arithmetic_value_contract_promoted"],
+    "f128_runtime_positive_rounded_tenths_add_helper_promoted": module["scalar_abi_receipts"]["f128_runtime_positive_rounded_tenths_add_helper_promoted"],
     "f128_native_ieee_class_code_helper_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_helper_promoted"],
     "f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_source_observable_zero_subnormal_normal_infinity_promoted"],
     "f128_native_ieee_class_code_nan_source_surface_promoted": module["scalar_abi_receipts"]["f128_native_ieee_class_code_nan_source_surface_promoted"],
@@ -3338,7 +3345,7 @@ receipt = {
     "missing_full_obligations": [
         "f128 arbitrary decimal-to-binary128 native materialization beyond the current finite value-contract case set",
         "f128 generic IEEE arithmetic helpers beyond the class-code helper, including rounding-mode-sensitive operations",
-        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix plus direct literal/parameter-return call propagation and callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper differentials",
+        "f128 arithmetic beyond the finite signed decimal-tenths plus quarter value-contract matrix, the bounded rounded-tenths add helper for binary128(0.1)+binary128(0.2), direct literal/parameter-return call propagation, callee-side exact add/sub/mul/div runtime helper, external SysV f128 ABI/SRET, and full IEEE helper differentials",
     ],
 }
 receipt["receipt_sha256"] = sha256_text(stable_json(receipt))
@@ -3350,7 +3357,7 @@ print(
 PY
 
 echo "[madaros-v2-s5-program-mir-abi] PASS: scalar i64/bool + SRET + f64/XMM0 + wide-int + local+imported i256/u256 wide ABI call-return + generic aggregate + f128 internal native-v2 call-return/SRET-arg-boundary/value-contract binary128 compiler MachineModule ABI receipts are deterministic without claiming S5 FULL"
-echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation and callee-side add/sub/mul/div runtime helper execution, plus source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
+echo "[madaros-v2-s5-program-mir-abi] PASS: i512/u512 fail closed before MachineModule export; f128 emits supported opaque MachineIR metadata/literal bridge/ABI metadata, exact-dyadic, bounded-rounded, algorithmic two-limb scale0..18 decimal, and truncated high-precision value-contract binary128 materialization, finite signed decimal-tenths and quarter value-contract arithmetic with direct literal/parameter-return propagation, bounded rounded-tenths add helper for binary128(0.1)+binary128(0.2), and callee-side add/sub/mul/div runtime helper execution, plus source-observable IEEE class-code helper classification for zero/subnormal/normal/infinity/NaN via canonical quiet-NaN constructor, while unsupported f128 surfaces fail closed either before ELF emission or through explicit runtime rc=12 helper traps, without segfault or fallback"
 echo "[madaros-v2-s5-program-mir-abi] PASS: native-v2 vs lean_single differential receipt covers promoted comparable S5 surfaces including f128 value-contract/local ABI/SRET-boundary/layout/classifier cases; generic IEEE arithmetic and external ABI differentials remain explicit full blockers"
 echo "[madaros-v2-s5-program-mir-abi] module=$MODULE"
 echo "[madaros-v2-s5-program-mir-abi] receipt=$RECEIPT"

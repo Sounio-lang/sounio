@@ -4,9 +4,9 @@
 S5.2 promotes local opaque storage and copy of f128 values as two 64-bit stack
 words in native-v2 x86 ELF output. Later S5 receipts promote direct f128
     call/return shapes and S5.8 promotes a finite runtime add/sub helper. This
-    receipt still guards over-wide f128 call shapes and records that rounded
-    decimal arithmetic fails closed through the S5.8 runtime trap rather than
-    full IEEE arithmetic.
+    receipt still guards over-wide f128 call shapes and records that S5.18
+    promotes bounded rounded-tenths add while full IEEE arithmetic remains
+    outside this receipt.
 """
 
 from __future__ import annotations
@@ -42,13 +42,14 @@ CASES: list[dict[str, Any]] = [
         "expected_exit": 0,
     },
     {
-        "case_id": "f128_rounded_decimal_arithmetic_runtime_traps",
-        "kind": "runtime_fail_closed",
-        "expected_runtime_rc": 12,
+        "case_id": "f128_rounded_decimal_arithmetic_runtime_helper_executes",
+        "kind": "exec",
+        "expected_exit": 0,
         "source": """fn main() -> i64 {
     let x: f128 = 0.1 as f128
     let y: f128 = 0.2 as f128
     let z: f128 = x + y
+    let w: f128 = z
     0
 }
 """,
@@ -315,6 +316,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_ieee_binary128_materialization_promoted": False,
             "f128_native_arithmetic_promoted": False,
             "f128_runtime_add_sub_helper_promoted_elsewhere": True,
+            "f128_runtime_positive_rounded_tenths_add_helper_promoted_elsewhere": True,
             "f128_opaque_direct_call_return_abi_promoted_elsewhere": True,
             "f128_external_sysv_abi_promoted": False,
             "f128_sret_abi_promoted": False,
