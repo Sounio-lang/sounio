@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-tower-seam
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -42,7 +43,11 @@ that the two *a-priori-unrelated* sets land on it.)
 
 **The base fact `L_i²=−I`** is the CD cocycle identity `σ(i,j)·σ(i,i⊕j) = −1` (all `i≥1`, all `j`),
 certified here at dim 16/32/64. A Mathlib-free general induction on `bits` would upgrade the forward
-obstruction to a theorem for *all* n; it is **left open**.
+obstruction to a theorem for *all* n. **First step done** (`formal/lean4/SounioCDCocycle.lean`): the CD
+sign is reformulated on explicit bit-lists (structural XOR; verified to agree with the Nat `cdSigma` at
+dim 16/32), and **`e_i²=−1` (diag) is proved for ALL n** by structural induction. The full `L_i²=−I`
+and basis-unit anticommutation close on paper (a simultaneous induction over the sign's four branches)
+but their Mathlib-free formalization is **still open** — they remain certified at n=4,5,6 above.
 
 **Open (all n): the converse.** `off-seam ⟹ e_l+e_u is a ZD` is *verified* at n=4,5,6, not proved — a
 tower-wide conjecture (the sedenion "natural next lemma" of `sedenion_seam_bridge.md`, now at tower
