@@ -663,32 +663,43 @@ fn lowerer_preseed_fn_signature_mut(
     }
 
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
-    (*(*lo).module).functions[fn_id as usize].compile_strategy = strategy
-    (*(*lo).module).functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
-    (*(*lo).module).functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
-    (*(*lo).module).functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    // Extract module Box + function slot to locals, mutate, write back once. The
+    // direct nested-lvalue form `(*(*lo).module).functions[fn_id].field = X` — notably
+    // the 512-byte aggregate store `.param_regs = [IR_INVALID_REG; 64]` — is miscompiled
+    // by lean_single (two-level-nested-store defect): the aggregate lvalue base is
+    // wrong and the write SIGSEGVs. This impl-method-signature preseed is the only
+    // caller, so it stayed latent until an imported module carried an `impl`. Safe
+    // idiom matches lowerer_preseed_program_items_mut's ItemFn branch.
+    var module_box = (*lo).module
+    var fn_slot = (*module_box).functions[fn_id as usize]
+    fn_slot.compile_strategy = strategy
+    fn_slot.returns_float = lower_opt_return_float_code(return_type)
+    fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
+    fn_slot.param_count = ir_param_list_count_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
-        (*(*lo).module).functions[fn_id as usize].param_count = (*(*lo).module).functions[fn_id as usize].param_count + 1
-        if (*(*lo).module).functions[fn_id as usize].prof_counter_id < 0 {
-            let ctr_idx = (*(*lo).module).prof_counter_count
+        fn_slot.param_count = fn_slot.param_count + 1
+        if fn_slot.prof_counter_id < 0 {
+            let ctr_idx = (*module_box).prof_counter_count
             if ctr_idx < 64 {
-                (*(*lo).module).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
+                (*module_box).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
                     fn_id: fn_id,
                     fn_name: name,
                     counter_id: ctr_idx,
                 }
-                (*(*lo).module).prof_counter_count = ctr_idx + 1
-                (*(*lo).module).functions[fn_id as usize].prof_counter_id = ctr_idx
+                (*module_box).prof_counter_count = ctr_idx + 1
+                fn_slot.prof_counter_id = ctr_idx
             } else {
                 lo.error_count = lo.error_count + 1
                 lo.had_error = true
             }
         }
     }
-    (*(*lo).module).functions[fn_id as usize].param_regs = [IR_INVALID_REG; 64]
-    (*(*lo).module).functions[fn_id as usize].instr_count = 0
-    (*(*lo).module).functions[fn_id as usize].reg_count = 0
-    (*(*lo).module).functions[fn_id as usize].label_count = 0
+    fn_slot.param_regs = [IR_INVALID_REG; 64]
+    fn_slot.instr_count = 0
+    fn_slot.reg_count = 0
+    fn_slot.label_count = 0
+    (*module_box).functions[fn_id as usize] = fn_slot
+    (*lo).module = module_box
 }
 
 fn lowerer_register_enum_variants_mut(

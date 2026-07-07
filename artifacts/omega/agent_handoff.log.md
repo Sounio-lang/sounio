@@ -3066,3 +3066,56 @@ notes: |
   TYPE-CHECKS CLEAN but does not yet RUN — blocked solely by the pre-existing
   cross-module `lower_array` native-lowering segfault (WP-A4/native-lowering
   territory), NOT by A7. No new gap introduced.
+
+---
+session: A10 (Opus, fable5 madaros generic-F)
+wp: A10 — generic-dependency summary-lowering SIGSEGV (partial; extends A6/A7 dep_begin 1 gap)
+branch: fix/madaros-generic-dep-summary-lowering (base main; base branch fix/madaros-crossmod-sret-lowering-impl + A8)
+action: CLAIM -> RELEASE
+root_cause: |
+  The compile-time SIGSEGV at `lower_array: dep_begin 1` (between summary_begin/
+  summary_done) when a program imports a module that declares an `impl` was inside
+  lowerer_preseed_fn_signature_mut (self-hosted/ir/lower.sio). That function — whose
+  ONLY caller is the impl-method summary preseed — mutated the function slot via the
+  direct nested lvalue `(*(*lo).module).functions[fn_id].field = X`. The 512-byte
+  aggregate store `.param_regs = [IR_INVALID_REG; 64]` triggers the documented
+  lean_single two-level-nested-store miscompile (aggregate lvalue base computed wrong
+  -> the write faults). It stayed latent until an imported module carried an `impl`
+  (main + prior multi-module deps had none).
+fix: |
+  Rewrote lowerer_preseed_fn_signature_mut to the extract-to-local idiom
+  (var module_box = (*lo).module; var fn_slot = (*module_box).functions[fn_id]; mutate
+  fn_slot; (*module_box).functions[fn_id] = fn_slot; (*lo).module = module_box) —
+  identical to the working ItemFn branch in lowerer_preseed_program_items_mut. +350
+  bytes; the fixed function has no other caller, so single-module/non-generic paths
+  are byte-identical.
+checks (Slurm madaros build from main.sio, jobs 5667/5668/5669/5670/5672/5673; FALSE-GREEN guard: ELFs run, actual rc/stdout asserted):
+  - W1 gen_dep_summary_min.sio  -> BUILD rc0 RUN rc0 "GEN_DEP_SUMMARY_OK"
+  - W1 gen_dep_summary_min2.sio (trait + impl for i64 + bounded [F;2048] dep; reproduced
+    the crash on base) -> BUILD rc0 RUN rc0 "GEN_DEP_SUMMARY2_OK"
+  - W4 regressions (base<->fixed): sret_forwarding_cross_module_min "CROSS_SRET_MIN_OK",
+    sret_forwarding_cross_module_cd_mul "CD_MUL_CROSS_SRET_OK", sret_8_field_return "OK",
+    generic_struct_return "6"/"spike PASS", turbofish 3/3 — all rc0. No green->red.
+  - Non-regression proof: algebra_g2_invariants_import + associator_field_octonion
+    SIGSEGV IDENTICALLY on base and fixed (both crash in dep BODY lowering; neither dep
+    has an impl -> outside my fix's only caller).
+  - W2 cd_exact_generic_i64: my fix advances it PAST module-1 summary lowering
+    (base: crash in `summary` before summary_done; fixed: reaches summary_done +
+    bodies_begin). Still no ELF -> see new gap below. NOT flipped to verified.
+new_gap: |
+  cd_exact end-to-end is blocked by a SEPARATE pre-existing wall, NOT this fix:
+  IrModule ~250 MB (functions[2048] x instrs[1024]); the multi-module lowerer makes
+  many by-value module/summary copies -> ~18 GB VM peak (VmPeak measured, job 5672)
+  compiling the 4-module cd_exact closure. Under bin/madaros' `ulimit -v 16G` the
+  allocator fails mid lower_program_bodies_ref and SIGSEGVs at the 5th generic
+  [F;2048]-returning body (cd_sub_exact, structurally identical to cd_add_exact one
+  step earlier -> accumulation). With NO ulimit (93 GB free) it advances past module-1
+  body+merge and SIGSEGVs at `lower_array: dep_begin 2` (module-2 summary) — a genuine
+  fault, not OOM. Same body-lowering wall hits g2imp/octo on base. Needs IrModule
+  shrink / by-value-copy elimination in the multi-module path + module-2 summary fix.
+commit: pending
+status: lock-released
+notes: |
+  A10_PARTIAL: summary-lowering impl-preseed SIGSEGV FIXED + verified, non-regressing.
+  Headline (WP-A5: cd_exact runs ZD PROVED/SQ PASS/NONZERO PASS/16xCOMP 0) NOT reached
+  — blocked by the memory/body-lowering wall above. PR opened (base main), NOT merged.
