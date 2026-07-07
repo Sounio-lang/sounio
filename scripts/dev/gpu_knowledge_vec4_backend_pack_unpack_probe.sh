@@ -326,7 +326,10 @@ SIO
   export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_CHECK_EXIT="$import_check"
   export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_RUN_EXIT="$import_run"
 
-  if [ "$no_import_check" -eq 0 ] && [ "$no_import_run" -eq 0 ] && [ "$import_check" -eq 0 ] && [ "$import_run" -eq 139 ]; then
+  if [ "$no_import_check" -eq 0 ] && [ "$no_import_run" -eq 0 ] && [ "$import_check" -eq 0 ] && [ "$import_run" -eq 0 ]; then
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_STATUS="pass"
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_imported_elf_pass"
+  elif [ "$no_import_check" -eq 0 ] && [ "$no_import_run" -eq 0 ] && [ "$import_check" -eq 0 ] && [ "$import_run" -eq 139 ]; then
     export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_imported_elf_segfault_after_compile"
   else
     export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_import_probe_unexpected_result"

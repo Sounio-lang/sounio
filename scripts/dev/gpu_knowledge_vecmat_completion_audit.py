@@ -195,7 +195,7 @@ def main() -> int:
                 "Fallback-Path": "direct backend Vec4 emitter; lean extract retained as reference fallback" if backend_closed else "local ptxas/package witness only",
                 "Legacy-Kept": "yes",
                 "LLM-Offload": "not-required",
-                "Next-Action": "Closed for the direct backend Vec4 emitter; keep the GpuKernelIr.ops modular ABI issue as a separate compiler/runtime hardening note." if backend_closed else "Transfer the minimal imported-module ELF segfault to the modular compiler/runtime owner, then rerun the Vec4 backend-IR/PTX probe until it emits PTX and passes ptxas.",
+                "Next-Action": "Closed for the direct backend Vec4 emitter; keep the GpuKernelIr.ops modular ABI issue as a separate compiler/runtime hardening note." if backend_closed else "Reduce the remaining imported GPU dependency-lowering crash: a two-import kernel_ir_wmma_lean + ptx probe still segfaults while lowering ptx.sio as dependency, then rerun the Vec4 backend-IR/PTX probe until it emits PTX and passes ptxas.",
             },
             {
                 "Blocker-ID": "BLK-20260706-gpu-knowledge-vecmat-imported-runtime",

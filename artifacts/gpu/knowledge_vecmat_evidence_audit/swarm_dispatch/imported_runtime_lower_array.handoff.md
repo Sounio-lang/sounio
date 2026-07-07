@@ -2,7 +2,7 @@
 
 - owner: compiler-lowering-owner
 - model: gpt-5.4-mini
-- status: blocked_or_unproved
+- status: imported_runtime_pass
 - required_action: repair_imported_vec4_lane_plan_runtime
 - gap: imported_runtime_fixture
 - acceptance_gate: imported lower_array Vec4 lane-plan fixture runs without crash under the canonical compiler path
