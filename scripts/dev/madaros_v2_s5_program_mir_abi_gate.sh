@@ -1722,14 +1722,14 @@ for case_id, expected in required_anchor_cases.items():
     if not row.get("elf_sha256") or not row.get("machine_module_sha256"):
         raise SystemExit(f"{case_id} missing ELF or MachineModule hash")
 
-if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.1":
+if f128_binary128_value_contract_native_receipt.get("schema") != "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.2":
     raise SystemExit("bad S5 f128 binary128 value-contract native receipt schema")
 if f128_binary128_value_contract_native_receipt.get("status") != "pass":
     raise SystemExit("program MIR/ABI gate requires passing f128 binary128 value-contract native receipt")
-if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_17_F128_NATIVE_SIGNED_EXTREME_BINARY128_MATERIALIZATION":
-    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.17 signed extreme binary128 stage contract")
-if f128_binary128_value_contract_native_receipt.get("case_count") != 84:
-    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty-four cases")
+if f128_binary128_value_contract_native_receipt.get("stage_contract_level") != "S5_26_F128_NATIVE_LARGE_SIGNIFICAND_EXTREME_UNDERFLOW":
+    raise SystemExit("f128 binary128 value-contract native receipt must declare S5.26 large-significand extreme underflow stage contract")
+if f128_binary128_value_contract_native_receipt.get("case_count") != 86:
+    raise SystemExit("f128 binary128 value-contract native receipt must contain exact eighty-six cases")
 if f128_binary128_value_contract_native_receipt.get("negative_case_count") != 2:
     raise SystemExit("f128 binary128 value-contract native receipt must contain exact two negative fail-closed cases")
 value_native_claims = f128_binary128_value_contract_native_receipt.get("claims", {})
@@ -1746,6 +1746,7 @@ for field in [
     "f128_native_bounded_truncated_below_one_decimal_binary128_materialization_promoted",
     "f128_native_subnormal_underflow_overflow_value_contract_promoted",
     "f128_native_extreme_decimal_saturation_promoted",
+    "f128_native_large_significand_extreme_underflow_to_signed_zero_promoted",
     "f128_native_signed_minimum_subnormal_binary128_materialization_promoted",
     "uncontracted_f128_decimal_materialization_fails_closed",
 ]:
@@ -1839,6 +1840,8 @@ required_value_native_cases = {
     "two_limb_overflow_to_negative_infinity": {"literal": "-123456789012345678901234567890123456e5001", "hex": "ffff0000000000000000000000000000", "metadata": [-1, 901234567890123456, 123456789012345678, 36, -5001, 0]},
     "underflow_to_positive_zero_scale6000": {"literal": "1e-6000", "hex": "00000000000000000000000000000000", "metadata": [1, 0, 1, 1, 6000, 0]},
     "underflow_to_negative_zero_scale6000": {"literal": "-1e-6000", "hex": "80000000000000000000000000000000", "metadata": [-1, 0, 1, 1, 6000, 0]},
+    "two_limb_underflow_to_positive_zero": {"literal": "123456789012345678901234567890123456e-5000", "hex": "00000000000000000000000000000000", "metadata": [1, 901234567890123456, 123456789012345678, 36, 5000, 0]},
+    "two_limb_underflow_to_negative_zero": {"literal": "-123456789012345678901234567890123456e-5000", "hex": "80000000000000000000000000000000", "metadata": [-1, 901234567890123456, 123456789012345678, 36, 5000, 0]},
     "truncated_arbitrary_1p23456789012345678901234567890123456789": {"literal": "1.23456789012345678901234567890123456789", "hex": "3fff3c0ca428c59fb71a7be16b6b6d5b", "metadata": [1, 901234567890123456, 123456789012345678, 39, 38, 3]},
     "truncated_pi_40_digits": {"literal": "3.14159265358979323846264338327950288419", "hex": "4000921fb54442d18469898cc51701b8", "metadata": [1, 846264338327950288, 314159265358979323, 39, 38, 3]},
     "truncated_pi_tail20_algorithmic": {"literal": "3.14159265358979323846264338327950288420", "hex": "4000921fb54442d18469898cc51701b8", "metadata": [1, 846264338327950288, 314159265358979323, 39, 38, 3]},
@@ -1868,7 +1871,7 @@ for case_id, expected in required_value_native_cases.items():
 value_native_negative_cases = {row.get("case_id"): row for row in f128_binary128_value_contract_native_receipt.get("negative_cases", [])}
 required_value_native_negative = {
     "uncontracted_near_half_min_subnormal_fails_closed": "f128_decimal_materialization_pending",
-    "uncontracted_large_significand_underflow_boundary_fails_closed": "f128_decimal_materialization_pending",
+    "uncontracted_near_half_min_subnormal_negative_fails_closed": "f128_decimal_materialization_pending",
 }
 if set(value_native_negative_cases) != set(required_value_native_negative):
     raise SystemExit(f"f128 binary128 value-contract native negative cases mismatch: {sorted(value_native_negative_cases)}")

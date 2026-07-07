@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.1"
-STAGE_CONTRACT_LEVEL = "S5_17_F128_NATIVE_SIGNED_EXTREME_BINARY128_MATERIALIZATION"
+SCHEMA = "madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.2"
+STAGE_CONTRACT_LEVEL = "S5_26_F128_NATIVE_LARGE_SIGNIFICAND_EXTREME_UNDERFLOW"
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,8 @@ CASES: list[Case] = [
     Case("two_limb_overflow_to_negative_infinity", "-123456789012345678901234567890123456e5001", "ffff0000000000000000000000000000", [-1, 901234567890123456, 123456789012345678, 36, -5001, 0]),
     Case("underflow_to_positive_zero_scale6000", "1e-6000", "00000000000000000000000000000000", [1, 0, 1, 1, 6000, 0]),
     Case("underflow_to_negative_zero_scale6000", "-1e-6000", "80000000000000000000000000000000", [-1, 0, 1, 1, 6000, 0]),
+    Case("two_limb_underflow_to_positive_zero", "123456789012345678901234567890123456e-5000", "00000000000000000000000000000000", [1, 901234567890123456, 123456789012345678, 36, 5000, 0]),
+    Case("two_limb_underflow_to_negative_zero", "-123456789012345678901234567890123456e-5000", "80000000000000000000000000000000", [-1, 901234567890123456, 123456789012345678, 36, 5000, 0]),
     Case(
         "truncated_arbitrary_1p23456789012345678901234567890123456789",
         "1.23456789012345678901234567890123456789",
@@ -187,10 +189,10 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
     NegativeCase(
-        "uncontracted_large_significand_underflow_boundary_fails_closed",
-        "123456789012345678901234567890123456e-5000",
+        "uncontracted_near_half_min_subnormal_negative_fails_closed",
+        "-3.23758755971901255546221947911382327624978466901734e-4966",
         "f128_decimal_materialization_pending",
-        "large-significand underflow boundary still requires full arbitrary decimal rounding",
+        "signed near-half-min-subnormal decimal is not present in the explicit f128 value-contract set",
     ),
 ]
 
@@ -442,6 +444,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_bounded_truncated_below_one_decimal_binary128_materialization_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
             "f128_native_extreme_decimal_saturation_promoted": True,
+            "f128_native_large_significand_extreme_underflow_to_signed_zero_promoted": True,
             "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],

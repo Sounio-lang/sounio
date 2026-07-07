@@ -4146,3 +4146,62 @@ status: lock-released
     arbitrary decimal-to-binary128 materialization or broader f128 differential
     coverage; keep external SysV ABI generalization separate unless the linker
     path is the explicit next lane.
+
+## 2026-07-07 — Madaros S-next S5.26 f128 large-significand underflow (Codex)
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: reduce the arbitrary-decimal materialization blocker with a narrow,
+  mathematically safe saturation class: two-limb large-significand decimal
+  underflow at scale >= 5000 now materializes to signed binary128 zero.
+- Files changed:
+  - `self-hosted/native/machine_ir.sio`
+  - `self-hosted/native/codegen_x86_linux.sio`
+  - `scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+- What changed:
+  - Aligned MachineIR legality and x86 native-v2 materialization so extreme
+    underflow accepts any nonzero positive two-limb significand, not only `1e-N`.
+  - Upgraded the value-contract native receipt to
+    `madaros.v2.s5.f128_binary128_value_contract_native_receipt/0.2` /
+    `S5_26_F128_NATIVE_LARGE_SIGNIFICAND_EXTREME_UNDERFLOW`.
+  - Promoted two new positive cases:
+    `123456789012345678901234567890123456e-5000 -> +0` and signed negative
+    counterpart -> `-0`.
+  - Kept near-half-min-subnormal positive/negative decimals fail-closed with
+    `f128_decimal_materialization_pending`; arbitrary decimal materialization
+    remains unpromoted.
+- Local proof completed:
+  - `make build-madaros` passed and rebuilt `artifacts/self-hosted/madaros`.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py`
+    passed.
+  - `bash -n scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed.
+  - `python3 scripts/dev/madaros_v2_s5_f128_binary128_value_contract_native_receipt.py emit --compiler "$PWD/artifacts/self-hosted/madaros" --root "$PWD" --out-dir /tmp/sounio-s5-f128-binary128-value-contract-native --timeout-s 120`
+    passed.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    passed: aggregate sha `ab2253ece47d`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Closed blocker:
+  - Blocker-ID: `BLK-20260707-madaros-snext-f128-large-underflow`
+  - Status: closed
+  - Severity: B1 -> closed
+  - Class: compiler-numeric-materialization
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 f128 decimal materialization
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: S5.26 value-contract native receipt, aggregate S5 gate,
+    full gate, source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; near-half-min-subnormal rounding, arbitrary decimal
+    materialization, generic IEEE arithmetic, external SysV f128 ABI, and S5
+    FULL remain unpromoted
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane
+  - Next-Action: continue S5 FULL toward S6 readiness by targeting broader
+    f128 differential coverage or the remaining near-half/min-subnormal decimal
+    rounding boundary.
