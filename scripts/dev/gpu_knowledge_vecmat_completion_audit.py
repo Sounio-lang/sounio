@@ -32,7 +32,7 @@ def rel(path: pathlib.Path) -> str:
 
 def git_text(*args: str) -> str:
     try:
-        return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+        return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip() or "<detached>"
     except Exception:
         return "<unknown>"
 
@@ -227,12 +227,15 @@ def main() -> int:
         f"- {item['Blocker-ID']} ({item['Severity']}, {item['Class']}, owner={item['Owner']}, evidence={item['Evidence-Level']})"
         for item in blockers["blockers"]
     )
+    completion_blocker_line = ", ".join(completion_blockers) if completion_blockers else "none"
     handoff = f"""# GPU Knowledge Vec/Mat Operational Handoff
 
 Current-SHA: {git_text("rev-parse", "HEAD")}
 Current-Branch: {git_text("branch", "--show-current")}
 Current-Worktree: {ROOT}
 Dirty-Status: see `git status --short -- scripts/dev/gpu_knowledge_vec* scripts/ci/gpu_knowledge_vecmat_evidence_gate.sh scripts/dev/dgx_spark_public_gpu_gate.sh artifacts/gpu/knowledge_vecmat_evidence_audit artifacts/gpu/dgx_spark_public_gpu_package artifacts/gpu/dgx_spark_public_gpu_gate.v1.json`
+Current-Goal-Status: {payload["goal_status"]}
+Completion-Blockers: {completion_blocker_line}
 
 Owned-Files:
 - scripts/dev/gpu_knowledge_vec4_dgx_runtime_runbook.sh

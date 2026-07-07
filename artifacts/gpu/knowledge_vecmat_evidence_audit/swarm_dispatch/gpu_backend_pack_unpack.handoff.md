@@ -2,7 +2,7 @@
 
 - owner: gpu-backend-owner
 - model: current-codex
-- status: backend_ir_pack_unpack_ptxas_pass
+- status: blocked_souc_runtime_segfault_after_compile
 - required_action: wire_automatic_backend_pack_unpack
 - gap: automatic_backend_pack_unpack
 - acceptance_gate: automatic Vec/Mat aggregate backend pack/unpack proof across relevant emitters without imported-lower fallback
