@@ -675,6 +675,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.sedenion-e8-boundary | historical | docs/research/sedenion_e8_boundary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-fano-fibers | historical | docs/research/sedenion_fano_fibers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-quartet-fiber-incidence | historical | docs/research/sedenion_quartet_fiber_incidence.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sedenion-spectra | historical | docs/research/sedenion_spectra.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zd-fiber-identity | historical | docs/research/sedenion_zd_fiber_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zd-fibers | historical | docs/research/sedenion_zd_fibers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zd-quartets | historical | docs/research/sedenion_zd_quartets.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
