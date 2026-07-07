@@ -17,6 +17,8 @@
 #   madaros s1-receipt input.sio [--out-dir OUT]
 #   madaros s3-receipt input.sio [--out-dir OUT]
 #   madaros s4-receipt input.sio [--out-dir OUT]
+#   madaros s5-receipt input.sio [--out-dir OUT]
+#   madaros native-v2-link input.sio -o OUT --link-object OBJ [--cc CC]
 #   madaros pkg ...
 #
 # Environment:
@@ -119,12 +121,16 @@ Usage:
                                       emit Madaros v2 S4 e-graph/E-KAN rewrite receipt
   madaros s5-receipt <source.sio|project-dir> [--out-dir OUT] [--expected-exit N] [--case-id ID]
                                       emit Madaros v2 S5 scalar MIR/ABI receipt
+  madaros native-v2-link <source.sio> -o OUT --link-object OBJ [--cc CC] [--link-arg ARG...]
+                                      emit native-v2 ET_REL and link with host objects
   madaros pkg <subcommand>...           package-manager commands
   madaros <raw-compiler-args>...        pass through to the raw ELF
 
 Common modular-compiler modes:
   madaros --check <source.sio>          raw check mode
   madaros --native-v2-compile SRC OUT   raw source-to-ELF native-v2 path
+  madaros native-v2-link SRC -o OUT --link-object helper.o
+                                      native-v2 object + host linker path
   madaros --native-v2-emit13            emit artifacts/omega/emit13.elf
   madaros --native-v2-emit-scalar N     emit a scalar witness
   madaros --version-json                emit version metadata
@@ -579,6 +585,102 @@ _emit_s5_receipt() {
   "${cmd[@]}"
 }
 
+_native_v2_link() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  local out=""
+  local cc="${CC:-cc}"
+  local keep_temp=0
+  local link_objects=()
+  local link_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros native-v2-link: $1 requires a path" >&2
+          return 2
+        fi
+        out="$2"
+        shift 2
+        ;;
+      --cc)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros native-v2-link: --cc requires a compiler/linker" >&2
+          return 2
+        fi
+        cc="$2"
+        shift 2
+        ;;
+      --link-object)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros native-v2-link: --link-object requires a path" >&2
+          return 2
+        fi
+        link_objects+=("$2")
+        shift 2
+        ;;
+      --link-arg)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros native-v2-link: --link-arg requires an argument" >&2
+          return 2
+        fi
+        link_args+=("$2")
+        shift 2
+        ;;
+      --keep-temp)
+        keep_temp=1
+        shift
+        ;;
+      *)
+        echo "error: madaros native-v2-link: unsupported option: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+  if [[ -z "$out" ]]; then
+    echo "error: madaros native-v2-link requires -o OUT" >&2
+    return 2
+  fi
+  if [[ ${#link_objects[@]} -eq 0 ]]; then
+    echo "error: madaros native-v2-link requires at least one --link-object" >&2
+    return 2
+  fi
+  if ! command -v "$cc" >/dev/null 2>&1; then
+    echo "error: madaros native-v2-link: linker not found: $cc" >&2
+    return 127
+  fi
+  local tmp_dir obj rc
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/madaros-native-v2-link.XXXXXX")"
+  obj="$tmp_dir/main.o"
+  if ! ( ulimit -v 16777216 2>/dev/null || true; timeout 300 "$RAW_MADAROS" --native-v2-emit-obj "$src" -o "$obj" ); then
+    rm -rf "$tmp_dir"
+    echo "error: madaros native-v2-link: native-v2 object emission failed" >&2
+    return 1
+  fi
+  if [[ ! -s "$obj" ]]; then
+    rm -rf "$tmp_dir"
+    echo "error: madaros native-v2-link: compiler produced no object" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$out")"
+  rm -f "$out"
+  "$cc" -no-pie "$obj" "${link_objects[@]}" "${link_args[@]}" -o "$out"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    rm -rf "$tmp_dir"
+    echo "error: madaros native-v2-link: host link failed rc=$rc" >&2
+    return "$rc"
+  fi
+  chmod +x "$out"
+  echo "native-v2-link: emitted path=$out"
+  if [[ "$keep_temp" == "1" ]]; then
+    echo "native-v2-link: object=$obj"
+  else
+    rm -rf "$tmp_dir"
+  fi
+}
+
 # Parse subcommands.
 if [[ $# -eq 0 ]]; then
   usage
@@ -700,6 +802,20 @@ case "$1" in
       shift
     fi
     _emit_s5_receipt "$src" "$@"
+    ;;
+  native-v2-link)
+    shift
+    candidate="${1:-}"
+    if [[ -z "$candidate" || "$candidate" == -* ]]; then
+      echo "error: madaros native-v2-link requires <source.sio>" >&2
+      exit 2
+    fi
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros native-v2-link requires <source.sio> or a project with sounio.toml" >&2
+      exit 2
+    fi
+    shift
+    _native_v2_link "$src" "$@"
     ;;
   -h|--help|help)
     usage

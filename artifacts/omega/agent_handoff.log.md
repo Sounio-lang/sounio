@@ -4335,3 +4335,64 @@ status: lock-released
   - Next-Action: pursue the next S5 FULL blocker as a full slice, preferably
     external SysV f128 executable link/SRET promotion or the next arbitrary
     decimal rounding family with differential coverage.
+
+## 2026-07-07T08:11:03Z - Madaros S-next S5.29 external SysV f128 wrapper-link scalar oracle
+
+- Lane: `work/madaros-s-next-codex`
+- Worktree: `/tmp/sounio-madaros-s-next-codex`
+- Coordinator: Codex
+- Intent: turn the existing native-v2 ET_REL + host linker f128 passthrough
+  oracle into an explicit compiler launcher mode, instead of leaving it only as
+  receipt-internal Python glue.
+- Files changed:
+  - `bin/madaros`
+  - `scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py`
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+  - `artifacts/omega/agent_handoff.log.md`
+- What changed:
+  - Added `madaros native-v2-link <source.sio> -o OUT --link-object OBJ
+    [--cc CC] [--link-arg ARG...]`, which emits a native-v2 relocatable object
+    with the raw compiler and links it with host objects through `cc -no-pie`.
+  - Bumped the external SysV f128 receipt to schema `0.3` and stage
+    `S5_29_EXTERNAL_SYSV_F128_WRAPPER_LINK_SCALAR_ORACLE`.
+  - Added a fourth external SysV f128 case:
+    `extern_c_passthru_f128_native_v2_wrapper_link_oracle`, proving the wrapper
+    mode links `_Float128 passthru_f128(_Float128)` and the executable exits 0.
+  - Updated the aggregate S5 gate to require the S5.29 schema/stage, four cases,
+    three positive cases, wrapper-link flags, and the wrapper-link case payload.
+- Local proof completed:
+  - Direct smoke:
+    `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros ./bin/madaros native-v2-link <passthru.sio> -o <linked> --link-object <helper.o>`
+    passed; linked executable exited `0`.
+  - `python3 -m py_compile scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py`
+    passed.
+  - `bash -n bin/madaros scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh`
+    passed.
+  - `python3 scripts/dev/madaros_v2_s5_external_sysv_f128_blocker_receipt.py emit --compiler "$PWD/bin/madaros" --root "$PWD" --out-dir /tmp/sounio-s5-external-sysv-f128-s529 --timeout 120`
+    passed: `cases=4 blocked=True`.
+  - `scripts/dev/madaros_v2_s5_program_mir_abi_gate.sh` passed with external
+    SysV f128 S5.29 recorded.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_full_gate.sh`
+    passed, including imported-SMT solver gate `6/6`.
+  - `MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/madaros_source_to_elf_gate.sh`
+    passed.
+- Blocker status:
+  - Blocker-ID: `BLK-20260707-madaros-snext-external-sysv-f128-wrapper-link`
+  - Status: partial-closed / parent blocker remains open
+  - Severity: B1 remains open for S5 FULL
+  - Class: compiler-external-abi-linking
+  - Owner: Codex / next compiler-lane agent
+  - Lane: Madaros S-next S5 external SysV f128 ABI
+  - Worktree: `/tmp/sounio-madaros-s-next-codex`
+  - Branch: `work/madaros-s-next-codex`
+  - Acceptance-Gate: S5.29 external SysV f128 receipt, aggregate S5 gate, full
+    gate, source-to-ELF gate
+  - Evidence-Level: E3
+  - Legacy-Kept: yes; direct self-hosted native-v2 executable mode still fails
+    closed for unresolved externs, and general external SysV f128 ABI/SRET
+    remains unpromoted. S5 FULL/S6 readiness are still unclaimed.
+  - LLM-Offload: not-required for local compiler mechanics; required before
+    external-facing SOTA/novelty claims based on this lane.
+  - Next-Action: promote the next external ABI slice: either direct backend
+    linker integration for unresolved externs or external aggregate/SRET f128
+    oracle coverage.

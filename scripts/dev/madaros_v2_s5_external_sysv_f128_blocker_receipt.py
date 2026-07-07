@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.2"
-STAGE = "S5_24_EXTERNAL_SYSV_F128_RELOCATABLE_SCALAR_ORACLE"
+SCHEMA = "madaros.v2.s5.external_sysv_f128_blocker_receipt/0.3"
+STAGE = "S5_29_EXTERNAL_SYSV_F128_WRAPPER_LINK_SCALAR_ORACLE"
 CASE_ID = "external_sysv_f128_abi_blocked_front_half_received"
 
 PASSTHRU_SOURCE = """extern "C" {
@@ -395,6 +395,80 @@ def emit_passthru_relocatable_oracle_case(root: Path, compiler: Path, out_dir: P
     }
 
 
+def emit_passthru_wrapper_link_case(root: Path, out_dir: Path, timeout_s: int) -> dict[str, Any]:
+    case_id = "extern_c_passthru_f128_native_v2_wrapper_link_oracle"
+    source_path = out_dir / f"{case_id}.sio"
+    helper_path = out_dir / f"{case_id}.c"
+    helper_obj_path = out_dir / f"{case_id}.helper.o"
+    exe_path = out_dir / f"{case_id}.linked"
+    helper_log_path = out_dir / f"{case_id}.helper_compile.log"
+    link_log_path = out_dir / f"{case_id}.native_v2_link.log"
+    run_log_path = out_dir / f"{case_id}.run.log"
+    source_path.write_text(PASSTHRU_CALL_SOURCE, encoding="utf-8")
+    helper_path.write_text(PASSTHRU_HELPER_C, encoding="utf-8")
+
+    wrapper = root / "bin" / "madaros"
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if not wrapper.exists():
+        raise SystemExit(f"{case_id}: wrapper not found: {wrapper}")
+    if cc is None:
+        raise SystemExit(f"{case_id}: gcc/cc is required for the host SysV f128 wrapper-link oracle")
+
+    rc, stdout, stderr = run_host_command([cc, "-std=gnu11", "-c", str(helper_path), "-o", str(helper_obj_path)], root, timeout_s)
+    helper_log = stdout + stderr
+    helper_log_path.write_text(helper_log, encoding="utf-8")
+    if rc != 0 or not helper_obj_path.exists() or helper_obj_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: helper _Float128 object compile failed rc={rc}; log={helper_log_path}")
+
+    rc, stdout, stderr = run_command(
+        [
+            str(wrapper),
+            "native-v2-link",
+            str(source_path),
+            "-o",
+            str(exe_path),
+            "--link-object",
+            str(helper_obj_path),
+            "--cc",
+            cc,
+        ],
+        root,
+        timeout_s,
+    )
+    link_log = stdout + stderr
+    link_log_path.write_text(link_log, encoding="utf-8")
+    if rc != 0 or "native-v2-link: emitted path=" not in link_log or not exe_path.exists() or exe_path.stat().st_size <= 0:
+        raise SystemExit(f"{case_id}: madaros native-v2-link failed rc={rc}; log={link_log_path}")
+
+    rc, stdout, stderr = run_host_command([str(exe_path)], root, timeout_s)
+    run_log = stdout + stderr
+    run_log_path.write_text(run_log, encoding="utf-8")
+    if rc != 0:
+        raise SystemExit(f"{case_id}: wrapper-linked SysV f128 oracle returned rc={rc}; log={run_log_path}")
+
+    return {
+        "case_id": case_id,
+        "class": "positive_native_v2_wrapper_link_sysv_f128_oracle",
+        "symbol": "passthru_f128",
+        "signature": "(f128)->f128",
+        "source_sha256": sha256_text(PASSTHRU_CALL_SOURCE),
+        "helper_c_sha256": sha256_text(PASSTHRU_HELPER_C),
+        "wrapper": str(wrapper),
+        "wrapper_mode": "native-v2-link",
+        "host_c_compiler": cc,
+        "host_helper_compile_rc": 0,
+        "native_v2_link_rc": 0,
+        "native_v2_link_log_sha256": sha256_text(link_log),
+        "linked_executable_sha256": sha256_bytes(exe_path.read_bytes()),
+        "linked_executable_exit_code": 0,
+        "f128_external_sysv_scalar_passthru_wrapper_link_promoted": True,
+        "f128_external_sysv_argument_wrapper_link_promoted": True,
+        "f128_external_sysv_return_wrapper_link_promoted": True,
+        "native_v2_external_link_launcher_promoted": True,
+        "external_aggregate_sret_abi_covered": False,
+    }
+
+
 def emit(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     compiler = Path(args.compiler).resolve()
@@ -406,16 +480,17 @@ def emit(args: argparse.Namespace) -> int:
     passthru_case = emit_passthru_case(root, compiler, out_dir, int(args.timeout))
     passthru_call_case = emit_passthru_call_boundary_case(root, compiler, out_dir, int(args.timeout))
     relocatable_oracle_case = emit_passthru_relocatable_oracle_case(root, compiler, out_dir, int(args.timeout))
+    wrapper_link_case = emit_passthru_wrapper_link_case(root, out_dir, int(args.timeout))
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "pass",
         "stage_contract_level": STAGE,
         "target": "x86_64-linux",
         "case_id": CASE_ID,
-        "case_count": 3,
-        "positive_case_count": 2,
+        "case_count": 4,
+        "positive_case_count": 3,
         "negative_boundary_case_count": 1,
-        "cases": [passthru_case, passthru_call_case, relocatable_oracle_case],
+        "cases": [passthru_case, passthru_call_case, relocatable_oracle_case, wrapper_link_case],
         "source_evidence": source_evidence,
         "extern_decl_f128_typecheck_promoted": True,
         "parser_has_explicit_is_extern_bit": True,
@@ -426,16 +501,20 @@ def emit(args: argparse.Namespace) -> int:
         "native_v2_machineir_external_call_symbol_promoted": True,
         "native_v2_external_relocation_promoted": True,
         "native_v2_external_relocatable_object_promoted": True,
+        "native_v2_external_link_launcher_promoted": True,
         "f128_external_sysv_scalar_passthru_oracle_promoted": True,
+        "f128_external_sysv_scalar_passthru_wrapper_link_promoted": True,
         "f128_external_sysv_abi_promoted": False,
         "f128_external_sysv_runtime_promoted": True,
         "f128_external_sysv_argument_oracle_promoted": True,
         "f128_external_sysv_return_oracle_promoted": True,
+        "f128_external_sysv_argument_wrapper_link_promoted": True,
+        "f128_external_sysv_return_wrapper_link_promoted": True,
         "f128_internal_opaque_direct_call_abi_promoted_elsewhere": True,
         "f128_internal_opaque_return_abi_promoted_elsewhere": True,
         "f128_sysv_classes_recorded_as_metadata_only": True,
         "blocked": True,
-        "blocked_reason": "narrow_scalar_f128_relocatable_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open",
+        "blocked_reason": "narrow_scalar_f128_wrapper_link_oracle_promoted_but_general_external_sysv_abi_and_aggregate_sret_coverage_remain_open",
         "roundtrip_contract": [
             "extern_C_f128_declaration_typechecks_without_kernel_diagnostics",
             "lowerer_has_IR_STRATEGY_EXTERN_and_IrCallExtern_symbol_path",
@@ -443,9 +522,10 @@ def emit(args: argparse.Namespace) -> int:
             "MachineModule_JSON_exports_external_call_symbol_name_for_relocation_followup",
             "native_v2_emit_obj_exports_an_ET_REL_object_with_R_X86_64_PLT32_to_passthru_f128",
             "linked_C__Float128_passthrough_oracle_exits_zero",
+            "madaros_wrapper_native_v2_link_emits_a_linked_executable_for_the_scalar_passthrough_oracle",
         ],
         "missing_full_obligations": [
-            "native-v2 executable mode still requires an external linker path for unresolved externs",
+            "self-hosted native-v2 direct executable mode still requires an internal/external linker path for unresolved externs",
             "general external SysV ABI classification beyond exact scalar f128 passthrough",
             "external aggregate/SRET ABI oracle coverage",
         ],
