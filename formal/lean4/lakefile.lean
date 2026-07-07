@@ -72,6 +72,10 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
+-- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
+lean_lib «SounioSedenionAutomorphism» where
+
 -- Frente B: quartet<->fiber incidence of the sedenion ZD geometry (42 quartets = 2*K_7 on 7 fibers).
 @[default_target]
 lean_lib «SounioSedenionIncidence» where
