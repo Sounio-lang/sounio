@@ -76,6 +76,11 @@ lean_lib «SounioSedenionMeasurement» where
 @[default_target]
 lean_lib «SounioSedenionSpectra» where
 
+-- Frente B vector 4/2: substrate dynamics — spanning-tree complexity (Matrix-Tree, exact Bareiss
+-- integer det) + random-walk return counts of the ZD-geometry graphs. Mathlib-free, native_decide.
+@[default_target]
+lean_lib «SounioSedenionDynamics» where
+
 -- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
