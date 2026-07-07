@@ -73,6 +73,9 @@ lean_lib «SounioZeroDivisorBridge» where
 lean_lib «SounioSedenionMeasurement» where
 
 @[default_target]
+lean_lib «SounioGresnigtG2S3» where
+
+@[default_target]
 lean_lib «SounioGresnigtFamilyS3» where
 
 @[default_target]
