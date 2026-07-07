@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.continuity.a8-crossmod-forwarding-miscompile
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.continuity.a8-crossmod-forwarding-miscompile
+-->
+
 # A8 — Madaros imported-lane cross-module forwarding miscompile (SIGSEGV)
 
 ## RESOLUTION (2026-07-06) — FIXED in `ir_module_finalize_merged_calls`
