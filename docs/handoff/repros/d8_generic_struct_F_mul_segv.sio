@@ -1,0 +1,60 @@
+// D8 (issue #651) — souc miscompiles the [Rational;N] array-of-struct multiply-accumulate loop.
+// NOT a run-pass test (kept out of tests/run-pass/ so CI never globs it): it prints a WRONG value.
+//
+// This is NOT a generics bug. The generic exact-CD engine works perfectly for scalar F=i64
+// (cd_exact_generic_vs_concrete.sio: byte-identical to the concrete engine), and the SAME generic
+// RMW loop over [i64;16] is correct. The defect is the [Rational;N] (array-of-2-field-struct)
+// Cayley-Dickson accumulation loop below — reproduced here with NO generics at all.
+//
+// Symptom scaling (stage2 souc, post-#650 main):
+//   * N=16   → WRONG value (c[0] ≈ 4.2e6/1, varies run-to-run — corrupted memory; correct is 1/1).
+//   * N=2048 → SIGSEGV (exit 139) — the miscomputed access walks out of bounds.
+// Isolation — every SUB-operation is correct; only the full nested loop corrupts:
+//   * single constant-index RMW on [Rational;2048]           → correct (1/1)
+//   * variable-index READ of a [Rational;16] element         → correct
+//   * variable-indexed struct element as a by-value arg      → correct
+//   * ONE variable-index RMW iteration                       → correct
+//   * the full 16x16 accumulate loop (below)                 → WRONG
+// So it is a struct-temporary / aggregate corruption that accumulates across a nested loop of
+// struct-returning calls writing back into an array-of-struct slot.
+//
+// Relation to other defects: DISTINCT from #637 (that is a *cross-module arity-mismatch* compiler
+// SIGSEGV during lowering; this is single-module, a *runtime* wrong-value that only segfaults at
+// large N). Same family as #643 / D6 (struct value-copy aliasing/corruption). Scalar arrays
+// ([i64;N]) are unaffected — the concrete-i64 engine uses [i64;2048] with this exact loop correctly.
+//
+// Impact: blocks the exact CD product over Rational / BigInt, i.e. all-16-components over unbounded ℚ
+// (the exact-algebra lane's last residual). Unbounded-ℚ meanwhile uses the common-denominator integer
+// representation (sedenion_cd_full16_q.sio), which is [i64;N] — no array-of-struct — and is unaffected.
+use math::rational::{Rational, rat_zero, rat_one, rat_add, rat_mul}
+
+struct SmallR { c: [Rational; 16] }   // array-of-struct; the [i64;16] analogue is correct
+
+// e1*e1 over the sedenion basis, sign dropped for minimality (idx = i XOR j, no cd_sigma).
+fn sr_mul(a: SmallR, b: SmallR) -> SmallR with Mut, Panic, Div {
+    var r = SmallR { c: [rat_zero(); 16] }
+    var i: i32 = 0
+    while i < 16 {
+        var j: i32 = 0
+        while j < 16 {
+            let idx = i ^ j
+            r.c[idx as usize] = rat_add(r.c[idx as usize], rat_mul(a.c[i as usize], b.c[j as usize]))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn main() with IO, Mut, Panic, Div {
+    var a = SmallR { c: [rat_zero(); 16] }
+    a.c[1] = rat_one()
+    var b = SmallR { c: [rat_zero(); 16] }
+    b.c[1] = rat_one()
+    let p = sr_mul(a, b)                       // e1*e1: only idx=0 accumulates 1*1 = 1
+    print("c0=")
+    print_int(p.c[0 as usize].num)             // observed ~4.2e6 (garbage, varies); correct is 1
+    print("/")
+    print_int(p.c[0 as usize].den)
+    print("\n")
+}

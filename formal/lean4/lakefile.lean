@@ -72,6 +72,44 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+-- Frente B vector 4/1: emergent metric — integral spectra of the ZD-geometry graphs.
+@[default_target]
+lean_lib «SounioSedenionSpectra» where
+
+-- Frente B vector 4/2: substrate dynamics — spanning-tree complexity (Matrix-Tree, exact Bareiss
+-- integer det) + random-walk return counts of the ZD-geometry graphs. Mathlib-free, native_decide.
+@[default_target]
+lean_lib «SounioSedenionDynamics» where
+
+-- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
+-- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
+lean_lib «SounioSedenionAutomorphism» where
+
+-- Frente B vector 1: the 7 fibers = Fano plane PG(2,2), Aut = PGL(3,2). Corollary of the
+-- automorphism sweep; NON-default_target (~1 min): `lake build SounioSedenionFano`.
+lean_lib «SounioSedenionFano» where
+
+-- Frente B: quartet<->fiber incidence of the sedenion ZD geometry (42 quartets = 2*K_7 on 7 fibers).
+@[default_target]
+lean_lib «SounioSedenionIncidence» where
+
+@[default_target]
+lean_lib «SounioSedenionQuartets» where
+
+-- Frente B: the associator side of the sedenion tower — 1848 = 11*168 ordered non-associative
+-- basis triples (confirms the ZD-geometry report conjecture). Mathlib-free native_decide, no sorry.
+@[default_target]
+lean_lib «SounioSedenionAssociator1848» where
+
+@[default_target]
+lean_lib «SounioSedenionFiberIdentity» where
+
+-- Independent-spec (native_decide) leg for the sedenion ZD e8-boundary + 7-fiber decomposition.
+-- Mathlib-free, no sorry; the third checker (Lean kernel) behind the executed-in-Sounio results
+-- tests/run-pass/sedenion_e8_boundary.sio and sedenion_zd_fibers.sio.
+@[default_target]
+lean_lib «SounioSedenionE8Fibers» where
+
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
 

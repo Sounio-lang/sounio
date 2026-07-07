@@ -1197,6 +1197,58 @@ fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return h
 }
 
+// Same FNV-1a as gl_name_hash() but over a compiler-literal string instead of
+// a source-buffer span — lets us compare a hash captured from source text
+// (e.g. FN_RECV_HASH for `impl R for i64`, which is gl_name_hash() of the
+// literal token text "i64") against a known primitive-type-name constant
+// without needing that constant to also live in the source buffer.
+fn str_lit_hash(kw: string) -> i64 with Panic, Mut {
+    let l = str_len(kw)
+    var h: i64 = 2166136261
+    var hi: i64 = 0
+    while hi < l {
+        h = ((h ^ (str_char_at(kw, hi) & 0xFF)) * 16777619) & 0x1FFFFFFFFF
+        hi = hi + 1
+    }
+    return h
+}
+
+// C3/C2 helper: does a name-hash (as produced by gl_name_hash on an impl
+// target's identifier text, e.g. FN_RECV_HASH for `impl R for i64`) belong to
+// a primitive type name? Returns the VAR_TY/SCAN_TY code scan_type() would
+// assign that primitive (see scan_type ~line 5490-5525: i8/u8/i32/u32/i64/
+// u64/usize -> 1, f32/f64 -> 2, str/string -> 3, bool -> 4), or -1 if h does
+// not match any primitive-type-name literal.
+fn prim_name_hash_ty(h: i64) -> i64 with Panic, Mut {
+    if h == str_lit_hash("i64") { return 1 }
+    if h == str_lit_hash("i32") { return 1 }
+    if h == str_lit_hash("u64") { return 1 }
+    if h == str_lit_hash("usize") { return 1 }
+    if h == str_lit_hash("u8") { return 1 }
+    if h == str_lit_hash("i8") { return 1 }
+    if h == str_lit_hash("u32") { return 1 }
+    if h == str_lit_hash("f64") { return 2 }
+    if h == str_lit_hash("f32") { return 2 }
+    if h == str_lit_hash("bool") { return 4 }
+    return -1
+}
+
+// Inverse of prim_name_hash_ty(): canonical literal-name hash for a
+// primitive VAR_TY/EXPR_TY code. Used at method-dispatch call sites (C2) to
+// recover the same hash fn_find_method() indexes FN_RECV_HASH by for
+// `impl Trait for <primitive>` blocks, since primitive expressions normally
+// carry EXPR_TY_HASH == 0 (see scan_type — primitives never set SCAN_TY_HASH).
+// Code 1 covers every integer-width primitive (i8/u8/i32/u32/i64/u64/usize);
+// "i64" is used as the canonical text since that is the width in the C2/C3
+// witnesses and lean_single's numeric expressions are otherwise width-erased.
+fn prim_lit_hash(t: i64) -> i64 with Panic, Mut {
+    if t == 1 { return str_lit_hash("i64") }
+    if t == 2 { return str_lit_hash("f64") }
+    if t == 3 { return str_lit_hash("str") }
+    if t == 4 { return str_lit_hash("bool") }
+    return 0
+}
+
 // ─── Gen 19: Unit dimension helpers ──────────────────────────────────────────
 
 // Pack 7 dimension exponents (-8..+7 each) into one i64 using 4-bit 2's-complement
@@ -5815,12 +5867,20 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
     SCAN_TY_NEXT = p
 }
 
-// Build mangled name "name_type" in SRC buffer, return (start, end)
+// Build mangled name "name__mg_type" in SRC buffer, return (start, end).
+// The separator must NOT be a bare "_": user code legitimately ships hand-
+// monomorphized siblings named `<name>_<ty>` (e.g. cd_zero_exact_i64 next to
+// generic cd_zero_exact), and a bare-underscore mangle makes the instantiation
+// resolve to the wrong fn (arity mismatch across the whole bundle).
 fn mono_mangle(ns: i64, ne: i64, ts: i64, te: i64) -> i64 with Mut, Panic {
     let start = SRC_LEN
     var i: i64 = 0
     while i < ne - ns { SRC[(SRC_LEN + i) as usize] = SRC[(ns + i) as usize]; i = i + 1 }
     SRC_LEN = SRC_LEN + (ne - ns)
+    SRC[SRC_LEN as usize] = 95; SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 95; SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 109; SRC_LEN = SRC_LEN + 1
+    SRC[SRC_LEN as usize] = 103; SRC_LEN = SRC_LEN + 1
     SRC[SRC_LEN as usize] = 95; SRC_LEN = SRC_LEN + 1
     i = 0
     while i < te - ts { SRC[(SRC_LEN + i) as usize] = SRC[(ts + i) as usize]; i = i + 1 }
@@ -5856,6 +5916,32 @@ fn mono_register_struct(gi: i64, tys: i64, tye: i64) -> i64 with Panic, Mut {
     MONO_TY2_E[mi as usize] = 0
     MONO_IS_ST[mi as usize] = 1
     let ms = mono_mangle(GEN_ST_NS[gi as usize], GEN_ST_NE[gi as usize], tys, tye)
+    MAN_BUF_S[mi as usize] = ms
+    MAN_BUF_E[mi as usize] = SRC_LEN
+    MONO_COUNT = MONO_COUNT + 1
+    return mi
+}
+
+// Find-or-register a generic FN specialization discovered transitively inside a mono
+// fn-body copy: a generic fn calling another generic fn via `callee::<F>(..)`. After
+// the F->concrete substitution the emitted copy contains `callee::<i64>`, but Pass 0d
+// only scans the pre-mono token range (generic bodies are skipped there), so the
+// instance must be registered from the copy loop. The copy loop's `while m_i <
+// MONO_COUNT` re-reads MONO_COUNT, so instances appended here are emitted later in
+// the same loop (transitive closure; mono_find_inst dedups, so self-recursion
+// terminates). Returns the MONO index, or -1 on capacity overflow.
+fn mono_register_fn(gi: i64, tys: i64, tye: i64, ty2s: i64, ty2e: i64) -> i64 with Panic, Mut {
+    let existing = mono_find_inst(gi, 0, tys, tye)
+    if existing >= 0 { return existing }
+    if MONO_COUNT >= 128 { return -1 }
+    let mi = MONO_COUNT
+    MONO_GEN[mi as usize] = gi
+    MONO_TY_S[mi as usize] = tys
+    MONO_TY_E[mi as usize] = tye
+    MONO_TY2_S[mi as usize] = ty2s
+    MONO_TY2_E[mi as usize] = ty2e
+    MONO_IS_ST[mi as usize] = 0
+    let ms = mono_mangle(GEN_FN_NS[gi as usize], GEN_FN_NE[gi as usize], tys, tye)
     MAN_BUF_S[mi as usize] = ms
     MAN_BUF_E[mi as usize] = SRC_LEN
     MONO_COUNT = MONO_COUNT + 1
@@ -15544,6 +15630,16 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if EXPR_TY == 10 {
                     recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
                 }
+                // C2: a primitive receiver normally carries hash 0 (scan_type never
+                // sets SCAN_TY_HASH for primitives), which fn_find_method() cannot
+                // disambiguate when two impls of the same trait both define this
+                // method name. Recover the literal-name hash impl registration used
+                // for FN_RECV_HASH (`impl Trait for i64` -> gl_name_hash("i64") text)
+                // so the exact-match branch of fn_find_method() can select correctly.
+                if recv_h == 0 {
+                    let recv_prim_h = prim_lit_hash(EXPR_TY)
+                    if recv_prim_h != 0 { recv_h = recv_prim_h }
+                }
                 let mfi = fn_find_method(fns, fne, recv_h)
                 if mfi >= 0 {
                     EP = EP + 1  // skip method name
@@ -21244,7 +21340,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         EP = EP + 1  // skip 'impl'
         if TK[EP as usize] == 3 { EP = EP + 1 }  // skip name
         // Skip 'for Type' if present
-        if TK[EP as usize] == 3 && src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "for") {
+        if TK[EP as usize] == 54 {
             EP = EP + 1  // skip 'for'
             if TK[EP as usize] == 3 { EP = EP + 1 }  // skip type name
         }
@@ -25865,7 +25961,7 @@ fn mono_pass() with IO, Mut, Panic, Div {
             d_gi = 0
             while d_gi < GEN_FN_COUNT {
                 if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
-                    if mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 {
+                    if mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 && MONO_COUNT < 128 {
                         d_mi = MONO_COUNT
                         MONO_GEN[d_mi as usize] = d_gi
                         MONO_TY_S[d_mi as usize] = d_tys
@@ -25929,7 +26025,7 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 d_gi = 0
                 while d_gi < GEN_FN_COUNT {
                     if name_eq(d_cns, d_cne, GEN_FN_NS[d_gi as usize], GEN_FN_NE[d_gi as usize]) {
-                        if mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 {
+                        if mono_find_inst(d_gi, 0, d_tys, d_tye) < 0 && MONO_COUNT < 128 {
                             d_mi = MONO_COUNT
                             MONO_GEN[d_mi as usize] = d_gi
                             MONO_TY_S[d_mi as usize] = d_tys
@@ -26157,6 +26253,67 @@ fn mono_pass() with IO, Mut, Panic, Div {
                     }
                 }
             }
+            // Rewrite a bare generic-struct CONSTRUCTOR `GenStruct {` inside a generic
+            // *fn* body to the mangled `GenStruct_<ty> {` for this instantiation. The
+            // collapse arm above only fires on `GenStruct < T >`; a plain struct
+            // literal has no angle brackets, so without this the literal keeps the
+            // template spelling, its type hash stays gl_name_hash("GenStruct") while
+            // the declared return collapsed to "GenStruct_<ty>", and the tail-type
+            // check rejects valid code ("tail type mismatch"). Single-param structs,
+            // instantiated at the fn's first concrete type — same limitation as the
+            // collapse arm. (An `IDENT {` where IDENT is a local var coincidentally
+            // spelled like a generic struct would false-fire; requires an exact
+            // case-sensitive collision with a generic struct name.)
+            if m_is_st == 0 && m_tk == 3 && m_ti + 1 < m_be && TK[(m_ti + 1) as usize] == 8 {
+                var bc_gi: i64 = 0
+                var bc_hit: i64 = -1
+                while bc_gi < GEN_ST_COUNT && bc_hit < 0 {
+                    if name_eq(m_tts, m_tte, GEN_ST_NS[bc_gi as usize], GEN_ST_NE[bc_gi as usize]) { bc_hit = bc_gi }
+                    bc_gi = bc_gi + 1
+                }
+                if bc_hit >= 0 {
+                    let bc_mi = mono_register_struct(bc_hit, m_tys, m_tye)
+                    if bc_mi >= 0 {
+                        TK[TC as usize] = 3
+                        TS[TC as usize] = MAN_BUF_S[bc_mi as usize]
+                        TE[TC as usize] = MAN_BUF_E[bc_mi as usize]
+                        TV[TC as usize] = 0
+                        TL[TC as usize] = TL[m_ti as usize]
+                        TC = TC + 1
+                        m_ti = m_ti + 1
+                        continue
+                    }
+                    print("warning: mono table overflow -- generic struct instantiation dropped\n")
+                }
+            }
+            // Transitive generic-fn instantiation: register `callee ::< T [, U] >` seen
+            // while copying a generic fn body (see mono_register_fn). Tokens are NOT
+            // consumed -- the type-param arms below rewrite the T/U tokens as they are
+            // copied, and compile_primary resolves the call via mono_find_inst.
+            if m_is_st == 0 && m_tk == 3 && m_ti + 4 < m_be && TK[(m_ti + 1) as usize] == 51 && TK[(m_ti + 2) as usize] == 23 && TK[(m_ti + 3) as usize] == 3 {
+                var tf_gi: i64 = 0
+                var tf_hit: i64 = -1
+                while tf_gi < GEN_FN_COUNT && tf_hit < 0 {
+                    if name_eq(m_tts, m_tte, GEN_FN_NS[tf_gi as usize], GEN_FN_NE[tf_gi as usize]) { tf_hit = tf_gi }
+                    tf_gi = tf_gi + 1
+                }
+                if tf_hit >= 0 {
+                    var tf_tys: i64 = TS[(m_ti + 3) as usize]
+                    var tf_tye: i64 = TE[(m_ti + 3) as usize]
+                    if name_eq(tf_tys, tf_tye, m_tps, m_tpe) { tf_tys = m_tys; tf_tye = m_tye }
+                    if m_tp2s != 0 && name_eq(TS[(m_ti + 3) as usize], TE[(m_ti + 3) as usize], m_tp2s, m_tp2e) { tf_tys = m_ty2s; tf_tye = m_ty2e }
+                    var tf_ty2s: i64 = 0
+                    var tf_ty2e: i64 = 0
+                    if TK[(m_ti + 4) as usize] == 28 && m_ti + 5 < m_be && TK[(m_ti + 5) as usize] == 3 {
+                        tf_ty2s = TS[(m_ti + 5) as usize]
+                        tf_ty2e = TE[(m_ti + 5) as usize]
+                        if name_eq(tf_ty2s, tf_ty2e, m_tps, m_tpe) { tf_ty2s = m_tys; tf_ty2e = m_tye }
+                        if m_tp2s != 0 && name_eq(TS[(m_ti + 5) as usize], TE[(m_ti + 5) as usize], m_tp2s, m_tp2e) { tf_ty2s = m_ty2s; tf_ty2e = m_ty2e }
+                    }
+                    let tf_mi = mono_register_fn(tf_hit, tf_tys, tf_tye, tf_ty2s, tf_ty2e)
+                    if tf_mi < 0 { print("warning: mono table overflow -- generic fn instantiation dropped\n") }
+                }
+            }
             if m_tk == 3 && name_eq(m_tts, m_tte, m_gns, m_gne) {
                 TK[TC as usize] = 3
                 TS[TC as usize] = m_mns
@@ -26378,6 +26535,96 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Gen 19: preload unit dimension table (SI, CGS, Imperial, Astronomical, Pharma, Atomic)
     init_unit_table()
+
+    // C4: Pass 0 (token rewrite) — resolve `Self` inside impl blocks.
+    // scan_type() has no "Self" case (it only understands a single bare
+    // identifier resolved against structs/enums/primitives), so `o: Self` /
+    // `-> Self` never typed correctly downstream. Rather than teach every
+    // scan_type() call site about Self, rewrite the token stream ONCE, up
+    // front: inside each `impl [Trait for] Target { ... }` body, every ident
+    // token whose source text is exactly "Self" has its TS/TE overwritten to
+    // Target's own identifier span (kind stays 3 = ident), so all later
+    // passes see the concrete type name as if the source had said so
+    // directly. Trait blocks (kw 75) are skipped entirely — they have no
+    // concrete target to rewrite to, and bodyless trait methods must keep
+    // `Self` unresolved (there is nothing else to check it against there).
+    var selfrw_p: i64 = 0
+    while selfrw_p < TC {
+        if TK[selfrw_p as usize] == 75 {
+            // Skip the whole trait block untouched.
+            selfrw_p = selfrw_p + 1
+            while selfrw_p < TC && TK[selfrw_p as usize] != 8 && TK[selfrw_p as usize] != 0 { selfrw_p = selfrw_p + 1 }
+            if selfrw_p < TC && TK[selfrw_p as usize] == 8 {
+                var srw_trait_depth: i64 = 1
+                selfrw_p = selfrw_p + 1
+                while selfrw_p < TC && srw_trait_depth > 0 {
+                    if TK[selfrw_p as usize] == 8 { srw_trait_depth = srw_trait_depth + 1 }
+                    if TK[selfrw_p as usize] == 9 { srw_trait_depth = srw_trait_depth - 1 }
+                    selfrw_p = selfrw_p + 1
+                }
+            }
+            continue
+        }
+        if TK[selfrw_p as usize] == 76 {
+            selfrw_p = selfrw_p + 1  // skip 'impl'
+            // Skip optional impl-level generic params: impl<T> ...
+            if selfrw_p < TC && TK[selfrw_p as usize] == 23 {
+                var srw_gd: i64 = 1
+                selfrw_p = selfrw_p + 1
+                while selfrw_p < TC && srw_gd > 0 {
+                    if TK[selfrw_p as usize] == 23 { srw_gd = srw_gd + 1 }
+                    if TK[selfrw_p as usize] == 24 { srw_gd = srw_gd - 1 }
+                    selfrw_p = selfrw_p + 1
+                }
+            }
+            var srw_target_ts: i64 = -1
+            var srw_target_te: i64 = -1
+            if selfrw_p < TC && TK[selfrw_p as usize] == 3 {
+                srw_target_ts = TS[selfrw_p as usize]
+                srw_target_te = TE[selfrw_p as usize]
+                selfrw_p = selfrw_p + 1
+                // `impl Trait for Target` — the target is the ident after `for`,
+                // not the trait name right after `impl`.
+                if selfrw_p < TC && TK[selfrw_p as usize] == 54 {
+                    selfrw_p = selfrw_p + 1  // skip 'for'
+                    if selfrw_p < TC && TK[selfrw_p as usize] == 3 {
+                        srw_target_ts = TS[selfrw_p as usize]
+                        srw_target_te = TE[selfrw_p as usize]
+                        selfrw_p = selfrw_p + 1
+                    }
+                }
+            }
+            // Skip optional generic args on the target type: Foo<T>
+            if selfrw_p < TC && TK[selfrw_p as usize] == 23 {
+                var srw_tgd: i64 = 1
+                selfrw_p = selfrw_p + 1
+                while selfrw_p < TC && srw_tgd > 0 {
+                    if TK[selfrw_p as usize] == 23 { srw_tgd = srw_tgd + 1 }
+                    if TK[selfrw_p as usize] == 24 { srw_tgd = srw_tgd - 1 }
+                    selfrw_p = selfrw_p + 1
+                }
+            }
+            // Advance to the impl body's opening brace, then rewrite every
+            // "Self" ident inside it (tracking nested braces so we stop at
+            // the impl block's own matching close, not an inner one).
+            while selfrw_p < TC && TK[selfrw_p as usize] != 8 && TK[selfrw_p as usize] != 0 { selfrw_p = selfrw_p + 1 }
+            if selfrw_p < TC && TK[selfrw_p as usize] == 8 && srw_target_ts >= 0 {
+                var srw_depth: i64 = 1
+                selfrw_p = selfrw_p + 1
+                while selfrw_p < TC && srw_depth > 0 {
+                    if TK[selfrw_p as usize] == 8 { srw_depth = srw_depth + 1 }
+                    if TK[selfrw_p as usize] == 9 { srw_depth = srw_depth - 1 }
+                    if srw_depth > 0 && TK[selfrw_p as usize] == 3 && src_match(TS[selfrw_p as usize], TE[selfrw_p as usize] - TS[selfrw_p as usize], "Self") {
+                        TS[selfrw_p as usize] = srw_target_ts
+                        TE[selfrw_p as usize] = srw_target_te
+                    }
+                    selfrw_p = selfrw_p + 1
+                }
+            }
+            continue
+        }
+        selfrw_p = selfrw_p + 1
+    }
 
     // Pass 0a: register structs, constants, and skip algebra/study declarations
     ST_COUNT = 0
@@ -26704,7 +26951,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 p = p + 1
                 var impl_type_hash: i64 = impl_hash1
                 // Check for "for" keyword — if present, this is `impl Trait for Type`
-                if p < TC && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "for") {
+                if p < TC && TK[p as usize] == 54 {
                     p = p + 1  // skip 'for'
                     if p < TC && TK[p as usize] == 3 {
                         impl_type_hash = gl_name_hash(TS[p as usize], TE[p as usize])
@@ -27009,6 +27256,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Pass 1: register all function names (skip generic templates)
     while p < TC {
+        // Skip trait declarations — trait methods are abstract signatures, not fn defs.
+        if TK[p as usize] == 75 {
+            p = p + 1  // skip 'trait'
+            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
+            if p < TC && TK[p as usize] == 8 {
+                p = p + 1
+                var trait_skip_depth1: i64 = 1
+                while p < TC && trait_skip_depth1 > 0 {
+                    if TK[p as usize] == 8 { trait_skip_depth1 = trait_skip_depth1 + 1 }
+                    if TK[p as usize] == 9 { trait_skip_depth1 = trait_skip_depth1 - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             FN_IS_KERNEL[FN_COUNT as usize] = 0
             if token_is_kernel_marker(p - 1) { FN_IS_KERNEL[FN_COUNT as usize] = 1 }
@@ -27039,6 +27301,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     var sig_impl_depth: i64 = 0    // brace depth while inside an impl block
     var sig_impl_pending_open: i64 = 0
     while p < TC {
+        // Skip trait declarations — trait methods are abstract signatures, not fn defs.
+        if sig_impl_depth == 0 && TK[p as usize] == 75 {
+            p = p + 1  // skip 'trait'
+            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
+            if p < TC && TK[p as usize] == 8 {
+                p = p + 1
+                var trait_skip_depth2: i64 = 1
+                while p < TC && trait_skip_depth2 > 0 {
+                    if TK[p as usize] == 8 { trait_skip_depth2 = trait_skip_depth2 + 1 }
+                    if TK[p as usize] == 9 { trait_skip_depth2 = trait_skip_depth2 - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
         if TK[p as usize] == 77 {
             sig_impl_hash = 0
             sig_impl_depth = 0
@@ -27092,7 +27369,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if iq < TC && TK[iq as usize] == 3 {
                 var ih: i64 = gl_name_hash(TS[iq as usize], TE[iq as usize])
                 iq = iq + 1
-                if iq < TC && TK[iq as usize] == 3 && src_match(TS[iq as usize], TE[iq as usize] - TS[iq as usize], "for") {
+                if iq < TC && TK[iq as usize] == 54 {
                     iq = iq + 1
                     if iq < TC && TK[iq as usize] == 3 { ih = gl_name_hash(TS[iq as usize], TE[iq as usize]) }
                 }
@@ -27226,6 +27503,22 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var ret_fi: i64 = 0
     while p < TC {
+        // Skip trait declarations — must match Pass 1 / sig-pass trait skip so ret_fi
+        // stays aligned with the FN_* index space (trait bodyless methods aren't registered).
+        if TK[p as usize] == 75 {
+            p = p + 1  // skip 'trait'
+            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
+            if p < TC && TK[p as usize] == 8 {
+                p = p + 1
+                var trait_skip_depth3: i64 = 1
+                while p < TC && trait_skip_depth3 > 0 {
+                    if TK[p as usize] == 8 { trait_skip_depth3 = trait_skip_depth3 + 1 }
+                    if TK[p as usize] == 9 { trait_skip_depth3 = trait_skip_depth3 - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
@@ -27265,6 +27558,22 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     var eff_fi: i64 = 0
     while p < TC {
+        // Skip trait declarations — must match Pass 1 / sig-pass trait skip so eff_fi
+        // stays aligned with the FN_* index space (trait bodyless methods aren't registered).
+        if TK[p as usize] == 75 {
+            p = p + 1  // skip 'trait'
+            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
+            if p < TC && TK[p as usize] == 8 {
+                p = p + 1
+                var trait_skip_depth4: i64 = 1
+                while p < TC && trait_skip_depth4 > 0 {
+                    if TK[p as usize] == 8 { trait_skip_depth4 = trait_skip_depth4 + 1 }
+                    if TK[p as usize] == 9 { trait_skip_depth4 = trait_skip_depth4 - 1 }
+                    p = p + 1
+                }
+            }
+            continue
+        }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             // Skip generic templates
@@ -27737,8 +28046,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] != 43 && src_match(pns, pne - pns, "self") && FN_RECV_HASH[fn_idx as usize] != 0 {
                     let self_hash = FN_RECV_HASH[fn_idx as usize]
                     if pslot >= 0 {
-                        VAR_TY[(VAR_COUNT - 1) as usize] = 6
-                        VAR_TY_HASH[(VAR_COUNT - 1) as usize] = self_hash
+                        // C3: `self` in `impl Trait for <primitive>` must carry the
+                        // primitive's VAR_TY code (with hash 0, as every primitive
+                        // does — see scan_type), not the struct code 6. Without this,
+                        // arithmetic on `self` (e.g. `self * 10`) is typechecked as a
+                        // struct operand and rejected ("arithmetic operands must have
+                        // matching numeric types").
+                        let self_prim_ty = prim_name_hash_ty(self_hash)
+                        if self_prim_ty >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = self_prim_ty
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = 0
+                            if self_prim_ty == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        } else {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = 6
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = self_hash
+                        }
                     }
                 }
                 if TK[p as usize] == 43 {
@@ -32264,6 +32586,12 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 var recv_h = EXPR_TY_HASH
                 if EXPR_TY == 10 {
                     recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
+                }
+                // C2 (a64 mirror of the x86_64 fix): see the x86_64 method-call site
+                // for the full rationale.
+                if recv_h == 0 {
+                    let recv_prim_h = prim_lit_hash(EXPR_TY)
+                    if recv_prim_h != 0 { recv_h = recv_prim_h }
                 }
                 let mfi = fn_find_method(fns, fne, recv_h)
                 if mfi >= 0 {

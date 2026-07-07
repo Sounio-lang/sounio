@@ -14,6 +14,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
@@ -1332,12 +1333,19 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
-// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id.
+// Resolve a call's canonical target from its (fn_id, name) fields only.
 // Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
-// callee symbol at the current fn_id when instr.name is empty.
-fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
-    let old_id = instr.fn_id
-    var resolve_name = instr.name
+// callee symbol at the current fn_id when the call's name is empty.
+//
+// A8 fix: the previous entry point (`ir_module_resolve_one_call_target`) took
+// `instr: IrInstr` BY VALUE. IrInstr is a
+// large struct carrying a `Box` (call_args); under lean_single, passing it by value
+// miscompiles the copy and corrupts the CALLER's `ins` local (dst/src1/call_args all
+// scramble), which was then written back — SIGSEGV in cross-module forwarding fns
+// (`var r = zero(k); r.c[i]=1; return r`). Passing only the scalar fn_id + fixed-size
+// Name avoids the large-struct/Box by-value copy entirely.
+fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
+    var resolve_name = instr_name
     if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
         resolve_name = (*module).functions[old_id as usize].name
     }
@@ -1370,9 +1378,12 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
         while ii < (*module).functions[fi as usize].instr_count {
             let op = (*module).functions[fi as usize].instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(
+                let cur_fn = (*module).functions[fi as usize].instrs[ii as usize].fn_id
+                let cur_nm = (*module).functions[fi as usize].instrs[ii as usize].name
+                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_call_target_fields(
                     module,
-                    (*module).functions[fi as usize].instrs[ii as usize]
+                    cur_fn,
+                    cur_nm
                 )
             }
             ii = ii + 1
@@ -1463,6 +1474,80 @@ fn ir_module_dump_fn_body(module: &IrModule, fn_index: i64, label: string) with 
         }
         print("\n")
         ii = ii + 1
+    }
+}
+
+fn ir_diag_opcode_tag(op: IrOpcode) -> i64 {
+    if op == IrOpcode::IrLoadImm { 0 }
+    else if op == IrOpcode::IrCopy { 4 }
+    else if op == IrOpcode::IrBinOp { 5 }
+    else if op == IrOpcode::IrCall { 7 }
+    else if op == IrOpcode::IrReturn { 8 }
+    else if op == IrOpcode::IrFieldGet { 12 }
+    else if op == IrOpcode::IrFieldSet { 13 }
+    else if op == IrOpcode::IrIndexGet { 14 }
+    else if op == IrOpcode::IrIndexSet { 15 }
+    else if op == IrOpcode::IrAlloc { 16 }
+    else if op == IrOpcode::IrCallSret { 40 }
+    else if op == IrOpcode::IrReturnSret { 41 }
+    else { 99 }
+}
+
+fn ir_module_dump_all_calls_diag(module: &IrModule) with IO, Mut, Div, Panic {
+    print("DUMPALL fn_count=")
+    print_int((*module).fn_count)
+    print("\n")
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let fname = (*module).functions[fi as usize].name
+        print("DUMPFN idx ")
+        print_int(fi)
+        print(" ic ")
+        print_int((*module).functions[fi as usize].instr_count)
+        print(" NM=[")
+        print(str_from_bytes(fname.buf, fname.len))
+        print("]\n")
+        let ficnt = (*module).functions[fi as usize].instr_count
+        if ficnt > 0 && ficnt < 40 {
+            var ii: i64 = 0
+            while ii < ficnt {
+                let ins = (*module).functions[fi as usize].instrs[ii as usize]
+                // one print_int per line (compiler print_int appends \n).
+                print("Dq i=")
+                print_int(ii)
+                print("Dq op=")
+                print_int(ir_diag_opcode_tag(ins.op))
+                print("Dq dst=")
+                print_int(ins.dst)
+                print("Dq s1=")
+                print_int(ins.src1)
+                print("Dq s2=")
+                print_int(ins.src2)
+                print("Dq fi=")
+                print_int(ins.field_idx)
+                print("Dq ac=")
+                print_int(ins.arg_count)
+                print("Dq imm=")
+                print_int(ins.imm_i64)
+                print("Dq fn=")
+                print_int(ins.fn_id)
+                var cur_args = &ins.call_args
+                var guard: i64 = 0
+                while guard < 8 {
+                    match *cur_args {
+                        Some(rl) => {
+                            print("Dq arg=")
+                            print_int((*rl).head)
+                            cur_args = &(*rl).tail
+                            guard = guard + 1
+                        }
+                        None => { guard = 8 }
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+        fi = fi + 1
     }
 }
 
@@ -1630,20 +1715,28 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
 // Post-finalize compaction: rewrite every direct fn-ref opcode to the canonical
 // body index for the callee symbol. Whole IrInstr slot writes avoid the
 // &!Box<IrModule> in-place fn_id mutation drop.
+// A14: rebind stale fn_ids per WHOLE FUNCTION (by-value IrFunction copy, 2-level
+// owned fn_id write, 1-level writeback — the merge-append idiom). A nested 3-level
+// store (`out.functions[fi].instrs[ii].fn_id=v`, direct OR via &! pointer) is silently
+// DROPPED by lean_single, and a whole-IrInstr writeback drags the Box and zeroes the
+// slot — either way a cross-module IrCall from a non-first fn to a transitive target
+// is miscompiled (call elided / wrong target -> null-deref SIGSEGV or result 0).
 fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, Div, Panic {
     var out = module
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
+            var f = out.functions[fi as usize]
+            var changed: bool = false
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                if ir_merge_is_direct_fn_ref_opcode(out.functions[fi as usize].instrs[ii as usize].op) {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
-                    let old_id = ins.fn_id
+            while ii < f.instr_count {
+                if ir_merge_is_direct_fn_ref_opcode(f.instrs[ii as usize].op) {
+                    let old_id = f.instrs[ii as usize].fn_id
+                    let nm = f.instrs[ii as usize].name
                     var canon: i64 = old_id
-                    if ins.name.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, ins.name)
+                    if nm.len > 0 {
+                        let by_name = ir_merge_find_function_name_index(&out, nm)
                         if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
                             canon = by_name
                         }
@@ -1654,11 +1747,14 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
                         && canon < out.fn_count
                         && out.functions[canon as usize].instr_count > 0
                         && canon != old_id {
-                        ins.fn_id = canon
-                        out.functions[fi as usize].instrs[ii as usize] = ins
+                        f.instrs[ii as usize].fn_id = canon
+                        changed = true
                     }
                 }
                 ii = ii + 1
+            }
+            if changed {
+                out.functions[fi as usize] = f
             }
             fi = fi + 1
         }
@@ -1715,15 +1811,26 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
+            // A14: whole-function copy/writeback (see ir_module_compact_duplicate_fn_refs)
+            // — nested `out.functions[fi].instrs[ii].fn_id=v` writes are dropped.
+            var f = out.functions[fi as usize]
+            var changed: bool = false
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                let op = out.functions[fi as usize].instrs[ii as usize].op
+            while ii < f.instr_count {
+                let op = f.instrs[ii as usize].op
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
-                    ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
-                    out.functions[fi as usize].instrs[ii as usize] = ins
+                    let cur_fn = f.instrs[ii as usize].fn_id
+                    let cur_nm = f.instrs[ii as usize].name
+                    let new_id = ir_module_resolve_call_target_fields(&out, cur_fn, cur_nm)
+                    if new_id != cur_fn {
+                        f.instrs[ii as usize].fn_id = new_id
+                        changed = true
+                    }
                 }
                 ii = ii + 1
+            }
+            if changed {
+                out.functions[fi as usize] = f
             }
             fi = fi + 1
         }
@@ -4508,6 +4615,55 @@ fn module_frontend_lower_program_full_traced(
     }
 }
 
+// WP-A3: run the AST generic specializer over the MERGED multi-module item list
+// to produce the TYPE-CHECK verdict for imported programs that instantiate a
+// cross-module generic.
+//
+// The single-module specializer (check::specializer) is name-safe only when it
+// sees every locally declared struct/enum, so it was hooked only into the
+// no-import lanes. Here we recover it for the imported path via design (a):
+// concatenate all modules' items (main first) into ONE list and run
+// specialize_generics over that fully-merged view — where an imported
+// `struct F {..}` is now a "known name" and thus excluded from free-type-var
+// recovery, and every turbofish call site + template is simultaneously visible.
+//
+// It is deliberately TYPE-CHECK-ONLY: the merged, monomorphized list is used to
+// compute the verdict (which drops the `expected CDElementExact / found
+// CDElementExact__T` E008 mono-mismatch the un-specialized imported checker
+// emitted), but the per-module `programs` array is left UNTOUCHED so the
+// existing per-module IR lowering / cross-module merge path is unchanged. This
+// keeps working generic multi-module programs (e.g. wrap::<i64> returning
+// W<i64>) lowering exactly as before while removing the spurious E008.
+//
+// Returns (handled, verdict): handled=false means the pass did not instantiate
+// any generic (merged list differs from the inputs by at most dropped
+// never-referenced templates) — the caller MUST fall back to its normal
+// per-module check_modules_verdict_boot4 so ordinary multi-module code stays
+// byte-identical. handled=true means `verdict` is the authoritative merged
+// verdict (0 ok / 1 reject).
+fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64) -> (bool, i64) with IO, Mut, Panic, Div, Alloc {
+    if count <= 0 {
+        return (false, 0)
+    }
+    var merged: Option<Box<ItemList>> = None
+    var i: i64 = count - 1
+    while i >= 0 {
+        merged = spec_append_item_lists((*programs)[i as usize].items, merged)
+        i = i - 1
+    }
+    let specialized = specialize_generics(merged)
+    if !spec_last_instantiated() {
+        return (false, 0)
+    }
+    if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+        print("mm_spec: specialized-typecheck over merged ")
+        print_int(count)
+        print(" modules (generic instantiated)\n")
+    }
+    let verdict = check_items_verdict_boot4(specialized)
+    (true, verdict)
+}
+
 fn module_frontend_merge_imported_into(
     programs: &! [Program; 256],
     loaded: i64,
@@ -4519,7 +4675,13 @@ fn module_frontend_merge_imported_into(
     }
 
     trace.last_stage = "typecheck"
-    let verdict = check_modules_verdict_boot4(programs, loaded)
+    let spec_tc = module_frontend_specialized_typecheck(programs, loaded)
+    var verdict: i64 = 0
+    if spec_tc.0 {
+        verdict = spec_tc.1
+    } else {
+        verdict = check_modules_verdict_boot4(programs, loaded)
+    }
     if verdict != 0 {
         print("Type check failed during imported IR merge\n")
         return false
@@ -4624,7 +4786,17 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
 
     trace.last_stage = "typecheck"
     print("imported_compile: typecheck_begin\n")
-    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    // WP-A3: when a cross-module generic is instantiated, take the verdict from
+    // the merged + monomorphized item list (drops the E008 CDElementExact__T
+    // mono-mismatch); otherwise use the normal per-module verdict. The programs
+    // array is left untouched, so IR lowering below is unchanged.
+    let spec_tc = module_frontend_specialized_typecheck(&! programs, loaded)
+    var verdict: i64 = 0
+    if spec_tc.0 {
+        verdict = spec_tc.1
+    } else {
+        verdict = check_modules_verdict_boot4(&! programs, loaded)
+    }
     print("imported_compile: typecheck_done\n")
     if verdict != 0 {
         print("Type check failed during imported IR merge\n")
@@ -4650,8 +4822,16 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         ir_module_dump_merge_calls(&(*module_box))
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+    if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
+        print("DUMPALL: pre_finalize\n")
+        ir_module_dump_all_calls_diag(&(*module_box))
+    }
     var merged_module = ir_module_finalize_merged_calls(*module_box)
     merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
+    if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
+        print("DUMPALL: post_finalize\n")
+        ir_module_dump_all_calls_diag(&merged_module)
+    }
     let fn_count = merged_module.fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
@@ -5470,7 +5650,7 @@ pub fn module_frontend_file_maybe_has_use(path: string) -> bool with IO, Mut, Pa
 }
 
 pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
-    let main_prog = load_module_file(main_path)
+    var main_prog = load_module_file(main_path)
     let main_parse_errors = parser_last_error_count()
     if main_parse_errors > 0 {
         print("Parse failed for module 0: ")
@@ -5488,6 +5668,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Loaded 1 modules\n")
         print("Resolve skip: single module with no imports\n")
         print("Type checking module 0\n")
+        main_prog.items = specialize_generics(main_prog.items)
         let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if single_verdict_no_use != 0 {
             print("Type check failed for module 0\n")
@@ -5502,6 +5683,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Loaded 1 modules\n")
         print("Resolve skip: single module with no imports\n")
         print("Type checking module 0\n")
+        main_prog.items = specialize_generics(main_prog.items)
         let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if single_verdict != 0 {
             print("Type check failed for module 0\n")
@@ -5524,7 +5706,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
 
 pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     parser_reset_last_errors()
-    let main_prog = load_module_file(main_path)
+    var main_prog = load_module_file(main_path)
     let main_parse_errors = parser_last_error_count()
     if main_parse_errors > 0 {
         print("Parse failed during IR lowering for module 0: ")
@@ -5542,6 +5724,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         var single_epistemic_no_use = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        main_prog.items = specialize_generics(main_prog.items)
         let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict_no_use != 0 {
@@ -5574,6 +5757,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         var single_epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        main_prog.items = specialize_generics(main_prog.items)
         let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict != 0 {
