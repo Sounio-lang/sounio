@@ -59,6 +59,7 @@ eisa_paths=(
   tests/stdlib/eisa/test_eisax_v1_format.sio
 )
 
+(( ${#eisa_paths[@]} > 0 )) || fail "internal error: eisa_paths is empty"
 for path in "${eisa_paths[@]}"; do
   need_path "$EISA_REF" "$path"
 done
@@ -98,9 +99,25 @@ if git ls-tree -r --name-only HEAD | awk '/^(stdlib\/eisa\/|tests\/stdlib\/eisa\
   head_has_eisa_source_tree="yes"
 fi
 
+[[ "$head_has_eisa_source_tree" == "yes" ]] || fail "HEAD is missing the EISA import tree"
+
+missing_eisa_paths=()
+for path in "${eisa_paths[@]}"; do
+  if ! git ls-files --error-unmatch "$path" >/dev/null 2>&1 || [[ ! -e "$path" ]]; then
+    missing_eisa_paths+=("$path")
+  fi
+done
+
+if ((${#missing_eisa_paths[@]} > 0)); then
+  printf '[eisa-metron-canon] missing tracked imported EISA paths:\n' >&2
+  printf '  %s\n' "${missing_eisa_paths[@]}" >&2
+  fail "working tree has a partial EISA import"
+fi
+
 echo "[eisa-metron-canon] PASS"
 echo "  madaros_ref=$MADAROS_REF $(git rev-parse --short "$MADAROS_REF")"
 echo "  eisa_ref=$EISA_REF $(git rev-parse --short "$EISA_REF")"
 echo "  blocker_ref=$BLOCKER_REF $(git rev-parse --short "$BLOCKER_REF")"
 echo "  eisa_test_suites=$eisa_test_count"
 echo "  head_has_eisa_source_tree=$head_has_eisa_source_tree"
+echo "  tracked_eisa_required_paths=present"

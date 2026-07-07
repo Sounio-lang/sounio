@@ -1,0 +1,134 @@
+// stdlib/eisa/core.sio — EISA v0 runtime reference semantics
+//
+// Runtime split:
+// - err lane follows Dekker/Knuth EFT arithmetic with dd64 accumulation.
+// - u lane follows first-order GUM uncertainty propagation (JCGM 100:2008).
+// - value lane stores the runtime f64 result.
+//
+// Invariant boundary: eadd/esub preserve the Dekker/Knuth EFT residual in
+// dd64. emul/ediv/esqrt keep the first-order correction trail used by the EISA
+// v0 oracle; they do not carry or bound a formal second-order remainder and do
+// not claim exact real multiplication/division/square-root semantics.
+//
+// The textual .eisa syntax specification lives under docs/research/.
+module eisa::core
+
+use math::dd64::*
+
+pub struct EReg {
+    pub val: f64,
+    pub err: Dd64,
+    pub u: f64,
+}
+
+fn eisa_sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x * 0.5 } else { g = 1.0 }
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+pub fn ereg_exact(v: f64) -> EReg {
+    EReg { val: v, err: dd_zero(), u: 0.0 }
+}
+
+pub fn ereg_measured(v: f64, sigma: f64) -> EReg {
+    EReg { val: v, err: dd_zero(), u: sigma }
+}
+
+pub fn ereg_true(x: EReg) -> Dd64 {
+    dd_add_f64(x.err, x.val)
+}
+
+pub fn eadd(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let s = two_sum(x.val, y.val)
+    let ux = x.u * x.u
+    let uy = y.u * y.u
+    EReg {
+        val: s.hi,
+        err: dd_add(dd_add(x.err, y.err), dd_from_f64(s.lo)),
+        u: eisa_sqrt_f64(ux + uy),
+    }
+}
+
+pub fn esub(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let s = two_sum(x.val, 0.0 - y.val)
+    let ux = x.u * x.u
+    let uy = y.u * y.u
+    EReg {
+        val: s.hi,
+        err: dd_add(dd_sub(x.err, y.err), dd_from_f64(s.lo)),
+        u: eisa_sqrt_f64(ux + uy),
+    }
+}
+
+pub fn emul(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let p = two_prod(x.val, y.val)
+    let t1 = y.val * x.u
+    let t2 = x.val * y.u
+    EReg {
+        val: p.hi,
+        err: dd_add(
+            dd_add(dd_mul_f64(x.err, y.val), dd_mul_f64(y.err, x.val)),
+            dd_from_f64(p.lo)
+        ),
+        u: eisa_sqrt_f64(t1 * t1 + t2 * t2),
+    }
+}
+
+pub fn ediv(x: EReg, y: EReg) -> EReg with Div, Mut {
+    let q = x.val / y.val
+    let p = two_prod(q, y.val)
+    let residual_dd = dd_sub(dd_from_f64(x.val), p)
+    let res = dd_to_f64(residual_dd) / y.val
+    let ay = if y.val < 0.0 { 0.0 - y.val } else { y.val }
+    let inner = x.u * x.u + (q * y.u) * (q * y.u)
+    EReg {
+        val: q,
+        err: dd_add(
+            dd_sub(dd_mul_f64(x.err, 1.0 / y.val), dd_mul_f64(y.err, q / y.val)),
+            dd_from_f64(res)
+        ),
+        u: (1.0 / ay) * eisa_sqrt_f64(inner),
+    }
+}
+
+pub fn esqrt(x: EReg) -> EReg with Mut, Div {
+    if x.val <= 0.0 { return ereg_exact(0.0) }
+    let z = eisa_sqrt_f64(x.val)
+    let p = two_prod(z, z)
+    let r_dd = dd_sub(dd_from_f64(x.val), p)
+    let res = dd_to_f64(r_dd) / (2.0 * z)
+    EReg {
+        val: z,
+        err: dd_add(dd_mul_f64(x.err, 1.0 / (2.0 * z)), dd_from_f64(res)),
+        u: x.u / (2.0 * z),
+    }
+}
+
+pub fn egate(x: EReg, k: i64) -> i64 with Mut, Div {
+    let roundoff = dd_to_f64(dd_abs(x.err))
+    let budget = x.u
+    if budget <= 0.0 {
+        if roundoff == 0.0 { return 0 } else { return 2 }
+    }
+    if roundoff * 10.0 >= budget { return 2 }
+    if roundoff * 100.0 >= budget { return 1 }
+    let _keep_k = k
+    0
+}
+
+pub fn egate_names(code: i64) -> string {
+    if code == 0 { "ok" }
+    else {
+        if code == 1 { "marginal" }
+        else {
+            if code == 2 { "reject" } else { "unknown" }
+        }
+    }
+}
