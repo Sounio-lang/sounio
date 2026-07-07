@@ -72,6 +72,9 @@ lean_lib «SounioZeroDivisorBridge» where
 @[default_target]
 lean_lib «SounioSedenionMeasurement» where
 
+@[default_target]
+lean_lib «SounioSedenionOctonionCensus» where
+
 -- Frente B vector 4/3: sedenion left-mult algebra = Cℓ(8) (peer-reviewed; Gresnigt).
 @[default_target]
 lean_lib «SounioSedenionClifford8» where
