@@ -5,8 +5,10 @@ This promotes native-v2 materialization for the f128 binary128 value-contract
 case set plus an explicit bounded-decimal class: sig_hi=0, no truncation, and
 scale10<=18, with roundTiesToEven. It also promotes an algorithmic two-limb
 decimal class: sig_hi>0, digit_count<=36, scale10<=18, no truncation, with
-binary128 roundTiesToEven. It still deliberately does not promote arbitrary
-large-scale decimals, f128 arithmetic, external ABI, or return ABI.
+binary128 roundTiesToEven. It also promotes an explicit native saturation class
+for decimal overflow-to-infinity and exact power-of-ten underflow-to-zero. It
+still deliberately does not promote arbitrary large-scale rounded decimals,
+f128 arithmetic, external ABI, or return ABI.
 """
 
 from __future__ import annotations
@@ -102,8 +104,15 @@ CASES: list[Case] = [
     Case("minimum_subnormal_rounded", "6.475175119438025110924438958227646552499569338034681e-4966", "00000000000000000000000000000001", [1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
     Case("negative_minimum_subnormal_rounded", "-6.475175119438025110924438958227646552499569338034681e-4966", "80000000000000000000000000000001", [-1, 92443895822764655, 647517511943802511, 52, 5017, 16]),
     Case("underflow_to_positive_zero", "1e-5000", "00000000000000000000000000000000", [1, 0, 1, 1, 5000, 0]),
+    Case("underflow_to_negative_zero", "-1e-5000", "80000000000000000000000000000000", [-1, 0, 1, 1, 5000, 0]),
     Case("overflow_to_positive_infinity", "1e5000", "7fff0000000000000000000000000000", [1, 0, 1, 1, -5000, 0]),
     Case("overflow_to_negative_infinity", "-1e5000", "ffff0000000000000000000000000000", [-1, 0, 1, 1, -5000, 0]),
+    Case("overflow_to_positive_infinity_plus_one", "1e5001", "7fff0000000000000000000000000000", [1, 0, 1, 1, -5001, 0]),
+    Case("overflow_to_negative_infinity_plus_one", "-1e5001", "ffff0000000000000000000000000000", [-1, 0, 1, 1, -5001, 0]),
+    Case("two_limb_overflow_to_positive_infinity", "123456789012345678901234567890123456e5001", "7fff0000000000000000000000000000", [1, 901234567890123456, 123456789012345678, 36, -5001, 0]),
+    Case("two_limb_overflow_to_negative_infinity", "-123456789012345678901234567890123456e5001", "ffff0000000000000000000000000000", [-1, 901234567890123456, 123456789012345678, 36, -5001, 0]),
+    Case("underflow_to_positive_zero_scale6000", "1e-6000", "00000000000000000000000000000000", [1, 0, 1, 1, 6000, 0]),
+    Case("underflow_to_negative_zero_scale6000", "-1e-6000", "80000000000000000000000000000000", [-1, 0, 1, 1, 6000, 0]),
     Case(
         "truncated_arbitrary_1p23456789012345678901234567890123456789",
         "1.23456789012345678901234567890123456789",
@@ -157,16 +166,10 @@ NEGATIVE_CASES: list[NegativeCase] = [
         "same prefix/count as the contracted pi probe but a different truncated-tail contract",
     ),
     NegativeCase(
-        "uncontracted_positive_overflow_boundary_fails_closed",
-        "1e5001",
+        "uncontracted_large_significand_underflow_boundary_fails_closed",
+        "123456789012345678901234567890123456e-5000",
         "f128_decimal_materialization_pending",
-        "overflow-to-infinity is contracted for 1e5000 only, not arbitrary overflow spellings",
-    ),
-    NegativeCase(
-        "uncontracted_positive_underflow_boundary_fails_closed",
-        "1e-6000",
-        "f128_decimal_materialization_pending",
-        "underflow-to-zero is contracted for 1e-5000 only, not arbitrary underflow spellings",
+        "large-significand underflow boundary still requires full arbitrary decimal rounding",
     ),
 ]
 
@@ -415,6 +418,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "f128_native_two_limb_fractional_decimal_binary128_materialization_promoted": True,
             "f128_native_truncated_decimal_binary128_value_contract_promoted": True,
             "f128_native_subnormal_underflow_overflow_value_contract_promoted": True,
+            "f128_native_extreme_decimal_saturation_promoted": True,
             "f128_native_signed_minimum_subnormal_binary128_materialization_promoted": True,
             "f128_native_value_contract_classes": [case.case_id for case in CASES],
             "f128_native_payload_words": ["binary128_hi64", "binary128_lo64"],
@@ -431,6 +435,7 @@ def emit_receipt(args: argparse.Namespace) -> Path:
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale0_integer_decimal_matrix",
             "native_v2_emits_and_runs_algorithmic_two_limb_non_truncated_scale1_to_18_fractional_decimal_matrix",
             "native_v2_materializes_explicit_value_contract_signed_subnormal_underflow_and_finite_overflow_to_infinity_cases",
+            "native_v2_materializes_decimal_overflow_to_signed_infinity_and_power10_underflow_to_signed_zero_saturation_cases",
             "machine_module_preserves_expected_decimal_metadata_for_every_case_including_negative_zero",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_high_word",
             "elf_contains_expected_mov_rax_imm64_for_nonzero_binary128_low_word",
