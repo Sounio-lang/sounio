@@ -17,6 +17,56 @@ status: lock-open|lock-released|blocked
 
 ---
 
+agent: claude
+time_utc: 2026-07-07T03:10:00Z
+wp: A11
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - docs/compiler/KNOWN_LIMITATIONS.md
+  - docs/handoff/continuity/SCOREBOARD.md
+  - artifacts/omega/agent_handoff.log.md
+intent: |
+  CLAIM+RELEASE WP-A11. Convert the finalize-path IrModule by-value copies in the
+  multi-module compile-to-file path to in-place &! IrModule. Rewrote
+  ir_module_finalize_merged_calls / ir_module_promote_canonical_into_stub_slots /
+  ir_module_compact_duplicate_fn_refs / ir_module_restore_user_main_calls (+ the 2
+  call sites in module_frontend_compile_imported_to_file and
+  module_frontend_merge_imported_into) to thread the merged module through the Box
+  pointee (&! IrModule) instead of 5+ whole-module by-value copies. Per-fn slot is
+  extracted to a 256KB local, mutated, written back whole (2-level (*m).functions[fi]=f;
+  no miscompiled 3-level store). Kept module_frontend.sio 113 bytes SMALLER than base
+  (the lean_single SRC import buffer is a hard 8 MB and base sits at its cliff — a +977B
+  first draft OVERFLOWED it on patterns.sio; trimmed comments + dropped the changed-guard).
+checks (Slurm madaros build from main.sio, base=origin/main@1bf4b45b9 ↔ branch, jobs 5683/5685/5686; /proc VmHWM/VmPeak high-water; FALSE-GREEN guard: ELFs run, actual rc/stdout asserted):
+  - W1 MEMORY (base↔branch, NO reduction): sret_forwarding_cross_module_min (reaches
+    finalize) RSS 0.93→0.94 GB / VM 7.65→8.01 GB; cd_exact_generic_i64 RSS 1.45→1.45 GB /
+    VM 22.0→22.4 GB. Within run-to-run noise. The by-value copies were NOT the wall.
+  - W2 cd_exact: BUILD rc139 on BOTH — fine-trace byte-identical: dep_begin 2 →
+    summary_done → bodies_begin → SIGSEGV (module-2 BODY lowering, before bodies_done).
+    Unchanged by this fix (finalize is downstream of the crash). Typechecks clean (0 errors).
+  - W3 regressions (12-test multi-module battery, EXACT rc/stdout parity base↔branch,
+    zero green→red): sret_forwarding_cross_module_min CROSS_SRET_MIN_OK rc0,
+    sret_8_field_return OK rc0, generic_struct_return 6/"spike PASS" rc0, turbofish 3/3,
+    turbofish_native rc0, generic_struct_return_structf E035 (A1 scope),
+    cd_exact_generic_vs_concrete/associator_field_octonion/algebra_g2_invariants_import/
+    cardinality_erdos rc139 (pre-existing), audit_trail E137 (pre-existing).
+new_gap: |
+  The multi-module memory wall is NOT the finalize by-value copies — it is address-space
+  reservation from the per-module Box<IrModule> allocations during summary+body lowering
+  (~15 IrModule-sized reservations for 2 modules → 7.65 GB VM; ~45 for 4-module cd_exact
+  → 22 GB VM). cd_exact's genuine SIGSEGV is in module-2 BODY lowering (lower_program_
+  bodies_ref), reached via dep_begin 2 → bodies_begin. Reducing the wall needs shrinking
+  IR_MAX_FUNCS/IR_MAX_INSTRS or reusing one Box<IrModule> across a module's summary+body
+  lowering — larger + higher-risk than this refactor. See docs/compiler/KNOWN_LIMITATIONS.md.
+commit: pending
+status: lock-released
+notes: |
+  A11 landed as a correct, zero-regression by-ref refactor that removes the named
+  by-value IrModule copies, but it is MEMORY-NEUTRAL and does NOT unblock cd_exact.
+  PR opened (base main), NOT merged. Headline WP-A5 (cd_exact runs ZD PROVED/...) NOT reached.
+
+---
+
 agent: codex
 time_utc: 2026-05-14T00:10:20Z
 files:
