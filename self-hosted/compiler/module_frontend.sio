@@ -1715,20 +1715,28 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
 // Post-finalize compaction: rewrite every direct fn-ref opcode to the canonical
 // body index for the callee symbol. Whole IrInstr slot writes avoid the
 // &!Box<IrModule> in-place fn_id mutation drop.
+// A14: rebind stale fn_ids per WHOLE FUNCTION (by-value IrFunction copy, 2-level
+// owned fn_id write, 1-level writeback — the merge-append idiom). A nested 3-level
+// store (`out.functions[fi].instrs[ii].fn_id=v`, direct OR via &! pointer) is silently
+// DROPPED by lean_single, and a whole-IrInstr writeback drags the Box and zeroes the
+// slot — either way a cross-module IrCall from a non-first fn to a transitive target
+// is miscompiled (call elided / wrong target -> null-deref SIGSEGV or result 0).
 fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, Div, Panic {
     var out = module
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
+            var f = out.functions[fi as usize]
+            var changed: bool = false
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                if ir_merge_is_direct_fn_ref_opcode(out.functions[fi as usize].instrs[ii as usize].op) {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
-                    let old_id = ins.fn_id
+            while ii < f.instr_count {
+                if ir_merge_is_direct_fn_ref_opcode(f.instrs[ii as usize].op) {
+                    let old_id = f.instrs[ii as usize].fn_id
+                    let nm = f.instrs[ii as usize].name
                     var canon: i64 = old_id
-                    if ins.name.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, ins.name)
+                    if nm.len > 0 {
+                        let by_name = ir_merge_find_function_name_index(&out, nm)
                         if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
                             canon = by_name
                         }
@@ -1739,11 +1747,14 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
                         && canon < out.fn_count
                         && out.functions[canon as usize].instr_count > 0
                         && canon != old_id {
-                        ins.fn_id = canon
-                        out.functions[fi as usize].instrs[ii as usize] = ins
+                        f.instrs[ii as usize].fn_id = canon
+                        changed = true
                     }
                 }
                 ii = ii + 1
+            }
+            if changed {
+                out.functions[fi as usize] = f
             }
             fi = fi + 1
         }
@@ -1800,26 +1811,26 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
     while pass < 2 {
         var fi: i64 = 0
         while fi < out.fn_count {
+            // A14: whole-function copy/writeback (see ir_module_compact_duplicate_fn_refs)
+            // — nested `out.functions[fi].instrs[ii].fn_id=v` writes are dropped.
+            var f = out.functions[fi as usize]
+            var changed: bool = false
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                let op = out.functions[fi as usize].instrs[ii as usize].op
+            while ii < f.instr_count {
+                let op = f.instrs[ii as usize].op
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    // A8 fix: resolve from scalar fields (no IrInstr by-value copy) and
-                    // only write back the whole slot when the fn_id actually changes.
-                    // The prior code passed the whole IrInstr by value into the resolver,
-                    // which lean_single miscompiled — corrupting the caller's `ins`
-                    // (dst/src1/call_args) before the unconditional write-back, crashing
-                    // cross-module struct-forwarding fns at runtime.
-                    let cur_fn = out.functions[fi as usize].instrs[ii as usize].fn_id
-                    let cur_nm = out.functions[fi as usize].instrs[ii as usize].name
+                    let cur_fn = f.instrs[ii as usize].fn_id
+                    let cur_nm = f.instrs[ii as usize].name
                     let new_id = ir_module_resolve_call_target_fields(&out, cur_fn, cur_nm)
                     if new_id != cur_fn {
-                        var ins = out.functions[fi as usize].instrs[ii as usize]
-                        ins.fn_id = new_id
-                        out.functions[fi as usize].instrs[ii as usize] = ins
+                        f.instrs[ii as usize].fn_id = new_id
+                        changed = true
                     }
                 }
                 ii = ii + 1
+            }
+            if changed {
+                out.functions[fi as usize] = f
             }
             fi = fi + 1
         }

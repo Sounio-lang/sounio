@@ -3164,3 +3164,33 @@ notes: |
   WP-A5 HEADLINE REACHED: cd_exact green on Madaros. cd_exact_generic_vs_concrete still
   shows MUL_AB DIFF (the concrete engine hits its own multi-term madaros issue when both
   engines coexist — separate, was already red pre-fix). PR opened (base main), NOT merged.
+
+---
+
+## A14 — Madaros transitive cross-module call drop FIXED (2026-07-07)
+agent: Claude Opus (A14 lane)
+task: root-cause + fix the residual transitive cross-module call-drop bug filed by WP-A5/#684
+wp: A14
+claim: module_frontend.sio (merged-IR call finalize) + stdlib/algebra/cayley_dickson_exact.sio (revert cd_sigma_x workaround)
+result: |
+  FIXED. Root cause: ir_module_compact_duplicate_fn_refs + the ir_module_finalize_merged_calls
+  resolve loop rebind fn_id with a whole-IrInstr writeback (var ins=slot; ins.fn_id=X; slot=ins).
+  IrInstr carries a Box(call_args) -> lean_single zeroes the slot on that by-value copy -> the
+  transitive call from a non-first fn is elided (result vreg 0 aliases param slot 0). Nested
+  3-level scalar stores (out.functions[fi].instrs[ii].fn_id=X, direct OR via &! pointer) are ALSO
+  dropped by lean_single. Fix rebinds per WHOLE FUNCTION (merge-append idiom: by-value IrFunction
+  copy, 2-level owned fn_id write, 1-level array writeback). Net module_frontend.sio +231 bytes.
+witnesses: |
+  Slurm madaros, base f01ecb7a3 vs fix, SAME node r770, ELFs run, actual rc:
+  - a13_crossmod_nonfirst_fn_drop_ctrlA/ctrlC: 139 -> 0 "2"; ctrlE 0 (control)
+  - a14_transitive_min (new 3-module repro): 1/"0" -> 0/"115"
+  - cd_exact_generic_i64 (W3, workaround REVERTED -> transitive cd_sigma): 0 ZD PROVED/SQ PASS/NONZERO PASS/16xCOMP
+  - cd_exact_generic_vs_concrete: base 0 BYTECOMPARE FAIL (false-green) -> fix 0 BYTECOMPARE PASS
+  - sret_min/cdmul/sret8/gen_ret("6"/spike PASS)/turbofish 3/3/a8_diag_* all rc0 unchanged
+  - g2_import 1 -> 139 (red->red; pre-existing octonion native-lowering wall, mode shift only)
+  - W4 EISA test_eisa_isa/evm: still "multimodule native thin-link compilation failed" (distinct blocker; NOT unblocked)
+commit: PR #685 (base main), NOT merged
+status: lock-released
+notes: |
+  Removes the #684 cd_sigma_x stdlib workaround. KNOWN_LIMITATIONS + SCOREBOARD flipped OPEN->FIXED.
+  EISA thin-link + the cd_exact 18GB body-lowering memory wall remain separate open gaps.
