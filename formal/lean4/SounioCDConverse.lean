@@ -314,4 +314,184 @@ theorem fVal_lo_reduce (n l uL a : Nat)
   rw [cdSigma_stable n l a hl ha, cdSigma_hi_lo n uL a huL ha1 ha]
   rw [Int.mul_neg]
 
+/-- **Low×high branch of the CD sign** (transpose into the low block): `cdSigma a (2^(n+1)+bL) =
+    cdSigma bL a` for `1 ≤ a < 2^(n+1)`.  Definitional (`!aHi && bHi` branch). -/
+theorem cdSigma_lo_hi (n bL a : Nat) (hbL : bL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha : a < 2 ^ (n+1)) :
+    cdSigma a (2 ^ (n+1) + bL) (n+2) = cdSigma bL a (n+1) := by
+  have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
+  rw [cdSigma]
+  have hg : ¬ (a == 0 || (2 ^ (n+1) + bL) == 0) = true := by
+    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+  rw [if_neg hg]
+  have hAhi : ¬ a ≥ 2 ^ (n+1) := by omega
+  have hBhi : (2 ^ (n+1) + bL) ≥ 2 ^ (n+1) := by omega
+  have hmod1 : a % 2 ^ (n+1) = a := Nat.mod_eq_of_lt ha
+  have hmod2 : (2 ^ (n+1) + bL) % 2 ^ (n+1) = bL := by
+    rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hbL
+  simp only [ge_iff_le, hAhi, hBhi, decide_true, decide_false, Bool.not_false, Bool.not_true,
+    Bool.and_false, Bool.true_and, hmod1, hmod2]
+  rfl
+
+/-- **High×high branch of the CD sign**: `cdSigma (2^(n+1)+uL) (2^(n+1)+bL) = cdSigma bL uL` for
+    `1 ≤ bL < 2^(n+1)` (nonzero right low part).  Definitional (both-high branch). -/
+theorem cdSigma_hi_hi (n uL bL : Nat) (huL : uL < 2 ^ (n+1)) (hb1 : 1 ≤ bL) (hbL : bL < 2 ^ (n+1)) :
+    cdSigma (2 ^ (n+1) + uL) (2 ^ (n+1) + bL) (n+2) = cdSigma bL uL (n+1) := by
+  have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
+  rw [cdSigma]
+  have hg : ¬ ((2 ^ (n+1) + uL) == 0 || (2 ^ (n+1) + bL) == 0) = true := by
+    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+  rw [if_neg hg]
+  have hAhi : (2 ^ (n+1) + uL) ≥ 2 ^ (n+1) := by omega
+  have hBhi : (2 ^ (n+1) + bL) ≥ 2 ^ (n+1) := by omega
+  have hmod1 : (2 ^ (n+1) + uL) % 2 ^ (n+1) = uL := by
+    rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt huL
+  have hmod2 : (2 ^ (n+1) + bL) % 2 ^ (n+1) = bL := by
+    rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hbL
+  have hbz : ¬ (bL == 0) = true := by simp only [beq_iff_eq]; omega
+  simp only [ge_iff_le, hAhi, hBhi, decide_true, Bool.not_true, Bool.and_false, Bool.false_and,
+    Bool.and_self, hmod1, hmod2, hbz]
+  rfl
+
+/-- **High-index half of the doubling recursion (transposed, antisym-free).**  For the upstairs pair
+    `(l, u)` with `u = 2^(n+1)+uL`, the paired sign at a HIGH index `2^(n+1)+b` (`1 ≤ b < 2^(n+1)`)
+    equals the *transposed* downstairs product `cdSigma b l · cdSigma b uL` (arguments flipped
+    relative to `f_{(l,uL)}(b) = cdSigma l b · cdSigma uL b`).  The flip is exactly one CD
+    antisymmetry `cdSigma x y = -cdSigma y x` per factor — the single missing input (open on
+    `cdSigma`; proved for the bit-list sign `sgn` as `SounioCDCocycle.antisym`). -/
+theorem fVal_hi_reduce (n l uL b : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (n+1)) (huL : uL < 2 ^ (n+1))
+    (hb1 : 1 ≤ b) (hb : b < 2 ^ (n+1)) :
+    fVal l (2 ^ (n+1) + uL) (2 ^ (n+1) + b) (n+2)
+      = cdSigma b l (n+1) * cdSigma b uL (n+1) := by
+  unfold fVal
+  rw [cdSigma_lo_hi n b l hb hl1 hl, cdSigma_hi_hi n uL b huL hb1 hb]
+
+-- ── Top-bit XOR bookkeeping: the orbit map `a ↦ a⊕d` splits low/high across the seam ─────────────
+/-- Below the seam, XOR against the seam bit is just addition: `2^k ^^^ z = 2^k + z` for `z < 2^k`.
+    (Proved bit-by-bit; the seam bit `k` is free in `z`, so no carry.) -/
+theorem two_pow_xor_eq_add (k z : Nat) (hz : z < 2 ^ k) : 2 ^ k ^^^ z = 2 ^ k + z := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_xor, Nat.testBit_two_pow]
+  rcases Nat.lt_trichotomy i k with h|h|h
+  · rw [Nat.testBit_two_pow_add_gt h]
+    simp [show k ≠ i by omega]
+  · subst h
+    rw [Nat.testBit_two_pow_add_eq, Nat.testBit_lt_two_pow hz]
+    simp
+  · have hpow : 2 ^ k ≤ 2 ^ i := Nat.pow_le_pow_right (by decide) (by omega)
+    have hzi : z.testBit i = false := Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le hz hpow)
+    have hsucc : 2 ^ (k+1) = 2 ^ k * 2 := Nat.pow_succ 2 k
+    have hpow2 : 2 ^ (k+1) ≤ 2 ^ i := Nat.pow_le_pow_right (by decide) (by omega)
+    have hsum : 2 ^ k + z < 2 ^ i := by omega
+    rw [Nat.testBit_lt_two_pow hsum, hzi]
+    simp [show k ≠ i by omega]
+
+/-- **Orbit map across the seam.**  On the loHi locus the involution `a ↦ a⊕d` carries a low index
+    `a < 2^k` to the high index `2^k + (a ⊕ dL)` (where `d = 2^k + dL`, `dL < 2^k`).  Hence every
+    orbit has exactly one low and one high member, so the winner search may be run over low
+    representatives only. -/
+theorem orbit_low_to_high (k a dL : Nat) (ha : a < 2 ^ k) (hdL : dL < 2 ^ k) :
+    a ^^^ (2 ^ k + dL) = 2 ^ k + (a ^^^ dL) := by
+  have haxL : a ^^^ dL < 2 ^ k := Nat.xor_lt_two_pow ha hdL
+  rw [← two_pow_xor_eq_add k dL hdL, ← two_pow_xor_eq_add k (a ^^^ dL) haxL]
+  rw [← Nat.xor_assoc, Nat.xor_comm a (2 ^ k), Nat.xor_assoc]
+
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- THE DOUBLING RECURSION, CONDITIONAL ON CD ANTISYMMETRY
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- CD antisymmetry at width `m`: distinct nonzero basis units anticommute (`e_x e_y = - e_y e_x`),
+    i.e. `cdSigma x y = - cdSigma y x`.  Verified by `native_decide` up to width 6 in
+    `SounioCDTowerSeam` (implicitly, via the coincidence gates) and proved *for all widths* on the
+    equivalent bit-list sign `sgn` as `SounioCDCocycle.antisym`.  Its transfer to `cdSigma` (the
+    bridge `sgn = cdSigma` ∀n) is the one open input consumed below. -/
+def cdAntisym (m : Nat) : Prop :=
+  ∀ x y : Nat, 1 ≤ x → x < 2 ^ m → 1 ≤ y → y < 2 ^ m → x ≠ y →
+    cdSigma x y m = - cdSigma y x m
+
+/-- **The doubling recursion for the converse winner value.**  GIVEN CD antisymmetry one level down,
+    the upstairs winner value at a low index `a` is *minus* the downstairs winner value:
+    `P_{(l,u)}(a) = - P_{(l,uL)}(a)` for `u = 2^(n+1)+uL` and every low `a ∉ {l, uL, l⊕uL}`.
+    This is the Biss–Dugger–Isaksen doubling step, fully assembled from the antisym-free branch
+    reductions (`fVal_lo_reduce`, `fVal_hi_reduce`) plus two applications of `cdAntisym (n+1)`.
+    (Empirically exact: 263088/263088 low reps over widths 3..7.) -/
+theorem converse_recursion (n l uL a : Nat)
+    (hasym : cdAntisym (n+1))
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (n+1))
+    (huL1 : 1 ≤ uL) (huL : uL < 2 ^ (n+1))
+    (ha1 : 1 ≤ a) (ha : a < 2 ^ (n+1))
+    (hal : a ≠ l) (hauL : a ≠ uL) (hadL : a ≠ l ^^^ uL) :
+    fVal l (2 ^ (n+1) + uL) a (n+2)
+        * fVal l (2 ^ (n+1) + uL) (a ^^^ (l ^^^ (2 ^ (n+1) + uL))) (n+2)
+      = - (fVal l uL a (n+1) * fVal l uL (a ^^^ (l ^^^ uL)) (n+1)) := by
+  -- write b := a ⊕ (l⊕uL) inline (Mathlib-free: no `set`).
+  have hdL : l ^^^ uL < 2 ^ (n+1) := Nat.xor_lt_two_pow hl huL
+  have hb : a ^^^ (l ^^^ uL) < 2 ^ (n+1) := Nat.xor_lt_two_pow ha hdL
+  -- b ≠ 0  (⟺ a ≠ l⊕uL, excluded)
+  have hbne0 : a ^^^ (l ^^^ uL) ≠ 0 := fun h => hadL (xor_eq_zero_of a (l ^^^ uL) h)
+  have hb1 : 1 ≤ a ^^^ (l ^^^ uL) := Nat.one_le_iff_ne_zero.mpr hbne0
+  -- b ≠ l  (⟺ a ≠ uL) and b ≠ uL (⟺ a ≠ l)
+  have hbl : a ^^^ (l ^^^ uL) ≠ l := by
+    intro h; apply hauL
+    have e : a ^^^ (l ^^^ uL) ^^^ (l ^^^ uL) = l ^^^ (l ^^^ uL) := by rw [h]
+    rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, ← Nat.xor_assoc, Nat.xor_self,
+      Nat.zero_xor] at e
+  have hbuL : a ^^^ (l ^^^ uL) ≠ uL := by
+    intro h; apply hal
+    have e : a ^^^ (l ^^^ uL) ^^^ (l ^^^ uL) = uL ^^^ (l ^^^ uL) := by rw [h]
+    rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, xor_left_comm, Nat.xor_self,
+      Nat.xor_zero] at e
+  -- the upstairs difference index is high: a ⊕ d_up = 2^(n+1) + b
+  have hd : l ^^^ (2 ^ (n+1) + uL) = 2 ^ (n+1) + (l ^^^ uL) := by
+    rw [← two_pow_xor_eq_add (n+1) uL huL, ← two_pow_xor_eq_add (n+1) (l ^^^ uL) hdL]
+    rw [xor_left_comm]
+  have hidx : a ^^^ (l ^^^ (2 ^ (n+1) + uL)) = 2 ^ (n+1) + (a ^^^ (l ^^^ uL)) := by
+    rw [hd, orbit_low_to_high (n+1) a (l ^^^ uL) ha hdL]
+  -- reduce both upstairs factors to downstairs data
+  rw [hidx, fVal_lo_reduce n l uL a hl huL ha1 ha,
+      fVal_hi_reduce n l uL (a ^^^ (l ^^^ uL)) hl1 hl huL hb1 hb]
+  -- RHS downstairs paired sign, with the two antisym swaps
+  unfold fVal
+  rw [hasym (a ^^^ (l ^^^ uL)) l hb1 hb hl1 hl hbl,
+      hasym (a ^^^ (l ^^^ uL)) uL hb1 hb huL1 huL hbuL]
+  rw [Int.neg_mul_neg, Int.neg_mul, Int.mul_assoc]
+
+/-
+  ── MAP FOR THE NEXT ATTEMPT: how `converse_recursion` feeds the ∀n existence proof ──────────────
+
+  GOAL (still open):  `offSeam bits l u = true → hasXorAnnih bits l u = true` on the loHi locus.
+  By `hasXorAnnih_sound` this already yields `isZD`, so only EXISTENCE of a winner is missing.
+
+  What `converse_recursion` gives.  Every nontrivial orbit `{a, a⊕d}` has a unique LOW representative
+  `a ∈ [1, 2^(bits-1))` (`orbit_low_to_high`), and by `P_eq_fVal` the winner value there is
+  `P_{(l,u)}(a) = f(a)·f(a⊕d)`.  For `u = 2^(n+1)+uL` and every low `a ∉ {l, uL, l⊕uL}`,
+  `converse_recursion` proves — GIVEN `cdAntisym (n+1)` — the Biss–Dugger–Isaksen doubling step
+
+        P_{(l,u)}(a)  =  - P_{(l,uL)}(a)          (upstairs winner  ⟺  downstairs LOSER).
+
+  So `hasXorAnnih bits l u` (∃ low `a` with `P_{(l,u)}(a)=+1`, `a ∉ {l,uL,l⊕uL}` acceptable since
+  those three orbits are the known losers) is EQUIVALENT to: the DOWNSTAIRS pair `(l, uL)` in
+  `A_{n+1}` has a low index `a ∉ {l, uL, l⊕uL}` with `P_{(l,uL)}(a) = -1` (a non-annihilator).
+
+  The two remaining inputs, precisely:
+
+  (1) `cdAntisym m` for all `m` — CD antisymmetry `cdSigma x y = -cdSigma y x` on distinct nonzero
+      basis units.  PROVED for the bit-list sign as `SounioCDCocycle.antisym` (∀n, no native_decide);
+      the only missing piece is the bridge `sgn = cdSigma` ∀n (a sibling lane).  Once that lands,
+      `cdAntisym` is discharged and `converse_recursion` becomes UNCONDITIONAL.
+
+  (2) The downstairs EXISTENCE: pair `(l, uL)` — now a GENERAL pair of `A_{n+1}` (NOT necessarily a
+      loHi pair, since `uL < 2^n` is possible) — must have a low non-annihilator index off the three
+      trivial-loser orbits.  This is the genuine open combinatorial core.  The counting identity
+      `S := Σ_a P(a) = 4·#agree − 2^bits` (each orbit counted twice) reduces it to a lower bound on
+      the number of AGREEING orbits; empirically `#agree` is large (winner sets of size `8·(2^k−1)`),
+      but a dimension-independent lower bound `#agree ≥ 2` (one nontrivial) is not yet formalized.
+      A clean base case `A_3` (octonions, `n = 1`) is finite (`converse_16`-style native_decide),
+      so an induction on `n` closes the whole tower ONCE (2) has a dimension-free witness.
+
+  In short: `converse_recursion` reduces the tower-wide converse to {the sgn=cdSigma bridge} ∧ {a
+  dimension-free downstairs-loser witness}.  The sign-flip half is now fully mechanized here.
+-/
+
 end SounioCDConverse
