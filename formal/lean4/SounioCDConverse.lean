@@ -281,4 +281,37 @@ theorem cdSigma_stable (n a b : Nat)
       Bool.and_self, Bool.true_and, Bool.and_true, if_true, decide_eq_false_iff_not,
       Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb]
 
+/-- **High×low branch of the CD sign.**  The upper generator flips the sign relative to the low
+    block: `cdSigma (2^(n+1)+uL) a = - cdSigma uL a` for `1 ≤ a < 2^(n+1)`.  Definitional (the
+    `aHi && !bHi` branch with nonzero low part), no cocycle input. -/
+theorem cdSigma_hi_lo (n uL a : Nat) (huL : uL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha : a < 2 ^ (n+1)) :
+    cdSigma (2 ^ (n+1) + uL) a (n+2) = - cdSigma uL a (n+1) := by
+  have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
+  rw [cdSigma]
+  have hg : ¬ ((2 ^ (n+1) + uL) == 0 || a == 0) = true := by
+    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+  rw [if_neg hg]
+  have hAhi : (2 ^ (n+1) + uL) ≥ 2 ^ (n+1) := by omega
+  have hBhi : ¬ a ≥ 2 ^ (n+1) := by omega
+  have hmod1 : (2 ^ (n+1) + uL) % 2 ^ (n+1) = uL := by
+    rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt huL
+  have hmod2 : a % 2 ^ (n+1) = a := Nat.mod_eq_of_lt ha
+  have hbz : ¬ (a == 0) = true := by simp only [beq_iff_eq]; omega
+  simp only [ge_iff_le, hAhi, hBhi, decide_true, decide_false, Bool.not_false,
+    Bool.not_true, Bool.and_false, Bool.and_true, Bool.true_and,
+    hmod1, hmod2, hbz]
+  rfl
+
+/-- **Low-`a` half of the doubling recursion (antisym-free).**  On the loHi locus (`l,uL < 2^(n+1)`,
+    `u = 2^(n+1)+uL`), the paired sign of the *upstairs* pair at a low index `1 ≤ a < 2^(n+1)` is
+    minus the paired sign of the *downstairs* pair `(l, uL)`:  `f_{(l,u)}(a) = - f_{(l,uL)}(a)`.
+    This is the sign-flip that drives `P_{(l,u)}(a) = - P'_{(l,uL)}(a)` for generic low `a`; it uses
+    only width-stability + the high×low branch (no cocycle / antisym). -/
+theorem fVal_lo_reduce (n l uL a : Nat)
+    (hl : l < 2 ^ (n+1)) (huL : uL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha : a < 2 ^ (n+1)) :
+    fVal l (2 ^ (n+1) + uL) a (n+2) = - fVal l uL a (n+1) := by
+  unfold fVal
+  rw [cdSigma_stable n l a hl ha, cdSigma_hi_lo n uL a huL ha1 ha]
+  rw [Int.mul_neg]
+
 end SounioCDConverse
