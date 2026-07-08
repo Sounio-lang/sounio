@@ -15,6 +15,15 @@
     • Lsq         : L_i²=−I headline, i.e. sgn i j · sgn i (xorL i j) = −1  (corollary).
     • antisym     : basis units anticommute for ALL n (corollary; the standing open piece of #718).
   Cross-checked at width 4 and 5 by native_decide (agree4/agree5/xor_agree4).
+
+  BRIDGE to the canonical Nat sign `cdSigma` (closes the native_decide-only agreement gap; the four
+  new theorems are Mathlib-free, no sorry, no native_decide — axioms [propext, Quot.sound]):
+    • isZ_bitsOf     : isZ (bitsOf n i) = true ↔ i = 0                          (∀ n, i < 2^n).
+    • xorL_bitsOf    : xorL (bitsOf n i) (bitsOf n j) = bitsOf n (i ^^^ j)      (generalizes xor_agree4).
+    • sgn_eq_cdSigma : sgn (bitsOf n i) (bitsOf n j) = cdSigma i j n            (∀ n ≥ 1; generalizes
+        agree4/agree5 — n=0 is the unreachable dummy CD level where cdSigma 0 0 0 = -1 ≠ 1 = sgn [] []).
+    • cdSigma_cocycle: cdSigma i j n · cdSigma i (i ^^^ j) n = -1              (L_i²=−I on the canonical
+        Nat sign, ALL levels n and every imaginary i; via sgn_eq_cdSigma ∘ xorL_bitsOf ∘ isZ_bitsOf ∘ Lsq).
 -/
 namespace SounioCDCocycle
 -- bit-list Cayley-Dickson sign, MSB first (head = top bit). Structural XOR, no Nat arithmetic.
@@ -487,5 +496,220 @@ theorem antisym (i j : List Bool) (h : i.length = j.length)
     sgn i j = - sgn j i :=
   (cocycle_bundle i j h).2.1 hi hj hij
 
+-- ==================================================================================
+-- BRIDGE: the bit-list sign `sgn` equals the canonical Nat sign `cdSigma` for ALL n.
+-- Then the cocycle identity L_i²=−I transfers to `cdSigma` for all n (∀ dims), not just
+-- the native_decide anchors at dim 16/32.
+-- ==================================================================================
+
+-- (0) bitsOf has the advertised width.
+theorem bitsOf_length : ∀ (n v : Nat), (bitsOf n v).length = n
+  | 0, _ => rfl
+  | w+1, v => by simp only [bitsOf, List.length_cons, bitsOf_length w (v % 2^w)]
+
+-- (0') the head bit `decide (v ≥ 2^w)` of a width-(w+1) number equals `Nat.testBit v w`.
+theorem testBit_eq_decide (w x : Nat) (h : x < 2^(w+1)) :
+    x.testBit w = decide (x ≥ 2^w) := by
+  by_cases hge : x ≥ 2^w
+  · rw [Nat.testBit_of_two_pow_le_and_two_pow_add_one_gt hge h]; simp [hge]
+  · have hlt : x < 2^w := by omega
+    rw [Nat.testBit_lt_two_pow hlt]; simp [hge]
+
+-- (0'') XOR commutes with truncation to the low w bits.
+theorem xor_mod_two_pow (w i j : Nat) : (i % 2^w) ^^^ (j % 2^w) = (i ^^^ j) % 2^w := by
+  apply Nat.eq_of_testBit_eq
+  intro k
+  simp only [Nat.testBit_xor, Nat.testBit_mod_two_pow]
+  by_cases hk : k < w <;> simp [hk]
+
+-- (1) isZ ∘ bitsOf detects the value 0.
+theorem isZ_bitsOf : ∀ (n i : Nat), i < 2^n → (isZ (bitsOf n i) = true ↔ i = 0)
+  | 0, i, hi => by
+      have h0 : i = 0 := by simpa using hi
+      subst h0; simp [bitsOf, isZ]
+  | w+1, i, hi => by
+      have hp : 0 < 2^w := Nat.two_pow_pos w
+      have hmod : i % 2^w < 2^w := Nat.mod_lt _ hp
+      have ih := isZ_bitsOf w (i % 2^w) hmod
+      show isZ (decide (i ≥ 2^w) :: bitsOf w (i % 2^w)) = true ↔ i = 0
+      simp only [isZ]
+      by_cases hge : i ≥ 2^w
+      · have hd : decide (i ≥ 2^w) = true := by simp [hge]
+        rw [hd]; simp only [Bool.not_true, Bool.false_and]
+        constructor
+        · intro h; exact absurd h (by decide)
+        · intro h; exfalso; omega
+      · have hlt : i < 2^w := by omega
+        have hd : decide (i ≥ 2^w) = false := by simp [hge]
+        rw [hd]; simp only [Bool.not_false, Bool.true_and, ih]
+        rw [Nat.mod_eq_of_lt hlt]
+
+-- (2) xorL on bit-lists tracks Nat XOR (generalizes xor_agree4).
+theorem xorL_bitsOf : ∀ (n i j : Nat), i < 2^n → j < 2^n →
+    xorL (bitsOf n i) (bitsOf n j) = bitsOf n (i ^^^ j)
+  | 0, _, _, _, _ => rfl
+  | w+1, i, j, hi, hj => by
+      have hp : 0 < 2^w := Nat.two_pow_pos w
+      have hij : i ^^^ j < 2^(w+1) := Nat.xor_lt_two_pow hi hj
+      have ih := xorL_bitsOf w (i % 2^w) (j % 2^w) (Nat.mod_lt _ hp) (Nat.mod_lt _ hp)
+      show xorL (decide (i ≥ 2^w) :: bitsOf w (i % 2^w)) (decide (j ≥ 2^w) :: bitsOf w (j % 2^w))
+          = decide (i ^^^ j ≥ 2^w) :: bitsOf w ((i ^^^ j) % 2^w)
+      simp only [xorL]
+      rw [ih, xor_mod_two_pow]
+      congr 1
+      -- head: xor (decide (i≥2^w)) (decide (j≥2^w)) = decide (i^^^j ≥ 2^w)
+      rw [← testBit_eq_decide w i hi, ← testBit_eq_decide w j hj,
+          ← testBit_eq_decide w (i ^^^ j) hij, Nat.testBit_xor]
+
+-- (1') corollary: bitsOf of a nonzero value is not the isZ list.
+theorem isZ_bitsOf_false (n i : Nat) (hi : i < 2^n) (h0 : i ≠ 0) :
+    isZ (bitsOf n i) = false := by
+  cases hb : isZ (bitsOf n i) with
+  | false => rfl
+  | true => exact absurd ((isZ_bitsOf n i hi).mp hb) h0
+
+-- ===== cdSigma branch-reduction lemmas (mirror sgn_ff/ft/tf/tt on the Nat sign) =====
+theorem cdSigma_zero_left (L b : Nat) : cdSigma 0 b (L+1) = 1 := by
+  cases L <;> rfl
+
+theorem cdSigma_ff (m i j : Nat) (hi0 : i ≠ 0) (hj0 : j ≠ 0)
+    (hai : ¬ (i ≥ 2^(m+1))) (hbj : ¬ (j ≥ 2^(m+1))) :
+    cdSigma i j (m+2) = cdSigma (i % 2^(m+1)) (j % 2^(m+1)) (m+1) := by
+  simp only [cdSigma]
+  rw [if_neg (by simp [hi0, hj0]), if_pos (by simp [hai, hbj])]
+
+theorem cdSigma_ft (m i j : Nat) (hi0 : i ≠ 0) (hj0 : j ≠ 0)
+    (hai : ¬ (i ≥ 2^(m+1))) (hbj : j ≥ 2^(m+1)) :
+    cdSigma i j (m+2) = cdSigma (j % 2^(m+1)) (i % 2^(m+1)) (m+1) := by
+  simp only [cdSigma]
+  rw [if_neg (by simp [hi0, hj0]), if_neg (by simp [hbj]), if_pos (by simp [hai, hbj])]
+
+theorem cdSigma_tf (m i j : Nat) (hi0 : i ≠ 0) (hj0 : j ≠ 0)
+    (hai : i ≥ 2^(m+1)) (hbj : ¬ (j ≥ 2^(m+1))) :
+    cdSigma i j (m+2) = - cdSigma (i % 2^(m+1)) (j % 2^(m+1)) (m+1) := by
+  have hjlt : j < 2^(m+1) := by omega
+  simp only [cdSigma]
+  rw [if_neg (by simp [hi0, hj0]), if_neg (by simp [hai]), if_neg (by simp [hai]),
+      if_pos (by simp [hai, hbj]), if_neg (by rw [Nat.mod_eq_of_lt hjlt]; simp [hj0])]
+
+theorem cdSigma_tt_raw (m i j : Nat) (hi0 : i ≠ 0) (hj0 : j ≠ 0)
+    (hai : i ≥ 2^(m+1)) (hbj : j ≥ 2^(m+1)) :
+    cdSigma i j (m+2)
+      = (if j % 2^(m+1) == 0 then - cdSigma 0 (i % 2^(m+1)) (m+1)
+         else cdSigma (j % 2^(m+1)) (i % 2^(m+1)) (m+1)) := by
+  simp only [cdSigma]
+  rw [if_neg (by simp [hi0, hj0]), if_neg (by simp [hai]), if_neg (by simp [hai]),
+      if_neg (by simp [hbj])]
+
+-- (3) the bridge: `sgn` on bit-lists equals the canonical Nat sign `cdSigma`, ALL levels ≥ 1.
+--     (n = 0 is genuinely FALSE: sgn [] [] = 1 but cdSigma 0 0 0 = -1, an unreachable dummy
+--      level; the CD recursion bottoms at level 1, hence the `1 ≤ n` hypothesis.)
+theorem sgn_eq_cdSigma_aux : ∀ (m i j : Nat), i < 2^(m+1) → j < 2^(m+1) →
+    sgn (bitsOf (m+1) i) (bitsOf (m+1) j) = cdSigma i j (m+1)
+  | 0, i, j, hi, hj => by
+      have hi2 : i < 2 := by simpa using hi
+      have hj2 : j < 2 := by simpa using hj
+      have hi01 : i = 0 ∨ i = 1 := by omega
+      have hj01 : j = 0 ∨ j = 1 := by omega
+      rcases hi01 with rfl | rfl <;> rcases hj01 with rfl | rfl <;>
+        (simp only [bitsOf, sgn, cdSigma] <;> decide)
+  | m+1, i, j, hi, hj => by
+      have hpos : 0 < 2^(m+1) := Nat.two_pow_pos (m+1)
+      have hiLo : i % 2^(m+1) < 2^(m+1) := Nat.mod_lt i hpos
+      have hjLo : j % 2^(m+1) < 2^(m+1) := Nat.mod_lt j hpos
+      have eqi : bitsOf (m+2) i = decide (i ≥ 2^(m+1)) :: bitsOf (m+1) (i % 2^(m+1)) := rfl
+      have eqj : bitsOf (m+2) j = decide (j ≥ 2^(m+1)) :: bitsOf (m+1) (j % 2^(m+1)) := rfl
+      rw [eqi, eqj]
+      by_cases hg : i = 0 ∨ j = 0
+      · -- GUARD: one operand is zero → both signs are 1
+        have hlen : (decide (i ≥ 2^(m+1)) :: bitsOf (m+1) (i % 2^(m+1))).length
+                  = (decide (j ≥ 2^(m+1)) :: bitsOf (m+1) (j % 2^(m+1))).length := by
+          simp only [List.length_cons, bitsOf_length]
+        have hz : isZ (decide (i ≥ 2^(m+1)) :: bitsOf (m+1) (i % 2^(m+1))) = true
+                ∨ isZ (decide (j ≥ 2^(m+1)) :: bitsOf (m+1) (j % 2^(m+1))) = true := by
+          rcases hg with h | h
+          · left;  rw [← eqi]; exact (isZ_bitsOf (m+2) i hi).mpr h
+          · right; rw [← eqj]; exact (isZ_bitsOf (m+2) j hj).mpr h
+        rw [sgn_isZ _ _ hlen hz]
+        have hgb : (i == 0 || j == 0) = true := by
+          rcases hg with h | h
+          · subst h; rfl
+          · subst h; exact Bool.or_true _
+        rw [show cdSigma i j (m+2) = 1 from by simp only [cdSigma]; rw [if_pos hgb]]
+      · -- non-guard: i ≠ 0 and j ≠ 0
+        have hi0 : i ≠ 0 := fun h => hg (Or.inl h)
+        have hj0 : j ≠ 0 := fun h => hg (Or.inr h)
+        by_cases hai : i ≥ 2^(m+1)
+        · by_cases hbj : j ≥ 2^(m+1)
+          · -- true/true
+            have hda : decide (i ≥ 2^(m+1)) = true := by simp [hai]
+            have hdb : decide (j ≥ 2^(m+1)) = true := by simp [hbj]
+            rw [hda, hdb]
+            have hlen : (bitsOf (m+1) (i % 2^(m+1))).length
+                      = (bitsOf (m+1) (j % 2^(m+1))).length := by
+              rw [bitsOf_length, bitsOf_length]
+            rw [sgn_tt _ _ hlen, cdSigma_tt_raw m i j hi0 hj0 hai hbj]
+            by_cases hz : j % 2^(m+1) = 0
+            · have hbljT : isZ (bitsOf (m+1) (j % 2^(m+1))) = true :=
+                (isZ_bitsOf (m+1) _ hjLo).mpr hz
+              have hzb : (j % 2^(m+1) == 0) = true := by rw [hz]; rfl
+              rw [if_pos hbljT, if_pos hzb, cdSigma_zero_left m (i % 2^(m+1))]
+            · have hbljF : isZ (bitsOf (m+1) (j % 2^(m+1))) = false :=
+                isZ_bitsOf_false _ _ hjLo hz
+              have hzb : ¬ ((j % 2^(m+1) == 0) = true) := by simp [hz]
+              rw [if_neg (by rw [hbljF]; decide), if_neg hzb]
+              exact sgn_eq_cdSigma_aux m (j % 2^(m+1)) (i % 2^(m+1)) hjLo hiLo
+          · -- true/false
+            have hda : decide (i ≥ 2^(m+1)) = true := by simp [hai]
+            have hdb : decide (j ≥ 2^(m+1)) = false := by simp [hbj]
+            rw [hda, hdb]
+            have hjlt : j < 2^(m+1) := by omega
+            have hblj : isZ (bitsOf (m+1) (j % 2^(m+1))) = false :=
+              isZ_bitsOf_false _ _ hjLo (by rw [Nat.mod_eq_of_lt hjlt]; exact hj0)
+            rw [sgn_tf _ _ hblj, cdSigma_tf m i j hi0 hj0 hai hbj,
+                sgn_eq_cdSigma_aux m (i % 2^(m+1)) (j % 2^(m+1)) hiLo hjLo]
+        · by_cases hbj : j ≥ 2^(m+1)
+          · -- false/true
+            have hda : decide (i ≥ 2^(m+1)) = false := by simp [hai]
+            have hdb : decide (j ≥ 2^(m+1)) = true := by simp [hbj]
+            rw [hda, hdb]
+            have hilt : i < 2^(m+1) := by omega
+            have hbli : isZ (bitsOf (m+1) (i % 2^(m+1))) = false :=
+              isZ_bitsOf_false _ _ hiLo (by rw [Nat.mod_eq_of_lt hilt]; exact hi0)
+            rw [sgn_ft _ _ hbli, cdSigma_ft m i j hi0 hj0 hai hbj]
+            exact sgn_eq_cdSigma_aux m (j % 2^(m+1)) (i % 2^(m+1)) hjLo hiLo
+          · -- false/false
+            have hda : decide (i ≥ 2^(m+1)) = false := by simp [hai]
+            have hdb : decide (j ≥ 2^(m+1)) = false := by simp [hbj]
+            rw [hda, hdb]
+            have hilt : i < 2^(m+1) := by omega
+            have hjlt : j < 2^(m+1) := by omega
+            have hbli : isZ (bitsOf (m+1) (i % 2^(m+1))) = false :=
+              isZ_bitsOf_false _ _ hiLo (by rw [Nat.mod_eq_of_lt hilt]; exact hi0)
+            have hblj : isZ (bitsOf (m+1) (j % 2^(m+1))) = false :=
+              isZ_bitsOf_false _ _ hjLo (by rw [Nat.mod_eq_of_lt hjlt]; exact hj0)
+            rw [sgn_ff _ _ hbli hblj, cdSigma_ff m i j hi0 hj0 hai hbj]
+            exact sgn_eq_cdSigma_aux m (i % 2^(m+1)) (j % 2^(m+1)) hiLo hjLo
+
+theorem sgn_eq_cdSigma (n i j : Nat) (hn : 1 ≤ n) (hi : i < 2^n) (hj : j < 2^n) :
+    sgn (bitsOf n i) (bitsOf n j) = cdSigma i j n := by
+  obtain ⟨m, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by omega⟩
+  exact sgn_eq_cdSigma_aux m i j hi hj
+
+-- (4) THE PAYOFF: L_i²=−I on the canonical Nat sign, for ALL levels n and every imaginary i.
+theorem cdSigma_cocycle (n i j : Nat) (hi : i < 2^n) (hj : j < 2^n) (hi0 : i ≠ 0) :
+    cdSigma i j n * cdSigma i (i ^^^ j) n = -1 := by
+  cases n with
+  | zero =>
+      have h1 : i < 1 := by simpa using hi
+      exact absurd (by omega : i = 0) hi0
+  | succ m =>
+      have hn : 1 ≤ m + 1 := by omega
+      have hij : i ^^^ j < 2^(m+1) := Nat.xor_lt_two_pow hi hj
+      rw [← sgn_eq_cdSigma (m+1) i j hn hi hj,
+          ← sgn_eq_cdSigma (m+1) i (i ^^^ j) hn hi hij,
+          ← xorL_bitsOf (m+1) i j hi hj]
+      exact Lsq (bitsOf (m+1) i) (bitsOf (m+1) j)
+        (by rw [bitsOf_length, bitsOf_length]) (isZ_bitsOf_false (m+1) i hi hi0)
 
 end SounioCDCocycle
