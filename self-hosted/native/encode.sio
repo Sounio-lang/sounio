@@ -10,6 +10,20 @@ pub struct CodeBuffer {
     pub len: i64,
 }
 
+// Off-stack machine-code buffer for the native_v2 x86 Linux path. The .text bytes
+// used to live inline in CodeBuffer.bytes (embedded by value in NativeCompiler on
+// the 8MB stack); growing that past ~640KB miscompiles (large stack frame). This
+// module-global BSS array holds the emitted code so NativeCompiler stays small on
+// the stack, while `.len` (a scalar, threaded through BOTH the by-ref nc_emit_byte
+// path and the by-value emit_byte path) stays the authoritative length. Both emit
+// paths write NC_BIG_CODE[.len]; the struct .bytes field is now vestigial for the
+// Linux path (kept only for the macho/pe by-value readers). Because .len is threaded
+// consistently, the by-value builtin emitters (which emit into a copy of nc) append
+// to the same global at the shared offset, so no persist/call-site changes are
+// needed. Accessed INLINE only — never via a returning helper (miscompiles under
+// the seed). NOT used by the aarch64/suite scratch-buffer paths (those keep .bytes).
+pub var NC_BIG_CODE: [i8; 2097152] = [0; 2097152]
+
 pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
     out.len = 0
@@ -58,8 +72,8 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
     if out.len >= 0 {
-        if out.len < 262144 {
-            out.bytes[out.len as usize] = low8(b) as i8
+        if out.len < 2097152 {
+            NC_BIG_CODE[out.len as usize] = low8(b) as i8
             out.len = out.len + 1
         }
     }
@@ -68,8 +82,8 @@ pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
     if (*buf).len >= 0 {
-        if (*buf).len < 262144 {
-            (*buf).bytes[(*buf).len as usize] = low8(b) as i8
+        if (*buf).len < 2097152 {
+            NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
             (*buf).len = (*buf).len + 1
         }
     }
