@@ -48,7 +48,7 @@ The content is the chain `offSeam ⟺ hasXorAnnih ⟺ isZD`, each **link separat
 
 | Link | Direction | Status |
 |---|---|---|
-| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved** given `L_i²=−I`, which is now itself **proved ∀n on the bit-list sign** (`Lsq`, §3); transfer to the Nat `cdSigma` used here is decided at n=4,5 (`agree4/5`), general bridge pending (§3) |
+| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** — `L_i²=−I` is proved ∀n on the canonical Nat sign (`cdSigma_cocycle`, via the `sgn=cdSigma` bridge, §3); no residual, no representation gap |
 | `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, axioms `[propext, Quot.sound]`), on the domain `l,u < 2^bits`, `l ≠ u` — both hold on loHi |
 | `isZD ⟹ hasXorAnnih` | reduction (necessity) | **decided** n=4 (`xorAnnih_eq_isZD_16`); argument **Grok-verified** exhaustive *for 2-term factors* (§2) |
 | `offSeam ⟹ hasXorAnnih` | the converse proper | **decided** n=4,5,6; **conjectured** (verified n≤10, §2); **cited** as following ∀n from Moreno/BDI modulo the index bridge (§4) |
@@ -92,12 +92,13 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
   `[propext, Quot.sound]`, no `sorry`/`native_decide`). Proved via the bundled four-property
   conjunction `cocycle_bundle` (diag ∧ antisym ∧ L ∧ R) by a length-indexed ∀-pairs induction — the
   simultaneous induction the Door-1 target always required. This closes Door 1 as framed, and the
-  standing anticommutation piece open since #718. **Residual (representation bridge):** the proof is
-  on the bit-list `sgn`; its equality to the Nat `cdSigma` used by the forward/converse predicates is
-  `native_decide`-checked at n=4,5 (`agree4/agree5`), so the *fully general* transfer to `cdSigma`
-  awaits a separate (mechanical) `sgn = cdSigma` ∀n induction. At the `sgn` level the forward
-  obstruction of §1 is now **unconditional**; at the `cdSigma` level it is unconditional for n=4,5 and
-  conditional-on-the-bridge beyond.
+  standing anticommutation piece open since #718.
+- **Representation bridge `sgn = cdSigma`, for all n — proved** (`sgn_eq_cdSigma` for `1 ≤ n`;
+  `xorL_bitsOf`, `isZ_bitsOf`; all axioms `[propext, Quot.sound]`), generalizing the n=4,5
+  `native_decide` anchors `agree4/agree5`. Hence **`cdSigma_cocycle` — `L_i²=−I` on the canonical Nat
+  sign `cdSigma`, for all n** (`∀ n i j, i<2^n → j<2^n → i≠0 → cdSigma i j n · cdSigma i (i⊕j) n = −1`).
+  The residual is closed: the forward obstruction of §1 is **unconditional on `cdSigma` for all n**, no
+  representation gap remains.
 - **Reduction sufficiency `hasXorAnnih ⟹ isZD` — proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, no
   `sorry`/`native_decide`; axioms `[propext, Quot.sound]`), on `l,u < 2^bits`, `l ≠ u`. From a
   `hasXorAnnih` witness `a` it constructs the explicit `isZD` certificate — the XOR-linked pair
@@ -132,13 +133,13 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
 
 ## 5. The honest ledger
 
-- **Proved (∀n, bit-list `sgn`):** `e_i²=−1`; **`L_i²=−I` (`Lsq`) and basis-unit anticommutation
-  (`antisym`)** via `cocycle_bundle`; and the reduction sufficiency `hasXorAnnih ⟹ isZD`
-  (`hasXorAnnih_sound`, on `l,u < 2^bits`, `l ≠ u`).
-- **Proved (∀n on `sgn`; on `cdSigma` for n=4,5 + conditional-on-bridge beyond):** the forward
-  obstruction `¬offSeam ⟹ ¬isZD` (its `L_i²=−I` hypothesis is now discharged at the `sgn` level).
-- **Decided (fixed n):** `sgn=cdSigma` representation bridge at n=4,5 (`agree4/5`); seam coincidence
-  n=4,5,6; reduction `hasXorAnnih==isZD` n=4; sharp converse n=4,5,6; Moreno's example.
+- **Proved (∀n):** `e_i²=−1`; **`L_i²=−I` and basis-unit anticommutation** — on the bit-list sign
+  (`Lsq`, `antisym`, `cocycle_bundle`) **and on the canonical Nat sign** (`cdSigma_cocycle`, via the
+  proved `sgn = cdSigma` bridge); the reduction sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`,
+  on `l,u < 2^bits`, `l ≠ u`); and hence the forward obstruction `¬offSeam ⟹ ¬isZD`, now
+  unconditional on `cdSigma` for all n.
+- **Decided (fixed n):** seam coincidence n=4,5,6; reduction `hasXorAnnih==isZD` n=4; sharp converse
+  n=4,5,6; Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024).
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
   (Moreno Thm 2.9; BDI Prop 11.1).
@@ -156,12 +157,13 @@ python3 scripts/research/cd_tower_converse_probe.py     # validate O(N) vs brute
 python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 ```
 
-**Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); and **Door 1 — `L_i²=−I` + `antisym`
-proved ∀n** on the bit-list sign (`cocycle_bundle`), discharging the forward obstruction's hypothesis.
-**Remaining open theorems:** (i) the `sgn = cdSigma` ∀n representation bridge (mechanical induction;
-currently `native_decide` at n=4,5) — closing it makes the forward obstruction unconditional on
-`cdSigma` too; (ii) the converse proper `offSeam ⟹ hasXorAnnih` ∀n, which needs an existence argument
-(a winning `a`), route via the BDI doubling recursion (base case `A_3`).
+**Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); **Door 1 — `L_i²=−I` + `antisym`
+proved ∀n** (`cocycle_bundle`); and the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
+forward obstruction is now unconditional on the canonical `cdSigma` with no representation gap.
+**The single remaining open theorem:** the converse proper `offSeam ⟹ hasXorAnnih` ∀n — needs an
+existence argument (a winning `a`), route via the BDI doubling recursion (base case `A_3`); the
+recursion relation `P_(l,u)(a) = −P_(l,u_lo)(a)` on low `a` (with the exceptional orbits `{0,l,u_lo,d}`)
+is the concrete inductive core.
 
 ## References
 
