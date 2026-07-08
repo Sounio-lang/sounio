@@ -208,4 +208,77 @@ theorem hasXorAnnih_sound (bits l u : Nat)
     refine ⟨decide_eq_true_eq.mpr hgt, ?_⟩
     rcases hs_pm with h|h <;> rw [h] at hah <;> simp [hah]
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- STRUCTURAL LEMMAS toward the CONVERSE (`offSeam ⟹ hasXorAnnih` ∀n).  All ∀n, Mathlib-free, no
+-- `sorry`, no `native_decide`.  They formalize the "orbit / doubling-recursion" analysis of the
+-- winner predicate `P(a) := cdSigma l a · cdSigma u a · cdSigma l (a⊕d) · cdSigma u (a⊕d)`, where
+-- `d = l⊕u`.  See the closing prose block for how these combine (and where the last gap is).
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- The paired sign `f(a) = cdSigma l a · cdSigma u a ∈ {±1}` (the left-multiplication sign of the
+    factor `e_l + e_u` acting on `e_a`, up to the output index). -/
+def fVal (l u a bits : Nat) : Int := cdSigma l a bits * cdSigma u a bits
+
+theorem fVal_pm (l u a bits : Nat) : fVal l u a bits = 1 ∨ fVal l u a bits = -1 := by
+  unfold fVal
+  rcases cdSigma_pm bits l a with h1|h1 <;> rcases cdSigma_pm bits u a with h2|h2 <;>
+    rw [h1, h2] <;> decide
+
+/-- **Reformulation of the `hasXorAnnih` winner product** as `P(a) = f(a)·f(a⊕d)`.  Pure Int algebra;
+    no cocycle input.  This is the identity that turns the four-sign test into the involution
+    `a ↦ a⊕d` "agreeing" on the orbit of `a`. -/
+theorem P_eq_fVal (l u a bits : Nat) :
+    cdSigma l a bits * cdSigma u a bits
+        * cdSigma l (a ^^^ (l ^^^ u)) bits * cdSigma u (a ^^^ (l ^^^ u)) bits
+      = fVal l u a bits * fVal l u (a ^^^ (l ^^^ u)) bits := by
+  unfold fVal
+  rw [Int.mul_assoc]
+
+/-- `cdSigma _ 0 = 1` for every positive width (the identity `e₀=1` kills the sign).  Note it is
+    genuinely `-1` at width `0`, hence the `1 ≤ bits`. -/
+theorem cdSigma_zero_right : ∀ (bits x : Nat), 1 ≤ bits → cdSigma x 0 bits = 1
+  | 1, x, _ => by simp [cdSigma]
+  | (n+2), x, _ => by simp [cdSigma]
+
+/-- `cdSigma 0 _ = 1` for every positive width (identity on the left). -/
+theorem cdSigma_zero_left : ∀ (bits x : Nat), 1 ≤ bits → cdSigma 0 x bits = 1
+  | 1, x, _ => by simp [cdSigma]
+  | (n+2), x, _ => by simp [cdSigma]
+
+/-- `f(0) = 1`: the trivial orbit `{0,d}` carries paired sign `+1` at the `0` end (so the trivial
+    orbit "agrees" exactly when `f(d)=1` — and, being trivial, is never itself a legal witness). -/
+theorem fVal_zero (l u bits : Nat) (h : 1 ≤ bits) : fVal l u 0 bits = 1 := by
+  unfold fVal; rw [cdSigma_zero_right bits l h, cdSigma_zero_right bits u h]; decide
+
+/-- **Orbit invariance of the winner value:** `P(a) = P(a⊕d)`.  The four-sign test is constant on
+    each orbit `{a, a⊕d}` of the fixed-point-free involution `a ↦ a⊕d`, so `hasXorAnnih` is really a
+    statement about orbits, and every orbit is witnessed by either of its two members. -/
+theorem P_orbit_inv (l u a bits : Nat) :
+    fVal l u a bits * fVal l u (a ^^^ (l ^^^ u)) bits
+      = fVal l u (a ^^^ (l ^^^ u)) bits * fVal l u ((a ^^^ (l ^^^ u)) ^^^ (l ^^^ u)) bits := by
+  have hxx : (a ^^^ (l ^^^ u)) ^^^ (l ^^^ u) = a := by
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  rw [hxx, Int.mul_comm]
+
+/-- **Width-stability of the CD sign on the low block.**  `cdSigma a b` does not depend on the width
+    as long as both indices fit below the previous doubling seam `2^(bits-1)`.  This is what lets the
+    doubling recursion descend `bits ↦ bits-1` cleanly.  (Proof: the guard and the `!aHi && !bHi`
+    branch of `cdSigma` peel one level, matching `cdSigma _ _ (bits-1)` verbatim.) -/
+theorem cdSigma_stable (n a b : Nat)
+    (ha : a < 2 ^ (n+1)) (hb : b < 2 ^ (n+1)) :
+    cdSigma a b (n+2) = cdSigma a b (n+1) := by
+  have hai : ¬ a ≥ 2 ^ (n+1) := by omega
+  have hbi : ¬ b ≥ 2 ^ (n+1) := by omega
+  rw [cdSigma]
+  by_cases h0 : (a == 0 || b == 0) = true
+  · rw [if_pos h0]
+    rw [Bool.or_eq_true] at h0
+    rcases h0 with h|h
+    · rw [beq_iff_eq] at h; subst h; rw [cdSigma_zero_left (n+1) b (by omega)]
+    · rw [beq_iff_eq] at h; subst h; rw [cdSigma_zero_right (n+1) a (by omega)]
+  · rw [if_neg h0]
+    simp only [ge_iff_le, hai, hbi, not_false_eq_true, decide_not, decide_false, Bool.not_false,
+      Bool.and_self, Bool.true_and, Bool.and_true, if_true, decide_eq_false_iff_not,
+      Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb]
+
 end SounioCDConverse
