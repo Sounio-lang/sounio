@@ -49,7 +49,8 @@ The content is the chain `offSeam ⟺ hasXorAnnih ⟺ isZD`, each **link separat
 | Link | Direction | Status |
 |---|---|---|
 | `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved** *conditionally on* `L_i²=−I` (dimension-independent linear algebra); the hypothesis itself is only **decided** at n=4,5,6 (§3) |
-| `hasXorAnnih ⟺ isZD` | the reduction | **decided** n=4 (`xorAnnih_eq_isZD_16`); reduction argument **cited/Grok-verified** exhaustive *for 2-term factors* (§2); `hasXorAnnih ⟹ isZD` ∀n is a bounded construction (next step, §6) |
+| `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, axioms `[propext, Quot.sound]`), on the domain `l,u < 2^bits`, `l ≠ u` — both hold on loHi |
+| `isZD ⟹ hasXorAnnih` | reduction (necessity) | **decided** n=4 (`xorAnnih_eq_isZD_16`); argument **Grok-verified** exhaustive *for 2-term factors* (§2) |
 | `offSeam ⟹ hasXorAnnih` | the converse proper | **decided** n=4,5,6; **conjectured** (verified n≤10, §2); **cited** as following ∀n from Moreno/BDI modulo the index bridge (§4) |
 
 Note the two blocking overclaims we explicitly avoid: (a) we make **no** claim about zero divisors
@@ -90,6 +91,12 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
   `n > 6`; the full ∀n induction (and basis-unit anticommutation) is the standing Door-1 target.
   Consequently every "∀n" invocation of the forward obstruction in §1 is *conditional on this
   unproved hypothesis*.
+- **Reduction sufficiency `hasXorAnnih ⟹ isZD` — proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, no
+  `sorry`/`native_decide`; axioms `[propext, Quot.sound]`), on `l,u < 2^bits`, `l ≠ u`. From a
+  `hasXorAnnih` witness `a` it constructs the explicit `isZD` certificate — the XOR-linked pair
+  `{a, a⊕(l⊕u)}` with sign `s = −σ(l,a)σ(u,b)`, ordered — and discharges `annih` at every output
+  index. (The three hypotheses are load-bearing: the theorem is false for `l=u` or unbounded indices;
+  all hold on loHi.)
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
   `xorAnnih_eq_isZD_16` (reduction == brute at n=4), all `native_decide`, no `sorry`.
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
@@ -118,7 +125,8 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
 
 ## 5. The honest ledger
 
-- **Proved (∀n):** `e_i²=−1`.
+- **Proved (∀n):** `e_i²=−1`; and the reduction sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`,
+  on `l,u < 2^bits`, `l ≠ u`).
 - **Proved (conditional on `L_i²=−I`):** the forward obstruction `¬offSeam ⟹ ¬isZD`.
 - **Decided (fixed n):** cocycle lemma & seam coincidence n=4,5,6; reduction `hasXorAnnih==isZD` n=4;
   sharp converse n=4,5,6; Moreno's example.
@@ -139,10 +147,10 @@ python3 scripts/research/cd_tower_converse_probe.py     # validate O(N) vs brute
 python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 ```
 
-**Highest-leverage next theorem** (upgrades a link computed→proved ∀n): `hasXorAnnih ⟹ isZD` — a
-bounded construction (supply `a`, `b=a⊕d`, `s`; discharge the two sign equations at each output
-index). Unlike `offSeam ⟹ hasXorAnnih` it needs no existence argument. The full converse then has a
-concrete route via the BDI doubling recursion (base case `A_3`), still riding on the Door-1 `L_i²=−I`.
+**Done this pass:** `hasXorAnnih ⟹ isZD` is now proved ∀n (`hasXorAnnih_sound`) — the reduction
+sufficiency is no longer merely decided at n=4. **Remaining open theorem** (the converse proper):
+`offSeam ⟹ hasXorAnnih` ∀n — this one needs an existence argument (a winning `a`), with a concrete
+route via the BDI doubling recursion (base case `A_3`), still riding on the Door-1 `L_i²=−I` ∀n.
 
 ## References
 
