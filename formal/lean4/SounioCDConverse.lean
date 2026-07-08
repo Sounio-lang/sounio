@@ -277,8 +277,8 @@ theorem cdSigma_stable (n a b : Nat)
     · rw [beq_iff_eq] at h; subst h; rw [cdSigma_zero_left (n+1) b (by omega)]
     · rw [beq_iff_eq] at h; subst h; rw [cdSigma_zero_right (n+1) a (by omega)]
   · rw [if_neg h0]
-    simp only [ge_iff_le, hai, hbi, not_false_eq_true, decide_not, decide_false, Bool.not_false,
-      Bool.and_self, Bool.true_and, Bool.and_true, if_true, decide_eq_false_iff_not,
+    simp only [ge_iff_le, hai, hbi, decide_false, Bool.not_false,
+      Bool.and_self, Bool.true_and, Bool.and_true, if_true,
       Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb]
 
 /-- **High×low branch of the CD sign.**  The upper generator flips the sign relative to the low
@@ -298,7 +298,7 @@ theorem cdSigma_hi_lo (n uL a : Nat) (huL : uL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha 
   have hmod2 : a % 2 ^ (n+1) = a := Nat.mod_eq_of_lt ha
   have hbz : ¬ (a == 0) = true := by simp only [beq_iff_eq]; omega
   simp only [ge_iff_le, hAhi, hBhi, decide_true, decide_false, Bool.not_false,
-    Bool.not_true, Bool.and_false, Bool.and_true, Bool.true_and,
+    Bool.not_true, Bool.and_false, Bool.and_true,
     hmod1, hmod2, hbz]
   rfl
 
