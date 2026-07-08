@@ -202,6 +202,22 @@ pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 
+// Off-stack flat relocation table for the native_v2 x86 Linux path. This is
+// module-WIDE (accumulates across ALL functions of a compile, reset via
+// flat_reloc_count=0 in compiler_new). It used to be four [i64; 4096] arrays
+// inline in NativeCompiler — but a large multi-function program overflows 4096
+// (e.g. the EISA isa suite emits ~9700 relocations across its 467 functions),
+// silently dropping every reloc past 4096, so calls/rodata refs (incl. the entry
+// trampoline's call to main) stay unpatched → jump to garbage → SIGSEGV. Raising
+// the inline arrays would add ~2MB to NativeCompiler's stack frame (rc=14 zone),
+// so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
+// in NativeCompiler and indexes these. Accessed INLINE only (never a returning
+// helper — that miscompiles under the seed).
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 65536] = [0; 65536]
+
 // ============================================================================
 // Compiler state
 // ============================================================================
@@ -210,10 +226,8 @@ pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
     pub relocs: RelocationTable,
-    pub flat_reloc_offsets: [i64; 4096],
-    pub flat_reloc_kind_codes: [i64; 4096],
-    pub flat_reloc_is_functions: [i64; 4096],
-    pub flat_reloc_target_indices: [i64; 4096],
+    // flat_reloc storage moved off-stack to module globals NC_FLAT_RELOC_* (above);
+    // only the count remains here (module-wide, indexes the globals).
     pub flat_reloc_count: i64,
     pub flat_rodata_bytes: [i8; 8192],
     pub flat_rodata_len: i64,
