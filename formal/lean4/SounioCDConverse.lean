@@ -66,4 +66,10 @@ theorem converse_sharp_64 : converseHoldsSharp 6 = true := by native_decide
     same content as the brute `isZD` statement, at the level where both are cheap to decide). -/
 theorem converse_sharp_agrees_16 : converseHoldsSharp 4 = converseHolds 4 := by native_decide
 
+/-- **Primary-source cross-check (Moreno 1998, `q-alg/9710013`, opening example).** In the sedenions
+    `A_4`, `e₁ + e₁₀` is annihilated by `e₁₅ − e₄` (equivalently `e₄ − e₁₅`, a scalar multiple). Here
+    `l=1, u=10, d=l⊕u=11`, and the annihilator index pair is XOR-linked: `4 = 15 ⊕ 11`, i.e.
+    `b = a ⊕ d`. This is exactly `hasXorAnnih`'s witness, and it discharges `annih` directly. -/
+theorem moreno_e1_e10 : annih 4 1 10 4 15 (-1) = true := by native_decide
+
 end SounioCDConverse
