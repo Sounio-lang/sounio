@@ -946,4 +946,56 @@ theorem Q_ge3 (W : Nat) (hW : 3 ≤ W) : Qstmt W := by
   obtain ⟨k, rfl⟩ : ∃ k, W = k + 3 := ⟨W - 3, by omega⟩
   exact Q_all k
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- THE CONNECTION: offSeam ⟹ hasXorAnnih on the loHi locus, for ALL bits ≥ 4.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **The tower-wide CONVERSE, on the loHi locus (`l < 2^(bits-1) ≤ u < 2^bits`), for all `bits ≥ 4`.**
+    An off-seam lower×upper pair admits an XOR-linked 2-term annihilator: `offSeam ⟹ hasXorAnnih`.
+    Proof: `Q_ge3` at level `bits-1` produces a non-exceptional disagreeing witness `a` for the
+    downstairs pair `(l, u - 2^(bits-1))`; `converse_recursion'` flips its `-1` to `+1` upstairs,
+    which is exactly the `hasXorAnnih` winner product.  The `4 ≤ bits` bound is essential — at
+    `bits = 3` the octonions have no zero divisors, so off-seam pairs (e.g. `(1,6)`) genuinely fail
+    `hasXorAnnih` (matching `ConverseConjecture`'s `4 ≤ bits`). -/
+theorem converse_holds (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hoff : offSeam bits l u = true) :
+    hasXorAnnih bits l u = true := by
+  obtain ⟨uL, rfl⟩ : ∃ uL, u = 2 ^ (bits-1) + uL := ⟨u - 2 ^ (bits-1), by omega⟩
+  have hpow : 2 ^ bits = 2 ^ (bits-1) * 2 := by
+    have hps : 2 ^ ((bits-1)+1) = 2 ^ (bits-1) * 2 := Nat.pow_succ 2 (bits-1)
+    rw [Nat.sub_add_cancel (show 1 ≤ bits by omega)] at hps
+    exact hps
+  have huL : uL < 2 ^ (bits-1) := by omega
+  have hdval : l ^^^ (2 ^ (bits-1) + uL) = 2 ^ (bits-1) + (l ^^^ uL) := by
+    rw [← two_pow_xor_eq_add (bits-1) uL huL, xor_left_comm,
+        two_pow_xor_eq_add (bits-1) (l ^^^ uL) (Nat.xor_lt_two_pow hl huL)]
+  -- parse offSeam
+  rw [offSeam, Bool.not_or, Bool.and_eq_true] at hoff
+  obtain ⟨h1, h2⟩ := hoff
+  simp only [Bool.not_eq_true', beq_eq_false_iff_ne] at h1 h2
+  have huL0 : uL ≠ 0 := by intro h; apply h1; omega
+  have hluL : l ≠ uL := by
+    intro h; apply h2; rw [hdval, h, Nat.xor_self, Nat.add_zero]
+  -- Q downstairs at level bits-1
+  obtain ⟨a, haW, ha0, hadxu, hal, hauL, haP⟩ :=
+    Q_ge3 (bits-1) (by omega) l uL hl1 hl (by omega) huL hluL
+  -- doubling recursion upstairs
+  have hbb1 : bits - 2 + 1 = bits - 1 := by omega
+  have hbb2 : bits - 2 + 2 = bits := by omega
+  have hrec := converse_recursion' (bits-2) l uL a hl1
+    (by rw [hbb1]; exact hl) (by omega) (by rw [hbb1]; exact huL)
+    (by omega) (by rw [hbb1]; exact haW) hal hauL hadxu
+  rw [hbb1, hbb2] at hrec
+  have hprod : fVal l (2 ^ (bits-1) + uL) a bits
+      * fVal l (2 ^ (bits-1) + uL) (a ^^^ (l ^^^ (2 ^ (bits-1) + uL))) bits = 1 := by
+    rw [hrec, haP]; decide
+  -- assemble hasXorAnnih
+  have had : a ≠ l ^^^ (2 ^ (bits-1) + uL) := by rw [hdval]; omega
+  unfold hasXorAnnih
+  refine List.any_eq_true.mpr ⟨a, List.mem_range.mpr (by omega), ?_⟩
+  rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+  refine ⟨⟨by omega, had⟩, ?_⟩
+  rw [P_eq_fVal]; exact hprod
+
 end SounioCDConverse
