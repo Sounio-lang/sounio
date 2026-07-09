@@ -19,6 +19,7 @@
   (grok-4.1). Mathlib-free, no sorry.
 -/
 import SounioCDTowerSeam
+import SounioCDCocycle
 
 namespace SounioCDConverse
 open SounioCDTowerSeam
@@ -477,6 +478,79 @@ theorem converse_recursion (n l uL a : Nat)
   rw [hasym (a ^^^ (l ^^^ uL)) l hb1 hb hl1 hl hbl,
       hasym (a ^^^ (l ^^^ uL)) uL hb1 hb huL1 huL hbuL]
   rw [Int.neg_mul_neg, Int.neg_mul, Int.mul_assoc]
+
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- DISCHARGING `cdAntisym` FOR ALL WIDTHS (transfer from the bit-list antisymmetry)
+-- The bridge `SounioCDCocycle.antisym` proves CD antisymmetry for the bit-list sign `sgn` for ALL n
+-- (Mathlib-free, axioms [propext, Quot.sound]).  We transfer it to the canonical Nat sign `cdSigma`
+-- used throughout this file, removing the one open hypothesis `cdAntisym` of `converse_recursion`.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **The two `cdSigma` definitions coincide.**  `SounioCDCocycle.cdSigma` (used by the bit-list
+    bridge) and `SounioCDTowerSeam.cdSigma` (used here) are byte-for-byte the same recursion, differing
+    only by TowerSeam's `let`-naming of `aHi/bHi/aLo/bLo`; equal by induction on the width. -/
+theorem cdSigma_defeq : ∀ (n a b : Nat),
+    SounioCDCocycle.cdSigma a b n = cdSigma a b n
+  | 0, _, _ => rfl
+  | 1, _, _ => rfl
+  | (n+2), a, b => by
+      have ih : ∀ a b, SounioCDCocycle.cdSigma a b (n+1) = cdSigma a b (n+1) :=
+        fun a b => cdSigma_defeq (n+1) a b
+      simp only [SounioCDCocycle.cdSigma, cdSigma, ih]
+
+/-- **Injectivity of the width-`n` bit encoding.**  Transferred from the cocycle-lane XOR facts:
+    `bitsOf n x = bitsOf n y → xorL … isZ → bitsOf n (x⊕y) isZ → x⊕y = 0 → x = y`. -/
+theorem bitsOf_inj (n x y : Nat) (hx : x < 2 ^ n) (hy : y < 2 ^ n)
+    (h : SounioCDCocycle.bitsOf n x = SounioCDCocycle.bitsOf n y) : x = y := by
+  have hlen : (SounioCDCocycle.bitsOf n x).length = (SounioCDCocycle.bitsOf n y).length := by
+    rw [SounioCDCocycle.bitsOf_length, SounioCDCocycle.bitsOf_length]
+  have hz : SounioCDCocycle.isZ
+      (SounioCDCocycle.xorL (SounioCDCocycle.bitsOf n x) (SounioCDCocycle.bitsOf n y)) = true :=
+    (SounioCDCocycle.xorL_isZ_iff _ _ hlen).mpr h
+  rw [SounioCDCocycle.xorL_bitsOf n x y hx hy] at hz
+  have hxor : x ^^^ y = 0 :=
+    (SounioCDCocycle.isZ_bitsOf n (x ^^^ y) (Nat.xor_lt_two_pow hx hy)).mp hz
+  exact xor_eq_zero_of x y hxor
+
+/-- **`cdAntisym` holds for EVERY width** — the one open input to `converse_recursion`, now proved.
+    Distinct nonzero basis units anticommute, `cdSigma x y m = - cdSigma y x m`, for all `m`.  For
+    `m = 0` the domain is empty (`1 ≤ x < 2^0 = 1`); for `m ≥ 1` chain the two `cdSigma` defs through
+    the bit-list bridge and apply `SounioCDCocycle.antisym`. -/
+theorem cdAntisym_all : ∀ m, cdAntisym m := by
+  intro m x y hx1 hx hy1 hy hxy
+  cases m with
+  | zero => rw [Nat.pow_zero] at hx; omega
+  | succ k =>
+    have hm : 1 ≤ k + 1 := by omega
+    have hx0 : x ≠ 0 := by omega
+    have hy0 : y ≠ 0 := by omega
+    have hbne : SounioCDCocycle.bitsOf (k+1) x ≠ SounioCDCocycle.bitsOf (k+1) y :=
+      fun h => hxy (bitsOf_inj (k+1) x y hx hy h)
+    calc cdSigma x y (k+1)
+        = SounioCDCocycle.cdSigma x y (k+1) := (cdSigma_defeq (k+1) x y).symm
+      _ = SounioCDCocycle.sgn (SounioCDCocycle.bitsOf (k+1) x) (SounioCDCocycle.bitsOf (k+1) y) :=
+            (SounioCDCocycle.sgn_eq_cdSigma (k+1) x y hm hx hy).symm
+      _ = - SounioCDCocycle.sgn (SounioCDCocycle.bitsOf (k+1) y) (SounioCDCocycle.bitsOf (k+1) x) :=
+            SounioCDCocycle.antisym _ _
+              (by rw [SounioCDCocycle.bitsOf_length, SounioCDCocycle.bitsOf_length])
+              (SounioCDCocycle.isZ_bitsOf_false (k+1) x hx hx0)
+              (SounioCDCocycle.isZ_bitsOf_false (k+1) y hy hy0) hbne
+      _ = - SounioCDCocycle.cdSigma y x (k+1) := by
+            rw [SounioCDCocycle.sgn_eq_cdSigma (k+1) y x hm hy hx]
+      _ = - cdSigma y x (k+1) := by rw [cdSigma_defeq (k+1) y x]
+
+/-- **`converse_recursion`, now UNCONDITIONAL** — the `cdAntisym (n+1)` hypothesis is discharged by
+    `cdAntisym_all`.  The Biss–Dugger–Isaksen doubling step for the winner value holds for all widths
+    with no open input. -/
+theorem converse_recursion' (n l uL a : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (n+1))
+    (huL1 : 1 ≤ uL) (huL : uL < 2 ^ (n+1))
+    (ha1 : 1 ≤ a) (ha : a < 2 ^ (n+1))
+    (hal : a ≠ l) (hauL : a ≠ uL) (hadL : a ≠ l ^^^ uL) :
+    fVal l (2 ^ (n+1) + uL) a (n+2)
+        * fVal l (2 ^ (n+1) + uL) (a ^^^ (l ^^^ (2 ^ (n+1) + uL))) (n+2)
+      = - (fVal l uL a (n+1) * fVal l uL (a ^^^ (l ^^^ uL)) (n+1)) :=
+  converse_recursion n l uL a (cdAntisym_all (n+1)) hl1 hl huL1 huL ha1 ha hal hauL hadL
 
 /-
   ── MAP FOR THE NEXT ATTEMPT: how `converse_recursion` feeds the ∀n existence proof ──────────────
