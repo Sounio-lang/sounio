@@ -681,4 +681,26 @@ theorem cdSigma_cocycle' (n i j : Nat) (hi : i < 2 ^ n) (hj : j < 2 ^ n) (hi0 : 
   rw [← cdSigma_defeq n i j, ← cdSigma_defeq n i (i ^^^ j)]
   exact SounioCDCocycle.cdSigma_cocycle n i j hi hj hi0
 
+/-- **L1 — both-high low-block stability.**  For a both-high pair `(2^k+l_lo, 2^k+m_lo)` and a low
+    index `a < 2^k`, the paired sign at width `k+1` equals the downstairs paired sign of `(l_lo, m_lo)`
+    at width `k`.  Proof: `a = 0` → all factors `1` (`cdSigma_zero_right`); `a ≥ 1` → two `cdSigma_hi_lo`
+    sign-flips cancel (`Int.neg_mul_neg`). -/
+theorem fVal_high_stable (k l_lo m_lo a : Nat)
+    (hl : l_lo < 2 ^ k) (hm : m_lo < 2 ^ k) (ha : a < 2 ^ k) :
+    fVal (2 ^ k + l_lo) (2 ^ k + m_lo) a (k+1) = fVal l_lo m_lo a k := by
+  cases k with
+  | zero =>
+    rw [Nat.pow_zero] at hl hm ha
+    have hl0 : l_lo = 0 := by omega
+    have hm0 : m_lo = 0 := by omega
+    have ha0 : a = 0 := by omega
+    subst hl0; subst hm0; subst ha0; decide
+  | succ j =>
+    unfold fVal
+    rcases Nat.eq_zero_or_pos a with ha0 | ha1
+    · subst ha0
+      rw [cdSigma_zero_right (j+2) _ (by omega), cdSigma_zero_right (j+2) _ (by omega),
+          cdSigma_zero_right (j+1) _ (by omega), cdSigma_zero_right (j+1) _ (by omega)]
+    · rw [cdSigma_hi_lo j l_lo a hl ha1 ha, cdSigma_hi_lo j m_lo a hm ha1 ha, Int.neg_mul_neg]
+
 end SounioCDConverse
