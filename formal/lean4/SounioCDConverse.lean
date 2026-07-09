@@ -740,4 +740,25 @@ theorem edge_m_eq_H (k l a : Nat)
     rcases cdSigma_pm (j+1) l (l ^^^ a) with hB|hB <;>
       rw [hA, hB] at hcoc ⊢ <;> first | decide | exact absurd hcoc (by decide)
 
+/-- **L3 — seam-element edge `(l, 2^k+l)`.**  For `1 ≤ l < 2^k`, `1 ≤ a < 2^k`, the orbit at `a`
+    disagrees: `P l (2^k+l) a (k+1) = -1`.  Here `d = l⊕(2^k+l) = 2^k`; low factor `= -1`, high
+    factor `= 1`. -/
+theorem edge_m_eq_H_plus_l (k l a : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ k) (ha1 : 1 ≤ a) (ha : a < 2 ^ k) :
+    fVal l (2 ^ k + l) a (k+1)
+      * fVal l (2 ^ k + l) (a ^^^ (l ^^^ (2 ^ k + l))) (k+1) = -1 := by
+  cases k with
+  | zero => rw [Nat.pow_zero] at hl; omega
+  | succ j =>
+    have hd : l ^^^ (2 ^ (j+1) + l) = 2 ^ (j+1) := by
+      rw [← two_pow_xor_eq_add (j+1) l hl, xor_left_comm, Nat.xor_self, Nat.xor_zero]
+    have hidx : a ^^^ (l ^^^ (2 ^ (j+1) + l)) = 2 ^ (j+1) + a := by
+      rw [hd, Nat.xor_comm a (2 ^ (j+1)), two_pow_xor_eq_add (j+1) a ha]
+    rw [hidx]
+    unfold fVal
+    rw [cdSigma_stable j l a hl ha, cdSigma_hi_lo j l a hl ha1 ha,
+        cdSigma_lo_hi j a l ha hl1 hl, cdSigma_hi_hi j l a hl ha1 ha]
+    rcases cdSigma_pm (j+1) l a with hA|hA <;>
+    rcases cdSigma_pm (j+1) a l with hB|hB <;> rw [hA, hB] <;> decide
+
 end SounioCDConverse
