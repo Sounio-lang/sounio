@@ -589,4 +589,89 @@ theorem converse_recursion' (n l uL a : Nat)
   dimension-free downstairs-loser witness}.  The sign-flip half is now fully mechanized here.
 -/
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- BOUNDED LEVERS OF THE CONVERSE COUNTING ARGUMENT (all ∀n except the octonion base case)
+-- Three self-contained lemmas that formalize the concretely-provable steps of the converse counting
+-- argument (`scripts/research/cd_tower_converse_counting.py`).  Mathlib-free, no `sorry`.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **CD diagonal sign** `cdSigma x x k = -1` for every nonzero basis unit (`1 ≤ x < 2^k`).  This is
+    the algebraic `e_i² = -1`, obtained by transferring `SounioCDCocycle.diag` (the bit-list diagonal
+    sign) across the `sgn = cdSigma` bridge.  The width bound `1 ≤ k` is forced by `1 ≤ x < 2^k`. -/
+theorem cdSigma_diag (k x : Nat) (h1 : 1 ≤ x) (hx : x < 2 ^ k) : cdSigma x x k = -1 := by
+  have hk : 1 ≤ k := by
+    cases k with
+    | zero => rw [Nat.pow_zero] at hx; omega
+    | succ _ => omega
+  have hx0 : x ≠ 0 := by omega
+  rw [← cdSigma_defeq k x x, ← SounioCDCocycle.sgn_eq_cdSigma k x x hk hx hx]
+  exact SounioCDCocycle.diag _ (SounioCDCocycle.isZ_bitsOf_false k x hx hx0)
+
+/-- **Lemma 1 (octonion base case).**  The octonions `A_3` are a division algebra: for every mixed
+    (distinct, nonzero) index pair `(l, m)` and every `a`, the four-sign winner product is `-1` — i.e.
+    *every* orbit disagrees, so there is no zero divisor.  A fixed finite claim, discharged by
+    `native_decide` (a legitimate base-case anchor; the general lemmas below avoid it). -/
+theorem oct_all_disagree :
+    (List.range 8).all (fun l => (List.range 8).all (fun m =>
+      (List.range 8).all (fun a =>
+        (! ((! (l == 0)) && (! (m == 0)) && (l != m)))
+          || (fVal l m a 3 * fVal l m (a ^^^ (l ^^^ m)) 3 == -1)))) = true := by native_decide
+
+/-- **Lemma 2 (the main σ-identity, ∀n): explicit disagreeing witness for a mixed pair.**  For a mixed
+    pair `(l, 2^k + m_lo)` with `1 ≤ l, m_lo < 2^k` and `m_lo ≠ l`, the orbit anchored at `a = m_lo`
+    DISAGREES: the four-sign winner product equals `-1`.  Fully derived from the branch reductions
+    (`cdSigma_stable`, `cdSigma_hi_lo`, `cdSigma_lo_hi`, `cdSigma_hi_hi`) plus the diagonal
+    `cdSigma_diag`; no `native_decide`.  Numerically verified 5094/5094. -/
+theorem mixed_witness_disagree (k l m_lo : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ k) (hm1 : 1 ≤ m_lo) (hm : m_lo < 2 ^ k) (hne : m_lo ≠ l) :
+    fVal l (2 ^ k + m_lo) m_lo (k+1)
+      * fVal l (2 ^ k + m_lo) (m_lo ^^^ (l ^^^ (2 ^ k + m_lo))) (k+1) = -1 := by
+  cases k with
+  | zero => rw [Nat.pow_zero] at hl; omega
+  | succ j =>
+    have hlm : l ^^^ m_lo < 2 ^ (j+1) := Nat.xor_lt_two_pow hl hm
+    -- XOR bookkeeping: the disagreeing partner index is `2^(j+1) + l`.
+    have hd : l ^^^ (2 ^ (j+1) + m_lo) = 2 ^ (j+1) + (l ^^^ m_lo) := by
+      rw [← two_pow_xor_eq_add (j+1) m_lo hm, ← two_pow_xor_eq_add (j+1) (l ^^^ m_lo) hlm,
+          xor_left_comm]
+    have hidx : m_lo ^^^ (l ^^^ (2 ^ (j+1) + m_lo)) = 2 ^ (j+1) + l := by
+      rw [hd, orbit_low_to_high (j+1) m_lo (l ^^^ m_lo) hm hlm]
+      have hml : m_lo ^^^ (l ^^^ m_lo) = l := by
+        rw [xor_left_comm, Nat.xor_self, Nat.xor_zero]
+      rw [hml]
+    rw [hidx]
+    unfold fVal
+    -- factor 1: cdSigma l m_lo (j+1) * -(cdSigma m_lo m_lo (j+1)) = cdSigma l m_lo (j+1)
+    -- factor 2: cdSigma l l (j+1) * cdSigma l m_lo (j+1) = -(cdSigma l m_lo (j+1))
+    rw [cdSigma_stable j l m_lo hl hm,
+        cdSigma_hi_lo j m_lo m_lo hm hm1 hm,
+        cdSigma_diag (j+1) m_lo hm1 hm,
+        cdSigma_lo_hi j l l hl hl1 hl,
+        cdSigma_diag (j+1) l hl1 hl,
+        cdSigma_hi_hi j m_lo l hm hl1 hl]
+    -- product = X * -(-1) * (-1 * X) = -X² = -1  (X = cdSigma l m_lo (j+1) ∈ {±1})
+    rcases cdSigma_pm (j+1) l m_lo with h|h <;> rw [h] <;> decide
+
+/-- **Lemma 3 (doubling core, per-element): winner value is level-stable on the low block.**  For a
+    both-low pair `(l, m)` (`l, m < 2^k`) and any low index `a < 2^k`, the four-sign winner product at
+    width `k+1` equals the one at width `k`.  This is the per-element identity driving the sum doubling
+    `S(k+1) = 2·S(k)` (each low orbit contributes identically at the next level, and the high orbits
+    add a second copy); the full Finset/List sum identity is out of scope — this is its core.  Every
+    index (`l, m, a, a⊕(l⊕m)`) stays `< 2^k`, so `cdSigma_stable` applies to each of the four factors. -/
+theorem P_stable_low (k l m a : Nat) (hl : l < 2 ^ k) (hm : m < 2 ^ k) (ha : a < 2 ^ k) :
+    fVal l m a (k+1) * fVal l m (a ^^^ (l ^^^ m)) (k+1)
+      = fVal l m a k * fVal l m (a ^^^ (l ^^^ m)) k := by
+  have hb : a ^^^ (l ^^^ m) < 2 ^ k := Nat.xor_lt_two_pow ha (Nat.xor_lt_two_pow hl hm)
+  cases k with
+  | zero =>
+    rw [Nat.pow_zero] at hl hm ha
+    have hl0 : l = 0 := by omega
+    have hm0 : m = 0 := by omega
+    have ha0 : a = 0 := by omega
+    subst hl0; subst hm0; subst ha0; decide
+  | succ j =>
+    unfold fVal
+    rw [cdSigma_stable j l a hl ha, cdSigma_stable j m a hm ha,
+        cdSigma_stable j l (a ^^^ (l ^^^ m)) hl hb, cdSigma_stable j m (a ^^^ (l ^^^ m)) hm hb]
+
 end SounioCDConverse
