@@ -52,7 +52,7 @@ The content is the chain `offSeam ⟺ hasXorAnnih ⟺ isZD`, each **link separat
 
 | Link | Direction | Status |
 |---|---|---|
-| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** — `L_i²=−I` is proved ∀n on the canonical Nat sign (`cdSigma_cocycle`, via the `sgn=cdSigma` bridge, §3); no residual, no representation gap |
+| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n *modulo the `offSeam⟺anti0` bridge*** — the operator obstruction (`anti0 ⟹ ¬isZD`) is dimension-independent linear algebra given `L_i²=−I`, and that key lemma is now proved ∀n on the canonical Nat sign (`cdSigma_cocycle`, via the `sgn=cdSigma` bridge, §3), closing the representation gap; **but** the `¬offSeam ⟺ anti0` link is only **decided** n=4,5,6 (`coincidence_*`), *not* a ∀n theorem — so the isZD-level forward obstruction is not yet ∀n in the encoding |
 | `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, axioms `[propext, Quot.sound]`), on the domain `l,u < 2^bits`, `l ≠ u` — both hold on loHi |
 | `isZD ⟹ hasXorAnnih` | reduction (necessity) | **decided** n=4 (`xorAnnih_eq_isZD_16`); argument **Grok-verified** exhaustive *for 2-term factors* (§2) |
 | `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`, `∀ bits≥4` on loHi) — ordinary induction (`Q_all`; octonion base by `native_decide`; six exhaustive seam cases) composed with the BDI doubling recursion `converse_recursion'`; the file's `ConverseConjecture : Prop` is **discharged** by `converse_conjecture_proved`. Axioms `[propext, Quot.sound]` + the single k=3 base anchor. Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
@@ -107,8 +107,9 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   `xorL_bitsOf`, `isZ_bitsOf`; all axioms `[propext, Quot.sound]`), generalizing the n=4,5
   `native_decide` anchors `agree4/agree5`. Hence **`cdSigma_cocycle` — `L_i²=−I` on the canonical Nat
   sign `cdSigma`, for all n** (`∀ n i j, i<2^n → j<2^n → i≠0 → cdSigma i j n · cdSigma i (i⊕j) n = −1`).
-  The residual is closed: the forward obstruction of §1 is **unconditional on `cdSigma` for all n**, no
-  representation gap remains.
+  The **representation gap is closed**: the cocycle lemma `L_i²=−I` — the ∀n input to the §1 forward
+  obstruction — is now unconditional on `cdSigma` for all n. (The remaining fixed-n piece of that
+  forward obstruction is the `¬offSeam ⟺ anti0` bridge, `native_decide`'d n≤6 — see the §1 table.)
 - **Reduction sufficiency `hasXorAnnih ⟹ isZD` — proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, no
   `sorry`/`native_decide`; axioms `[propext, Quot.sound]`), on `l,u < 2^bits`, `l ≠ u`. From a
   `hasXorAnnih` witness `a` it constructs the explicit `isZD` certificate — the XOR-linked pair
@@ -158,13 +159,15 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 - **Proved (∀n):** `e_i²=−1`; **`L_i²=−I` and basis-unit anticommutation** — on the bit-list sign
   (`Lsq`, `antisym`, `cocycle_bundle`) **and on the canonical Nat sign** (`cdSigma_cocycle`, via the
   proved `sgn = cdSigma` bridge); the reduction sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`,
-  on `l,u < 2^bits`, `l ≠ u`); the forward obstruction `¬offSeam ⟹ ¬isZD`, unconditional on `cdSigma`;
-  and — **new — the converse proper `offSeam ⟹ hasXorAnnih`** (`converse_holds`) and its composite
+  on `l,u < 2^bits`, `l ≠ u`); the cocycle lemma `L_i²=−I` unconditional on `cdSigma` (the ∀n input to
+  the §1 forward obstruction — whose `offSeam⟺anti0` bridge stays decided n≤6, so `¬offSeam ⟹ ¬isZD`
+  itself is *not* listed here as ∀n); and — **new — the converse proper `offSeam ⟹ hasXorAnnih`** (`converse_holds`) and its composite
   `converse_conjecture_proved : ConverseConjecture` (⟹ `isZD`), on the loHi locus for all `bits ≥ 4`.
   Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion `native_decide` base anchor
   in the converse proof.
 - **Decided (fixed n):** the *necessity* direction `isZD ⟹ hasXorAnnih` (`xorAnnih_eq_isZD_16`, n=4);
-  seam coincidence n=4,5,6; Moreno's example.
+  the forward-obstruction `¬offSeam ⟺ anti0 ⟺ ¬isZD` seam coincidence n=4,5,6 (`coincidence_*`);
+  Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
   cross-check of a proved theorem, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
@@ -187,7 +190,8 @@ python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 
 **Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); **Door 1 — `L_i²=−I` + `antisym`
 proved ∀n** (`cocycle_bundle`); the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
-forward obstruction is unconditional on the canonical `cdSigma`; and — **the converse proper
+cocycle-lemma input to the forward obstruction is unconditional on the canonical `cdSigma` (its
+`offSeam⟺anti0` bridge stays decided n≤6, §1); and — **the converse proper
 `offSeam ⟹ hasXorAnnih` now proved ∀n** (`converse_holds`), discharging `ConverseConjecture`
 (`converse_conjecture_proved`). The former "single remaining open theorem" is closed.
 
@@ -209,11 +213,12 @@ The proof levers, all now formal:
 - **Seam-element edges:** the three pairs touching `H=2^{k−1}` collapse to `cdSigma_cocycle`,
   `cdAntisym_all`, `cdSigma_diag` (`edge_m_eq_H`, `edge_m_eq_H_plus_l`, `edge_l_eq_H`).
 
-**On the earlier "both-low residual seam":** it was a **misdiagnosis**. Both-low pairs do *not* need
-the recursion to "peel" them — they **inherit** their disagreeing witness from the level below via
-sign-stability (`P_stable_low`), exactly like both-high pairs (`fVal_high_stable`). Once that is seen,
-the induction is ordinary and every case closes; no hard both-low core remains. (This supersedes the
-provisional "genuinely hard case, cf. Zhilina" note in earlier drafts.)
+**On the earlier "both-low residual seam":** it is **resolved by inheritance**, and was never an
+independent obstruction. Both-low pairs do *not* need the recursion to "peel" them — they **inherit**
+their disagreeing witness from the level below via sign-stability (`P_stable_low`), exactly like
+both-high pairs (`fVal_high_stable`). The seam was genuinely non-trivial until this reduction was
+found; once it is seen, the induction is ordinary and every case closes, with no hard both-low core
+remaining. (This supersedes the provisional "genuinely hard case, cf. Zhilina" note in earlier drafts.)
 
 ## References
 
