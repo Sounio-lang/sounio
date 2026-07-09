@@ -1,0 +1,48 @@
+//
+// HAND-WRITTEN DRAFT (2026-07-09) — od256 GPU octuple EFT building blocks.
+// Not yet emitter-generated; this is the reference the kaxi_to_ptx od256 pattern
+// must reproduce (analogous to the still-scaffold f32_assoc_gum lane).
+// Validate on a GPU worker: ptxas -arch=sm_50 eft_primitives.ptx -o /dev/null
+//
+// Kernel: one thread reads a=mem[0], b=mem[1] and writes
+//   mem[2]=two_sum.hi  mem[3]=two_sum.lo  mem[4]=two_prod.hi  mem[5]=two_prod.lo
+// two_sum   : s=a+b; bb=s-a; e=(a-(s-bb))+(b-bb)             (6 f64 add/sub)
+// two_prod  : p=a*b; e=fma(a,b,-p)                            (mul + fma — GPU
+//             uses native fma.rn.f64, 2 ops, vs Dekker split's ~10 on CPU dd64)
+//
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry kaxi_kernel(
+    .param .u64 param_mem
+)
+{
+    .reg .b64 %rd<8>;
+    .reg .f64 %fd<16>;
+
+    ld.param.u64 %rd0, [param_mem];
+    // a = mem[0], b = mem[1]
+    ld.global.f64 %fd0, [%rd0];
+    ld.global.f64 %fd1, [%rd0+8];
+
+    // --- two_sum(a,b) -> (%fd2 = s, %fd3 = e) ---
+    add.rn.f64 %fd2, %fd0, %fd1;      // s  = a + b
+    sub.rn.f64 %fd4, %fd2, %fd0;      // bb = s - a
+    sub.rn.f64 %fd5, %fd2, %fd4;      // s - bb
+    sub.rn.f64 %fd5, %fd0, %fd5;      // a - (s - bb)
+    sub.rn.f64 %fd6, %fd1, %fd4;      // b - bb
+    add.rn.f64 %fd3, %fd5, %fd6;      // e  = (a-(s-bb)) + (b-bb)
+
+    // --- two_prod(a,b) via FMA -> (%fd7 = p, %fd8 = e) ---
+    mul.rn.f64 %fd7, %fd0, %fd1;      // p = a * b
+    neg.f64    %fd9, %fd7;            // -p
+    fma.rn.f64 %fd8, %fd0, %fd1, %fd9; // e = fma(a, b, -p)
+
+    // store hi/lo of both
+    st.global.f64 [%rd0+16], %fd2;
+    st.global.f64 [%rd0+24], %fd3;
+    st.global.f64 [%rd0+32], %fd7;
+    st.global.f64 [%rd0+40], %fd8;
+    ret;
+}

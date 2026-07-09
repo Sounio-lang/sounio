@@ -1,0 +1,173 @@
+// stdlib/math/od256.sio — oct-double (~424-bit) software octuple precision
+//
+// DRAFT SKELETON (2026-07-08). Design validated against mpmath by
+// scripts/ci/od256_mpmath_gate.py (add 414 / sub 419 / mul 431 effective bits).
+// M1 = make this compile under SOUNIO_SOUC_ENGINE=lean_single and match the gate.
+//
+// Representation: x = x0+x1+...+x7, x0 most significant, canonical non-overlap
+// |x_{i+1}| <= 0.5 ulp(x_i). 8-limb generalization of qd128 (Qd128).
+//
+// Lineage: CAMPARY generic multi-double (Joldes-Muller-Popescu 2016) rather than
+// the hand-unrolled Hida-Li-Bailey boxes qd128 uses (intractable at 8 limbs).
+// EFT primitives (two_sum/quick_two_sum/two_prod) are reused verbatim from
+// math::dd64 — no new kernels. Accumulation = Shewchuk grow-expansion (exact);
+// renorm = keep the 8 most-significant limbs (discarded tail = ~2^-424 rounding).
+//
+// Scope (v0): finite-domain only; faithful (not correctly-rounded); no
+// transcendentals; NaN/Inf are caller responsibility (as in qd128).
+//
+// ABI: Od256 is 64 bytes (>16) => MEMORY class => passed by reference, NOT as 8
+// scalar f64 args. Never explode into 8 f64 parameters (avoids the default-
+// Madaros wide-f64-arg bug BLK-20260707-madaros-f64-arg-abi-oct-mul).
+
+use math::dd64::*
+use math::qd128::*
+
+pub struct Od256 {
+    pub x0: f64, pub x1: f64, pub x2: f64, pub x3: f64,
+    pub x4: f64, pub x5: f64, pub x6: f64, pub x7: f64,
+}
+
+fn od_mag(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+pub fn od_zero() -> Od256 {
+    Od256 { x0: 0.0, x1: 0.0, x2: 0.0, x3: 0.0, x4: 0.0, x5: 0.0, x6: 0.0, x7: 0.0 }
+}
+
+pub fn od_from_f64(a: f64) -> Od256 {
+    Od256 { x0: a, x1: 0.0, x2: 0.0, x3: 0.0, x4: 0.0, x5: 0.0, x6: 0.0, x7: 0.0 }
+}
+
+pub fn od_from_qd(a: Qd128) -> Od256 {
+    Od256 { x0: a.x0, x1: a.x1, x2: a.x2, x3: a.x3, x4: 0.0, x5: 0.0, x6: 0.0, x7: 0.0 }
+}
+
+pub fn od_to_f64(a: Od256) -> f64 { a.x0 }             // leading limb (nearest f64)
+pub fn od_to_qd(a: Od256) -> Qd128 {
+    Qd128 { x0: a.x0, x1: a.x1, x2: a.x2, x3: a.x3 }   // narrowing = top 4 limbs
+}
+
+// --- core: exact accumulate (Shewchuk grow) then keep 8 most-significant limbs.
+// `t` holds `n` raw terms; scratch expansion built in `e` (increasing magnitude,
+// non-overlapping). Bound 160 covers od_mul's 128 partial-product terms + margin.
+pub fn od_renorm(t: [f64; 160], n: i64) -> Od256 with Mut {
+    var e = [0.0; 160]
+    var elen = 0
+    var i = 0
+    while i < n {
+        let b = t[i]
+        if b != 0.0 {
+            var q = b
+            var j = 0
+            var w = 0                       // write cursor for the new expansion
+            var e2 = [0.0; 160]
+            while j < elen {
+                let s = two_sum(q, e[j])    // Dd64 { hi, lo }
+                q = s.hi
+                if s.lo != 0.0 { e2[w] = s.lo; w = w + 1 }
+                j = j + 1
+            }
+            if q != 0.0 { e2[w] = q; w = w + 1 }
+            e = e2
+            elen = w
+        }
+        i = i + 1
+    }
+    // keep the 8 most-significant limbs (highest indices), most-significant first
+    var out = [0.0; 8]
+    var k = 0
+    while k < 8 {
+        let idx = elen - 1 - k
+        if idx >= 0 { out[k] = e[idx] } else { out[k] = 0.0 }
+        k = k + 1
+    }
+    Od256 { x0: out[0], x1: out[1], x2: out[2], x3: out[3],
+            x4: out[4], x5: out[5], x6: out[6], x7: out[7] }
+}
+
+pub fn od_neg(a: Od256) -> Od256 {
+    Od256 { x0: 0.0 - a.x0, x1: 0.0 - a.x1, x2: 0.0 - a.x2, x3: 0.0 - a.x3,
+            x4: 0.0 - a.x4, x5: 0.0 - a.x5, x6: 0.0 - a.x6, x7: 0.0 - a.x7 }
+}
+
+pub fn od_add(a: Od256, b: Od256) -> Od256 with Mut {
+    var t = [0.0; 160]
+    t[0]=a.x0; t[1]=a.x1; t[2]=a.x2; t[3]=a.x3; t[4]=a.x4; t[5]=a.x5; t[6]=a.x6; t[7]=a.x7
+    t[8]=b.x0; t[9]=b.x1; t[10]=b.x2; t[11]=b.x3; t[12]=b.x4; t[13]=b.x5; t[14]=b.x6; t[15]=b.x7
+    od_renorm(t, 16)
+}
+
+pub fn od_sub(a: Od256, b: Od256) -> Od256 with Mut { od_add(a, od_neg(b)) }
+
+// od_mul: 64 two_prod partial products -> 128 terms -> renorm.
+pub fn od_mul(a: Od256, b: Od256) -> Od256 with Mut {
+    var al = [a.x0, a.x1, a.x2, a.x3, a.x4, a.x5, a.x6, a.x7]
+    var bl = [b.x0, b.x1, b.x2, b.x3, b.x4, b.x5, b.x6, b.x7]
+    var t = [0.0; 160]
+    var w = 0
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            // guard: skip products far below the target precision (i+j >= ~9)
+            if i + j < 9 {
+                let p = two_prod(al[i], bl[j])
+                t[w] = p.hi; t[w+1] = p.lo; w = w + 2
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    od_renorm(t, w)
+}
+
+// f64 sqrt seed via Heron (self-contained; same style as qd128_sqrt_f64).
+fn od256_sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x * 0.5 } else { g = 1.0 }
+    var i = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+// 1/b via Newton: y <- y + y*(1 - b*y). 53->106->212->424->848 bits (4 iters).
+pub fn od_recip(b: Od256) -> Od256 with Mut, Div, Panic {
+    var y = od_from_f64(1.0 / b.x0)
+    var i = 0
+    while i < 4 {
+        let r = od_sub(od_from_f64(1.0), od_mul(b, y))
+        y = od_add(y, od_mul(y, r))
+        i = i + 1
+    }
+    y
+}
+
+pub fn od_div(a: Od256, b: Od256) -> Od256 with Mut, Div, Panic { od_mul(a, od_recip(b)) }
+
+// sqrt(a) = a*(1/sqrt(a)); inv-sqrt Newton: y <- y + 0.5*y*(1 - a*y*y).
+// Finite-domain: a<=0 returns zero (caller owns negative/NaN, as in qd128).
+pub fn od_sqrt(a: Od256) -> Od256 with Mut, Div, Panic {
+    if a.x0 == 0.0 { return od_zero() }
+    if a.x0 < 0.0 { return od_zero() }
+    let seed = od256_sqrt_f64(a.x0)
+    var y = od_from_f64(1.0 / seed)
+    let half = od_from_f64(0.5)
+    var i = 0
+    while i < 4 {
+        let ay2 = od_mul(a, od_mul(y, y))
+        let one_minus = od_sub(od_from_f64(1.0), ay2)
+        y = od_add(y, od_mul(od_mul(half, y), one_minus))
+        i = i + 1
+    }
+    od_mul(a, y)
+}
+
+pub fn od_abs(a: Od256) -> Od256 { if a.x0 < 0.0 { od_neg(a) } else { a } }
+
+pub fn od_cmp(a: Od256, b: Od256) -> i64 with Mut {
+    let d = od_sub(a, b)
+    if d.x0 > 0.0 { 1 } else { if d.x0 < 0.0 { 0 - 1 } else { 0 } }
+}
+pub fn od_eq(a: Od256, b: Od256) -> bool with Mut { od_cmp(a, b) == 0 }
+pub fn od_lt(a: Od256, b: Od256) -> bool with Mut { od_cmp(a, b) < 0 }
