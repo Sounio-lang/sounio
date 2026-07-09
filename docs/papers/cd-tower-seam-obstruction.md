@@ -2,7 +2,7 @@
 topic_id: repo.docs.papers.cd-tower-seam-obstruction
 authority: repo_only
 audience: researchers
-last_validated: 2026-07-08
+last_validated: 2026-07-09
 validated_by: claude-opus-4-8
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.cd-tower-seam-obstruction
 -->
@@ -14,11 +14,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.cd-towe
 In every Cayley–Dickson (CD) algebra `A_n` (dimension `2^n`), for the "lower × upper" basis-index
 pairs `(l,u)` (`1 ≤ l < 2^{n-1} ≤ u < 2^n`), zero-division of `e_l + e_u` is governed by a single
 **sign-cocycle predicate** on the multiplication cocycle `σ`. This paper does **not** claim the
-underlying mathematics as new: that these basis pairs are zero divisors, *with an explicit 2-term
-annihilator*, is a proved general-`n` theorem (Moreno 1998; Biss–Dugger–Isaksen 2008). What is new
-here is an **executable, Mathlib-free, `native_decide`-checked certification** of the phenomenon in
-exact integer σ-form, an `O(N)` decision reduction that pushes empirical verification to dimension
-`1024`, and a primary-source cross-check against Moreno's original annihilator.
+underlying *mathematical fact* as new: that these basis pairs are zero divisors, *with an explicit
+2-term annihilator*, is a proved general-`n` theorem (Moreno 1998; Biss–Dugger–Isaksen 2008). What is
+new here is (i) an **independent, machine-checked, Mathlib-free ∀n proof** of the converse
+`off-seam(l,u) ⟹ e_l+e_u is a 2-term zero divisor` **in exact integer σ-form** — an ordinary
+induction over the tower with an octonion base, kernel axioms `[propext, Quot.sound]` plus a single
+`native_decide` base anchor (`converse_holds` / `converse_conjecture_proved`); (ii) an `O(N)` decision
+reduction that pushes the cross-check to dimension `1024`; and (iii) a primary-source cross-check
+against Moreno's original annihilator. The σ-recursion machinery gives a *combinatorial* form of the
+Moreno/BDI statement — its own, self-contained proof in the Sounio convention, not a transcription.
 
 > **Core contract:** Exactness is a property of the computation, not of the number. Every claim below
 > is tagged as exactly one of: **proved** (Lean, no `sorry`, no Mathlib), **decided** (Lean
@@ -51,12 +55,16 @@ The content is the chain `offSeam ⟺ hasXorAnnih ⟺ isZD`, each **link separat
 | `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** — `L_i²=−I` is proved ∀n on the canonical Nat sign (`cdSigma_cocycle`, via the `sgn=cdSigma` bridge, §3); no residual, no representation gap |
 | `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, axioms `[propext, Quot.sound]`), on the domain `l,u < 2^bits`, `l ≠ u` — both hold on loHi |
 | `isZD ⟹ hasXorAnnih` | reduction (necessity) | **decided** n=4 (`xorAnnih_eq_isZD_16`); argument **Grok-verified** exhaustive *for 2-term factors* (§2) |
-| `offSeam ⟹ hasXorAnnih` | the converse proper | **decided** n=4,5,6; **conjectured** (verified n≤10, §2); **cited** as following ∀n from Moreno/BDI modulo the index bridge (§4) |
+| `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`, `∀ bits≥4` on loHi) — ordinary induction (`Q_all`; octonion base by `native_decide`; six exhaustive seam cases) composed with the BDI doubling recursion `converse_recursion'`; the file's `ConverseConjecture : Prop` is **discharged** by `converse_conjecture_proved`. Axioms `[propext, Quot.sound]` + the single k=3 base anchor. Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
 
-Note the two blocking overclaims we explicitly avoid: (a) we make **no** claim about zero divisors
-with annihilators of length `> 2` — every predicate above is about 2-term factors by definition; and
-(b) `offSeam ⟺ hasXorAnnih` is stated as a *chain of tagged links*, never as a single proved
-biconditional.
+Composing the two ∀n links `offSeam ⟹ hasXorAnnih ⟹ isZD` gives **`offSeam ⟹ isZD` proved ∀n** on the
+loHi locus (`bits ≥ 4`): every off-seam lower×upper basis pair is a 2-term zero divisor, at every
+Cayley–Dickson level. Note the two blocking overclaims we still explicitly avoid: (a) we make **no**
+claim about zero divisors with annihilators of length `> 2` — every predicate above is about 2-term
+factors by definition; and (b) the *necessity* direction `isZD ⟹ hasXorAnnih` remains **decided at
+n=4** (Grok-verified exhaustive for 2-term factors), so `hasXorAnnih ⟺ isZD` is a chain of tagged
+links, not a single ∀n biconditional — but the converse implication we set out to establish is now a
+theorem.
 
 ## 2. The 2-term reduction (the crux, in exact σ-form)
 
@@ -79,9 +87,11 @@ An independent math-review (grok-4.1) confirmed this reduction is correct and **
 path *validated equal to* the brute `isZD` at n=4,5,6 and then run to n=7,8,9,10 (dim 128..1024) with
 **zero counterexamples** (`cd_tower_converse_probe.py`).
 
-**Structural observation (empirical, n≤10 — not proved):** the winner set `{a : P(a)=+1}` is never
-empty on the off-seam locus; its cardinality is `≥ 8` and takes tower-shaped values `8·(2^k−1)` at
-the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#agreeing-orbits − N`).
+**Structural fact (now proved ∀n).** The winner set `{a : P(a)=+1}` is never empty on the off-seam
+loHi locus — this is exactly what `Q_all` + `converse_recursion'` establish (a non-exceptional
+disagreeing orbit downstairs maps to an upstairs winner). Its *cardinality* remains an empirical
+observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested levels
+(`Σ_a P(a) = 4·#agreeing-orbits − N`), not needed for the non-emptiness proof.
 
 ## 3. Ingredients proved / decided in the Sounio encoding
 
@@ -105,6 +115,18 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
   `{a, a⊕(l⊕u)}` with sign `s = −σ(l,a)σ(u,b)`, ordered — and discharges `annih` at every output
   index. (The three hypotheses are load-bearing: the theorem is false for `l=u` or unbounded indices;
   all hold on loHi.)
+- **The converse proper `offSeam ⟹ hasXorAnnih` — proved ∀n** (`converse_holds`, `∀ bits≥4` on loHi;
+  and `converse_conjecture_proved : ConverseConjecture` composing it with `hasXorAnnih_sound`).
+  Mathlib-free, axioms `[propext, Quot.sound]` + the single k=3 octonion-base `native_decide` anchor.
+  The engine is `Q_all`: *every distinct-nonzero pair in `A_k` (`k≥3`) has a non-exceptional
+  disagreeing orbit* (`P=−1`), by **ordinary** induction on the level. Base = octonions `A_3` (a
+  division algebra; `native_decide`). Step = six exhaustive cases on the seam position `H=2^k`: three
+  seam-element **edges** collapse to the cocycle/antisym/diagonal identities (`edge_m_eq_H`,
+  `edge_m_eq_H_plus_l`, `edge_l_eq_H`); **both-low** and **both-high** pairs *inherit* their witness
+  from the level below via sign-stability (`P_stable_low`, `fVal_high_stable`); **mixed** pairs use the
+  explicit witness `a=m_lo` (`mixed_witness_disagree`). The doubling step `P_(l,u)(a)=−P_(l,u_lo)(a)`
+  (`converse_recursion'`, unconditional via the proved `cdAntisym_all`) turns a downstairs disagreeing
+  orbit into an upstairs `hasXorAnnih` winner.
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
   `xorAnnih_eq_isZD_16` (reduction == brute at n=4), all `native_decide`, no `sorry`.
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
@@ -136,17 +158,23 @@ the tested levels, consistent with a counting/recursion proof (`Σ_a P(a) = 4·#
 - **Proved (∀n):** `e_i²=−1`; **`L_i²=−I` and basis-unit anticommutation** — on the bit-list sign
   (`Lsq`, `antisym`, `cocycle_bundle`) **and on the canonical Nat sign** (`cdSigma_cocycle`, via the
   proved `sgn = cdSigma` bridge); the reduction sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`,
-  on `l,u < 2^bits`, `l ≠ u`); and hence the forward obstruction `¬offSeam ⟹ ¬isZD`, now
-  unconditional on `cdSigma` for all n.
-- **Decided (fixed n):** seam coincidence n=4,5,6; reduction `hasXorAnnih==isZD` n=4; sharp converse
-  n=4,5,6; Moreno's example.
-- **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024).
+  on `l,u < 2^bits`, `l ≠ u`); the forward obstruction `¬offSeam ⟹ ¬isZD`, unconditional on `cdSigma`;
+  and — **new — the converse proper `offSeam ⟹ hasXorAnnih`** (`converse_holds`) and its composite
+  `converse_conjecture_proved : ConverseConjecture` (⟹ `isZD`), on the loHi locus for all `bits ≥ 4`.
+  Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion `native_decide` base anchor
+  in the converse proof.
+- **Decided (fixed n):** the *necessity* direction `isZD ⟹ hasXorAnnih` (`xorAnnih_eq_isZD_16`, n=4);
+  seam coincidence n=4,5,6; Moreno's example.
+- **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
+  cross-check of a proved theorem, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
-  (Moreno Thm 2.9; BDI Prop 11.1).
-- **Conjectured / open in this encoding:** `offSeam ⟹ hasXorAnnih` as a *formal* ∀n theorem, and the
-  closed-form off-seam⟺criterion identity (possibly Zhilina). `ConverseConjecture : Prop` is stated,
-  **unasserted** — its honest status is "follows ∀n from Moreno/BDI modulo a seam-index correspondence
-  we have not formally checked; empirically verified n≤10; not yet proved in the Sounio encoding."
+  (Moreno Thm 2.9; BDI Prop 11.1) — our `converse_holds` now supplies an *independent, machine-checked*
+  proof of the same statement in the Sounio convention.
+- **Still open in this encoding:** the *closed-form* off-seam⟺criterion identity (possibly Zhilina);
+  the necessity direction `isZD ⟹ hasXorAnnih` as a ∀n theorem (currently decided n=4, Grok-verified
+  exhaustive for 2-term factors); and the unchecked Moreno seam-index correspondence (§4). Note
+  `ConverseConjecture` — the conjecture this file was built around — is **no longer open**; it is a
+  theorem (`converse_conjecture_proved`).
 
 ## 6. Reproduce, and the next formal step
 
@@ -158,24 +186,34 @@ python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 ```
 
 **Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); **Door 1 — `L_i²=−I` + `antisym`
-proved ∀n** (`cocycle_bundle`); and the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
-forward obstruction is now unconditional on the canonical `cdSigma` with no representation gap.
-**The single remaining open theorem:** the converse proper `offSeam ⟹ hasXorAnnih` ∀n. Via the
-(unconditional) recursion `P_(l,u)(a) = −P_(l,u_lo)(a)`, it reduces to a **counting statement `Q`** on
-the sign cocycle (`scripts/research/cd_tower_converse_counting.py`): *every distinct-nonzero pair
-`(l,m)` in `A_k` (`k≥3`) has a non-exceptional disagreeing orbit* (`P=−1`), where an orbit is
-`{a, a⊕d}`, `d=l⊕m`, `P` is constant on orbits, and the two exceptional orbits are `{0,d}` and
-`{l,m}`. Equivalently `k_d ≥ 4` where `k_d = (N − S)/4`, `S = Σ_a P(a)` (a σ-autocorrelation). `Q` is
-verified over all pairs for `k ≤ 7`, with these proof levers established/empirical:
-- **Bound (empirical, `k≤7`):** `k_d ≥ 4` (`S ≤ N−16`), always `≥ 2` non-exceptional disagreeing orbits.
-- **Doubling (provable from `cdSigma_stable`):** for a both-low pair, `k_d(l,m,k) = 2·k_d(l,m,k−1)`.
-- **Base (`native_decide`-able):** octonions `A_3` are a division algebra — *every* orbit disagrees.
-- **Explicit witness (`5088/5088`, a σ-identity):** a mixed pair `(l, 2^{k−1}+m_lo)` with `m_lo ∉ {0,l}`
-  disagrees at `a = m_lo` and `a = l⊕m_lo`.
-The **residual seam**: assembling these into one induction is blocked by *both-low* pairs at their
-minimal level, which the recursion cannot peel — the genuinely hard case (cf. Zhilina's hexagons,
-paywalled). So the converse is now reduced to a single, sharply-characterized counting bound with base
-case and two of three inductive cases in hand.
+proved ∀n** (`cocycle_bundle`); the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
+forward obstruction is unconditional on the canonical `cdSigma`; and — **the converse proper
+`offSeam ⟹ hasXorAnnih` now proved ∀n** (`converse_holds`), discharging `ConverseConjecture`
+(`converse_conjecture_proved`). The former "single remaining open theorem" is closed.
+
+The engine is the counting statement `Q` on the sign cocycle
+(`scripts/research/cd_tower_converse_counting.py`), now a **theorem** (`Q_all`): *every
+distinct-nonzero pair `(l,m)` in `A_k` (`k≥3`) has a non-exceptional disagreeing orbit* (`P=−1`),
+where an orbit is `{a, a⊕d}`, `d=l⊕m`, `P` is constant on orbits, and the two exceptional orbits are
+`{0,d}` and `{l,m}`. Proved by **ordinary induction on the level** (`native_decide` octonion base,
+six exhaustive seam cases), then lifted through the doubling recursion `P_(l,u)(a) = −P_(l,u_lo)(a)`.
+
+The proof levers, all now formal:
+- **Base:** octonions `A_3` are a division algebra — *every* orbit disagrees (`oct_all_disagree` /
+  `Q_base_bool`, `native_decide`; the sole native anchor).
+- **Doubling / stability:** `P_stable_low` (both-low, low block) and `fVal_high_stable` (both-high, low
+  block) — the sign is level-invariant on the low block, so these pairs **inherit** a disagreeing
+  witness from the level below.
+- **Explicit witness (a σ-identity):** a mixed pair `(l, 2^{k−1}+m_lo)` with `m_lo ∉ {0,l}` disagrees
+  at `a = m_lo` (`mixed_witness_disagree`).
+- **Seam-element edges:** the three pairs touching `H=2^{k−1}` collapse to `cdSigma_cocycle`,
+  `cdAntisym_all`, `cdSigma_diag` (`edge_m_eq_H`, `edge_m_eq_H_plus_l`, `edge_l_eq_H`).
+
+**On the earlier "both-low residual seam":** it was a **misdiagnosis**. Both-low pairs do *not* need
+the recursion to "peel" them — they **inherit** their disagreeing witness from the level below via
+sign-stability (`P_stable_low`), exactly like both-high pairs (`fVal_high_stable`). Once that is seen,
+the induction is ordinary and every case closes; no hard both-low core remains. (This supersedes the
+provisional "genuinely hard case, cf. Zhilina" note in earlier drafts.)
 
 ## References
 
