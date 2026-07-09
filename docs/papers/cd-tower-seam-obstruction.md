@@ -160,10 +160,22 @@ python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 **Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); **Door 1 — `L_i²=−I` + `antisym`
 proved ∀n** (`cocycle_bundle`); and the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
 forward obstruction is now unconditional on the canonical `cdSigma` with no representation gap.
-**The single remaining open theorem:** the converse proper `offSeam ⟹ hasXorAnnih` ∀n — needs an
-existence argument (a winning `a`), route via the BDI doubling recursion (base case `A_3`); the
-recursion relation `P_(l,u)(a) = −P_(l,u_lo)(a)` on low `a` (with the exceptional orbits `{0,l,u_lo,d}`)
-is the concrete inductive core.
+**The single remaining open theorem:** the converse proper `offSeam ⟹ hasXorAnnih` ∀n. Via the
+(unconditional) recursion `P_(l,u)(a) = −P_(l,u_lo)(a)`, it reduces to a **counting statement `Q`** on
+the sign cocycle (`scripts/research/cd_tower_converse_counting.py`): *every distinct-nonzero pair
+`(l,m)` in `A_k` (`k≥3`) has a non-exceptional disagreeing orbit* (`P=−1`), where an orbit is
+`{a, a⊕d}`, `d=l⊕m`, `P` is constant on orbits, and the two exceptional orbits are `{0,d}` and
+`{l,m}`. Equivalently `k_d ≥ 4` where `k_d = (N − S)/4`, `S = Σ_a P(a)` (a σ-autocorrelation). `Q` is
+verified over all pairs for `k ≤ 7`, with these proof levers established/empirical:
+- **Bound (empirical, `k≤7`):** `k_d ≥ 4` (`S ≤ N−16`), always `≥ 2` non-exceptional disagreeing orbits.
+- **Doubling (provable from `cdSigma_stable`):** for a both-low pair, `k_d(l,m,k) = 2·k_d(l,m,k−1)`.
+- **Base (`native_decide`-able):** octonions `A_3` are a division algebra — *every* orbit disagrees.
+- **Explicit witness (`5088/5088`, a σ-identity):** a mixed pair `(l, 2^{k−1}+m_lo)` with `m_lo ∉ {0,l}`
+  disagrees at `a = m_lo` and `a = l⊕m_lo`.
+The **residual seam**: assembling these into one induction is blocked by *both-low* pairs at their
+minimal level, which the recursion cannot peel — the genuinely hard case (cf. Zhilina's hexagons,
+paywalled). So the converse is now reduced to a single, sharply-characterized counting bound with base
+case and two of three inductive cases in hand.
 
 ## References
 
