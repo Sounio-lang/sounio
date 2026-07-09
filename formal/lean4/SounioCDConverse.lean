@@ -237,13 +237,25 @@ theorem P_eq_fVal (l u a bits : Nat) :
 /-- `cdSigma _ 0 = 1` for every positive width (the identity `e₀=1` kills the sign).  Note it is
     genuinely `-1` at width `0`, hence the `1 ≤ bits`. -/
 theorem cdSigma_zero_right : ∀ (bits x : Nat), 1 ≤ bits → cdSigma x 0 bits = 1
-  | 1, x, _ => by simp [cdSigma]
-  | (n+2), x, _ => by simp [cdSigma]
+  | 1, x, _ => by
+      have hg : (x == 0 || (0:Nat) == 0) = true := by
+        rw [show ((0:Nat) == 0) = true from rfl, Bool.or_true]
+      rw [cdSigma, if_pos hg]
+  | (n+2), x, _ => by
+      have hg : (x == 0 || (0:Nat) == 0) = true := by
+        rw [show ((0:Nat) == 0) = true from rfl, Bool.or_true]
+      rw [cdSigma, if_pos hg]
 
 /-- `cdSigma 0 _ = 1` for every positive width (identity on the left). -/
 theorem cdSigma_zero_left : ∀ (bits x : Nat), 1 ≤ bits → cdSigma 0 x bits = 1
-  | 1, x, _ => by simp [cdSigma]
-  | (n+2), x, _ => by simp [cdSigma]
+  | 1, x, _ => by
+      have hg : ((0:Nat) == 0 || x == 0) = true := by
+        rw [show ((0:Nat) == 0) = true from rfl, Bool.true_or]
+      rw [cdSigma, if_pos hg]
+  | (n+2), x, _ => by
+      have hg : ((0:Nat) == 0 || x == 0) = true := by
+        rw [show ((0:Nat) == 0) = true from rfl, Bool.true_or]
+      rw [cdSigma, if_pos hg]
 
 /-- `f(0) = 1`: the trivial orbit `{0,d}` carries paired sign `+1` at the `0` end (so the trivial
     orbit "agrees" exactly when `f(d)=1` — and, being trivial, is never itself a legal witness). -/
@@ -289,14 +301,17 @@ theorem cdSigma_hi_lo (n uL a : Nat) (huL : uL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha 
   have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
   rw [cdSigma]
   have hg : ¬ ((2 ^ (n+1) + uL) == 0 || a == 0) = true := by
-    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+    rw [Bool.or_eq_true]
+    rintro (h | h)
+    · exact absurd (eq_of_beq h) (by omega)
+    · exact absurd (eq_of_beq h) (by omega)
   rw [if_neg hg]
   have hAhi : (2 ^ (n+1) + uL) ≥ 2 ^ (n+1) := by omega
   have hBhi : ¬ a ≥ 2 ^ (n+1) := by omega
   have hmod1 : (2 ^ (n+1) + uL) % 2 ^ (n+1) = uL := by
     rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt huL
   have hmod2 : a % 2 ^ (n+1) = a := Nat.mod_eq_of_lt ha
-  have hbz : ¬ (a == 0) = true := by simp only [beq_iff_eq]; omega
+  have hbz : ¬ (a == 0) = true := fun h => absurd (eq_of_beq h) (by omega)
   simp only [ge_iff_le, hAhi, hBhi, decide_true, decide_false, Bool.not_false,
     Bool.not_true, Bool.and_false, Bool.and_true,
     hmod1, hmod2, hbz]
@@ -321,7 +336,10 @@ theorem cdSigma_lo_hi (n bL a : Nat) (hbL : bL < 2 ^ (n+1)) (ha1 : 1 ≤ a) (ha 
   have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
   rw [cdSigma]
   have hg : ¬ (a == 0 || (2 ^ (n+1) + bL) == 0) = true := by
-    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+    rw [Bool.or_eq_true]
+    rintro (h | h)
+    · exact absurd (eq_of_beq h) (by omega)
+    · exact absurd (eq_of_beq h) (by omega)
   rw [if_neg hg]
   have hAhi : ¬ a ≥ 2 ^ (n+1) := by omega
   have hBhi : (2 ^ (n+1) + bL) ≥ 2 ^ (n+1) := by omega
@@ -339,7 +357,10 @@ theorem cdSigma_hi_hi (n uL bL : Nat) (huL : uL < 2 ^ (n+1)) (hb1 : 1 ≤ bL) (h
   have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
   rw [cdSigma]
   have hg : ¬ ((2 ^ (n+1) + uL) == 0 || (2 ^ (n+1) + bL) == 0) = true := by
-    simp only [Bool.or_eq_true, beq_iff_eq, not_or]; omega
+    rw [Bool.or_eq_true]
+    rintro (h | h)
+    · exact absurd (eq_of_beq h) (by omega)
+    · exact absurd (eq_of_beq h) (by omega)
   rw [if_neg hg]
   have hAhi : (2 ^ (n+1) + uL) ≥ 2 ^ (n+1) := by omega
   have hBhi : (2 ^ (n+1) + bL) ≥ 2 ^ (n+1) := by omega
@@ -347,7 +368,7 @@ theorem cdSigma_hi_hi (n uL bL : Nat) (huL : uL < 2 ^ (n+1)) (hb1 : 1 ≤ bL) (h
     rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt huL
   have hmod2 : (2 ^ (n+1) + bL) % 2 ^ (n+1) = bL := by
     rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hbL
-  have hbz : ¬ (bL == 0) = true := by simp only [beq_iff_eq]; omega
+  have hbz : ¬ (bL == 0) = true := fun h => absurd (eq_of_beq h) (by omega)
   simp only [ge_iff_le, hAhi, hBhi, decide_true, Bool.not_true, Bool.and_false, Bool.false_and,
     Bool.and_self, hmod1, hmod2, hbz]
   rfl
