@@ -790,4 +790,51 @@ theorem edge_l_eq_H (k m_lo a : Nat)
     rcases cdSigma_pm (j+1) m_lo (m_lo ^^^ a) with hB|hB <;>
       rw [hA, hB] at hcoc ⊢ <;> first | decide | exact absurd hcoc (by decide)
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- Q: a non-exceptional disagreeing witness exists for EVERY mixed pair (ORDINARY induction on level).
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- `fVal` is symmetric in the pair `(l,m)` (the paired sign `cdSigma l a · cdSigma m a`). -/
+theorem fVal_comm (l m a bits : Nat) : fVal l m a bits = fVal m l a bits := by
+  unfold fVal; rw [Int.mul_comm]
+
+/-- The winner-existence statement at level `k`: every mixed pair has a non-exceptional
+    (`a ∉ {0, l⊕m, l, m}`) orbit whose four-sign product disagrees (`= -1`). -/
+def Qstmt (k : Nat) : Prop :=
+  ∀ l m, 1 ≤ l → l < 2 ^ k → 1 ≤ m → m < 2 ^ k → l ≠ m →
+    ∃ a, a < 2 ^ k ∧ a ≠ 0 ∧ a ≠ l ^^^ m ∧ a ≠ l ∧ a ≠ m ∧
+         fVal l m a k * fVal l m (a ^^^ (l ^^^ m)) k = -1
+
+/-- The witness set is symmetric under swapping the pair: a witness for `(l,m)` is a witness for
+    `(m,l)` (guards symmetric, `l⊕m = m⊕l`, `fVal` symmetric). -/
+theorem exists_witness_symm (k l m : Nat)
+    (h : ∃ a, a < 2 ^ k ∧ a ≠ 0 ∧ a ≠ l ^^^ m ∧ a ≠ l ∧ a ≠ m ∧
+         fVal l m a k * fVal l m (a ^^^ (l ^^^ m)) k = -1) :
+    ∃ a, a < 2 ^ k ∧ a ≠ 0 ∧ a ≠ m ^^^ l ∧ a ≠ m ∧ a ≠ l ∧
+         fVal m l a k * fVal m l (a ^^^ (m ^^^ l)) k = -1 := by
+  obtain ⟨a, h1, h2, h3, h4, h5, h6⟩ := h
+  refine ⟨a, h1, h2, ?_, h5, h4, ?_⟩
+  · rw [Nat.xor_comm m l]; exact h3
+  · rw [Nat.xor_comm m l, fVal_comm m l, fVal_comm m l]; exact h6
+
+/-- **Base `Qstmt 3` (octonions)** as a finite decidable Bool over `range 8` — the ONE legitimate
+    `native_decide` anchor. -/
+theorem Q_base_bool : ∀ l, l < 2 ^ 3 → ∀ m, m < 2 ^ 3 → 1 ≤ l → 1 ≤ m → l ≠ m →
+    (List.range (2 ^ 3)).any (fun a =>
+      (a != 0) && (a != l ^^^ m) && (a != l) && (a != m)
+        && (fVal l m a 3 * fVal l m (a ^^^ (l ^^^ m)) 3 == -1)) = true := by
+  native_decide
+
+/-- Base case `Qstmt 3`, extracting the `∃`-witness from the decidable Bool anchor. -/
+theorem Q_base : Qstmt 3 := by
+  intro l m hl1 hl hm1 hm hlm
+  have hb := Q_base_bool l hl m hm hl1 hm1 hlm
+  rw [List.any_eq_true] at hb
+  obtain ⟨a, hmem, hpred⟩ := hb
+  rw [List.mem_range] at hmem
+  rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true,
+      bne_iff_ne, bne_iff_ne, bne_iff_ne, bne_iff_ne, beq_iff_eq] at hpred
+  obtain ⟨⟨⟨⟨g0, gd⟩, gl⟩, gm⟩, gP⟩ := hpred
+  exact ⟨a, hmem, g0, gd, gl, gm, gP⟩
+
 end SounioCDConverse
