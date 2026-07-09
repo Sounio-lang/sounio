@@ -998,4 +998,40 @@ theorem converse_holds (bits l u : Nat) (hb : 4 ≤ bits)
   refine ⟨⟨by omega, had⟩, ?_⟩
   rw [P_eq_fVal]; exact hprod
 
+/-- **Membership in `loHi bits`** pins the exact locus: `1 ≤ l < 2^(bits-1) ≤ u < 2^bits`
+    (in particular `l ≥ 1` — the identity `e₀` is excluded). -/
+theorem loHi_mem (bits : Nat) (hb : 1 ≤ bits) (p : Nat × Nat) (hp : p ∈ loHi bits) :
+    1 ≤ p.1 ∧ p.1 < 2 ^ (bits-1) ∧ 2 ^ (bits-1) ≤ p.2 ∧ p.2 < 2 ^ bits := by
+  have htop : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos (bits-1)
+  have hpow : 2 ^ bits = 2 ^ (bits-1) * 2 := by
+    have hps : 2 ^ ((bits-1)+1) = 2 ^ (bits-1) * 2 := Nat.pow_succ 2 (bits-1)
+    rw [Nat.sub_add_cancel hb] at hps; exact hps
+  simp only [loHi, List.mem_flatMap, List.mem_map, List.mem_range] at hp
+  obtain ⟨l, hl, u, hu, rfl⟩ := hp
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> (dsimp only; omega)
+
+/-- **THE TOWER-WIDE CONVERSE, DISCHARGED** — `ConverseConjecture` is now a theorem: for every level
+    `bits ≥ 4`, every off-seam lower×upper pair is a zero divisor.  Composition of `converse_holds`
+    (off-seam ⟹ `hasXorAnnih`, ∀n, proved by the octonion-base induction) with `hasXorAnnih_sound`
+    (`hasXorAnnih` ⟹ `isZD`, ∀n).  Kernel axioms `[propext, Quot.sound]` + the single k=3 base
+    `native_decide` anchor. -/
+theorem converse_conjecture_proved : ConverseConjecture := by
+  intro bits hb
+  unfold converseHolds
+  rw [List.all_eq_true]
+  intro p hp
+  obtain ⟨hp1, hp2, hp3, hp4⟩ := loHi_mem bits (by omega) p hp
+  have hlt : p.1 < 2 ^ bits := by
+    have hpow : 2 ^ bits = 2 ^ (bits-1) * 2 := by
+      have hps : 2 ^ ((bits-1)+1) = 2 ^ (bits-1) * 2 := Nat.pow_succ 2 (bits-1)
+      rw [Nat.sub_add_cancel (show 1 ≤ bits by omega)] at hps; exact hps
+    have htop : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos (bits-1)
+    omega
+  by_cases hoff : offSeam bits p.1 p.2 = true
+  · have hxa := converse_holds bits p.1 p.2 hb hp1 hp2 hp3 hp4 hoff
+    have hne : p.1 ≠ p.2 := by omega
+    rw [hasXorAnnih_sound bits p.1 p.2 hlt hp4 hne hxa, Bool.or_true]
+  · rw [Bool.not_eq_true] at hoff
+    rw [hoff]; rfl
+
 end SounioCDConverse
