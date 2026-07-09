@@ -4489,23 +4489,38 @@ fn module_frontend_lower_programs_array_direct_box(
                         let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
                         let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
                         let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
+                        // Functions with index < acc_fn_before existed before this dep merge;
+                        // a fn_remap target below this marks a DEDUP reuse (skip re-placing).
+                        let acc_fn_before = (*acc_box).fn_count
                         var fn_remap: [i64; 2048] = [-1; 2048]
                         var append_count: i64 = 0
                         var rfi: i64 = 0
                         while rfi < dep_fn_count {
                             let dep_ic = (*dep_box).functions[rfi as usize].instr_count
                             var stub_idx: i64 = 0 - 1
+                            var existing_body_idx: i64 = 0 - 1
                             var sfi: i64 = 0
                             while sfi < (*acc_box).fn_count {
                                 if ir_name_eq(
                                     (*acc_box).functions[sfi as usize].name,
                                     (*dep_box).functions[rfi as usize].name
-                                ) && (*acc_box).functions[sfi as usize].instr_count <= 0 {
-                                    stub_idx = sfi
+                                ) {
+                                    if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                        stub_idx = sfi
+                                    } else {
+                                        existing_body_idx = sfi
+                                    }
                                 }
                                 sfi = sfi + 1
                             }
-                            if stub_idx >= 0 && dep_ic > 0 {
+                            if existing_body_idx >= 0 {
+                                // DEDUP: this function's body is already merged (a shared
+                                // import pulled in via another module). Point dep's callers
+                                // at the existing copy and skip re-appending the duplicate
+                                // body. Post-merge call finalize (ir_module_finalize_merged_calls)
+                                // resolves every call by name to this kept copy.
+                                fn_remap[rfi as usize] = existing_body_idx
+                            } else if stub_idx >= 0 && dep_ic > 0 {
                                 // Keep import stubs (ic=0) at low fn_id indices and append
                                 // lowered bodies — matches the 3-module clinical+knightian
                                 // layout where stub slots survive for post-finalize promotion.
@@ -4527,7 +4542,9 @@ fn module_frontend_lower_programs_array_direct_box(
                         var mfi: i64 = 0
                         while mfi < dep_fn_count {
                             let dst_fi = fn_remap[mfi as usize]
-                            if dst_fi >= 0 {
+                            // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
+                            // skip re-placing it. Only place newly-appended functions.
+                            if dst_fi >= acc_fn_before {
                                 // Remap cross-module call targets by symbol name while fn_id
                                 // values are still in the dependency module index space.
                                 var dep_func = (*dep_box).functions[mfi as usize]
