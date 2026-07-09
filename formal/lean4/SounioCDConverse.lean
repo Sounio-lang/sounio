@@ -703,4 +703,41 @@ theorem fVal_high_stable (k l_lo m_lo a : Nat)
           cdSigma_zero_right (j+1) _ (by omega), cdSigma_zero_right (j+1) _ (by omega)]
     · rw [cdSigma_hi_lo j l_lo a hl ha1 ha, cdSigma_hi_lo j m_lo a hm ha1 ha, Int.neg_mul_neg]
 
+/-- **L2 — seam-element edge `(l, 2^k)`.**  For `1 ≤ l < 2^k`, `1 ≤ a < 2^k`, `a ≠ l`, the orbit at
+    `a` disagrees: `P l (2^k) a (k+1) = -1`.  Derived from the branch reductions + `cdAntisym_all` +
+    `cdSigma_cocycle'`; no `native_decide`. -/
+theorem edge_m_eq_H (k l a : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ k) (ha1 : 1 ≤ a) (ha : a < 2 ^ k) (hal : a ≠ l) :
+    fVal l (2 ^ k) a (k+1)
+      * fVal l (2 ^ k) (a ^^^ (l ^^^ 2 ^ k)) (k+1) = -1 := by
+  cases k with
+  | zero => rw [Nat.pow_zero] at hl; omega
+  | succ j =>
+    have hax : a ^^^ l < 2 ^ (j+1) := Nat.xor_lt_two_pow ha hl
+    have haxne : a ^^^ l ≠ 0 := fun h => hal (xor_eq_zero_of a l h)
+    have hax1 : 1 ≤ a ^^^ l := Nat.one_le_iff_ne_zero.mpr haxne
+    have hd : l ^^^ 2 ^ (j+1) = 2 ^ (j+1) + l := by
+      rw [Nat.xor_comm l (2 ^ (j+1)), two_pow_xor_eq_add (j+1) l hl]
+    have hidx : a ^^^ (l ^^^ 2 ^ (j+1)) = 2 ^ (j+1) + (a ^^^ l) := by
+      rw [hd, orbit_low_to_high (j+1) a l ha hl]
+    rw [hidx]
+    unfold fVal
+    have h2 := cdSigma_hi_lo j 0 a (Nat.two_pow_pos (j+1)) ha1 ha
+    rw [Nat.add_zero, cdSigma_zero_left (j+1) a (by omega)] at h2
+    have h4 := cdSigma_hi_hi j 0 (a ^^^ l) (Nat.two_pow_pos (j+1)) hax1 hax
+    rw [Nat.add_zero, cdSigma_zero_right (j+1) (a ^^^ l) (by omega)] at h4
+    have hne_axl : a ^^^ l ≠ l := by
+      intro h
+      have e : (a ^^^ l) ^^^ l = l ^^^ l := by rw [h]
+      rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at e
+      omega
+    rw [cdSigma_stable j l a hl ha, h2,
+        cdSigma_lo_hi j (a ^^^ l) l hax hl1 hl, h4,
+        cdAntisym_all (j+1) (a ^^^ l) l hax1 hax hl1 hl hne_axl,
+        Nat.xor_comm a l]
+    have hcoc := cdSigma_cocycle' (j+1) l a hl ha (by omega : l ≠ 0)
+    rcases cdSigma_pm (j+1) l a with hA|hA <;>
+    rcases cdSigma_pm (j+1) l (l ^^^ a) with hB|hB <;>
+      rw [hA, hB] at hcoc ⊢ <;> first | decide | exact absurd hcoc (by decide)
+
 end SounioCDConverse
