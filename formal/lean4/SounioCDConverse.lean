@@ -761,4 +761,33 @@ theorem edge_m_eq_H_plus_l (k l a : Nat)
     rcases cdSigma_pm (j+1) l a with hA|hA <;>
     rcases cdSigma_pm (j+1) a l with hB|hB <;> rw [hA, hB] <;> decide
 
+/-- **L4 — seam-element edge `(2^k, 2^k+m_lo)`.**  For `1 ≤ m_lo < 2^k`, `1 ≤ a < 2^k`, `a ≠ m_lo`,
+    the orbit at `a` disagrees: `P (2^k) (2^k+m_lo) a (k+1) = -1`.  Here `d = m_lo` (low); each factor
+    is `(-1)·(-cdSigma m_lo · k)`, closed by `cdSigma_cocycle'` with `i = m_lo`. -/
+theorem edge_l_eq_H (k m_lo a : Nat)
+    (hm1 : 1 ≤ m_lo) (hm : m_lo < 2 ^ k) (ha1 : 1 ≤ a) (ha : a < 2 ^ k) (ham : a ≠ m_lo) :
+    fVal (2 ^ k) (2 ^ k + m_lo) a (k+1)
+      * fVal (2 ^ k) (2 ^ k + m_lo) (a ^^^ (2 ^ k ^^^ (2 ^ k + m_lo))) (k+1) = -1 := by
+  cases k with
+  | zero => rw [Nat.pow_zero] at hm; omega
+  | succ j =>
+    have hax : a ^^^ m_lo < 2 ^ (j+1) := Nat.xor_lt_two_pow ha hm
+    have haxne : a ^^^ m_lo ≠ 0 := fun h => ham (xor_eq_zero_of a m_lo h)
+    have hax1 : 1 ≤ a ^^^ m_lo := Nat.one_le_iff_ne_zero.mpr haxne
+    have hd : (2 ^ (j+1)) ^^^ (2 ^ (j+1) + m_lo) = m_lo := by
+      rw [← two_pow_xor_eq_add (j+1) m_lo hm, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    have hidx : a ^^^ ((2 ^ (j+1)) ^^^ (2 ^ (j+1) + m_lo)) = a ^^^ m_lo := by rw [hd]
+    rw [hidx]
+    unfold fVal
+    have h1 := cdSigma_hi_lo j 0 a (Nat.two_pow_pos (j+1)) ha1 ha
+    rw [Nat.add_zero, cdSigma_zero_left (j+1) a (by omega)] at h1
+    have h3 := cdSigma_hi_lo j 0 (a ^^^ m_lo) (Nat.two_pow_pos (j+1)) hax1 hax
+    rw [Nat.add_zero, cdSigma_zero_left (j+1) (a ^^^ m_lo) (by omega)] at h3
+    rw [h1, cdSigma_hi_lo j m_lo a hm ha1 ha, h3,
+        cdSigma_hi_lo j m_lo (a ^^^ m_lo) hm hax1 hax, Nat.xor_comm a m_lo]
+    have hcoc := cdSigma_cocycle' (j+1) m_lo a hm ha (by omega : m_lo ≠ 0)
+    rcases cdSigma_pm (j+1) m_lo a with hA|hA <;>
+    rcases cdSigma_pm (j+1) m_lo (m_lo ^^^ a) with hB|hB <;>
+      rw [hA, hB] at hcoc ⊢ <;> first | decide | exact absurd hcoc (by decide)
+
 end SounioCDConverse
