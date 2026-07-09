@@ -837,4 +837,113 @@ theorem Q_base : Qstmt 3 := by
   obtain ⟨⟨⟨⟨g0, gd⟩, gl⟩, gm⟩, gP⟩ := hpred
   exact ⟨a, hmem, g0, gd, gl, gm, gP⟩
 
+/-- **The inductive step `Qstmt W → Qstmt (W+1)`** (ORDINARY induction, `W ≥ 3`).  Six-case split on
+    the seam position of the pair; edges by L2/L3/L4, both-low by `P_stable_low`+IH, mixed non-edge by
+    `mixed_witness_disagree`, both-high by L1+IH.  WLOG `l < m` via `exists_witness_symm`. -/
+theorem Qstep (W : Nat) (hW : 3 ≤ W) (ih : Qstmt W) : Qstmt (W+1) := by
+  have hpow : 2 ^ (W+1) = 2 ^ W * 2 := Nat.pow_succ 2 W
+  have h8 : 8 ≤ 2 ^ W := by
+    have h : 2 ^ 3 ≤ 2 ^ W := Nat.pow_le_pow_right (by decide) (show 3 ≤ W by omega)
+    exact h
+  have core : ∀ l m, 1 ≤ l → l < m → m < 2 ^ (W+1) →
+      ∃ a, a < 2 ^ (W+1) ∧ a ≠ 0 ∧ a ≠ l ^^^ m ∧ a ≠ l ∧ a ≠ m ∧
+           fVal l m a (W+1) * fVal l m (a ^^^ (l ^^^ m)) (W+1) = -1 := by
+    intro l m hl1 hlm hmW
+    have hm1 : 1 ≤ m := by omega
+    by_cases hmlt : m < 2 ^ W
+    · -- CASE 4: both low
+      have hlW' : l < 2 ^ W := by omega
+      obtain ⟨a, ha, ha0, had, hal, ham, haP⟩ := ih l m hl1 hlW' hm1 hmlt (by omega)
+      exact ⟨a, by omega, ha0, had, hal, ham,
+        by rw [P_stable_low W l m a hlW' hmlt ha]; exact haP⟩
+    · by_cases hllt : l < 2 ^ W
+      · -- ¬hi_l, hi_m
+        by_cases hmH : m = 2 ^ W
+        · -- CASE 1: m = 2^W
+          subst hmH
+          have hlW' : l < 2 ^ W := by omega
+          obtain ⟨a, ha1, haH, hal⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ W ∧ a ≠ l := by
+            by_cases hle : l = 1
+            · exact ⟨2, by omega, by omega, by omega⟩
+            · exact ⟨1, by omega, by omega, by omega⟩
+          have hlmv : l ^^^ 2 ^ W = 2 ^ W + l := by
+            rw [Nat.xor_comm l (2 ^ W), two_pow_xor_eq_add W l hlW']
+          refine ⟨a, by omega, by omega, by omega, hal, by omega, ?_⟩
+          exact edge_m_eq_H W l a hl1 hlW' ha1 haH hal
+        · -- m > 2^W
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ W + mlo := ⟨m - 2 ^ W, by omega⟩
+          have hmloH : mlo < 2 ^ W := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          by_cases hmlol : mlo = l
+          · -- CASE 2: m = 2^W + l
+            obtain ⟨a, ha1, haH, hal⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ W ∧ a ≠ l := by
+              by_cases hle : l = 1
+              · exact ⟨2, by omega, by omega, by omega⟩
+              · exact ⟨1, by omega, by omega, by omega⟩
+            have hlmv : l ^^^ (2 ^ W + mlo) = 2 ^ W := by
+              rw [hmlol, ← two_pow_xor_eq_add W l hllt, xor_left_comm, Nat.xor_self, Nat.xor_zero]
+            refine ⟨a, by omega, by omega, ?_, hal, by omega, ?_⟩
+            · rw [hlmv]; omega
+            · rw [hmlol]; exact edge_m_eq_H_plus_l W l a hl1 hllt ha1 haH
+          · -- CASE 5: mixed non-edge
+            have hmlol' : mlo ≠ l := hmlol
+            have hlmv : l ^^^ (2 ^ W + mlo) = 2 ^ W + (l ^^^ mlo) := by
+              rw [← two_pow_xor_eq_add W mlo hmloH, xor_left_comm,
+                  two_pow_xor_eq_add W (l ^^^ mlo) (Nat.xor_lt_two_pow hllt hmloH)]
+            refine ⟨mlo, by omega, by omega, ?_, hmlol', by omega, ?_⟩
+            · rw [hlmv]; omega
+            · exact mixed_witness_disagree W l mlo hl1 hllt hmlo1 hmloH hmlol'
+      · -- l ≥ 2^W, both high
+        by_cases hlH : l = 2 ^ W
+        · -- CASE 3: l = 2^W
+          subst hlH
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ W + mlo := ⟨m - 2 ^ W, by omega⟩
+          have hmloH : mlo < 2 ^ W := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          obtain ⟨a, ha1, haH, ham⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ W ∧ a ≠ mlo := by
+            by_cases hle : mlo = 1
+            · exact ⟨2, by omega, by omega, by omega⟩
+            · exact ⟨1, by omega, by omega, by omega⟩
+          have hlmv : (2 ^ W) ^^^ (2 ^ W + mlo) = mlo := by
+            rw [← two_pow_xor_eq_add W mlo hmloH, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+          refine ⟨a, by omega, by omega, ?_, ?_, by omega, ?_⟩
+          · rw [hlmv]; exact ham
+          · omega
+          · exact edge_l_eq_H W mlo a hmlo1 hmloH ha1 haH ham
+        · -- CASE 6: both high, l ≠ 2^W
+          obtain ⟨llo, rfl⟩ : ∃ llo, l = 2 ^ W + llo := ⟨l - 2 ^ W, by omega⟩
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ W + mlo := ⟨m - 2 ^ W, by omega⟩
+          have hlloH : llo < 2 ^ W := by omega
+          have hmloH : mlo < 2 ^ W := by omega
+          have hllo1 : 1 ≤ llo := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          have hlomlo : llo ≠ mlo := by omega
+          obtain ⟨a, ha, ha0, had, hal, ham, haP⟩ := ih llo mlo hllo1 hlloH hmlo1 hmloH hlomlo
+          have hxor : (2 ^ W + llo) ^^^ (2 ^ W + mlo) = llo ^^^ mlo := by
+            rw [← two_pow_xor_eq_add W llo hlloH, ← two_pow_xor_eq_add W mlo hmloH,
+                Nat.xor_assoc, xor_left_comm llo (2 ^ W) mlo, ← Nat.xor_assoc,
+                Nat.xor_self, Nat.zero_xor]
+          have hbH : a ^^^ (llo ^^^ mlo) < 2 ^ W :=
+            Nat.xor_lt_two_pow ha (Nat.xor_lt_two_pow hlloH hmloH)
+          refine ⟨a, by omega, ha0, ?_, by omega, by omega, ?_⟩
+          · rw [hxor]; exact had
+          · rw [hxor, fVal_high_stable W llo mlo a hlloH hmloH ha,
+                fVal_high_stable W llo mlo (a ^^^ (llo ^^^ mlo)) hlloH hmloH hbH]
+            exact haP
+  intro l m hl1 hlW hm1 hmW hlm
+  rcases Nat.lt_or_ge l m with hlt | hge
+  · exact core l m hl1 hlt hmW
+  · exact exists_witness_symm (W+1) m l (core m l hm1 (by omega) hlW)
+
+/-- **Q for all levels `≥ 3`** (ORDINARY induction on the offset): every mixed pair has a
+    non-exceptional disagreeing orbit. -/
+theorem Q_all : ∀ k, Qstmt (k + 3)
+  | 0 => Q_base
+  | (k+1) => Qstep (k + 3) (by omega) (Q_all k)
+
+/-- Convenience repackaging: `Qstmt W` for every `W ≥ 3`. -/
+theorem Q_ge3 (W : Nat) (hW : 3 ≤ W) : Qstmt W := by
+  obtain ⟨k, rfl⟩ : ∃ k, W = k + 3 := ⟨W - 3, by omega⟩
+  exact Q_all k
+
 end SounioCDConverse
