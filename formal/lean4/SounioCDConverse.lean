@@ -674,4 +674,11 @@ theorem P_stable_low (k l m a : Nat) (hl : l < 2 ^ k) (hm : m < 2 ^ k) (ha : a <
     rw [cdSigma_stable j l a hl ha, cdSigma_stable j m a hm ha,
         cdSigma_stable j l (a ^^^ (l ^^^ m)) hl hb, cdSigma_stable j m (a ^^^ (l ^^^ m)) hm hb]
 
+/-- **Bridged cocycle** `cdSigma i j n · cdSigma i (i⊕j) n = -1` for the TowerSeam `cdSigma`,
+    transferred from `SounioCDCocycle.cdSigma_cocycle` across the `cdSigma_defeq` bridge. -/
+theorem cdSigma_cocycle' (n i j : Nat) (hi : i < 2 ^ n) (hj : j < 2 ^ n) (hi0 : i ≠ 0) :
+    cdSigma i j n * cdSigma i (i ^^^ j) n = -1 := by
+  rw [← cdSigma_defeq n i j, ← cdSigma_defeq n i (i ^^^ j)]
+  exact SounioCDCocycle.cdSigma_cocycle n i j hi hj hi0
+
 end SounioCDConverse
