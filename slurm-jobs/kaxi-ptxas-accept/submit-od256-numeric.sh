@@ -46,7 +46,7 @@ for p in od256_two_sum od256_two_prod od256_add od256_mul; do
   [[ -f "$g" ]] || { echo "missing golden $g — run the golden gate first" >&2; exit 1; }
   cp -f "$g" "$STAGE_LOCAL/ptx/${p}.ptx"
 done
-python3 scripts/ci/od256_numeric_gate.py --gen "$STAGE_LOCAL/fixtures" --cases "$CASES"
+python3 scripts/ci/od256_numeric_gate.py --gen "$STAGE_LOCAL/fixtures" --cases "$CASES" ${ADVERSARIAL:+--adversarial}
 cp -f scripts/gpu/kaxi_ptx_runner.c "$STAGE_LOCAL/kaxi_ptx_runner.c"
 # gpu-orangefs nodes are driver-only (no gcc); ship a prebuilt binary. It dlopens
 # libcuda at runtime, so it only needs a compatible glibc (worker: 2.39).
