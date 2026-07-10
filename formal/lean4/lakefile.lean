@@ -79,6 +79,9 @@ lean_lib «SounioCDCocycle» where
 lean_lib «SounioCDTowerSeam» where
 
 @[default_target]
+lean_lib «SounioCDConverse» where
+
+@[default_target]
 lean_lib «SounioCDqbig» where
 
 @[default_target]
