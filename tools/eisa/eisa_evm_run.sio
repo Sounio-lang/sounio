@@ -1,0 +1,1233 @@
+module tools::eisa::eisa_evm_run
+
+use eisa::backend::*
+use eisa::format::*
+use eisa::evm::*
+use str::lib::*
+
+fn nl() -> Str with Mut, Div, Panic {
+    var b: [i8; 256] = [0; 256]
+    b[0] = 10 as i8
+    str_from_bytes_buf(&b, 1)
+}
+
+fn add_line(dst: &Str, txt: string, n: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(txt)
+    let t = str_cat(dst, &line)
+    str_cat(&t, n)
+}
+
+fn golden_mul_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_mul() {", &n)
+    s = add_line(&s, "let a = 0.5", &n)
+    s = add_line(&s, "let b = 7.25", &n)
+    s = add_line(&s, "let c = a * b", &n)
+    s = add_line(&s, "gate c", &n)
+    s = add_line(&s, "store [dose] <- c", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+fn golden_add_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_add() {", &n)
+    s = add_line(&s, "let a = 0.5", &n)
+    s = add_line(&s, "let b = 7.25", &n)
+    s = add_line(&s, "let c = a + b", &n)
+    s = add_line(&s, "gate c", &n)
+    s = add_line(&s, "store [dose] <- c", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+fn golden_sqrt_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_sqrt() {", &n)
+    s = add_line(&s, "let a = 2.0", &n)
+    s = add_line(&s, "let b = sqrt(a)", &n)
+    s = add_line(&s, "gate b", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+fn golden_poison_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_poison() {", &n)
+    s = add_line(&s, "let a = 1.0", &n)
+    s = add_line(&s, "let b = 0.0", &n)
+    s = add_line(&s, "let c = a / b", &n)
+    s = add_line(&s, "let d = c + a", &n)
+    s = add_line(&s, "gate d", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+// E5 showcase kernel: reduced-quartic catastrophic cancellation, same source
+// as examples/eisa_cancellation_kernel.sio (gate j = pre-cancel O(1) operand,
+// gate k = collapsed result whose roundoff lane carries the true ~2^-80).
+fn e5_cancellation_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn k() {", &n)
+    s = add_line(&s, "let a = 1.000001", &n)
+    s = add_line(&s, "let b = a * a", &n)
+    s = add_line(&s, "let c = b * a", &n)
+    s = add_line(&s, "let d = b * b", &n)
+    s = add_line(&s, "let e = 6.0 * b", &n)
+    s = add_line(&s, "let f = d + e", &n)
+    s = add_line(&s, "let g = f + 1.0", &n)
+    s = add_line(&s, "let h = 4.0 * c", &n)
+    s = add_line(&s, "let i = 4.0 * a", &n)
+    s = add_line(&s, "let j = h + i", &n)
+    s = add_line(&s, "gate j", &n)
+    s = add_line(&s, "let k = g - j", &n)
+    s = add_line(&s, "store [r] <- k", &n)
+    s = add_line(&s, "gate k", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+fn run_one(src: Str) -> i64 with IO, Mut, Div, Panic {
+    let br = eisa_compile(src)
+    if br.status != 0 { return 1 }
+    let img = eisax_encode(br.build)
+    var m = evm_load(img)
+    evm_run(&!m)
+}
+
+fn run_img(img: EisaxImage) -> i64 with IO, Mut, Div, Panic {
+    var m = evm_load(img)
+    evm_run(&!m)
+}
+
+fn v1_loop_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 24)
+    b.consts[0] = 0.0
+    b.consts[1] = 3.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 2
+    b.as_[1] = 1
+    b.ops[2] = op_ebrz()
+    b.as_[2] = 0
+    b.bs_[2] = 4
+    b.ops[3] = op_ehalt()
+    b.ops[4] = op_egate()
+    b.dsts[4] = 2
+    b.ops[5] = op_ehalt()
+    b.n_code = 6
+    eisax_encode(b)
+}
+
+fn v1_if_both_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 40)
+    b.consts[0] = 0.0 - 1.0
+    b.consts[1] = 1.0
+    b.consts[2] = 0.0
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 2
+    b.as_[2] = 2
+    b.ops[3] = op_ebrn()
+    b.as_[3] = 0
+    b.bs_[3] = 5
+    b.ops[4] = op_ebr()
+    b.as_[4] = 6
+    b.ops[5] = op_emov()
+    b.dsts[5] = 2
+    b.as_[5] = 1
+    b.ops[6] = op_egate()
+    b.dsts[6] = 2
+    b.ops[7] = op_econst()
+    b.dsts[7] = 0
+    b.as_[7] = 1
+    b.ops[8] = op_ebrn()
+    b.as_[8] = 0
+    b.bs_[8] = 10
+    b.ops[9] = op_egate()
+    b.dsts[9] = 0
+    b.ops[10] = op_ehalt()
+    b.n_code = 11
+    eisax_encode(b)
+}
+
+fn v1_i6_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 32)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.consts[2] = 5.0
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_ediv()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_ebrz()
+    b.as_[3] = 2
+    b.bs_[3] = 6
+    b.ops[4] = op_econst()
+    b.dsts[4] = 3
+    b.as_[4] = 2
+    b.ops[5] = op_egate()
+    b.dsts[5] = 3
+    b.ops[6] = op_ehalt()
+    b.n_code = 7
+    eisax_encode(b)
+}
+
+fn v1_fuel_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 5)
+    b.consts[0] = 1.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 5
+    b.as_[0] = 0
+    b.ops[1] = op_ebr()
+    b.as_[1] = 1
+    b.n_code = 2
+    eisax_encode(b)
+}
+
+
+fn v1_highreg_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 7.25
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 20
+    b.as_[0] = 0
+    b.ops[1] = op_egate()
+    b.dsts[1] = 20
+    b.ops[2] = op_ehalt()
+    b.n_code = 3
+    eisax_encode(b)
+}
+
+// W4 micro-step 1: smallest v2 (qd128) program — econst + gate, no qd math.
+// Byte-oracle for the v2-const-gate conformance lane.
+fn v2_const_gate_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 7.25
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_egate()
+    b.dsts[1] = 3
+    b.ops[2] = op_ehalt()
+    b.n_code = 3
+    eisax_encode(b)
+}
+
+// W4 micro-step 2 byte-oracle: 0.1 + 0.2 on the qd128 err lane.
+fn v2_add_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 0.1
+    b.consts[1] = 0.2
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 4
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 5
+    b.as_[2] = 3
+    b.bs_[2] = 4
+    b.ops[3] = op_egate()
+    b.dsts[3] = 5
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// W4 micro-step 3 byte-oracle: 0.3 - 0.1 on the qd128 err lane.
+fn v2_sub_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 0.3
+    b.consts[1] = 0.1
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 4
+    b.as_[1] = 1
+    b.ops[2] = op_esub()
+    b.dsts[2] = 5
+    b.as_[2] = 3
+    b.bs_[2] = 4
+    b.ops[3] = op_egate()
+    b.dsts[3] = 5
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// W4 micro-step 4 byte-oracle: 0.1 * 0.2 on the qd128 err lane.
+fn v2_mul_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 0.1
+    b.consts[1] = 0.2
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 4
+    b.as_[1] = 1
+    b.ops[2] = op_emul()
+    b.dsts[2] = 5
+    b.as_[2] = 3
+    b.bs_[2] = 4
+    b.ops[3] = op_egate()
+    b.dsts[3] = 5
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// W4 micro-step 5 byte-oracle: 1.0 / 3.0 on the qd128 err lane.
+fn v2_div_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 1.0
+    b.consts[1] = 3.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 4
+    b.as_[1] = 1
+    b.ops[2] = op_ediv()
+    b.dsts[2] = 5
+    b.as_[2] = 3
+    b.bs_[2] = 4
+    b.ops[3] = op_egate()
+    b.dsts[3] = 5
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// W4 micro-step 6 byte-oracle: sqrt(2.0) on the qd128 err lane.
+fn v2_sqrt_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 2.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_esqrt()
+    b.dsts[1] = 4
+    b.as_[1] = 3
+    b.ops[2] = op_egate()
+    b.dsts[2] = 4
+    b.ops[3] = op_ehalt()
+    b.n_code = 4
+    eisax_encode(b)
+}
+
+// Rump 1988 byte-oracle (mirrors wv2_build_wh_rump). version=2 reconstructs
+// -54767/66192 on the qd128 err lane; version=1 is the dd64 failure lane.
+fn rump_build(ver: i64) -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, ver)
+    b = eisax_build_set_fuel(b, 64)
+    b.consts[0] = 77617.0
+    b.consts[1] = 33096.0
+    b.consts[2] = 333.75
+    b.consts[3] = 11.0
+    b.consts[4] = 121.0
+    b.consts[5] = 2.0
+    b.consts[6] = 5.5
+    b.n_const = 7
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 1
+    b.bs_[2] = 1
+    b.ops[3] = op_emul()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 2
+    b.ops[4] = op_emul()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.bs_[4] = 2
+    b.ops[5] = op_emul()
+    b.dsts[5] = 5
+    b.as_[5] = 3
+    b.bs_[5] = 3
+    b.ops[6] = op_emul()
+    b.dsts[6] = 6
+    b.as_[6] = 0
+    b.bs_[6] = 0
+    b.ops[7] = op_econst()
+    b.dsts[7] = 7
+    b.as_[7] = 2
+    b.ops[8] = op_emul()
+    b.dsts[8] = 8
+    b.as_[8] = 4
+    b.bs_[8] = 7
+    b.ops[9] = op_econst()
+    b.dsts[9] = 7
+    b.as_[9] = 3
+    b.ops[10] = op_emul()
+    b.dsts[10] = 9
+    b.as_[10] = 6
+    b.bs_[10] = 2
+    b.ops[11] = op_emul()
+    b.dsts[11] = 9
+    b.as_[11] = 9
+    b.bs_[11] = 7
+    b.ops[12] = op_esub()
+    b.dsts[12] = 9
+    b.as_[12] = 9
+    b.bs_[12] = 4
+    b.ops[13] = op_econst()
+    b.dsts[13] = 7
+    b.as_[13] = 4
+    b.ops[14] = op_emul()
+    b.dsts[14] = 10
+    b.as_[14] = 3
+    b.bs_[14] = 7
+    b.ops[15] = op_esub()
+    b.dsts[15] = 9
+    b.as_[15] = 9
+    b.bs_[15] = 10
+    b.ops[16] = op_econst()
+    b.dsts[16] = 10
+    b.as_[16] = 5
+    b.ops[17] = op_esub()
+    b.dsts[17] = 9
+    b.as_[17] = 9
+    b.bs_[17] = 10
+    b.ops[18] = op_emul()
+    b.dsts[18] = 9
+    b.as_[18] = 6
+    b.bs_[18] = 9
+    b.ops[19] = op_econst()
+    b.dsts[19] = 7
+    b.as_[19] = 6
+    b.ops[20] = op_emul()
+    b.dsts[20] = 11
+    b.as_[20] = 5
+    b.bs_[20] = 7
+    b.ops[21] = op_emul()
+    b.dsts[21] = 12
+    b.as_[21] = 1
+    b.bs_[21] = 10
+    b.ops[22] = op_ediv()
+    b.dsts[22] = 12
+    b.as_[22] = 0
+    b.bs_[22] = 12
+    b.ops[23] = op_eadd()
+    b.dsts[23] = 13
+    b.as_[23] = 8
+    b.bs_[23] = 9
+    b.ops[24] = op_eadd()
+    b.dsts[24] = 13
+    b.as_[24] = 13
+    b.bs_[24] = 11
+    b.ops[25] = op_eadd()
+    b.dsts[25] = 14
+    b.as_[25] = 13
+    b.bs_[25] = 12
+    b.ops[26] = op_egate()
+    b.dsts[26] = 13
+    b.ops[27] = op_egate()
+    b.dsts[27] = 12
+    b.ops[28] = op_egate()
+    b.dsts[28] = 14
+    b.ops[29] = op_ehalt()
+    b.n_code = 30
+    eisax_encode(b)
+}
+
+fn v2_rump_qd_img() -> EisaxImage with Mut, Panic, Div {
+    rump_build(eisax_version_v2())
+}
+
+fn v1_rump_dd_img() -> EisaxImage with Mut, Panic, Div {
+    rump_build(eisax_version_v1())
+}
+
+fn v1e_fixedpoint_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 100)
+    b.consts[0] = 2.0
+    b.consts[1] = 4.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.ops[3] = op_ediv()
+    b.dsts[3] = 3
+    b.as_[3] = 1
+    b.bs_[3] = 0
+    b.ops[4] = op_eadd()
+    b.dsts[4] = 4
+    b.as_[4] = 0
+    b.bs_[4] = 3
+    b.ops[5] = op_ediv()
+    b.dsts[5] = 5
+    b.as_[5] = 4
+    b.bs_[5] = 2
+    b.ops[6] = op_esub()
+    b.dsts[6] = 6
+    b.as_[6] = 5
+    b.bs_[6] = 0
+    b.ops[7] = op_emov()
+    b.dsts[7] = 0
+    b.as_[7] = 5
+    b.ops[8] = op_ebrz()
+    b.as_[8] = 6
+    b.bs_[8] = 10
+    b.ops[9] = op_ebr()
+    b.as_[9] = 3
+    b.ops[10] = op_egate()
+    b.dsts[10] = 0
+    b.ops[11] = op_ehalt()
+    b.n_code = 12
+    eisax_encode(b)
+}
+
+fn v1e_frail_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0e16
+    b.consts[1] = 1.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_esub()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+    b.ops[4] = op_ebrz()
+    b.as_[4] = 3
+    b.bs_[4] = 6
+    b.ops[5] = op_ehalt()
+    b.ops[6] = op_egate()
+    b.dsts[6] = 3
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    eisax_encode(b)
+}
+
+fn v1e_emov_negzero_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_esub()
+    b.dsts[2] = 2
+    b.as_[2] = 1
+    b.bs_[2] = 0
+    b.ops[3] = op_ediv()
+    b.dsts[3] = 3
+    b.as_[3] = 1
+    b.bs_[3] = 2
+    b.ops[4] = op_emov()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.ops[5] = op_egate()
+    b.dsts[5] = 3
+    b.ops[6] = op_egate()
+    b.dsts[6] = 4
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    eisax_encode(b)
+}
+
+fn v1e_rump_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 220)
+    b.consts[0] = 77617.0
+    b.consts[1] = 33096.0
+    b.consts[2] = 333.75
+    b.consts[3] = 11.0
+    b.consts[4] = 121.0
+    b.consts[5] = 2.0
+    b.consts[6] = 5.5
+    b.n_const = 7
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 2
+    b.as_[2] = 2
+    b.ops[3] = op_econst()
+    b.dsts[3] = 3
+    b.as_[3] = 3
+    b.ops[4] = op_econst()
+    b.dsts[4] = 4
+    b.as_[4] = 4
+    b.ops[5] = op_econst()
+    b.dsts[5] = 5
+    b.as_[5] = 5
+    b.ops[6] = op_econst()
+    b.dsts[6] = 6
+    b.as_[6] = 6
+    b.ops[7] = op_emul()
+    b.dsts[7] = 7
+    b.as_[7] = 1
+    b.bs_[7] = 1
+    b.ops[8] = op_emul()
+    b.dsts[8] = 8
+    b.as_[8] = 7
+    b.bs_[8] = 7
+    b.ops[9] = op_emul()
+    b.dsts[9] = 9
+    b.as_[9] = 8
+    b.bs_[9] = 7
+    b.ops[10] = op_emul()
+    b.dsts[10] = 10
+    b.as_[10] = 8
+    b.bs_[10] = 8
+    b.ops[11] = op_emul()
+    b.dsts[11] = 11
+    b.as_[11] = 0
+    b.bs_[11] = 0
+    b.ops[12] = op_emul()
+    b.dsts[12] = 12
+    b.as_[12] = 2
+    b.bs_[12] = 9
+    b.ops[13] = op_emul()
+    b.dsts[13] = 13
+    b.as_[13] = 3
+    b.bs_[13] = 11
+    b.ops[14] = op_emul()
+    b.dsts[14] = 14
+    b.as_[14] = 13
+    b.bs_[14] = 7
+    b.ops[15] = op_esub()
+    b.dsts[15] = 15
+    b.as_[15] = 14
+    b.bs_[15] = 9
+    b.ops[16] = op_emul()
+    b.dsts[16] = 15
+    b.as_[16] = 4
+    b.bs_[16] = 8
+    b.ops[17] = op_esub()
+    b.dsts[17] = 13
+    b.as_[17] = 13
+    b.bs_[17] = 15
+    b.ops[18] = op_esub()
+    b.dsts[18] = 13
+    b.as_[18] = 13
+    b.bs_[18] = 5
+    b.ops[19] = op_emul()
+    b.dsts[19] = 14
+    b.as_[19] = 11
+    b.bs_[19] = 13
+    b.ops[20] = op_emul()
+    b.dsts[20] = 12
+    b.as_[20] = 2
+    b.bs_[20] = 9
+    b.ops[21] = op_emul()
+    b.dsts[21] = 13
+    b.as_[21] = 6
+    b.bs_[21] = 10
+    b.ops[22] = op_emul()
+    b.dsts[22] = 15
+    b.as_[22] = 5
+    b.bs_[22] = 1
+    b.ops[23] = op_ediv()
+    b.dsts[23] = 15
+    b.as_[23] = 0
+    b.bs_[23] = 15
+    b.ops[24] = op_eadd()
+    b.dsts[24] = 12
+    b.as_[24] = 12
+    b.bs_[24] = 14
+    b.ops[25] = op_eadd()
+    b.dsts[25] = 12
+    b.as_[25] = 12
+    b.bs_[25] = 13
+    b.ops[26] = op_eadd()
+    b.dsts[26] = 12
+    b.as_[26] = 12
+    b.bs_[26] = 15
+    b.ops[27] = op_egate()
+    b.dsts[27] = 12
+    b.ops[28] = op_ehalt()
+    b.n_code = 29
+    eisax_encode(b)
+}
+
+// Full arithmetic chain entirely on e20..e40-range registers (see
+// tools/eisa/eisa_bridge_emit.sio for the lane rationale).
+fn v1_arith_high_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 40)
+    b.consts[0] = 2.0
+    b.consts[1] = 4.0
+    b.consts[2] = 0.5
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 20
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 21
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 22
+    b.as_[2] = 2
+    b.ops[3] = op_eadd()
+    b.dsts[3] = 30
+    b.as_[3] = 20
+    b.bs_[3] = 21
+    b.ops[4] = op_esub()
+    b.dsts[4] = 31
+    b.as_[4] = 30
+    b.bs_[4] = 22
+    b.ops[5] = op_emul()
+    b.dsts[5] = 32
+    b.as_[5] = 31
+    b.bs_[5] = 21
+    b.ops[6] = op_ediv()
+    b.dsts[6] = 33
+    b.as_[6] = 32
+    b.bs_[6] = 20
+    b.ops[7] = op_esqrt()
+    b.dsts[7] = 34
+    b.as_[7] = 33
+    b.ops[8] = op_emov()
+    b.dsts[8] = 40
+    b.as_[8] = 34
+    b.ops[9] = op_egate()
+    b.dsts[9] = 40
+    b.ops[10] = op_ehalt()
+    b.n_code = 11
+    eisax_encode(b)
+}
+
+// Fuel-exhaustion witness whose LAST WRITE is the high register e20.
+fn v1_fuel_high_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 5)
+    b.consts[0] = 1.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 20
+    b.as_[0] = 0
+    b.ops[1] = op_ebr()
+    b.as_[1] = 1
+    b.n_code = 2
+    eisax_encode(b)
+}
+
+// ebrz/ebrn + frail counting on high registers (e33..e37).
+fn v1_branch_high_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0e16
+    b.consts[1] = 1.0
+    b.consts[2] = 0.0 - 1.0
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 33
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 34
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 35
+    b.as_[2] = 33
+    b.bs_[2] = 34
+    b.ops[3] = op_esub()
+    b.dsts[3] = 36
+    b.as_[3] = 35
+    b.bs_[3] = 33
+    b.ops[4] = op_ebrz()
+    b.as_[4] = 36
+    b.bs_[4] = 6
+    b.ops[5] = op_ehalt()
+    b.ops[6] = op_econst()
+    b.dsts[6] = 37
+    b.as_[6] = 2
+    b.ops[7] = op_ebrn()
+    b.as_[7] = 37
+    b.bs_[7] = 9
+    b.ops[8] = op_ehalt()
+    b.ops[9] = op_egate()
+    b.dsts[9] = 36
+    b.ops[10] = op_egate()
+    b.dsts[10] = 37
+    b.ops[11] = op_ehalt()
+    b.n_code = 12
+    eisax_encode(b)
+}
+
+// W4 v2 fuel-stop lane: mirrors v1_fuel_img with version 2 — exercises the
+// v2 fuel-stop v3 receipt (stop=fuel) epilogue.
+fn v2_fuel_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 5)
+    b.consts[0] = 1.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 5
+    b.as_[0] = 0
+    b.ops[1] = op_ebr()
+    b.as_[1] = 1
+    b.n_code = 2
+    eisax_encode(b)
+}
+
+// W4 v2 mem lane: minimal estore+eload roundtrip on the qd128 mem lane.
+// econst r3; estore [slot0] <- r3; eload r4 <- [slot0]; gate r4; ehalt.
+fn v2_mem_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 7.25
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 3
+    b.as_[0] = 0
+    b.ops[1] = op_estore()
+    b.dsts[1] = 3
+    b.as_[1] = 0
+    b.ops[2] = op_eload()
+    b.dsts[2] = 4
+    b.as_[2] = 0
+    b.ops[3] = op_egate()
+    b.dsts[3] = 4
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// W4 v2 adversarial poison roundtrip: poison a register (1/0), then push it
+// through estore -> eload -> emov and gate. Exercises the poison-on-bad-operand
+// path of all three memory ops (the one non-trivial reachable non-canonical
+// state; the poison=0 + non-finite-component state is unreachable because every
+// write normalises). Receipt must be byte-identical to the Metron VM.
+fn v2_mem_poison_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 20)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_ediv()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_estore()
+    b.dsts[3] = 2
+    b.as_[3] = 0
+    b.ops[4] = op_eload()
+    b.dsts[4] = 3
+    b.as_[4] = 0
+    b.ops[5] = op_emov()
+    b.dsts[5] = 4
+    b.as_[5] = 3
+    b.ops[6] = op_egate()
+    b.dsts[6] = 4
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    eisax_encode(b)
+}
+
+// W4 v2 emov lane: mirrors v1e_emov_negzero_img with version 2 — moves a -0.0
+// value across the deep qd128 lane (emov roundtrip + negzero canonicalisation).
+fn v2_emov_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_esub()
+    b.dsts[2] = 2
+    b.as_[2] = 1
+    b.bs_[2] = 0
+    b.ops[3] = op_ediv()
+    b.dsts[3] = 3
+    b.as_[3] = 1
+    b.bs_[3] = 2
+    b.ops[4] = op_emov()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.ops[5] = op_egate()
+    b.dsts[5] = 3
+    b.ops[6] = op_egate()
+    b.dsts[6] = 4
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    eisax_encode(b)
+}
+
+// W4 v2 loop lane: mirrors v1_loop_img with version 2 — ebrz-driven skip on
+// the deep qd128 lane.
+fn v2_loop_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 24)
+    b.consts[0] = 0.0
+    b.consts[1] = 3.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 2
+    b.as_[1] = 1
+    b.ops[2] = op_ebrz()
+    b.as_[2] = 0
+    b.bs_[2] = 4
+    b.ops[3] = op_ehalt()
+    b.ops[4] = op_egate()
+    b.dsts[4] = 2
+    b.ops[5] = op_ehalt()
+    b.n_code = 6
+    eisax_encode(b)
+}
+
+// W4 v2 frail lane: mirrors v1e_frail_img with version 2 — exercises the deep
+// qd128 branch-frail band counting (sc(34)) through ebrz.
+fn v2_frail_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0e16
+    b.consts[1] = 1.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_esub()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+    b.ops[4] = op_ebrz()
+    b.as_[4] = 3
+    b.bs_[4] = 6
+    b.ops[5] = op_ehalt()
+    b.ops[6] = op_egate()
+    b.dsts[6] = 3
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    eisax_encode(b)
+}
+
+// Hand-built v0 images that reproduce the surface golden_* / e5 programs.
+// Toolchain-portable (no eisa_compile string parsing); receipts stay v=1.
+fn golden_mul_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 0.5
+    b.consts[1] = 7.25
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_egate()
+    b.dsts[3] = 2
+    b.ops[4] = op_estore()
+    b.dsts[4] = 2
+    b.as_[4] = 0
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+fn golden_add_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 0.5
+    b.consts[1] = 7.25
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_egate()
+    b.dsts[3] = 2
+    b.ops[4] = op_estore()
+    b.dsts[4] = 2
+    b.as_[4] = 0
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+fn golden_sqrt_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 2.0
+    b.n_const = 1
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_esqrt()
+    b.dsts[1] = 1
+    b.as_[1] = 0
+    b.ops[2] = op_egate()
+    b.dsts[2] = 1
+    b.n_code = 3
+    eisax_encode(b)
+}
+
+fn golden_poison_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_fuel(b, 12)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_ediv()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_eadd()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+    b.ops[4] = op_egate()
+    b.dsts[4] = 3
+    b.n_code = 5
+    eisax_encode(b)
+}
+
+// Reduced-quartic catastrophic cancellation (mirrors e5_cancellation_src).
+// a=1.000001; b=a*a; c=b*a; d=b*b; e=6*b; f=d+e; g=f+1; h=4*c; i=4*a;
+// j=h+i; gate j; k=g-j; store [r]<-k; gate k; halt.
+fn e5_cancellation_img() -> EisaxImage with Mut, Panic, Div {
+    var b = eisax_build_new()
+    b = eisax_build_set_fuel(b, 64)
+    b.consts[0] = 1.000001
+    b.consts[1] = 6.0
+    b.consts[2] = 1.0
+    b.consts[3] = 4.0
+    b.n_const = 4
+    // constants into registers
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 2
+    b.as_[2] = 2
+    b.ops[3] = op_econst()
+    b.dsts[3] = 3
+    b.as_[3] = 3
+    // b = a*a
+    b.ops[4] = op_emul()
+    b.dsts[4] = 4
+    b.as_[4] = 0
+    b.bs_[4] = 0
+    // c = b*a
+    b.ops[5] = op_emul()
+    b.dsts[5] = 5
+    b.as_[5] = 4
+    b.bs_[5] = 0
+    // d = b*b
+    b.ops[6] = op_emul()
+    b.dsts[6] = 6
+    b.as_[6] = 4
+    b.bs_[6] = 4
+    // e = 6*b
+    b.ops[7] = op_emul()
+    b.dsts[7] = 7
+    b.as_[7] = 1
+    b.bs_[7] = 4
+    // f = d+e
+    b.ops[8] = op_eadd()
+    b.dsts[8] = 8
+    b.as_[8] = 6
+    b.bs_[8] = 7
+    // g = f+1
+    b.ops[9] = op_eadd()
+    b.dsts[9] = 9
+    b.as_[9] = 8
+    b.bs_[9] = 2
+    // h = 4*c
+    b.ops[10] = op_emul()
+    b.dsts[10] = 10
+    b.as_[10] = 3
+    b.bs_[10] = 5
+    // i = 4*a
+    b.ops[11] = op_emul()
+    b.dsts[11] = 11
+    b.as_[11] = 3
+    b.bs_[11] = 0
+    // j = h+i
+    b.ops[12] = op_eadd()
+    b.dsts[12] = 12
+    b.as_[12] = 10
+    b.bs_[12] = 11
+    // gate j
+    b.ops[13] = op_egate()
+    b.dsts[13] = 12
+    // k = g-j
+    b.ops[14] = op_esub()
+    b.dsts[14] = 13
+    b.as_[14] = 9
+    b.bs_[14] = 12
+    // store [r] <- k
+    b.ops[15] = op_estore()
+    b.dsts[15] = 13
+    b.as_[15] = 0
+    // gate k
+    b.ops[16] = op_egate()
+    b.dsts[16] = 13
+    b.n_code = 17
+    eisax_encode(b)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    if run_img(golden_mul_img()) != 0 { fails = fails + 1 }
+    if run_img(golden_add_img()) != 0 { fails = fails + 1 }
+    if run_img(golden_sqrt_img()) != 0 { fails = fails + 1 }
+    if run_img(golden_poison_img()) != 0 { fails = fails + 1 }
+    if run_img(e5_cancellation_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_loop_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_if_both_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_i6_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_fuel_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_highreg_img()) != 0 { fails = fails + 1 }
+    if run_img(v1e_fixedpoint_img()) != 0 { fails = fails + 1 }
+    if run_img(v1e_frail_img()) != 0 { fails = fails + 1 }
+    if run_img(v1e_emov_negzero_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_arith_high_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_fuel_high_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_branch_high_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_const_gate_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_add_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_sub_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_mul_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_div_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_sqrt_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_rump_qd_img()) != 0 { fails = fails + 1 }
+    if run_img(v1_rump_dd_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_fuel_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_mem_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_emov_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_loop_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_frail_img()) != 0 { fails = fails + 1 }
+    if run_img(v2_mem_poison_img()) != 0 { fails = fails + 1 }
+    assert(fails == 0)
+    0
+}
