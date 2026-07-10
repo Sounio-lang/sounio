@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""od256 branchless GPU renormalization — validated reference (design for the
+K-AXI/PTX emitter). Proves od_add's renorm needs ONLY fixed, straight-line ops
+(no data-dependent branches), so it lowers to K-AXI add/sub + SETP_NE/SETP_EQ +
+SELP.
+
+Pipeline (adding two normalized 8-limb od256 a, b):
+  1. MERGE  a[0..7], b[0..7] (each |mag|-descending) -> 16 descending.
+            Branchless in HW: odd-even merge network; each compare-exchange =
+            abs(x),abs(y) + SETP compare + 2x SELP (min/max by magnitude).
+  2. VECSUM 15 fixed two_sums (CAMPARY Algorithm 4): error-free; concentrates
+            the sum at index 0.
+  3. VSEB   VecSumErrBranch, BRANCHLESS via SELP-emulated moving index: the
+            data-dependent "advance output slot" becomes K SELPs/step keyed on
+            SETP_EQ(j,cnt) & SETP_NE(err,0). Bit-identical to the branchy CAMPARY
+            algorithm; ~424-bit (octuple) accurate. EFT primitives match dd64.
+"""
+import random
+from mpmath import mp, mpf, fabs, log
+
+K = 8
+
+def two_sum(a, b):
+    s = a + b; bb = s - a
+    return s, (a - (s - bb)) + (b - bb)
+
+def fast_two_sum(a, b):            # assumes |a| >= |b|
+    s = a + b
+    return s, b - (s - a)
+
+def vecsum(x):                     # e[0] most significant, sum preserved (EFT)
+    n = len(x); e = [0.0]*n; s = x[n-1]
+    for i in range(n-2, -1, -1):
+        s, e[i+1] = two_sum(x[i], s)
+    e[0] = s
+    return e
+
+def merge_desc(a, b):
+    """Merge two |mag|-descending sequences -> descending (branchless in HW)."""
+    return sorted(list(a) + list(b), key=lambda v: -abs(v))
+
+def vseb_branchless(e, k=K):
+    """VecSumErrBranch with the conditional advance emulated by SELP over a fixed
+    output array — straight-line, no branches (K-AXI SETP/SELP)."""
+    n = len(e); f = [0.0]*k; cnt = 0; eps = e[0]
+    for i in range(n-1):
+        r, err = fast_two_sum(eps, e[i+1])
+        nz = 1 if err != 0.0 else 0                    # SETP_NE err, 0
+        for j in range(k):                             # k SELPs
+            hit = (nz == 1 and j == cnt)               # SETP_EQ j,cnt & nz
+            f[j] = r if hit else f[j]                  # SELP
+        cnt += nz                                      # predicated ADD (0/1)
+        eps = err if nz == 1 else r                    # SELP
+    for j in range(k):
+        if j == cnt and cnt < k:
+            f[j] = eps
+    return f
+
+def vseb_branch(e, k=K):           # branchy reference (for bit-identity check)
+    n = len(e); f = [0.0]*k; j = 0; eps = e[0]
+    for i in range(n-1):
+        r, err = fast_two_sum(eps, e[i+1])
+        if err != 0.0:
+            if j < k: f[j] = r
+            j += 1; eps = err
+        else:
+            eps = r
+    if j < k: f[j] = eps
+    return f
+
+def od_add_gpu(a, b):
+    return vseb_branchless(vecsum(merge_desc(a, b)))
+
+def _grow_norm(terms):             # exact accumulate -> clean 8-limb od256
+    e = []
+    for t in terms:
+        if t == 0.0: continue
+        q = t; h = []
+        for ei in e:
+            s, lo = two_sum(q, ei); q = s
+            if lo != 0.0: h.append(lo)
+        if q != 0.0: h.append(q)
+        e = h
+    return (e[-K:][::-1] + [0.0]*K)[:K]
+
+def _split_mpf(v):                 # round a high-prec value into a clean od256
+    a = []
+    for _ in range(K):
+        d = float(v); a.append(d); v = v - mpf(d)
+    return _grow_norm(a)
+
+if __name__ == "__main__":
+    mp.prec = 800
+    rng = random.Random(5)
+    worst = 999.0; mismatch = 0; N = 8000
+    for _ in range(N):
+        va = mpf(rng.getrandbits(420)) / mpf(2)**rng.randint(200, 240) * (1 if rng.random() < .5 else -1)
+        vb = mpf(rng.getrandbits(420)) / mpf(2)**rng.randint(200, 240) * (1 if rng.random() < .5 else -1)
+        a = _split_mpf(va); b = _split_mpf(vb)
+        e = vecsum(merge_desc(a, b))
+        if vseb_branch(e) != vseb_branchless(e):
+            mismatch += 1
+        true = sum(mpf(x) for x in a) + sum(mpf(x) for x in b)
+        approx = sum(mpf(x) for x in vseb_branchless(e))
+        if true != 0:
+            r = fabs((approx - true) / true)
+            worst = min(worst, 999.0 if r == 0 else float(-log(r, 2)))
+    print(f"branchless SELP-VSEB vs branchy: {N-mismatch}/{N} bit-identical")
+    print(f"od_add branchless renorm: worst {worst:.1f} effective bits over {N}")
+    ok = mismatch == 0 and worst >= 400
+    print("GATE:", "PASS" if ok else "FAIL", "(bit-identical + >=400 bits)")
+    raise SystemExit(0 if ok else 1)
