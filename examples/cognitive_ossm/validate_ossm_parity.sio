@@ -1,0 +1,681 @@
+//! Corrected, byte-level, scaled canonical Sounio validator for the CPC 2026
+//! O-SSM comparison.
+//!
+//! Two fixes relative to `run_regimes.sio`:
+//!   1. Wiring bug: `process_regime` there never called the recurrence
+//!      functions it defined; it wrote one hardcoded placeholder row.
+//!   2. Model mismatch: `update_unit` there used a single shared (a,b,c) row
+//!      for all 4 hidden units with no cross-unit coupling. The Python
+//!      mirror (`ossm_reference_simulator.py`) gives each unit its own
+//!      A/B/C/D row and mixes units through a coupling=0.18 mean-field term.
+//!
+//! One additional fix discovered during scaling: Sounio's `string` type has
+//! O(total_length)-per-call indexing (str_char_at / str_slice), making any
+//! per-character scan of a multi-MB file quadratic and practically
+//! non-terminating. This version never converts the trajectory files to
+//! `string` at all -- it parses directly on the `[i8]` byte buffer returned
+//! by `read_file`, which is O(1)-indexed.
+
+use math::octonion::*
+
+struct RegimeConfig {
+    name: string,
+    temperature: f32,
+    valence_gate: f32,
+    initial_state_mode: string,
+}
+
+struct OctState {
+    h0: Octonion,
+    h1: Octonion,
+    h2: Octonion,
+    h3: Octonion,
+}
+
+struct FeatureTable {
+    a: [f32],
+    b: [f32],
+    c: [f32],
+    d: [f32],
+    e: [f32],
+    f: [f32],
+    g: [f32],
+    h: [f32],
+}
+
+struct RegimeStats {
+    n: i64,
+    mean_entropy_production: f64,
+    var_entropy_production: f64,
+    mean_associator: f64,
+    var_associator: f64,
+    mean_c_ent_variance: f64,
+    mean_h_entropy: f64,
+}
+
+// ---------- tiny string helpers (only ever used on short strings: paths, flags) ----------
+
+fn bool_to_string(v: bool) -> string {
+    if v { "true" } else { "false" }
+}
+
+fn path_join(a: string, b: string) -> string with Mut, Panic, Div {
+    let n = str_len(a)
+    if n <= 0 { return b }
+    if str_eq(str_slice(a, n - 1, n), "/") { a ++ b } else { a ++ "/" ++ b }
+}
+
+fn write_text_file(path: string, text: string) -> bool with IO, Mut, Panic, Div {
+    var data: [i8; 1048576] = [0; 1048576]
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n && i < 1048576 {
+        data[i as usize] = str_char_at(text, i) as i8
+        i = i + 1
+    }
+    let result = write_file(path, data, i)
+    result == 0
+}
+
+fn parse_decimal_digit(ch: string) -> i64 {
+    if str_eq(ch, "0") { 0 } else if str_eq(ch, "1") { 1 } else if str_eq(ch, "2") { 2 }
+    else if str_eq(ch, "3") { 3 } else if str_eq(ch, "4") { 4 } else if str_eq(ch, "5") { 5 }
+    else if str_eq(ch, "6") { 6 } else if str_eq(ch, "7") { 7 } else if str_eq(ch, "8") { 8 }
+    else if str_eq(ch, "9") { 9 } else { -1 }
+}
+
+fn parse_nonnegative_i64(raw: string) -> i64 with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 { return -1 }
+    var i: i64 = 0
+    var value: i64 = 0
+    while i < len {
+        let d = parse_decimal_digit(str_slice(raw, i, i + 1))
+        if d < 0 { return -1 }
+        value = value * 10 + d
+        i = i + 1
+    }
+    value
+}
+
+fn f64_abs(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
+
+// ---------- byte-level parsing on [i8] (O(1)-indexed, unlike `string`) ----------
+
+fn is_digit_byte(b: i64) -> bool { b >= 48 && b <= 57 }
+
+fn parse_uint_bytes(raw: [i8], start: i64, end: i64) -> i64 {
+    var value: i64 = 0
+    var i = start
+    while i < end {
+        let b = raw[i as usize] as i64
+        if is_digit_byte(b) { value = value * 10 + (b - 48) }
+        i = i + 1
+    }
+    value
+}
+
+fn parse_float_bytes(raw: [i8], start: i64, end: i64) -> f64 {
+    var i = start
+    var neg = false
+    if i < end && (raw[i as usize] as i64) == 45 { neg = true; i = i + 1 }
+    var result = 0.0
+    var frac = 0.1
+    var seen_dot = false
+    while i < end {
+        let b = raw[i as usize] as i64
+        if b == 46 { seen_dot = true }
+        else if is_digit_byte(b) {
+            if !seen_dot { result = result * 10.0 + ((b - 48) as f64) }
+            else { result = result + frac * ((b - 48) as f64); frac = frac * 0.1 }
+        }
+        i = i + 1
+    }
+    if neg { 0.0 - result } else { result }
+}
+
+// ---------- octonion helpers ----------
+
+fn oct_add_local(a: Octonion, b: Octonion) -> Octonion {
+    oct(a.a + b.a, a.b + b.b, a.c + b.c, a.d + b.d, a.e + b.e, a.f + b.f, a.g + b.g, a.h + b.h)
+}
+
+fn oct_scale_local(a: Octonion, s: f32) -> Octonion {
+    oct(a.a * s, a.b * s, a.c * s, a.d * s, a.e * s, a.f * s, a.g * s, a.h * s)
+}
+
+fn oct_abs_component(x: f32) -> f32 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn oct_softsign_component(x: f32, temperature: f32) -> f32 {
+    let t = if temperature > 1e-6 { temperature } else { 1e-6 }
+    let scaled = x / t
+    if scaled >= 0.0 { scaled / (1.0 + scaled) } else { scaled / (1.0 + (0.0 - scaled)) }
+}
+
+fn oct_softsign(a: Octonion, temperature: f32) -> Octonion {
+    oct(
+        oct_softsign_component(a.a, temperature), oct_softsign_component(a.b, temperature),
+        oct_softsign_component(a.c, temperature), oct_softsign_component(a.d, temperature),
+        oct_softsign_component(a.e, temperature), oct_softsign_component(a.f, temperature),
+        oct_softsign_component(a.g, temperature), oct_softsign_component(a.h, temperature),
+    )
+}
+
+fn oct_associator_local(a: Octonion, b: Octonion, c: Octonion) -> Octonion {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    let left = oct_mul(ab, c)
+    let right = oct_mul(a, bc)
+    oct(left.a - right.a, left.b - right.b, left.c - right.c, left.d - right.d,
+        left.e - right.e, left.f - right.f, left.g - right.g, left.h - right.h)
+}
+
+// ---------- regime + per-unit parameter tables (verbatim from ossm_reference_simulator.py) ----------
+
+fn regime_named(name: string) -> RegimeConfig {
+    if str_eq(name, "anxious") {
+        RegimeConfig { name: "anxious", temperature: 2.0, valence_gate: 2.0, initial_state_mode: "negative_attractor" }
+    } else if str_eq(name, "ruminative") {
+        RegimeConfig { name: "ruminative", temperature: 0.3, valence_gate: 1.5, initial_state_mode: "rigid" }
+    } else if str_eq(name, "psychotic") {
+        RegimeConfig { name: "psychotic", temperature: 5.0, valence_gate: 0.5, initial_state_mode: "dispersed" }
+    } else {
+        RegimeConfig { name: "normative", temperature: 0.5, valence_gate: 1.0, initial_state_mode: "balanced" }
+    }
+}
+
+fn init_state(mode: string) -> OctState {
+    if str_eq(mode, "negative_attractor") {
+        OctState {
+            h0: oct(-0.12, 0.02, 0.04, -0.28, 0.02, 0.0, 0.0, 0.0),
+            h1: oct(-0.10, 0.01, 0.03, -0.24, 0.01, 0.0, 0.01, 0.0),
+            h2: oct(-0.11, 0.02, 0.02, -0.26, 0.01, 0.01, 0.0, 0.0),
+            h3: oct(-0.09, 0.01, 0.02, -0.22, 0.02, 0.0, 0.0, 0.01),
+        }
+    } else if str_eq(mode, "rigid") {
+        OctState {
+            h0: oct(0.35, 0.10, 0.08, 0.03, 0.0, 0.0, 0.0, 0.0),
+            h1: oct(0.31, 0.06, 0.09, 0.02, 0.0, 0.0, 0.0, 0.0),
+            h2: oct(0.29, 0.08, 0.06, 0.04, 0.0, 0.0, 0.0, 0.0),
+            h3: oct(0.33, 0.07, 0.07, 0.03, 0.0, 0.0, 0.0, 0.0),
+        }
+    } else if str_eq(mode, "dispersed") {
+        OctState {
+            h0: oct(0.18, -0.07, 0.11, 0.05, 0.09, -0.03, 0.04, 0.02),
+            h1: oct(-0.09, 0.12, -0.05, 0.07, 0.02, 0.08, -0.03, 0.04),
+            h2: oct(0.04, 0.03, 0.13, -0.06, -0.08, 0.05, 0.09, -0.04),
+            h3: oct(0.11, -0.05, 0.02, 0.14, 0.03, -0.09, 0.01, 0.07),
+        }
+    } else {
+        OctState {
+            h0: oct(0.28, 0.08, 0.08, 0.04, 0.04, 0.02, 0.02, 0.01),
+            h1: oct(0.24, 0.02, 0.09, 0.06, 0.04, 0.03, 0.02, 0.01),
+            h2: oct(0.26, 0.03, 0.04, 0.09, 0.03, 0.02, 0.03, 0.01),
+            h3: oct(0.25, 0.04, 0.03, 0.03, 0.09, 0.02, 0.02, 0.02),
+        }
+    }
+}
+
+fn a_row(i: i64) -> Octonion {
+    if i == 0 { oct(0.82, 0.14, 0.04, 0.00, 0.05, 0.02, 0.00, 0.01) }
+    else if i == 1 { oct(0.78, 0.00, 0.16, 0.06, 0.00, 0.03, 0.02, 0.00) }
+    else if i == 2 { oct(0.80, 0.03, 0.00, 0.18, 0.04, 0.00, 0.02, 0.01) }
+    else { oct(0.76, 0.05, 0.04, 0.00, 0.14, 0.02, 0.03, 0.02) }
+}
+
+fn b_row(i: i64) -> Octonion {
+    if i == 0 { oct(0.91, 0.03, 0.02, 0.00, 0.00, 0.01, 0.00, 0.00) }
+    else if i == 1 { oct(0.89, 0.00, 0.04, 0.02, 0.00, 0.00, 0.01, 0.00) }
+    else if i == 2 { oct(0.90, 0.01, 0.00, 0.05, 0.02, 0.00, 0.00, 0.01) }
+    else { oct(0.88, 0.02, 0.01, 0.00, 0.04, 0.01, 0.00, 0.00) }
+}
+
+fn c_row(i: i64) -> Octonion {
+    if i == 0 { oct(0.45, 0.08, 0.03, 0.12, 0.04, 0.04, 0.02, 0.01) }
+    else if i == 1 { oct(0.42, 0.02, 0.09, 0.08, 0.03, 0.04, 0.04, 0.02) }
+    else if i == 2 { oct(0.40, 0.03, 0.02, 0.14, 0.05, 0.02, 0.04, 0.03) }
+    else { oct(0.44, 0.05, 0.04, 0.04, 0.11, 0.03, 0.03, 0.02) }
+}
+
+fn d_row(i: i64) -> Octonion {
+    if i == 0 { oct(0.55, 0.10, 0.04, 0.18, 0.02, 0.01, 0.00, 0.00) }
+    else if i == 1 { oct(0.50, 0.02, 0.12, 0.14, 0.03, 0.01, 0.01, 0.00) }
+    else if i == 2 { oct(0.53, 0.03, 0.02, 0.20, 0.02, 0.00, 0.01, 0.01) }
+    else { oct(0.48, 0.04, 0.03, 0.10, 0.11, 0.01, 0.00, 0.02) }
+}
+
+const COUPLING: f32 = 0.18
+const RESIDUAL: f32 = 0.22
+
+fn mean_state(s: OctState) -> Octonion {
+    oct_scale_local(oct_add_local(oct_add_local(s.h0, s.h1), oct_add_local(s.h2, s.h3)), 0.25)
+}
+
+fn update_unit_v2(prev_unit: Octonion, mixed_unit: Octonion, x: Octonion, unit_index: i64, temperature: f32) -> Octonion {
+    let recurrent = oct_mul(oct_mul(a_row(unit_index), mixed_unit), b_row(unit_index))
+    let driven = oct_mul(c_row(unit_index), x)
+    let residual = oct_scale_local(prev_unit, RESIDUAL)
+    oct_softsign(oct_add_local(oct_add_local(recurrent, driven), residual), temperature)
+}
+
+fn step_state_v2(prev: OctState, x_gated: Octonion, regime: RegimeConfig) -> OctState {
+    let m = mean_state(prev)
+    let mixed0 = oct_add_local(prev.h0, oct_scale_local(m, COUPLING))
+    let mixed1 = oct_add_local(prev.h1, oct_scale_local(m, COUPLING))
+    let mixed2 = oct_add_local(prev.h2, oct_scale_local(m, COUPLING))
+    let mixed3 = oct_add_local(prev.h3, oct_scale_local(m, COUPLING))
+    OctState {
+        h0: update_unit_v2(prev.h0, mixed0, x_gated, 0, regime.temperature),
+        h1: update_unit_v2(prev.h1, mixed1, x_gated, 1, regime.temperature),
+        h2: update_unit_v2(prev.h2, mixed2, x_gated, 2, regime.temperature),
+        h3: update_unit_v2(prev.h3, mixed3, x_gated, 3, regime.temperature),
+    }
+}
+
+// NOTE: this interpreter build's native `.ln()` (and, in some contexts,
+// `.sqrt()`) silently breaks execution once the result reaches a print/
+// to_string() call, with no panic message and exit code 0 -- confirmed via
+// isolated diagnostics. ln_poly avoids the broken intrinsic entirely using
+// only +,-,*,/ (a standard range-reduction + atanh-series ln implementation),
+// verified accurate to ~1e-7 against reference ln values.
+fn ln_poly(x: f64) -> f64 with Mut, Div, Panic {
+    var y = x
+    var k: i64 = 0
+    while y < 0.5 {
+        y = y * 2.0
+        k = k + 1
+    }
+    while y >= 1.0 {
+        y = y * 0.5
+        k = k - 1
+    }
+    let t = (y - 1.0) / (y + 1.0)
+    let t2 = t * t
+    let series = 1.0 + t2 * (1.0 / 3.0 + t2 * (1.0 / 5.0 + t2 * (1.0 / 7.0 + t2 * (1.0 / 9.0 + t2 * (1.0 / 11.0)))))
+    let ln_y = 2.0 * t * series
+    let ln2 = 0.6931471805599453
+    ln_y - (k as f64) * ln2
+}
+
+fn hidden_entropy(state: OctState) -> f32 with Mut, Panic, Div {
+    let mags: [f32; 32] = [
+        oct_abs_component(state.h0.a), oct_abs_component(state.h0.b), oct_abs_component(state.h0.c), oct_abs_component(state.h0.d),
+        oct_abs_component(state.h0.e), oct_abs_component(state.h0.f), oct_abs_component(state.h0.g), oct_abs_component(state.h0.h),
+        oct_abs_component(state.h1.a), oct_abs_component(state.h1.b), oct_abs_component(state.h1.c), oct_abs_component(state.h1.d),
+        oct_abs_component(state.h1.e), oct_abs_component(state.h1.f), oct_abs_component(state.h1.g), oct_abs_component(state.h1.h),
+        oct_abs_component(state.h2.a), oct_abs_component(state.h2.b), oct_abs_component(state.h2.c), oct_abs_component(state.h2.d),
+        oct_abs_component(state.h2.e), oct_abs_component(state.h2.f), oct_abs_component(state.h2.g), oct_abs_component(state.h2.h),
+        oct_abs_component(state.h3.a), oct_abs_component(state.h3.b), oct_abs_component(state.h3.c), oct_abs_component(state.h3.d),
+        oct_abs_component(state.h3.e), oct_abs_component(state.h3.f), oct_abs_component(state.h3.g), oct_abs_component(state.h3.h),
+    ]
+    var total = 0.0
+    var i: i64 = 0
+    while i < 32 { total = total + (mags[i as usize] as f64); i = i + 1 }
+    if total <= 0.0 { return 0.0 }
+    var entropy = 0.0
+    i = 0
+    while i < 32 {
+        let p = (mags[i as usize] as f64) / total
+        if p > 1e-12 { entropy = entropy - p * ln_poly(p) }
+        i = i + 1
+    }
+    (entropy / ln_poly(32.0)) as f32
+}
+
+// Same fix as ln_poly, for `.sqrt()`: pure Newton-Raphson iteration using
+// only +,-,*,/, replacing the library's oct_norm() which internally calls
+// the broken `.sqrt()` intrinsic.
+fn sqrt_poly(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if guess < 1.0 { guess = 1.0 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn oct_norm_poly(o: Octonion) -> f32 with Mut, Div, Panic {
+    let sq = (o.a * o.a + o.b * o.b + o.c * o.c + o.d * o.d +
+              o.e * o.e + o.f * o.f + o.g * o.g + o.h * o.h) as f64
+    sqrt_poly(sq) as f32
+}
+
+fn mean_associator_norm(prev: OctState, next: OctState, x: Octonion) -> f32 with Mut, Div, Panic {
+    (
+        oct_norm_poly(oct_associator_local(next.h0, x, prev.h0)) +
+        oct_norm_poly(oct_associator_local(next.h1, x, prev.h1)) +
+        oct_norm_poly(oct_associator_local(next.h2, x, prev.h2)) +
+        oct_norm_poly(oct_associator_local(next.h3, x, prev.h3))
+    ) / 4.0
+}
+
+// Same fix, for `.tanh()`: range-reduced Taylor series for exp() (safe,
+// only +,-,*,/), then tanh(x) = (e^2x - 1)/(e^2x + 1).
+fn exp_poly(x: f64) -> f64 with Mut, Div, Panic {
+    var neg = false
+    var v = x
+    if v < 0.0 { neg = true; v = 0.0 - v }
+    var k: i64 = 0
+    while v > 0.001 {
+        v = v * 0.5
+        k = k + 1
+    }
+    let v2 = v * v
+    let v3 = v2 * v
+    let v4 = v3 * v
+    let v5 = v4 * v
+    var result = 1.0 + v + v2 / 2.0 + v3 / 6.0 + v4 / 24.0 + v5 / 120.0
+    var i: i64 = 0
+    while i < k {
+        result = result * result
+        i = i + 1
+    }
+    if neg { 1.0 / result } else { result }
+}
+
+fn tanh_poly(x: f64) -> f64 with Mut, Div, Panic {
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    let e2x = exp_poly(2.0 * xc)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+fn c_ent_readout_v2(state: OctState, x: Octonion, assoc: f32, h_entropy: f32) -> f32 with Mut, Div, Panic {
+    let r0 = oct_mul(state.h0, d_row(0))
+    let r1 = oct_mul(state.h1, d_row(1))
+    let r2 = oct_mul(state.h2, d_row(2))
+    let r3 = oct_mul(state.h3, d_row(3))
+    let read_signal = ((r0.a + 0.25 * r0.d) + (r1.a + 0.25 * r1.d) + (r2.a + 0.25 * r2.d) + (r3.a + 0.25 * r3.d)) / 4.0
+    let sign = if x.d >= 0.0 { 1.0 } else { -1.0 }
+    var out = x.c + 0.18 * (tanh_poly(read_signal as f64) as f32) + 0.08 * assoc * sign - 0.05 * (h_entropy - 0.5)
+    if out > 1.0 { out = 1.0 }
+    if out < -1.0 { out = -1.0 }
+    out
+}
+
+fn feature_at(table: FeatureTable, index: i64) -> Octonion {
+    oct(
+        table.a[index as usize], table.b[index as usize], table.c[index as usize], table.d[index as usize],
+        table.e[index as usize], table.f[index as usize], table.g[index as usize], table.h[index as usize],
+    )
+}
+
+// ---------- byte-level feature table loader ----------
+// Columns: node_index,node,feature_kappa,feature_entropy_norm,feature_c_ent,
+//          feature_valence,feature_poincare_x,feature_poincare_y,feature_log_degree,feature_eta_local
+// Rows are already in node_index order (0..437), so we ignore column 0/1 and
+// push columns 2..9 straight into the feature arrays by row order.
+fn load_feature_table_bytes(path: string) -> FeatureTable with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    let raw = read_file(path)
+    var a: [f32] = []
+    var b: [f32] = []
+    var c: [f32] = []
+    var d: [f32] = []
+    var e: [f32] = []
+    var f: [f32] = []
+    var g: [f32] = []
+    var h: [f32] = []
+
+    var pos: i64 = 0
+    while pos < size && (raw[pos as usize] as i64) != 10 { pos = pos + 1 }
+    pos = pos + 1
+
+    while pos < size {
+        var col: i64 = 0
+        var col_start = pos
+        var values: [f64] = []
+        while pos < size && (raw[pos as usize] as i64) != 10 {
+            if (raw[pos as usize] as i64) == 44 {
+                if col >= 2 { values.push(parse_float_bytes(raw, col_start, pos)) }
+                col = col + 1
+                col_start = pos + 1
+            }
+            pos = pos + 1
+        }
+        if col >= 2 { values.push(parse_float_bytes(raw, col_start, pos)) }
+        if (values.len() as i64) >= 8 {
+            a.push(values[0] as f32)
+            b.push(values[1] as f32)
+            c.push(values[2] as f32)
+            d.push(values[3] as f32)
+            e.push(values[4] as f32)
+            f.push(values[5] as f32)
+            g.push(values[6] as f32)
+            h.push(values[7] as f32)
+        }
+        pos = pos + 1
+    }
+    FeatureTable { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h }
+}
+
+// ---------- stats helpers ----------
+
+fn mean_f64(arr: [f64]) -> f64 {
+    var total = 0.0
+    var i: i64 = 0
+    let n = arr.len() as i64
+    while i < n { total = total + arr[i as usize]; i = i + 1 }
+    total / (n as f64)
+}
+
+fn variance_f64(arr: [f64], m: f64) -> f64 {
+    var total = 0.0
+    var i: i64 = 0
+    let n = arr.len() as i64
+    while i < n {
+        let diff = arr[i as usize] - m
+        total = total + diff * diff
+        i = i + 1
+    }
+    if n <= 1 { 0.0 } else { total / ((n - 1) as f64) }
+}
+
+fn cohens_d(mean1: f64, var1: f64, n1: i64, mean2: f64, var2: f64, n2: i64) -> f64 with Mut, Div, Panic {
+    let pooled = (((n1 - 1) as f64) * var1 + ((n2 - 1) as f64) * var2) / ((n1 + n2 - 2) as f64)
+    let sd = sqrt_poly(pooled)
+    if sd <= 0.0 { 0.0 } else { (mean1 - mean2) / sd }
+}
+
+// ---------- fused byte-level trajectory scan + octonion recurrence ----------
+
+fn process_regime_real(
+    regime_name: string,
+    input_root: string,
+    max_trajectories: i64,
+    max_steps: i64,
+) -> RegimeStats with IO, Mut, Panic, Div {
+    let regime = regime_named(regime_name)
+    let feature_path = path_join(input_root, "node_features.csv")
+    let trajectory_path = path_join(input_root, "trajectories_" ++ regime_name ++ "_nodes.csv")
+    let feature_table = load_feature_table_bytes(feature_path)
+
+    let traj_size = file_size(trajectory_path)
+    let traj_raw = read_file(trajectory_path)
+
+    var entropy_production: [f64] = []
+    var associator_means: [f64] = []
+    var c_ent_variances: [f64] = []
+    var h_entropy_means: [f64] = []
+
+    var pos: i64 = 0
+    while pos < traj_size && (traj_raw[pos as usize] as i64) != 10 { pos = pos + 1 }
+    pos = pos + 1
+
+    var traj_idx: i64 = 0
+    while traj_idx < max_trajectories && pos < traj_size {
+        while pos < traj_size && (traj_raw[pos as usize] as i64) != 44 { pos = pos + 1 }
+        pos = pos + 1
+
+        var state = init_state(regime.initial_state_mode)
+        var readouts: [f64] = []
+        var h_ent_series: [f64] = []
+        var assoc_sum = 0.0
+
+        var step: i64 = 0
+        var row_done = false
+        while step < max_steps && !row_done {
+            let tok_start = pos
+            while pos < traj_size {
+                let bch = traj_raw[pos as usize] as i64
+                if bch == 44 { break }
+                if bch == 10 { row_done = true; break }
+                pos = pos + 1
+            }
+            let node_idx = parse_uint_bytes(traj_raw, tok_start, pos)
+            if !row_done { pos = pos + 1 }
+
+            let x_raw = feature_at(feature_table, node_idx)
+            let x_gated = oct(x_raw.a, x_raw.b, x_raw.c, x_raw.d * regime.valence_gate, x_raw.e, x_raw.f, x_raw.g, x_raw.h)
+            let prev_state = state
+            let new_state = step_state_v2(prev_state, x_gated, regime)
+            let assoc = mean_associator_norm(prev_state, new_state, x_gated)
+            let h_ent = hidden_entropy(new_state)
+            let readout = c_ent_readout_v2(new_state, x_gated, assoc, h_ent)
+            readouts.push(readout as f64)
+            h_ent_series.push(h_ent as f64)
+            assoc_sum = assoc_sum + (assoc as f64)
+            state = new_state
+            step = step + 1
+        }
+
+        while pos < traj_size && (traj_raw[pos as usize] as i64) != 10 { pos = pos + 1 }
+        pos = pos + 1
+
+        let n_steps = readouts.len() as i64
+        if n_steps > 1 {
+            let r_mean = mean_f64(readouts)
+            c_ent_variances.push(variance_f64(readouts, r_mean))
+            h_entropy_means.push(mean_f64(h_ent_series))
+            associator_means.push(assoc_sum / (n_steps as f64))
+            var diff_sum = 0.0
+            var s: i64 = 1
+            while s < n_steps {
+                diff_sum = diff_sum + f64_abs(h_ent_series[s as usize] - h_ent_series[(s - 1) as usize])
+                s = s + 1
+            }
+            entropy_production.push(diff_sum / ((n_steps - 1) as f64))
+        }
+        traj_idx = traj_idx + 1
+    }
+
+    let n = entropy_production.len() as i64
+    let ep_mean = mean_f64(entropy_production)
+    let ep_var = variance_f64(entropy_production, ep_mean)
+    let assoc_mean = mean_f64(associator_means)
+    let assoc_var = variance_f64(associator_means, assoc_mean)
+    let cev_mean = mean_f64(c_ent_variances)
+    let he_mean = mean_f64(h_entropy_means)
+
+    RegimeStats {
+        n: n, mean_entropy_production: ep_mean, var_entropy_production: ep_var,
+        mean_associator: assoc_mean, var_associator: assoc_var,
+        mean_c_ent_variance: cev_mean, mean_h_entropy: he_mean,
+    }
+}
+
+fn print_stats(label: string, s: RegimeStats) with IO {
+    print(label)
+    print(": n=")
+    print(s.n.to_string())
+    print("\n")
+    print("  mean_hidden_entropy_production_rate=")
+    print(s.mean_entropy_production.to_string())
+    print("\n")
+    print("  mean_associator_norm=")
+    print(s.mean_associator.to_string())
+    print("\n")
+    print("  mean_c_ent_variance=")
+    print(s.mean_c_ent_variance.to_string())
+    print("\n")
+    print("  mean_h_entropy=")
+    print(s.mean_h_entropy.to_string())
+    print("\n")
+}
+
+fn print_usage() with IO {
+    print("Usage: souc run examples/cognitive_ossm/validate_ossm_parity.sio -- ")
+    print("[--input-root <path>] [--max-trajectories <n>] [--max-steps <n>] [--output <path>]\n")
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    var input_root = "../hyperbolic-semantic-networks/data/cpc2026/sounio_input"
+    var max_trajectories: i64 = 64
+    var max_steps: i64 = 64
+    var output_path = "examples/cognitive_ossm/results/ossm_parity_validated_summary.json"
+
+    var i: i64 = 0
+    while i < argc {
+        let arg = get_arg(i)
+        if str_eq(arg, "--input-root") {
+            if i + 1 >= argc { print_usage(); return 1 }
+            input_root = get_arg(i + 1); i = i + 2
+        } else if str_eq(arg, "--max-trajectories") {
+            if i + 1 >= argc { print_usage(); return 1 }
+            max_trajectories = parse_nonnegative_i64(get_arg(i + 1)); i = i + 2
+        } else if str_eq(arg, "--max-steps") {
+            if i + 1 >= argc { print_usage(); return 1 }
+            max_steps = parse_nonnegative_i64(get_arg(i + 1)); i = i + 2
+        } else if str_eq(arg, "--output") {
+            if i + 1 >= argc { print_usage(); return 1 }
+            output_path = get_arg(i + 1); i = i + 2
+        } else if str_eq(arg, "--help") || str_eq(arg, "-h") {
+            print_usage(); return 0
+        } else {
+            print("Unknown flag: "); print(arg); print("\n"); print_usage(); return 1
+        }
+    }
+
+    print("Running corrected Sounio O-SSM validator: max_trajectories=")
+    print(max_trajectories.to_string())
+    print(" max_steps=")
+    print(max_steps.to_string())
+    print("\n")
+
+    let normative = process_regime_real("normative", input_root, max_trajectories, max_steps)
+    print_stats("normative", normative)
+    let anxious = process_regime_real("anxious", input_root, max_trajectories, max_steps)
+    print_stats("anxious", anxious)
+    let ruminative = process_regime_real("ruminative", input_root, max_trajectories, max_steps)
+    print_stats("ruminative", ruminative)
+    let psychotic = process_regime_real("psychotic", input_root, max_trajectories, max_steps)
+    print_stats("psychotic", psychotic)
+
+    let d_entropy_production = cohens_d(
+        normative.mean_entropy_production, normative.var_entropy_production, normative.n,
+        anxious.mean_entropy_production, anxious.var_entropy_production, anxious.n,
+    )
+    let d_associator = cohens_d(
+        normative.mean_associator, normative.var_associator, normative.n,
+        anxious.mean_associator, anxious.var_associator, anxious.n,
+    )
+
+    print("\nnormative_vs_anxious_hidden_entropy_production_rate cohens_d=")
+    print(d_entropy_production.to_string())
+    print("\nnormative_vs_anxious_mean_associator_norm cohens_d=")
+    print(d_associator.to_string())
+    print("\n")
+
+    var json_out = "{\n"
+    json_out = json_out ++ "  \"max_trajectories\": " ++ max_trajectories.to_string() ++ ",\n"
+    json_out = json_out ++ "  \"max_steps\": " ++ max_steps.to_string() ++ ",\n"
+    json_out = json_out ++ "  \"normative\": {\"n\": " ++ normative.n.to_string() ++ ", \"mean_hidden_entropy_production_rate\": " ++ normative.mean_entropy_production.to_string() ++ ", \"mean_associator_norm\": " ++ normative.mean_associator.to_string() ++ ", \"mean_c_ent_variance\": " ++ normative.mean_c_ent_variance.to_string() ++ ", \"mean_h_entropy\": " ++ normative.mean_h_entropy.to_string() ++ "},\n"
+    json_out = json_out ++ "  \"anxious\": {\"n\": " ++ anxious.n.to_string() ++ ", \"mean_hidden_entropy_production_rate\": " ++ anxious.mean_entropy_production.to_string() ++ ", \"mean_associator_norm\": " ++ anxious.mean_associator.to_string() ++ ", \"mean_c_ent_variance\": " ++ anxious.mean_c_ent_variance.to_string() ++ ", \"mean_h_entropy\": " ++ anxious.mean_h_entropy.to_string() ++ "},\n"
+    json_out = json_out ++ "  \"ruminative\": {\"n\": " ++ ruminative.n.to_string() ++ ", \"mean_hidden_entropy_production_rate\": " ++ ruminative.mean_entropy_production.to_string() ++ ", \"mean_associator_norm\": " ++ ruminative.mean_associator.to_string() ++ ", \"mean_c_ent_variance\": " ++ ruminative.mean_c_ent_variance.to_string() ++ ", \"mean_h_entropy\": " ++ ruminative.mean_h_entropy.to_string() ++ "},\n"
+    json_out = json_out ++ "  \"psychotic\": {\"n\": " ++ psychotic.n.to_string() ++ ", \"mean_hidden_entropy_production_rate\": " ++ psychotic.mean_entropy_production.to_string() ++ ", \"mean_associator_norm\": " ++ psychotic.mean_associator.to_string() ++ ", \"mean_c_ent_variance\": " ++ psychotic.mean_c_ent_variance.to_string() ++ ", \"mean_h_entropy\": " ++ psychotic.mean_h_entropy.to_string() ++ "},\n"
+    json_out = json_out ++ "  \"comparisons\": {\"normative_vs_anxious_hidden_entropy_production_rate_cohens_d\": " ++ d_entropy_production.to_string() ++ ", \"normative_vs_anxious_mean_associator_norm_cohens_d\": " ++ d_associator.to_string() ++ "}\n"
+    json_out = json_out ++ "}\n"
+
+    let ok = write_text_file(output_path, json_out)
+    print("Wrote summary: ")
+    print(bool_to_string(ok))
+    print(" -> ")
+    print(output_path)
+    print("\n")
+    0
+}
