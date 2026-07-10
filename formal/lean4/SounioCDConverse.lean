@@ -1474,4 +1474,51 @@ theorem on_seam_P_neg (bits l u : Nat) (hb : 4 ≤ bits)
     rw [P_eq_of_xor bits l u c (c ^^^ (l ^^^ u)) rfl]
     exact P_low_neg bits l u hb hl1 hl hu1 hu hon (c ^^^ (l ^^^ u)) hr_lt
 
+/-- **TARGET 2 — `anti0 = ! offSeam` on the loHi locus, ∀ bits ≥ 4.**  The seam coincidence for the
+    operator/anti-commutator member: `{L_l,L_u}=0 ⟺ NOT off-seam`.  Off-seam ⟹ the converse winner
+    exists (`converse_holds`), so some `P(a)=+1` breaks the anti0 test (`anti0=false`); on-seam ⟹
+    `∀c P(c)=-1` (`on_seam_P_neg`), so anti0 holds.  Via the `Q=P` bridge (`anti0_iff`).  Kernel axioms
+    `[propext, Quot.sound]` + the single inherited k=3 base anchor. -/
+theorem seam_eq_anti0 (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits) :
+    anti0 bits l u = ! offSeam bits l u := by
+  have htop1 : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos _
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := Nat.pow_le_pow_right (by decide) (by omega)
+  have hlt : l < 2 ^ bits := by omega
+  have hl0 : l ≠ 0 := by omega
+  have hu0 : u ≠ 0 := by omega
+  cases hoff : offSeam bits l u with
+  | false =>
+    show anti0 bits l u = true
+    rw [anti0_iff bits l u hl0 hu0 hlt hu]
+    intro c hc
+    exact on_seam_P_neg bits l u hb hl1 hl hu1 hu hoff c hc
+  | true =>
+    show anti0 bits l u = false
+    have hxa := converse_holds bits l u hb hl1 hl hu1 hu hoff
+    simp only [hasXorAnnih] at hxa
+    rw [List.any_eq_true] at hxa
+    obtain ⟨a, hmem, hpred⟩ := hxa
+    rw [List.mem_range] at hmem
+    rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+      at hpred
+    obtain ⟨⟨_, _⟩, hPa⟩ := hpred
+    cases hanti : anti0 bits l u with
+    | false => rfl
+    | true =>
+      exfalso
+      have hall := (anti0_iff bits l u hl0 hu0 hlt hu).mp hanti
+      have hneg := hall a hmem
+      exact absurd (hPa.symm.trans hneg) (by decide)
+
+/-- **Corollary generalizing `coincidence_16`/`coincidence_32`'s `anti0 == ! offSeam` to ∀n over the
+    loHi locus** (`bits ≥ 4`), via `loHi_mem` + `seam_eq_anti0`. -/
+theorem anti0_eq_offSeam_all (bits : Nat) (hb : 4 ≤ bits) :
+    (loHi bits).all (fun p => anti0 bits p.1 p.2 == ! offSeam bits p.1 p.2) = true := by
+  rw [List.all_eq_true]
+  intro p hp
+  obtain ⟨hp1, hp2, hp3, hp4⟩ := loHi_mem bits (by omega) p hp
+  rw [beq_iff_eq]
+  exact seam_eq_anti0 bits p.1 p.2 hb hp1 hp2 hp3 hp4
+
 end SounioCDConverse
