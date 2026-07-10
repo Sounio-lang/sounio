@@ -189,6 +189,7 @@ int main(int argc, char **argv) {
     const char *init_var_file = NULL;
     int verify_init_seq = 0;  // if set, init mem to [1..mem_words] before launch
     int print_count = -1;     // override print count (default = mem_words)
+    const char *dump_file = NULL;  // if set, write raw output mem bytes here (exact readback)
     // Phase W: streamed multi-launch over a 1M-patient cohort.
     long cohort_size = 0;     // if > 0 override mem_words and enter streamed path
     int n_streams = 0;        // if > 0 use this many CUDA streams (else default-stream)
@@ -215,6 +216,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--init-var-file") == 0 && i + 1 < argc) { init_var_file = argv[++i]; }
         else if (strcmp(argv[i], "--init-seq") == 0) { verify_init_seq = 1; }
         else if (strcmp(argv[i], "--print-count") == 0 && i + 1 < argc) { print_count = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--dump-file") == 0 && i + 1 < argc) { dump_file = argv[++i]; }
         else if (strcmp(argv[i], "--cohort-size") == 0 && i + 1 < argc) { cohort_size = strtol(argv[++i], NULL, 10); }
         else if (strcmp(argv[i], "--streams") == 0 && i + 1 < argc) { n_streams = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--chunks") == 0 && i + 1 < argc) { n_chunks = atoi(argv[++i]); }
@@ -689,6 +691,11 @@ int main(int argc, char **argv) {
     }
 
     emit_status("pass", "launch_pass", "cuMemcpyDtoH", 0);
+
+    if (dump_file) {
+        FILE *df = fopen(dump_file, "wb");
+        if (df) { fwrite(h_mem, 1, bytes, df); fclose(df); }
+    }
 
     printf("MEM:");
     if (value_type == 1) {
