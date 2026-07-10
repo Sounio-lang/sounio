@@ -249,6 +249,9 @@ madaros pkg self-test >"$WORK/pkg_self_test.log" 2>&1
 expect_log_contains "SPM self-tests: ALL PASSED" "$WORK/pkg_self_test.log"
 pass "package manager self-test"
 
+bash scripts/ci/madaros_read_env_absence_gate.sh
+pass "source-fresh missing-env merged checker"
+
 run_imported_smt_gate
 write_gate_receipt
 
