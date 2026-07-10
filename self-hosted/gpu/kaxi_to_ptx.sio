@@ -16,7 +16,7 @@
 //   shared_mem is emitted as a TODO comment; the K-AXI shared kernels still
 //   exercise scalar paths that pass via the C differential.
 
-use gpu::kaxi_backend::{KaxiAsmBuf, kaxi_asm_new, kaxi_asm_push_byte, kaxi_asm_to_string, kaxi_asm_get}
+use gpu::kaxi_backend::{KaxiAsmBuf, kaxi_asm_new, kaxi_asm_push_byte, kaxi_asm_push_str, kaxi_asm_to_string, kaxi_asm_print_lines, kaxi_asm_get}
 
 pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
     // Phase C.3: post-C.2 only the dialect-specific TODO comments
@@ -1548,100 +1548,100 @@ pub fn kaxi_max_f64_reg(asm: KaxiAsmBuf) -> i64 with Mut, Panic {
     maxreg
 }
 
-pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
-    // Phase G: heap-string accumulator (was: stack-allocated KaxiAsmBuf,
-    // 64K hard cap that broke sedenion_mul in epistemic / f32_epistemic).
-    // Sounio strings aren't subject to SRET-large-struct issues, so output
-    // can grow past 64K — unlocks arbitrarily-large kernels.
-    var out: string = ""
-    out = out + ".version 7.0\n"
-    out = out + ".target sm_50\n"
-    out = out + ".address_size 64\n\n"
-    out = out + ".visible .entry kaxi_kernel(\n"
+pub fn kaxi_transpile_to_ptx_unified_buf(asm: KaxiAsmBuf, mode: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase G+: heap-backed KaxiAsmBuf accumulator (was: heap-string via
+    // str_concat, itself O(n^2) past a few hundred KiB — OOM-crashed on the
+    // ~2.4 MiB od256 div/sqrt outputs). kaxi_asm_push_str appends in O(1)
+    // amortized, so this scales to arbitrarily-large kernels.
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, ".version 7.0\n")
+    out = kaxi_asm_push_str(out, ".target sm_50\n")
+    out = kaxi_asm_push_str(out, ".address_size 64\n\n")
+    out = kaxi_asm_push_str(out, ".visible .entry kaxi_kernel(\n")
 
     // Param decls
     if mode == 0 || mode == 2 {
-        out = out + "    .param .u64 param_mem\n"
+        out = kaxi_asm_push_str(out, "    .param .u64 param_mem\n")
     } else if mode == 3 {
-        out = out + "    .param .u64 param_a,\n"
-        out = out + "    .param .u64 param_b\n"
+        out = kaxi_asm_push_str(out, "    .param .u64 param_a,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_b\n")
     } else if mode == 5 {
         // f32_gum: 4 buffers — C1, C2, V1, V2.
-        out = out + "    .param .u64 param_a,\n"
-        out = out + "    .param .u64 param_b,\n"
-        out = out + "    .param .u64 param_c,\n"
-        out = out + "    .param .u64 param_d\n"
+        out = kaxi_asm_push_str(out, "    .param .u64 param_a,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_b,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_c,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_d\n")
     } else {
         // mode == 1 (epistemic) || mode == 4 (f32_epistemic)
-        out = out + "    .param .u64 param_mem,\n"
-        out = out + "    .param .u64 param_var\n"
+        out = kaxi_asm_push_str(out, "    .param .u64 param_mem,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_var\n")
     }
-    out = out + ")\n{\n"
+    out = kaxi_asm_push_str(out, ")\n{\n")
 
     // Register banks. Order is byte-significant against goldens.
     if mode == 0 {
         // Phase L: bank up to 260 (scratch %rd256, base %rd258 above
         // value lane). %fd stays at <70> — no f64 patterns reach that high.
         // M4: %f<260> for typed f32 path; %r<260> for typed i32 path.
-        out = out + "    .reg .b64 %rd<260>;\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<260>;\n")
         let fdmax = kaxi_max_f64_reg(asm)
         let fdcount = if fdmax + 1 > 70 { fdmax + 1 } else { 70 }
-        out = out + "    .reg .f64 %fd<" + ptx_int_to_string(fdcount) + ">;\n"
-        out = out + "    .reg .f32 %f<260>;\n"
-        out = out + "    .reg .b32 %r<260>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .f64 %fd<" + ptx_int_to_string(fdcount) + ">;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     } else if mode == 1 {
         // Phase I: bank up to 260 (value 0..127, variance 128..255,
         // scratch 256/257, base 258/259).
         // Phase W.C: %fd<8> scratch for u64↔f64 sqrt round-trip.
-        out = out + "    .reg .b64 %rd<260>;\n"
-        out = out + "    .reg .f64 %fd<8>;\n"
-        out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f64 %fd<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     } else if mode == 2 {
         // Phase L: bank up to 260 (scratch %rd256, base %rd258).
-        out = out + "    .reg .b64 %rd<260>;\n"
-        out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<260>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     } else if mode == 3 {
         // Phase K: bank up to 260 to make room for scratch+base above
         // the value-lane region (was %rd<128> + %f<70>).
-        out = out + "    .reg .b64 %rd<260>;\n"
-        out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<260>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     } else if mode == 5 {
         // f32_gum: same bank as f32_2c; base ptrs %rd258..%rd261.
-        out = out + "    .reg .b64 %rd<262>;\n"
-        out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<260>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<262>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     } else {
         // mode == 4 (f32_epistemic) — Phase I bank-up
-        out = out + "    .reg .b64 %rd<260>;\n"
-        out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<260>;\n"
-        out = out + "    .reg .pred %p<64>;\n\n"
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<260>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<64>;\n\n")
     }
 
     // ld.param — single-param modes use %rd258; dual %rd258/%rd259; quad %rd258..%rd261.
     if mode == 0 || mode == 2 {
-        out = out + "    ld.param.u64 %rd258, [param_mem];\n"
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd258, [param_mem];\n")
     } else if mode == 3 {
         // Phase K: base ptrs at %rd258/%rd259 (was %rd96/%rd97).
-        out = out + "    ld.param.u64 %rd258, [param_a];\n"
-        out = out + "    ld.param.u64 %rd259, [param_b];\n"
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd258, [param_a];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd259, [param_b];\n")
     } else if mode == 5 {
         // f32_gum: base ptrs C1=%rd258, C2=%rd259, V1=%rd260, V2=%rd261.
-        out = out + "    ld.param.u64 %rd258, [param_a];\n"
-        out = out + "    ld.param.u64 %rd259, [param_b];\n"
-        out = out + "    ld.param.u64 %rd260, [param_c];\n"
-        out = out + "    ld.param.u64 %rd261, [param_d];\n"
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd258, [param_a];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd259, [param_b];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd260, [param_c];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd261, [param_d];\n")
     } else {
         // mode == 1 || mode == 4 — Phase I: base ptrs at %rd258/%rd259.
-        out = out + "    ld.param.u64 %rd258, [param_mem];\n"
-        out = out + "    ld.param.u64 %rd259, [param_var];\n"
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd258, [param_mem];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd259, [param_var];\n")
     }
 
     // Loop — identical across all 5 transpilers; dispatches to the
@@ -1683,11 +1683,11 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
                     } else {
                         kaxi_transpile_line_to_ptx_f32_epistemic(asm, line_start, line_len)
                     }
-                    out = out + "L" + ptx_int_to_string(instr_idx) + ":\n"
+                    out = kaxi_asm_push_str(out, "L" + ptx_int_to_string(instr_idx) + ":\n")
                     if str_len(p) > 0 {
-                        out = out + p
+                        out = kaxi_asm_push_str(out, p)
                     } else {
-                        out = out + "    // unhandled\n"
+                        out = kaxi_asm_push_str(out, "    // unhandled\n")
                     }
                     instr_idx = instr_idx + 1
                 }
@@ -1697,5 +1697,15 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         i = i + 1
     }
 
-    out + "}\n"
+    out = kaxi_asm_push_str(out, "}\n")
+    out
+}
+
+// Thin wrapper: preserves the existing string-returning call surface for
+// callers that still want a single string (small kernels; non-PTX-driver
+// use sites). Streaming callers should use kaxi_transpile_to_ptx_unified_buf
+// + kaxi_asm_print_lines directly to avoid the O(n^2) kaxi_asm_to_string
+// rebuild on large kernels.
+pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    kaxi_asm_to_string(kaxi_transpile_to_ptx_unified_buf(asm, mode))
 }

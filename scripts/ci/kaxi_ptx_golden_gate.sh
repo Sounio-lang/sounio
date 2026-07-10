@@ -111,7 +111,7 @@ for mode_entry in "${MODES[@]}"; do
 done
 
 # od256 octuple kernels — default (f64) mode only; goldens in the od256/ subdir.
-OD256_PATTERNS=(od256_two_sum od256_two_prod od256_add od256_mul)
+OD256_PATTERNS=(od256_two_sum od256_two_prod od256_add od256_mul od256_div od256_sqrt)
 for pattern in "${OD256_PATTERNS[@]}"; do
     gold_ptx="$GOLDEN_DIR/od256/$pattern.ptx"
     if [[ ! -f "$gold_ptx" ]]; then

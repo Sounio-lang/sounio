@@ -33,7 +33,7 @@ STAGE_LOCAL="${STAGE_LOCAL:-/tmp/od256_numeric_spark_stage}"
 rm -rf "$STAGE_LOCAL"; mkdir -p "$STAGE_LOCAL/ptx" "$STAGE_LOCAL/fixtures"
 
 # --- 1. stage payload -------------------------------------------------------
-for p in od256_two_sum od256_two_prod od256_add od256_mul; do
+for p in od256_two_sum od256_two_prod od256_add od256_mul od256_div od256_sqrt; do
   g="tests/golden/kaxi_ptx/od256/${p}.ptx"
   [[ -f "$g" ]] || { echo "missing golden $g" >&2; exit 1; }
   cp -f "$g" "$STAGE_LOCAL/ptx/${p}.ptx"
