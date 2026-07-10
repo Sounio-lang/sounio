@@ -48,5 +48,13 @@ for mode_entry in "${MODES[@]}"; do
         if [[ $? -eq 0 && -s "$out" ]]; then n=$((n+1)); else err=$((err+1)); echo "emit FAIL: $mode/$pattern" >&2; fi
     done
 done
+# od256 octuple kernels — default (f64) mode only.
+OD256=(od256_two_sum od256_two_prod od256_add od256_mul)
+for pattern in "${OD256[@]}"; do
+    out="$OUT_DIR/default__${pattern}.ptx"
+    ./bin/kretikos kaxi-emit-ptx "$pattern" -o "$out" --no-ptxas >/dev/null 2>&1
+    if [[ $? -eq 0 && -s "$out" ]]; then n=$((n+1)); else err=$((err+1)); echo "emit FAIL: default/$pattern" >&2; fi
+done
+
 echo "emitted=$n emit_errs=$err -> $OUT_DIR"
 [[ $err -eq 0 ]] || exit 1

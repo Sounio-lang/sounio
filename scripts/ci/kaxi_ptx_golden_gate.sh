@@ -110,6 +110,32 @@ for mode_entry in "${MODES[@]}"; do
     done
 done
 
+# od256 octuple kernels — default (f64) mode only; goldens in the od256/ subdir.
+OD256_PATTERNS=(od256_two_sum od256_two_prod od256_add od256_mul)
+for pattern in "${OD256_PATTERNS[@]}"; do
+    gold_ptx="$GOLDEN_DIR/od256/$pattern.ptx"
+    if [[ ! -f "$gold_ptx" ]]; then
+        MISSING=$((MISSING + 1))
+        [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("MISS  od256/$pattern (no golden)")
+        continue
+    fi
+    tmp_ptx="$(mktemp -t kaxi-gate.XXXXXX.ptx)"
+    set +e
+    ./bin/kretikos kaxi-emit-ptx "$pattern" -o "$tmp_ptx" --no-ptxas >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 || ! -s "$tmp_ptx" ]]; then
+        FAIL=$((FAIL + 1))
+        [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("DROP  od256/$pattern (rc=$rc)")
+    elif [[ "$(sha256sum "$tmp_ptx" | awk '{print $1}')" == "$(sha256sum "$gold_ptx" | awk '{print $1}')" ]]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("DIFF  od256/$pattern")
+    fi
+    rm -f "$tmp_ptx"
+done
+
 echo "=== kaxi_ptx golden gate ==="
 echo "  PASS:    $PASS"
 echo "  FAIL:    $FAIL"
