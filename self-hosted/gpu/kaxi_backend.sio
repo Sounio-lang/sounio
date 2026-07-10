@@ -183,22 +183,57 @@ fn kaxi_txn_stream_append(s: KaxiTxnStream, value: i64, variance: i64, pl: i64, 
 // K-AXI text assembly buffer
 // ============================================================================
 
+// Heap-backed K-AXI byte buffer (was a fixed [i8;2097152] inline array passed by
+// value — that capped emission at 2 MiB AND copied the whole array on every push,
+// so large kernels like od256 div/sqrt truncated + crashed). Now {ptr,len,cap}:
+// the struct copies in 24 bytes and the bytes live in one heap_alloc'd (mmap,
+// page-granular ~0 RSS until touched) block shared via ptr. Usage is linear
+// (buf = push(buf,...) discards the old handle), so ptr-sharing is safe — same
+// contract as the native CodeBuffer heap-backing (PR1 archive/pr1-...codebuffer).
+// *mut i8 is not byte-indexable in the seed, so byte access is an 8-byte-word RMW
+// through *mut i64 (kaxi_asm_get/kaxi_asm_set).
+let KAXI_ASM_CAP: i64 = 16777216   // 16 MiB reservation (mmap; cheap until touched)
+
 pub struct KaxiAsmBuf {
-    data: [i8; 2097152],
+    ptr: i64,     // heap address of the byte block
     len: i64,
+    cap: i64,
 }
 
-pub fn kaxi_asm_new() -> KaxiAsmBuf {
+pub fn kaxi_asm_new() -> KaxiAsmBuf with Alloc {
     KaxiAsmBuf {
-        data: [0; 2097152],
+        ptr: heap_alloc(KAXI_ASM_CAP) as i64,   // calloc-zeroed
         len: 0,
+        cap: KAXI_ASM_CAP,
     }
 }
 
-pub fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic {
+// byte read: word at (ptr + (i>>3)*8); extract byte (i&7). *mut is deref-only
+// (not index-able) in the seed, so we do pointer-arith + *(addr as *mut i64).
+pub fn kaxi_asm_get(buf: KaxiAsmBuf, i: i64) -> i64 with Mut, Panic, Div {
+    let addr = buf.ptr + (i >> 3) * 8
+    let word = *(addr as *mut i64)
+    (word >> ((i & 7) * 8)) & 255
+}
+
+// byte write (RMW): clear the target byte lane, OR in the new byte. Mutates the
+// shared heap block via ptr, so no KaxiAsmBuf needs to be returned.
+fn kaxi_asm_set(buf: KaxiAsmBuf, i: i64, b: i64) with Mut, Panic, Div {
+    let addr: i64 = buf.ptr + (i >> 3) * 8
+    let sh: i64 = (i & 7) * 8
+    let word: i64 = *(addr as *mut i64)
+    let mask: i64 = (255 as i64) << sh
+    let cleared: i64 = word - (word & mask)          // zero the target byte lane
+    let newbyte: i64 = (b & 255) << sh
+    let result: i64 = cleared | newbyte
+    let p: *mut i64 = addr as *mut i64
+    *p = result
+}
+
+pub fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic, Div {
     var out = buf
-    if out.len >= 0 && out.len < 2097152 {
-        out.data[out.len as usize] = b
+    if out.len >= 0 && out.len < out.cap {
+        kaxi_asm_set(out, out.len, b as i64)
         out.len = out.len + 1
     }
     out
@@ -209,8 +244,8 @@ pub fn kaxi_asm_push_str(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Pan
     let n = str_len(s)
     var i: i64 = 0
     while i < n {
-        if out.len < 2097152 {
-            out.data[out.len as usize] = str_char_at(s, i) as i8
+        if out.len < out.cap {
+            kaxi_asm_set(out, out.len, str_char_at(s, i))
             out.len = out.len + 1
         }
         i = i + 1
@@ -224,11 +259,11 @@ pub fn kaxi_asm_push_line(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Pa
     out
 }
 
-fn kaxi_asm_buf_append(a: KaxiAsmBuf, b: KaxiAsmBuf) -> KaxiAsmBuf with Mut, Panic {
+fn kaxi_asm_buf_append(a: KaxiAsmBuf, b: KaxiAsmBuf) -> KaxiAsmBuf with Mut, Panic, Div {
     var out = a
     var i: i64 = 0
-    while i < b.len && out.len < 2097152 {
-        out.data[out.len as usize] = b.data[i as usize]
+    while i < b.len && out.len < out.cap {
+        kaxi_asm_set(out, out.len, kaxi_asm_get(b, i))
         out.len = out.len + 1
         i = i + 1
     }
@@ -342,7 +377,7 @@ pub fn kaxi_asm_to_string(buf: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc
     var s = ""
     var i: i64 = 0
     while i < buf.len {
-        let ch = buf.data[i as usize] as i64
+        let ch = kaxi_asm_get(buf, i) as i64
         s = str_concat(s, kaxi_asm_char_to_str(ch))
         i = i + 1
     }
@@ -354,7 +389,7 @@ pub fn kaxi_asm_print_lines(buf: KaxiAsmBuf) with IO, Mut, Panic, Div, Alloc {
     var i: i64 = 0
     var line: string = ""
     while i < buf.len {
-        let ch = buf.data[i as usize] as i64
+        let ch = kaxi_asm_get(buf, i) as i64
         if ch == 10 {
             println(line)
             line = ""
@@ -375,7 +410,7 @@ fn kaxi_asm_buf_contains(buf: KaxiAsmBuf, needle: string) -> bool with Mut, Pani
         var j: i64 = 0
         var matched: bool = true
         while j < nlen {
-            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+            if kaxi_asm_get(buf, (i + j)) != (str_char_at(needle, j) as i8) {
                 matched = false
                 break
             }
@@ -419,26 +454,26 @@ pub fn kaxi_asm_get_conf_budget(buf: KaxiAsmBuf) -> i64 with Mut, Panic, Div {
     if buf.len < pat_len { return 1000 }
     var i: i64 = 0
     while i <= buf.len - pat_len {
-        if buf.data[i as usize] as i8 == 59
-           && buf.data[(i + 1) as usize] as i8 == 32
-           && buf.data[(i + 2) as usize] as i8 == 99
-           && buf.data[(i + 3) as usize] as i8 == 111
-           && buf.data[(i + 4) as usize] as i8 == 110
-           && buf.data[(i + 5) as usize] as i8 == 102
-           && buf.data[(i + 6) as usize] as i8 == 95
-           && buf.data[(i + 7) as usize] as i8 == 98
-           && buf.data[(i + 8) as usize] as i8 == 117
-           && buf.data[(i + 9) as usize] as i8 == 100
-           && buf.data[(i + 10) as usize] as i8 == 103
-           && buf.data[(i + 11) as usize] as i8 == 101
-           && buf.data[(i + 12) as usize] as i8 == 116
-           && buf.data[(i + 13) as usize] as i8 == 61 {
+        if kaxi_asm_get(buf, i) as i8 == 59
+           && kaxi_asm_get(buf, (i + 1)) as i8 == 32
+           && kaxi_asm_get(buf, (i + 2)) as i8 == 99
+           && kaxi_asm_get(buf, (i + 3)) as i8 == 111
+           && kaxi_asm_get(buf, (i + 4)) as i8 == 110
+           && kaxi_asm_get(buf, (i + 5)) as i8 == 102
+           && kaxi_asm_get(buf, (i + 6)) as i8 == 95
+           && kaxi_asm_get(buf, (i + 7)) as i8 == 98
+           && kaxi_asm_get(buf, (i + 8)) as i8 == 117
+           && kaxi_asm_get(buf, (i + 9)) as i8 == 100
+           && kaxi_asm_get(buf, (i + 10)) as i8 == 103
+           && kaxi_asm_get(buf, (i + 11)) as i8 == 101
+           && kaxi_asm_get(buf, (i + 12)) as i8 == 116
+           && kaxi_asm_get(buf, (i + 13)) as i8 == 61 {
             // Parse decimal digits after '='
             var p: i64 = i + pat_len
             var n: i64 = 0
             var any: bool = false
             while p < buf.len {
-                let c = buf.data[p as usize] as i64
+                let c = kaxi_asm_get(buf, p) as i64
                 if c >= 48 && c <= 57 {
                     n = n * 10 + (c - 48)
                     any = true
@@ -1530,12 +1565,12 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
     var i: i64 = 0
     while i <= asm.len {
         let is_end = i == asm.len
-        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        let is_newline = if i < asm.len { kaxi_asm_get(*asm, i) as i8 == 10 } else { true }
         if is_end || is_newline {
             let line_len = i - line_start
             if line_len > 0 {
                 // Inline parse logic to avoid tuple-return compiler bug
-                let first_char = asm.data[line_start as usize] as i8
+                let first_char = kaxi_asm_get(*asm, line_start) as i8
                 var parse_ok: i64 = 0
                 var opc: i64 = 0
                 var dst: i64 = -1
@@ -1545,16 +1580,16 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                 var seq: i64 = 0
 
                 if first_char != 59 && first_char != 0 {
-                    let c0 = asm.data[line_start as usize] as i8
-                    let c1 = asm.data[(line_start + 1) as usize] as i8
-                    let c2 = asm.data[(line_start + 2) as usize] as i8
-                    let c3 = if line_len > 3 { asm.data[(line_start + 3) as usize] as i8 } else { 0 as i8 }
-                    let c4 = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 0 as i8 }
-                    let c5 = if line_len > 5 { asm.data[(line_start + 5) as usize] as i8 } else { 0 as i8 }
-                    let c6 = if line_len > 6 { asm.data[(line_start + 6) as usize] as i8 } else { 0 as i8 }
-                    let c7 = if line_len > 7 { asm.data[(line_start + 7) as usize] as i8 } else { 0 as i8 }
-                    let c8 = if line_len > 8 { asm.data[(line_start + 8) as usize] as i8 } else { 0 as i8 }
-                    let c9 = if line_len > 9 { asm.data[(line_start + 9) as usize] as i8 } else { 0 as i8 }
+                    let c0 = kaxi_asm_get(*asm, line_start) as i8
+                    let c1 = kaxi_asm_get(*asm, (line_start + 1)) as i8
+                    let c2 = kaxi_asm_get(*asm, (line_start + 2)) as i8
+                    let c3 = if line_len > 3 { kaxi_asm_get(*asm, (line_start + 3)) as i8 } else { 0 as i8 }
+                    let c4 = if line_len > 4 { kaxi_asm_get(*asm, (line_start + 4)) as i8 } else { 0 as i8 }
+                    let c5 = if line_len > 5 { kaxi_asm_get(*asm, (line_start + 5)) as i8 } else { 0 as i8 }
+                    let c6 = if line_len > 6 { kaxi_asm_get(*asm, (line_start + 6)) as i8 } else { 0 as i8 }
+                    let c7 = if line_len > 7 { kaxi_asm_get(*asm, (line_start + 7)) as i8 } else { 0 as i8 }
+                    let c8 = if line_len > 8 { kaxi_asm_get(*asm, (line_start + 8)) as i8 } else { 0 as i8 }
+                    let c9 = if line_len > 9 { kaxi_asm_get(*asm, (line_start + 9)) as i8 } else { 0 as i8 }
 
                     if c0 == 97 && c1 == 100 && c2 == 100 { opc = KAXI_OP_ADD; parse_ok = 1 }
                     else if c0 == 115 && c1 == 117 && c2 == 98 { opc = KAXI_OP_SUB; parse_ok = 1 }
@@ -1564,8 +1599,8 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                     // setp.lt/le/eq/ge/gt/ne
                     else if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
                         if line_len > 6 {
-                            let cmp0 = asm.data[(line_start + 5) as usize] as i8
-                            let cmp1 = asm.data[(line_start + 6) as usize] as i8
+                            let cmp0 = kaxi_asm_get(*asm, (line_start + 5)) as i8
+                            let cmp1 = kaxi_asm_get(*asm, (line_start + 6)) as i8
                             if cmp0 == 108 && cmp1 == 116 { opc = KAXI_OP_SETP_LT; parse_ok = 1 }
                             else if cmp0 == 108 && cmp1 == 101 { opc = KAXI_OP_SETP_LE; parse_ok = 1 }
                             else if cmp0 == 101 && cmp1 == 113 { opc = KAXI_OP_SETP_EQ; parse_ok = 1 }
@@ -1606,16 +1641,16 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                     if parse_ok == 1 && opc >= 0 {
                         var pos = line_start
                         var end_pos = line_start + line_len
-                        while pos < end_pos && asm.data[pos as usize] as i8 != 32 { pos = pos + 1 }
+                        while pos < end_pos && kaxi_asm_get(*asm, pos) as i8 != 32 { pos = pos + 1 }
                         pos = pos + 1
 
                         while pos < end_pos {
-                            if asm.data[pos as usize] as i8 == 114 {
+                            if kaxi_asm_get(*asm, pos) as i8 == 114 {
                                 pos = pos + 1
                                 var num: i64 = 0
                                 var has_digit: bool = false
                                 while pos < end_pos {
-                                    let ch = asm.data[pos as usize] as i8
+                                    let ch = kaxi_asm_get(*asm, pos) as i8
                                     if ch >= 48 && ch <= 57 {
                                         num = num * 10 + (ch - 48) as i64
                                         has_digit = true
@@ -1630,17 +1665,17 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     else { src_b = num }
                                 }
                             }
-                            else if asm.data[pos as usize] as i8 == 112 {
+                            else if kaxi_asm_get(*asm, pos) as i8 == 112 {
                                 // check for "pred=p" first, before bare predicate register
-                                if pos + 6 < end_pos && asm.data[(pos + 1) as usize] as i8 == 114
-                                                && asm.data[(pos + 2) as usize] as i8 == 101
-                                                && asm.data[(pos + 3) as usize] as i8 == 100
-                                                && asm.data[(pos + 4) as usize] as i8 == 61
-                                                && asm.data[(pos + 5) as usize] as i8 == 112 {
+                                if pos + 6 < end_pos && kaxi_asm_get(*asm, (pos + 1)) as i8 == 114
+                                                && kaxi_asm_get(*asm, (pos + 2)) as i8 == 101
+                                                && kaxi_asm_get(*asm, (pos + 3)) as i8 == 100
+                                                && kaxi_asm_get(*asm, (pos + 4)) as i8 == 61
+                                                && kaxi_asm_get(*asm, (pos + 5)) as i8 == 112 {
                                     pos = pos + 6
                                     var num: i64 = 0
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             pos = pos + 1
@@ -1655,7 +1690,7 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     var num: i64 = 0
                                     var has_digit: bool = false
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             has_digit = true
@@ -1671,17 +1706,17 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     }
                                 }
                             }
-                            else if asm.data[pos as usize] as i8 == 97 {
+                            else if kaxi_asm_get(*asm, pos) as i8 == 97 {
                                 // check for "addr=r"
-                                if pos + 6 < end_pos && asm.data[(pos + 1) as usize] as i8 == 100
-                                                && asm.data[(pos + 2) as usize] as i8 == 100
-                                                && asm.data[(pos + 3) as usize] as i8 == 114
-                                                && asm.data[(pos + 4) as usize] as i8 == 61
-                                                && asm.data[(pos + 5) as usize] as i8 == 114 {
+                                if pos + 6 < end_pos && kaxi_asm_get(*asm, (pos + 1)) as i8 == 100
+                                                && kaxi_asm_get(*asm, (pos + 2)) as i8 == 100
+                                                && kaxi_asm_get(*asm, (pos + 3)) as i8 == 114
+                                                && kaxi_asm_get(*asm, (pos + 4)) as i8 == 61
+                                                && kaxi_asm_get(*asm, (pos + 5)) as i8 == 114 {
                                     pos = pos + 6
                                     var num: i64 = 0
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             pos = pos + 1
@@ -1694,20 +1729,20 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     pos = pos + 1
                                 }
                             }
-                            else if asm.data[pos as usize] as i8 == 105 {
+                            else if kaxi_asm_get(*asm, pos) as i8 == 105 {
                                 // check for "imm="
-                                if pos + 4 < end_pos && asm.data[(pos + 1) as usize] as i8 == 109
-                                                && asm.data[(pos + 2) as usize] as i8 == 109
-                                                && asm.data[(pos + 3) as usize] as i8 == 61 {
+                                if pos + 4 < end_pos && kaxi_asm_get(*asm, (pos + 1)) as i8 == 109
+                                                && kaxi_asm_get(*asm, (pos + 2)) as i8 == 109
+                                                && kaxi_asm_get(*asm, (pos + 3)) as i8 == 61 {
                                     pos = pos + 4
                                     var num: i64 = 0
                                     var neg: bool = false
-                                    if pos < end_pos && asm.data[pos as usize] as i8 == 45 {
+                                    if pos < end_pos && kaxi_asm_get(*asm, pos) as i8 == 45 {
                                         neg = true
                                         pos = pos + 1
                                     }
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             pos = pos + 1
@@ -1721,14 +1756,14 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     pos = pos + 1
                                 }
                             }
-                            else if asm.data[pos as usize] as i8 == 115 {
-                                if pos + 4 < end_pos && asm.data[(pos + 1) as usize] as i8 == 101
-                                                && asm.data[(pos + 2) as usize] as i8 == 113
-                                                && asm.data[(pos + 3) as usize] as i8 == 61 {
+                            else if kaxi_asm_get(*asm, pos) as i8 == 115 {
+                                if pos + 4 < end_pos && kaxi_asm_get(*asm, (pos + 1)) as i8 == 101
+                                                && kaxi_asm_get(*asm, (pos + 2)) as i8 == 113
+                                                && kaxi_asm_get(*asm, (pos + 3)) as i8 == 61 {
                                     pos = pos + 4
                                     var num: i64 = 0
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             pos = pos + 1
@@ -1741,18 +1776,18 @@ pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Di
                                     pos = pos + 1
                                 }
                             }
-                            else if asm.data[pos as usize] as i8 == 116 {
+                            else if kaxi_asm_get(*asm, pos) as i8 == 116 {
                                 // check for "target="
-                                if pos + 7 < end_pos && asm.data[(pos + 1) as usize] as i8 == 97
-                                                && asm.data[(pos + 2) as usize] as i8 == 114
-                                                && asm.data[(pos + 3) as usize] as i8 == 103
-                                                && asm.data[(pos + 4) as usize] as i8 == 101
-                                                && asm.data[(pos + 5) as usize] as i8 == 116
-                                                && asm.data[(pos + 6) as usize] as i8 == 61 {
+                                if pos + 7 < end_pos && kaxi_asm_get(*asm, (pos + 1)) as i8 == 97
+                                                && kaxi_asm_get(*asm, (pos + 2)) as i8 == 114
+                                                && kaxi_asm_get(*asm, (pos + 3)) as i8 == 103
+                                                && kaxi_asm_get(*asm, (pos + 4)) as i8 == 101
+                                                && kaxi_asm_get(*asm, (pos + 5)) as i8 == 116
+                                                && kaxi_asm_get(*asm, (pos + 6)) as i8 == 61 {
                                     pos = pos + 7
                                     var num: i64 = 0
                                     while pos < end_pos {
-                                        let ch = asm.data[pos as usize] as i8
+                                        let ch = kaxi_asm_get(*asm, pos) as i8
                                         if ch >= 48 && ch <= 57 {
                                             num = num * 10 + (ch - 48) as i64
                                             pos = pos + 1
