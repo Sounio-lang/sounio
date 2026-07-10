@@ -3690,6 +3690,146 @@ pub fn kaxi_emit_od256_add_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     buf
 }
 
+// od256 GPU-octuple MUL: c = a * b, ~424 bits, branchless.
+// 43 partial products two_prod(a[i],b[j]) for i+j<9 (rest < 2^-424) -> 86 terms
+// -> 3x VecSum (in-place) -> branchless SELP-VSEB -> 8. Needs >70 f64 regs
+// (dynamic %fd decl). Stride 24: 0-7=a, 8-15=b, 16-23=out.
+// f64 map: a=10+i b=18+j ah=26+i al=34+i bh=42+j bl=50+j C=58 ZEROF=59
+//   terms/VecSum=60..145 f[]=146..153 vs-temps=154..158 vseb-temps=159..162
+//   prod-temps TP=163 TT=164 TU=165 SC=166 SD=167 ; int cnt=200..jr=204.
+fn od_f(dst: i64) -> string { "r" + ptx_int_to_string(dst) }
+fn od_mul3(op: string, d: i64, a: i64, b: i64) -> string {
+    op + " r" + ptx_int_to_string(d) + ", r" + ptx_int_to_string(a) + ", r" + ptx_int_to_string(b) + ", var=+0%, type=f64"
+}
+pub fn kaxi_emit_od256_mul_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var buf: KaxiAsmBuf = kaxi_asm_new()
+    buf = kaxi_asm_push_line(buf, "; K-AXI od256 MUL: c=a*b (43 two_prod + 3x VecSum + branchless VSEB)")
+    buf = kaxi_asm_push_line(buf, "get_tid r0, var=0%")
+    buf = kaxi_asm_push_line(buf, "load_imm r1, imm=24")
+    buf = kaxi_asm_push_line(buf, "mul r2, r0, r1, var=+0%")
+    buf = kaxi_asm_push_line(buf, "load_immf r58, fimm64=41A0000002000000, type=f64")   // C=2^27+1
+    buf = kaxi_asm_push_line(buf, "load_immf r59, fimm64=0000000000000000, type=f64")   // 0.0
+    // load a[i] (slot i) -> r(10+i), b[j] (slot 8+j) -> r(18+j)
+    var i: i64 = 0
+    while i < 8 {
+        buf = kaxi_asm_push_line(buf, "load_imm r3, imm=" + ptx_int_to_string(i))
+        buf = kaxi_asm_push_line(buf, "add r4, r2, r3, var=+0%")
+        buf = kaxi_asm_push_line(buf, "load_global r" + ptx_int_to_string(10 + i) + ", addr=r4, type=f64")
+        buf = kaxi_asm_push_line(buf, "load_imm r3, imm=" + ptx_int_to_string(8 + i))
+        buf = kaxi_asm_push_line(buf, "add r4, r2, r3, var=+0%")
+        buf = kaxi_asm_push_line(buf, "load_global r" + ptx_int_to_string(18 + i) + ", addr=r4, type=f64")
+        i = i + 1
+    }
+    // split a[i] -> ah=r(26+i), al=r(34+i) ; split b[i] -> bh=r(42+i), bl=r(50+i)
+    i = 0
+    while i < 8 {
+        // split(a[i]): c=C*x; d=c-x; hi=c-d; lo=x-hi
+        buf = kaxi_asm_push_line(buf, od_mul3("mul", 166, 58, 10 + i))          // c
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 167, 166, 10 + i))         // d=c-x
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 26 + i, 166, 167))         // ah=c-d
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 34 + i, 10 + i, 26 + i))   // al=x-ah
+        // split(b[i])
+        buf = kaxi_asm_push_line(buf, od_mul3("mul", 166, 58, 18 + i))
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 167, 166, 18 + i))
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 42 + i, 166, 167))         // bh
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 50 + i, 18 + i, 42 + i))   // bl
+        i = i + 1
+    }
+    // partial products for i+j<9, bucket order -> terms r60..r145 (2 per product)
+    var k: i64 = 0
+    var ss: i64 = 0
+    while ss < 9 {
+        var ii: i64 = 0
+        while ii < 8 {
+            let jj = ss - ii
+            if jj >= 0 && jj < 8 {
+                let pr = 60 + 2*k
+                let er = 61 + 2*k
+                let ahi = 26 + ii
+                let ali = 34 + ii
+                let bhj = 42 + jj
+                let blj = 50 + jj
+                buf = kaxi_asm_push_line(buf, od_mul3("mul", pr, 10 + ii, 18 + jj))   // p
+                buf = kaxi_asm_push_line(buf, od_mul3("mul", 164, ahi, bhj))          // t=ah*bh
+                buf = kaxi_asm_push_line(buf, od_mul3("sub", 164, 164, pr))           // t-=p
+                buf = kaxi_asm_push_line(buf, od_mul3("mul", 165, ahi, blj))          // u=ah*bl
+                buf = kaxi_asm_push_line(buf, od_mul3("add", 164, 164, 165))
+                buf = kaxi_asm_push_line(buf, od_mul3("mul", 165, ali, bhj))          // u=al*bh
+                buf = kaxi_asm_push_line(buf, od_mul3("add", 164, 164, 165))
+                buf = kaxi_asm_push_line(buf, od_mul3("mul", 165, ali, blj))          // u=al*bl
+                buf = kaxi_asm_push_line(buf, od_mul3("add", er, 164, 165))           // e
+                k = k + 1
+            }
+            ii = ii + 1
+        }
+        ss = ss + 1
+    }
+    // k = 43 products -> 86 terms in r60..r(60+2k-1)=r145. VecSum x3 in place (n=86).
+    let n = 2 * k
+    var passn: i64 = 0
+    while passn < 3 {
+        // S(r154) = x[n-1]
+        buf = kaxi_asm_push_line(buf, od_mul3("add", 154, 60 + n - 1, 59))
+        var t: i64 = n - 2
+        while t >= 0 {
+            let xa = 60 + t
+            buf = kaxi_asm_push_line(buf, od_mul3("add", 155, xa, 154))    // SUM
+            buf = kaxi_asm_push_line(buf, od_mul3("sub", 156, 155, xa))    // BB
+            buf = kaxi_asm_push_line(buf, od_mul3("sub", 157, 155, 156))   // SUM-BB
+            buf = kaxi_asm_push_line(buf, od_mul3("sub", 157, xa, 157))    // a-(SUM-BB)
+            buf = kaxi_asm_push_line(buf, od_mul3("sub", 158, 154, 156))   // b-BB
+            buf = kaxi_asm_push_line(buf, od_mul3("add", 60 + t + 1, 157, 158))  // e[t+1]
+            buf = kaxi_asm_push_line(buf, od_mul3("add", 154, 155, 59))    // S=SUM
+            t = t - 1
+        }
+        buf = kaxi_asm_push_line(buf, od_mul3("add", 60, 154, 59))         // e[0]=S
+        passn = passn + 1
+    }
+    // branchless VSEB over e[0..n-1] (r60..). EPS=r162, cnt=r200, f[]=r146..153
+    buf = kaxi_asm_push_line(buf, od_mul3("add", 162, 60, 59))
+    buf = kaxi_asm_push_line(buf, "load_imm r200, imm=0")
+    buf = kaxi_asm_push_line(buf, "load_imm r202, imm=1")
+    buf = kaxi_asm_push_line(buf, "load_imm r203, imm=0")
+    var jf: i64 = 0
+    while jf < 8 { buf = kaxi_asm_push_line(buf, od_mul3("add", 146 + jf, 59, 59)); jf = jf + 1 }
+    var st: i64 = 0
+    while st < n - 1 {
+        let ei1 = 61 + st
+        buf = kaxi_asm_push_line(buf, od_mul3("add", 159, 162, ei1))       // R=EPS+ei1
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 160, 159, 162))       // R-EPS
+        buf = kaxi_asm_push_line(buf, od_mul3("sub", 160, ei1, 160))       // ERR
+        buf = kaxi_asm_push_line(buf, "setp.ne p0, r160, r59, type=f64")
+        buf = kaxi_asm_push_line(buf, "selp r201, r202, r203, pred=p0")    // NZI
+        var jj2: i64 = 0
+        while jj2 < 8 {
+            buf = kaxi_asm_push_line(buf, "load_imm r204, imm=" + ptx_int_to_string(jj2))
+            buf = kaxi_asm_push_line(buf, "setp.eq p1, r204, r200")
+            buf = kaxi_asm_push_line(buf, "selp r161, r159, r" + ptx_int_to_string(146 + jj2) + ", pred=p0, type=f64")
+            buf = kaxi_asm_push_line(buf, "selp r" + ptx_int_to_string(146 + jj2) + ", r161, r" + ptx_int_to_string(146 + jj2) + ", pred=p1, type=f64")
+            jj2 = jj2 + 1
+        }
+        buf = kaxi_asm_push_line(buf, "add r200, r200, r201, var=+0%")
+        buf = kaxi_asm_push_line(buf, "selp r162, r160, r159, pred=p0, type=f64")
+        st = st + 1
+    }
+    var jt2: i64 = 0
+    while jt2 < 8 {
+        buf = kaxi_asm_push_line(buf, "load_imm r204, imm=" + ptx_int_to_string(jt2))
+        buf = kaxi_asm_push_line(buf, "setp.eq p1, r204, r200")
+        buf = kaxi_asm_push_line(buf, "selp r" + ptx_int_to_string(146 + jt2) + ", r162, r" + ptx_int_to_string(146 + jt2) + ", pred=p1, type=f64")
+        jt2 = jt2 + 1
+    }
+    var jsx: i64 = 0
+    while jsx < 8 {
+        buf = kaxi_asm_push_line(buf, "load_imm r3, imm=" + ptx_int_to_string(16 + jsx))
+        buf = kaxi_asm_push_line(buf, "add r4, r2, r3, var=+0%")
+        buf = kaxi_asm_push_line(buf, "store_global r" + ptx_int_to_string(146 + jsx) + ", addr=r4, type=f64")
+        jsx = jsx + 1
+    }
+    buf = kaxi_asm_push_line(buf, "ret")
+    buf
+}
+
 // f64 setp/selp probe: min(a,b) = a<b ? a : b. Validates mode-0 f64 setp/selp.
 pub fn kaxi_emit_od256_selp_probe_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     var buf: KaxiAsmBuf = kaxi_asm_new()
@@ -3852,6 +3992,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_octonion_assoc_norm_sum_asm()
     } else if str_eq(pattern, "od256_selp_probe") {
         buf = kaxi_emit_od256_selp_probe_asm()
+    } else if str_eq(pattern, "od256_mul") {
+        buf = kaxi_emit_od256_mul_asm()
     } else if str_eq(pattern, "od256_add") {
         buf = kaxi_emit_od256_add_asm()
     } else if str_eq(pattern, "od256_two_sum") {

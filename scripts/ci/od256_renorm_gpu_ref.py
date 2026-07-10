@@ -75,6 +75,28 @@ def od_add_gpu(a, b):
     # interleave + 2x VecSum + branchless VSEB (matches the emitted GPU kernel).
     return vseb_branchless(vecsum(vecsum(interleave(a, b))))
 
+def _split(x):
+    C = 134217729.0; c = C*x; d = c - x; hi = c - d
+    return hi, x - hi
+
+def _two_prod(a, b):                # Dekker (no FMA), matches dd64 / the GPU emit
+    p = a*b; ah, al = _split(a); bh, bl = _split(b)
+    return p, ((ah*bh - p) + ah*bl + al*bh) + al*bl
+
+def od_mul_gpu(a, b):
+    # 43 partial products two_prod(a[i],b[j]) for i+j<9 (rest < 2^-424), bucket
+    # order -> 3x VecSum -> branchless VSEB. Matches the emitted GPU kernel.
+    terms = []
+    for s in range(9):
+        for i in range(K):
+            j = s - i
+            if 0 <= j < K:
+                p, e = _two_prod(a[i], b[j]); terms.append(p); terms.append(e)
+    c = terms
+    for _ in range(3):
+        c = vecsum(c)
+    return vseb_branchless(c)
+
 def _grow_norm(terms):             # exact accumulate -> clean 8-limb od256
     e = []
     for t in terms:
@@ -111,6 +133,18 @@ if __name__ == "__main__":
             worst = min(worst, 999.0 if r == 0 else float(-log(r, 2)))
     print(f"branchless SELP-VSEB vs branchy: {N-mismatch}/{N} bit-identical")
     print(f"od_add branchless renorm: worst {worst:.1f} effective bits over {N}")
-    ok = mismatch == 0 and worst >= 400
-    print("GATE:", "PASS" if ok else "FAIL", "(bit-identical + >=400 bits)")
+    # od_mul design gate
+    rng2 = random.Random(21); worst_m = 999.0
+    for _ in range(2000):
+        va = mpf(rng2.getrandbits(420)) / mpf(2)**rng2.randint(-30, 30) * (1 if rng2.random() < .5 else -1)
+        vb = mpf(rng2.getrandbits(420)) / mpf(2)**rng2.randint(-30, 30) * (1 if rng2.random() < .5 else -1)
+        a = _split_mpf(va); b = _split_mpf(vb)
+        approx = sum(mpf(x) for x in od_mul_gpu(a, b))
+        true = (sum(mpf(x) for x in a)) * (sum(mpf(x) for x in b))
+        if true != 0:
+            r = fabs((approx - true) / true)
+            worst_m = min(worst_m, 999.0 if r == 0 else float(-log(r, 2)))
+    print(f"od_mul (43 two_prod + 3x VecSum + VSEB): worst {worst_m:.1f} effective bits")
+    ok = mismatch == 0 and worst >= 400 and worst_m >= 400
+    print("GATE:", "PASS" if ok else "FAIL", "(bit-identical + add/mul >=400 bits)")
     raise SystemExit(0 if ok else 1)

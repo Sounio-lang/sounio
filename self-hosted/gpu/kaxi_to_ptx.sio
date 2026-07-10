@@ -1499,6 +1499,55 @@ fn kaxi_lower_simple(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64)
 
 // ----- unified transpiler -------------------------------------------
 
+// Max f64 register number used across all `type=f64` lines of the K-AXI asm.
+// Used to size the `.reg .f64 %fd<N>` declaration dynamically (patterns with no
+// f64 lines / all regs <70 keep the historical %fd<70>; f64-heavy kernels like
+// od256_mul get more). A register token is 'r' + digits preceded by a non-letter.
+pub fn kaxi_max_f64_reg(asm: KaxiAsmBuf) -> i64 with Mut, Panic {
+    var maxreg: i64 = 0
+    var line_start: i64 = 0
+    var i: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                if kaxi_line_has_type_f64(asm, line_start, line_len) {
+                    var pos: i64 = line_start
+                    let line_end = line_start + line_len
+                    while pos < line_end {
+                        let ch = asm.data[pos as usize] as i8
+                        if ch == 114 {
+                            let prevok = if pos == line_start { true } else {
+                                let pc = asm.data[(pos - 1) as usize] as i8
+                                !((pc >= 97 && pc <= 122) || (pc >= 65 && pc <= 90))
+                            }
+                            let nextok = if pos + 1 < line_end {
+                                let nc = asm.data[(pos + 1) as usize] as i8
+                                nc >= 48 && nc <= 57
+                            } else { false }
+                            if prevok && nextok {
+                                var q: i64 = pos + 1
+                                var num: i64 = 0
+                                while q < line_end {
+                                    let d = asm.data[q as usize] as i8
+                                    if d >= 48 && d <= 57 { num = num * 10 + (d - 48) as i64; q = q + 1 } else { break }
+                                }
+                                if num > maxreg { maxreg = num }
+                                pos = q
+                            } else { pos = pos + 1 }
+                        } else { pos = pos + 1 }
+                    }
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    maxreg
+}
+
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
     // Phase G: heap-string accumulator (was: stack-allocated KaxiAsmBuf,
     // 64K hard cap that broke sedenion_mul in epistemic / f32_epistemic).
@@ -1535,7 +1584,9 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         // value lane). %fd stays at <70> — no f64 patterns reach that high.
         // M4: %f<260> for typed f32 path; %r<260> for typed i32 path.
         out = out + "    .reg .b64 %rd<260>;\n"
-        out = out + "    .reg .f64 %fd<70>;\n"
+        let fdmax = kaxi_max_f64_reg(asm)
+        let fdcount = if fdmax + 1 > 70 { fdmax + 1 } else { 70 }
+        out = out + "    .reg .f64 %fd<" + ptx_int_to_string(fdcount) + ">;\n"
         out = out + "    .reg .f32 %f<260>;\n"
         out = out + "    .reg .b32 %r<260>;\n"
         out = out + "    .reg .pred %p<64>;\n\n"
