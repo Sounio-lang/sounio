@@ -1362,4 +1362,116 @@ theorem P_eq_of_xor (bits l u c r : Nat) (h1 : c ^^^ (l ^^^ u) = r) :
   rcases cdSigma_pm bits l r with a3|a3 <;> rcases cdSigma_pm bits u r with a4|a4 <;>
     rw [a1, a2, a3, a4] <;> decide
 
+/-- **On-seam corner `P(l) = -1`** for the `u = top` pair.  The orbit `{l, top}` has low rep `l`,
+    excluded from `edge_m_eq_H`; here `σ(l,l)σ(top,l)σ(l,top)σ(top,top) = (-1)(-1)(1)(-1) = -1`. -/
+theorem P_corner_l (bits l : Nat) (hb : 2 ≤ bits) (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) :
+    cdSigma l l bits * cdSigma (2 ^ (bits-1)) l bits
+        * cdSigma l (l ^^^ (l ^^^ 2 ^ (bits-1))) bits
+        * cdSigma (2 ^ (bits-1)) (l ^^^ (l ^^^ 2 ^ (bits-1))) bits = -1 := by
+  have hbb1 : bits - 2 + 1 = bits - 1 := by omega
+  have hbb2 : bits - 2 + 2 = bits := by omega
+  have htop1 : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos _
+  have hpow : 2 ^ bits = 2 ^ (bits-1) * 2 := by
+    have hps : 2 ^ ((bits-1)+1) = 2 ^ (bits-1) * 2 := Nat.pow_succ 2 (bits-1)
+    rw [Nat.sub_add_cancel (show 1 ≤ bits by omega)] at hps; exact hps
+  have hlbits : l < 2 ^ bits := by omega
+  have htopbits : 2 ^ (bits-1) < 2 ^ bits := by omega
+  have hidx : l ^^^ (l ^^^ 2 ^ (bits-1)) = 2 ^ (bits-1) := by
+    rw [← Nat.xor_assoc l l (2 ^ (bits-1)), Nat.xor_self, Nat.zero_xor]
+  rw [hidx]
+  have e2 : cdSigma (2 ^ (bits-1)) l bits = -1 := by
+    have h := cdSigma_hi_lo (bits-2) 0 l (Nat.two_pow_pos _) hl1 (by rw [hbb1]; exact hl)
+    rw [hbb1, hbb2, Nat.add_zero, cdSigma_zero_left (bits-1) l (by omega)] at h
+    exact h
+  have e3 : cdSigma l (2 ^ (bits-1)) bits = 1 := by
+    have h := cdSigma_lo_hi (bits-2) 0 l (Nat.two_pow_pos _) hl1 (by rw [hbb1]; exact hl)
+    rw [hbb1, hbb2, Nat.add_zero, cdSigma_zero_left (bits-1) l (by omega)] at h
+    exact h
+  rw [cdSigma_diag bits l hl1 hlbits, e2, e3, cdSigma_diag bits (2 ^ (bits-1)) htop1 htopbits]
+  decide
+
+/-- Both indices above the seam ⟹ their XOR falls below it: `2^k ≤ a,d < 2^k+2^k → a⊕d < 2^k`. -/
+theorem xor_high_high_lt (k a d : Nat) (hak : 2 ^ k ≤ a) (hal : a < 2 ^ k + 2 ^ k)
+    (hdk : 2 ^ k ≤ d) (hdl : d < 2 ^ k + 2 ^ k) : a ^^^ d < 2 ^ k := by
+  obtain ⟨aLo, haLo, rfl⟩ : ∃ x, x < 2 ^ k ∧ a = 2 ^ k + x := ⟨a - 2 ^ k, by omega, by omega⟩
+  obtain ⟨dLo, hdLo, rfl⟩ : ∃ x, x < 2 ^ k ∧ d = 2 ^ k + x := ⟨d - 2 ^ k, by omega, by omega⟩
+  rw [← two_pow_xor_eq_add k aLo haLo, ← two_pow_xor_eq_add k dLo hdLo, xor_cross_cancel]
+  exact Nat.xor_lt_two_pow haLo hdLo
+
+/-- **On-seam ⟹ `P(r) = -1` for every low index `r < top`.**  The three low reps split into the
+    corners `r=0` (`P0_neg_of_onSeam`), `r=l` in the `u=top` case (`P_corner_l`), and the generic
+    edge (`edge_m_eq_H` / `edge_m_eq_H_plus_l`).  No `native_decide`. -/
+theorem P_low_neg (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hon : offSeam bits l u = false) (r : Nat) (hr : r < 2 ^ (bits-1)) :
+    cdSigma l r bits * cdSigma u r bits
+        * cdSigma l (r ^^^ (l ^^^ u)) bits * cdSigma u (r ^^^ (l ^^^ u)) bits = -1 := by
+  have hk1 : bits - 1 + 1 = bits := by omega
+  have hon' : u = 2 ^ (bits-1) ∨ l ^^^ u = 2 ^ (bits-1) := by
+    simp only [offSeam] at hon
+    have hcond : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) = true := by
+      cases hx : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) with
+      | true => rfl
+      | false => rw [hx] at hon; exact absurd hon (by decide)
+    rw [Bool.or_eq_true, beq_iff_eq, beq_iff_eq] at hcond
+    exact hcond
+  by_cases hr0 : r = 0
+  · subst hr0
+    rw [Nat.zero_xor]
+    exact P0_neg_of_onSeam bits l u (by omega) hl1 hl hu1 hu hon
+  · have hr1 : 1 ≤ r := by omega
+    rcases hon' with hutop | hdtop
+    · subst hutop
+      by_cases hrl : r = l
+      · rw [hrl]
+        exact P_corner_l bits l (by omega) hl1 hl
+      · rw [P_eq_fVal l (2 ^ (bits-1)) r bits]
+        have H := edge_m_eq_H (bits-1) l r hl1 hl hr1 hr hrl
+        rw [hk1] at H
+        exact H
+    · have h1 : u = l ^^^ 2 ^ (bits-1) := by
+        rw [← hdtop, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+      have hu_eq : u = 2 ^ (bits-1) + l := by
+        rw [h1, Nat.xor_comm l (2 ^ (bits-1)), two_pow_xor_eq_add (bits-1) l hl]
+      subst hu_eq
+      rw [P_eq_fVal l (2 ^ (bits-1) + l) r bits]
+      have H := edge_m_eq_H_plus_l (bits-1) l r hl1 hl hr1 hr
+      rw [hk1] at H
+      exact H
+
+/-- **On-seam ⟹ `∀c P(c) = -1`.**  Every `c` reduces (via the orbit involution `P_eq_of_xor`) to a low
+    rep `< top`: if `c` is already low use it; otherwise `c` and `d=l⊕u` both sit above the seam so
+    `c⊕d < top` (`xor_high_high_lt`).  Then `P_low_neg`. -/
+theorem on_seam_P_neg (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hon : offSeam bits l u = false) (c : Nat) (hc : c < 2 ^ bits) :
+    cdSigma l c bits * cdSigma u c bits
+        * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits = -1 := by
+  have htop1 : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos _
+  have hpow : 2 ^ bits = 2 ^ (bits-1) * 2 := by
+    have hps : 2 ^ ((bits-1)+1) = 2 ^ (bits-1) * 2 := Nat.pow_succ 2 (bits-1)
+    rw [Nat.sub_add_cancel (show 1 ≤ bits by omega)] at hps; exact hps
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := by omega
+  have hlt : l < 2 ^ bits := by omega
+  have hon' : u = 2 ^ (bits-1) ∨ l ^^^ u = 2 ^ (bits-1) := by
+    simp only [offSeam] at hon
+    have hcond : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) = true := by
+      cases hx : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) with
+      | true => rfl
+      | false => rw [hx] at hon; exact absurd hon (by decide)
+    rw [Bool.or_eq_true, beq_iff_eq, beq_iff_eq] at hcond
+    exact hcond
+  have hdlt : l ^^^ u < 2 ^ bits := Nat.xor_lt_two_pow hlt hu
+  have hdhi : 2 ^ (bits-1) ≤ l ^^^ u := by
+    rcases hon' with h|h
+    · rw [h, Nat.xor_comm l (2 ^ (bits-1)), two_pow_xor_eq_add (bits-1) l hl]; omega
+    · exact Nat.le_of_eq h.symm
+  by_cases hlow : c < 2 ^ (bits-1)
+  · exact P_low_neg bits l u hb hl1 hl hu1 hu hon c hlow
+  · have hchi : 2 ^ (bits-1) ≤ c := by omega
+    have hr_lt : c ^^^ (l ^^^ u) < 2 ^ (bits-1) :=
+      xor_high_high_lt (bits-1) c (l ^^^ u) hchi (by omega) hdhi (by omega)
+    rw [P_eq_of_xor bits l u c (c ^^^ (l ^^^ u)) rfl]
+    exact P_low_neg bits l u hb hl1 hl hu1 hu hon (c ^^^ (l ^^^ u)) hr_lt
+
 end SounioCDConverse
