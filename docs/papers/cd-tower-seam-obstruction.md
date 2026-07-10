@@ -1,9 +1,9 @@
 <!-- docs:meta
 topic_id: repo.docs.papers.cd-tower-seam-obstruction
 authority: repo_only
-audience: researchers
-last_validated: 2026-07-10
-validated_by: claude-opus-4-8
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.cd-tower-seam-obstruction
 -->
 
