@@ -1336,12 +1336,12 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
-// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id.
+// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id without
+// passing the boxed IrInstr by value through the bootstrap compiler.
 // Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
-// callee symbol at the current fn_id when instr.name is empty.
-fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
-    let old_id = instr.fn_id
-    var resolve_name = instr.name
+// callee symbol at the current fn_id when instr_name is empty.
+fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
+    var resolve_name = instr_name
     if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
         resolve_name = (*module).functions[old_id as usize].name
     }
@@ -1374,9 +1374,12 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
         while ii < (*module).functions[fi as usize].instr_count {
             let op = (*module).functions[fi as usize].instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(
+                let cur_fn = (*module).functions[fi as usize].instrs[ii as usize].fn_id
+                let cur_nm = (*module).functions[fi as usize].instrs[ii as usize].name
+                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_call_target_fields(
                     module,
-                    (*module).functions[fi as usize].instrs[ii as usize]
+                    cur_fn,
+                    cur_nm
                 )
             }
             ii = ii + 1
@@ -4891,18 +4894,10 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         ir_module_dump_merge_calls(&(*module_box))
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
-        print("DUMPALL: pre_finalize\n")
-        ir_module_dump_all_calls_diag(&(*module_box))
-    }
     // WP-A11: finalize + restore in place on the Box pointee (was *module_box by-value
     // deref + merged_module stack local + 5 internal copies -> ~18GB VM / OOM).
     ir_module_finalize_merged_calls_ip(&! (*module_box))
     ir_module_restore_user_main_calls_ip(&! (*module_box), user_main_snapshot)
-    if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
-        print("DUMPALL: post_finalize\n")
-        ir_module_dump_all_calls_diag(&(*module_box))
-    }
     let fn_count = (*module_box).fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
