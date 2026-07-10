@@ -606,6 +606,49 @@ pub fn ptx_parse_fimm_hex(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> st
     ""
 }
 
+// Read 16 hex chars after "fimm64=" in a K-AXI line (IEEE-754 f64 bit pattern).
+// Returns "" if not found. Used by od256 / f64-immediate lowering (mode 0).
+pub fn ptx_parse_fimm64_hex(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    var pos: i64 = line_start
+    let end_pos = line_start + line_len
+    let needle = "fimm64="
+    let nlen = str_len(needle)
+    while pos + nlen <= end_pos {
+        var found = true
+        var ni: i64 = 0
+        while ni < nlen {
+            if asm.data[(pos + ni) as usize] as i8 != str_char_at(needle, ni) {
+                found = false
+            }
+            ni = ni + 1
+        }
+        if found {
+            pos = pos + nlen
+            var out_buf: KaxiAsmBuf = kaxi_asm_new()
+            var taken: i64 = 0
+            while taken < 16 && pos < end_pos {
+                let ch = asm.data[pos as usize] as i8
+                let is_digit = ch >= 48 && ch <= 57
+                let is_lo = ch >= 97 && ch <= 102
+                let is_hi = ch >= 65 && ch <= 70
+                if is_digit || is_lo || is_hi {
+                    out_buf = kaxi_asm_push_byte(out_buf, ch)
+                    pos = pos + 1
+                    taken = taken + 1
+                } else {
+                    break
+                }
+            }
+            if taken == 16 {
+                return kaxi_asm_to_string(out_buf)
+            }
+            return ""
+        }
+        pos = pos + 1
+    }
+    ""
+}
+
 fn ptx_parse_setp_cmp(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
     if line_len > 7 {
         let c0 = asm.data[(line_start + 5) as usize] as i8
@@ -1261,11 +1304,20 @@ fn kaxi_lower_load_imm(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i6
 }
 
 fn kaxi_lower_load_immf(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
-    // load_immf rD, fimm=HEX — only present in f32-family dialects (2/3/4).
-    if mode == 0 || mode == 1 { return "" }
+    // load_immf rD, fimm=HEX (f32, dialects 2/3/4) OR fimm64=HEX16 (f64, mode 0).
     let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    if dst < 0 { return "" }
+    // f64 immediate (mode 0): load_immf rD, fimm64=<16 hex> -> mov.f64 %fd, 0d...
+    if mode == 0 {
+        let hex64 = ptx_parse_fimm64_hex(asm, line_start, line_len)
+        if str_len(hex64) == 16 {
+            return "    mov.f64 " + fd(dst) + ", 0d" + hex64 + ";\n"
+        }
+        return ""
+    }
+    if mode == 1 { return "" }
     let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
-    if dst < 0 || str_len(hex) != 8 { return "" }
+    if str_len(hex) != 8 { return "" }
     if mode == 2 || mode == 3 || mode == 5 {
         return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
     }
@@ -1292,8 +1344,16 @@ fn kaxi_lower_load(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -
     // `load_imm`, which (by accident-of-parsing) finds "imm=" inside "fimm=N"
     // and parses N as integer. Replicate that so C.3 can stub the old
     // handlers without breaking byte-identity.
-    if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 && mode >= 2 {
-        return kaxi_lower_load_immf(asm, line_start, line_len, mode)
+    if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
+        if mode >= 2 {
+            return kaxi_lower_load_immf(asm, line_start, line_len, mode)
+        }
+        if mode == 0 {
+            // f64 immediate (fimm64=): route to load_immf; fall back to
+            // load_imm (integer parse of fimm=) when no fimm64 is present.
+            let r64 = kaxi_lower_load_immf(asm, line_start, line_len, mode)
+            if str_len(r64) > 0 { return r64 }
+        }
     }
     kaxi_lower_load_imm(asm, line_start, line_len, mode)
 }
