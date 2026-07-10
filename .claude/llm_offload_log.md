@@ -2461,3 +2461,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Providers: xai/grok-4.1 = DONE, 3/3 checks pass ("both-low a=4+l and both-high a=llo are non-exceptional; six branches + lt/ge symmetry cover every mixed pair in {1..7}; Q_base depends only on [propext, Quot.sound]"). zai = SKIP (unwired).
 - 2nd lens: Lean kernel #print axioms = [propext, Quot.sound] across Q_base/Q_all/seam_coincidence/converse_conjecture_proved — anchor removed, no native_decide in the ∀n chain.
 - Verdict: pass. Advisor also confirmed statement-identical Q_base (zero drift) + caught the stale "only member anchor-free" claim.
+
+## 2026-07-10 — M1 math-review: widen ZD characterization to full box
+- File: formal/lean4/SounioCDConverse.lean (P0_neg_general, hasXorAnnih_complete_full, isZD_eq_hasXorAnnih_full)
+- Task: verify P(0)=−1 sign algebra; a=0-vacuity argument; that offSeam correctly does NOT widen
+- Providers: xai/grok-4.1 = DONE, all 3 claims hold ("P0_neg_general sign algebra correct; a=0 corner provably empty for every distinct nonzero pair; offSeam stays a loHi device, widening sound"). (Grok garbled one line — said the 49 offSeam mismatches are 'inside loHi'; they are off-locus/both-low+both-high, as the manuscript states.) zai = SKIP (unwired).
+- 2nd lens: #print axioms = [propext, Quot.sound] on all three; dim-16 full-box native_decide regression isZD_eq_hasXorAnnih_box_16 passes; Python cross-check isZD==hasXorAnnih 0 mismatches to dim 64.
+- Verdict: pass. Advisor caught the manuscript full-box overclaim + reframed the target to isZD=hasXorAnnih (not isZD=offSeam).
