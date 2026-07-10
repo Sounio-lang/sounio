@@ -2,7 +2,7 @@
 topic_id: repo.docs.papers.cd-tower-seam-obstruction
 authority: repo_only
 audience: researchers
-last_validated: 2026-07-09
+last_validated: 2026-07-10
 validated_by: claude-opus-4-8
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.cd-tower-seam-obstruction
 -->
@@ -16,13 +16,16 @@ pairs `(l,u)` (`1 ≤ l < 2^{n-1} ≤ u < 2^n`), zero-division of `e_l + e_u` is
 **sign-cocycle predicate** on the multiplication cocycle `σ`. This paper does **not** claim the
 underlying *mathematical fact* as new: that these basis pairs are zero divisors, *with an explicit
 2-term annihilator*, is a proved general-`n` theorem (Moreno 1998; Biss–Dugger–Isaksen 2008). What is
-new here is (i) an **independent, machine-checked, Mathlib-free ∀n proof** of the converse
-`off-seam(l,u) ⟹ e_l+e_u is a 2-term zero divisor` **in exact integer σ-form** — an ordinary
-induction over the tower with an octonion base, kernel axioms `[propext, Quot.sound]` plus a single
-`native_decide` base anchor (`converse_holds` / `converse_conjecture_proved`); (ii) an `O(N)` decision
-reduction that pushes the cross-check to dimension `1024`; and (iii) a primary-source cross-check
-against Moreno's original annihilator. The σ-recursion machinery gives a *combinatorial* form of the
-Moreno/BDI statement — its own, self-contained proof in the Sounio convention, not a transcription.
+new here is (i) an **independent, machine-checked, Mathlib-free ∀n proof of the entire seam
+coincidence** `off-seam ⟺ 2-term zero divisor ⟺ XOR-winner ⟺ {L_l,L_u} ≠ 0` **in exact integer
+σ-form** (`seam_coincidence`: `isZD = offSeam ∧ hasXorAnnih = offSeam ∧ anti0 = ¬offSeam`, ∀ `bits≥4`
+on loHi) — both the converse (`off-seam ⟹ ZD`, an ordinary induction over the tower with an octonion
+base) and its forward obstruction (`on-seam ⟹ not a ZD`), plus the operator bridge, all with kernel
+axioms `[propext, Quot.sound]` plus a single `native_decide` octonion-base anchor; (ii) an `O(N)`
+decision reduction that pushes the cross-check to dimension `1024`; and (iii) a primary-source
+cross-check against Moreno's original annihilator. The σ-recursion machinery gives a *combinatorial*
+form of the Moreno/BDI statement — its own, self-contained proof in the Sounio convention, not a
+transcription.
 
 > **Core contract:** Exactness is a property of the computation, not of the number. Every claim below
 > is tagged as exactly one of: **proved** (Lean, no `sorry`, no Mathlib), **decided** (Lean
@@ -38,33 +41,33 @@ product index is the bitwise XOR `a⊕b`). Left multiplication `L_i(x) = e_i·x`
 lower×upper pairs is `{(l,u) : u = top or l⊕u = top}`; its complement is the **off-seam** set,
 `off-seam(l,u) := ¬(u = top ∨ l⊕u = top)`. The base identity `L_i² = −I` is `σ(i,j)·σ(i, i⊕j) = −1`.
 
-## 1. Three predicates and the status-tagged chain
+## 1. The predicates and the status-tagged coincidence
 
-Over the lower×upper locus we relate three predicates on `(l,u)` (`SounioCDTowerSeam.lean`,
+Over the lower×upper locus we relate four predicates on `(l,u)` (`SounioCDTowerSeam.lean`,
 `SounioCDConverse.lean`):
 
 - `offSeam(l,u)` — combinatorial (off the top seam).
 - `hasXorAnnih(l,u)` — **defined as** the existence of a **2-term** annihilator `e_a + s·e_b` with
   `a,b ≥ 1`; §2 shows this forces `b = a⊕(l⊕u)` and reduces to a four-sign condition.
 - `isZD(l,u)` — the brute search for a 2-term annihilator (`SounioCDTowerSeam.isZD`).
+- `anti0(l,u)` — the operator anticommutator vanishing, `{L_l, L_u} = 0` (`SounioCDTowerSeam.anti0`).
 
-The content is the chain `offSeam ⟺ hasXorAnnih ⟺ isZD`, each **link separately tagged**:
+The content is the coincidence `offSeam ⟺ hasXorAnnih ⟺ isZD ⟺ ¬anti0`. **Every link is now a proved
+∀n theorem** on the loHi locus (`bits ≥ 4`), bundled as `seam_coincidence`:
 
 | Link | Direction | Status |
 |---|---|---|
-| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n *modulo the `offSeam⟺anti0` bridge*** — the operator obstruction (`anti0 ⟹ ¬isZD`) is dimension-independent linear algebra given `L_i²=−I`, and that key lemma is now proved ∀n on the canonical Nat sign (`cdSigma_cocycle`, via the `sgn=cdSigma` bridge, §3), closing the representation gap; **but** the `¬offSeam ⟺ anti0` link is only **decided** n=4,5,6 (`coincidence_*`), *not* a ∀n theorem — so the isZD-level forward obstruction is not yet ∀n in the encoding |
-| `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, axioms `[propext, Quot.sound]`), on the domain `l,u < 2^bits`, `l ≠ u` — both hold on loHi |
-| `isZD ⟹ hasXorAnnih` | reduction (necessity) | **decided** n=4 (`xorAnnih_eq_isZD_16`); argument **Grok-verified** exhaustive *for 2-term factors* (§2) |
-| `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`, `∀ bits≥4` on loHi) — ordinary induction (`Q_all`; octonion base by `native_decide`; six exhaustive seam cases) composed with the BDI doubling recursion `converse_recursion'`; the file's `ConverseConjecture : Prop` is **discharged** by `converse_conjecture_proved`. Axioms `[propext, Quot.sound]` + the single k=3 base anchor. Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
+| `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`) — ordinary induction (`Q_all`; octonion base by `native_decide`; six exhaustive seam cases) + the BDI doubling recursion `converse_recursion'`; discharges `ConverseConjecture` (`converse_conjecture_proved`). Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
+| `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, on `l,u < 2^bits`, `l ≠ u`) |
+| `isZD ⟹ hasXorAnnih` | reduction (necessity) | **proved ∀n** (`hasXorAnnih_complete`) — the reverse reduction `annih_forces` (any 2-term annihilator forces `b=a⊕(l⊕u)` and the four-sign winner, axioms `[propext, Quot.sound]`), with the `a=0`/`{0,d}`-orbit corner (`P0_neg_of_onSeam`) routed through `converse_holds`. Upgrades the old n=4 anchor; `xorAnnih_eq_isZD_all` gives the full `hasXorAnnih == isZD` on loHi ∀n |
+| `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** (`isZD_eq_offSeam`) — on-seam pairs have no XOR-winner (`hasXorAnnih_false_of_onSeam`, every orbit loses via the edge lemmas) composed with `hasXorAnnih_complete`. A purely combinatorial route (no operator/`anti0` detour needed) |
+| `anti0 ⟺ ¬offSeam` | operator bridge | **proved ∀n** (`seam_eq_anti0`) — via the identity `Q(c)=P(c)` (the anticommutator four-sign product equals the converse winner product, two `cdSigma_cocycle` rewrites), so the operator condition reduces to the same `P`-analysis. Generalizes `coincidence_16/32` to all n (`anti0_eq_offSeam_all`) |
 
-Composing the two ∀n links `offSeam ⟹ hasXorAnnih ⟹ isZD` gives **`offSeam ⟹ isZD` proved ∀n** on the
-loHi locus (`bits ≥ 4`): every off-seam lower×upper basis pair is a 2-term zero divisor, at every
-Cayley–Dickson level. Note the two blocking overclaims we still explicitly avoid: (a) we make **no**
-claim about zero divisors with annihilators of length `> 2` — every predicate above is about 2-term
-factors by definition; and (b) the *necessity* direction `isZD ⟹ hasXorAnnih` remains **decided at
-n=4** (Grok-verified exhaustive for 2-term factors), so `hasXorAnnih ⟺ isZD` is a chain of tagged
-links, not a single ∀n biconditional — but the converse implication we set out to establish is now a
-theorem.
+All links carry axioms `[propext, Quot.sound]` plus the single inherited k=3 octonion `native_decide`
+base anchor. `seam_coincidence` states the four-way identity as one theorem: `isZD = offSeam ∧
+hasXorAnnih = offSeam ∧ anti0 = ¬offSeam`, ∀ bits≥4 on loHi. The one overclaim we still avoid: **no**
+claim about zero divisors with annihilators of length `> 2` — every predicate here is about 2-term
+factors by definition (Grok-verified exhaustive for 2-term factors, §2).
 
 ## 2. The 2-term reduction (the crux, in exact σ-form)
 
@@ -107,9 +110,9 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   `xorL_bitsOf`, `isZ_bitsOf`; all axioms `[propext, Quot.sound]`), generalizing the n=4,5
   `native_decide` anchors `agree4/agree5`. Hence **`cdSigma_cocycle` — `L_i²=−I` on the canonical Nat
   sign `cdSigma`, for all n** (`∀ n i j, i<2^n → j<2^n → i≠0 → cdSigma i j n · cdSigma i (i⊕j) n = −1`).
-  The **representation gap is closed**: the cocycle lemma `L_i²=−I` — the ∀n input to the §1 forward
-  obstruction — is now unconditional on `cdSigma` for all n. (The remaining fixed-n piece of that
-  forward obstruction is the `¬offSeam ⟺ anti0` bridge, `native_decide`'d n≤6 — see the §1 table.)
+  The **representation gap is closed**: the cocycle lemma `L_i²=−I` is unconditional on `cdSigma` for
+  all n, and (see below) the `¬offSeam ⟺ anti0` operator bridge is now **also proved ∀n**
+  (`seam_eq_anti0`), so the forward obstruction `¬offSeam ⟹ ¬isZD` is a ∀n theorem (`isZD_eq_offSeam`).
 - **Reduction sufficiency `hasXorAnnih ⟹ isZD` — proved ∀n** (`hasXorAnnih_sound`, Mathlib-free, no
   `sorry`/`native_decide`; axioms `[propext, Quot.sound]`), on `l,u < 2^bits`, `l ≠ u`. From a
   `hasXorAnnih` witness `a` it constructs the explicit `isZD` certificate — the XOR-linked pair
@@ -128,8 +131,26 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   explicit witness `a=m_lo` (`mixed_witness_disagree`). The doubling step `P_(l,u)(a)=−P_(l,u_lo)(a)`
   (`converse_recursion'`, unconditional via the proved `cdAntisym_all`) turns a downstairs disagreeing
   orbit into an upstairs `hasXorAnnih` winner.
+- **Reduction necessity `isZD ⟹ hasXorAnnih` — proved ∀n** (`hasXorAnnih_complete`, loHi, `bits≥4`).
+  The core is `annih_forces` (axioms `[propext, Quot.sound]`, no native anchor): *any* 2-term
+  annihilator `(a,b,s)` forces `b = a⊕(l⊕u)` and the four-sign winner product `= +1` — the reverse of
+  `hasXorAnnih_sound`. Subtlety handled: the brute `isZD` admits an `a=0` factor `1+s·e_d` on the
+  `{0,d}` orbit that `hasXorAnnih` excludes; on-seam it cannot annihilate (`P0_neg_of_onSeam`), off-seam
+  `converse_holds` supplies the real winner. `xorAnnih_eq_isZD_all` then gives the full
+  `hasXorAnnih == isZD` on loHi for all n (generalizing the n=4 anchor `xorAnnih_eq_isZD_16`).
+- **Forward obstruction `¬offSeam ⟹ ¬isZD` — proved ∀n** (`isZD_eq_offSeam`, in fact `isZD = offSeam`
+  on loHi ∀ `bits≥4`). On-seam pairs have no XOR-winner (`hasXorAnnih_false_of_onSeam`: every orbit
+  loses, via the edge lemmas + `P0_neg_of_onSeam`), composed with `hasXorAnnih_complete`. A purely
+  combinatorial route — no operator/`anti0` detour.
+- **Operator bridge `anti0 ⟺ ¬offSeam` — proved ∀n** (`seam_eq_anti0`; `anti0_eq_offSeam_all` over
+  `loHi`). Key identity `anti0_QP`: the anticommutator four-sign product `Q(c)` equals the converse
+  winner product `P(c)` (two `cdSigma_cocycle` rewrites), so `{L_l,L_u}=0 ⟺ ∀c P(c)=−1 ⟺ ¬offSeam`
+  reuses the converse `P`-analysis wholesale. Generalizes `coincidence_16/32` to all n.
+- **The full coincidence — `seam_coincidence`:** `isZD = offSeam ∧ hasXorAnnih = offSeam ∧
+  anti0 = ¬offSeam`, one theorem, ∀ `bits≥4` on loHi, axioms `[propext, Quot.sound]` + the single k=3 base.
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
-  `xorAnnih_eq_isZD_16` (reduction == brute at n=4), all `native_decide`, no `sorry`.
+  `xorAnnih_eq_isZD_16`, `coincidence_16/32` (now all superseded ∀n by the theorems above but retained
+  as fast regressions), `native_decide`, no `sorry`.
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
   annihilated by `e₁₅−e₄`, discharged via `annih` (`l=1,u=10,a=15,b=4,s=−1`; note `4 = 15⊕11`,
   i.e. `b=a⊕d` — the XOR link appears literally in the 1998 source).
@@ -158,26 +179,26 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 
 - **Proved (∀n):** `e_i²=−1`; **`L_i²=−I` and basis-unit anticommutation** — on the bit-list sign
   (`Lsq`, `antisym`, `cocycle_bundle`) **and on the canonical Nat sign** (`cdSigma_cocycle`, via the
-  proved `sgn = cdSigma` bridge); the reduction sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`,
-  on `l,u < 2^bits`, `l ≠ u`); the cocycle lemma `L_i²=−I` unconditional on `cdSigma` (the ∀n input to
-  the §1 forward obstruction — whose `offSeam⟺anti0` bridge stays decided n≤6, so `¬offSeam ⟹ ¬isZD`
-  itself is *not* listed here as ∀n); and — **new — the converse proper `offSeam ⟹ hasXorAnnih`** (`converse_holds`) and its composite
-  `converse_conjecture_proved : ConverseConjecture` (⟹ `isZD`), on the loHi locus for all `bits ≥ 4`.
-  Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion `native_decide` base anchor
-  in the converse proof.
-- **Decided (fixed n):** the *necessity* direction `isZD ⟹ hasXorAnnih` (`xorAnnih_eq_isZD_16`, n=4);
-  the forward-obstruction `¬offSeam ⟺ anti0 ⟺ ¬isZD` seam coincidence n=4,5,6 (`coincidence_*`);
-  Moreno's example.
+  proved `sgn = cdSigma` bridge). And — on the loHi locus for all `bits ≥ 4` — **the entire seam
+  coincidence** (`seam_coincidence`: `isZD = offSeam ∧ hasXorAnnih = offSeam ∧ anti0 = ¬offSeam`), i.e.
+  all four links: the converse `offSeam ⟹ hasXorAnnih` (`converse_holds`, discharging
+  `ConverseConjecture`), sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`), necessity
+  `isZD ⟹ hasXorAnnih` (`hasXorAnnih_complete`, via `annih_forces`), the forward obstruction
+  `¬offSeam ⟹ ¬isZD` (`isZD_eq_offSeam`), and the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`,
+  via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion
+  `native_decide` base anchor (inherited from the converse's octonion base).
+- **Decided (fixed n), retained as fast regressions (all superseded ∀n above):** `xorAnnih_eq_isZD_16`
+  (necessity n=4); `coincidence_16/32` (the seam coincidence n=4,5,6); Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
-  cross-check of a proved theorem, not the evidence base.
+  cross-check of proved theorems, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
-  (Moreno Thm 2.9; BDI Prop 11.1) — our `converse_holds` now supplies an *independent, machine-checked*
-  proof of the same statement in the Sounio convention.
-- **Still open in this encoding:** the *closed-form* off-seam⟺criterion identity (possibly Zhilina);
-  the necessity direction `isZD ⟹ hasXorAnnih` as a ∀n theorem (currently decided n=4, Grok-verified
-  exhaustive for 2-term factors); and the unchecked Moreno seam-index correspondence (§4). Note
-  `ConverseConjecture` — the conjecture this file was built around — is **no longer open**; it is a
-  theorem (`converse_conjecture_proved`).
+  (Moreno Thm 2.9; BDI Prop 11.1) — our `seam_coincidence` now supplies an *independent, machine-checked*
+  proof of the same statement (and its converse) in the Sounio convention.
+- **Still open in this encoding:** the *closed-form* off-seam⟺criterion identity in the published
+  literature's own framing (possibly Zhilina); and the unchecked Moreno seam-index correspondence (§4)
+  — a caveat about matching *their* operator pair, not a gap in our proofs. `ConverseConjecture` — the
+  conjecture this file was built around — is a theorem (`converse_conjecture_proved`), and the seam
+  coincidence it sits inside is now fully closed ∀n on loHi.
 
 ## 6. Reproduce, and the next formal step
 
@@ -188,12 +209,13 @@ python3 scripts/research/cd_tower_converse_probe.py     # validate O(N) vs brute
 python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
 ```
 
-**Done:** `hasXorAnnih ⟹ isZD` proved ∀n (`hasXorAnnih_sound`); **Door 1 — `L_i²=−I` + `antisym`
-proved ∀n** (`cocycle_bundle`); the **`sgn = cdSigma` bridge + `cdSigma_cocycle` proved ∀n**, so the
-cocycle-lemma input to the forward obstruction is unconditional on the canonical `cdSigma` (its
-`offSeam⟺anti0` bridge stays decided n≤6, §1); and — **the converse proper
-`offSeam ⟹ hasXorAnnih` now proved ∀n** (`converse_holds`), discharging `ConverseConjecture`
-(`converse_conjecture_proved`). The former "single remaining open theorem" is closed.
+**Done — the seam coincidence is fully closed ∀n on loHi** (`seam_coincidence`): `Door 1 — L_i²=−I +
+antisym` proved ∀n (`cocycle_bundle`) on both `sgn` and canonical `cdSigma`; the converse
+`offSeam ⟹ hasXorAnnih` (`converse_holds`, discharging `ConverseConjecture`); sufficiency
+`hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`); necessity `isZD ⟹ hasXorAnnih` (`hasXorAnnih_complete`,
+via the reverse reduction `annih_forces`); the forward obstruction `¬offSeam ⟹ ¬isZD`
+(`isZD_eq_offSeam`); and the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`, via `Q(c)=P(c)`).
+Every "single remaining open theorem" of the earlier drafts is now closed.
 
 The engine is the counting statement `Q` on the sign cocycle
 (`scripts/research/cd_tower_converse_counting.py`), now a **theorem** (`Q_all`): *every
