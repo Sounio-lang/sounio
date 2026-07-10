@@ -1034,4 +1034,32 @@ theorem converse_conjecture_proved : ConverseConjecture := by
   · rw [Bool.not_eq_true] at hoff
     rw [hoff]; rfl
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- TARGET 1 (necessity): isZD ⟹ hasXorAnnih on the loHi locus, ∀ bits ≥ 4.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **High×pure-seam branch of the CD sign**: `cdSigma (2^(n+1)+uL) (2^(n+1)) = -1`.  The right index is
+    the pure seam bit `2^(n+1)` (so `bLo = 0`); the both-high branch takes `- cdSigma 0 uL (n+1) = -1`.
+    Definitional + `cdSigma_zero_left`; no cocycle input.  (Cross-checked `#eval`: `-1` for all `uL`.) -/
+theorem cdSigma_hi_pow (n uL : Nat) (huL : uL < 2 ^ (n+1)) :
+    cdSigma (2 ^ (n+1) + uL) (2 ^ (n+1)) (n+2) = -1 := by
+  have hpos : 0 < 2 ^ (n+1) := Nat.two_pow_pos (n+1)
+  have hg : ¬ ((2 ^ (n+1) + uL) == 0 || (2 ^ (n+1)) == 0) = true := by
+    rw [Bool.or_eq_true]
+    rintro (h | h)
+    · exact absurd (eq_of_beq h) (by omega)
+    · exact absurd (eq_of_beq h) (by omega)
+  have hAhi : (2 ^ (n+1) + uL) ≥ 2 ^ (n+1) := by omega
+  have hBhi : (2 ^ (n+1)) ≥ 2 ^ (n+1) := by omega
+  have hmod1 : (2 ^ (n+1) + uL) % 2 ^ (n+1) = uL := by
+    rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt huL
+  have hmod2 : (2 ^ (n+1)) % 2 ^ (n+1) = 0 := Nat.mod_self _
+  have hstep : cdSigma (2 ^ (n+1) + uL) (2 ^ (n+1)) (n+2) = - cdSigma 0 uL (n+1) := by
+    rw [cdSigma]
+    rw [if_neg hg]
+    simp only [ge_iff_le, hAhi, hBhi, decide_true, Bool.not_true, Bool.and_false, Bool.false_and,
+      Bool.and_self, hmod1, hmod2]
+    rfl
+  rw [hstep, cdSigma_zero_left (n+1) uL (by omega)]
+
 end SounioCDConverse
