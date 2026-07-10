@@ -478,6 +478,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ops.foundry-slurm-handoff | repo_only | docs/ops/foundry_slurm_handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.168-theorem-preprint | repo_only | docs/papers/168-theorem-preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.arxiv-abstract | repo_only | docs/papers/arxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.cd-tower-seam-obstruction | repo_only | docs/papers/cd-tower-seam-obstruction.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.cover-letters.cp-cover-letter | repo_only | docs/papers/cover_letters/cp_cover_letter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.cover-letters.dissertation-committee-memo | repo_only | docs/papers/cover_letters/dissertation_committee_memo.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.cover-letters.popl-cover-letter | repo_only | docs/papers/cover_letters/popl_cover_letter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
