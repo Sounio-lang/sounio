@@ -966,7 +966,7 @@ fn compiler_bytes_contains(bytes: [i8; 65536], size: i64, needle: string) -> boo
     false
 }
 
-fn compiler_bytes_contains_seq_i64(bytes: [i8; 131072], size: i64, seq: [i64; 32], seq_len: i64) -> bool with Mut, Panic, Div {
+fn compiler_bytes_contains_seq_i64(cb: &CodeBuffer, size: i64, seq: [i64; 32], seq_len: i64) -> bool with Mut, Panic, Div {
     if seq_len <= 0 {
         return true
     }
@@ -979,7 +979,7 @@ fn compiler_bytes_contains_seq_i64(bytes: [i8; 131072], size: i64, seq: [i64; 32
         var j: i64 = 0
         var matched = true
         while j < seq_len {
-            if bytes[(i + j) as usize] != (seq[j as usize] as i8) {
+            if code_get(cb, i + j) != (seq[j as usize] as i8) {
                 matched = false
                 break
             }
@@ -5241,7 +5241,7 @@ fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool with Mut {
     if a.len != b.len { return false }
     var i: i64 = 0
     while i < a.len {
-        if compiler_main_native_byte_u8(a.bytes[i as usize]) != compiler_main_native_byte_u8(b.bytes[i as usize]) {
+        if compiler_main_native_byte_u8(code_get(&a, i)) != compiler_main_native_byte_u8(code_get(&b, i)) {
             return false
         }
         i = i + 1
@@ -5255,10 +5255,10 @@ fn compiler_main_native_find_pattern4(
     if buf.len < 4 { return -1 }
     var i: i64 = 0
     while i <= buf.len - 4 {
-        if compiler_main_native_byte_u8(buf.bytes[i as usize]) == b0 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 1) as usize]) == b1 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 2) as usize]) == b2 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 3) as usize]) == b3 {
+        if compiler_main_native_byte_u8(code_get(&buf, i)) == b0 &&
+           compiler_main_native_byte_u8(code_get(&buf, i + 1)) == b1 &&
+           compiler_main_native_byte_u8(code_get(&buf, i + 2)) == b2 &&
+           compiler_main_native_byte_u8(code_get(&buf, i + 3)) == b3 {
             return i
         }
         i = i + 1
@@ -5592,9 +5592,9 @@ fn compiler_main_test_prof_counter_inc_encoding() -> bool with Mut, Panic, Div, 
     lower_instr(&!nc, instr)
     // INC QWORD PTR [RIP+disp32]: 48 FF 05 <4 bytes disp32> = 7 bytes total
     if nc.code.len != 7 { return false }
-    if nc.code.bytes[0] != 0x48 as i8 { return false }
-    if nc.code.bytes[1] != 0xFF as i8 { return false }
-    if nc.code.bytes[2] != 0x05 as i8 { return false }
+    if code_get(&nc.code, 0) != 0x48 as i8 { return false }
+    if code_get(&nc.code, 1) != 0xFF as i8 { return false }
+    if code_get(&nc.code, 2) != 0x05 as i8 { return false }
     true
 }
 
@@ -5613,7 +5613,7 @@ fn compiler_main_test_prof_counter_reloc_recorded() -> bool with Mut, Panic, Div
 }
 
 // Sprint 46: verify __prof_dump function is emitted when prof_counter_count > 0
-fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div {
+fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     // Simulate: 1 prof counter with fn_name "test" at .rodata offset 0
     nc.prof_counter_count = 1
@@ -5631,12 +5631,12 @@ fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div {
     // Verify: code was emitted (prologue + at least one syscall + epilogue)
     if nc.code.len <= before_len { return false }
     // Verify: function ends with ret (0xC3)
-    if nc.code.bytes[(nc.code.len - 1) as usize] != 0xC3 as i8 { return false }
+    if code_get(&nc.code, nc.code.len - 1) != 0xC3 as i8 { return false }
     true
 }
 
 // Sprint 46: verify __prof_dump writes to stderr (fd=2) and records relocations
-fn compiler_main_test_prof_dump_writes_stderr() -> bool with Mut, Panic, Div {
+fn compiler_main_test_prof_dump_writes_stderr() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.prof_counter_count = 1
     nc.prof_counter_names[0] = 0
@@ -6145,7 +6145,7 @@ fn compiler_main_test_multipreg_spill_one() -> bool with Mut, Div, Panic {
 }
 
 // T34: prologue byte count == 12 with frame_size=0
-fn compiler_main_test_multipreg_prologue_bytes() -> bool with Mut, Panic, Div {
+fn compiler_main_test_multipreg_prologue_bytes() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_prologue(buf, 0)
     // push_r15(2)+push_r14(2)+push_r13(2)+push_r12(2)+push_rbp(1)+mov_rbp_rsp(3) = 12
@@ -6153,23 +6153,23 @@ fn compiler_main_test_multipreg_prologue_bytes() -> bool with Mut, Panic, Div {
 }
 
 // T35: prologue starts with push r15 (41 57) then push r14 (41 56)
-fn compiler_main_test_multipreg_prologue_prefix() -> bool with Mut, Panic, Div {
+fn compiler_main_test_multipreg_prologue_prefix() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_prologue(buf, 0)
-    if buf.bytes[0 as usize] != 0x41 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x57 as i8 { return false }  // push r15
-    if buf.bytes[2 as usize] != 0x41 as i8 { return false }
-    if buf.bytes[3 as usize] != 0x56 as i8 { return false }  // push r14
+    if code_get(&buf, 0) != 0x41 as i8 { return false }
+    if code_get(&buf, 1) != 0x57 as i8 { return false }  // push r15
+    if code_get(&buf, 2) != 0x41 as i8 { return false }
+    if code_get(&buf, 3) != 0x56 as i8 { return false }  // push r14
     true
 }
 
 // T36: epilogue byte count == 13; last byte == 0xC3 (RET)
-fn compiler_main_test_multipreg_epilogue_bytes() -> bool with Mut, Panic, Div {
+fn compiler_main_test_multipreg_epilogue_bytes() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_epilogue(buf)
     // mov_rsp_rbp(3)+pop_rbp(1)+pop_r12(2)+pop_r13(2)+pop_r14(2)+pop_r15(2)+ret(1) = 13
     if buf.len != 13 { return false }
-    if buf.bytes[12 as usize] != 0xC3 as i8 { return false }
+    if code_get(&buf, 12) != 0xC3 as i8 { return false }
     true
 }
 
@@ -6306,38 +6306,38 @@ fn compiler_main_test_disp8_no_fit_vreg16() -> bool {
 }
 
 // T52: emit_load_rbp_disp8_rax emits 4 bytes: 0x48 0x8B 0x45 0xF8 (disp=-8)
-fn compiler_main_test_disp8_load_bytes() -> bool with Mut, Panic, Div {
+fn compiler_main_test_disp8_load_bytes() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_load_rbp_disp8_rax(buf, -8)
     if buf.len != 4 { return false }
-    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x8b as i8 { return false }
-    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
-    if buf.bytes[3 as usize] != 0xf8 as i8 { return false }  // low8(-8) = 0xF8
+    if code_get(&buf, 0) != 0x48 as i8 { return false }
+    if code_get(&buf, 1) != 0x8b as i8 { return false }
+    if code_get(&buf, 2) != 0x45 as i8 { return false }
+    if code_get(&buf, 3) != 0xf8 as i8 { return false }  // low8(-8) = 0xF8
     true
 }
 
 // T53: emit_store_rax_rbp_disp8 emits 4 bytes: 0x48 0x89 0x45 0xF0 (disp=-16)
-fn compiler_main_test_disp8_store_bytes() -> bool with Mut, Panic, Div {
+fn compiler_main_test_disp8_store_bytes() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_store_rax_rbp_disp8(buf, -16)
     if buf.len != 4 { return false }
-    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x89 as i8 { return false }
-    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
-    if buf.bytes[3 as usize] != 0xf0 as i8 { return false }  // low8(-16) = 0xF0
+    if code_get(&buf, 0) != 0x48 as i8 { return false }
+    if code_get(&buf, 1) != 0x89 as i8 { return false }
+    if code_get(&buf, 2) != 0x45 as i8 { return false }
+    if code_get(&buf, 3) != 0xf0 as i8 { return false }  // low8(-16) = 0xF0
     true
 }
 
 // T54: emit_load_rbp_disp32_rax still emits 7 bytes (regression)
-fn compiler_main_test_disp32_load_len() -> bool with Mut, Panic, Div {
+fn compiler_main_test_disp32_load_len() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_load_rbp_disp32_rax(buf, -8)
     buf.len == 7
 }
 
 // T55: emit_store_rax_rbp_disp32 still emits 7 bytes (regression)
-fn compiler_main_test_disp32_store_len() -> bool with Mut, Panic, Div {
+fn compiler_main_test_disp32_store_len() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_store_rax_rbp_disp32(buf, -8)
     buf.len == 7
@@ -6441,7 +6441,7 @@ fn compiler_main_test_native_v2_shadow_contract_write() -> bool with IO, Mut, Pa
 // ============================================================================
 
 // T62: nc_min_frame_size returns 0 for empty function (reg_count=0)
-fn compiler_main_test_frame_trim_empty() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_empty() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     var func = ir_empty_function()
     func.reg_count = 0
@@ -6449,7 +6449,7 @@ fn compiler_main_test_frame_trim_empty() -> bool with Mut, Panic, Div {
 }
 
 // T63: nc_min_frame_size returns 0 when all vregs preg-allocated
-fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15   // r15
     nc.vreg_to_preg[1 as usize] = 14   // r14
@@ -6459,7 +6459,7 @@ fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div {
 }
 
 // T64: nc_min_frame_size returns 16 for 1 spilled vreg at index 0 (align16(8)=16)
-fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = -1   // RA_SPILLED
     var func = ir_empty_function()
@@ -6468,7 +6468,7 @@ fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div {
 }
 
 // T65: nc_min_frame_size returns 32 when highest stack vreg is index 3
-fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
     nc.vreg_to_preg[1 as usize] = 14   // preg-alloc
@@ -6480,7 +6480,7 @@ fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div {
 }
 
 // T66: nc_min_frame_size returns 16 when middle vreg is spilled, higher is preg-alloc
-fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
     nc.vreg_to_preg[1 as usize] = -1   // RA_SPILLED
@@ -6491,7 +6491,7 @@ fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div {
 }
 
 // T67: nc_min_frame_size returns 0 for 4 preg-alloc vregs (all 4 callee-saved registers used)
-fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15   // r15
     nc.vreg_to_preg[1 as usize] = 14   // r14
@@ -6503,7 +6503,7 @@ fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div {
 }
 
 // T68: nc_min_frame_size returns 48 for spilled vreg at index 4 (align16(40)=48)
-fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 14
@@ -6516,7 +6516,7 @@ fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div {
 }
 
 // T69: nc_min_frame_size handles param vreg (preg=-2 RA_UNASSIGNED) as needing stack slot
-fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
+fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = -2   // RA_UNASSIGNED (param)
     nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
@@ -6526,7 +6526,7 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut {
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
@@ -7575,16 +7575,16 @@ fn compiler_main_test_native_v2_machine_regalloc_uses_shared_order() -> bool wit
     saw_slot0 && saw_slot1
 }
 
-fn compiler_main_test_native_v2_frame_uses_allocated_callee_saved_only() -> bool with Mut, Panic, Div {
+fn compiler_main_test_native_v2_frame_uses_allocated_callee_saved_only() -> bool with Mut, Panic, Div, Alloc {
     let preg_mask = X86_ALLOCATABLE_R15_MASK() | X86_ALLOCATABLE_R13_MASK()
     let prologue = emit_prologue_with_preg_mask(code_buffer_new(), 0, preg_mask)
     let epilogue = emit_epilogue_with_preg_mask(code_buffer_new(), preg_mask)
     if prologue.len != 8 { return false }
-    if prologue.bytes[0 as usize] != (0x41 as i8) || prologue.bytes[1 as usize] != (0x57 as i8) { return false }
-    if prologue.bytes[2 as usize] != (0x41 as i8) || prologue.bytes[3 as usize] != (0x55 as i8) { return false }
+    if code_get(&prologue, 0) != (0x41 as i8) || code_get(&prologue, 1) != (0x57 as i8) { return false }
+    if code_get(&prologue, 2) != (0x41 as i8) || code_get(&prologue, 3) != (0x55 as i8) { return false }
     if epilogue.len != 9 { return false }
-    if epilogue.bytes[4 as usize] != (0x41 as i8) || epilogue.bytes[5 as usize] != (0x5D as i8) { return false }
-    if epilogue.bytes[6 as usize] != (0x41 as i8) || epilogue.bytes[7 as usize] != (0x5F as i8) { return false }
+    if code_get(&epilogue, 4) != (0x41 as i8) || code_get(&epilogue, 5) != (0x5D as i8) { return false }
+    if code_get(&epilogue, 6) != (0x41 as i8) || code_get(&epilogue, 7) != (0x5F as i8) { return false }
     true
 }
 
@@ -7834,7 +7834,7 @@ fn compiler_main_test_native_v2_alloc_slow_path_trap() -> bool with Mut, Panic, 
     seq[13] = 0x00
     seq[14] = 0x0F
     seq[15] = 0x05
-    compiler_bytes_contains_seq_i64(nc.code.bytes, nc.code.len, seq, 16)
+    compiler_bytes_contains_seq_i64(&nc.code, nc.code.len, seq, 16)
 }
 
 fn compiler_main_test_native_v2_runtime_context_handles() -> bool {
@@ -11878,14 +11878,14 @@ fn compiler_main_test_name_is_sqrt() -> bool with Mut, Panic, Div {
 }
 
 // T401: emit_sqrtsd_xmm0_xmm0 emits F2 0F 51 C0 (4 bytes)
-fn compiler_main_test_sqrtsd_encoding() -> bool with Mut, Panic, Div {
+fn compiler_main_test_sqrtsd_encoding() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     buf = emit_sqrtsd_xmm0_xmm0(buf)
     buf.len == 4
-        && buf.bytes[0] == (0xF2 as i8)
-        && buf.bytes[1] == (0x0F as i8)
-        && buf.bytes[2] == (0x51 as i8)
-        && buf.bytes[3] == (0xC0 as i8)
+        && code_get(&buf, 0) == (0xF2 as i8)
+        && code_get(&buf, 1) == (0x0F as i8)
+        && code_get(&buf, 2) == (0x51 as i8)
+        && code_get(&buf, 3) == (0xC0 as i8)
 }
 
 // T402: name_is_print_f64 recognizes "print_f64" and rejects non-matches
@@ -11918,7 +11918,7 @@ fn compiler_main_test_name_is_print_f64() -> bool with Mut, Panic, Div {
 }
 
 // T403: emit_builtin_print_f64 produces substantial code
-fn compiler_main_test_emit_print_f64_produces_code() -> bool with Mut, Panic, Div {
+fn compiler_main_test_emit_print_f64_produces_code() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let before_len = nc.code.len
     nc = emit_builtin_print_f64(nc)
@@ -12207,7 +12207,7 @@ fn compiler_main_test_name_is_log() -> bool with Mut, Div, Panic {
 }
 
 // T420: emit_builtin_exp produces >50 bytes of code
-fn compiler_main_test_emit_exp_produces_code() -> bool with Mut, Panic, Div {
+fn compiler_main_test_emit_exp_produces_code() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let before_len = nc.code.len
     nc = emit_builtin_exp(nc)
@@ -12216,7 +12216,7 @@ fn compiler_main_test_emit_exp_produces_code() -> bool with Mut, Panic, Div {
 }
 
 // T421: emit_builtin_log produces >50 bytes of code
-fn compiler_main_test_emit_log_produces_code() -> bool with Mut, Panic, Div {
+fn compiler_main_test_emit_log_produces_code() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let before_len = nc.code.len
     nc = emit_builtin_log(nc)
@@ -12547,7 +12547,7 @@ fn compiler_main_test_name_is_cos() -> bool with Mut, Div, Panic {
 }
 
 // T448: emit_builtin_sin produces >50 bytes of code
-fn compiler_main_test_emit_sin_produces_code() -> bool with Mut, Panic, Div {
+fn compiler_main_test_emit_sin_produces_code() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let before_len = nc.code.len
     nc = emit_builtin_sin(nc)
@@ -12556,7 +12556,7 @@ fn compiler_main_test_emit_sin_produces_code() -> bool with Mut, Panic, Div {
 }
 
 // T449: emit_builtin_cos produces >50 bytes of code
-fn compiler_main_test_emit_cos_produces_code() -> bool with Mut, Panic, Div {
+fn compiler_main_test_emit_cos_produces_code() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let before_len = nc.code.len
     nc = emit_builtin_cos(nc)
@@ -12565,7 +12565,7 @@ fn compiler_main_test_emit_cos_produces_code() -> bool with Mut, Panic, Div {
 }
 
 // T450: CVTSD2SI encoding is 5 bytes (F2 48 0F 2D C0)
-fn compiler_main_test_cvtsd2si_encoding() -> bool with Mut, Panic, Div {
+fn compiler_main_test_cvtsd2si_encoding() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     let before = buf.len
     buf = emit_cvtsd2si_rax_xmm0(buf)
@@ -12574,7 +12574,7 @@ fn compiler_main_test_cvtsd2si_encoding() -> bool with Mut, Panic, Div {
 }
 
 // T451: CVTSI2SD encoding is 5 bytes (F2 48 0F 2A C0)
-fn compiler_main_test_cvtsi2sd_encoding() -> bool with Mut, Panic, Div {
+fn compiler_main_test_cvtsi2sd_encoding() -> bool with Mut, Panic, Div, Alloc {
     var buf = code_buffer_new()
     let before = buf.len
     buf = emit_cvtsi2sd_xmm0_rax(buf)

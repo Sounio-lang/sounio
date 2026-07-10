@@ -5,16 +5,70 @@
 
 module native::encode
 
+// CodeBuffer — truly-unbounded .text byte buffer (PR1 reserve-hoisting design).
+// Storage is a heap block {ptr,len,cap}; growth happens only at code_reserve
+// points which the per-instruction dispatch loops call at instruction
+// boundaries. Because all code-buffer patching is offset-based, a realloc-move
+// is safe, and hoisting the grow out of leaf emitters makes mid-chain aliasing
+// structurally impossible.
 pub struct CodeBuffer {
-    pub bytes: [i8; 131072],
+    pub ptr: *mut i8,
     pub len: i64,
+    pub cap: i64,
 }
 
-pub fn code_buffer_new() -> CodeBuffer {
+pub fn code_buffer_new() -> CodeBuffer with Alloc {
     var out: CodeBuffer
+    out.ptr = heap_alloc(65536) as *mut i8
     out.len = 0
+    out.cap = 65536
     out
 }
+
+// ── CodeBuffer byte accessors (PR1 reserve-hoisting refactor) ───────────────
+// The heap block is addressed 8 bytes at a time (read_i64/write_i64 index by
+// 8-byte word, and `*mut i8` is not indexable in the bootstrap seed), so byte
+// access is a read-modify-write over the enclosing word. Effect-free (code_get)
+// / Mut-only (code_set) so routing stays effect-preserving; read_i64/write_i64
+// require no effect. Bit ops (>>, &) avoid the Div effect. Returned/accepted i8
+// makes the routed comparison/store sites byte-identical to the old `bytes[i]`.
+pub fn code_get(cb: &CodeBuffer, i: i64) -> i8 {
+    let w = i >> (3 as u8)          // i / 8  (i >= 0)
+    let b = i & 7                   // i % 8
+    let sh = (b * 8) as u8
+    let word = read_i64((*cb).ptr, w)
+    ((word >> sh) & 0xFF) as i8
+}
+
+pub fn code_set(cb: &! CodeBuffer, i: i64, v: i8) with Mut {
+    let w = i >> (3 as u8)
+    let b = i & 7
+    let sh = (b * 8) as u8
+    let word = read_i64((*cb).ptr, w)
+    let mask = (0xFF as i64) << sh
+    let notmask = mask ^ (0 - 1)         // ~mask without a bitwise-not operator
+    let nb = (v as i64) & 0xFF
+    write_i64((*cb).ptr, w, (word & notmask) | (nb << sh))
+}
+
+// code_reserve — ensure the buffer can hold `needed` bytes, growing the heap
+// block (doubling) if required. Called at instruction boundaries so any
+// heap_realloc move happens between helper chains, never mid-chain. `with Alloc`
+// is contained here (and in code_buffer_new) — reached only from callers that
+// already carry Alloc.
+pub fn code_reserve(cb: &! CodeBuffer, needed: i64) with Mut, Alloc {
+    if needed > (*cb).cap {
+        var new_cap = (*cb).cap * 2
+        if needed > new_cap { new_cap = needed }
+        (*cb).ptr = heap_realloc((*cb).ptr, new_cap) as *mut i8
+        (*cb).cap = new_cap
+    }
+}
+
+// Upper bound on the machine bytes a single IR/machine instruction can emit.
+// The per-op dispatch loops reserve `len + MAX_IR_INSTR_BYTES` before each
+// instruction so growth happens only at instruction boundaries.
+pub let MAX_IR_INSTR_BYTES: i64 = 512
 
 pub fn low8(x: i64) -> i64 with Mut, Panic, Div {
     var n = x % 256
@@ -48,7 +102,7 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
     var out = dst
     var i: i64 = 0
     while i < src.len && out.len < 262144 {
-        out.bytes[out.len as usize] = src.bytes[i as usize]
+        out.bytes[out.len as usize] = code_get(&src, i)
         out.len = out.len + 1
         i = i + 1
     }
@@ -58,8 +112,8 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
     if out.len >= 0 {
-        if out.len < 131072 {
-            out.bytes[out.len as usize] = low8(b) as i8
+        if out.len < out.cap {
+            code_set(&! out, out.len, low8(b) as i8)
             out.len = out.len + 1
         }
     }
@@ -68,8 +122,8 @@ pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
     if (*buf).len >= 0 {
-        if (*buf).len < 131072 {
-            (*buf).bytes[(*buf).len as usize] = low8(b) as i8
+        if (*buf).len < (*buf).cap {
+            code_set(buf, (*buf).len, low8(b) as i8)
             (*buf).len = (*buf).len + 1
         }
     }

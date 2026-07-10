@@ -1342,8 +1342,8 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
-    if len >= 0 && len < 131072 {
-        (*nc).code.bytes[len as usize] = low8(b) as i8
+    if len >= 0 && len < (*nc).code.cap {
+        code_set(&! (*nc).code, len, low8(b) as i8)
         (*nc).code.len = len + 1
     } else {
         (*nc).code_overflow = true
@@ -1590,10 +1590,10 @@ fn nc_emit_jnz_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic, Div {
     if offset >= 0 && offset + 4 <= (*nc).code.len {
-        (*nc).code.bytes[offset as usize] = low8(val) as i8
-        (*nc).code.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
-        (*nc).code.bytes[(offset + 2) as usize] = low8(val >> 16) as i8
-        (*nc).code.bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+        code_set(&! (*nc).code, offset, low8(val) as i8)
+        code_set(&! (*nc).code, offset + 1, low8(val >> 8) as i8)
+        code_set(&! (*nc).code, offset + 2, low8(val >> 16) as i8)
+        code_set(&! (*nc).code, offset + 3, low8(val >> 24) as i8)
     }
 }
 
@@ -4474,8 +4474,8 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     // Patch jns displacement
     let neg_block_len = c.code.len - (jns_pos + 2)
-    if jns_pos + 1 < 131072 {
-        c.code.bytes[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
+    if jns_pos + 1 < c.code.cap {
+        code_set(&! c.code, jns_pos + 1, low8(neg_block_len) as i8)
     }
 
     // Integer part: cvttsd2si
@@ -4729,23 +4729,23 @@ pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrMo
 
 fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     patch_offset > 0 && patch_offset + 4 <= (*nc).code.len
-        && (*nc).code.bytes[(patch_offset - 1) as usize] == (0xe8 as i8)
+        && code_get(&(*nc).code, patch_offset - 1) == (0xe8 as i8)
 }
 
 fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     if !(patch_offset >= 3 && patch_offset + 4 <= (*nc).code.len) { return false }
     if patch_offset >= 4
-        && (*nc).code.bytes[(patch_offset - 4) as usize] == (0xf2 as i8)
-        && (*nc).code.bytes[(patch_offset - 3) as usize] == (0x0f as i8)
-        && (*nc).code.bytes[(patch_offset - 2) as usize] == (0x10 as i8) {
-        let sse_modrm = (*nc).code.bytes[(patch_offset - 1) as usize]
+        && code_get(&(*nc).code, patch_offset - 4) == (0xf2 as i8)
+        && code_get(&(*nc).code, patch_offset - 3) == (0x0f as i8)
+        && code_get(&(*nc).code, patch_offset - 2) == (0x10 as i8) {
+        let sse_modrm = code_get(&(*nc).code, patch_offset - 1)
         if sse_modrm == (0x05 as i8) || sse_modrm == (0x0d as i8) {
             return true
         }
     }
-    if (*nc).code.bytes[(patch_offset - 3) as usize] != (0x48 as i8) { return false }
-    let op = (*nc).code.bytes[(patch_offset - 2) as usize]
-    let modrm = (*nc).code.bytes[(patch_offset - 1) as usize]
+    if code_get(&(*nc).code, patch_offset - 3) != (0x48 as i8) { return false }
+    let op = code_get(&(*nc).code, patch_offset - 2)
+    let modrm = code_get(&(*nc).code, patch_offset - 1)
     (op == (0x8d as i8) && modrm == (0x05 as i8))
         || (op == (0x8b as i8) && modrm == (0x1d as i8))
         || (op == (0x89 as i8) && modrm == (0x05 as i8))
@@ -4941,9 +4941,11 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     // Spill parameters from ABI registers to their stack slots
     c = spill_ir_params(c, effective_func)
 
-    // Lower each IR instruction
+    // Lower each IR instruction. Reserve at the instruction boundary so any
+    // heap growth happens between (not within) helper chains — realloc-move safe.
     var ip = 0
     while ip < effective_func.instr_count {
+        code_reserve(&! c.code, c.code.len + MAX_IR_INSTR_BYTES)
         lower_instr(&!c, effective_func.instrs[ip as usize])
         ip = ip + 1
     }
@@ -5811,6 +5813,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     let fn_offset = c.fn_offsets[fn_index as usize]
     var mi: i64 = 0
     while mi < machine_func.blocks[0].instr_count {
+        code_reserve(&! c.code, c.code.len + MAX_IR_INSTR_BYTES)
         let em_instr = machine_func.blocks[0].instrs[mi as usize]
         if native_v2_machine_instr_is_safepoint(em_instr) {
             let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
@@ -6669,6 +6672,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
 
     var i = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        code_reserve(&! (*nc).code, (*nc).code.len + MAX_IR_INSTR_BYTES)
         let instr_op = (*func).instrs[i as usize].op
         if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             let mark_reg = (*func).instrs[i as usize].dst
@@ -9678,7 +9682,7 @@ fn native_v2_build_elf_image_into(bytes: &! [i8; 262144], nc: &! NativeCompiler,
 
     var i: i64 = 0
     while i < code_len && (text_offset + i) < 262144 {
-        (*bytes)[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
+        (*bytes)[(text_offset + i) as usize] = code_get(&(*nc).code, i)
         i = i + 1
     }
 
@@ -9894,7 +9898,16 @@ fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSp
     w.strtab = macho_strtab_init()
     w = macho_add_section(w, macho_make_text_section(text_vmaddr, c.code.len, text_offset))
     var empty_data: [i8; 131072] = [0; 131072]
-    let macho = macho_assemble_executable(w, c.code.bytes, c.code.len, empty_data, 0, text_offset + c.entry_offset)
+    // CodeBuffer is now a heap {ptr,len,cap} block; macho_assemble_executable
+    // still takes a fixed [i8;131072] by value, so materialise the code bytes
+    // into a local array via the accessor (arm64/macOS preview is bounded).
+    var code_arr: [i8; 131072] = [0; 131072]
+    var mi: i64 = 0
+    while mi < c.code.len && mi < 131072 {
+        code_arr[mi as usize] = code_get(&c.code, mi)
+        mi = mi + 1
+    }
+    let macho = macho_assemble_executable(w, code_arr, c.code.len, empty_data, 0, text_offset + c.entry_offset)
     native_compile_result_ok_narrow(macho.buf, macho.buf_len, FORMAT_MACHO64())
 }
 
@@ -10141,7 +10154,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     // Copy code bytes — direct BSS write + struct-ref read (both work)
     var ci: i64 = 0
     while ci < code_len {
-        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).code.bytes[ci as usize]
+        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = code_get(&(*nc).code, ci)
         NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
         ci = ci + 1
     }
@@ -10300,7 +10313,7 @@ fn finalize_elf64_relocatable(
     // .text
     let text_offset = bin.len
     var ti = 0
-    while ti < code.len { elf_emit_byte_ref(&! bin, code.bytes[ti as usize] as i64); ti = ti + 1 }
+    while ti < code.len { elf_emit_byte_ref(&! bin, code_get(&code, ti) as i64); ti = ti + 1 }
 
     // .rodata
     let rodata_file_offset = bin.len
@@ -10526,7 +10539,7 @@ fn finalize_elf64_shared(code: CodeBuffer, symbols: SymbolData, fn_offsets: [i64
     while bin.len < 4096 { elf_emit_byte_ref(&! bin, 0) }
     let text_offset = bin.len
     var ti = 0
-    while ti < code.len { elf_emit_byte_ref(&! bin, code.bytes[ti as usize] as i64); ti = ti + 1 }
+    while ti < code.len { elf_emit_byte_ref(&! bin, code_get(&code, ti) as i64); ti = ti + 1 }
     while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
     let dynsym_offset = bin.len
     emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
