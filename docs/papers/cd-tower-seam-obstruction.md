@@ -61,7 +61,7 @@ The content is the coincidence `offSeam ⟺ hasXorAnnih ⟺ isZD ⟺ ¬anti0`. *
 | `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, on `l,u < 2^bits`, `l ≠ u`) |
 | `isZD ⟹ hasXorAnnih` | reduction (necessity) | **proved ∀n** (`hasXorAnnih_complete`) — the reverse reduction `annih_forces` (any 2-term annihilator forces `b=a⊕(l⊕u)` and the four-sign winner, axioms `[propext, Quot.sound]`), with the `a=0`/`{0,d}`-orbit corner (`P0_neg_of_onSeam`) routed through `converse_holds`. Upgrades the old n=4 anchor; `xorAnnih_eq_isZD_all` gives the full `hasXorAnnih == isZD` on loHi ∀n |
 | `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** (`isZD_eq_offSeam`) — on-seam pairs have no XOR-winner (`hasXorAnnih_false_of_onSeam`, every orbit loses via the edge lemmas) composed with `hasXorAnnih_complete`. A purely combinatorial route (no operator/`anti0` detour needed) |
-| `anti0 ⟺ ¬offSeam` | operator bridge | **proved ∀n** (`seam_eq_anti0`) — via the identity `Q(c)=P(c)` (the anticommutator four-sign product equals the converse winner product, two `cdSigma_cocycle` rewrites), so the operator condition reduces to the same `P`-analysis. Generalizes `coincidence_16/32` to all n (`anti0_eq_offSeam_all`) |
+| `anti0 ⟺ ¬offSeam` | operator bridge | **proved ∀n** (`seam_eq_anti0`) — via the identity `Q(c)=P(c)` (the anticommutator four-sign product equals the converse winner product, two `cdSigma_cocycle` rewrites), so the operator condition reduces to the same `P`-analysis. Generalizes the `anti0==!offSeam` member of `coincidence_16/32` to all n (`anti0_eq_offSeam_all`) |
 
 All links carry axioms `[propext, Quot.sound]` plus the single inherited k=3 octonion `native_decide`
 base anchor. `seam_coincidence` states the four-way identity as one theorem: `isZD = offSeam ∧
@@ -145,12 +145,13 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 - **Operator bridge `anti0 ⟺ ¬offSeam` — proved ∀n** (`seam_eq_anti0`; `anti0_eq_offSeam_all` over
   `loHi`). Key identity `anti0_QP`: the anticommutator four-sign product `Q(c)` equals the converse
   winner product `P(c)` (two `cdSigma_cocycle` rewrites), so `{L_l,L_u}=0 ⟺ ∀c P(c)=−1 ⟺ ¬offSeam`
-  reuses the converse `P`-analysis wholesale. Generalizes `coincidence_16/32` to all n.
+  reuses the converse `P`-analysis wholesale. Generalizes the `anti0==!offSeam` member of `coincidence_16/32` to all n.
 - **The full coincidence — `seam_coincidence`:** `isZD = offSeam ∧ hasXorAnnih = offSeam ∧
   anti0 = ¬offSeam`, one theorem, ∀ `bits≥4` on loHi, axioms `[propext, Quot.sound]` + the single k=3 base.
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
-  `xorAnnih_eq_isZD_16`, `coincidence_16/32` (now all superseded ∀n by the theorems above but retained
-  as fast regressions), `native_decide`, no `sorry`.
+  `xorAnnih_eq_isZD_16`, `coincidence_16/32` (their `anti0==!offSeam` and `anti0==!isZD` members are now
+  superseded ∀n by the theorems above; the `anti0==llsqNegI` member — `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` —
+  was **never a target** and remains decided n≤6), retained as fast regressions, `native_decide`, no `sorry`.
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
   annihilated by `e₁₅−e₄`, discharged via `annih` (`l=1,u=10,a=15,b=4,s=−1`; note `4 = 15⊕11`,
   i.e. `b=a⊕d` — the XOR link appears literally in the 1998 source).
@@ -187,8 +188,10 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   `¬offSeam ⟹ ¬isZD` (`isZD_eq_offSeam`), and the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`,
   via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion
   `native_decide` base anchor (inherited from the converse's octonion base).
-- **Decided (fixed n), retained as fast regressions (all superseded ∀n above):** `xorAnnih_eq_isZD_16`
-  (necessity n=4); `coincidence_16/32` (the seam coincidence n=4,5,6); Moreno's example.
+- **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
+  ∀n); `coincidence_16/32` (n=4,5,6 — the `anti0==!offSeam` / `anti0==!isZD` members superseded ∀n, but
+  the `anti0==llsqNegI` member `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` is **still only decided n≤6** — never a
+  target, not superseded); Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
   cross-check of proved theorems, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
