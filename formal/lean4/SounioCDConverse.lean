@@ -1157,4 +1157,52 @@ theorem annih_forces (bits l u a b : Nat) (s : Int)
     rcases cdSigma_pm bits l b with h3 | h3 <;> rcases cdSigma_pm bits u b with h4 | h4 <;>
     simp only [hs, h1, h2, h3, h4] at e1 e2 ⊢ <;> revert e1 e2 <;> decide
 
+/-- **On-seam ⟹ `P(0) = −1`** (the `a = 0` corner).  For an on-seam loHi pair (`offSeam = false`),
+    the four-sign winner product at `a = 0` is `−1` — so `a = 0` is NOT a `hasXorAnnih` winner.  Two
+    subcases (`u = top` / `l⊕u = top`), each computed from the branch lemmas; no cocycle input beyond
+    `cdSigma_diag`.  (Per-case σ values `#eval`-confirmed: `u=top→(−1,1)`, `d=top→(1,−1)`.) -/
+theorem P0_neg_of_onSeam (bits l u : Nat) (hb : 2 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hon : offSeam bits l u = false) :
+    cdSigma l 0 bits * cdSigma u 0 bits
+      * cdSigma l (l ^^^ u) bits * cdSigma u (l ^^^ u) bits = -1 := by
+  have hbb1 : bits - 2 + 1 = bits - 1 := by omega
+  have hbb2 : bits - 2 + 2 = bits := by omega
+  rw [cdSigma_zero_right bits l (by omega), cdSigma_zero_right bits u (by omega)]
+  have hon' : u = 2 ^ (bits-1) ∨ l ^^^ u = 2 ^ (bits-1) := by
+    simp only [offSeam] at hon
+    have hcond : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) = true := by
+      cases hx : (u == 2 ^ (bits-1) || l ^^^ u == 2 ^ (bits-1)) with
+      | true => rfl
+      | false => rw [hx] at hon; exact absurd hon (by decide)
+    rw [Bool.or_eq_true, beq_iff_eq, beq_iff_eq] at hcond
+    exact hcond
+  rcases hon' with hutop | hdtop
+  · -- u = top; d = l⊕u = top + l ;  σ_l d = -1 (diag), σ_u d = 1 (hi_hi to zero_right)
+    subst hutop
+    have hd : l ^^^ 2 ^ (bits-1) = 2 ^ (bits-1) + l := by
+      rw [Nat.xor_comm l (2 ^ (bits-1)), two_pow_xor_eq_add (bits-1) l hl]
+    have e_ld : cdSigma l (2 ^ (bits-1) + l) bits = cdSigma l l (bits-1) := by
+      have h := cdSigma_lo_hi (bits-2) l l (by rw [hbb1]; exact hl) hl1 (by rw [hbb1]; exact hl)
+      rw [hbb1, hbb2] at h; exact h
+    have e_ud : cdSigma (2 ^ (bits-1)) (2 ^ (bits-1) + l) bits = cdSigma l 0 (bits-1) := by
+      have h := cdSigma_hi_hi (bits-2) 0 l (Nat.two_pow_pos _) hl1 (by rw [hbb1]; exact hl)
+      rw [hbb1, hbb2, Nat.add_zero] at h; exact h
+    rw [hd, e_ld, cdSigma_diag (bits-1) l hl1 hl, e_ud, cdSigma_zero_right (bits-1) l (by omega)]
+    decide
+  · -- l⊕u = top; u = top + l ;  σ_l d = 1 (lo_hi to zero_left), σ_u d = -1 (hi_pow)
+    have h1 : u = l ^^^ 2 ^ (bits-1) := by
+      rw [← hdtop, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    have hu_eq : u = 2 ^ (bits-1) + l := by
+      rw [h1, Nat.xor_comm l (2 ^ (bits-1)), two_pow_xor_eq_add (bits-1) l hl]
+    subst hu_eq
+    have e_ld : cdSigma l (2 ^ (bits-1)) bits = cdSigma 0 l (bits-1) := by
+      have h := cdSigma_lo_hi (bits-2) 0 l (Nat.two_pow_pos _) hl1 (by rw [hbb1]; exact hl)
+      rw [hbb1, hbb2, Nat.add_zero] at h; exact h
+    have e_ud : cdSigma (2 ^ (bits-1) + l) (2 ^ (bits-1)) bits = -1 := by
+      have h := cdSigma_hi_pow (bits-2) l (by rw [hbb1]; exact hl)
+      rw [hbb1, hbb2] at h; exact h
+    rw [hdtop, e_ld, cdSigma_zero_left (bits-1) l (by omega), e_ud]
+    decide
+
 end SounioCDConverse
