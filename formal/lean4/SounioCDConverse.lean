@@ -1062,4 +1062,99 @@ theorem cdSigma_hi_pow (n uL : Nat) (huL : uL < 2 ^ (n+1)) :
     rfl
   rw [hstep, cdSigma_zero_left (n+1) uL (by omega)]
 
+/-- XOR left-cancellation (Mathlib-free): `c ⊕ x = c ⊕ y → x = y`. -/
+theorem xor_cancel_left (c x y : Nat) (h : c ^^^ x = c ^^^ y) : x = y := by
+  have h2 : c ^^^ (c ^^^ x) = c ^^^ (c ^^^ y) := by rw [h]
+  rwa [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, ← Nat.xor_assoc, Nat.xor_self,
+    Nat.zero_xor] at h2
+
+/-- XOR right-cancellation (Mathlib-free): `x ⊕ c = y ⊕ c → x = y`. -/
+theorem xor_cancel_right (x y c : Nat) (h : x ^^^ c = y ^^^ c) : x = y := by
+  have h2 : x ^^^ c ^^^ c = y ^^^ c ^^^ c := by rw [h]
+  rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+
+/-- **Reduction extraction (necessity core): every annihilator is XOR-linked with sign product `+1`.**
+    The reverse of `annih_of`: if `e_a + s·e_b` annihilates `e_l+e_u` (`annih … = true`), then the
+    partner is forced, `b = a ⊕ (l⊕u)`, and the four-sign product is `+1`.  Mathlib-free, no cocycle
+    input beyond `cdSigma_pm`. -/
+theorem annih_forces (bits l u a b : Nat) (s : Int)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) (ha : a < 2 ^ bits) (hne : l ≠ u) (hab : a ≠ b)
+    (hh : annih bits l u a b s = true) :
+    b = a ^^^ (l ^^^ u) ∧
+    cdSigma l a bits * cdSigma u a bits * cdSigma l b bits * cdSigma u b bits = 1 := by
+  unfold annih at hh
+  rw [List.all_eq_true] at hh
+  have hk : ∀ k, k < 2 ^ bits →
+      (if (l ^^^ a) == k then cdSigma l a bits else 0)
+      + (if (l ^^^ b) == k then s * cdSigma l b bits else 0)
+      + (if (u ^^^ a) == k then cdSigma u a bits else 0)
+      + (if (u ^^^ b) == k then s * cdSigma u b bits else 0) = 0 := by
+    intro k hkk
+    have hkm := hh k (List.mem_range.mpr hkk)
+    rwa [beq_iff_eq] at hkm
+  -- guards that hold at any k (index distinctness independent of k)
+  have hla : l ^^^ a < 2 ^ bits := Nat.xor_lt_two_pow hl ha
+  -- ── Step 1: b = a ⊕ (l⊕u) ───────────────────────────────────────────────────────────────────────
+  have hb : b = a ^^^ (l ^^^ u) := by
+    by_cases hbe : b = a ^^^ (l ^^^ u)
+    · exact hbe
+    · exfalso
+      -- evaluate hk at k = l⊕a; only term1 fires
+      have g1 : ((l ^^^ a) == (l ^^^ a)) = true := beq_iff_eq.mpr rfl
+      have g2 : ¬ ((l ^^^ b) == (l ^^^ a)) = true :=
+        fun hc => hab (xor_cancel_left l b a (beq_iff_eq.mp hc)).symm
+      have g3 : ¬ ((u ^^^ a) == (l ^^^ a)) = true :=
+        fun hc => hne (xor_cancel_right u l a (beq_iff_eq.mp hc)).symm
+      have g4 : ¬ ((u ^^^ b) == (l ^^^ a)) = true := by
+        intro hc
+        apply hbe
+        have hub : u ^^^ b = l ^^^ a := beq_iff_eq.mp hc
+        exact xor_cancel_left u b (a ^^^ (l ^^^ u)) (by
+          rw [hub, xor_left_comm u a (l ^^^ u), xor_left_comm u l u, Nat.xor_self, Nat.xor_zero,
+            Nat.xor_comm a l])
+      have he := hk (l ^^^ a) hla
+      rw [if_pos g1, if_neg g2, if_neg g3, if_neg g4] at he
+      rcases cdSigma_pm bits l a with h1 | h1 <;> rw [h1] at he <;> revert he <;> decide
+  -- ── Step 2: sign product = 1 ────────────────────────────────────────────────────────────────────
+  refine ⟨hb, ?_⟩
+  -- folding: u⊕b = l⊕a and l⊕b = u⊕a
+  have hf1 : u ^^^ b = l ^^^ a := by
+    rw [hb, xor_left_comm u a (l ^^^ u), xor_left_comm u l u, Nat.xor_self, Nat.xor_zero,
+      Nat.xor_comm a l]
+  have hf2 : l ^^^ b = u ^^^ a := by
+    rw [hb, xor_left_comm l a (l ^^^ u), ← Nat.xor_assoc l l u, Nat.xor_self, Nat.zero_xor,
+      Nat.xor_comm a u]
+  have hlb : l ^^^ b < 2 ^ bits := by rw [hf2]; exact Nat.xor_lt_two_pow hu ha
+  -- guards at k1 = l⊕a
+  have g1a : ((l ^^^ a) == (l ^^^ a)) = true := beq_iff_eq.mpr rfl
+  have g2a : ¬ ((l ^^^ b) == (l ^^^ a)) = true :=
+    fun hc => hab (xor_cancel_left l b a (beq_iff_eq.mp hc)).symm
+  have g3a : ¬ ((u ^^^ a) == (l ^^^ a)) = true :=
+    fun hc => hne (xor_cancel_right u l a (beq_iff_eq.mp hc)).symm
+  have g4a : ((u ^^^ b) == (l ^^^ a)) = true := beq_iff_eq.mpr hf1
+  have e1 := hk (l ^^^ a) hla
+  rw [if_pos g1a, if_neg g2a, if_neg g3a, if_pos g4a] at e1
+  -- e1 : cdSigma l a + 0 + 0 + s*cdSigma u b = 0
+  -- guards at k2 = l⊕b
+  have g1b : ¬ ((l ^^^ a) == (l ^^^ b)) = true :=
+    fun hc => hab (xor_cancel_left l a b (beq_iff_eq.mp hc))
+  have g2b : ((l ^^^ b) == (l ^^^ b)) = true := beq_iff_eq.mpr rfl
+  have g3b : ((u ^^^ a) == (l ^^^ b)) = true := beq_iff_eq.mpr hf2.symm
+  have g4b : ¬ ((u ^^^ b) == (l ^^^ b)) = true := by
+    intro hc
+    have hcc : u ^^^ b = l ^^^ b := beq_iff_eq.mp hc
+    rw [hf1] at hcc
+    exact hab (xor_cancel_left l a b hcc)
+  have e2 := hk (l ^^^ b) hlb
+  rw [if_neg g1b, if_pos g2b, if_pos g3b, if_neg g4b] at e2
+  -- e2 : 0 + s*cdSigma l b + cdSigma u a + 0 = 0
+  -- solve: s = ±1 then product = s² = 1
+  have hs : s = 1 ∨ s = -1 := by
+    rcases cdSigma_pm bits l a with h1 | h1 <;> rcases cdSigma_pm bits u b with h4 | h4 <;>
+      rw [h1, h4] at e1 <;> omega
+  rcases hs with hs | hs <;>
+    rcases cdSigma_pm bits l a with h1 | h1 <;> rcases cdSigma_pm bits u a with h2 | h2 <;>
+    rcases cdSigma_pm bits l b with h3 | h3 <;> rcases cdSigma_pm bits u b with h4 | h4 <;>
+    simp only [hs, h1, h2, h3, h4] at e1 e2 ⊢ <;> revert e1 e2 <;> decide
+
 end SounioCDConverse
