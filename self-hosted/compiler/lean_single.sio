@@ -32364,7 +32364,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 7 { EP = EP + 1 }
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
-                let callee_eff = FN_EFFECTS[fi as usize]
+                // Parity with the x86-64 twin (compile_primary ~14477): mask out the
+                // visibility/meta bits (pub=1024, import=2048, and higher marker bits)
+                // before the effect subset check. Imported/pub callees otherwise look
+                // like they "require" effects the caller lacks -> false effect errors.
+                let callee_eff = FN_EFFECTS[fi as usize] & 1023
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
@@ -32908,7 +32912,47 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = FN_SIG[fri as usize]
                     LAST_EXPR_IS_CLOSURE = 1
                 }
-                else { tc_undefined_var(name_tok); em32(0xD2800000); EXPR_TY = 0; EXPR_TY_HASH = 0 }
+                else {
+                    // Parity with the x86-64 twin (compile_primary ~15188): a bare
+                    // identifier that is not a local/global/fn may be a named const.
+                    // The arm64 walker previously skipped this lookup entirely, so
+                    // every const reference (esp. imported enum-style consts) became
+                    // a false "unknown identifier".
+                    if const_find_val(ns, ne) != 0 {
+                        let ci = CONST_FOUND_IDX
+                        if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
+                            let ct = CONST_TOK_IDX[ci as usize]
+                            emit_imm64_a64(TV[ct as usize])
+                            em32(0x9E620000)  // scvtf d0, x0
+                            if TF[ct as usize] > 0 {
+                                emit_imm64_a64(TF[ct as usize])
+                                em32(0x9E620001)  // scvtf d1, x0
+                                emit_imm64_a64(TD[ct as usize])
+                                em32(0x9E620002)  // scvtf d2, x0
+                                em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
+                                em32(0x1E612800)  // fadd d0, d0, d1
+                            }
+                            if TX[ct as usize] >= 0 { FL_SCI_SCRATCH = TX[ct as usize]; FL_SCI_NEG = 0 }
+                            else { FL_SCI_SCRATCH = 0 - TX[ct as usize]; FL_SCI_NEG = 1 }
+                            if FL_SCI_SCRATCH != 0 {
+                                emit_imm64_a64(0x4024000000000000)  // bits of 10.0
+                                em32(0x9E670001)  // fmov d1, x0
+                                if FL_SCI_NEG == 0 {
+                                    while FL_SCI_SCRATCH > 0 { em32(0x1E610800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fmul d0, d0, d1
+                                } else {
+                                    while FL_SCI_SCRATCH > 0 { em32(0x1E611800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fdiv d0, d0, d1
+                                }
+                            }
+                            em32(0x9E660000)  // fmov x0, d0
+                            EXPR_TY = 2; EXPR_TY_HASH = 0; EXPR_IS_F64 = 1
+                        } else {
+                            emit_imm64_reg_a64(0, CONST_FOUND_VAL)  // x0 = const value
+                            EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                        }
+                        return
+                    }
+                    tc_undefined_var(name_tok); em32(0xD2800000); EXPR_TY = 0; EXPR_TY_HASH = 0
+                }
             }
             if gi < 0 { EXPR_IS_F64 = 0 }
         }
