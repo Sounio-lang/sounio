@@ -4,12 +4,11 @@ K-AXI/PTX emitter). Proves od_add's renorm needs ONLY fixed, straight-line ops
 (no data-dependent branches), so it lowers to K-AXI add/sub + SETP_NE/SETP_EQ +
 SELP.
 
-Pipeline (adding two normalized 8-limb od256 a, b):
-  1. MERGE  a[0..7], b[0..7] (each |mag|-descending) -> 16 descending.
-            Branchless in HW: odd-even merge network; each compare-exchange =
-            abs(x),abs(y) + SETP compare + 2x SELP (min/max by magnitude).
-  2. VECSUM 15 fixed two_sums (CAMPARY Algorithm 4): error-free; concentrates
-            the sum at index 0.
+Pipeline (adding two normalized 8-limb od256 a, b) — the emitted GPU kernel:
+  1. INTERLEAVE a[i],b[i] -> 16 (NO merge network needed: a,b each already
+            |mag|-descending, so interleaving is "descending in pairs" and two
+            VecSum passes recover full octuple — validated at 429.5 bits).
+  2. VECSUM x2: 15 fixed two_sums each (CAMPARY Algorithm 4), error-free.
   3. VSEB   VecSumErrBranch, BRANCHLESS via SELP-emulated moving index: the
             data-dependent "advance output slot" becomes K SELPs/step keyed on
             SETP_EQ(j,cnt) & SETP_NE(err,0). Bit-identical to the branchy CAMPARY
@@ -35,9 +34,13 @@ def vecsum(x):                     # e[0] most significant, sum preserved (EFT)
     e[0] = s
     return e
 
-def merge_desc(a, b):
-    """Merge two |mag|-descending sequences -> descending (branchless in HW)."""
-    return sorted(list(a) + list(b), key=lambda v: -abs(v))
+def interleave(a, b):
+    """Interleave a[i],b[i] -> 16 (NO merge network; a,b each already sorted).
+    Followed by 2x VecSum this reaches octuple — the emitted kernel's approach."""
+    c = []
+    for i in range(K):
+        c.append(a[i]); c.append(b[i])
+    return c
 
 def vseb_branchless(e, k=K):
     """VecSumErrBranch with the conditional advance emulated by SELP over a fixed
@@ -69,7 +72,8 @@ def vseb_branch(e, k=K):           # branchy reference (for bit-identity check)
     return f
 
 def od_add_gpu(a, b):
-    return vseb_branchless(vecsum(merge_desc(a, b)))
+    # interleave + 2x VecSum + branchless VSEB (matches the emitted GPU kernel).
+    return vseb_branchless(vecsum(vecsum(interleave(a, b))))
 
 def _grow_norm(terms):             # exact accumulate -> clean 8-limb od256
     e = []
@@ -97,7 +101,7 @@ if __name__ == "__main__":
         va = mpf(rng.getrandbits(420)) / mpf(2)**rng.randint(200, 240) * (1 if rng.random() < .5 else -1)
         vb = mpf(rng.getrandbits(420)) / mpf(2)**rng.randint(200, 240) * (1 if rng.random() < .5 else -1)
         a = _split_mpf(va); b = _split_mpf(vb)
-        e = vecsum(merge_desc(a, b))
+        e = vecsum(vecsum(interleave(a, b)))
         if vseb_branch(e) != vseb_branchless(e):
             mismatch += 1
         true = sum(mpf(x) for x in a) + sum(mpf(x) for x in b)
