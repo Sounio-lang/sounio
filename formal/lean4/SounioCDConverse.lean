@@ -1521,4 +1521,60 @@ theorem anti0_eq_offSeam_all (bits : Nat) (hb : 4 ≤ bits) :
   rw [beq_iff_eq]
   exact seam_eq_anti0 bits p.1 p.2 hb hp1 hp2 hp3 hp4
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- THE FULL SEAM COINCIDENCE ON loHi, ∀ bits≥4 — every link now a proved ∀n theorem.
+--   offSeam  ⟺  isZD  ⟺  hasXorAnnih  ⟺  ¬anti0
+-- (forward obstruction `¬offSeam ⟹ ¬isZD` included; no `native_decide` beyond the inherited k=3 base).
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **On-seam loHi pairs have NO XOR-winner** (`hasXorAnnih = false`): every orbit loses (`on_seam_P_neg`),
+    so no index passes the winner test.  This is the converse-side half of the forward obstruction. -/
+theorem hasXorAnnih_false_of_onSeam (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hon : offSeam bits l u = false) :
+    hasXorAnnih bits l u = false := by
+  rw [Bool.eq_false_iff]
+  intro hxa
+  unfold hasXorAnnih at hxa
+  rw [List.any_eq_true] at hxa
+  obtain ⟨a, hmem, hpred⟩ := hxa
+  rw [List.mem_range] at hmem
+  rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq] at hpred
+  obtain ⟨⟨-, -⟩, hP⟩ := hpred
+  have hneg := on_seam_P_neg bits l u hb hl1 hl hu1 hu hon a hmem
+  rw [hP] at hneg
+  exact absurd hneg (by decide)
+
+/-- **Forward obstruction + converse, unified**: on the loHi locus (`∀ bits≥4`) a lower×upper pair is a
+    2-term zero divisor **iff** it is off-seam.  `isZD = offSeam`.  Off-seam ⟹ `isZD` is the converse
+    (`converse_holds`+`hasXorAnnih_sound`); on-seam ⟹ `¬isZD` is the forward obstruction
+    (`hasXorAnnih_false_of_onSeam`+`hasXorAnnih_complete`). Kernel-clean (inherited k=3 base only). -/
+theorem isZD_eq_offSeam (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits) :
+    isZD bits l u = offSeam bits l u := by
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := Nat.pow_le_pow_right (by decide) (by omega)
+  have hlt : l < 2 ^ bits := by omega
+  have hne : l ≠ u := by omega
+  cases hoff : offSeam bits l u with
+  | true =>
+    exact hasXorAnnih_sound bits l u hlt hu hne (converse_holds bits l u hb hl1 hl hu1 hu hoff)
+  | false =>
+    have hnx := hasXorAnnih_false_of_onSeam bits l u hb hl1 hl hu1 hu hoff
+    rw [Bool.eq_false_iff]
+    intro hzd
+    rw [hasXorAnnih_complete bits l u hb hl1 hl hu1 hu hzd] at hnx
+    exact absurd hnx (by decide)
+
+/-- **The full seam coincidence, ∀ bits≥4 on loHi** — the four predicates coincide, each link a proved
+    ∀n theorem: `isZD = offSeam`, `hasXorAnnih = offSeam`, `anti0 = ¬offSeam`. -/
+theorem seam_coincidence (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits) :
+    isZD bits l u = offSeam bits l u
+      ∧ hasXorAnnih bits l u = offSeam bits l u
+      ∧ anti0 bits l u = ! offSeam bits l u := by
+  refine ⟨isZD_eq_offSeam bits l u hb hl1 hl hu1 hu, ?_, seam_eq_anti0 bits l u hb hl1 hl hu1 hu⟩
+  cases hoff : offSeam bits l u with
+  | true => exact converse_holds bits l u hb hl1 hl hu1 hu hoff
+  | false => exact hasXorAnnih_false_of_onSeam bits l u hb hl1 hl hu1 hu hoff
+
 end SounioCDConverse
