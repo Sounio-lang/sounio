@@ -25,16 +25,21 @@ bit-identical to scripts/ci/od256_renorm_gpu_ref.py (already proven vs the PTX
 simulator). This gate confirms that on real silicon.
 """
 import argparse, json, os, struct, random, sys
-from mpmath import mp, mpf, fabs, log
+from mpmath import mp, mpf, fabs, log, sqrt as mpsqrt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import od256_renorm_gpu_ref as ref
 
+# kind: scalar (2 f64 in, 2 out) | binary (2 od256 in @0-7,@8-15, out @16-23) |
+#       unary (1 od256 in @0-7, out @16-23). div/sqrt use a wider stride (72) for
+# the Newton scratch slots; the gate only reads a/b/out so stride is opaque here.
 KERNELS = {
-    "od256_two_sum":  {"stride": 4,  "scalar": True,  "op": ref.two_sum},
-    "od256_two_prod": {"stride": 4,  "scalar": True,  "op": ref._two_prod},
-    "od256_add":      {"stride": 24, "scalar": False, "op": ref.od_add_gpu},
-    "od256_mul":      {"stride": 24, "scalar": False, "op": ref.od_mul_gpu},
+    "od256_two_sum":  {"stride": 4,  "kind": "scalar", "op": ref.two_sum},
+    "od256_two_prod": {"stride": 4,  "kind": "scalar", "op": ref._two_prod},
+    "od256_add":      {"stride": 24, "kind": "binary", "op": ref.od_add_gpu},
+    "od256_mul":      {"stride": 24, "kind": "binary", "op": ref.od_mul_gpu},
+    "od256_div":      {"stride": 72, "kind": "binary", "op": ref.od_div_gpu,  "nz_b": True},
+    "od256_sqrt":     {"stride": 72, "kind": "unary",  "op": ref.od_sqrt_gpu, "pos_a": True},
 }
 
 def _rand_scalar(rng): return rng.uniform(-1e6, 1e6)
@@ -119,38 +124,49 @@ def gen(dir_, ncases, seed, adversarial=False):
     os.makedirs(dir_, exist_ok=True)
     rng = random.Random(seed)
     manifest = []
+    MULT = {"od256_two_prod", "od256_mul", "od256_div", "od256_sqrt"}
+    def in_dom(nm, true, nlimbs):      # multiplicative kernels leave the domain when a limb underflows
+        if nm not in MULT or true == 0: return True
+        return abs(mpf(true)) >= mpf(2) ** (-1022 + 53 * (nlimbs - 1))
     for name, cfg in KERNELS.items():
-        stride, scalar, op = cfg["stride"], cfg["scalar"], cfg["op"]
-        if adversarial:
-            pairs = _adv_scalar_pairs(rng, ncases) if scalar \
-                else _adv_od256_pairs(rng, ncases, op_add=(name == "od256_add"))
+        stride, kind, op = cfg["stride"], cfg["kind"], cfg["op"]
+        if adversarial and kind == "scalar":
+            pairs = _adv_scalar_pairs(rng, ncases)
+        elif adversarial and name in ("od256_add", "od256_mul"):
+            pairs = _adv_od256_pairs(rng, ncases, op_add=(name == "od256_add"))
         else:
-            pairs = None
+            pairs = None                  # div/sqrt: random inputs even in adversarial mode
         mem = [0.0] * (ncases * stride)
         cases = []
         for t in range(ncases):
             base = t * stride
-            if scalar:
-                a, b = pairs[t] if adversarial else (_rand_scalar(rng), _rand_scalar(rng))
+            if kind == "scalar":
+                a, b = pairs[t] if pairs else (_rand_scalar(rng), _rand_scalar(rng))
                 mem[base + 0] = a; mem[base + 1] = b
                 hi, lo = op(a, b)
                 exp = [hi, lo]
                 true = (mpf(a) + mpf(b)) if name == "od256_two_sum" else (mpf(a) * mpf(b))
-                # multiplicative EFTs (Dekker) lose exactness once the product OR any
-                # of its error limbs underflows into the denormal range — outside the
-                # algorithm's guarantee, so don't gate bit-exactness there. A 2-limb
-                # result needs |value| >= 2^-1022 * 2^53 for the low limb to stay normal.
-                in_domain = _mul_in_domain(name, "od256_two_prod", true, 2)
-                cases.append({"exp": exp, "exp_slots": [2, 3], "true": str(true), "dom": in_domain})
-            else:
-                a, b = pairs[t] if adversarial else (_rand_od256(rng), _rand_od256(rng))
+                cases.append({"exp": exp, "exp_slots": [2, 3], "true": str(true),
+                              "dom": in_dom(name, true, 2)})
+            elif kind == "binary":
+                a, b = pairs[t] if pairs else (_rand_od256(rng), _rand_od256(rng))
+                if cfg.get("nz_b") and all(x == 0.0 for x in b): b = ref._split_mpf(mpf(1))
                 for i in range(8): mem[base + i] = a[i]; mem[base + 8 + i] = b[i]
                 exp = op(a, b)
                 ta = sum(mpf(x) for x in a); tb = sum(mpf(x) for x in b)
-                true = (ta + tb) if name == "od256_add" else (ta * tb)
-                # 8-limb result: all limbs stay normal only if |value| >= 2^-1022 * 2^(53*7).
-                in_domain = _mul_in_domain(name, "od256_mul", true, 8)
-                cases.append({"exp": exp, "exp_slots": list(range(16, 24)), "true": str(true), "dom": in_domain})
+                true = (ta + tb) if name == "od256_add" else (ta / tb if name == "od256_div" else ta * tb)
+                cases.append({"exp": exp, "exp_slots": list(range(16, 24)), "true": str(true),
+                              "dom": in_dom(name, true, 8)})
+            else:                          # unary (sqrt): a @0-7, out @16-23
+                a = _rand_od256(rng)
+                va = sum(mpf(x) for x in a)
+                if cfg.get("pos_a") and va < 0: a = ref.od_neg(a); va = -va
+                if va == 0: a = ref._split_mpf(mpf(1)); va = mpf(1)
+                for i in range(8): mem[base + i] = a[i]
+                exp = op(a)
+                true = mpsqrt(va)
+                cases.append({"exp": exp, "exp_slots": list(range(16, 24)), "true": str(true),
+                              "dom": in_dom(name, true, 8)})
         with open(os.path.join(dir_, name + ".in.f64"), "wb") as f:
             f.write(struct.pack("<" + "d" * len(mem), *mem))
         with open(os.path.join(dir_, name + ".truth.json"), "w") as f:

@@ -122,6 +122,36 @@ def _split_mpf(v):                 # round a high-prec value into a clean od256
         d = float(v); a.append(d); v = v - mpf(d)
     return _grow_norm(a)
 
+# --- Newton div/sqrt, built ONLY from the GPU primitives (od_add_gpu/od_mul_gpu)
+# so the reference is bit-exact to the emitted GPU kernels. Mirrors the structure
+# of stdlib/math/od256.sio (od_recip/od_div/od_sqrt). Requires the 6-pass od_add
+# (Newton's y+y*r adds operands with a partial magnitude gap). ~429 bits.
+def od_from_f64(x): return [x] + [0.0]*(K-1)
+def od_zero(): return [0.0]*K
+def od_neg(a): return [-x for x in a]
+def od_sub_gpu(a, b): return od_add_gpu(a, od_neg(b))
+
+def od_recip_gpu(b, iters=4):          # y <- y + y*(1 - b*y), seed 1/b.x0
+    y = od_from_f64(1.0 / b[0]); one = od_from_f64(1.0)
+    for _ in range(iters):
+        r = od_sub_gpu(one, od_mul_gpu(b, y))
+        y = od_add_gpu(y, od_mul_gpu(y, r))
+    return y
+
+def od_div_gpu(a, b): return od_mul_gpu(a, od_recip_gpu(b))
+
+def od_sqrt_gpu(a, iters=4):           # inv-sqrt Newton y<-y+0.5*y*(1-a*y*y); sqrt=a*y
+    # seed 1/sqrt(a0) via IEEE f64 sqrt (== PTX sqrt.rn.f64, bit-identical to the
+    # emitted kernel; simpler + tighter than a Heron loop).
+    import math
+    if a[0] <= 0.0: return od_zero()
+    y = od_from_f64(1.0 / math.sqrt(a[0])); half = od_from_f64(0.5)
+    for _ in range(iters):
+        ay2 = od_mul_gpu(a, od_mul_gpu(y, y))
+        one_minus = od_sub_gpu(od_from_f64(1.0), ay2)
+        y = od_add_gpu(y, od_mul_gpu(od_mul_gpu(half, y), one_minus))
+    return od_mul_gpu(a, y)
+
 if __name__ == "__main__":
     mp.prec = 800
     rng = random.Random(5)
