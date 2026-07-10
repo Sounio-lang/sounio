@@ -1251,4 +1251,25 @@ theorem hasXorAnnih_complete (bits l u : Nat) (hb : 4 ≤ bits)
     rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
     exact ⟨⟨hapos, hane⟩, hP⟩
 
+/-- **`hasXorAnnih == isZD` on the loHi locus, ∀ bits ≥ 4** — the ∀n generalization of
+    `xorAnnih_eq_isZD_16`.  Soundness (`⟹`) by `hasXorAnnih_sound`, completeness (`⟸`) by
+    `hasXorAnnih_complete`.  Kernel axioms `[propext, Quot.sound]` + the single inherited k=3 anchor. -/
+theorem xorAnnih_eq_isZD_all (bits : Nat) (hb : 4 ≤ bits) :
+    (loHi bits).all (fun p => hasXorAnnih bits p.1 p.2 == isZD bits p.1 p.2) = true := by
+  rw [List.all_eq_true]
+  intro p hp
+  obtain ⟨hp1, hp2, hp3, hp4⟩ := loHi_mem bits (by omega) p hp
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := Nat.pow_le_pow_right (by decide) (by omega)
+  have hlt : p.1 < 2 ^ bits := by omega
+  have hne : p.1 ≠ p.2 := by omega
+  rw [beq_iff_eq]
+  cases hI : isZD bits p.1 p.2 with
+  | true => exact hasXorAnnih_complete bits p.1 p.2 hb hp1 hp2 hp3 hp4 hI
+  | false =>
+    cases hX : hasXorAnnih bits p.1 p.2 with
+    | false => rfl
+    | true =>
+      have hsd := hasXorAnnih_sound bits p.1 p.2 hlt hp4 hne hX
+      rw [hI] at hsd; exact absurd hsd (by decide)
+
 end SounioCDConverse
