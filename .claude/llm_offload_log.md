@@ -2454,3 +2454,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - File: docs/papers/cd-tower-seam-obstruction.md (§6 "The next formal steps" block)
 - Providers: xai/grok-4.1 = DONE, no issues ("internal/external split exact; no mischaracterization of dropping the native_decide base or widening past loHi; no overclaims; technically precise"). Other legs infra-degraded (SKIP).
 - Verdict: pass. Docs-only, no theorem claims changed.
+
+## 2026-07-10 — M1 math-review: drop native_decide octonion base (Q_base structural)
+- File: formal/lean4/SounioCDConverse.lean (Q_base + cdSigma_cross_neg, both_low_witness_disagree, both_high_witness_disagree)
+- Task: verify the structural octonion base (witness existence sufficiency; both witnesses non-exceptional; 6-case exhaustiveness)
+- Providers: xai/grok-4.1 = DONE, 3/3 checks pass ("both-low a=4+l and both-high a=llo are non-exceptional; six branches + lt/ge symmetry cover every mixed pair in {1..7}; Q_base depends only on [propext, Quot.sound]"). zai = SKIP (unwired).
+- 2nd lens: Lean kernel #print axioms = [propext, Quot.sound] across Q_base/Q_all/seam_coincidence/converse_conjecture_proved — anchor removed, no native_decide in the ∀n chain.
+- Verdict: pass. Advisor also confirmed statement-identical Q_base (zero drift) + caught the stale "only member anchor-free" claim.
