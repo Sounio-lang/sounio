@@ -2468,3 +2468,8 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Providers: xai/grok-4.1 = DONE, all 3 claims hold ("P0_neg_general sign algebra correct; a=0 corner provably empty for every distinct nonzero pair; offSeam stays a loHi device, widening sound"). (Grok garbled one line — said the 49 offSeam mismatches are 'inside loHi'; they are off-locus/both-low+both-high, as the manuscript states.) zai = SKIP (unwired).
 - 2nd lens: #print axioms = [propext, Quot.sound] on all three; dim-16 full-box native_decide regression isZD_eq_hasXorAnnih_box_16 passes; Python cross-check isZD==hasXorAnnih 0 mismatches to dim 64.
 - Verdict: pass. Advisor caught the manuscript full-box overclaim + reframed the target to isZD=hasXorAnnih (not isZD=offSeam).
+
+## 2026-07-10 — operator-side widening (anti0_eq_not_isZD_full), M1 note
+- File: formal/lean4/SounioCDConverse.lean (anti0_eq_not_isZD_full)
+- Corollary of already-reviewed pieces (P0_neg_general, isZD_eq_hasXorAnnih_full, anti0_iff) — no new mechanism. Advisor predicted it holds and it does; empirically anti0 == !isZD on the full box = 0 mismatches (bits 4,5,6); #print axioms = [propext, Quot.sound].
+- M1 discharge: covered by the prior full-box review (same P0_neg_general core) + advisor + kernel + empirical. No separate provider round.
