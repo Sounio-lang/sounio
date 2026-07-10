@@ -1205,4 +1205,50 @@ theorem P0_neg_of_onSeam (bits l u : Nat) (hb : 2 ≤ bits)
     rw [hdtop, e_ld, cdSigma_zero_left (bits-1) l (by omega), e_ud]
     decide
 
+/-- **NECESSITY (Target 1): `isZD ⟹ hasXorAnnih` on the loHi locus, ∀ bits ≥ 4.**  The sharp O(N)
+    predicate captures *every* zero divisor, not just the XOR-linked witnesses: any `isZD` certificate,
+    via `annih_forces`, is XOR-linked with sign product `+1`.  The `a ≥ 1` witness injects directly;
+    the `a = 0` corner cannot be a winner on-seam (`P0_neg_of_onSeam`), so the pair is off-seam and the
+    already-proved `converse_holds` supplies a genuine winner. -/
+theorem hasXorAnnih_complete (bits l u : Nat) (hb : 4 ≤ bits)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits)
+    (hzd : isZD bits l u = true) : hasXorAnnih bits l u = true := by
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := Nat.pow_le_pow_right (by decide) (by omega)
+  have hlt : l < 2 ^ bits := by omega
+  have hne : l ≠ u := by omega
+  simp only [isZD] at hzd
+  rw [List.any_eq_true] at hzd
+  obtain ⟨a, ha_mem, hzd⟩ := hzd
+  rw [List.any_eq_true] at hzd
+  obtain ⟨b, hb_mem, hzd⟩ := hzd
+  rw [Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true] at hzd
+  obtain ⟨hab_lt, hann⟩ := hzd
+  have hltA : a < 2 ^ bits := List.mem_range.mp ha_mem
+  obtain ⟨s, hannih⟩ : ∃ s : Int, annih bits l u a b s = true := by
+    rcases hann with h | h
+    · exact ⟨1, h⟩
+    · exact ⟨-1, h⟩
+  obtain ⟨hbe, hP⟩ :=
+    annih_forces bits l u a b s hlt hu hltA hne (Nat.ne_of_lt hab_lt) hannih
+  rcases Nat.eq_zero_or_pos a with ha0 | hapos
+  · -- a = 0: P(0) = 1 forces off-seam, then converse_holds gives the winner
+    subst ha0
+    rw [hbe, Nat.zero_xor] at hP
+    have hoff : offSeam bits l u = true := by
+      cases ho : offSeam bits l u with
+      | true => rfl
+      | false =>
+        have hneg := P0_neg_of_onSeam bits l u (by omega) hl1 hl hu1 hu ho
+        rw [hP] at hneg
+        exact absurd hneg (by decide)
+    exact converse_holds bits l u hb hl1 hl hu1 hu hoff
+  · -- a ≥ 1: inject a directly as the XOR-linked winner
+    have hane : a ≠ l ^^^ u := by
+      intro h; rw [h, Nat.xor_self] at hbe; omega
+    rw [hbe] at hP
+    unfold hasXorAnnih
+    refine List.any_eq_true.mpr ⟨a, List.mem_range.mpr hltA, ?_⟩
+    rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+    exact ⟨⟨hapos, hane⟩, hP⟩
+
 end SounioCDConverse
