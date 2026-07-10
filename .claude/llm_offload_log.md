@@ -2449,3 +2449,8 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Providers: xai/grok-4.1 = **DONE, no gaps** ("proofs correct; R(c)=P(c) holds; two minus signs cancel, not −P(c); no hidden edge cases"). zai = SKIP (unwired in driver).
 - 2nd lens: Lean kernel `#print axioms` = [propext, Quot.sound], no native_decide anchor (anchor-free).
 - Verdict: pass on the mandated leg; zai fan-out infra-degraded (incomplete per policy, kernel substitutes).
+
+## 2026-07-10 — M3 prose review: cd-tower-seam §6 next-step rewrite
+- File: docs/papers/cd-tower-seam-obstruction.md (§6 "The next formal steps" block)
+- Providers: xai/grok-4.1 = DONE, no issues ("internal/external split exact; no mischaracterization of dropping the native_decide base or widening past loHi; no overclaims; technically precise"). Other legs infra-degraded (SKIP).
+- Verdict: pass. Docs-only, no theorem claims changed.
