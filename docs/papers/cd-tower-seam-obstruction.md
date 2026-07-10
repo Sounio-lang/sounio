@@ -149,9 +149,16 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 - **The full coincidence — `seam_coincidence`:** `isZD = offSeam ∧ hasXorAnnih = offSeam ∧
   anti0 = ¬offSeam`, one theorem, ∀ `bits≥4` on loHi, axioms `[propext, Quot.sound]` + the single k=3 base.
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
-  `xorAnnih_eq_isZD_16`, `coincidence_16/32` (their `anti0==!offSeam` and `anti0==!isZD` members are now
-  superseded ∀n by the theorems above; the `anti0==llsqNegI` member — `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` —
-  was **never a target** and remains decided n≤6), retained as fast regressions, `native_decide`, no `sorry`.
+  `xorAnnih_eq_isZD_16`, `coincidence_16/32` (**now fully superseded ∀n** — all three members proved:
+  `anti0==!offSeam` and `anti0==!isZD` by the theorems above, and the `anti0==llsqNegI` member —
+  `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` — by `anti0_eq_llsqNegI` below), retained as fast regressions,
+  `native_decide`, no `sorry`.
+- **Operator identity `anti0 ⟺ llsqNegI` — proved ∀n** (`anti0_eq_llsqNegI`, and `anti0_eq_llsqNegI_all`
+  over `loHi`). The two operator conditions `{L_l,L_u}=0` and `(L_lL_u)²=−I` coincide for **all** `l,u≠0`
+  (not just loHi). Key identity `llsq_QP`: the `(L_lL_u)²=−I` four-sign product `R(c)` equals the same
+  `P(c)`, so both reduce to `∀c P(c)=−1`. Notably this member carries axioms `[propext, Quot.sound]`
+  with **no `native_decide` anchor at all** — it rests on the cocycle identity alone, not the octonion
+  base — the last member of `coincidence_16/32` to close, and the only one proved anchor-free.
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
   annihilated by `e₁₅−e₄`, discharged via `annih` (`l=1,u=10,a=15,b=4,s=−1`; note `4 = 15⊕11`,
   i.e. `b=a⊕d` — the XOR link appears literally in the 1998 source).
@@ -189,9 +196,9 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion
   `native_decide` base anchor (inherited from the converse's octonion base).
 - **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
-  ∀n); `coincidence_16/32` (n=4,5,6 — the `anti0==!offSeam` / `anti0==!isZD` members superseded ∀n, but
-  the `anti0==llsqNegI` member `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` is **still only decided n≤6** — never a
-  target, not superseded); Moreno's example.
+  ∀n); `coincidence_16/32` (n=4,5,6 — **all three members now superseded ∀n**: `anti0==!offSeam` /
+  `anti0==!isZD` via the coincidence theorems, and `anti0==llsqNegI` `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` via
+  `anti0_eq_llsqNegI`, the latter anchor-free `[propext, Quot.sound]`); Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
   cross-check of proved theorems, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
