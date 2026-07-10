@@ -1272,4 +1272,94 @@ theorem xorAnnih_eq_isZD_all (bits : Nat) (hb : 4 ≤ bits) :
       have hsd := hasXorAnnih_sound bits p.1 p.2 hlt hp4 hne hX
       rw [hI] at hsd; exact absurd hsd (by decide)
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- TARGET 2 (seam coincidence): anti0 == ! offSeam on the loHi locus, ∀ bits ≥ 4.
+-- The bridge `Q(c) = P(c)`: the anti0 four-sign product equals the converse winner product, so anti0
+-- reduces to `∀c P(c) = -1`, closed off-seam by `converse_holds` and on-seam by the edge lemmas.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- XOR cross-cancellation (Mathlib-free): `(a⊕b)⊕(a⊕c) = b⊕c`. -/
+theorem xor_cross_cancel (a b c : Nat) : (a ^^^ b) ^^^ (a ^^^ c) = b ^^^ c := by
+  rw [Nat.xor_assoc, xor_left_comm b a c, ← Nat.xor_assoc a a (b ^^^ c), Nat.xor_self, Nat.zero_xor]
+
+/-- **THE UNLOCK — `Q(c) = P(c)`.**  The anti0 four-sign product `σ(l,u⊕c)·σ(u,c)·σ(u,l⊕c)·σ(l,c)`
+    equals the converse winner product `σ(l,c)·σ(u,c)·σ(l,c⊕d)·σ(u,c⊕d)` (`d = l⊕u`), for `l,u ≠ 0`.
+    Two cocycle rewrites (`σ(l,u⊕c) = -σ(l,c⊕d)`, `σ(u,l⊕c) = -σ(u,c⊕d)`); the two `-1`s cancel. -/
+theorem anti0_QP (bits l u c : Nat) (hl0 : l ≠ 0) (hu0 : u ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) (hc : c < 2 ^ bits) :
+    cdSigma l (u ^^^ c) bits * cdSigma u c bits * cdSigma u (l ^^^ c) bits * cdSigma l c bits
+      = cdSigma l c bits * cdSigma u c bits
+          * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits := by
+  have hd : l ^^^ u < 2 ^ bits := Nat.xor_lt_two_pow hl hu
+  have hx : c ^^^ (l ^^^ u) < 2 ^ bits := Nat.xor_lt_two_pow hc hd
+  have hlx : l ^^^ (c ^^^ (l ^^^ u)) = u ^^^ c := by
+    rw [xor_left_comm l c (l ^^^ u), ← Nat.xor_assoc l l u, Nat.xor_self, Nat.zero_xor,
+      Nat.xor_comm c u]
+  have hux : u ^^^ (c ^^^ (l ^^^ u)) = l ^^^ c := by
+    rw [xor_left_comm u c (l ^^^ u), xor_left_comm u l u, Nat.xor_self, Nat.xor_zero,
+      Nat.xor_comm c l]
+  have hcoc_l := cdSigma_cocycle' bits l (c ^^^ (l ^^^ u)) hl hx hl0
+  rw [hlx] at hcoc_l
+  have hcoc_u := cdSigma_cocycle' bits u (c ^^^ (l ^^^ u)) hu hx hu0
+  rw [hux] at hcoc_u
+  -- σ(l,c⊕d) = -σ(l,u⊕c) and σ(u,c⊕d) = -σ(u,l⊕c)
+  have e5 : cdSigma l (c ^^^ (l ^^^ u)) bits = - cdSigma l (u ^^^ c) bits := by
+    rcases cdSigma_pm bits l (c ^^^ (l ^^^ u)) with h|h <;>
+    rcases cdSigma_pm bits l (u ^^^ c) with h'|h' <;>
+      rw [h, h'] at hcoc_l ⊢ <;> first | decide | exact absurd hcoc_l (by decide)
+  have e6 : cdSigma u (c ^^^ (l ^^^ u)) bits = - cdSigma u (l ^^^ c) bits := by
+    rcases cdSigma_pm bits u (c ^^^ (l ^^^ u)) with h|h <;>
+    rcases cdSigma_pm bits u (l ^^^ c) with h'|h' <;>
+      rw [h, h'] at hcoc_u ⊢ <;> first | decide | exact absurd hcoc_u (by decide)
+  rw [e5, e6]
+  rcases cdSigma_pm bits l (u ^^^ c) with h1|h1 <;>
+  rcases cdSigma_pm bits u c with h2|h2 <;>
+  rcases cdSigma_pm bits u (l ^^^ c) with h3|h3 <;>
+  rcases cdSigma_pm bits l c with h4|h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- Per-`c` bridge: the anti0 vanishing condition `A(c)+B(c) = 0` is equivalent to `P(c) = -1`. -/
+theorem anti0_term_iff (bits l u c : Nat) (hl0 : l ≠ 0) (hu0 : u ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) (hc : c < 2 ^ bits) :
+    (cdSigma l (u ^^^ c) bits * cdSigma u c bits + cdSigma u (l ^^^ c) bits * cdSigma l c bits = 0)
+      ↔ (cdSigma l c bits * cdSigma u c bits
+          * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits = -1) := by
+  rw [← anti0_QP bits l u c hl0 hu0 hl hu hc]
+  rcases cdSigma_pm bits l (u ^^^ c) with h1|h1 <;>
+  rcases cdSigma_pm bits u c with h2|h2 <;>
+  rcases cdSigma_pm bits u (l ^^^ c) with h3|h3 <;>
+  rcases cdSigma_pm bits l c with h4|h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- **Bridge lemma:** `anti0 = true ↔ ∀ c < 2^bits, P(c) = -1` (the converse winner product). -/
+theorem anti0_iff (bits l u : Nat) (hl0 : l ≠ 0) (hu0 : u ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) :
+    anti0 bits l u = true ↔ ∀ c, c < 2 ^ bits →
+      cdSigma l c bits * cdSigma u c bits
+        * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits = -1 := by
+  simp only [anti0]
+  rw [List.all_eq_true]
+  constructor
+  · intro h c hc
+    have hcc := h c (List.mem_range.mpr hc)
+    rw [beq_iff_eq] at hcc
+    exact (anti0_term_iff bits l u c hl0 hu0 hl hu hc).mp hcc
+  · intro h c hc
+    rw [List.mem_range] at hc
+    rw [beq_iff_eq]
+    exact (anti0_term_iff bits l u c hl0 hu0 hl hu hc).mpr (h c hc)
+
+/-- **Orbit reduction of the winner product:** `P(c) = P(r)` whenever `c ⊕ d = r` (`d = l⊕u`).  The
+    involution `c ↦ c⊕d` fixes the four-sign product, so every orbit is witnessed by either member. -/
+theorem P_eq_of_xor (bits l u c r : Nat) (h1 : c ^^^ (l ^^^ u) = r) :
+    cdSigma l c bits * cdSigma u c bits
+        * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits
+      = cdSigma l r bits * cdSigma u r bits
+          * cdSigma l (r ^^^ (l ^^^ u)) bits * cdSigma u (r ^^^ (l ^^^ u)) bits := by
+  have h2 : r ^^^ (l ^^^ u) = c := by rw [← h1, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  rw [h1, h2]
+  rcases cdSigma_pm bits l c with a1|a1 <;> rcases cdSigma_pm bits u c with a2|a2 <;>
+  rcases cdSigma_pm bits l r with a3|a3 <;> rcases cdSigma_pm bits u r with a4|a4 <;>
+    rw [a1, a2, a3, a4] <;> decide
+
 end SounioCDConverse
