@@ -224,8 +224,11 @@ antisym` proved ∀n (`cocycle_bundle`) on both `sgn` and canonical `cdSigma`; t
 `offSeam ⟹ hasXorAnnih` (`converse_holds`, discharging `ConverseConjecture`); sufficiency
 `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`); necessity `isZD ⟹ hasXorAnnih` (`hasXorAnnih_complete`,
 via the reverse reduction `annih_forces`); the forward obstruction `¬offSeam ⟹ ¬isZD`
-(`isZD_eq_offSeam`); and the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`, via `Q(c)=P(c)`).
-Every "single remaining open theorem" of the earlier drafts is now closed.
+(`isZD_eq_offSeam`); the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`, via `Q(c)=P(c)`); and
+the two-operator identity `anti0 ⟺ llsqNegI` (`{L_l,L_u}=0 ⟺ (L_lL_u)²=−I`, `anti0_eq_llsqNegI`, via
+`R(c)=P(c)` — the **only** member proved *anchor-free*, `[propext, Quot.sound]` with no `native_decide`).
+Every "single remaining open theorem" of the earlier drafts is now closed, and `coincidence_16/32` are
+fully superseded ∀n on all three members.
 
 The engine is the counting statement `Q` on the sign cocycle
 (`scripts/research/cd_tower_converse_counting.py`), now a **theorem** (`Q_all`): *every
@@ -251,6 +254,33 @@ their disagreeing witness from the level below via sign-stability (`P_stable_low
 both-high pairs (`fVal_high_stable`). The seam was genuinely non-trivial until this reduction was
 found; once it is seen, the induction is ordinary and every case closes, with no hard both-low core
 remaining. (This supersedes the provisional "genuinely hard case, cf. Zhilina" note in earlier drafts.)
+
+### The next formal steps
+
+With every internal predicate now equated ∀n, the open frontier is entirely *external* — matching this
+self-contained result to the literature and widening its domain. In rough order of tractability:
+
+1. **Drop the single `native_decide` octonion base** (`Q_base_bool`). The whole coincidence rests on one
+   `k=3` anchor: that `A_3` is a division algebra, so every orbit disagrees. A structural proof of this
+   base — e.g. from the octonion norm being multiplicative, or a direct `cdSigma`-combinatorial argument
+   over the 8 units — would make `seam_coincidence` axiom-clean `[propext, Quot.sound]` throughout, the
+   status `anti0_eq_llsqNegI` already enjoys. Purely internal; no new mathematics, only formalization.
+2. **Widen past the `loHi` locus.** The coincidence is stated on lower×upper pairs
+   (`1 ≤ l < 2^{n−1} ≤ u < 2^n`). Empirically the ZD ⟺ off-seam correspondence holds across the *full*
+   distinct-nonzero box (probe to dim 1024); formalizing the both-low / both-high / seam-touching
+   remainder as first-class theorems (not just the inherited-witness lemmas they already are internally)
+   would upgrade the headline from a locus statement to an all-pairs one.
+3. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
+   `{L_{e_l}, L_{e_{u'}}}` with `u' = u − top` in `A_{n−1}`; ours is on `{L_l, L_u}` at the `A_n`
+   indices. Formalizing the doubling correspondence between the two operator pairs would turn our
+   "unchecked matching caveat" into a proved identity — and let the Moreno/BDI ∀n result be *cited as a
+   consequence* of `seam_coincidence` rather than merely *paralleled by* it.
+4. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
+   framing (doubly-alternative ZDs / hexagons) coincides with ours remains unconfirmed — the sources are
+   paywalled. Access + a definitional bridge would settle the literature-priority question the honest
+   ledger currently leaves open.
+
+Items 1–2 are internal formalization (bounded, no discovery risk); 3–4 depend on external sources.
 
 ## References
 
