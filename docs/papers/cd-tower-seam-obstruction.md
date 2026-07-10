@@ -207,10 +207,11 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout — **fully anchor-free**: the octonion
   base `Q_base` is proved structurally (`both_low_witness_disagree`/`both_high_witness_disagree`), so
   no `native_decide` appears anywhere in the ∀n chain.
-- **Proved (∀n, FULL box — not just loHi):** the zero-divisor characterization `isZD = hasXorAnnih`
-  for *every* distinct nonzero pair (`1≤l,u<2^n`, `l≠u`) — `isZD_eq_hasXorAnnih_full`, via the general
-  `P0_neg_general` (`P(0)=−1` everywhere makes the `a=0` corner vacuous). `[propext, Quot.sound]`. The
-  geometric `isZD = offSeam` reading stays loHi-only (it is *false* off the locus).
+- **Proved (∀n, FULL box — not just loHi):** the two *intrinsic* zero-divisor characterizations for
+  *every* distinct nonzero pair (`1≤l,u<2^n`, `l≠u`) — `isZD = hasXorAnnih` (`isZD_eq_hasXorAnnih_full`)
+  and `anti0 = ¬isZD` (`anti0_eq_not_isZD_full`), both via the general `P0_neg_general` (`P(0)=−1`
+  everywhere kills the `a=0` corner and collapses the `{0,d}` orbit). `[propext, Quot.sound]`. Only the
+  geometric `isZD = offSeam` reading stays loHi-only — it is *false* off the locus.
 - **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
   ∀n); `coincidence_16/32` (n=4,5,6 — **all three members now superseded ∀n**: `anti0==!offSeam` /
   `anti0==!isZD` via the coincidence theorems, and `anti0==llsqNegI` `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` via
@@ -286,14 +287,18 @@ is inherently loHi-specific: `offSeam` only tests the seam element `H`, so it re
 both-low / both-high pair, which is **not** the zero-divisor set off the locus (e.g. `e₁+e₂` in the
 sedenions is off-seam by that test but is *not* a ZD — 49 such mismatches at dim 16 alone). So the naive
 "drop the `loHi` bounds" statement is **false** and is not what widens. What *does* extend to the full
-box is the `hasXorAnnih` characterization: **`isZD = hasXorAnnih` for every distinct nonzero pair**
-(`1 ≤ l,u < 2^n`, `l ≠ u`, ∀n) — `isZD_eq_hasXorAnnih_full`, axioms `[propext, Quot.sound]`. It falls out
-because `annih_forces` is already stated for all pairs and the one loHi-dependent step in the necessity
-proof — the `a=0`/`{0,d}` corner — is **vacuous everywhere**: `P0_neg_general` proves `P(0) = −1` for
-*every* distinct nonzero pair (`cdSigma _ 0 = 1` twice, then two cocycles + `cdSigma_cross_neg`), so no
-annihilator can have low index `0`. Cross-checked `isZD == hasXorAnnih` over the entire box to dim 64
-(0 mismatches; dim-16 anchor `isZD_eq_hasXorAnnih_box_16`). The *geometric* `offSeam` reading stays a
-loHi statement — correctly, since it is false elsewhere.
+box are the two *intrinsic* characterizations: **`isZD = hasXorAnnih`** (the XOR-winner test) and
+**`anti0 = ¬isZD`** (the operator test `{L_l,L_u}=0`), each for every distinct nonzero pair
+(`1 ≤ l,u < 2^n`, `l ≠ u`, ∀n) — `isZD_eq_hasXorAnnih_full` and `anti0_eq_not_isZD_full`, both axioms
+`[propext, Quot.sound]`. They fall out because `annih_forces` is already stated for all pairs and the one
+loHi-dependent step in the necessity proof — the `a=0`/`{0,d}` corner — is **vacuous everywhere**:
+`P0_neg_general` proves `P(0) = −1` for *every* distinct nonzero pair (`cdSigma _ 0 = 1` twice, then two
+cocycles + `cdSigma_cross_neg`), so no annihilator can have low index `0`; the same lemma handles the
+`{0,d}` orbit that makes `anti0` (a `∀c` test) collapse onto `¬hasXorAnnih`. Cross-checked
+`isZD == hasXorAnnih` and `anti0 == ¬isZD` over the entire box to dim 64 (0 mismatches; dim-16 anchor
+`isZD_eq_hasXorAnnih_box_16`). **Only the *geometric* `offSeam` predicate stays loHi-bound** — because it
+merely tests the seam element `H`, it is genuinely false off the locus; the operator and winner readings,
+being intrinsic, are not.
 
 What remains is matching this self-contained result to the literature. In rough order of tractability:
 

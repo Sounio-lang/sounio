@@ -1752,6 +1752,72 @@ theorem anti0_eq_offSeam_all (bits : Nat) (hb : 4 ≤ bits) :
   rw [beq_iff_eq]
   exact seam_eq_anti0 bits p.1 p.2 hb hp1 hp2 hp3 hp4
 
+/-- **The OPERATOR characterization also widens: `anti0 = ¬isZD` on the full box, ∀ bits.**  For *every*
+    distinct nonzero pair, `{L_l,L_u}=0` ⟺ `e_l+e_u` is not a zero divisor — no loHi hypothesis.  Unlike
+    the *geometric* `offSeam` (which is loHi-specific and false off the locus), the operator predicate
+    `anti0` is an honest all-pairs ZD detector.  Proof: `anti0 ⟺ ∀c P(c)=−1` (`anti0_iff`), while
+    `¬hasXorAnnih ⟺ ∀ non-exceptional a, P(a)=−1`; the two exceptional orbits `{0,d}` are handled by
+    `P0_neg_general` (`P(0)=P(d)=−1`), so `anti0 = ¬hasXorAnnih = ¬isZD` (`isZD_eq_hasXorAnnih_full`). -/
+theorem anti0_eq_not_isZD_full (bits l u : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ bits) (hu1 : 1 ≤ u) (hu : u < 2 ^ bits) (hne : l ≠ u) :
+    anti0 bits l u = ! isZD bits l u := by
+  have hbits : 1 ≤ bits := by
+    cases bits with
+    | zero => rw [Nat.pow_zero] at hl; omega
+    | succ _ => omega
+  have hl0 : l ≠ 0 := by omega
+  have hu0 : u ≠ 0 := by omega
+  -- the {0,d} orbit product is -1 (from P0_neg_general, cancelling the two `cdSigma _ 0 = 1` factors)
+  have hddu : cdSigma l (l ^^^ u) bits * cdSigma u (l ^^^ u) bits = -1 := by
+    have h0 := P0_neg_general bits l u hl1 hl hu1 hu hne
+    rw [cdSigma_zero_right bits l hbits, cdSigma_zero_right bits u hbits,
+        Int.one_mul, Int.one_mul] at h0
+    exact h0
+  rw [isZD_eq_hasXorAnnih_full bits l u hl1 hl hu1 hu hne]
+  cases hX : hasXorAnnih bits l u with
+  | true =>
+    rw [Bool.not_true]
+    cases hA : anti0 bits l u with
+    | false => rfl
+    | true =>
+      exfalso
+      have hall := (anti0_iff bits l u hl0 hu0 hl hu).mp hA
+      unfold hasXorAnnih at hX
+      rw [List.any_eq_true] at hX
+      obtain ⟨a, ha_mem, hpred⟩ := hX
+      rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq] at hpred
+      obtain ⟨⟨_, _⟩, hPa⟩ := hpred
+      have hc := hall a (List.mem_range.mp ha_mem)
+      rw [hPa] at hc
+      exact absurd hc (by decide)
+  | false =>
+    rw [Bool.not_false, anti0_iff bits l u hl0 hu0 hl hu]
+    intro c hc
+    by_cases hc0 : c = 0
+    · subst hc0; rw [Nat.zero_xor]
+      exact P0_neg_general bits l u hl1 hl hu1 hu hne
+    · by_cases hcd : c = l ^^^ u
+      · subst hcd
+        rw [Nat.xor_self, cdSigma_zero_right bits l hbits, cdSigma_zero_right bits u hbits,
+            Int.mul_one, Int.mul_one]
+        exact hddu
+      · have hc1 : 1 ≤ c := by omega
+        have hPc : cdSigma l c bits * cdSigma u c bits
+            * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits ≠ 1 := by
+          intro hP1
+          have hxt : hasXorAnnih bits l u = true := by
+            unfold hasXorAnnih
+            refine List.any_eq_true.mpr ⟨c, List.mem_range.mpr hc, ?_⟩
+            rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+            exact ⟨⟨hc1, hcd⟩, hP1⟩
+          rw [hX] at hxt; exact absurd hxt (by decide)
+        rcases cdSigma_pm bits l c with h1 | h1 <;>
+        rcases cdSigma_pm bits u c with h2 | h2 <;>
+        rcases cdSigma_pm bits l (c ^^^ (l ^^^ u)) with h3 | h3 <;>
+        rcases cdSigma_pm bits u (c ^^^ (l ^^^ u)) with h4 | h4 <;>
+          rw [h1, h2, h3, h4] at hPc ⊢ <;>
+          first | rfl | exact absurd rfl hPc
+
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 -- THE FULL SEAM COINCIDENCE ON loHi, ∀ bits≥4 — every link now a proved ∀n theorem.
 --   offSeam  ⟺  isZD  ⟺  hasXorAnnih  ⟺  ¬anti0
