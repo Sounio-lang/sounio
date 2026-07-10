@@ -21,7 +21,8 @@ coincidence** `off-seam ⟺ 2-term zero divisor ⟺ XOR-winner ⟺ {L_l,L_u} ≠
 σ-form** (`seam_coincidence`: `isZD = offSeam ∧ hasXorAnnih = offSeam ∧ anti0 = ¬offSeam`, ∀ `bits≥4`
 on loHi) — both the converse (`off-seam ⟹ ZD`, an ordinary induction over the tower with an octonion
 base) and its forward obstruction (`on-seam ⟹ not a ZD`), plus the operator bridge, all with kernel
-axioms `[propext, Quot.sound]` plus a single `native_decide` octonion-base anchor; (ii) an `O(N)`
+axioms `[propext, Quot.sound]` and **no `native_decide` anywhere in the ∀n chain** (the octonion base
+is proved structurally); (ii) an `O(N)`
 decision reduction that pushes the cross-check to dimension `1024`; and (iii) a primary-source
 cross-check against Moreno's original annihilator. The σ-recursion machinery gives a *combinatorial*
 form of the Moreno/BDI statement — its own, self-contained proof in the Sounio convention, not a
@@ -57,14 +58,16 @@ The content is the coincidence `offSeam ⟺ hasXorAnnih ⟺ isZD ⟺ ¬anti0`. *
 
 | Link | Direction | Status |
 |---|---|---|
-| `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`) — ordinary induction (`Q_all`; octonion base by `native_decide`; six exhaustive seam cases) + the BDI doubling recursion `converse_recursion'`; discharges `ConverseConjecture` (`converse_conjecture_proved`). Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
+| `offSeam ⟹ hasXorAnnih` | the converse proper | **proved ∀n** (`converse_holds`) — ordinary induction (`Q_all`; octonion base `Q_base` proved structurally, no `native_decide`; six exhaustive seam cases) + the BDI doubling recursion `converse_recursion'`; discharges `ConverseConjecture` (`converse_conjecture_proved`). Empirically verified n≤10 (§2); matches Moreno/BDI (§4) |
 | `hasXorAnnih ⟹ isZD` | reduction (sufficiency) | **proved ∀n** (`hasXorAnnih_sound`, on `l,u < 2^bits`, `l ≠ u`) |
 | `isZD ⟹ hasXorAnnih` | reduction (necessity) | **proved ∀n** (`hasXorAnnih_complete`) — the reverse reduction `annih_forces` (any 2-term annihilator forces `b=a⊕(l⊕u)` and the four-sign winner, axioms `[propext, Quot.sound]`), with the `a=0`/`{0,d}`-orbit corner (`P0_neg_of_onSeam`) routed through `converse_holds`. Upgrades the old n=4 anchor; `xorAnnih_eq_isZD_all` gives the full `hasXorAnnih == isZD` on loHi ∀n |
 | `¬offSeam ⟹ ¬isZD` | forward obstruction | **proved ∀n** (`isZD_eq_offSeam`) — on-seam pairs have no XOR-winner (`hasXorAnnih_false_of_onSeam`, every orbit loses via the edge lemmas) composed with `hasXorAnnih_complete`. A purely combinatorial route (no operator/`anti0` detour needed) |
 | `anti0 ⟺ ¬offSeam` | operator bridge | **proved ∀n** (`seam_eq_anti0`) — via the identity `Q(c)=P(c)` (the anticommutator four-sign product equals the converse winner product, two `cdSigma_cocycle` rewrites), so the operator condition reduces to the same `P`-analysis. Generalizes the `anti0==!offSeam` member of `coincidence_16/32` to all n (`anti0_eq_offSeam_all`) |
 
-All links carry axioms `[propext, Quot.sound]` plus the single inherited k=3 octonion `native_decide`
-base anchor. `seam_coincidence` states the four-way identity as one theorem: `isZD = offSeam ∧
+All links carry axioms `[propext, Quot.sound]` — **fully anchor-free**, with no `native_decide`
+anywhere in the ∀n chain (the octonion base `Q_base` is proved structurally; the only `native_decide`
+uses in the file are the fixed-n regression anchors of §3, outside the ∀n chain).
+`seam_coincidence` states the four-way identity as one theorem: `isZD = offSeam ∧
 hasXorAnnih = offSeam ∧ anti0 = ¬offSeam`, ∀ bits≥4 on loHi. The one overclaim we still avoid: **no**
 claim about zero divisors with annihilators of length `> 2` — every predicate here is about 2-term
 factors by definition (Grok-verified exhaustive for 2-term factors, §2).
@@ -121,10 +124,13 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   all hold on loHi.)
 - **The converse proper `offSeam ⟹ hasXorAnnih` — proved ∀n** (`converse_holds`, `∀ bits≥4` on loHi;
   and `converse_conjecture_proved : ConverseConjecture` composing it with `hasXorAnnih_sound`).
-  Mathlib-free, axioms `[propext, Quot.sound]` + the single k=3 octonion-base `native_decide` anchor.
+  Mathlib-free, axioms `[propext, Quot.sound]` — anchor-free (no `native_decide`).
   The engine is `Q_all`: *every distinct-nonzero pair in `A_k` (`k≥3`) has a non-exceptional
   disagreeing orbit* (`P=−1`), by **ordinary** induction on the level. Base = octonions `A_3` (a
-  division algebra; `native_decide`). Step = six exhaustive cases on the seam position `H=2^k`: three
+  division algebra; `Q_base`, proved **structurally** by the same six-way seam split as the step, with
+  the two doubling cases discharged without an IH — both-low via the high witness `a=2²+l`, both-high
+  via the low witness `a=l_lo`; `both_low_witness_disagree`/`both_high_witness_disagree`, no
+  `native_decide`). Step = six exhaustive cases on the seam position `H=2^k`: three
   seam-element **edges** collapse to the cocycle/antisym/diagonal identities (`edge_m_eq_H`,
   `edge_m_eq_H_plus_l`, `edge_l_eq_H`); **both-low** and **both-high** pairs *inherit* their witness
   from the level below via sign-stability (`P_stable_low`, `fVal_high_stable`); **mixed** pairs use the
@@ -147,7 +153,7 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   winner product `P(c)` (two `cdSigma_cocycle` rewrites), so `{L_l,L_u}=0 ⟺ ∀c P(c)=−1 ⟺ ¬offSeam`
   reuses the converse `P`-analysis wholesale. Generalizes the `anti0==!offSeam` member of `coincidence_16/32` to all n.
 - **The full coincidence — `seam_coincidence`:** `isZD = offSeam ∧ hasXorAnnih = offSeam ∧
-  anti0 = ¬offSeam`, one theorem, ∀ `bits≥4` on loHi, axioms `[propext, Quot.sound]` + the single k=3 base.
+  anti0 = ¬offSeam`, one theorem, ∀ `bits≥4` on loHi, axioms `[propext, Quot.sound]` — anchor-free.
 - **Converse anchors — decided:** `converse_16` (brute), `converse_sharp_16/32/64` (sharp σ-form),
   `xorAnnih_eq_isZD_16`, `coincidence_16/32` (**now fully superseded ∀n** — all three members proved:
   `anti0==!offSeam` and `anti0==!isZD` by the theorems above, and the `anti0==llsqNegI` member —
@@ -156,9 +162,11 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 - **Operator identity `anti0 ⟺ llsqNegI` — proved ∀n** (`anti0_eq_llsqNegI`, and `anti0_eq_llsqNegI_all`
   over `loHi`). The two operator conditions `{L_l,L_u}=0` and `(L_lL_u)²=−I` coincide for **all** `l,u≠0`
   (not just loHi). Key identity `llsq_QP`: the `(L_lL_u)²=−I` four-sign product `R(c)` equals the same
-  `P(c)`, so both reduce to `∀c P(c)=−1`. Notably this member carries axioms `[propext, Quot.sound]`
-  with **no `native_decide` anchor at all** — it rests on the cocycle identity alone, not the octonion
-  base — the last member of `coincidence_16/32` to close, and the only one proved anchor-free.
+  `P(c)`, so both reduce to `∀c P(c)=−1`. This was the last member of `coincidence_16/32` to close;
+  it rests on the cocycle identity alone and was the first link proved without routing through the
+  octonion base at all. (Since the octonion base is now itself structural — see the converse engine
+  above — the *whole* ∀n chain is anchor-free `[propext, Quot.sound]`; anchor-free is the norm here,
+  not this member's distinction.)
 - **Primary-source regression — decided:** `moreno_e1_e10` — Moreno's own example, `e₁+e₁₀`
   annihilated by `e₁₅−e₄`, discharged via `annih` (`l=1,u=10,a=15,b=4,s=−1`; note `4 = 15⊕11`,
   i.e. `b=a⊕d` — the XOR link appears literally in the 1998 source).
@@ -193,12 +201,13 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   `ConverseConjecture`), sufficiency `hasXorAnnih ⟹ isZD` (`hasXorAnnih_sound`), necessity
   `isZD ⟹ hasXorAnnih` (`hasXorAnnih_complete`, via `annih_forces`), the forward obstruction
   `¬offSeam ⟹ ¬isZD` (`isZD_eq_offSeam`), and the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`,
-  via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout, plus the single k=3 octonion
-  `native_decide` base anchor (inherited from the converse's octonion base).
+  via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout — **fully anchor-free**: the octonion
+  base `Q_base` is proved structurally (`both_low_witness_disagree`/`both_high_witness_disagree`), so
+  no `native_decide` appears anywhere in the ∀n chain.
 - **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
   ∀n); `coincidence_16/32` (n=4,5,6 — **all three members now superseded ∀n**: `anti0==!offSeam` /
   `anti0==!isZD` via the coincidence theorems, and `anti0==llsqNegI` `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` via
-  `anti0_eq_llsqNegI`, the latter anchor-free `[propext, Quot.sound]`); Moreno's example.
+  `anti0_eq_llsqNegI`, `[propext, Quot.sound]`); Moreno's example.
 - **Computed:** brute==fast reduction n=4,5,6; the converse frontier n=7..10 (dim ≤1024) — now a
   cross-check of proved theorems, not the evidence base.
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
@@ -226,20 +235,25 @@ antisym` proved ∀n (`cocycle_bundle`) on both `sgn` and canonical `cdSigma`; t
 via the reverse reduction `annih_forces`); the forward obstruction `¬offSeam ⟹ ¬isZD`
 (`isZD_eq_offSeam`); the operator bridge `anti0 ⟺ ¬offSeam` (`seam_eq_anti0`, via `Q(c)=P(c)`); and
 the two-operator identity `anti0 ⟺ llsqNegI` (`{L_l,L_u}=0 ⟺ (L_lL_u)²=−I`, `anti0_eq_llsqNegI`, via
-`R(c)=P(c)` — the **only** member proved *anchor-free*, `[propext, Quot.sound]` with no `native_decide`).
-Every "single remaining open theorem" of the earlier drafts is now closed, and `coincidence_16/32` are
-fully superseded ∀n on all three members.
+`R(c)=P(c)`). Every "single remaining open theorem" of the earlier drafts is now closed;
+`coincidence_16/32` are fully superseded ∀n on all three members; and — with the octonion base now
+proved structurally (`Q_base`) — the **entire ∀n chain is anchor-free `[propext, Quot.sound]`**, no
+`native_decide` anywhere in it (the only `native_decide` uses left are the fixed-n regression anchors).
 
 The engine is the counting statement `Q` on the sign cocycle
 (`scripts/research/cd_tower_converse_counting.py`), now a **theorem** (`Q_all`): *every
 distinct-nonzero pair `(l,m)` in `A_k` (`k≥3`) has a non-exceptional disagreeing orbit* (`P=−1`),
 where an orbit is `{a, a⊕d}`, `d=l⊕m`, `P` is constant on orbits, and the two exceptional orbits are
-`{0,d}` and `{l,m}`. Proved by **ordinary induction on the level** (`native_decide` octonion base,
+`{0,d}` and `{l,m}`. Proved by **ordinary induction on the level** (structural octonion base,
 six exhaustive seam cases), then lifted through the doubling recursion `P_(l,u)(a) = −P_(l,u_lo)(a)`.
 
 The proof levers, all now formal:
-- **Base:** octonions `A_3` are a division algebra — *every* orbit disagrees (`oct_all_disagree` /
-  `Q_base_bool`, `native_decide`; the sole native anchor).
+- **Base (`Q_base`, structural — no `native_decide`):** octonions `A_3` close by the *same* six-way
+  seam split as the step, but with the two doubling cases discharged **without an IH** — a both-low pair
+  takes the high witness `a=2²+l` (orbit `{2²+l, 2²+m}`, reduced by `cdSigma_lo_hi`+diag), a both-high
+  pair takes the low witness `a=l_lo` (orbit `{l_lo,m_lo}`, reduced by `fVal_high_stable`+diag), both
+  bottoming out on the core identity `cdSigma a b · cdSigma b a = −1` (`cdSigma_cross_neg`, one
+  antisymmetry). Lemmas `both_low_witness_disagree` / `both_high_witness_disagree`.
 - **Doubling / stability:** `P_stable_low` (both-low, low block) and `fVal_high_stable` (both-high, low
   block) — the sign is level-invariant on the low block, so these pairs **inherit** a disagreeing
   witness from the level below.
@@ -257,30 +271,27 @@ remaining. (This supersedes the provisional "genuinely hard case, cf. Zhilina" n
 
 ### The next formal steps
 
-With every internal predicate now equated ∀n, the open frontier is entirely *external* — matching this
-self-contained result to the literature and widening its domain. In rough order of tractability:
+**Done — the octonion base is now structural** (was step 1 here): `Q_base` is proved by the six-way
+seam split with no `native_decide`, so the *entire* ∀n chain is anchor-free `[propext, Quot.sound]`.
+What remains is matching this self-contained result to the literature and widening its domain. In
+rough order of tractability:
 
-1. **Drop the single `native_decide` octonion base** (`Q_base_bool`). The whole coincidence rests on one
-   `k=3` anchor: that `A_3` is a division algebra, so every orbit disagrees. A structural proof of this
-   base — e.g. from the octonion norm being multiplicative, or a direct `cdSigma`-combinatorial argument
-   over the 8 units — would make `seam_coincidence` axiom-clean `[propext, Quot.sound]` throughout, the
-   status `anti0_eq_llsqNegI` already enjoys. Purely internal; no new mathematics, only formalization.
-2. **Widen past the `loHi` locus.** The coincidence is stated on lower×upper pairs
+1. **Widen past the `loHi` locus.** The coincidence is stated on lower×upper pairs
    (`1 ≤ l < 2^{n−1} ≤ u < 2^n`). Empirically the ZD ⟺ off-seam correspondence holds across the *full*
    distinct-nonzero box (probe to dim 1024); formalizing the both-low / both-high / seam-touching
    remainder as first-class theorems (not just the inherited-witness lemmas they already are internally)
    would upgrade the headline from a locus statement to an all-pairs one.
-3. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
+2. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
    `{L_{e_l}, L_{e_{u'}}}` with `u' = u − top` in `A_{n−1}`; ours is on `{L_l, L_u}` at the `A_n`
    indices. Formalizing the doubling correspondence between the two operator pairs would turn our
    "unchecked matching caveat" into a proved identity — and let the Moreno/BDI ∀n result be *cited as a
    consequence* of `seam_coincidence` rather than merely *paralleled by* it.
-4. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
+3. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
    framing (doubly-alternative ZDs / hexagons) coincides with ours remains unconfirmed — the sources are
    paywalled. Access + a definitional bridge would settle the literature-priority question the honest
    ledger currently leaves open.
 
-Items 1–2 are internal formalization (bounded, no discovery risk); 3–4 depend on external sources.
+Item 1 is internal formalization (bounded, no discovery risk); 2–3 depend on external sources.
 
 ## References
 
