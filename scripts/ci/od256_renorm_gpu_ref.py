@@ -72,8 +72,15 @@ def vseb_branch(e, k=K):           # branchy reference (for bit-identity check)
     return f
 
 def od_add_gpu(a, b):
-    # interleave + 2x VecSum + branchless VSEB (matches the emitted GPU kernel).
-    return vseb_branchless(vecsum(vecsum(interleave(a, b))))
+    # interleave + 6x VecSum + branchless VSEB (matches the emitted GPU kernel).
+    # 6 passes (was 2): with a partial magnitude gap between operands the
+    # interleaved sequence is disordered and carries must propagate up to K limbs;
+    # 2 passes lost ~half precision (215 bits) there. 6 (even, keeps the emitter's
+    # ping-pong bank parity) restores full ~430-bit precision across all gaps.
+    c = interleave(a, b)
+    for _ in range(6):
+        c = vecsum(c)
+    return vseb_branchless(c)
 
 def _split(x):
     C = 134217729.0; c = C*x; d = c - x; hi = c - d

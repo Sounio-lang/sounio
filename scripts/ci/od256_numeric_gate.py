@@ -86,14 +86,21 @@ def _adv_od256_pairs(rng, n, op_add):
     while len(out) < n:
         r = rng.random()
         if op_add:
-            if r < 0.45:                                      # near cancellation: a + b ~ tiny
+            if r < 0.35:                                      # near cancellation: a + b ~ tiny
                 v = val(-40, 40); a = ref._split_mpf(v)
                 b = ref._split_mpf(-v + v * mpf(2) ** rng.randint(-410, -360))
-            elif r < 0.7:                                     # denormal-scale operands
+            elif r < 0.65:                                    # PARTIAL-OVERLAP magnitude gap
+                # a ~ O(1), b ~ 2^-g with g in (0, 424): b's top limbs fall INSIDE
+                # a's 424-bit window and must merge. This is the regime that exposed
+                # the 2-pass-VecSum under-renormalization (fixed to 6 passes).
+                e = rng.randint(-30, 30)
+                a = ref._split_mpf(mant() * mpf(2) ** e)
+                b = ref._split_mpf(mant() * mpf(2) ** (e - rng.randint(40, 420)))
+            elif r < 0.8:                                     # denormal-scale operands
                 a = ref._split_mpf(val(-1040, -990)); b = ref._split_mpf(val(-1040, -990))
-            elif r < 0.85:                                    # huge (Dekker-safe) operands
+            elif r < 0.9:                                     # huge (Dekker-safe) operands
                 a = ref._split_mpf(val(760, 890)); b = ref._split_mpf(val(760, 890))
-            else:                                             # wide range between operands
+            else:                                             # wide range (gap > window: small drops)
                 a = ref._split_mpf(val(200, 300)); b = ref._split_mpf(val(-300, -200))
         else:                                                 # mul: bound the product exponent
             # target product regime: denormal / normal / near-overflow

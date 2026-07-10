@@ -3600,8 +3600,11 @@ pub fn kaxi_emit_od256_two_prod_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc 
 
 // od256 GPU-octuple ADD: c = a + b, faithful to ~424 bits (branchless).
 // Pipeline (design validated in scripts/ci/od256_renorm_gpu_ref.py):
-//   interleave a[i],b[i] -> 16 (no merge network) ; 2x VecSum ; branchless
+//   interleave a[i],b[i] -> 16 (no merge network) ; 6x VecSum ; branchless
 //   VecSumErrBranch (SELP-emulated moving index) -> 8 limbs.
+//   (6 passes, not 2: a partial magnitude gap disorders the interleaved
+//   sequence and carries must propagate up to K limbs — 2 passes lost ~half
+//   precision (215 bits) there; 6 restores ~430 bits across all gaps.)
 // Per-thread stride 24: slots 0-7=a, 8-15=b, 16-23=out. All f64 regs <= r59
 // (%fd<70>); int logic r60-64; predicates p0(nz)/p1(hit).
 fn od_ts_line(buf: KaxiAsmBuf, dst: i64, ra: i64, rb: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
@@ -3609,7 +3612,7 @@ fn od_ts_line(buf: KaxiAsmBuf, dst: i64, ra: i64, rb: i64, seq: i64) -> KaxiAsmB
 }
 pub fn kaxi_emit_od256_add_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     var buf: KaxiAsmBuf = kaxi_asm_new()
-    buf = kaxi_asm_push_line(buf, "; K-AXI od256 ADD: c=a+b (interleave + 2x VecSum + branchless VSEB)")
+    buf = kaxi_asm_push_line(buf, "; K-AXI od256 ADD: c=a+b (interleave + 6x VecSum + branchless VSEB)")
     var seq: i64 = 0
     buf = kaxi_asm_push_line(buf, "get_tid r0, var=0%, seq=0"); seq = 1
     buf = kaxi_asm_push_line(buf, "load_imm r1, imm=24, seq=1"); seq = 2
@@ -3626,10 +3629,10 @@ pub fn kaxi_emit_od256_add_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
         i = i + 1
     }
     var passn: i64 = 0
-    while passn < 2 {
+    while passn < 6 {
         var IN: i64 = 10
         var OUT: i64 = 26
-        if passn == 1 { IN = 26; OUT = 10 }
+        if passn % 2 == 1 { IN = 26; OUT = 10 }
         buf = od_ts_line(buf, 50, IN + 15, 59, seq); seq = seq + 1
         var k: i64 = 14
         while k >= 0 {
