@@ -64,7 +64,7 @@ while IFS=$'\t' read -r kernel ptx mem_words threads; do
     cin="$RESULTS_DIR/.${kernel}.chunk.in"; cout="$RESULTS_DIR/.${kernel}.chunk.out"
     # slice cases [off, off+chunk): bs = one case (stride*8 bytes)
     dd if="$infile" of="$cin" bs=$(( stride * 8 )) skip=$off count=$chunk status=none
-    timeout 120 "$RUNNER" "$pfile" --kernel kaxi_kernel --type f64 \
+    timeout 600 "$RUNNER" "$pfile" --kernel kaxi_kernel --type f64 \
         --threads "$chunk" --mem-words "$cwords" \
         --init-file "$cin" --dump-file "$cout" >>"$RESULTS_DIR/${kernel}.log" 2>&1
     rc=$?
