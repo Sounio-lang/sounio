@@ -1282,6 +1282,40 @@ theorem annih_forces (bits l u a b : Nat) (s : Int)
     rcases cdSigma_pm bits l b with h3 | h3 <;> rcases cdSigma_pm bits u b with h4 | h4 <;>
     simp only [hs, h1, h2, h3, h4] at e1 e2 ⊢ <;> revert e1 e2 <;> decide
 
+/-- **`P(0) = −1` for EVERY distinct nonzero pair** (`1≤l,u<2^bits`, `l≠u`) — the general form of the
+    `a=0` corner, with no loHi/on-seam hypotheses.  The `{0,d}` orbit *always* disagrees: the four-sign
+    winner product at `a=0` is `−1`, so `a=0` can never be an annihilator's low index.  Proof is a pure
+    σ-identity: `cdSigma _ 0 = 1` (twice), then the two cocycles `σ(l,d)·σ(l,u)=−1`, `σ(u,d)·σ(u,l)=−1`
+    (`d=l⊕u`, so `l⊕d=u`, `u⊕d=l`) combine with `σ(l,u)·σ(u,l)=−1` (`cdSigma_cross_neg`) to force
+    `σ(l,d)·σ(u,d)=−1`.  No loHi, no `native_decide`.  This is what makes the `isZD ⟹ hasXorAnnih`
+    necessity extend to the *full* distinct-nonzero box (not just loHi): the `a=0` branch is vacuous. -/
+theorem P0_neg_general (bits l u : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ bits) (hu1 : 1 ≤ u) (hu : u < 2 ^ bits) (hne : l ≠ u) :
+    cdSigma l 0 bits * cdSigma u 0 bits
+      * cdSigma l (l ^^^ u) bits * cdSigma u (l ^^^ u) bits = -1 := by
+  have hbits : 1 ≤ bits := by
+    cases bits with
+    | zero => rw [Nat.pow_zero] at hl; omega
+    | succ _ => omega
+  have hd : l ^^^ u < 2 ^ bits := Nat.xor_lt_two_pow hl hu
+  have hlxd : l ^^^ (l ^^^ u) = u := by rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  have huxd : u ^^^ (l ^^^ u) = l := by
+    rw [Nat.xor_comm l u, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  have hc1 := cdSigma_cocycle' bits l (l ^^^ u) hl hd (by omega)
+  rw [hlxd] at hc1
+  have hc2 := cdSigma_cocycle' bits u (l ^^^ u) hu hd (by omega)
+  rw [huxd] at hc2
+  have hcn := cdSigma_cross_neg bits l u hl1 hl hu1 hu hne
+  rw [cdSigma_zero_right bits l (by omega), cdSigma_zero_right bits u (by omega)]
+  rcases cdSigma_pm bits l (l ^^^ u) with h1 | h1 <;>
+  rcases cdSigma_pm bits u (l ^^^ u) with h2 | h2 <;>
+  rcases cdSigma_pm bits l u with h3 | h3 <;>
+  rcases cdSigma_pm bits u l with h4 | h4 <;>
+    rw [h1] at hc1 <;> rw [h2] at hc2 <;> rw [h3] at hc1 hcn <;> rw [h4] at hc2 hcn <;>
+    rw [h1, h2] <;>
+    first | decide | exact absurd hc1 (by decide) | exact absurd hc2 (by decide)
+          | exact absurd hcn (by decide)
+
 /-- **On-seam ⟹ `P(0) = −1`** (the `a = 0` corner).  For an on-seam loHi pair (`offSeam = false`),
     the four-sign winner product at `a = 0` is `−1` — so `a = 0` is NOT a `hasXorAnnih` winner.  Two
     subcases (`u = top` / `l⊕u = top`), each computed from the branch lemmas; no cocycle input beyond
@@ -1396,6 +1430,78 @@ theorem xorAnnih_eq_isZD_all (bits : Nat) (hb : 4 ≤ bits) :
     | true =>
       have hsd := hasXorAnnih_sound bits p.1 p.2 hlt hp4 hne hX
       rw [hI] at hsd; exact absurd hsd (by decide)
+
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- WIDEN PAST loHi: `isZD = hasXorAnnih` on the FULL distinct-nonzero box, ∀ bits (any `1≤l,u<2^bits`,
+--   `l≠u` — NOT just lower×upper).  The geometric `offSeam` predicate is loHi-specific and does NOT
+--   characterize `isZD` off the locus (e.g. `e₁+e₂` in the sedenions is off-seam by that test but not a
+--   ZD); the correct all-pairs characterization is the `hasXorAnnih` one.  The necessity `isZD ⟹
+--   hasXorAnnih` extends here for free: `annih_forces` is already general, and the `a=0` corner (the only
+--   loHi-dependent step) is VACUOUS everywhere — `P0_neg_general` gives `P(0)=−1` for every pair.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **Necessity `isZD ⟹ hasXorAnnih` on the full box, ∀ bits.**  Every 2-term zero divisor is
+    XOR-linked with sign product `+1`, for *any* distinct nonzero pair (not just loHi).  Same argument
+    as `hasXorAnnih_complete` for the `a≥1` witness (which was never loHi-specific); the `a=0` corner is
+    now dispatched by `P0_neg_general` (`P(0)=−1` always) rather than the off-seam detour. -/
+theorem hasXorAnnih_complete_full (bits l u : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ bits) (hu1 : 1 ≤ u) (hu : u < 2 ^ bits) (hne : l ≠ u)
+    (hzd : isZD bits l u = true) : hasXorAnnih bits l u = true := by
+  simp only [isZD] at hzd
+  rw [List.any_eq_true] at hzd
+  obtain ⟨a, ha_mem, hzd⟩ := hzd
+  rw [List.any_eq_true] at hzd
+  obtain ⟨b, hb_mem, hzd⟩ := hzd
+  rw [Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true] at hzd
+  obtain ⟨hab_lt, hann⟩ := hzd
+  have hltA : a < 2 ^ bits := List.mem_range.mp ha_mem
+  obtain ⟨s, hannih⟩ : ∃ s : Int, annih bits l u a b s = true := by
+    rcases hann with h | h
+    · exact ⟨1, h⟩
+    · exact ⟨-1, h⟩
+  obtain ⟨hbe, hP⟩ :=
+    annih_forces bits l u a b s hl hu hltA hne (Nat.ne_of_lt hab_lt) hannih
+  rcases Nat.eq_zero_or_pos a with ha0 | hapos
+  · -- a = 0 is VACUOUS: annih_forces gives P(0)=+1, but P0_neg_general says P(0)=−1.
+    subst ha0
+    rw [hbe, Nat.zero_xor] at hP
+    have hneg := P0_neg_general bits l u hl1 hl hu1 hu hne
+    rw [hP] at hneg
+    exact absurd hneg (by decide)
+  · -- a ≥ 1: inject a directly as the XOR-linked winner
+    have hane : a ≠ l ^^^ u := by
+      intro h; rw [h, Nat.xor_self] at hbe; omega
+    rw [hbe] at hP
+    unfold hasXorAnnih
+    refine List.any_eq_true.mpr ⟨a, List.mem_range.mpr hltA, ?_⟩
+    rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+    exact ⟨⟨hapos, hane⟩, hP⟩
+
+/-- **The zero-divisor characterization on the FULL box, ∀ bits** — `isZD = hasXorAnnih` for *every*
+    distinct nonzero basis pair `(l,u)` (`1≤l,u<2^bits`, `l≠u`), not just lower×upper.  Soundness (`⟸`)
+    by `hasXorAnnih_sound`, necessity (`⟹`) by `hasXorAnnih_complete_full`.  So `e_l+e_u` is a 2-term
+    zero divisor **iff** it has a non-exceptional XOR-linked agreeing orbit — the honest all-pairs
+    widening of `xorAnnih_eq_isZD_all` (which was confined to loHi).  Axioms `[propext, Quot.sound]`. -/
+theorem isZD_eq_hasXorAnnih_full (bits l u : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ bits) (hu1 : 1 ≤ u) (hu : u < 2 ^ bits) (hne : l ≠ u) :
+    isZD bits l u = hasXorAnnih bits l u := by
+  cases hI : isZD bits l u with
+  | true => exact (hasXorAnnih_complete_full bits l u hl1 hl hu1 hu hne hI).symm
+  | false =>
+    cases hX : hasXorAnnih bits l u with
+    | false => rfl
+    | true =>
+      have hsd := hasXorAnnih_sound bits l u hl hu hne hX
+      rw [hI] at hsd; exact absurd hsd (by decide)
+
+/-- **Full-box regression (decided, dim 16):** `isZD == hasXorAnnih` for *every* distinct nonzero pair
+    in `A_4` — a concrete cross-check of `isZD_eq_hasXorAnnih_full` over the whole box (both-low,
+    both-high, and mixed), complementing the loHi-only `xorAnnih_eq_isZD_16`.  `native_decide`, no
+    `sorry`; a fixed-n anchor, outside the ∀n chain. -/
+theorem isZD_eq_hasXorAnnih_box_16 :
+    ((List.range 16).all (fun l => (List.range 16).all (fun u =>
+      (l == 0) || (u == 0) || (l == u) || (isZD 4 l u == hasXorAnnih 4 l u)))) = true := by
+  native_decide
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 -- TARGET 2 (seam coincidence): anti0 == ! offSeam on the loHi locus, ∀ bits ≥ 4.
@@ -1645,6 +1751,72 @@ theorem anti0_eq_offSeam_all (bits : Nat) (hb : 4 ≤ bits) :
   obtain ⟨hp1, hp2, hp3, hp4⟩ := loHi_mem bits (by omega) p hp
   rw [beq_iff_eq]
   exact seam_eq_anti0 bits p.1 p.2 hb hp1 hp2 hp3 hp4
+
+/-- **The OPERATOR characterization also widens: `anti0 = ¬isZD` on the full box, ∀ bits.**  For *every*
+    distinct nonzero pair, `{L_l,L_u}=0` ⟺ `e_l+e_u` is not a zero divisor — no loHi hypothesis.  Unlike
+    the *geometric* `offSeam` (which is loHi-specific and false off the locus), the operator predicate
+    `anti0` is an honest all-pairs ZD detector.  Proof: `anti0 ⟺ ∀c P(c)=−1` (`anti0_iff`), while
+    `¬hasXorAnnih ⟺ ∀ non-exceptional a, P(a)=−1`; the two exceptional orbits `{0,d}` are handled by
+    `P0_neg_general` (`P(0)=P(d)=−1`), so `anti0 = ¬hasXorAnnih = ¬isZD` (`isZD_eq_hasXorAnnih_full`). -/
+theorem anti0_eq_not_isZD_full (bits l u : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ bits) (hu1 : 1 ≤ u) (hu : u < 2 ^ bits) (hne : l ≠ u) :
+    anti0 bits l u = ! isZD bits l u := by
+  have hbits : 1 ≤ bits := by
+    cases bits with
+    | zero => rw [Nat.pow_zero] at hl; omega
+    | succ _ => omega
+  have hl0 : l ≠ 0 := by omega
+  have hu0 : u ≠ 0 := by omega
+  -- the {0,d} orbit product is -1 (from P0_neg_general, cancelling the two `cdSigma _ 0 = 1` factors)
+  have hddu : cdSigma l (l ^^^ u) bits * cdSigma u (l ^^^ u) bits = -1 := by
+    have h0 := P0_neg_general bits l u hl1 hl hu1 hu hne
+    rw [cdSigma_zero_right bits l hbits, cdSigma_zero_right bits u hbits,
+        Int.one_mul, Int.one_mul] at h0
+    exact h0
+  rw [isZD_eq_hasXorAnnih_full bits l u hl1 hl hu1 hu hne]
+  cases hX : hasXorAnnih bits l u with
+  | true =>
+    rw [Bool.not_true]
+    cases hA : anti0 bits l u with
+    | false => rfl
+    | true =>
+      exfalso
+      have hall := (anti0_iff bits l u hl0 hu0 hl hu).mp hA
+      unfold hasXorAnnih at hX
+      rw [List.any_eq_true] at hX
+      obtain ⟨a, ha_mem, hpred⟩ := hX
+      rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq] at hpred
+      obtain ⟨⟨_, _⟩, hPa⟩ := hpred
+      have hc := hall a (List.mem_range.mp ha_mem)
+      rw [hPa] at hc
+      exact absurd hc (by decide)
+  | false =>
+    rw [Bool.not_false, anti0_iff bits l u hl0 hu0 hl hu]
+    intro c hc
+    by_cases hc0 : c = 0
+    · subst hc0; rw [Nat.zero_xor]
+      exact P0_neg_general bits l u hl1 hl hu1 hu hne
+    · by_cases hcd : c = l ^^^ u
+      · subst hcd
+        rw [Nat.xor_self, cdSigma_zero_right bits l hbits, cdSigma_zero_right bits u hbits,
+            Int.mul_one, Int.mul_one]
+        exact hddu
+      · have hc1 : 1 ≤ c := by omega
+        have hPc : cdSigma l c bits * cdSigma u c bits
+            * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits ≠ 1 := by
+          intro hP1
+          have hxt : hasXorAnnih bits l u = true := by
+            unfold hasXorAnnih
+            refine List.any_eq_true.mpr ⟨c, List.mem_range.mpr hc, ?_⟩
+            rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq, beq_iff_eq]
+            exact ⟨⟨hc1, hcd⟩, hP1⟩
+          rw [hX] at hxt; exact absurd hxt (by decide)
+        rcases cdSigma_pm bits l c with h1 | h1 <;>
+        rcases cdSigma_pm bits u c with h2 | h2 <;>
+        rcases cdSigma_pm bits l (c ^^^ (l ^^^ u)) with h3 | h3 <;>
+        rcases cdSigma_pm bits u (c ^^^ (l ^^^ u)) with h4 | h4 <;>
+          rw [h1, h2, h3, h4] at hPc ⊢ <;>
+          first | rfl | exact absurd rfl hPc
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 -- THE FULL SEAM COINCIDENCE ON loHi, ∀ bits≥4 — every link now a proved ∀n theorem.

@@ -144,6 +144,9 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   `{0,d}` orbit that `hasXorAnnih` excludes; on-seam it cannot annihilate (`P0_neg_of_onSeam`), off-seam
   `converse_holds` supplies the real winner. `xorAnnih_eq_isZD_all` then gives the full
   `hasXorAnnih == isZD` on loHi for all n (generalizing the n=4 anchor `xorAnnih_eq_isZD_16`).
+  **Widened past loHi:** `isZD = hasXorAnnih` holds for the *entire* distinct-nonzero box
+  (`isZD_eq_hasXorAnnih_full`, any `1≤l,u<2^n`, `l≠u`, ∀n) — the `a=0` corner is vacuous everywhere
+  (`P0_neg_general`: `P(0)=−1` for every pair), so no loHi hypothesis is needed. See §6.
 - **Forward obstruction `¬offSeam ⟹ ¬isZD` — proved ∀n** (`isZD_eq_offSeam`, in fact `isZD = offSeam`
   on loHi ∀ `bits≥4`). On-seam pairs have no XOR-winner (`hasXorAnnih_false_of_onSeam`: every orbit
   loses, via the edge lemmas + `P0_neg_of_onSeam`), composed with `hasXorAnnih_complete`. A purely
@@ -204,6 +207,11 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout — **fully anchor-free**: the octonion
   base `Q_base` is proved structurally (`both_low_witness_disagree`/`both_high_witness_disagree`), so
   no `native_decide` appears anywhere in the ∀n chain.
+- **Proved (∀n, FULL box — not just loHi):** the two *intrinsic* zero-divisor characterizations for
+  *every* distinct nonzero pair (`1≤l,u<2^n`, `l≠u`) — `isZD = hasXorAnnih` (`isZD_eq_hasXorAnnih_full`)
+  and `anti0 = ¬isZD` (`anti0_eq_not_isZD_full`), both via the general `P0_neg_general` (`P(0)=−1`
+  everywhere kills the `a=0` corner and collapses the `{0,d}` orbit). `[propext, Quot.sound]`. Only the
+  geometric `isZD = offSeam` reading stays loHi-only — it is *false* off the locus.
 - **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
   ∀n); `coincidence_16/32` (n=4,5,6 — **all three members now superseded ∀n**: `anti0==!offSeam` /
   `anti0==!isZD` via the coincidence theorems, and `anti0==llsqNegI` `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` via
@@ -271,27 +279,40 @@ remaining. (This supersedes the provisional "genuinely hard case, cf. Zhilina" n
 
 ### The next formal steps
 
-**Done — the octonion base is now structural** (was step 1 here): `Q_base` is proved by the six-way
-seam split with no `native_decide`, so the *entire* ∀n chain is anchor-free `[propext, Quot.sound]`.
-What remains is matching this self-contained result to the literature and widening its domain. In
-rough order of tractability:
+**Done — the octonion base is now structural**: `Q_base` is proved by the six-way seam split with no
+`native_decide`, so the *entire* ∀n chain is anchor-free `[propext, Quot.sound]`.
 
-1. **Widen past the `loHi` locus.** The coincidence is stated on lower×upper pairs
-   (`1 ≤ l < 2^{n−1} ≤ u < 2^n`). Empirically the ZD ⟺ off-seam correspondence holds across the *full*
-   distinct-nonzero box (probe to dim 1024); formalizing the both-low / both-high / seam-touching
-   remainder as first-class theorems (not just the inherited-witness lemmas they already are internally)
-   would upgrade the headline from a locus statement to an all-pairs one.
-2. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
+**Done — the ZD characterization is widened past the `loHi` locus.** The *coincidence* `isZD = offSeam`
+is inherently loHi-specific: `offSeam` only tests the seam element `H`, so it reads `true` for every
+both-low / both-high pair, which is **not** the zero-divisor set off the locus (e.g. `e₁+e₂` in the
+sedenions is off-seam by that test but is *not* a ZD — 49 such mismatches at dim 16 alone). So the naive
+"drop the `loHi` bounds" statement is **false** and is not what widens. What *does* extend to the full
+box are the two *intrinsic* characterizations: **`isZD = hasXorAnnih`** (the XOR-winner test) and
+**`anti0 = ¬isZD`** (the operator test `{L_l,L_u}=0`), each for every distinct nonzero pair
+(`1 ≤ l,u < 2^n`, `l ≠ u`, ∀n) — `isZD_eq_hasXorAnnih_full` and `anti0_eq_not_isZD_full`, both axioms
+`[propext, Quot.sound]`. They fall out because `annih_forces` is already stated for all pairs and the one
+loHi-dependent step in the necessity proof — the `a=0`/`{0,d}` corner — is **vacuous everywhere**:
+`P0_neg_general` proves `P(0) = −1` for *every* distinct nonzero pair (`cdSigma _ 0 = 1` twice, then two
+cocycles + `cdSigma_cross_neg`), so no annihilator can have low index `0`; the same lemma handles the
+`{0,d}` orbit that makes `anti0` (a `∀c` test) collapse onto `¬hasXorAnnih`. Cross-checked
+`isZD == hasXorAnnih` and `anti0 == ¬isZD` over the entire box to dim 64 (0 mismatches; dim-16 anchor
+`isZD_eq_hasXorAnnih_box_16`). **Only the *geometric* `offSeam` predicate stays loHi-bound** — because it
+merely tests the seam element `H`, it is genuinely false off the locus; the operator and winner readings,
+being intrinsic, are not.
+
+What remains is matching this self-contained result to the literature. In rough order of tractability:
+
+1. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
    `{L_{e_l}, L_{e_{u'}}}` with `u' = u − top` in `A_{n−1}`; ours is on `{L_l, L_u}` at the `A_n`
    indices. Formalizing the doubling correspondence between the two operator pairs would turn our
    "unchecked matching caveat" into a proved identity — and let the Moreno/BDI ∀n result be *cited as a
    consequence* of `seam_coincidence` rather than merely *paralleled by* it.
-3. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
+2. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
    framing (doubly-alternative ZDs / hexagons) coincides with ours remains unconfirmed — the sources are
    paywalled. Access + a definitional bridge would settle the literature-priority question the honest
    ledger currently leaves open.
 
-Item 1 is internal formalization (bounded, no discovery risk); 2–3 depend on external sources.
+Both remaining items depend on external sources.
 
 ## References
 
