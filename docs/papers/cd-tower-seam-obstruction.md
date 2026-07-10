@@ -187,12 +187,25 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   closed combinatorial form, for **all** n. This is most plausibly the content of Zhilina's
   "doubly alternative zero divisors / hexagons" (IJAC 31:4 (2021); J. Math. Sci. 272:4 (2023)), which
   we could not access (paywalled, not on arXiv). **Action item, not a citation of proof.**
-- **UNVERIFIED — a correctness caveat, not a result.** Moreno/BDI's anticommutator lives on
-  `{L_{e_l}, L_{e_{u'}}}` with *both* indices in the lower algebra `A_{n-1}` (`u' = u − top`), whereas
-  our seam theorem is stated on `{L_l, L_u}` at the actual `A_n` indices. These are related through
-  the doubling generator but are **not literally the same operator pair** (the sign flavor differs
-  too). We treat the **Sounio convention as primary** — it is self-consistently `native_decide`-verified
-  and stands on its own — and flag the Moreno correspondence as an unchecked bridge, not an identity.
+- **VERIFIED (dims 16 / 32 / 64) — the Moreno seam-index bridge, now checked.** Reading Moreno's actual
+  construction (Chapter II): a zero divisor is written `(a,b)` via the doubling with `a,b` unit imaginary
+  in the *lower* algebra, and he derives `L²_{a+b}(y) = −2y`, i.e. `−2 ∈ spec(L²_{a+b})`, with **`a+b` at
+  the lower level**. Under the standard doubling our `e_l+e_u ∈ A_n` (loHi) is exactly his `(e_l, e_{u'})`
+  with `u' = u − top`, so his `a+b = e_l+e_{u'} ∈ A_{n-1}` — a `2^{n-1}`-dim operator, and his
+  special-couple hypotheses (`a,b` imaginary and independent) require `u' ≠ 0, l`, which are precisely the
+  on-seam pairs (correctly the non-ZDs). **The earlier caveat's `A_{n-1}` placement was right; it was just
+  unchecked.** It now checks: over every lower×upper pair at dims 16/32/64 (0 mismatches, exact-integer
+  Bareiss, `scripts/research/moreno_thm29_bridge_oracle.py`),
+  `our 2-term isZD == ker L_{e_l+e_u} ≠ 0 (textbook ZD) == Moreno[−2 ∈ spec L²_{e_l+e_{u'}} at A_{n-1}]`.
+  There is *also* an equivalent **direct `A_n` form**: since `L_i²=−I` (proved ∀n,
+  `cocycle_bundle`/`cdSigma_cocycle`), `L²_{e_l+e_u} = −2I + {L_l,L_u}`, so the criterion reads
+  `−4 ∈ spec(L²_{e_l+e_u}) ⟺ det(L²_{e_l+e_u}+4I)=0` — Moreno's operator exhibited as `−2I` plus our own
+  anticommutator. The two spectral forms sit one level apart; the `−2`↔`−4` is the **doubling scaling**
+  of the operator (both `e_l+e_{u'}` and `e_l+e_u` have norm² 2), not a normalization. **Honest ceiling:**
+  a verified correspondence at dims 16–64, not a ∀n theorem — the spectral/determinant half lives outside
+  the Mathlib-free combinatorial encoding. What *is* proved ∀n is the combinatorial leg
+  (`isZD = hasXorAnnih`, `anti0 = ¬isZD` on the full box); the oracle certifies that that leg *is*
+  Moreno's criterion, so the Moreno/BDI ∀n result and ours are the same statement — not merely parallel.
 
 ## 5. The honest ledger
 
@@ -221,11 +234,16 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 - **Cited (external, ∀n):** ZD-status + explicit 2-term XOR annihilator for these basis pairs
   (Moreno Thm 2.9; BDI Prop 11.1) — our `seam_coincidence` now supplies an *independent, machine-checked*
   proof of the same statement (and its converse) in the Sounio convention.
+- **Verified against the literature (dims 16–64), not yet ∀n:** the Moreno spectral criterion is our
+  `isZD`, certified exactly over every loHi pair at dims 16/32/64 (§4, `moreno_thm29_bridge_oracle.py`) in
+  both its literal lower form (`−2 ∈ spec L²_{e_l+e_{u'}}` at `A_{n-1}`, `u'=u−top`) and an equivalent
+  direct `A_n` form (`−4 ∈ spec L²_{e_l+e_u}`, via `L²_{e_l+e_u} = −2I + {L_l,L_u}` from `L_i²=−I`); the
+  `−2`↔`−4` is the doubling scaling. The earlier `A_{n-1}` caveat was correctly placed, just unchecked;
+  it is now checked. The spectral half is not ∀n-formalized (out of Mathlib-free reach).
 - **Still open in this encoding:** the *closed-form* off-seam⟺criterion identity in the published
-  literature's own framing (possibly Zhilina); and the unchecked Moreno seam-index correspondence (§4)
-  — a caveat about matching *their* operator pair, not a gap in our proofs. `ConverseConjecture` — the
-  conjecture this file was built around — is a theorem (`converse_conjecture_proved`), and the seam
-  coincidence it sits inside is now fully closed ∀n on loHi.
+  literature's own framing (possibly Zhilina). `ConverseConjecture` — the conjecture this file was built
+  around — is a theorem (`converse_conjecture_proved`), and the seam coincidence it sits inside is now
+  fully closed ∀n on loHi.
 
 ## 6. Reproduce, and the next formal step
 
@@ -300,17 +318,21 @@ cocycles + `cdSigma_cross_neg`), so no annihilator can have low index `0`; the s
 merely tests the seam element `H`, it is genuinely false off the locus; the operator and winner readings,
 being intrinsic, are not.
 
-What remains is matching this self-contained result to the literature. In rough order of tractability:
+**Done — the Moreno seam-index bridge is checked.** Exact-integer computation
+(`moreno_thm29_bridge_oracle.py`) certifies over every loHi pair at dims 16/32/64 that our `isZD` is
+Moreno's spectral criterion, in both his literal lower form (`−2 ∈ spec L²_{e_l+e_{u'}}` at `A_{n-1}`,
+`u'=u−top`) and an equivalent direct `A_n` form (`−4 ∈ spec L²_{e_l+e_u}`, via
+`L²_{e_l+e_u} = −2I + {L_l,L_u}`); the `−2`↔`−4` is the doubling scaling (§4). The earlier `A_{n-1}`
+placement was correct — just unchecked, now checked. A *verified correspondence*, not a ∀n theorem (the
+spectral half is outside the Mathlib-free encoding).
 
-1. **Verify the Moreno seam-index bridge (§4).** Moreno/BDI state their annihilator on
-   `{L_{e_l}, L_{e_{u'}}}` with `u' = u − top` in `A_{n−1}`; ours is on `{L_l, L_u}` at the `A_n`
-   indices. Formalizing the doubling correspondence between the two operator pairs would turn our
-   "unchecked matching caveat" into a proved identity — and let the Moreno/BDI ∀n result be *cited as a
-   consequence* of `seam_coincidence` rather than merely *paralleled by* it.
-2. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published,
+What remains:
+
+1. **Reach the Zhilina closed form (§4).** Whether the off-seam⟺criterion identity in its published
    framing (doubly-alternative ZDs / hexagons) coincides with ours remains unconfirmed — the sources are
    paywalled. Access + a definitional bridge would settle the literature-priority question the honest
-   ledger currently leaves open.
+   ledger currently leaves open. (A *spectral* ∀n formalization of the Moreno criterion would also close
+   the one gap left above, but requires determinant/eigenvalue theory this Mathlib-free lane avoids.)
 
 Both remaining items depend on external sources.
 
