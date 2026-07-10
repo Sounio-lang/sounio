@@ -1577,4 +1577,84 @@ theorem seam_coincidence (bits l u : Nat) (hb : 4 ≤ bits)
   | true => exact converse_holds bits l u hb hl1 hl hu1 hu hoff
   | false => exact hasXorAnnih_false_of_onSeam bits l u hb hl1 hl hu1 hu hoff
 
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+-- THE LAST COINCIDENCE MEMBER, ∀n:  anti0 ⟺ llsqNegI   ({L_l,L_u}=0  ⟺  (L_l L_u)²=−I)
+-- Both reduce to the SAME converse condition `∀c P(c)=−1` (via the cocycle), so they coincide for every
+-- l,u ≠ 0 — not just loHi.  Generalizes the `anti0==llsqNegI` member of `coincidence_16/32` to all n.
+-- ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+/-- **`R(c) = P(c)`**: the `(L_l L_u)²=−I` four-sign product equals the converse winner product `P(c)`,
+    via two `cdSigma_cocycle'` rewrites (`σ(l,l⊕c)=−σ(l,c)`, `σ(l,u⊕c)=−σ(l,c⊕d)`).  Needs `l ≠ 0`. -/
+theorem llsq_QP (bits l u c : Nat) (hl0 : l ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) (hc : c < 2 ^ bits) :
+    cdSigma l (l ^^^ c) bits * cdSigma u (l ^^^ u ^^^ c) bits
+        * cdSigma l (u ^^^ c) bits * cdSigma u c bits
+      = cdSigma l c bits * cdSigma u c bits
+        * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits := by
+  have hx : c ^^^ (l ^^^ u) < 2 ^ bits := Nat.xor_lt_two_pow hc (Nat.xor_lt_two_pow hl hu)
+  have hidx : l ^^^ u ^^^ c = c ^^^ (l ^^^ u) := Nat.xor_comm (l ^^^ u) c
+  -- σ(l,l⊕c) = −σ(l,c)
+  have hcoc1 := cdSigma_cocycle' bits l c hl hc hl0
+  have hb2 : cdSigma l (l ^^^ c) bits = - cdSigma l c bits := by
+    rcases cdSigma_pm bits l c with h|h <;>
+    rcases cdSigma_pm bits l (l ^^^ c) with h'|h' <;>
+      rw [h, h'] at hcoc1 ⊢ <;> first | decide | exact absurd hcoc1 (by decide)
+  -- σ(l,u⊕c) = −σ(l,c⊕d)  (l ⊕ (c⊕d) = u⊕c)
+  have hlx : l ^^^ (c ^^^ (l ^^^ u)) = u ^^^ c := by
+    rw [xor_left_comm l c (l ^^^ u), ← Nat.xor_assoc l l u, Nat.xor_self, Nat.zero_xor,
+      Nat.xor_comm c u]
+  have hcoc2 := cdSigma_cocycle' bits l (c ^^^ (l ^^^ u)) hl hx hl0
+  rw [hlx] at hcoc2
+  have hc2 : cdSigma l (u ^^^ c) bits = - cdSigma l (c ^^^ (l ^^^ u)) bits := by
+    rcases cdSigma_pm bits l (c ^^^ (l ^^^ u)) with h|h <;>
+    rcases cdSigma_pm bits l (u ^^^ c) with h'|h' <;>
+      rw [h, h'] at hcoc2 ⊢ <;> first | decide | exact absurd hcoc2 (by decide)
+  rw [hidx, hb2, hc2]
+  rcases cdSigma_pm bits l c with h1|h1 <;>
+  rcases cdSigma_pm bits u c with h2|h2 <;>
+  rcases cdSigma_pm bits l (c ^^^ (l ^^^ u)) with h3|h3 <;>
+  rcases cdSigma_pm bits u (c ^^^ (l ^^^ u)) with h4|h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- **Bridge:** `llsqNegI = true ↔ ∀ c < 2^bits, P(c) = −1` — the SAME condition `anti0_iff` gives. -/
+theorem llsqNegI_iff (bits l u : Nat) (hl0 : l ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) :
+    llsqNegI bits l u = true ↔ ∀ c, c < 2 ^ bits →
+      cdSigma l c bits * cdSigma u c bits
+        * cdSigma l (c ^^^ (l ^^^ u)) bits * cdSigma u (c ^^^ (l ^^^ u)) bits = -1 := by
+  simp only [llsqNegI]
+  rw [List.all_eq_true]
+  constructor
+  · intro h c hc
+    have hcc := h c (List.mem_range.mpr hc)
+    rw [beq_iff_eq] at hcc
+    rw [← llsq_QP bits l u c hl0 hl hu hc]; exact hcc
+  · intro h c hc
+    rw [List.mem_range] at hc
+    rw [beq_iff_eq, llsq_QP bits l u c hl0 hl hu hc]
+    exact h c hc
+
+/-- **The last member, proved ∀n**: `{L_l,L_u}=0 ⟺ (L_l L_u)²=−I`, i.e. `anti0 = llsqNegI`, for every
+    `l,u ≠ 0` (`< 2^bits`) — not just loHi.  Both sides `↔ ∀c P(c)=−1` (`anti0_iff`/`llsqNegI_iff`). -/
+theorem anti0_eq_llsqNegI (bits l u : Nat) (hl0 : l ≠ 0) (hu0 : u ≠ 0)
+    (hl : l < 2 ^ bits) (hu : u < 2 ^ bits) :
+    anti0 bits l u = llsqNegI bits l u := by
+  have key := (anti0_iff bits l u hl0 hu0 hl hu).trans (llsqNegI_iff bits l u hl0 hl hu).symm
+  cases hA : anti0 bits l u <;> cases hB : llsqNegI bits l u
+  · rfl
+  · rw [hA, hB] at key; exact absurd (key.mpr rfl) (by decide)
+  · rw [hA, hB] at key; exact absurd (key.mp rfl) (by decide)
+  · rfl
+
+/-- Corollary over `loHi`, generalizing the `anti0==llsqNegI` member of `coincidence_16/32` to all n. -/
+theorem anti0_eq_llsqNegI_all (bits : Nat) (hb : 4 ≤ bits) :
+    (loHi bits).all (fun p => anti0 bits p.1 p.2 == llsqNegI bits p.1 p.2) = true := by
+  rw [List.all_eq_true]
+  intro p hp
+  obtain ⟨hp1, hp2, hp3, hp4⟩ := loHi_mem bits (by omega) p hp
+  have htop : 1 ≤ 2 ^ (bits-1) := Nat.two_pow_pos (bits-1)
+  have hle : 2 ^ (bits-1) ≤ 2 ^ bits := Nat.pow_le_pow_right (by decide) (by omega)
+  rw [beq_iff_eq]
+  exact anti0_eq_llsqNegI bits p.1 p.2 (by omega) (by omega) (by omega) (by omega)
+
 end SounioCDConverse
