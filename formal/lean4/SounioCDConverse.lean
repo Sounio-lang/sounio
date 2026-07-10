@@ -582,17 +582,18 @@ theorem converse_recursion' (n l uL a : Nat)
       `S := Σ_a P(a) = 4·#agree − 2^bits` (each orbit counted twice) reduces it to a lower bound on
       the number of AGREEING orbits; empirically `#agree` is large (winner sets of size `8·(2^k−1)`),
       but a dimension-independent lower bound `#agree ≥ 2` (one nontrivial) is not yet formalized.
-      A clean base case `A_3` (octonions, `n = 1`) is finite (`converse_16`-style native_decide),
-      so an induction on `n` closes the whole tower ONCE (2) has a dimension-free witness.
+      A clean base case `A_3` (octonions, `n = 1`) is now proved structurally (`Q_base`, no
+      `native_decide`), so an induction on `n` closes the whole tower ONCE (2) has a dimension-free witness.
 
   In short: `converse_recursion` reduces the tower-wide converse to {the sgn=cdSigma bridge} ∧ {a
   dimension-free downstairs-loser witness}.  The sign-flip half is now fully mechanized here.
 -/
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
--- BOUNDED LEVERS OF THE CONVERSE COUNTING ARGUMENT (all ∀n except the octonion base case)
--- Three self-contained lemmas that formalize the concretely-provable steps of the converse counting
--- argument (`scripts/research/cd_tower_converse_counting.py`).  Mathlib-free, no `sorry`.
+-- BOUNDED LEVERS OF THE CONVERSE COUNTING ARGUMENT (ALL ∀n — the octonion base is now structural too)
+-- Self-contained lemmas that formalize the concretely-provable steps of the converse counting
+-- argument (`scripts/research/cd_tower_converse_counting.py`).  Mathlib-free, no `sorry`,
+-- no `native_decide` anywhere in the ∀n chain (the octonion base `Q_base` is proved structurally).
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 
 /-- **CD diagonal sign** `cdSigma x x k = -1` for every nonzero basis unit (`1 ≤ x < 2^k`).  This is
@@ -607,15 +608,6 @@ theorem cdSigma_diag (k x : Nat) (h1 : 1 ≤ x) (hx : x < 2 ^ k) : cdSigma x x k
   rw [← cdSigma_defeq k x x, ← SounioCDCocycle.sgn_eq_cdSigma k x x hk hx hx]
   exact SounioCDCocycle.diag _ (SounioCDCocycle.isZ_bitsOf_false k x hx hx0)
 
-/-- **Lemma 1 (octonion base case).**  The octonions `A_3` are a division algebra: for every mixed
-    (distinct, nonzero) index pair `(l, m)` and every `a`, the four-sign winner product is `-1` — i.e.
-    *every* orbit disagrees, so there is no zero divisor.  A fixed finite claim, discharged by
-    `native_decide` (a legitimate base-case anchor; the general lemmas below avoid it). -/
-theorem oct_all_disagree :
-    (List.range 8).all (fun l => (List.range 8).all (fun m =>
-      (List.range 8).all (fun a =>
-        (! ((! (l == 0)) && (! (m == 0)) && (l != m)))
-          || (fVal l m a 3 * fVal l m (a ^^^ (l ^^^ m)) 3 == -1)))) = true := by native_decide
 
 /-- **Lemma 2 (the main σ-identity, ∀n): explicit disagreeing witness for a mixed pair.**  For a mixed
     pair `(l, 2^k + m_lo)` with `1 ≤ l, m_lo < 2^k` and `m_lo ≠ l`, the orbit anchored at `a = m_lo`
@@ -790,6 +782,59 @@ theorem edge_l_eq_H (k m_lo a : Nat)
     rcases cdSigma_pm (j+1) m_lo (m_lo ^^^ a) with hB|hB <;>
       rw [hA, hB] at hcoc ⊢ <;> first | decide | exact absurd hcoc (by decide)
 
+/-- **Core disagreement identity.**  The transposed product of a distinct nonzero basis pair is `-1`:
+    `cdSigma a b · cdSigma b a = -1`.  One antisymmetry (`cdSigma b a = -cdSigma a b`) then `(±1)²=1`.
+    No `native_decide`. -/
+theorem cdSigma_cross_neg (k a b : Nat)
+    (ha1 : 1 ≤ a) (ha : a < 2 ^ k) (hb1 : 1 ≤ b) (hb : b < 2 ^ k) (hab : a ≠ b) :
+    cdSigma a b k * cdSigma b a k = -1 := by
+  rw [cdAntisym_all k b a hb1 hb ha1 ha (fun h => hab h.symm)]
+  rcases cdSigma_pm k a b with h | h <;> rw [h] <;> decide
+
+/-- **Both-low witness (base-case, no IH).**  For a both-low mixed pair `(l,m)` (`1≤l,m<2^(n+1)`,
+    `l≠m`) the high orbit anchored at `a = 2^(n+1)+l` — i.e. `{2^(n+1)+l, 2^(n+1)+m}` — DISAGREES:
+    the four-sign product is `-1`.  Each factor collapses through `cdSigma_lo_hi` (nonzero low part)
+    plus `cdSigma_diag`, and the residue is the core identity `cdSigma_cross_neg`.  No `native_decide`,
+    no induction hypothesis. -/
+theorem both_low_witness_disagree (n l m : Nat)
+    (hl1 : 1 ≤ l) (hl : l < 2 ^ (n+1)) (hm1 : 1 ≤ m) (hm : m < 2 ^ (n+1)) (hlm : l ≠ m) :
+    fVal l m (2 ^ (n+1) + l) (n+2)
+      * fVal l m ((2 ^ (n+1) + l) ^^^ (l ^^^ m)) (n+2) = -1 := by
+  have hidx : (2 ^ (n+1) + l) ^^^ (l ^^^ m) = 2 ^ (n+1) + m := by
+    rw [← two_pow_xor_eq_add (n+1) l hl, ← two_pow_xor_eq_add (n+1) m hm,
+        Nat.xor_assoc, ← Nat.xor_assoc l l m, Nat.xor_self, Nat.zero_xor]
+  rw [hidx]
+  unfold fVal
+  rw [cdSigma_lo_hi n l l hl hl1 hl, cdSigma_lo_hi n l m hl hm1 hm,
+      cdSigma_lo_hi n m l hm hl1 hl, cdSigma_lo_hi n m m hm hm1 hm,
+      cdSigma_diag (n+1) l hl1 hl, cdSigma_diag (n+1) m hm1 hm]
+  have hcn := cdSigma_cross_neg (n+1) l m hl1 hl hm1 hm hlm
+  rcases cdSigma_pm (n+1) l m with h | h <;> rcases cdSigma_pm (n+1) m l with h2 | h2 <;>
+    rw [h, h2] at hcn ⊢ <;> first | decide | exact absurd hcn (by decide)
+
+/-- **Both-high witness (base-case, no IH).**  For a both-high mixed pair
+    `(2^(n+1)+llo, 2^(n+1)+mlo)` (`llo≠mlo`, both `1≤·<2^(n+1)`) the low orbit `{llo, mlo}` DISAGREES.
+    `fVal_high_stable` collapses both factors to level `n+1`, leaving the `{llo,mlo}` orbit which is
+    `-1` by `cdSigma_diag` + `cdSigma_cross_neg`.  No `native_decide`, no induction hypothesis. -/
+theorem both_high_witness_disagree (n llo mlo : Nat)
+    (hl1 : 1 ≤ llo) (hl : llo < 2 ^ (n+1)) (hm1 : 1 ≤ mlo) (hm : mlo < 2 ^ (n+1)) (hlm : llo ≠ mlo) :
+    fVal (2 ^ (n+1) + llo) (2 ^ (n+1) + mlo) llo (n+2)
+      * fVal (2 ^ (n+1) + llo) (2 ^ (n+1) + mlo)
+          (llo ^^^ ((2 ^ (n+1) + llo) ^^^ (2 ^ (n+1) + mlo))) (n+2) = -1 := by
+  have hd : (2 ^ (n+1) + llo) ^^^ (2 ^ (n+1) + mlo) = llo ^^^ mlo := by
+    rw [← two_pow_xor_eq_add (n+1) llo hl, ← two_pow_xor_eq_add (n+1) mlo hm,
+        Nat.xor_assoc, xor_left_comm llo (2 ^ (n+1)) mlo, ← Nat.xor_assoc,
+        Nat.xor_self, Nat.zero_xor]
+  have hidx : llo ^^^ ((2 ^ (n+1) + llo) ^^^ (2 ^ (n+1) + mlo)) = mlo := by
+    rw [hd, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  rw [hidx, fVal_high_stable (n+1) llo mlo llo hl hm hl,
+      fVal_high_stable (n+1) llo mlo mlo hl hm hm]
+  unfold fVal
+  rw [cdSigma_diag (n+1) llo hl1 hl, cdSigma_diag (n+1) mlo hm1 hm]
+  have hcn := cdSigma_cross_neg (n+1) mlo llo hm1 hm hl1 hl (fun h => hlm h.symm)
+  rcases cdSigma_pm (n+1) mlo llo with h | h <;> rcases cdSigma_pm (n+1) llo mlo with h2 | h2 <;>
+    rw [h, h2] at hcn ⊢ <;> first | decide | exact absurd hcn (by decide)
+
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 -- Q: a non-exceptional disagreeing witness exists for EVERY mixed pair (ORDINARY induction on level).
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -817,25 +862,105 @@ theorem exists_witness_symm (k l m : Nat)
   · rw [Nat.xor_comm m l]; exact h3
   · rw [Nat.xor_comm m l, fVal_comm m l, fVal_comm m l]; exact h6
 
-/-- **Base `Qstmt 3` (octonions)** as a finite decidable Bool over `range 8` — the ONE legitimate
-    `native_decide` anchor. -/
-theorem Q_base_bool : ∀ l, l < 2 ^ 3 → ∀ m, m < 2 ^ 3 → 1 ≤ l → 1 ≤ m → l ≠ m →
-    (List.range (2 ^ 3)).any (fun a =>
-      (a != 0) && (a != l ^^^ m) && (a != l) && (a != m)
-        && (fVal l m a 3 * fVal l m (a ^^^ (l ^^^ m)) 3 == -1)) = true := by
-  native_decide
-
-/-- Base case `Qstmt 3`, extracting the `∃`-witness from the decidable Bool anchor. -/
+/-- **Base case `Qstmt 3` (octonions) — structural, NO `native_decide`.**  Every mixed pair in `A_3`
+    has a non-exceptional disagreeing orbit, by the SAME six-way seam split as the inductive step but
+    with the two doubling cases discharged *without* an IH: both-low takes the high witness
+    `a = 2^2+l` (`both_low_witness_disagree`), both-high takes the low witness `a = llo`
+    (`both_high_witness_disagree`), and the edges/mixed-non-edge reuse L2/L3/L4/`mixed_witness_disagree`
+    at `W = 2`.  This removes the last `native_decide` from the ∀n coincidence chain — every downstream
+    theorem is now `[propext, Quot.sound]`. -/
 theorem Q_base : Qstmt 3 := by
+  have h4 : (2 : Nat) ^ 2 = 4 := by decide
+  have h8 : (2 : Nat) ^ 3 = 8 := by decide
+  have core : ∀ l m, 1 ≤ l → l < m → m < 2 ^ 3 →
+      ∃ a, a < 2 ^ 3 ∧ a ≠ 0 ∧ a ≠ l ^^^ m ∧ a ≠ l ∧ a ≠ m ∧
+           fVal l m a 3 * fVal l m (a ^^^ (l ^^^ m)) 3 = -1 := by
+    intro l m hl1 hlm hm8
+    have hm1 : 1 ≤ m := by omega
+    by_cases hmlt : m < 2 ^ 2
+    · -- CASE 4: both low — high witness a = 2^2 + l
+      have hl4 : l < 2 ^ 2 := by omega
+      have hdlt : l ^^^ m < 2 ^ 2 := Nat.xor_lt_two_pow hl4 hmlt
+      refine ⟨2 ^ 2 + l, by omega, by omega, by omega, by omega, by omega, ?_⟩
+      exact both_low_witness_disagree 1 l m hl1 hl4 hm1 hmlt (by omega)
+    · by_cases hllt : l < 2 ^ 2
+      · by_cases hmH : m = 2 ^ 2
+        · -- CASE 1: m = 2^2
+          subst hmH
+          obtain ⟨a, ha1, haH, hal⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ 2 ∧ a ≠ l := by
+            by_cases hle : l = 1
+            · exact ⟨2, by omega, by omega, by omega⟩
+            · exact ⟨1, by omega, by omega, by omega⟩
+          have hlmv : l ^^^ 2 ^ 2 = 2 ^ 2 + l := by
+            rw [Nat.xor_comm l (2 ^ 2), two_pow_xor_eq_add 2 l hllt]
+          refine ⟨a, by omega, by omega, ?_, hal, by omega, ?_⟩
+          · rw [hlmv]; omega
+          · exact edge_m_eq_H 2 l a hl1 hllt ha1 haH hal
+        · -- m > 2^2
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ 2 + mlo := ⟨m - 2 ^ 2, by omega⟩
+          have hmloH : mlo < 2 ^ 2 := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          by_cases hmlol : mlo = l
+          · -- CASE 2: m = 2^2 + l
+            obtain ⟨a, ha1, haH, hal⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ 2 ∧ a ≠ l := by
+              by_cases hle : l = 1
+              · exact ⟨2, by omega, by omega, by omega⟩
+              · exact ⟨1, by omega, by omega, by omega⟩
+            have hlmv : l ^^^ (2 ^ 2 + mlo) = 2 ^ 2 := by
+              rw [hmlol, ← two_pow_xor_eq_add 2 l hllt, xor_left_comm, Nat.xor_self, Nat.xor_zero]
+            refine ⟨a, by omega, by omega, ?_, hal, by omega, ?_⟩
+            · rw [hlmv]; omega
+            · rw [hmlol]; exact edge_m_eq_H_plus_l 2 l a hl1 hllt ha1 haH
+          · -- CASE 5: mixed non-edge
+            have hlmv : l ^^^ (2 ^ 2 + mlo) = 2 ^ 2 + (l ^^^ mlo) := by
+              rw [← two_pow_xor_eq_add 2 mlo hmloH, xor_left_comm,
+                  two_pow_xor_eq_add 2 (l ^^^ mlo) (Nat.xor_lt_two_pow hllt hmloH)]
+            refine ⟨mlo, by omega, by omega, ?_, hmlol, by omega, ?_⟩
+            · rw [hlmv]; omega
+            · exact mixed_witness_disagree 2 l mlo hl1 hllt hmlo1 hmloH hmlol
+      · -- l ≥ 2^2, both high (l < m ⟹ m ≥ 2^2)
+        by_cases hlH : l = 2 ^ 2
+        · -- CASE 3: l = 2^2
+          subst hlH
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ 2 + mlo := ⟨m - 2 ^ 2, by omega⟩
+          have hmloH : mlo < 2 ^ 2 := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          obtain ⟨a, ha1, haH, ham⟩ : ∃ a, 1 ≤ a ∧ a < 2 ^ 2 ∧ a ≠ mlo := by
+            by_cases hle : mlo = 1
+            · exact ⟨2, by omega, by omega, by omega⟩
+            · exact ⟨1, by omega, by omega, by omega⟩
+          have hlmv : (2 ^ 2) ^^^ (2 ^ 2 + mlo) = mlo := by
+            rw [← two_pow_xor_eq_add 2 mlo hmloH, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+          refine ⟨a, by omega, by omega, ?_, ?_, by omega, ?_⟩
+          · rw [hlmv]; exact ham
+          · omega
+          · exact edge_l_eq_H 2 mlo a hmlo1 hmloH ha1 haH ham
+        · -- CASE 6: both high, l ≠ 2^2 — low witness a = llo
+          obtain ⟨llo, rfl⟩ : ∃ llo, l = 2 ^ 2 + llo := ⟨l - 2 ^ 2, by omega⟩
+          obtain ⟨mlo, rfl⟩ : ∃ mlo, m = 2 ^ 2 + mlo := ⟨m - 2 ^ 2, by omega⟩
+          have hlloH : llo < 2 ^ 2 := by omega
+          have hmloH : mlo < 2 ^ 2 := by omega
+          have hllo1 : 1 ≤ llo := by omega
+          have hmlo1 : 1 ≤ mlo := by omega
+          have hlomlo : llo ≠ mlo := by omega
+          have hd : (2 ^ 2 + llo) ^^^ (2 ^ 2 + mlo) = llo ^^^ mlo := by
+            rw [← two_pow_xor_eq_add 2 llo hlloH, ← two_pow_xor_eq_add 2 mlo hmloH,
+                Nat.xor_assoc, xor_left_comm llo (2 ^ 2) mlo, ← Nat.xor_assoc,
+                Nat.xor_self, Nat.zero_xor]
+          have hguard : llo ≠ (2 ^ 2 + llo) ^^^ (2 ^ 2 + mlo) := by
+            rw [hd]; intro h
+            have : mlo = 0 := by
+              calc mlo = llo ^^^ (llo ^^^ mlo) := by
+                        rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+                _ = llo ^^^ llo := by rw [← h]
+                _ = 0 := Nat.xor_self llo
+            omega
+          refine ⟨llo, by omega, by omega, hguard, by omega, by omega, ?_⟩
+          exact both_high_witness_disagree 1 llo mlo hllo1 hlloH hmlo1 hmloH hlomlo
   intro l m hl1 hl hm1 hm hlm
-  have hb := Q_base_bool l hl m hm hl1 hm1 hlm
-  rw [List.any_eq_true] at hb
-  obtain ⟨a, hmem, hpred⟩ := hb
-  rw [List.mem_range] at hmem
-  rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true,
-      bne_iff_ne, bne_iff_ne, bne_iff_ne, bne_iff_ne, beq_iff_eq] at hpred
-  obtain ⟨⟨⟨⟨g0, gd⟩, gl⟩, gm⟩, gP⟩ := hpred
-  exact ⟨a, hmem, g0, gd, gl, gm, gP⟩
+  rcases Nat.lt_or_ge l m with hlt | hge
+  · exact core l m hl1 hlt hm
+  · exact exists_witness_symm 3 m l (core m l hm1 (by omega) hl)
 
 /-- **The inductive step `Qstmt W → Qstmt (W+1)`** (ORDINARY induction, `W ≥ 3`).  Six-case split on
     the seam position of the pair; edges by L2/L3/L4, both-low by `P_stable_low`+IH, mixed non-edge by
@@ -1013,8 +1138,8 @@ theorem loHi_mem (bits : Nat) (hb : 1 ≤ bits) (p : Nat × Nat) (hp : p ∈ loH
 /-- **THE TOWER-WIDE CONVERSE, DISCHARGED** — `ConverseConjecture` is now a theorem: for every level
     `bits ≥ 4`, every off-seam lower×upper pair is a zero divisor.  Composition of `converse_holds`
     (off-seam ⟹ `hasXorAnnih`, ∀n, proved by the octonion-base induction) with `hasXorAnnih_sound`
-    (`hasXorAnnih` ⟹ `isZD`, ∀n).  Kernel axioms `[propext, Quot.sound]` + the single k=3 base
-    `native_decide` anchor. -/
+    (`hasXorAnnih` ⟹ `isZD`, ∀n).  Kernel axioms `[propext, Quot.sound]` — fully anchor-free (the
+    octonion base `Q_base` is now structural, no `native_decide`). -/
 theorem converse_conjecture_proved : ConverseConjecture := by
   intro bits hb
   unfold converseHolds
@@ -1253,7 +1378,7 @@ theorem hasXorAnnih_complete (bits l u : Nat) (hb : 4 ≤ bits)
 
 /-- **`hasXorAnnih == isZD` on the loHi locus, ∀ bits ≥ 4** — the ∀n generalization of
     `xorAnnih_eq_isZD_16`.  Soundness (`⟹`) by `hasXorAnnih_sound`, completeness (`⟸`) by
-    `hasXorAnnih_complete`.  Kernel axioms `[propext, Quot.sound]` + the single inherited k=3 anchor. -/
+    `hasXorAnnih_complete`.  Kernel axioms `[propext, Quot.sound]` — anchor-free. -/
 theorem xorAnnih_eq_isZD_all (bits : Nat) (hb : 4 ≤ bits) :
     (loHi bits).all (fun p => hasXorAnnih bits p.1 p.2 == isZD bits p.1 p.2) = true := by
   rw [List.all_eq_true]
@@ -1478,7 +1603,7 @@ theorem on_seam_P_neg (bits l u : Nat) (hb : 4 ≤ bits)
     operator/anti-commutator member: `{L_l,L_u}=0 ⟺ NOT off-seam`.  Off-seam ⟹ the converse winner
     exists (`converse_holds`), so some `P(a)=+1` breaks the anti0 test (`anti0=false`); on-seam ⟹
     `∀c P(c)=-1` (`on_seam_P_neg`), so anti0 holds.  Via the `Q=P` bridge (`anti0_iff`).  Kernel axioms
-    `[propext, Quot.sound]` + the single inherited k=3 base anchor. -/
+    `[propext, Quot.sound]` — anchor-free (the octonion base is structural). -/
 theorem seam_eq_anti0 (bits l u : Nat) (hb : 4 ≤ bits)
     (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits) :
     anti0 bits l u = ! offSeam bits l u := by
@@ -1524,7 +1649,8 @@ theorem anti0_eq_offSeam_all (bits : Nat) (hb : 4 ≤ bits) :
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 -- THE FULL SEAM COINCIDENCE ON loHi, ∀ bits≥4 — every link now a proved ∀n theorem.
 --   offSeam  ⟺  isZD  ⟺  hasXorAnnih  ⟺  ¬anti0
--- (forward obstruction `¬offSeam ⟹ ¬isZD` included; no `native_decide` beyond the inherited k=3 base).
+-- (forward obstruction `¬offSeam ⟹ ¬isZD` included; NO `native_decide` in the ∀n chain — fully
+--  anchor-free; the 7 fixed-n regression anchors near the top of the file retain `native_decide`).
 -- ══════════════════════════════════════════════════════════════════════════════════════════════════
 
 /-- **On-seam loHi pairs have NO XOR-winner** (`hasXorAnnih = false`): every orbit loses (`on_seam_P_neg`),
@@ -1548,7 +1674,8 @@ theorem hasXorAnnih_false_of_onSeam (bits l u : Nat) (hb : 4 ≤ bits)
 /-- **Forward obstruction + converse, unified**: on the loHi locus (`∀ bits≥4`) a lower×upper pair is a
     2-term zero divisor **iff** it is off-seam.  `isZD = offSeam`.  Off-seam ⟹ `isZD` is the converse
     (`converse_holds`+`hasXorAnnih_sound`); on-seam ⟹ `¬isZD` is the forward obstruction
-    (`hasXorAnnih_false_of_onSeam`+`hasXorAnnih_complete`). Kernel-clean (inherited k=3 base only). -/
+    (`hasXorAnnih_false_of_onSeam`+`hasXorAnnih_complete`). Kernel-clean `[propext, Quot.sound]`,
+    anchor-free. -/
 theorem isZD_eq_offSeam (bits l u : Nat) (hb : 4 ≤ bits)
     (hl1 : 1 ≤ l) (hl : l < 2 ^ (bits-1)) (hu1 : 2 ^ (bits-1) ≤ u) (hu : u < 2 ^ bits) :
     isZD bits l u = offSeam bits l u := by
