@@ -19,7 +19,8 @@ What is here:
   - legacy bounded smoke runner; its `process_regime` path does not execute the full reference recurrence and must not be used as parity evidence
 - `run_ossm_native_reference.sio`
   - self-contained byte-level implementation of the reference recurrence
-  - passes current Madaros `check`; current native-v2 compilation remains blocked
+  - compiles and runs through a rebuilt Madaros native-v2 compiler
+  - the evidence gate exercises a bounded `2 trajectories x 8 steps` runtime only
 - `export_results.sio`
   - emits a small manifest for the bounded parity outputs
 
@@ -38,9 +39,13 @@ Recommended commands from the `sounio-lang/sounio` root:
 ```bash
 ./bin/souc check examples/cognitive_ossm/run_ossm_native_reference.sio
 CPC2026_SCIENTIFIC_REPO=/workspace/hyperbolic-semantic-networks \
+CPC2026_MADAROS_RAW_BIN=/tmp/rebuilt-madaros \
   bash scripts/ci/cpc2026_yale_evidence_gate.sh
 uv run --with numpy python scripts/research/cpc2026_ossm_subset_audit.py
 ```
+
+The bounded native run proves compiler/runtime execution and JSON production. It
+does not replace or independently replicate the frozen Python `n=10,000` result.
 
 Historical bounded output directory:
 

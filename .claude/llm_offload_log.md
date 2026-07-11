@@ -2505,3 +2505,16 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Verification after repair: `tests/run-pass/cpc2026_scientific_float_parser.sio` prints `CPC2026_SCIENTIFIC_FLOAT_OK`; `scripts/ci/cpc2026_yale_evidence_gate.sh` prints `CPC2026_YALE_EVIDENCE_OK`; frozen Python effect sizes remain `d=11.650868078041157` and `d=-2.781365869022835`; current Madaros native-v2 remains classified, not promoted.
 - Verdict: pass for the evidence dossier and check-only Sounio source. Native O-SSM execution remains blocked and is explicitly excluded from parity claims.
 - Raw reviews: `/tmp/llm-offload-eDy7wx/`, `/tmp/llm-offload-HYSx3e/`, `/tmp/llm-offload-AiVb4r/`, and `/tmp/gemini_pr745_review.txt`.
+
+## 2026-07-11 — M1 math-review: CPC 2026 bounded native runtime repair
+- Files: `run_ossm_native_reference.sio`, `cpc2026_yale_evidence_gate.sh`, and `examples/cognitive_ossm/README.md`.
+- Providers: xAI/Grok 4.3 = **PASS** (`NO MATHEMATICAL CONTENT TO REVIEW`); Z.AI/GLM-5.2 = **PASS** on the 20 MB word-buffer arithmetic and bounded-evidence separation.
+- Follow-up: Z.AI questioned decimal-point handling based on truncated diff context; direct inspection confirmed the existing `b == 46` branch sets `seen_dot`, so no parser change was required.
+- Evidence boundary: native `2 x 8` compile/run is runtime evidence only; zero bounded associator output is not numerical parity with the frozen Python `n=10,000 x 500` result.
+- Raw review directory: `/tmp/llm-offload-sV6Gfw/`.
+
+## 2026-07-11 — M3 prose review: CPC 2026 bounded native evidence wording
+- Files: `cpc2026_yale_evidence_dossier_2026-07-11.md`, `examples/cognitive_ossm/README.md`, and `cpc2026_yale_evidence_gate.sh`.
+- Provider: xAI/Grok 4.3 = **PASS**; it confirmed the gate, documentation, resolved execution blocker, and `parity_claim=false` boundary are internally consistent.
+- Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
+- Raw review directory: `/tmp/llm-offload-sZlKAw/`.

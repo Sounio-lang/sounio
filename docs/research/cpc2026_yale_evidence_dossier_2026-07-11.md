@@ -42,7 +42,7 @@ claim, or biomarker claim is established.
 | Frozen O-SSM paper-scale simulation | Exploratory, reproducible Python | `10,000 x 500` deterministic no-training simulation. Quote `d=11.65` and `d=-2.78` only with the model-construction caveat below. |
 | Python same-subset audit | Recomputed in this audit | First 1,000 trajectories x 500 steps recover `d=11.6023` and `d=-2.7346`. |
 | Legacy native Sounio n=1000 JSON | Historical, excluded from parity | Directionally similar, but component metrics differ by up to 21.1%; it is not numerical parity. |
-| Current Sounio O-SSM source | Check-only | Current Madaros `check` passes; native-v2 compilation fails at the bridge. |
+| Current Sounio O-SSM source | Bounded native execution | Rebuilt Madaros compiles and runs `2 x 8`, producing JSON with `n=2` per regime. This is runtime evidence, not numerical parity. |
 | omega parity receipt | Previously reproduced | `2.03e-10` absolute delta was recorded with omega 1.0.0-beta.4 after a parser correction. The omega binary was not available for re-verification on 2026-07-11. |
 | Sounio epistemic receipts | Reverified | GUM `0.640000`, MC `0.643979`, exact order spread `2.044226`, all under `lean_single`. |
 
@@ -170,19 +170,21 @@ C-ent variance.
 | `octonion_associator_gum_validation.sio` | lean_single | compiler variance `0.640000`, analytical `0.640000`, pass |
 | `associator_variance_mc.sio` | lean_single | MC `0.643979` vs analytical `0.640000`, relative error `0.006218`, pass |
 | `run_ossm_native_reference.sio` check | default Madaros | pass |
-| `run_ossm_native_reference.sio` compile/run | default Madaros native-v2 | blocked: `native-v2 bridge compilation failed` |
+| `run_ossm_native_reference.sio` compile/run | rebuilt Madaros native-v2 | pass at `2 x 8`; associator output is zero and is not parity evidence |
 | Bounded corrected-parser receipt | omega 1.0.0-beta.4 | previously reproduced `2.03e-10`; not reverified this session |
 
 Run the evidence gate:
 
 ```bash
 CPC2026_SCIENTIFIC_REPO=/workspace/hyperbolic-semantic-networks \
+CPC2026_MADAROS_RAW_BIN=/tmp/rebuilt-madaros \
   bash scripts/ci/cpc2026_yale_evidence_gate.sh
 ```
 
 The gate fails closed if the frozen O-SSM numbers drift, if the legacy JSON
-loses its exclusion label, if current Madaros no longer checks the source, if
-the native-v2 failure changes unexpectedly, or if a lean_single receipt fails.
+loses its exclusion label, if rebuilt Madaros cannot compile and execute the
+bounded source, if the bounded JSON is structurally invalid, or if a
+lean_single receipt fails.
 
 ## Poster QA
 
@@ -226,34 +228,33 @@ The current QR decodes to:
   constructed-model result; the three reverified lean_single receipts.
 - **Share only with explicit provenance:** the prior omega parity receipt.
 - **Do not use as parity evidence:** the historical native n=1000 JSON.
-- **Not ready to claim:** Madaros native O-SSM execution, clinical translation,
-  natural emergence of quaternionic confinement, or released od256 hardware
-  support.
+- **Ready to claim narrowly:** rebuilt Madaros compiles and executes the O-SSM
+  runner at `2 x 8`, producing structurally valid JSON.
+- **Not ready to claim:** Madaros/Python numerical parity, native associator
+  parity, clinical translation, natural emergence of quaternionic confinement,
+  or released od256 hardware support.
 
-## Unresolved blocker contract
+## Resolved execution blocker
 
 ```text
 Blocker-ID: BLK-20260711-CPC-OSSM-NATIVE-V2
-Status: classified
+Status: resolved
 Severity: B1
 Class: compiler-semantics
 Owner: Codex
 Lane: cpc2026-ossm-native-promotion
-Worktree: /tmp/sounio-pr745-rescue
-Branch: codex/pr745-rescue
-Files-Owned: examples/cognitive_ossm/run_ossm_native_reference.sio; scripts/ci/cpc2026_yale_evidence_gate.sh; scripts/research/cpc2026_ossm_subset_audit.py; docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md
-Files-Read-Only: self-hosted/compiler/**; self-hosted/ir/**; self-hosted/native/**
-Do-Not-Touch: compiler lowering or canonical ELF artifacts from the poster/evidence lane
-Repro: bin/souc compile examples/cognitive_ossm/run_ossm_native_reference.sio -o /tmp/ossm-native
-Observed: source passes Madaros check, then compile exits nonzero with "native-v2 bridge compilation failed"
-Expected: compile emits a runnable ELF whose bounded output agrees with the corrected reference fixture
-Acceptance-Gate: scripts/ci/cpc2026_yale_evidence_gate.sh is deliberately changed from known-failure classification only after compile and bounded runtime parity pass
+Worktree: /tmp/sounio-cpc-ossm-native-v2
+Branch: fix/cpc2026-ossm-native-v2
+Repro: CPC2026_MADAROS_RAW_BIN=/tmp/madaros-cpc-final6 bash scripts/ci/cpc2026_yale_evidence_gate.sh
+Observed: rebuilt Madaros emits a runnable ELF; the bounded run exits zero and writes JSON with n=2 per regime
+Expected: compile emits a runnable ELF with structurally valid bounded output
+Acceptance-Gate: scripts/ci/cpc2026_yale_evidence_gate.sh requires compile plus bounded runtime success and explicitly sets parity_claim=false
 Evidence-Level: E3
-Evidence: scripts/ci/cpc2026_yale_evidence_gate.sh exact diagnostic gate
+Evidence: CPC2026_SOUNIO_NATIVE_OK status=bounded_runtime trajectories=2 steps=8 parity_claim=false
 Fallback-Path: none; Python owns paper-scale results and is not a silent Sounio fallback
 Legacy-Kept: yes; historical n=100/n=1000 JSON retained with exclusion metadata
-LLM-Offload: logged in .claude/llm_offload_log.md; Gemini bug catch fixed; xAI approved; Z.AI and MiniMax unavailable
-Next-Action: create a separate compiler-owned worktree, reduce the bridge failure to a minimal aggregate/array witness, and leave this evidence branch compiler-read-only
+LLM-Offload: xAI and Z.AI math-review completed; publication-facing wording remains subject to M3 fan-out
+Next-Action: treat zero native associator output as a separate numerical-parity investigation before making any native parity claim
 ```
 
 The source-local scientific-notation parser defect found during external review
