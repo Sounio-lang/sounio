@@ -30,7 +30,7 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 Current checked-artifact status:
 
-- version `1.0.0-beta.5`
+- version `Madaros v0.80.0`
 - checked host lanes:
   - Linux `x86_64`
   - macOS `arm64`

@@ -23,25 +23,23 @@ If you are a human reader: see §11.
 
 Sounio is not a small experimental repository. Past AI sessions, including those with many hours of context, have consistently underestimated its scope by roughly an order of magnitude. **Calibrate before producing analysis.** The most predictable AI failure mode in this repository is measuring `stdlib/` and treating it as the whole.
 
-Measured on `feature/mcp-server` at HEAD `75c5ac90`:
+Measured 2026-07-11 on `main` via `bash scripts/dev/measure_repo_scale.sh`:
 
 | Versioned `.sio` source | Value |
 |---|---:|
-| Files | 4,048 |
-| Lines (raw) | 1,810,739 |
-| Lines (code-only) | 1,379,461 |
-| Bytes | 63 MB |
+| Files | 6,130 |
+| Lines (raw) | 2,208,306 |
+| Bytes | 76 MB |
 
 | Subsystem | Files | LOC (raw) | What it is |
 |---|---:|---:|---|
-| `self-hosted/` | 551 | 554,531 | The Sounio compiler, written in Sounio |
-| `archive/` | 19 | 309,422 | Historical evolution of the language |
-| `stdlib/` | 954 | 293,096 | Math, special functions, statistics, PBPK, epistemic types, autograd, PINN, fractional calculus, RNG, I/O |
-| `examples/` | 782 | 257,214 | Working examples |
-| `bootstrap/` | 16 | 236,206 | Bootstrap compiler chain (C → Sounio) |
-| `tests/` | 1,529 | 137,360 | Test suite |
-| `benchmarks/` | 116 | 13,219 | Performance baselines |
-| Other | ~100 | ~9,000 | tools, experiments, ecosystem |
+| `self-hosted/` | 489 | 554,892 | The Sounio compiler (Madaros), written in Sounio |
+| `stdlib/` | 1,316 | 478,355 | Math, special functions, statistics, PBPK, epistemic types, autograd, PINN, fractional calculus, RNG, I/O |
+| `tests/` | 2,978 | 236,693 | Test suite |
+| `examples/` | 483 | 130,370 | Working examples |
+| Other | ~864 | ~808,000 | `archive/` (historical evolution), `bootstrap/` (C → Sounio chain), `benchmarks/`, tools, ecosystem |
+
+Re-derive any number above with `bash scripts/dev/measure_repo_scale.sh` — do not quote these from memory.
 
 Verify before disagreeing:
 
@@ -330,7 +328,7 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - No unary minus — write `0 - x`
 - No REPL / `--show-ast` / `--show-types` in native mode
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible** via the GPU-profile binary (`souc-linux-x86_64-gpu build … --backend gpu -o out.ptx`); the general `bin/souc` does not emit PTX. Runtime execution is fixture-bounded (13 L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible**. The default `bin/souc` **does** emit PTX now — `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
 
 ---
 

@@ -30,8 +30,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
 | Ownership/Borrowing | Production | Method receiver type resolved from declared signature; exclusive `&!Self` enforces borrow-conflict tracking; shared `&Self` is read-only. No heuristic string matching. |
-| Native Backend (Linux x86-64) | Production | Registry: `platform.linux_x86_64 = stable`. ELF + epistemic runtime + continuations. |
-| Cranelift Codegen | Production | Full implementation, effect handlers |
+| Native Backend (Linux x86-64) | Production | Registry: `platform.linux_x86_64 = stable`. Direct x86-64 ELF emission + epistemic runtime + continuations. (There is no Cranelift/JIT backend — the retired Rust Cranelift runner is gone; the default compiler is self-hosted Madaros.) |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System (single-file import unit) | Production | 2-pass resolver, imports, hierarchical namespaces |
 | CLI commands `check`/`compile`/`build`/`run`/`info`/`--version` | Production | Wired through `bin/souc`. **Exit-code contract repaired 2026-05-27 — typecheck failures now exit non-zero (G2).** |
@@ -73,9 +72,9 @@ Editor-tooling details:
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
-| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1252 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 155 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
+| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1316 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 178 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
 | **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
-| **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
+| **Generic structs/functions/traits** | `generics.* = prototype` | Multi-type-param generic functions work (incl. 3+ params, verified); do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
 | **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
 | **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
@@ -173,7 +172,7 @@ The following bugs were fixed in `lean_single.sio` and are active in the current
 
 **String methods** (fixed): `.as_bytes()` returns the string as a byte array (works). `.len()` on `string` now emits a runtime null-terminated byte count (x86-64 and ARM64); previously the condition missed `EXPR_TY == 3` and leaked the string pointer as the length. Regression test: `tests/run-pass/string_len.sio`.
 
-**Turbofish + generic monomorphization** (working): Single and dual type-parameter generic functions are monomorphised and execute correctly. `func::<T>(args)` and `func::<T, U>(args)` are fully supported — the `<TPARAMS>` section is stripped from the specialised token copy, both type parameters are substituted, and the specialised function is compiled as an ordinary function. Limitation: 3+ type parameters are not yet tracked (infrastructure covers 2 params; extend `GEN_FN_TP2_S/E` and `MONO_TY2_S/E` to add a third).
+**Turbofish + generic monomorphization** (working): Multi-type-parameter generic functions are monomorphised and execute correctly, including **3+ type parameters** — `func::<T>(args)`, `func::<T, U>(args)`, and `func::<A, B, C>(args)` are all supported (verified: `fn trip<A,B,C>(a,b,c)->C` with `trip::<i64,i64,i64>(1,2,7)` compiles and returns 7). The `<TPARAMS>` section is stripped from the specialised token copy, every type parameter is substituted, and the specialised function is compiled as an ordinary function.
 
 **Range slice half-open syntax** (fixed): `&arr[..n]` (start omitted, defaults to 0) now correctly compiles. Previously `compile_primary()` consumed the `..` token as an unrecognised primary, causing both the range-check and base-check to fail. Fix: detect `..`/`..=` at the start of the slice index and emit start=0 directly.
 

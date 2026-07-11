@@ -19,7 +19,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
   <a href="https://www.souniolang.org/playground"><img src="https://img.shields.io/badge/playground-wasm-purple.svg" alt="Playground"/></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
-  <a href="#honest-status"><img src="https://img.shields.io/badge/scale-4.2k%20.sio%20files-informational.svg" alt="~4.2k tracked .sio files; see SCALE.md"/></a>
+  <a href="#honest-status"><img src="https://img.shields.io/badge/scale-6.1k%20.sio%20files-informational.svg" alt="~6.1k tracked .sio files; see SCALE.md"/></a>
 </p>
 
 <p align="center">
@@ -187,7 +187,7 @@ This is an active research repository. Public claims are registry-backed; see [`
 **Registry rows you should read before drawing conclusions:**
 `stdlib.surface = validated_research` (bounded support contract only; not broad all-file callability) · `tooling.editor = validated_research` (checked formatter, REPL, preview LSP, and editor wiring; not mature IDE support) · `tooling.package = validated_research` (local packages only; no public registry) · `closures.lambdas = stale_conflicting` (spec §4.7.2 non-normative) · `generics.{structs,functions,traits} = prototype` · `binary.source = validated_research` (checked Madaros prebuilt is built from the modular tree; `lean_single.sio` remains the bootstrap seed) · `platform.windows = prototype`.
 
-**Scale (measured, 2026-05):** **4,233** tracked `.sio` files, **~1.84M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~542k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
+**Scale (measured 2026-07-11):** **6,130** tracked `.sio` files, **~2.21M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~555k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
 
 ### What WORKS (evidence-backed lanes)
 

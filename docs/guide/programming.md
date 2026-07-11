@@ -16,7 +16,7 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 > **WARNING**: This document mixes **implemented** and **aspirational** features.
 > Sections marked with ⚠️ are NOT YET IMPLEMENTED.
 
-### What Actually Works (v1.0)
+### What Actually Works (Madaros v0.80.0)
 
 | Feature | Status |
 |---------|--------|
