@@ -185,13 +185,33 @@ an unreachable declared gate, E2F through E1 regression, and zero diff over
 production codegen/ABI/runtime, qd semantics, and the frozen oracle. Run
 `scripts/dev/madaros_v2_e2g_enir_fuel_control_frail_gate.sh`.
 
-This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs. The remaining three programs are `v2_mem`, `v2_emov`, and
-`v2_mem_poison` (4 observations). Arbitrary nested/path-sensitive loops,
-general exceptional-value
-algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, and production-codegen
-selection also remain open and fail closed rather than falling back through
-the shadow fixture.
+Implementation note (2026-07-11):
+`E2H-ENIR-V2-MEMORY-MOVE-POISON-FULL` adds `v2_mem`, `v2_emov`, and
+`v2_mem_poison`, completing the bounded E2 Source-to-ENIR corpus at 30/30
+programs and 39/39 observations. `estore` and `eload` copy the complete qd128
+epistemic product atomically: value, four roundoff words, uncertainty, and
+poison status. In this deliberately single-block memory profile, a load is
+valid only after a linearly prior store to the same slot, and its provenance
+names that store operation. `emov` copies the same product; source-known and
+arithmetic zero values are canonicalized to positive zero before storage,
+move, or gate.
+
+The independent checker parses the three sources, normalizes the frozen EISA
+register/memory images to SSA, replays qd128 arithmetic, memory, move, poison,
+fuel, and observations, and requires exact source-fresh METRON parity. The FULL
+gate adds 16 source negatives, 25 descriptor/provenance/dominance/all-word/
+canonicalization tampers, nine runtime receipt tampers, a two-store dominance
+witness, causal source tamper, E2G through E1 regression, and zero diff over
+production codegen/ABI/runtime, qd semantics, and the frozen oracle. Run
+`scripts/dev/madaros_v2_e2h_enir_memory_move_poison_gate.sh`.
+
+This completes only the declared, finite `E2-ENIR-LOWERING-FULL` corpus. It
+does **not** establish arbitrary nested/path-sensitive loops, general
+exceptional-value algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, or
+production-codegen selection. Memory in multi-block CFG is explicitly rejected
+rather than assigned an unsound path-insensitive store provenance. Those stages
+remain absent or separately gated; there is no fallback through the shadow
+fixture.
 
 ## 1. Decision
 
@@ -207,9 +227,9 @@ assert that a corresponding pass or checker exists today. The first
 implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
-fallback. Until that milestone passes, ENIR is partially implemented only for
-the explicitly gated E2A/E2B/E2C/E2D/E2E/E2F/E2G slices; broader conformance
-remains unproven.
+fallback. That bounded milestone is implemented by the explicitly gated
+E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. Broader language conformance and the
+next `ENIR -> MIR` stage remain unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,
@@ -368,10 +388,12 @@ the expansion semantics artifact and an executable independent checker must
 exist. E2E supplies that pair for the six finite arithmetic witnesses through
 `self-hosted/enir/qd.sio` and its independently hashed Python replay. E2F adds
 the complete finite Rump graph and explicitly distinguishes exact two-gate
-reconstruction from the final single-register precision boundary. These
-results do not extend the claim to exceptional inputs, control flow, memory,
-MIR, ABI, or arbitrary qd programs; those remain blocked rather than
-provisionally redefining the equation.
+reconstruction from the final single-register precision boundary. E2G extends
+the bounded evidence to fuel and its canonical finite CFG; E2H extends it to
+the declared memory, move, negative-zero, and poison witnesses. These results
+do not extend the claim to general exceptional inputs, arbitrary control flow
+or memory, MIR, ABI, or arbitrary qd programs; those remain blocked rather
+than provisionally redefining the equation.
 
 ### 5.3 Epistemic uncertainty
 

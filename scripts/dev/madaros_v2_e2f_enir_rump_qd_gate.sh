@@ -73,7 +73,7 @@ cases = {
     "missing_close": "epistemic fn missing_close() {\nfuel 64\nlet x=1\ngate x\n",
     "set": "epistemic fn set_value() {\nfuel 64\nlet x=1\nset x=2\ngate x\n}\n",
     "if_control": "epistemic fn if_control() {\nfuel 64\nlet x=1\nif x < 0.0 {\n}\ngate x\n}\n",
-    "store": "epistemic fn store() {\nfuel 64\nlet x=1\nstore [m] <- x\ngate x\n}\n",
+    "load_before_store": "epistemic fn load_before_store() {\nfuel 64\nlet x=load [m]\ngate x\n}\n",
     "malformed_header": "fn malformed_header() {\nfuel 64\nlet x=1\ngate x\n}\n",
 }
 for name, text in cases.items():

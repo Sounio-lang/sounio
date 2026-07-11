@@ -313,6 +313,9 @@ pass "Madaros v2 E2F v2 Rump qd128 Source-to-ENIR lowering"
 bash scripts/dev/madaros_v2_e2g_enir_fuel_control_frail_gate.sh
 pass "Madaros v2 E2G v2 qd128 fuel, control, and frailty lowering"
 
+bash scripts/dev/madaros_v2_e2h_enir_memory_move_poison_gate.sh
+pass "Madaros v2 E2H v2 qd128 memory, move, and poison lowering"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt
