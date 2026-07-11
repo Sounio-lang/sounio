@@ -31875,11 +31875,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
                 inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
             }
-            // Guard: do NOT consume a field that is immediately indexed
-            // (`&x.arr[i]`). That element-borrow shape is handled by the postfix
-            // walker; consuming the field here would strip the index and mistype
-            // the element. Only pure field chains (`&x.a.b`) are folded in.
-            while TK[EP as usize] == 50 && TK[(EP + 2) as usize] != 41 {
+            // Consume the WHOLE field chain, including an array field that is then
+            // indexed (`&x.arr[i]`): the field loop leaves the borrow as ref-to-array
+            // and the postfix `[i]` walker turns that into ref-to-element (the
+            // type_is_array_ref case in compile_postfix_tail_a64). Earlier this loop
+            // skipped a field followed by `[` and let postfix index the VALUE, so
+            // `&!x.arr[i]` came out as the element value, not a ref (#740).
+            while TK[EP as usize] == 50 {
                 EP = EP + 1
                 let fb_tok = EP
                 let fbh = gl_name_hash(TS[EP as usize], TE[EP as usize])
@@ -33898,6 +33900,24 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
                 }
+            } else if type_is_array_ref(base_ty, base_hash) {
+                // Indexing a ref-to-array `&[T; N]` / `&![T; N]` yields a ref to
+                // element i (its ADDRESS), preserving the base's mutability — so
+                // `&! x.arr[i]` is `&!T`, not the element value (mirror of x86
+                // :~15661). Fixes the `&!module.functions[i]` element-borrow #740.
+                let inner_hash = ref_hash_inner_hash(base_hash)
+                let esiz = arr_hash_esiz(inner_hash)
+                let elem_ty = arr_hash_elem_ty(inner_hash)
+                let elem_hash = arr_hash_elem_hash(inner_hash)
+                LAST_ALEN = arr_hash_alen(inner_hash)
+                if esiz == 8 {
+                    em32(0x8B090C00)  // add x0, x0, x9, lsl #3  (element address)
+                } else {
+                    em32(0x8B090000)  // add x0, x0, x9          (esiz=1 byte)
+                }
+                EXPR_TY = 10
+                EXPR_TY_HASH = ref_hash_make(elem_ty, elem_hash, ref_hash_mut(base_hash))
+                EXPR_IS_F64 = 0
             } else {
                 if base_ty != 0 && base_ty != 3 {
                     tc_error(EP - 1, "value is not indexable")
