@@ -289,6 +289,9 @@ pass "package manager self-test"
 bash scripts/ci/madaros_read_env_absence_gate.sh
 pass "source-fresh missing-env merged checker"
 
+bash scripts/dev/madaros_v2_e1_enir_shadow_gate.sh
+pass "Madaros v2 E1 compiler-owned ENIR shadow"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt

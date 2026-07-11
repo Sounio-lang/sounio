@@ -1,0 +1,250 @@
+// Semantic and structural verifier for canonical E1 ENIR modules.
+
+use enir::ir::*
+
+fn enir_profile_valid(profile: i64) -> bool {
+    profile >= enir_profile_eisa_v0() && profile <= enir_profile_general()
+}
+
+fn enir_type_valid(ty: EnirType) -> bool {
+    if ty.value_kind != enir_value_f64() { return false }
+    if ty.error_kind < enir_error_exact() || ty.error_kind > enir_error_static_bound() { return false }
+    if ty.uncertainty_kind < enir_uncertainty_exact() || ty.uncertainty_kind > enir_uncertainty_unknown() { return false }
+    if ty.status_tracked != 1 || ty.provenance_tracked != 1 { return false }
+    enir_profile_valid(ty.profile)
+}
+
+fn enir_f64_class_from_bits(bits: i64) -> i64 {
+    let sign = (bits >> 63) & 1
+    let exponent = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if exponent == 0 {
+        if fraction == 0 {
+            return if sign == 0 { enir_fp_positive_zero() } else { enir_fp_negative_zero() }
+        }
+        return enir_fp_subnormal()
+    }
+    if exponent == 2047 {
+        if fraction == 0 {
+            return if sign == 0 { enir_fp_positive_infinity() } else { enir_fp_negative_infinity() }
+        }
+        if (fraction & 2251799813685248) != 0 { return enir_fp_quiet_nan() }
+        return enir_fp_signaling_nan()
+    }
+    enir_fp_normal()
+}
+
+fn enir_type_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.type_count {
+        if module.types[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_policy_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.policy_count {
+        if module.policies[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_module_value_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.value_count {
+        if module.values[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_provenance_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.provenance_count {
+        if module.provenance[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_value_index(ids: [i64; 128], count: i64, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < count {
+        if ids[i as usize] == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_value_defined(ids: [i64; 128], types: [i64; 128], count: i64, id: i64) -> bool {
+    let _keep_types = types
+    enir_value_index(ids, count, id) >= 0
+}
+
+fn enir_value_branchable(module: EnirModule, ids: [i64; 128], types: [i64; 128], count: i64, id: i64) -> bool {
+    let value_idx = enir_value_index(ids, count, id)
+    if value_idx < 0 { return false }
+    let type_idx = enir_type_index(module, types[value_idx as usize])
+    if type_idx < 0 { return false }
+    let uncertainty = module.types[type_idx as usize].uncertainty_kind
+    uncertainty == enir_uncertainty_exact() || uncertainty == enir_uncertainty_gum1()
+}
+
+pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
+    if module.schema_version != ENIR_SCHEMA_VERSION { return 101 }
+    if module.stage != ENIR_STAGE_SHADOW { return 102 }
+    if module.name.len <= 0 { return 103 }
+    if !enir_profile_valid(module.profile) { return 104 }
+    if module.type_count <= 0 || module.type_count > ENIR_MAX_TYPES { return 105 }
+    if module.value_count <= 0 || module.value_count > ENIR_MAX_VALUES { return 106 }
+    if module.provenance_count <= 0 || module.provenance_count > ENIR_MAX_PROVENANCE { return 107 }
+    if module.policy_count <= 0 || module.policy_count > ENIR_MAX_POLICIES { return 108 }
+    if module.op_count <= 0 || module.op_count > ENIR_MAX_OPS { return 109 }
+    if module.observation_count <= 0 || module.observation_count > ENIR_MAX_OBSERVATIONS { return 110 }
+    if module.program_count <= 0 || module.program_count > module.observation_count { return 111 }
+    if module.declared_type_count != module.type_count { return 110 }
+    if module.declared_value_count != module.value_count { return 112 }
+    if module.declared_provenance_count != module.provenance_count { return 113 }
+    if module.declared_policy_count != module.policy_count { return 114 }
+    if module.declared_op_count != module.op_count { return 115 }
+    if module.declared_observation_count != module.observation_count { return 116 }
+    if module.declared_program_count != module.program_count { return 117 }
+
+    var i: i64 = 0
+    while i < module.type_count {
+        let ty = module.types[i as usize]
+        if ty.id != i || !enir_type_valid(ty) { return 200 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.provenance_count {
+        let provenance = module.provenance[i as usize]
+        if provenance.id != i || provenance.source_span_id < 0 || provenance.transform_id < 0 { return 250 + i }
+        if provenance.input_origin_id < -1 || provenance.assumption_id < -1 || provenance.policy_id < -1 { return 270 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.value_count {
+        let value = module.values[i as usize]
+        if value.id != i || enir_type_index(module, value.type_id) < 0 || enir_provenance_index(module, value.provenance_id) < 0 { return 280 + i }
+        if value.known_bits != 0 && value.known_bits != 1 { return 290 + i }
+        if value.status_kind < enir_status_clean() || value.status_kind > enir_status_unsupported() { return 300 + i }
+        if value.status_kind == enir_status_clean() && value.status_reason != -1 { return 310 + i }
+        if value.status_kind != enir_status_clean() && value.status_reason < 0 { return 320 + i }
+        let ty = module.types[value.type_id as usize]
+        if value.known_bits == 1 {
+            if value.fp_class < enir_fp_positive_zero() || value.fp_class > enir_fp_signaling_nan() { return 330 + i }
+            if value.fp_class != enir_f64_class_from_bits(value.value_bits) { return 335 + i }
+        } else {
+            if value.value_bits != 0 || value.fp_class != -1 || value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0 || value.uncertainty_bits != 0 { return 340 + i }
+        }
+        if ty.error_kind == enir_error_exact() && (value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0) { return 350 + i }
+        if ty.error_kind == enir_error_dd64() && (value.error2_bits != 0 || value.error3_bits != 0) { return 360 + i }
+        if ty.uncertainty_kind == enir_uncertainty_exact() && value.uncertainty_bits != 0 { return 370 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.policy_count {
+        let policy = module.policies[i as usize]
+        if policy.id != i || policy.name.len <= 0 { return 380 + i }
+        if policy.branch_kind != enir_branch_policy_count_only() { return 390 + i }
+        if policy.gate_kind != enir_gate_policy_10_100() { return 395 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.provenance_count {
+        let policy_id = module.provenance[i as usize].policy_id
+        if policy_id >= 0 && enir_policy_index(module, policy_id) < 0 { return 399 + i }
+        i = i + 1
+    }
+
+    var value_ids: [i64; 128] = [-1; 128]
+    var value_types: [i64; 128] = [-1; 128]
+    var value_count: i64 = 0
+    i = 0
+    while i < module.op_count {
+        let op = module.ops[i as usize]
+        if op.id != i { return 400 + i }
+        if op.opcode < enir_op_econst() || op.opcode > enir_op_ehalt() { return 500 + i }
+        if op.fuel_cost != 1 { return 600 + i }
+        if op.type_id >= 0 && enir_type_index(module, op.type_id) < 0 { return 700 + i }
+
+        var produces = false
+        if op.opcode == enir_op_econst() {
+            produces = true
+            if op.a != -1 || op.b != -1 { return 800 + i }
+        } else if op.opcode == enir_op_eload() {
+            produces = true
+            if op.memory_slot < 0 { return 820 + i }
+        } else if op.opcode >= enir_op_eadd() && op.opcode <= enir_op_ediv() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) || !enir_value_defined(value_ids, value_types, value_count, op.b) { return 840 + i }
+        } else if op.opcode == enir_op_esqrt() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 860 + i }
+        } else if op.opcode == enir_op_egate() {
+            if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || enir_policy_index(module, op.policy_id) < 0 { return 880 + i }
+        } else if op.opcode == enir_op_estore() {
+            if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || op.memory_slot < 0 { return 900 + i }
+        } else if op.opcode == enir_op_emov() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 920 + i }
+        } else if op.opcode == enir_op_ebr() {
+            if op.result_id != -1 || op.target < 0 || op.target >= module.op_count { return 940 + i }
+        } else if op.opcode == enir_op_ebrz() || op.opcode == enir_op_ebrn() {
+            if op.result_id != -1 || op.target < 0 || op.target >= module.op_count || enir_policy_index(module, op.policy_id) < 0 { return 960 + i }
+            if !enir_value_branchable(module, value_ids, value_types, value_count, op.a) { return 980 + i }
+        } else if op.opcode == enir_op_ehalt() {
+            if op.result_id != -1 { return 1000 + i }
+        }
+
+        if produces {
+            if op.result_id < 0 || op.type_id < 0 { return 1020 + i }
+            let declared_value_idx = enir_module_value_index(module, op.result_id)
+            if declared_value_idx < 0 || module.values[declared_value_idx as usize].type_id != op.type_id { return 1030 + i }
+            if enir_value_defined(value_ids, value_types, value_count, op.result_id) { return 1040 + i }
+            if op.opcode == enir_op_econst() && module.values[declared_value_idx as usize].known_bits != 1 { return 1050 + i }
+            if value_count >= 128 { return 1060 + i }
+            value_ids[value_count as usize] = op.result_id
+            value_types[value_count as usize] = op.type_id
+            value_count = value_count + 1
+        } else if op.type_id != -1 {
+            return 1080 + i
+        }
+        i = i + 1
+    }
+    if value_count != module.value_count { return 1199 }
+
+    var programs: i64 = 0
+    var previous_name = enir_name_empty()
+    var expected_ordinal: i64 = 0
+    i = 0
+    while i < module.observation_count {
+        let obs = module.observations[i as usize]
+        if obs.id != i || obs.program_name.len <= 0 { return 1200 + i }
+        if obs.kind != enir_observation_gate() && obs.kind != enir_observation_fuel() { return 1300 + i }
+        if i == 0 || !enir_name_eq(obs.program_name, previous_name) {
+            programs = programs + 1
+            expected_ordinal = 0
+            // A program name may occupy only one contiguous observation group.
+            var prior: i64 = 0
+            while prior < i {
+                if enir_name_eq(module.observations[prior as usize].program_name, obs.program_name) { return 1400 + i }
+                prior = prior + 1
+            }
+        }
+        if obs.ordinal != expected_ordinal { return 1500 + i }
+        expected_ordinal = expected_ordinal + 1
+        previous_name = obs.program_name
+        i = i + 1
+    }
+    if programs != module.program_count { return 1601 }
+    0
+}

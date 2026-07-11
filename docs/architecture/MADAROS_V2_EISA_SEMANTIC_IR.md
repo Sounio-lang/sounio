@@ -16,6 +16,18 @@ Issue: [#751](https://github.com/Sounio-lang/sounio/issues/751)
 
 Target layer: `Semantic IR -> EpistemicNumericIR -> MIR`
 
+Implementation note (2026-07-11): `E1-ENIR-SHADOW-FULL` now provides a
+compiler-owned native ENIR model, strict canonical parser/printer, semantic
+verifier, deterministic hash, and exact source-derived 30-program/39-observation
+manifest under `self-hosted/enir/`. Its gate includes independent checking,
+byte-identical roundtrip, nine invalid mutations, valid numeric hash tamper,
+manifest tamper, and a zero-diff assertion over compiler lowering/codegen/ABI
+surfaces. This is an implemented **shadow foundation**, not the
+`E1-ENIR-CORPUS-FULL` lowering claimed below: no source program lowers through
+ENIR yet, no ENIR interpreter or ENIR-to-MIR pass exists, and code generation is
+unchanged. Run `scripts/dev/madaros_v2_e1_enir_shadow_gate.sh`; inspect or replay
+artifacts with `bin/madaros-enir emit|verify|roundtrip`.
+
 ## 1. Decision
 
 Any implementation claiming Madaros v2 ENIR conformance SHALL make EISA/METRON
