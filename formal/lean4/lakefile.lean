@@ -84,6 +84,20 @@ lean_lib «SounioCDConverse» where
 @[default_target]
 lean_lib «SounioCDqbig» where
 
+-- CD core-law twin recursion — per-dimension native_decide certificate (dims 16/32/64) of BOTH
+-- doubling recursions S=2S'-8·[hi_lo≠0] and S=8-2S', plus Dmax=4(2^(n-3)-1). The ∀n proof of the
+-- recursions is in SounioSeamFlip; this file anchors them at fixed dims (regression, like lsq_16/32/64).
+@[default_target]
+lean_lib «SounioCDCoreLaw» where
+
+-- Seam-flip law — the ∀n KEYSTONE under the whole 168 lane (lift / orbit theorem / annihilation=
+-- associator bridge / core-law twin recursion all bottom out on it). Proves, for ALL n, Mathlib-free,
+-- no sorry, no native_decide: the one-step cocycle recursion R (four branches), antisymmetry, cdSigma=±1,
+-- and the FULL associator seam-flip law — all eight (p,q,r) seam configurations over the whole locus
+-- (generic + degenerate), with exact chi-corrections. Axioms [propext, Classical.choice, Quot.sound].
+@[default_target]
+lean_lib «SounioSeamFlip» where
+
 @[default_target]
 lean_lib «SounioSeamBridge» where
 
@@ -628,3 +642,9 @@ lean_lib «SounioCayleyDicksonErasure» where
 -- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
 @[default_target]
 lean_lib «SounioG2Derivations» where
+
+-- CD monomial-automorphism tower — third independent kernel checker (native_decide)
+-- for the program's FINITE facts: seam is the unique associator-degree arg-max (n=4,5),
+-- octonion alternativity Psi_3, block lemma at n=4 (β=0), and the 168 count. Not built by
+-- CI (heavy GL(4,2) sweeps); build on demand `lake build SounioCDTowerAutomorphism`.
+lean_lib «SounioCDTowerAutomorphism» where
