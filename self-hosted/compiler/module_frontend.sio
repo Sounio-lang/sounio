@@ -1347,7 +1347,10 @@ fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_na
     }
     if resolve_name.len > 0 {
         let new_id = ir_merge_find_function_name_index(module, resolve_name)
-        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
+        // A canonical zero-body symbol can be a native builtin (str_char_at,
+        // print, math intrinsics). Preserve symbol identity here; codegen owns
+        // the supported-builtin or unresolved-extern verdict.
+        if new_id >= 0 {
             return new_id
         }
     }
@@ -4318,8 +4321,8 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 //
 // Fix: before resetting the arena, walk the newly-appended function range
 // [old_fn_count, new_fn_count) and extract every call_args chain (bounded
-// to 8 args/call-site, matching the existing native_v2_collect_call_args /
-// tco_extract_call_args convention) into this BSS scratch buffer -- plain
+// to 64 args/call-site, matching LowerExprArgsResult capacity) into this
+// BSS scratch buffer -- plain
 // fixed arrays, NOT Box-arena memory, so __arena_reset never touches them.
 // After the reset, rebuild fresh Box<IrRegList> chains from the scratch
 // buffer (landing in the just-freed, now-reused window) and write them
@@ -4331,7 +4334,7 @@ let MF_AREBOX_CAP: i64 = 8192
 var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
 var MF_AREBOX_II: [i64; 8192] = [0; 8192]
 var MF_AREBOX_ARGC: [i64; 8192] = [0; 8192]
-var MF_AREBOX_ARGS: [i64; 65536] = [0; 65536]
+var MF_AREBOX_ARGS: [i64; 524288] = [0; 524288]
 var MF_AREBOX_COUNT: i64 = 0
 var MF_AREBOX_OVERFLOW: bool = false
 
@@ -4340,16 +4343,14 @@ fn mf_arebox_reset_scratch() with Mut {
     MF_AREBOX_OVERFLOW = false
 }
 
-// Extract up to 8 regs from a call_args chain into MF_AREBOX_ARGS[slot*8 ..].
-// Extra args beyond 8 are truncated (existing convention elsewhere in the
-// codebase caps call-arg capture at 8/16; no observed call site needs more).
+// Extract up to 64 regs from a call_args chain into MF_AREBOX_ARGS[slot*64 ..].
 fn mf_arebox_extract(slot: i64, args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
     var n: i64 = 0
     var cur = args
-    while n < 8 {
+    while n < 64 {
         match cur {
             Some(node) => {
-                MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
+                MF_AREBOX_ARGS[(slot * 64 + n) as usize] = (*node).head
                 cur = (*node).tail
                 n = n + 1
             }
@@ -4361,13 +4362,28 @@ fn mf_arebox_extract(slot: i64, args: Option<Box<IrRegList>>) -> i64 with Mut, P
 
 // Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
 // args NOW while the source (pre-reset) memory is still valid.
-fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>) with Mut, Panic, Div {
+fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>, expected_argc: i64) with Mut, Panic, Div {
     if MF_AREBOX_COUNT >= MF_AREBOX_CAP {
         MF_AREBOX_OVERFLOW = true
         return
     }
     let slot = MF_AREBOX_COUNT
     let n = mf_arebox_extract(slot, args)
+    if expected_argc > n {
+        MF_AREBOX_OVERFLOW = true
+        if module_frontend_lower_trace_enabled() {
+            print("lower_array: call_args_pre_reset_truncated fi=")
+            print_int(fi)
+            print(" ii=")
+            print_int(ii)
+            print(" expected=")
+            print_int(expected_argc)
+            print(" captured=")
+            print_int(n)
+            print("\n")
+        }
+        return
+    }
     MF_AREBOX_FI[slot as usize] = fi
     MF_AREBOX_II[slot as usize] = ii
     MF_AREBOX_ARGC[slot as usize] = n
@@ -4377,15 +4393,52 @@ fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>) with Mut, Pa
 // Rebuild a fresh Box<IrRegList> chain from scratch slot `slot`, preserving
 // original head-first arg order. Must only be called AFTER __arena_reset so
 // the Box::new allocations land in the freed (reused) window.
+fn mf_arebox_list_len(args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = args
+    while n < 64 {
+        match cur {
+            Some(node) => {
+                n = n + 1
+                cur = (*node).tail
+            }
+            _ => return n,
+        }
+    }
+    n
+}
+
+fn mf_arebox_payload_matches(slot: i64, args: Option<Box<IrRegList>>) -> bool with Mut, Panic, Div {
+    let expected = MF_AREBOX_ARGC[slot as usize]
+    var index: i64 = 0
+    var cur = args
+    while index < expected && index < 64 {
+        match cur {
+            Some(node) => {
+                if (*node).head != MF_AREBOX_ARGS[(slot * 64 + index) as usize] {
+                    return false
+                }
+                index = index + 1
+                cur = (*node).tail
+            }
+            _ => return false,
+        }
+    }
+    index == expected
+}
+
 fn mf_arebox_rebuild(slot: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic, Div {
     let n = MF_AREBOX_ARGC[slot as usize]
-    var out: Option<Box<IrRegList>> = None
-    var k = n - 1
-    while k >= 0 {
-        out = Some(Box::new(ir_reg_list_cons(MF_AREBOX_ARGS[(slot * 8 + k) as usize], out)))
-        k = k - 1
+    if n <= 0 {
+        return None
     }
-    out
+    var out = ir_reg_list_single(MF_AREBOX_ARGS[(slot * 64) as usize])
+    var k: i64 = 1
+    while k < n {
+        out = ir_reg_list_append(out, MF_AREBOX_ARGS[(slot * 64 + k) as usize])
+        k = k + 1
+    }
+    Some(Box::new(out))
 }
 
 // Scan functions [fn_lo, fn_hi) of `module` for instrs carrying a live
@@ -4400,7 +4453,12 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
         var ii: i64 = 0
         while ii < ic {
             match (*module).functions[fi as usize].instrs[ii as usize].call_args {
-                Some(_) => mf_arebox_record(fi, ii, (*module).functions[fi as usize].instrs[ii as usize].call_args)
+                Some(_) => mf_arebox_record(
+                    fi,
+                    ii,
+                    (*module).functions[fi as usize].instrs[ii as usize].call_args,
+                    (*module).functions[fi as usize].instrs[ii as usize].arg_count
+                )
                 _ => {}
             }
             ii = ii + 1
@@ -4418,6 +4476,28 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
         let fi = MF_AREBOX_FI[s as usize]
         let ii = MF_AREBOX_II[s as usize]
         let rebuilt = mf_arebox_rebuild(s)
+        if module_frontend_lower_trace_enabled() {
+            let rebuilt_count = mf_arebox_list_len(rebuilt)
+            if rebuilt_count != MF_AREBOX_ARGC[s as usize] {
+                print("lower_array: call_args_post_reset_truncated fi=")
+                print_int(fi)
+                print(" ii=")
+                print_int(ii)
+                print(" expected=")
+                print_int(MF_AREBOX_ARGC[s as usize])
+                print(" rebuilt=")
+                print_int(rebuilt_count)
+                print("\n")
+            } else if !mf_arebox_payload_matches(s, rebuilt) {
+                print("lower_array: call_args_post_reset_payload_mismatch fi=")
+                print_int(fi)
+                print(" ii=")
+                print_int(ii)
+                print(" argc=")
+                print_int(rebuilt_count)
+                print("\n")
+            }
+        }
         (*module).functions[fi as usize].instrs[ii as usize].call_args = rebuilt
         s = s + 1
     }

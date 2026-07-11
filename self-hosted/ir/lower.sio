@@ -164,6 +164,7 @@ struct IrPreparedCallArgs {
     lo: Lowerer,
     args: Option<Box<IrRegList>>,
     argc: i64,
+    first_reg: i64,
 }
 
 pub struct IrProgramSummary {
@@ -5708,7 +5709,8 @@ impl Lowerer {
         self,
         fn_id: i64,
         args: Option<Box<IrRegList>>,
-        argc: i64
+        argc: i64,
+        first_reg: i64
     ) -> IrPreparedCallArgs with Mut, Panic, Div, Alloc, IO {
         let callee_strategy: i64 = if fn_id >= 0 && fn_id < self.module.fn_count {
             self.module.functions[fn_id as usize].compile_strategy
@@ -5717,22 +5719,40 @@ impl Lowerer {
         }
         var final_args = args
         var final_argc = argc
+        var final_first_reg = first_reg
         var lo = self
         if callee_strategy == IR_STRATEGY_INSTRUMENTED {
+            var validated_vreg: i64 = IR_INVALID_REG
             let caller_strategy: i64 = lo.current_fn_compile_strategy()
             if caller_strategy == IR_STRATEGY_INSTRUMENTED {
-                let caller_validated_vreg: i64 = lo.current_fn_validated_reg()
-                final_args = lo.prepend_arg(caller_validated_vreg, final_args)
+                validated_vreg = lo.current_fn_validated_reg()
             } else {
                 let pair_v = lo.fresh_reg()
                 lo = pair_v.0
-                let validated_vreg = pair_v.1
+                validated_vreg = pair_v.1
                 lo = lo.emit(ir_load_imm(validated_vreg, 1))
-                final_args = lo.prepend_arg(validated_vreg, final_args)
             }
+
+            // Prepending changes argument order without changing allocation
+            // order. Re-materialize [validated, explicit...] as one contiguous
+            // window before advertising its base through IrInstr.field_idx.
+            let normalized_validated = lo.fresh_reg()
+            lo = normalized_validated.0
+            lo = lo.emit(ir_copy(normalized_validated.1, validated_vreg))
+            var normalized_args = ir_reg_list_single(normalized_validated.1)
+            var ai: i64 = 0
+            while ai < argc {
+                let normalized_arg = lo.fresh_reg()
+                lo = normalized_arg.0
+                lo = lo.emit(ir_copy(normalized_arg.1, first_reg + ai))
+                normalized_args = ir_reg_list_append(normalized_args, normalized_arg.1)
+                ai = ai + 1
+            }
+            final_args = Some(Box::new(normalized_args))
+            final_first_reg = normalized_validated.1
             final_argc = final_argc + 1
         }
-        IrPreparedCallArgs { lo: lo, args: final_args, argc: final_argc }
+        IrPreparedCallArgs { lo: lo, args: final_args, argc: final_argc, first_reg: final_first_reg }
     }
 
     fn lower_fn_item_owned(self, name: Name, fd: FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -6685,6 +6705,29 @@ impl Lowerer {
             let empty = IrRegList { head: 0, tail: None }
             LowerExprArgsResult { lowerer: lo, regs: empty, count: 0 }
         } else {
+            // Calls carry a redundant contiguous vreg window. Recursive
+            // Option<Box<IrRegList>> tails can be lost by the bootstrap after
+            // aggregate copies; the contiguous window remains sufficient for
+            // exact register and stack argument lowering at any supported arity.
+            var contiguous = true
+            var ci: i64 = 1
+            while ci < reg_count {
+                if regs[ci as usize] != regs[0] + ci {
+                    contiguous = false
+                }
+                ci = ci + 1
+            }
+            if !contiguous {
+                var ni: i64 = 0
+                while ni < reg_count {
+                    let normalized = lo.fresh_reg()
+                    lo = normalized.0
+                    let normalized_reg = normalized.1
+                    lo = lo.emit(ir_copy(normalized_reg, regs[ni as usize]))
+                    regs[ni as usize] = normalized_reg
+                    ni = ni + 1
+                }
+            }
             var idx = reg_count - 1
             var args = IrRegList { head: regs[idx as usize], tail: None }
             while idx > 0 {
@@ -8236,10 +8279,12 @@ impl Lowerer {
             let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
             return (lo_ext, dst)
         }
-        let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
+        let first_reg = if argc > 0 { pair_args.regs.head } else { IR_INVALID_REG }
+        let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc, first_reg)
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
+        let final_first_reg = pair_call.first_reg
         var call_returns_f128 = false
         if fn_id >= 0 && fn_id < (*lo4.module).fn_count {
             let ext_ret_code_sret = lower_extern_fn_ret_code_for_call(e)
@@ -8256,11 +8301,11 @@ impl Lowerer {
             } else if ret_name_sret.len <= 0 {
                 ret_name_sret = ext_ret_name_sret
             }
-            if ext_ret_wide_bits_sret > 64 && final_argc <= 8 {
+            if ext_ret_wide_bits_sret > 64 {
                 let ret_wide_limbs_ext = lower_wide_limb_count(ext_ret_wide_bits_sret)
                 let sret_alloc_bytes_ext = lo4.aggregate_storage_bytes(ret_wide_limbs_ext)
                 var lo_sret_wide_ext = lo4.emit(ir_alloc(dst, sret_alloc_bytes_ext))
-                lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                lo_sret_wide_ext = lo_sret_wide_ext.emit(ir_call_sret_window(dst, dst, callee_name, fn_id, final_args, final_argc, final_first_reg))
                 let pair_wide_dst_ext = lo_sret_wide_ext.fresh_wide_reg(ret_wide_limbs_ext)
                 lo_sret_wide_ext = pair_wide_dst_ext.0
                 let wide_dst_ext = pair_wide_dst_ext.1
@@ -8271,14 +8316,14 @@ impl Lowerer {
                 }
                 return (lo_sret_wide_ext, wide_dst_ext)
             }
-            if lower_return_name_is_aggregate(ret_name_sret) && final_argc <= 8 {
+            if lower_return_name_is_aggregate(ret_name_sret) {
                 let ext_ret_field_count_sret = lower_extern_fn_ret_field_count_for_call(e)
                 let sret_alloc_bytes = if ext_ret_field_count_sret > 0 { lo4.aggregate_storage_bytes(ext_ret_field_count_sret) } else { lo4.aggregate_storage_bytes_for_type(ret_name_sret) }
                 let ret_wide_bits = lower_name_wide_int_bits(ret_name_sret)
                 if ret_wide_bits > 64 {
                     let ret_wide_limbs = lower_wide_limb_count(ret_wide_bits)
                     var lo_sret_wide = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
-                    lo_sret_wide = lo_sret_wide.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                    lo_sret_wide = lo_sret_wide.emit(ir_call_sret_window(dst, dst, callee_name, fn_id, final_args, final_argc, final_first_reg))
                     let pair_wide_dst = lo_sret_wide.fresh_wide_reg(ret_wide_limbs)
                     lo_sret_wide = pair_wide_dst.0
                     let wide_dst = pair_wide_dst.1
@@ -8290,7 +8335,7 @@ impl Lowerer {
                     return (lo_sret_wide, wide_dst)
                 }
                 var lo_sret = lo4.emit(ir_alloc(dst, sret_alloc_bytes))
-                lo_sret = lo_sret.emit(ir_call_sret_args(dst, dst, callee_name, fn_id, final_args, final_argc))
+                lo_sret = lo_sret.emit(ir_call_sret_window(dst, dst, callee_name, fn_id, final_args, final_argc, final_first_reg))
                 return (lo_sret, dst)
             }
         }
@@ -8681,17 +8726,33 @@ impl Lowerer {
         let lo1 = pair_b.0
         let base_reg = pair_b.1
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
-        let lo2 = pair_args.lowerer
-        let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var lo2 = pair_args.lowerer
         let arg_count = pair_args.count
-        let args2 = lo2.prepend_arg(base_reg, arg_list)
+        // Receiver evaluation precedes explicit argument evaluation, but nested
+        // expressions can allocate intervening vregs. Materialize the combined
+        // method ABI window explicitly before optional validated-arg insertion.
+        let normalized_receiver = lo2.fresh_reg()
+        lo2 = normalized_receiver.0
+        lo2 = lo2.emit(ir_copy(normalized_receiver.1, base_reg))
+        var method_args = ir_reg_list_single(normalized_receiver.1)
+        var method_ai: i64 = 0
+        let explicit_first = if arg_count > 0 { pair_args.regs.head } else { IR_INVALID_REG }
+        while method_ai < arg_count {
+            let normalized_arg = lo2.fresh_reg()
+            lo2 = normalized_arg.0
+            lo2 = lo2.emit(ir_copy(normalized_arg.1, explicit_first + method_ai))
+            method_args = ir_reg_list_append(method_args, normalized_arg.1)
+            method_ai = method_ai + 1
+        }
+        let args2: Option<Box<IrRegList>> = Some(Box::new(method_args))
         let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
         let fn_id = pair_fn.1
-        let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
+        let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1, normalized_receiver.1)
         let lo4 = pair_call.lo
         let final_args = pair_call.args
         let final_argc = pair_call.argc
+        let final_first_reg = pair_call.first_reg
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
@@ -8699,12 +8760,12 @@ impl Lowerer {
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             let ret_name_m = (*lo5.module).functions[fn_id as usize].return_struct_name
             method_call_returns_f128 = lower_name_is_f128(ret_name_m)
-            if lower_return_name_is_aggregate(ret_name_m) && final_argc <= 8 {
+            if lower_return_name_is_aggregate(ret_name_m) {
                 let ret_wide_bits_m = lower_name_wide_int_bits(ret_name_m)
                 if ret_wide_bits_m > 64 {
                     let ret_wide_limbs_m = lower_wide_limb_count(ret_wide_bits_m)
                     var lo_sret_wide_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
-                    lo_sret_wide_m = lo_sret_wide_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
+                    lo_sret_wide_m = lo_sret_wide_m.emit(ir_call_sret_window(dst, dst, call_name, fn_id, final_args, final_argc, final_first_reg))
                     let pair_wide_dst_m = lo_sret_wide_m.fresh_wide_reg(ret_wide_limbs_m)
                     lo_sret_wide_m = pair_wide_dst_m.0
                     let wide_dst_m = pair_wide_dst_m.1
@@ -8716,7 +8777,7 @@ impl Lowerer {
                     return (lo_sret_wide_m, wide_dst_m)
                 }
                 var lo_sret_m = lo5.emit(ir_alloc(dst, lo5.aggregate_storage_bytes_for_type(ret_name_m)))
-                lo_sret_m = lo_sret_m.emit(ir_call_sret_args(dst, dst, call_name, fn_id, final_args, final_argc))
+                lo_sret_m = lo_sret_m.emit(ir_call_sret_window(dst, dst, call_name, fn_id, final_args, final_argc, final_first_reg))
                 return (lo_sret_m, dst)
             }
         }

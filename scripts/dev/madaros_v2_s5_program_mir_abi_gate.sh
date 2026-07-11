@@ -588,8 +588,8 @@ if method_recv.get("actual_exit") != 24:
     raise SystemExit("method SRET receiver-only witness must return 24")
 if method_recv.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1]:
     raise SystemExit("method SRET receiver-only receipt must pass hidden dest then receiver")
-if method_recv.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [2, 0]:
-    raise SystemExit("method SRET receiver-only receipt must prove hidden dest slot2 then receiver slot0")
+if method_recv.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [3, 2]:
+    raise SystemExit("method SRET receiver-only receipt must prove hidden dest slot3 then normalized receiver slot2")
 if method_recv.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
     raise SystemExit("method SRET receiver-only receipt must prove aggregate field indices 0,1,2")
 if method_recv.get("machine_shape", {}).get("method_source_is_sret") != 1:
@@ -598,8 +598,8 @@ if method_reg.get("actual_exit") != 43:
     raise SystemExit("method SRET register-arg witness must return 43")
 if method_reg.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
     raise SystemExit("method SRET register receipt must pass hidden dest, receiver, and register args")
-if method_reg.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [6, 0, 2, 3, 4, 5]:
-    raise SystemExit("method SRET register receipt must prove hidden dest slot6, receiver slot0, explicit slots 2..5")
+if method_reg.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [11, 6, 7, 8, 9, 10]:
+    raise SystemExit("method SRET register receipt must prove hidden dest slot11 and normalized ABI window slots 6..10")
 if method_reg.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
     raise SystemExit("method SRET register receipt must prove aggregate field indices 0,1,2")
 if method_reg.get("machine_shape", {}).get("method_source_is_sret") != 1:
@@ -608,12 +608,12 @@ if method_stack.get("actual_exit") != 57:
     raise SystemExit("method SRET stack-arg witness must return 57")
 if method_stack.get("machine_shape", {}).get("main_arg_move_indices") != [0, 1, 2, 3, 4, 5]:
     raise SystemExit("method SRET stack receipt must pass hidden dest, receiver, and first register args")
-if method_stack.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [8, 0, 2, 3, 4, 5]:
-    raise SystemExit("method SRET stack receipt must prove hidden dest slot8, receiver slot0, explicit slots 2..5")
+if method_stack.get("machine_shape", {}).get("main_arg_move_source_stack_slots") != [15, 8, 9, 10, 11, 12]:
+    raise SystemExit("method SRET stack receipt must prove hidden dest slot15 and normalized register window slots 8..12")
 if method_stack.get("machine_shape", {}).get("main_stack_arg_push_indices") != [7, 6]:
     raise SystemExit("method SRET stack receipt must push explicit stack args in reverse order")
-if method_stack.get("machine_shape", {}).get("main_stack_arg_push_source_stack_slots") != [7, 6]:
-    raise SystemExit("method SRET stack receipt must load stack args from explicit slots 7 then 6")
+if method_stack.get("machine_shape", {}).get("main_stack_arg_push_source_stack_slots") != [14, 13]:
+    raise SystemExit("method SRET stack receipt must load normalized stack args from slots 14 then 13")
 if method_stack.get("machine_shape", {}).get("main_stack_adjust_immediates") != [16]:
     raise SystemExit("method SRET stack receipt must record cleanup 16 without padding")
 if method_stack.get("machine_shape", {}).get("main_field_load_indices") != [0, 1, 2]:
