@@ -9,6 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.modula
 
 # Follow-up scope — green the modular Madaros build (`build_modular_madaros.sh`)
 
+**Tracking issue:** [#767](https://github.com/Sounio-lang/sounio/issues/767)
 **Authored by:** Claude (EISA lane, `gpu/epistemic-tensor-core-next`), 2026-07-11
 **Type:** compiler-internals (modular `main.sio` path). Serialized surfaces; fixed-point + output-verified gates mandatory.
 **Priority:** non-blocking. The branch's *proven* compiler is `lean_single` (gen1→gen2→gen3 fixed point, md5 `6da577cadf74b50e8f3df7fa0813c62b`). This work only concerns the parallel modular `main.sio` compiler.
