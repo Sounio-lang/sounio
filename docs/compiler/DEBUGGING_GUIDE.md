@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.debug
 
 # Debugging Guide for Sounio Programs
 
+> **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but DWARF/debug-info emission now lives in `self-hosted/native/dwarf.sio` and `self-hosted/native/debug_info.sio`; the epistemic/knowledge runtime in `self-hosted/compiler/knowledge_runtime_guard*.sio` — not any `codegen/llvm/*.rs` or `backend/native/*.rs`. Do not look for the `.rs` paths below.
+
+
 ## 1. Introduction
 
 Debugging scientific code presents unique challenges compared to general-purpose programming, as it often involves not just correctness but also the reliability and interpretability of results. In Sounio programs, epistemic values—such as confidence levels and provenance—require special inspection to ensure that uncertainties are properly tracked and propagated. Refinement constraints, which enforce properties like positivity or bounds at the type level, demand validation to catch violations early. Units add another layer of complexity, as mismatches can lead to physically meaningless computations if not detected. To address these aspects in native code, Sounio leverages DWARF debug information, enabling detailed inspection of variables, types, and execution flow.
