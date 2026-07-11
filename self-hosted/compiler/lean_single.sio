@@ -34735,6 +34735,26 @@ fn compile_comparison_a64() with IO, Mut, Panic, Div {
         let left_hash = comparison_visible_hash(left_raw_ty, left_raw_hash)
         let right_ty = comparison_visible_ty(right_raw_ty, right_raw_hash)
         let right_hash = comparison_visible_hash(right_raw_ty, right_raw_hash)
+        // String == / != : byte-compare, not pointer-compare. The x86 twin
+        // (compile_comparison ~19417) special-cases two string operands; without
+        // this the arm64 path falls into the generic integer `cmp x1, x0` below,
+        // comparing the two string POINTERS — distinct literals never match, so
+        // every `str == str` returns false (breaks all CLI/keyword dispatch).
+        if left_ty == 3 && right_ty == 3 {
+            if op != 21 && op != 22 {
+                tc_error(op_tok, "ordered comparison requires matching numeric operands")
+            }
+            emit_pop_x1_a64()        // x1 = lhs string ptr (x0 already = rhs)
+            emit_str_eq_regs_a64()   // x0 = 1 iff bytes equal
+            if op == 22 {
+                em32(0xF100001F)     // cmp x0, #0
+                em32(0x9A9F17E0)     // cset x0, eq  → x0 = 1 iff NOT equal
+            }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 4
+            EXPR_TY_HASH = 0
+            return
+        }
         let left_f64 = if left_raw_f64 == 1 || left_ty == 2 { 1 } else { 0 }
         if op == 21 || op == 22 {
             if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
