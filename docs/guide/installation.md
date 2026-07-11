@@ -26,20 +26,31 @@ This guide covers all installation scenarios for the Sounio compiler, from basic
 
 ---
 
+> **⚠️ Rewritten 2026-07-11 (doc-reality audit).** The current Sounio toolchain is **self-hosted and prebuilt** — you do **not** build it with `cargo`/Rust, there is no Cranelift/LLVM feature-flag build, and there is no `./target/release/souc`. The compiler binaries are checked into `bin/`. The Rust / `cargo` / LLVM 15–17 / Z3 / feature-flag sections further down describe the **retired** Rust build and no longer apply to this checkout; they are kept for historical reference only. Use the Quick Start below.
+
 ## Quick Start
 
-For most users, the basic build requires only Rust:
+The compiler ships **prebuilt** in `bin/`. No build step is needed to use it.
 
 ```bash
 # Clone the repository
-git clone https://github.com/sounio-lang/sounio.git
+git clone https://github.com/Sounio-lang/sounio.git
 cd sounio
 
-# Build with default features (Cranelift JIT)
-cargo build --release
+# bin/souc routes to the self-hosted Madaros engine (no Rust/cargo needed)
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"   # required when running from outside the repo root
+./bin/souc --version                        # -> Madaros v0.80.0 (an un-rebuilt checkout may still print "Madares")
+./bin/souc run examples/hello.sio           # smoke test -> "Hello, Sounio"
+```
 
-# Verify installation
-./target/release/souc --version
+### Building the compiler from source (optional)
+
+Only needed to *rebuild* the compiler itself. It is self-hosted in Sounio and bootstrapped from a small C stage0 — **no Rust, no cargo**:
+
+```bash
+make build          # boot chain gen1 -> gen2 -> gen3; verifies the gen2 == gen3 fixed point
+make build-madaros  # (re)build the modular Madaros compiler from self-hosted/compiler/main.sio
+make check          # type-check the compiler + CI gates
 ```
 
 ---
@@ -68,27 +79,23 @@ cargo build --release
 
 ## Basic Installation
 
-### Step 1: Install Rust
+### Step 1: Clone (the compiler is prebuilt — no Rust needed)
 
 ```bash
-# Install rustup (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Ensure you have the latest stable
-rustup update stable
-```
-
-### Step 2: Clone and Build
-
-```bash
-git clone https://github.com/sounio-lang/sounio.git
+git clone https://github.com/Sounio-lang/sounio.git
 cd sounio
 
-# Basic build (uses Cranelift JIT)
-cargo build --release
+# The compiler binaries are checked into bin/; nothing to install.
+./bin/souc --version
+```
 
-# Install to PATH (optional)
-cargo install --path .
+### Step 2: (optional) Rebuild the self-hosted compiler
+
+Only if you want to rebuild it from source. Sounio is self-hosted and bootstrapped from a C stage0 — **no Rust, no cargo, no rustup**:
+
+```bash
+make build          # gen1 -> gen2 -> gen3, verifies gen2 == gen3 fixed point
+make install        # optional: place souc on PATH
 ```
 
 ### Step 3: Configure Stdlib Path
@@ -99,8 +106,8 @@ Set the stdlib path for programs that use standard library modules:
 # Add to ~/.bashrc or ~/.zshrc
 export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
 
-# Verify stdlib resolution
-souc sysroot stdlib-paths
+# Verify stdlib resolution by type-checking a program that imports the stdlib
+./bin/souc check examples/hello.sio    # (there is no `souc sysroot` subcommand)
 ```
 
 ---
@@ -393,22 +400,19 @@ cargo build --features "llvm15,llvm17"  # Error!
 
 ## Verifying Installation
 
-After installation, run the test suite:
+After cloning, verify the prebuilt toolchain and run the test suite (no cargo):
 
 ```bash
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+
 # Quick smoke test
-cargo test --release
+./bin/souc run examples/hello.sio
 
-# Full test suite
-cargo test --release --features "jit,gpu,ontology"
+# Full .sio test suite
+bash scripts/run_sio_test_suite.sh        # or: make test
 
-# With LLVM and SMT
-cargo test --release --features "llvm17,smt,gpu,ontology"
-```
-
-Expected output (as of v1.0):
-```
-test result: ok. 3851 passed; 0 failed; 0 ignored
+# Single test by pattern
+bash scripts/run_sio_test_suite.sh vancomycin --verbose
 ```
 
 ---
@@ -435,4 +439,4 @@ test result: ok. 3851 passed; 0 failed; 0 ignored
 
 ---
 
-*Last updated: January 2026 (v1.0.0)*
+*Last updated: 2026-07-11 (Madaros v0.80.0). Quick Start reflects the prebuilt self-hosted toolchain; the Rust/LLVM dependency sections are retained as historical reference for the retired Rust build.*
