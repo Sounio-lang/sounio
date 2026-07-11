@@ -31216,6 +31216,81 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             EP = EP + 1
         }
         let borrow_tok = EP - 1
+        // Parity with compile_borrow_primary_x86() ~10142: &(*ident).field...
+        // A field-borrow through a deref must compute the field ADDRESS and wrap
+        // it in a reference type. The arm64 walker previously lacked this case, so
+        // `&(*fd).params` fell through to the generic literal branch below, which
+        // typed it as the field VALUE (i64) instead of &i64 -> E001 at every such
+        // call site (the bulk of the lean.sio type-mismatch cascade, #740).
+        if TK[EP as usize] == 6 && TK[(EP + 1) as usize] == 19 && TK[(EP + 2) as usize] == 3 && TK[(EP + 3) as usize] == 7 {
+            let ptr_tok = EP + 2
+            let pns = TS[ptr_tok as usize]
+            let pne = TE[ptr_tok as usize]
+            EP = EP + 4
+            let pvi = var_find_idx(pns, pne)
+            if pvi >= 0 {
+                emit_load_var_a64(VAR_SLOT[pvi as usize])
+                var inner_ty = VAR_TY[pvi as usize]
+                var inner_hash = VAR_TY_HASH[pvi as usize]
+                if type_is_pointer_like(inner_ty, inner_hash) {
+                    inner_ty = ptr_hash_inner_ty(inner_hash)
+                    inner_hash = ptr_hash_inner_hash(inner_hash)
+                }
+                while TK[EP as usize] == 50 {
+                    EP = EP + 1
+                    let f_tok = EP
+                    let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                    EP = EP + 1
+                    if inner_ty == 10 && type_is_pointer_like(inner_ty, inner_hash) {
+                        inner_ty = ptr_hash_inner_ty(inner_hash)
+                        inner_hash = ptr_hash_inner_hash(inner_hash)
+                    }
+                    let si = st_find(inner_hash)
+                    if si < 0 {
+                        tc_error(f_tok, "field borrow through deref requires struct pointee")
+                        em32(0xD2800000)
+                        inner_ty = 0
+                        inner_hash = 0
+                    } else {
+                        ST_QUERY_NS = TS[f_tok as usize]
+                        ST_QUERY_NE = TE[f_tok as usize]
+                        let off = st_field_offset(si, fh)
+                        if off < 0 {
+                            tc_error(f_tok, "unknown field access")
+                            em32(0xD2800000)
+                            inner_ty = 0
+                            inner_hash = 0
+                        } else {
+                            if off != 0 {
+                                if off < 4096 { em32(0x91000000 | ((off & 0xFFF) << 10)) }  // add x0, x0, #off
+                                else { emit_imm64_reg_a64(9, off); em32(0x8B090000) }        // x9 = off; add x0, x0, x9
+                            }
+                            inner_ty = st_field_ty(si, fh)
+                            inner_hash = st_field_hash(si, fh)
+                            ST_QUERY_NS = -1
+                            ST_QUERY_NE = -1
+                        }
+                    }
+                }
+                if inner_ty == 11 && box_hash_is(inner_hash) {
+                    em32(0xF9400000)  // ldr x0, [x0]
+                    inner_ty = ptr_hash_inner_ty(inner_hash)
+                    inner_hash = ptr_hash_inner_hash(inner_hash)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 10
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
+                else { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 0) }
+                return
+            }
+            tc_undefined_var(ptr_tok)
+            em32(0xD2800000)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(0, 0, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(0, 0, 0) }
+            return
+        }
         if TK[EP as usize] != 3 {
             // Bug E: &<literal> (array literal, string literal, ...) — see the
             // x86-64 twin (compile_borrow_primary_x86()) for the full
@@ -31555,6 +31630,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         em32(0x10000000 | ((adr_immlo & 0x3) << 29) | ((adr_immhi & 0x7FFFF) << 5) | 0)
         EP = EP + 1
         EXPR_IS_F64 = 0
+        // Parity with the x86-64 twin (~11443): a string literal has type `string`
+        // (EXPR_TY = 3). The arm64 handler left EXPR_TY stale, so string-literal
+        // arguments inherited the previous expression's type (int/bool) -> E001.
+        EXPR_TY = 3
         return
     }
     // Identifier or function call
