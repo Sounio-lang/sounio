@@ -2,7 +2,7 @@
 topic_id: repo.frontdoor.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-07-11
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
