@@ -74,7 +74,7 @@ cases = {
     "undefined_gate": "epistemic fn undefined_gate() {\nfuel 12\ngate x\n}\n",
     "duplicate_symbol": "epistemic fn duplicate_symbol() {\nfuel 12\nlet x=1\nlet x=2\ngate x\n}\n",
     "nested_expression": "epistemic fn nested_expression() {\nfuel 12\nlet x=1+2+3\ngate x\n}\n",
-    "while_control": "epistemic fn while_control() {\nfuel 12\nlet x=1\nwhile x != 0.0 {\n}\ngate x\n}\n",
+    "nested_while_control": "epistemic fn nested_while_control() {\nfuel 12\nlet x=1\nwhile x != 0.0 {\nwhile x != 0.0 {\n}\n}\ngate x\n}\n",
     "store": "epistemic fn store() {\nfuel 12\nlet x=1\nstore [m] <- x\ngate x\n}\n",
     "malformed_decimal": "epistemic fn malformed_decimal() {\nfuel 12\nlet x=0.\ngate x\n}\n",
     "non_finite": "epistemic fn non_finite() {\nfuel 12\nlet x=999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999\ngate x\n}\n",
