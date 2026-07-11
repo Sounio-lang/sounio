@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.ci-gate-portability-2026-07-06
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ci-gate-portability-2026-07-06
+-->
+
 # Auditoria de portabilidade — gates EISA/Sounio para Slurm (2026-07-06)
 
 **Escopo:** `scripts/ci/eisa_bridge_conformance_gate.sh`, `slurm-jobs/eisa/submit-eisa-battery.sh`, e `bin/souc` (invocado indiretamente via `./bin/souc run`).

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.eisa-w4-v2-bridge-continuation
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.eisa-w4-v2-bridge-continuation
+-->
+
 # W4 status — v2 (qd128) AOT bridge
 
 Worktree `/workspace/sounio-eisa`, branch `gpu/epistemic-tensor-core-next`. All

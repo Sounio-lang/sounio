@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.lean-single-nan-semantics-2026-07-05
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.lean-single-nan-semantics-2026-07-05
+-->
+
 # Audit: lean_single f64 NaN/Inf comparison semantics deviate from IEEE-754
 
 - Date: 2026-07-05

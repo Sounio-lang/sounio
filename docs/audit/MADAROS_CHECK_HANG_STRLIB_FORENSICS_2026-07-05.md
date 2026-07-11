@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-check-hang-strlib-forensics-2026-07-05
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-check-hang-strlib-forensics-2026-07-05
+-->
+
 # Madaros checker hang on `str::lib` — forensic narrowing — 2026-07-05
 
 Companion to `docs/audit/MADAROS_CHECK_HANG_STRLIB_2026-07-05.md` (the blocker

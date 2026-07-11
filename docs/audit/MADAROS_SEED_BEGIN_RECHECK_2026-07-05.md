@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-seed-begin-recheck-2026-07-05
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-seed-begin-recheck-2026-07-05
+-->
+
 # Madaros `seed_begin` recheck — 2026-07-05 (post-PR #622)
 
 Status: **BLOCKER PERSISTS** on the default path. Oracle lane green.

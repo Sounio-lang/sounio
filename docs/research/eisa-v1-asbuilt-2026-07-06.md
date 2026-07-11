@@ -1,17 +1,16 @@
 <!-- docs:meta
 topic_id: repo.docs.research.eisa-v1-asbuilt-2026-07-06
-authority: historical/research
+authority: historical
 audience: researchers
-last_validated: 2026-07-06
-validated_by: as-built audit (git + file inspection)
+last_validated: 2026-03-07
+validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.eisa-v1-asbuilt-2026-07-06
 -->
 
+
 <!-- docs:status-note:start -->
-> Docs status: `historical/research`
-> As-built chronicle of the EISA v0/v1 stack as shipped on branch
-> `gpu/epistemic-tensor-core-next` in worktree `/workspace/sounio-eisa`.
-> Records what landed in git, not what the v1/v2 plans originally promised.
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
 # EISA v0/v1 — as-built chronicle (2026-07-06)
