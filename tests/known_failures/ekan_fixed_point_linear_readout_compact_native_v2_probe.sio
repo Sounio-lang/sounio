@@ -1,0 +1,63 @@
+//@ known-failure: compact fixed-point E-KAN linear readout currently segfaults in generated native-v2 ELF
+
+// Fixed-point E-KAN hidden-node + linear readout witness for native-v2.
+// It keeps the hidden-node witness and adds downstream output uncertainty
+// propagation while staying inside the current bridge's compact-main boundary.
+
+fn abs_fp(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+fn isqrt_fp(x: i64) -> i64 with Mut, Div {
+    if x <= 0 { return 0 }
+    var y = x
+    var i = 0
+    while i < 12 {
+        y = (y + x / y) / 2
+        i = i + 1
+    }
+    y
+}
+
+fn hat_fp(x: i64, k: i64) -> i64 with Div {
+    let c = k * 250
+    let d = abs_fp(x - c)
+    if d >= 250 { return 0 }
+    1000 - d * 4
+}
+
+struct EvFp { val: i64, unc: i64 }
+
+fn edge_eval_fp(coeffs: &[i64; 5], unc: &[i64; 5], x: i64) -> EvFp with Mut, Div {
+    var val = 0
+    var vs = 0
+    var k = 0
+    while k < 5 {
+        let b = hat_fp(x, k)
+        val = val + coeffs[k as usize] * b / 1000
+        let q = unc[k as usize] * b / 1000
+        vs = vs + q * q
+        k = k + 1
+    }
+    EvFp { val: val, unc: isqrt_fp(vs) }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    let c: [i64; 5] = [100, 420, 180, 320, 120]
+    let u: [i64; 5] = [10, 20, 10, 20, 10]
+    let a = edge_eval_fp(&c, &u, 250)
+    let b = edge_eval_fp(&c, &u, 750)
+    let combined_unc = isqrt_fp(a.unc * a.unc + b.unc * b.unc)
+    var hidden = a.val + b.val
+    if hidden < 0 { hidden = 0 }
+    if hidden > 1000 { hidden = 1000 }
+    let hidden_unc = isqrt_fp(combined_unc * combined_unc + 15 * 15 + 25 * 25)
+    let out_unc = isqrt_fp(hidden_unc * hidden_unc + 18 * 18)
+
+    if hidden > 300 && hidden < 900 && out_unc > hidden_unc {
+        println("ALL PASS")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}
