@@ -372,6 +372,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.eisa-w4-v2-bridge-continuation | repo_only | docs/handoff/eisa_w4_v2_bridge_continuation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.exact-engine-prereqs | repo_only | docs/handoff/exact_engine_prereqs.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.gpu-knowledge-vecmat-swarm-plan | repo_only | docs/handoff/gpu_knowledge_vecmat_swarm_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.modular-madaros-build-greenup-scope | repo_only | docs/handoff/modular_madaros_build_greenup_scope.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.pending-changes-triage-2026-07-11 | repo_only | docs/handoff/pending_changes_triage_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-v0800-defects | repo_only | docs/handoff/souc_v0800_defects.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.codex-claude-parallel-contract | historical | docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -584,6 +586,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cd-tower-seam | historical | docs/research/cd_tower_seam.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.eisa-precision-track-2026-07-05 | historical | docs/research/eisa-precision-track-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.eisa-stack-architecture-2026-07-05 | historical | docs/research/eisa-stack-architecture-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
