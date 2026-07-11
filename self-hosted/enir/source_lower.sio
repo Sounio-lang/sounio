@@ -390,6 +390,20 @@ fn enir_source_has_fuel(text: string) -> bool with Mut, Panic, Div {
     false
 }
 
+fn enir_source_has_while(text: string) -> bool with Mut, Panic, Div {
+    let n = str_len(text)
+    var pos: i64 = 0
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if enir_source_starts_with(text, start, finish, "while ") { return true }
+        pos = if end < n { end + 1 } else { end }
+    }
+    false
+}
+
 fn enir_source_positive_i64(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
     let s = enir_source_trim_start(text, start, end)
     let e = enir_source_trim_end(text, s, end)
@@ -435,6 +449,113 @@ fn enir_source_push_block_value(module: &!EnirModule, line: i64) -> i64 with Mut
     }
     module.value_count = module.value_count + 1
     value_id
+}
+
+// Fuel-bearing straight-line v1 programs use schema v2 even without CFG
+// edges. The halt terminator costs one fuel unit, matching the EVM's explicit
+// ehalt instruction while keeping control out of the operation stream.
+fn enir_lower_source_v1_resource_straight(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    var module = enir_module_empty()
+    module.schema_version = ENIR_SCHEMA_CFG_VERSION
+    module.stage = ENIR_STAGE_LOWERED
+    module.profile = enir_profile_eisa_v1()
+    module = enir_module_push_type(module, EnirType {
+        id: 0,
+        value_kind: enir_value_f64(),
+        error_kind: enir_error_dd64(),
+        uncertainty_kind: enir_uncertainty_gum1(),
+        status_tracked: 1,
+        provenance_tracked: 1,
+        profile: enir_profile_eisa_v1(),
+    })
+    module = enir_module_push_policy(module, EnirPolicy {
+        id: 0,
+        name: enir_name_from_string("eisa_10_100_count_only"),
+        branch_kind: enir_branch_policy_count_only(),
+        gate_kind: enir_gate_policy_10_100(),
+    })
+
+    var symbols = enir_source_symbols_new()
+    var seen_header = false
+    var seen_fuel = false
+    var seen_close = false
+    let n = str_len(text)
+    if n <= 0 { return enir_lower_fail(module, 1, 1) }
+    var pos: i64 = 0
+    var line: i64 = 1
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if finish > start {
+            if seen_close { return enir_lower_fail(module, line, 2) }
+            if !seen_header {
+                if !enir_source_starts_with(text, start, finish, "epistemic fn ") || finish - start < 18 { return enir_lower_fail(module, line, 3) }
+                let name_start = start + 13
+                let suffix_start = finish - 4
+                if suffix_start <= name_start || !enir_source_range_eq(text, suffix_start, finish, "() {") { return enir_lower_fail(module, line, 4) }
+                module.name = enir_source_name(text, name_start, suffix_start)
+                if module.name.len <= 0 { return enir_lower_fail(module, line, 5) }
+                seen_header = true
+            } else if enir_source_range_eq(text, start, finish, "}") {
+                seen_close = true
+            } else if enir_source_starts_with(text, start, finish, "fuel ") {
+                if seen_fuel || symbols.count != 0 || module.observation_count != 0 { return enir_lower_fail(module, line, 60) }
+                let fuel = enir_source_positive_i64(text, start + 5, finish)
+                if fuel < 0 { return enir_lower_fail(module, line, 61) }
+                module.fuel_limit = fuel
+                seen_fuel = true
+            } else if enir_source_starts_with(text, start, finish, "let ") {
+                if !seen_fuel { return enir_lower_fail(module, line, 10) }
+                var eq = start + 4
+                while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
+                if eq >= finish { return enir_lower_fail(module, line, 10) }
+                let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
+                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 64 { return enir_lower_fail(module, line, 11) }
+                let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                if !lowered.ok { return enir_lower_fail(module, line, 12) }
+                symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
+            } else if enir_source_starts_with(text, start, finish, "gate ") {
+                if !seen_fuel || module.observation_count >= ENIR_MAX_OBSERVATIONS { return enir_lower_fail(module, line, 20) }
+                let name = enir_source_name(text, enir_source_trim_start(text, start + 5, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 || module.op_count >= ENIR_MAX_OPS { return enir_lower_fail(module, line, 21) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count, opcode: enir_op_egate(), result_id: -1, type_id: -1,
+                    a: value_id, b: -1, target: -1, policy_id: 0, memory_slot: -1, fuel_cost: 1,
+                })
+                module = enir_module_push_observation(module, EnirObservation {
+                    id: module.observation_count,
+                    program_name: module.name,
+                    ordinal: module.observation_count,
+                    kind: enir_observation_gate(),
+                })
+            } else {
+                return enir_lower_fail(module, line, 40)
+            }
+        }
+        pos = if end < n { end + 1 } else { end }
+        line = line + 1
+    }
+    if !seen_header || !seen_fuel || !seen_close || module.observation_count <= 0 { return enir_lower_fail(module, line, 50) }
+    if module.fuel_limit < module.op_count + 1 { return enir_lower_fail(module, line, 52) }
+    module = enir_module_push_block(module, EnirBlock {
+        id: 0,
+        first_op: 0,
+        op_count: module.op_count,
+        arg_start: 0,
+        arg_count: 0,
+        terminator_kind: enir_term_halt(),
+        condition_value: -1,
+        edge0: -1,
+        edge1: -1,
+        terminator_fuel_cost: 1,
+    })
+    module = enir_module_finalize_cfg_counts(module, 1)
+    let rc = enir_verify(module)
+    if rc != 0 { return enir_lower_fail(module, line, 3000 + rc) }
+    EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
 }
 
 // E2C's source subset has one top-level while. The loop is represented with
@@ -921,5 +1042,9 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
 }
 
 pub fn enir_lower_source_v1(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
-    if enir_source_has_fuel(text) { enir_lower_source_v1_cfg(text) } else { enir_lower_source_profile(text, enir_profile_eisa_v1()) }
+    if enir_source_has_fuel(text) {
+        if enir_source_has_while(text) { enir_lower_source_v1_cfg(text) } else { enir_lower_source_v1_resource_straight(text) }
+    } else {
+        enir_lower_source_profile(text, enir_profile_eisa_v1())
+    }
 }
