@@ -15,7 +15,7 @@ from pathlib import Path
 
 PROGRAMS = ("v2_const_gate", "v2_add", "v2_sub", "v2_mul", "v2_div", "v2_sqrt")
 MIR_OPCODE = {0: 20, 2: 21, 3: 22, 4: 23, 5: 24, 6: 25, 7: 26}
-TAGS = {"emir": 7, "mtype": 8, "mvalue": 15, "mprov": 8, "mblock": 6, "minstr": 12, "mobs": 6, "mend": 7}
+TAGS = {"emir": 7, "mtype": 8, "mvalue": 15, "mprov": 8, "mblock": 6, "minstr": 14, "mobs": 6, "mend": 7}
 ORDER = {tag: index for index, tag in enumerate(TAGS)}
 POISON_VALUE_BITS = 0x7FF0000000000001
 POISON_U_BITS = 0x7FF0000000000000
@@ -74,7 +74,7 @@ def parse_mir(raw: bytes) -> dict[str, list[list[str]]]:
 
 def verify_relation(enir: dict[str, list[list[str]]], mir: dict[str, list[list[str]]], enir_raw: bytes, name: str) -> None:
     header = mir["emir"][0]
-    if header != ["emir", "1", "3", name, "2", enir["resource"][0][1], str(rolling_hash(enir_raw))]:
+    if header != ["emir", "2", "3", name, "2", enir["resource"][0][1], str(rolling_hash(enir_raw))]:
         fail(f"MIR header/source binding mismatch: {name}")
     if mir["mtype"][0][1:] != enir["type"][0][1:]:
         fail(f"logical type changed across ENIR-to-MIR: {name}")
@@ -98,7 +98,7 @@ def verify_relation(enir: dict[str, list[list[str]]], mir: dict[str, list[list[s
             fail(f"unsupported opcode reached E3A independent validator: {source_opcode}")
         effect = 1 if source_opcode == 7 else 0
         trap = 1 if 2 <= source_opcode <= 6 else 0
-        wanted = [index, MIR_OPCODE[source_opcode], op[2], op[3], op[4], op[5], effect, trap, op[7], op[0], op[9]]
+        wanted = [index, MIR_OPCODE[source_opcode], op[2], op[3], op[4], op[5], effect, trap, op[7], op[0], op[9], -1, -1]
         if got != wanted:
             fail(f"instruction relation mismatch {name}:{index}: {got} != {wanted}")
     if len(mir["mobs"]) != len(enir["obs"]):
@@ -139,7 +139,9 @@ def replay_mir(mir: dict[str, list[list[str]]], qd) -> tuple[list[dict[str, int]
     observations: list[dict[str, int]] = []
     last_write = -1
     for row in mir["minstr"]:
-        _, opcode, result, _, a, b, _, trap, _, _, tick = map(int, row[1:])
+        _, opcode, result, _, a, b, _, trap, _, _, tick, slot, origin = map(int, row[1:])
+        if slot != -1 or origin != -1:
+            fail("E3A arithmetic replay saw memory metadata")
         if tick != 1:
             fail("independent MIR replay saw non-unit semantic tick")
         if opcode == 20:
@@ -294,7 +296,7 @@ def main() -> int:
         "semantic_tick_preserved": True,
         "abi_independent": True,
         "machine_ir_used": False,
-        "memory_supported": False,
+        "memory_covered": False,
         "multi_block_cfg_supported": False,
         "fallback": "none",
         "compiler_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
@@ -306,7 +308,7 @@ def main() -> int:
         "qd_semantics_sha256": hashlib.sha256((args.root / "self-hosted/enir/qd.sio").read_bytes()).hexdigest(),
     }
     args.receipt.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="ascii")
-    print("E3A_ENIR_MIR_QD128_VERIFY_PASS programs=6 observations=6 relation=native+independent execution=enir==mir==metron semantic_ticks=exact abi=independent memory=fail-closed cfg=single-block")
+    print("E3A_ENIR_MIR_QD128_VERIFY_PASS programs=6 observations=6 relation=native+independent execution=enir==mir==metron semantic_ticks=exact abi=independent memory=e3b-separate cfg=single-block")
     return 0
 
 
