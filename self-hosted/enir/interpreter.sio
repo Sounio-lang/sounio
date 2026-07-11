@@ -128,7 +128,8 @@ fn enir_interp_sqrt(x: f64) -> f64 with Mut, Div {
 }
 
 fn enir_interp_clean(value: f64) -> EnirInterpValue {
-    EnirInterpValue { val: value, err: enir_interp_dd_zero(), qerr: qd_zero(), uncertainty: 0.0, poisoned: 0 }
+    let canonical = if value == 0.0 { 0.0 } else { value }
+    EnirInterpValue { val: canonical, err: enir_interp_dd_zero(), qerr: qd_zero(), uncertainty: 0.0, poisoned: 0 }
 }
 
 fn enir_interp_poison() -> EnirInterpValue {
@@ -271,11 +272,12 @@ fn enir_interp_qd_true(value: EnirInterpValue) -> Qd128 with Mut, Panic {
 fn enir_interp_qd_binary(x: EnirInterpValue, y: EnirInterpValue, opcode: i64) -> EnirInterpValue with Mut, Div, Panic {
     if x.poisoned == 1 || y.poisoned == 1 { return enir_interp_poison() }
     if opcode == enir_op_ediv() && y.val == 0.0 { return enir_interp_poison() }
-    let val = if opcode == enir_op_eadd() { x.val + y.val } else {
+    let raw_val = if opcode == enir_op_eadd() { x.val + y.val } else {
         if opcode == enir_op_esub() { x.val - y.val } else {
             if opcode == enir_op_emul() { x.val * y.val } else { x.val / y.val }
         }
     }
+    let val = if raw_val == 0.0 { 0.0 } else { raw_val }
     let tx = enir_interp_qd_true(x)
     let ty = enir_interp_qd_true(y)
     let truth = if opcode == enir_op_eadd() { qd_add(tx, ty) } else {
@@ -516,6 +518,11 @@ fn enir_interpret_cfg(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
         val: 0.0, err: EnirInterpDd { hi: 0.0, lo: 0.0 }, qerr: Qd128 { x0: 0.0, x1: 0.0, x2: 0.0, x3: 0.0 }, uncertainty: 0.0, poisoned: 1,
     }; 128]
     var defined: [i64; 128] = [0; 128]
+    var memory: [EnirInterpValue; 16] = [EnirInterpValue {
+        val: 0.0, err: EnirInterpDd { hi: 0.0, lo: 0.0 }, qerr: Qd128 { x0: 0.0, x1: 0.0, x2: 0.0, x3: 0.0 }, uncertainty: 0.0, poisoned: 1,
+    }; 16]
+    var memory_defined: [i64; 16] = [0; 16]
+    var memory_site: [i64; 16] = [-1; 16]
     var fuel_left = module.fuel_limit
     var observations: i64 = 0
     var executed: i64 = 0
@@ -544,6 +551,13 @@ fn enir_interpret_cfg(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
                 values[op.result_id as usize] = if enir_interp_finite(value) { enir_interp_clean(value) } else { enir_interp_poison() }
                 defined[op.result_id as usize] = 1
                 last_write = op.result_id
+            } else if op.opcode == enir_op_eload() {
+                if op.memory_slot < 0 || op.memory_slot >= 16 || memory_defined[op.memory_slot as usize] == 0 {
+                    return enir_interp_result(false, 18, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
+                }
+                values[op.result_id as usize] = memory[op.memory_slot as usize]
+                defined[op.result_id as usize] = 1
+                last_write = op.result_id
             } else if op.opcode == enir_op_eadd() || op.opcode == enir_op_esub() || op.opcode == enir_op_emul() || op.opcode == enir_op_ediv() {
                 if defined[op.a as usize] == 0 || defined[op.b as usize] == 0 { return enir_interp_result(false, 20, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
                 let x = values[op.a as usize]
@@ -561,6 +575,13 @@ fn enir_interpret_cfg(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
                 values[op.result_id as usize] = values[op.a as usize]
                 defined[op.result_id as usize] = 1
                 last_write = op.result_id
+            } else if op.opcode == enir_op_estore() {
+                if defined[op.a as usize] == 0 || op.memory_slot < 0 || op.memory_slot >= 16 {
+                    return enir_interp_result(false, 23, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
+                }
+                memory[op.memory_slot as usize] = values[op.a as usize]
+                memory_defined[op.memory_slot as usize] = 1
+                memory_site[op.memory_slot as usize] = op.id
             } else if op.opcode == enir_op_egate() {
                 if defined[op.a as usize] == 0 || observations >= module.observation_count || module.observations[observations as usize].kind != enir_observation_gate() { return enir_interp_result(false, 24, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
                 print(enir_interp_receipt(module, op, values[op.a as usize], observations, branch_poisoned, frail_branches))
@@ -625,6 +646,13 @@ fn enir_interpret_cfg(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
         }
     }
     if observations != module.observation_count { return enir_interp_result(false, 50, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+    var slot: i64 = 0
+    while slot < 16 {
+        if memory_defined[slot as usize] == 1 {
+            print(enir_interp_memory_receipt(module, slot, memory_site[slot as usize], memory[slot as usize]))
+        }
+        slot = slot + 1
+    }
     enir_interp_result(true, 0, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
 }
 

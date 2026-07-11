@@ -334,6 +334,7 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
     }
 
     var gate_count: i64 = 0
+    var memory_sites: [i64; 16] = [-1; 16]
     i = 0
     while i < module.op_count {
         let op = module.ops[i as usize]
@@ -343,6 +344,10 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
         if op.opcode == enir_op_econst() {
             produces = true
             if op.a != -1 || op.b != -1 || op.type_id < 0 { return 2640 + i }
+        } else if op.opcode == enir_op_eload() {
+            produces = true
+            if module.block_count != 1 || op.a != -1 || op.b != -1 || op.memory_slot < 0 || op.memory_slot >= 16 ||
+               memory_sites[op.memory_slot as usize] < 0 { return 2660 + i }
         } else if op.opcode >= enir_op_eadd() && op.opcode <= enir_op_ediv() {
             produces = true
             if !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || !enir_cfg_value_available(op.b, block_id, i, def_blocks, def_positions, dominators) { return 2680 + i }
@@ -352,10 +357,17 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
         } else if op.opcode == enir_op_egate() {
             if op.result_id != -1 || op.type_id != -1 || enir_policy_index(module, op.policy_id) < 0 || !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2720 + i }
             gate_count = gate_count + 1
+        } else if op.opcode == enir_op_estore() {
+            if module.block_count != 1 || op.result_id != -1 || op.type_id != -1 || op.b != -1 ||
+               op.memory_slot < 0 || op.memory_slot >= 16 ||
+               !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2740 + i }
+            memory_sites[op.memory_slot as usize] = i
         }
         if produces {
             if op.result_id < 0 || op.result_id >= module.value_count || op.type_id < 0 || module.values[op.result_id as usize].type_id != op.type_id || def_blocks[op.result_id as usize] != -1 { return 2760 + i }
-            if module.provenance[module.values[op.result_id as usize].provenance_id as usize].transform_id != op.opcode { return 2780 + i }
+            let provenance = module.provenance[module.values[op.result_id as usize].provenance_id as usize]
+            if provenance.transform_id != op.opcode { return 2780 + i }
+            if op.opcode == enir_op_eload() && provenance.input_origin_id != memory_sites[op.memory_slot as usize] { return 2790 + i }
             def_blocks[op.result_id as usize] = block_id
             def_positions[op.result_id as usize] = i
         } else if op.type_id != -1 { return 2800 + i }

@@ -158,11 +158,10 @@ if x < 0.0 {
 gate x
 }
 EOF
-cat >"$TMP_DIR/negative/unsupported_store.eisa" <<'EOF'
-epistemic fn unsupported_store() {
+cat >"$TMP_DIR/negative/load_before_store.eisa" <<'EOF'
+epistemic fn load_before_store() {
 fuel 64
-let x=1
-store [m] <- x
+let x=load [m]
 gate x
 }
 EOF
