@@ -30,10 +30,11 @@ Full error log captured during the merge investigation: rebuild and grep `^error
 | Bucket | Count | Files | Root cause |
 |---|---:|---|---|
 | **W1 wasm backend** | 136 | `wasm/lower.sio` (70), `wasm/encode.sio` (66) | Import-path mismatch, **not** missing code |
-| **W2 codegen EISA symbols** | 21 | `native/codegen_x86_linux.sio` | Referenced-but-never-declared EISA symbols |
+| **W2 codegen EISA symbols** | ✅ done | `native/codegen_x86_linux.sio` | Referenced-but-never-declared EISA symbols — fixed on `gpu/epistemic-tensor-core-next` (see W2 section) |
 | **W3 ir type mismatches** | 3 | `ir/const_prop.sio:1676`, `ir/dce.sio:885`, `ir/opt_strategy.sio:229` | Field-init / call-arg type mismatch |
+| **W4 gpu kernel_ir** | 5 | `gpu/kernel_ir.sio:2525,2582,2600,2618,2669` | `missing field in struct literal` — struct gained a field the literals don't set (EISA gpu lane) |
 | **W0 items.sio is_extern** | ✅ done | `parser/items.sio:1086` | Fixed in `c6321b788` |
-| `<main>` residual | 2 | bundled | Falls out once W1/W2 resolve |
+| `<main>` residual | 2 | `<main>:27615,27642` | `unknown field access` — **persists after W2 fix**, so NOT W1/W2 fallout; likely W1 (wasm types) or W4 (gpu) downstream. Re-attribute once W1 lands. |
 
 Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value is not indexable`, 5 `private struct field access [struct=Lowerer]`, 2 `field initializer type mismatch`, 1 `E001`.
 
@@ -45,12 +46,18 @@ Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value i
 - **main-parity:** `wasm/encode.sio` + `wasm/lower.sio` are **byte-identical to `origin/main`** → main has the identical errors. Fixing here does not diverge from main behaviour; it is a genuine shared bug. Consider landing the wasm wiring fix to main independently.
 - **Effort:** medium. Mechanical once the intended module layout is decided, but touches the module system.
 
-### W2 — codegen EISA symbols undeclared (21 errors, **EISA-specific**)
-- **Root cause:** `native/codegen_x86_linux.sio` references EISA's own off-stack/flat-reloc machinery that was never completed:
-  - globals `NC_FLAT_RELOC_OFFSETS` / `_KIND_CODES` / `_IS_FUNCTIONS` / `_TARGET_INDICES` — **used** (e.g. lines 1629, 5181) but **never declared** (unlike the sibling `NC_BIG_CODE` global, which is declared).
-  - functions `native_v2_core_ir_trace_fail`, `native_v2_patch_label_forwards_text_mirror`, `native_v2_text_reset` — **defined nowhere**.
-- **Fix direction:** declare the four `NC_FLAT_RELOC_*` globals alongside `NC_BIG_CODE` (module-scope fixed arrays, e.g. `[i64; 65536]`), and implement or honestly stub the three `native_v2_*` helpers per their call sites. This is finishing EISA's own work, not adopting main (main lacks this machinery entirely).
-- **Effort:** medium. Needs understanding the flat-reloc design intent; risk of masking a deeper incomplete feature.
+### W2 — codegen EISA symbols undeclared (✅ DONE, **EISA-specific**)
+- **Root cause:** `native/codegen_x86_linux.sio` references EISA's own off-stack/flat-reloc + text-mirror machinery that was scaffolded but never completed. The true count was **23** (21 + 2 more found during the fix):
+  - globals `NC_FLAT_RELOC_OFFSETS` / `_KIND_CODES` / `_IS_FUNCTIONS` / `_TARGET_INDICES` (`[i64; 65536]`, written at 1629, drained at 5181) + `NV2_RELOC_OVERFLOW` (bool overflow latch) — used but never declared.
+  - `NATIVE_V2_TEXT_BUF` / `NATIVE_V2_TEXT_LEN` — the ELF-writer ".text mirror" (read at 10910/11141, preferred over `code.bytes` when `ti < LEN`) — used but never declared. **Populate path never built**: nothing assigns `NATIVE_V2_TEXT_LEN`, so it is `0` and the mirror is never read.
+  - functions `native_v2_core_ir_trace_fail`, `native_v2_patch_label_forwards_text_mirror`, `native_v2_text_reset` — defined nowhere.
+- **Resolution** (all provable from the code, no guessed codegen):
+  - Declared the 7 globals module-scope next to `NC_BIG_ELF`/`NV2_SRET_*` (BSS, demand-paged).
+  - `native_v2_core_ir_trace_fail(...) -> bool` → returns `false` (fail-path sentinel; the core-IR path carries no IO effect so it cannot print — the `reason` string documents each bail site).
+  - `native_v2_patch_label_forwards_text_mirror(nc)` → **documented no-op**. `patch_label_forwards_mut(nc)` (called immediately before) patches the live buffer; the mirror is inert (`LEN ≡ 0`, never read), so patching it has no observable effect. Verified `NATIVE_V2_TEXT_LEN` is never assigned or address-taken anywhere in the tree.
+  - `native_v2_text_reset()` → pins `NATIVE_V2_TEXT_LEN = 0` (self-enforces the inert-mirror invariant the no-op relies on) and clears `NV2_RELOC_OVERFLOW`.
+- **Verified:** modular build → `codegen_x86_linux.sio` errors **23 → 0**, zero W2-family symbols remain. Edit is modular-native-v2-only (1 file, +53 lines); `lean_single.sio` contains 0 of these symbols and its seed still compiles → **gen2==gen3 unaffected by construction**.
+- **Note:** the off-stack text-mirror remains an inert, unfinished feature (scaffold + read sites, no populate). Completing it (populate `NATIVE_V2_TEXT_BUF`, patch its label forwards) is a separate native-v2 backend task, NOT W2. If a future change sets `NATIVE_V2_TEXT_LEN > 0`, the no-op mirror-patch becomes a live miscompile — a guard-comment at the call site flags this.
 
 ### W3 — ir type mismatches (3 errors, small)
 - `ir/const_prop.sio:1676` + `ir/dce.sio:885`: `field initializer type does not match struct field`. `ir/opt_strategy.sio:229`: `E001` call-argument type mismatch. These three files **differ from main** (EISA-modified), so the mismatches are EISA-carried.

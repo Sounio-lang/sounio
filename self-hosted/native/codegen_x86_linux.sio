@@ -51,6 +51,59 @@ var NC_BIG_ELF: [i8; 4194304] = [0; 4194304]
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
 var NV2_SRET_MAKE_FN: IrFunction = ir_empty_function()
 
+// Flat relocation side tables (BSS, module-scope — off the Madaros runtime
+// stack). Parallel arrays indexed by (*nc).flat_reloc_count (max 65536, guarded
+// in nc_add_flat_reloc). Written in nc_add_flat_reloc, drained in
+// apply_relocations_into. All four hold i64 (byte offsets / small enum codes /
+// target indices). NV2_RELOC_OVERFLOW latches if the table fills, so ELF write
+// can loudly reject rather than emit a binary with unpatched calls.
+var NC_FLAT_RELOC_OFFSETS: [i64; 65536] = [0; 65536]
+var NC_FLAT_RELOC_KIND_CODES: [i64; 65536] = [0; 65536]
+var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 65536] = [0; 65536]
+var NC_FLAT_RELOC_TARGET_INDICES: [i64; 65536] = [0; 65536]
+var NV2_RELOC_OVERFLOW: bool = false
+
+// Off-stack ".text" mirror for the ELF object/exe writers. When populated the
+// writers read emitted code from NATIVE_V2_TEXT_BUF for the first
+// NATIVE_V2_TEXT_LEN bytes, falling back to code.bytes beyond that. The
+// populate path was never built: nothing assigns NATIVE_V2_TEXT_LEN, so it
+// stays 0 and the mirror is never read (the writers always take the code.bytes
+// fallback). native_v2_text_reset() pins LEN=0 to keep that invariant
+// self-enforcing. Sized to the writers' 131072-byte fallback bound; BSS
+// (demand-paged, ~0 RSS) and never indexed while LEN=0.
+var NATIVE_V2_TEXT_BUF: [i8; 131072] = [0; 131072]
+var NATIVE_V2_TEXT_LEN: i64 = 0
+
+// Diagnostic bail for v2 core-IR codegen. Each call site passes a `reason`
+// string documenting why the function was refused; returns false to propagate
+// the refusal up the -> bool chain in compile_ir_function_v2_core_ir_into.
+// The core-IR codegen path carries no IO effect, so this records intent at the
+// call site rather than printing.
+fn native_v2_core_ir_trace_fail(func: &IrFunction, fn_index: i64, i: i64, reason: string) -> bool {
+    false
+}
+
+// No-op: the ".text" mirror (NATIVE_V2_TEXT_BUF) is inert — its populate path
+// was never built, so NATIVE_V2_TEXT_LEN stays 0 and the ELF writers never read
+// the mirror (they take the code.bytes fallback). patch_label_forwards_mut(nc),
+// invoked immediately before every call to this function, patches the live
+// buffer. Patching the never-read mirror would have no observable effect, so
+// this deliberately does nothing while the mirror is inert.
+fn native_v2_patch_label_forwards_text_mirror(nc: &! NativeCompiler) {
+}
+
+// Reset per-module native-v2 emission side tables: the ".text" mirror length
+// and the flat-reloc overflow latch. Pinning NATIVE_V2_TEXT_LEN = 0 keeps the
+// mirror inert (self-enforcing the invariant the ELF writers rely on), and
+// clearing NV2_RELOC_OVERFLOW drops a stale over-capacity latch from a prior
+// compile in the same process. The reloc arrays themselves are addressed by
+// (*nc).flat_reloc_count, which compiler_new() resets to 0 downstream, so their
+// stale contents are never read. Called at module-compile entry.
+fn native_v2_text_reset() with Mut {
+    NATIVE_V2_TEXT_LEN = 0
+    NV2_RELOC_OVERFLOW = false
+}
+
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
 // ============================================================================
