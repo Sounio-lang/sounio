@@ -31589,7 +31589,58 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if var_find_idx(rns, rne) >= 0 {
             var inner_ty_b = VAR_TY[var_find_idx(rns, rne) as usize]
             var inner_hash_b = VAR_TY_HASH[var_find_idx(rns, rne) as usize]
+            // Consume a `.field` chain in the borrow itself (mirror of
+            // compile_borrow_primary_x86 :~10592). Without this, `&x.field` left
+            // `.field` for the postfix walker → it typed the result as the field
+            // VALUE (e.g. Option/box ty=11) instead of a reference (ty=10) → E001
+            // "type mismatch" at every `&struct.list_field` call site (#740).
+            var borrow_fields_consumed: i64 = 0
+            if TK[EP as usize] == 50 && inner_ty_b == 10 && type_is_pointer_like(inner_ty_b, inner_hash_b) {
+                inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
+                inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
+            }
+            // Guard: do NOT consume a field that is immediately indexed
+            // (`&x.arr[i]`). That element-borrow shape is handled by the postfix
+            // walker; consuming the field here would strip the index and mistype
+            // the element. Only pure field chains (`&x.a.b`) are folded in.
+            while TK[EP as usize] == 50 && TK[(EP + 2) as usize] != 41 {
+                EP = EP + 1
+                let fb_tok = EP
+                let fbh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                EP = EP + 1
+                let fbsi = st_find(inner_hash_b)
+                if fbsi < 0 {
+                    tc_error(fb_tok, "field borrow requires struct base")
+                    em32(0xD2800000)
+                    inner_ty_b = 0
+                    inner_hash_b = 0
+                } else {
+                    ST_QUERY_NS = TS[fb_tok as usize]
+                    ST_QUERY_NE = TE[fb_tok as usize]
+                    let fboff = st_field_offset(fbsi, fbh)
+                    if fboff < 0 {
+                        tc_error(fb_tok, "unknown field access")
+                        em32(0xD2800000)
+                        inner_ty_b = 0
+                        inner_hash_b = 0
+                    } else {
+                        if fboff != 0 {
+                            if fboff < 4096 { em32(0x91000000 | ((fboff & 0xFFF) << 10)) }  // add x0, x0, #off
+                            else { emit_imm64_reg_a64(9, fboff); em32(0x8B090000) }          // x9=off; add x0,x0,x9
+                        }
+                        inner_ty_b = st_field_ty(fbsi, fbh)
+                        inner_hash_b = st_field_hash(fbsi, fbh)
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                        borrow_fields_consumed = 1
+                    }
+                }
+            }
             if inner_ty_b == 11 && box_hash_is(inner_hash_b) {
+                // A box FIELD holds a pointer at its address; follow it (mirror of
+                // x86 :~10643). `&boxvar` (no field consumed) already loaded the box
+                // value via emit_load_var_a64, so it needs no extra load.
+                if borrow_fields_consumed != 0 { em32(0xF9400000) }  // ldr x0, [x0]
                 inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
                 inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
             }
