@@ -1,5 +1,6 @@
-// E2 direct source-to-ENIR lowering for the coherent EISA v0 straight-line
-// grammar. This parser does not call eisa::backend and never constructs .eisax.
+// E2 direct source-to-ENIR lowering for the EISA v0 straight-line grammar and
+// the finite v1 structured-control subset. This parser does not call
+// eisa::backend and never constructs .eisax.
 
 use enir::ir::*
 use enir::verify::*
@@ -22,20 +23,44 @@ struct EnirSourceOperand {
 }
 
 struct EnirSourceSymbols {
-    names: [EnirName; 32],
-    values: [i64; 32],
+    names: [EnirName; 64],
+    values: [i64; 64],
     count: i64,
     slot_names: [EnirName; 16],
     slot_count: i64,
 }
 
+struct EnirSourceControl {
+    kinds: [i64; 16],
+    patches: [i64; 16],
+    tests: [i64; 16],
+    body_starts: [i64; 16],
+    value_bases: [i64; 16],
+    observation_bases: [i64; 16],
+    symbol_bases: [i64; 16],
+    count: i64,
+}
+
 fn enir_source_symbols_new() -> EnirSourceSymbols {
     EnirSourceSymbols {
-        names: [EnirName { buf: [0; 64], len: 0 }; 32],
-        values: [-1; 32],
+        names: [EnirName { buf: [0; 64], len: 0 }; 64],
+        values: [-1; 64],
         count: 0,
         slot_names: [EnirName { buf: [0; 64], len: 0 }; 16],
         slot_count: 0,
+    }
+}
+
+fn enir_source_control_new() -> EnirSourceControl {
+    EnirSourceControl {
+        kinds: [0; 16],
+        patches: [-1; 16],
+        tests: [-1; 16],
+        body_starts: [-1; 16],
+        value_bases: [0; 16],
+        observation_bases: [0; 16],
+        symbol_bases: [0; 16],
+        count: 0,
     }
 }
 
@@ -135,21 +160,43 @@ fn enir_source_number(text: string, start: i64, end: i64) -> EnirSourceNumber wi
 }
 
 fn enir_source_symbol_find(symbols: EnirSourceSymbols, name: EnirName) -> i64 {
-    var i: i64 = 0
-    while i < symbols.count {
+    // Innermost-first lookup is ready for scoped v1 names; duplicate visible
+    // bindings remain rejected by the lowering entrypoint.
+    var i: i64 = symbols.count - 1
+    while i >= 0 {
         if enir_name_eq(symbols.names[i as usize], name) { return symbols.values[i as usize] }
-        i = i + 1
+        i = i - 1
     }
     -1
 }
 
 fn enir_source_symbol_add(symbols: EnirSourceSymbols, name: EnirName, value_id: i64) -> EnirSourceSymbols with Mut {
     var out = symbols
-    if out.count >= 32 { return out }
+    if out.count >= 64 { return out }
     out.names[out.count as usize] = name
     out.values[out.count as usize] = value_id
     out.count = out.count + 1
     out
+}
+
+fn enir_source_parse_control_name(
+    text: string,
+    start: i64,
+    end: i64,
+    keyword: string,
+    predicate: string
+) -> EnirName with Mut, Panic, Div {
+    let prefix_end = start + str_len(keyword)
+    if !enir_source_starts_with(text, start, end, keyword) { return enir_name_empty() }
+    let name_start = enir_source_trim_start(text, prefix_end, end)
+    var pred = name_start
+    while pred < end && (str_char_at(text, pred) as i64) != (str_char_at(predicate, 0) as i64) { pred = pred + 1 }
+    if pred >= end { return enir_name_empty() }
+    let name_end = enir_source_trim_end(text, name_start, pred)
+    let suffix_start = enir_source_trim_start(text, pred, end)
+    let suffix = predicate ++ " 0.0 {"
+    if !enir_source_range_eq(text, suffix_start, end, suffix) { return enir_name_empty() }
+    enir_source_name(text, name_start, name_end)
 }
 
 fn enir_source_slot_find_or_add(symbols: EnirSourceSymbols, name: EnirName) -> EnirSourceSymbols with Mut {
@@ -320,10 +367,10 @@ fn enir_source_lower_expr(
     EnirSourceOperand { ok: false, value_id: -1 }
 }
 
-pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+fn enir_lower_source_profile(text: string, profile: i64) -> EnirLowerResult with Mut, Panic, Div, Alloc {
     var module = enir_module_empty()
     module.stage = ENIR_STAGE_LOWERED
-    module.profile = enir_profile_eisa_v0()
+    module.profile = profile
     module = enir_module_push_type(module, EnirType {
         id: 0,
         value_kind: enir_value_f64(),
@@ -331,7 +378,7 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
         uncertainty_kind: enir_uncertainty_gum1(),
         status_tracked: 1,
         provenance_tracked: 1,
-        profile: enir_profile_eisa_v0(),
+        profile: profile,
     })
     module = enir_module_push_policy(module, EnirPolicy {
         id: 0,
@@ -341,6 +388,8 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
     })
 
     var symbols = enir_source_symbols_new()
+    var control = enir_source_control_new()
+    let symbol_cap = if profile == enir_profile_eisa_v0() { 32 } else { 64 }
     let n = str_len(text)
     if n <= 0 { return enir_lower_fail(module, 1, 1) }
     var pos: i64 = 0
@@ -368,7 +417,105 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
                 module.name = name
                 seen_header = true
             } else if enir_source_range_eq(text, start, finish, "}") {
-                seen_close = true
+                if control.count > 0 {
+                    let top = control.count - 1
+                    symbols.count = control.symbol_bases[top as usize]
+                    if control.kinds[top as usize] == 1 {
+                        if module.op_count != control.body_starts[top as usize] { return enir_lower_fail(module, line, 64) }
+                        if module.op_count >= ENIR_MAX_OPS { return enir_lower_fail(module, line, 61) }
+                        module = enir_module_push_op(module, EnirOp {
+                            id: module.op_count,
+                            opcode: enir_op_ebr(),
+                            result_id: -1,
+                            type_id: -1,
+                            a: -1,
+                            b: -1,
+                            target: control.tests[top as usize],
+                            policy_id: -1,
+                            memory_slot: -1,
+                            fuel_cost: 1,
+                        })
+                        module.ops[control.patches[top as usize] as usize].target = module.op_count
+                    } else {
+                        if module.value_count != control.value_bases[top as usize] { return enir_lower_fail(module, line, 68) }
+                        if module.observation_count != control.observation_bases[top as usize] { return enir_lower_fail(module, line, 69) }
+                        module.ops[control.patches[top as usize] as usize].target = module.op_count
+                    }
+                    control.count = top
+                } else {
+                    seen_close = true
+                }
+            } else if enir_source_starts_with(text, start, finish, "fuel ") {
+                // Fuel is observable state and requires a canonical module
+                // field plus fuel-stop receipts. E2B rejects it until E2C.
+                return enir_lower_fail(module, line, 60)
+            } else if enir_source_starts_with(text, start, finish, "while ") {
+                if profile != enir_profile_eisa_v1() || control.count >= 16 { return enir_lower_fail(module, line, 62) }
+                let name = enir_source_parse_control_name(text, start, finish, "while ", "!=")
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 63) }
+                let test = module.op_count
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count,
+                    opcode: enir_op_ebrz(),
+                    result_id: -1,
+                    type_id: -1,
+                    a: value_id,
+                    b: -1,
+                    target: -1,
+                    policy_id: 0,
+                    memory_slot: -1,
+                    fuel_cost: 1,
+                })
+                let top = control.count
+                control.kinds[top as usize] = 1
+                control.patches[top as usize] = module.op_count - 1
+                control.tests[top as usize] = test
+                control.body_starts[top as usize] = module.op_count
+                control.value_bases[top as usize] = module.value_count
+                control.observation_bases[top as usize] = module.observation_count
+                control.symbol_bases[top as usize] = symbols.count
+                control.count = top + 1
+            } else if enir_source_starts_with(text, start, finish, "if ") {
+                if profile != enir_profile_eisa_v1() || control.count >= 16 || module.op_count + 2 > ENIR_MAX_OPS {
+                    return enir_lower_fail(module, line, 65)
+                }
+                let name = enir_source_parse_control_name(text, start, finish, "if ", "<")
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 66) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count,
+                    opcode: enir_op_ebrn(),
+                    result_id: -1,
+                    type_id: -1,
+                    a: value_id,
+                    b: -1,
+                    target: module.op_count + 2,
+                    policy_id: 0,
+                    memory_slot: -1,
+                    fuel_cost: 1,
+                })
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count,
+                    opcode: enir_op_ebr(),
+                    result_id: -1,
+                    type_id: -1,
+                    a: -1,
+                    b: -1,
+                    target: -1,
+                    policy_id: -1,
+                    memory_slot: -1,
+                    fuel_cost: 1,
+                })
+                let top = control.count
+                control.kinds[top as usize] = 2
+                control.patches[top as usize] = module.op_count - 1
+                control.tests[top as usize] = -1
+                control.body_starts[top as usize] = module.op_count
+                control.value_bases[top as usize] = module.value_count
+                control.observation_bases[top as usize] = module.observation_count
+                control.symbol_bases[top as usize] = symbols.count
+                control.count = top + 1
             } else if enir_source_starts_with(text, start, finish, "let ") {
                 var eq = start + 4
                 while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
@@ -376,7 +523,7 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
                 let lhs_start = enir_source_trim_start(text, start + 4, eq)
                 let lhs_end = enir_source_trim_end(text, lhs_start, eq)
                 let lhs = enir_source_name(text, lhs_start, lhs_end)
-                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 32 { return enir_lower_fail(module, line, 11) }
+                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= symbol_cap { return enir_lower_fail(module, line, 11) }
                 let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
                 if !lowered.ok { return enir_lower_fail(module, line, 12) }
                 symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
@@ -443,10 +590,33 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
         pos = if end < n { end + 1 } else { end }
         line = line + 1
     }
-    if !seen_header || !seen_close { return enir_lower_fail(module, line, 50) }
+    if !seen_header || !seen_close || control.count != 0 { return enir_lower_fail(module, line, 50) }
     if module.observation_count <= 0 { return enir_lower_fail(module, line, 51) }
+    if profile == enir_profile_eisa_v1() {
+        if module.op_count >= ENIR_MAX_OPS { return enir_lower_fail(module, line, 67) }
+        module = enir_module_push_op(module, EnirOp {
+            id: module.op_count,
+            opcode: enir_op_ehalt(),
+            result_id: -1,
+            type_id: -1,
+            a: -1,
+            b: -1,
+            target: -1,
+            policy_id: -1,
+            memory_slot: -1,
+            fuel_cost: 1,
+        })
+    }
     module = enir_module_finalize_counts(module, 1)
     let rc = enir_verify(module)
     if rc != 0 { return enir_lower_fail(module, line, 1000 + rc) }
     EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
+}
+
+pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    enir_lower_source_profile(text, enir_profile_eisa_v0())
+}
+
+pub fn enir_lower_source_v1(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    enir_lower_source_profile(text, enir_profile_eisa_v1())
 }
