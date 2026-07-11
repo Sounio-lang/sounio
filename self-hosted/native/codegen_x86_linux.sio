@@ -1096,7 +1096,20 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
 
 // M4: argv and string builtins
 fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
-    // "get_arg_count" = 13 chars
+    // Source-level spelling is "arg_count"; retain the older
+    // "get_arg_count" backend alias for hand-built IR witnesses.
+    if n.len == 9 {
+        if n.buf[0] != 97 as i8 { return false }      // 'a'
+        if n.buf[1] != 114 as i8 { return false }     // 'r'
+        if n.buf[2] != 103 as i8 { return false }     // 'g'
+        if n.buf[3] != 95 as i8 { return false }      // '_'
+        if n.buf[4] != 99 as i8 { return false }      // 'c'
+        if n.buf[5] != 111 as i8 { return false }     // 'o'
+        if n.buf[6] != 117 as i8 { return false }     // 'u'
+        if n.buf[7] != 110 as i8 { return false }     // 'n'
+        if n.buf[8] != 116 as i8 { return false }     // 't'
+        return true
+    }
     if n.len != 13 { return false }
     if n.buf[0] != 103 as i8 { return false }     // 'g'
     if n.buf[1] != 101 as i8 { return false }     // 'e'
@@ -6758,7 +6771,14 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrIndexGet {
             let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 2 {
+            if (*func).instrs[i as usize].label_id == 3 {
+                native_v2_core_emit_raw_byte_array_load_into(
+                    nc,
+                    (*func).instrs[i as usize].dst,
+                    base_reg,
+                    (*func).instrs[i as usize].src2,
+                )
+            } else if (*func).instrs[i as usize].label_id == 2 {
                 native_v2_core_emit_raw_array_load_into(
                     nc,
                     (*func).instrs[i as usize].dst,
@@ -6795,7 +6815,14 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrIndexSet {
             let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 2 {
+            if (*func).instrs[i as usize].label_id == 3 {
+                native_v2_core_emit_raw_byte_array_store_into(
+                    nc,
+                    base_reg,
+                    (*func).instrs[i as usize].src2,
+                    (*func).instrs[i as usize].imm_i64,
+                )
+            } else if (*func).instrs[i as usize].label_id == 2 {
                 native_v2_core_emit_raw_array_store_into(
                     nc,
                     base_reg,
@@ -7316,6 +7343,15 @@ pub fn native_v2_core_emit_rdx_to_temp_into(nc: &! NativeCompiler, dst: i64) wit
 }
 
 pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
+    // BSS globals occupy IrFunction slots so global-address instructions can
+    // refer to stable module indices, but they have no executable body.
+    // Compiling their empty slots as ordinary functions reads non-function
+    // frame metadata and can fill the machine-code buffer with bogus output.
+    if (*func).compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+        native_compiler_set_fn_offset(nc, fn_index, (*nc).code.len)
+        native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        return true
+    }
     let builtin_id = native_v2_builtin_id_for_func_ref(func)
     if builtin_id != 0 {
         if builtin_id <= 3 {
@@ -8153,6 +8189,24 @@ pub fn native_v2_core_emit_raw_array_store_into(nc: &! NativeCompiler, base_reg:
     nc_emit_mov_reg_reg(nc, 3, 0)
     nc_core_load_temp_to_rax(nc, src)
     nc_emit_store_rax_mem_rdx_rbx8(nc)
+}
+
+pub fn native_v2_core_emit_raw_byte_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_reg)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_movzx_rax_byte_rdx_rbx(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+pub fn native_v2_core_emit_raw_byte_array_store_into(nc: &! NativeCompiler, base_reg: i64, idx_reg: i64, src: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_reg)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_core_load_temp_to_rax(nc, src)
+    nc_emit_store_al_mem_rdx_rbx(nc)
 }
 
 pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, base_ref: i64, idx_reg: i64) with Mut, Panic, Div {
@@ -9763,6 +9817,8 @@ fn native_v2_trace_module_ir_ref(module: &IrModule) with IO, Mut, Panic, Div {
         let func = (*module).functions[fi as usize]
         print("NV2_IR function fn=")
         print_int(fi)
+        print(" name=")
+        print(str_from_bytes(func.name.buf, func.name.len))
         print(" instr_count=")
         print_int(func.instr_count)
         print(" returns_float=")
@@ -9832,6 +9888,13 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
             bss_count = bss_count + 1
         }
         if !compile_ir_function_v2_from_ir_into(&! nc, &fn_body, fi) {
+            if native_v2_ir_trace_enabled() {
+                print("NV2_IR unsupported fn=")
+                print_int(fi)
+                print(" name=")
+                print(str_from_bytes(fn_body.name.buf, fn_body.name.len))
+                print("\n")
+            }
             compile_ok = false
         }
         __arena_reset(cg_arena_mark)
@@ -9857,10 +9920,9 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let entry = trampoline_offset(nc)
     nc.bss_total_size = (*module).bss_total_size
     if nc.bss_total_size < 8 { nc.bss_total_size = 8 }
-    // Machine code exceeded the 128KB CodeBuffer: nc_emit_byte drops bytes past
-    // 131072 and sets code_overflow. .text is truncated and the entry trampoline
-    // lands out of bounds -> SIGSEGV at runtime. Fail with a distinct rc so the
-    // caller reports it instead of writing a broken ELF.
+    // Machine code exceeded the 2MB NC_BIG_CODE buffer. nc_emit_byte drops
+    // further bytes and sets code_overflow, which would leave a truncated ELF.
+    // Fail with a distinct rc instead of writing a binary that crashes.
     if nc.code_overflow {
         return 19
     }

@@ -1372,20 +1372,29 @@ fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_na
 fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
+        var f = (*module).functions[fi as usize]
+        var changed: bool = false
         var ii: i64 = 0
-        while ii < (*module).functions[fi as usize].instr_count {
-            let op = (*module).functions[fi as usize].instrs[ii as usize].op
+        while ii < f.instr_count {
+            let op = f.instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                let cur_fn = (*module).functions[fi as usize].instrs[ii as usize].fn_id
-                let cur_nm = (*module).functions[fi as usize].instrs[ii as usize].name
-                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_call_target_fields(
-                    module,
-                    cur_fn,
-                    cur_nm
-                )
+                let cur_fn = f.instrs[ii as usize].fn_id
+                let cur_nm = f.instrs[ii as usize].name
+                var new_fn = cur_fn
+                if cur_nm.len > 0 && native_v2_builtin_id_for_name(cur_nm) != 0 {
+                    let builtin_fn = ir_merge_find_function_name_index(module, cur_nm)
+                    if builtin_fn >= 0 { new_fn = builtin_fn }
+                } else {
+                    new_fn = ir_module_resolve_call_target_fields(module, cur_fn, cur_nm)
+                }
+                if new_fn != cur_fn {
+                    f.instrs[ii as usize].fn_id = new_fn
+                    changed = true
+                }
             }
             ii = ii + 1
         }
+        if changed { (*module).functions[fi as usize] = f }
         fi = fi + 1
     }
 }
@@ -5026,6 +5035,38 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     }
 
     let module_box = lowered.module
+    // A single module has no cross-module calls to finalize. Compile the boxed
+    // IrModule directly so the bridge never materializes or returns the very
+    // large module by value.
+    if loaded == 1 {
+        ir_module_resolve_all_call_targets(&! (*module_box))
+        let fn_count = (*module_box).fn_count
+        trace.last_stage = "done"
+        trace.last_module_index = 0
+        trace.merged_modules = 1
+        print("Merged IR: ")
+        print_int(fn_count)
+        print(" functions\n")
+        if fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            return 1
+        }
+        parser_reset_last_errors()
+        let single_target_spec = native_resolve_target("native", "auto", false)
+        let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
+        if single_write_rc != 0 {
+            print("Error: Failed to write native binary to ")
+            print(output_path)
+            print(" rc=")
+            print_int(single_write_rc)
+            print("\n")
+            return 1
+        }
+        print("Written to ")
+        print(output_path)
+        print("\n")
+        return 0
+    }
     if module_frontend_dump_merged_calls_enabled() {
         print("MERGE_DUMP: pre_finalize\n")
         ir_module_dump_merge_calls(&(*module_box))
