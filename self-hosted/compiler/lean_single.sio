@@ -2332,6 +2332,65 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     emit_store_var_a64(ptr_slot)
 }
 
+// x0 = destination base address (lowest). Zero `nslots` qwords via a runtime
+// loop (constant code) so a large struct local doesn't unroll. Clobbers x0, x2.
+fn emit_zero_words_a64(nslots: i64) with Mut, Panic, Div {
+    emit_imm64_reg_a64(2, nslots)  // x2 = count
+    em32(0xB40000A2)  // loop: cbz x2, done (+5)
+    em32(0xF900001F)  //       str xzr, [x0]
+    em32(0x91002000)  //       add x0, x0, #8
+    em32(0xD1000442)  //       sub x2, x2, #1
+    em32(0x17FFFFFC)  //       b loop (-4)
+    // done:
+}
+
+// a64 twin of bind_struct_local_zeroinit_x86: `var x: T` with no initializer —
+// register the struct local and zero-fill its slots.
+fn bind_struct_local_zeroinit_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
+    let si = st_find(ty_hash)
+    if si < 0 && knowledge_hash_is(ty_hash) == false {
+        let slot = var_add(ns, ne)
+        if slot < 0 { return }
+        em32(0xD2800000)  // mov x0, #0
+        emit_store_var_a64(slot)
+        let vix = VAR_COUNT - 1
+        VAR_TY[vix as usize] = 6
+        VAR_TY_HASH[vix as usize] = ty_hash
+        return
+    }
+    let nslots = struct_like_nslots(ty_hash)
+    var base: i64 = 0
+    var spill_addr: i64 = 0
+    let spill = nslots * 8 >= local_bss_spill_bytes()
+    if spill {
+        spill_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+    } else {
+        base = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + nslots
+    }
+    let ptr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    var linear_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize] }
+    var out_ty: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
+    if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
+        if spill == false { NEXT_SLOT = NEXT_SLOT - nslots }
+        NEXT_SLOT = NEXT_SLOT - 1
+        return
+    }
+    if spill {
+        emit_image_addr_a64(spill_addr)      // x0 = spill base
+        emit_zero_words_a64(nslots)
+        emit_image_addr_a64(spill_addr)      // x0 = spill base pointer
+    } else {
+        emit_lea_var_a64(base + nslots - 1)  // x0 = slots base (lowest addr)
+        emit_zero_words_a64(nslots)
+        emit_lea_var_a64(base + nslots - 1)  // x0 = base pointer (zero loop advanced x0)
+    }
+    emit_store_var_a64(ptr_slot)
+}
+
 fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var_a64(slot); return }
@@ -34755,6 +34814,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_lea_var_a64(base + nslots - 1)
             }
             emit_store_var_a64(ptr_slot)
+        } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
+            // `var x: StructT` with no initializer — register + zero-fill (mirror
+            // of the x86 twin, compile_stmt :~22226). Without this the a64 pass
+            // never bound `x`, so later `x.field = …` raised "unknown identifier"
+            // (the native/*.sio `var out: Elf64Binary` class, #740).
+            bind_struct_local_zeroinit_a64(ns, ne, decl_ty_hash)
         } else if has_eq == 0 && type_is_option_inline(decl_ty, decl_ty_hash) {
             let opt_tag_slot = var_add_option_inline(ns, ne, decl_ty_hash)
             if opt_tag_slot >= 0 {
