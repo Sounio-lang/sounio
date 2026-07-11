@@ -19,6 +19,8 @@ EXTRACT_RAW="$OUT_DIR/gpu_knowledge_vec4_pack_unpack_lean_extract.raw"
 EXTRACT_PTX="$OUT_DIR/gpu_knowledge_vec4_pack_unpack_lean_extract.ptx"
 EXTRACT_CUBIN="$OUT_DIR/gpu_knowledge_vec4_pack_unpack_lean_extract.cubin"
 EXTRACT_LOG="$OUT_DIR/lean_extract.log"
+MIN_NO_IMPORT_LOG="$OUT_DIR/minimal_no_import_run.log"
+MIN_IMPORT_LOG="$OUT_DIR/minimal_import_run.log"
 LOG="$OUT_DIR/souc_run.log"
 CHECK_LOG="$OUT_DIR/souc_check.log"
 STDOUT_LOG="$OUT_DIR/souc_stdout.log"
@@ -138,6 +140,28 @@ payload = {
             "does_not_claim_cuda_device_runtime_execution",
         ],
     },
+    "minimal_import_runtime_probe": {
+        "classification": "diagnostic_not_backend_contract",
+        "status": os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_STATUS", "not_run"),
+        "reason": os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON", "not_run"),
+        "no_import": {
+            "check_exit_code": int(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_CHECK_EXIT", "-1")),
+            "run_exit_code": int(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_RUN_EXIT", "-1")),
+            "run_log": rel(pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_LOG", ""))),
+            "run_log_tail": pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_LOG", "")).read_text(encoding="utf-8", errors="replace")[-2000:] if os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_LOG") and pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_LOG", "")).exists() else "",
+        },
+        "imported": {
+            "check_exit_code": int(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_CHECK_EXIT", "-1")),
+            "run_exit_code": int(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_RUN_EXIT", "-1")),
+            "run_log": rel(pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_LOG", ""))),
+            "run_log_tail": pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_LOG", "")).read_text(encoding="utf-8", errors="replace")[-2000:] if os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_LOG") and pathlib.Path(os.environ.get("SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_LOG", "")).exists() else "",
+        },
+        "boundaries": [
+            "does_not_claim_backend_ir_to_ptx",
+            "does_not_claim_cuda_device_runtime_execution",
+            "diagnoses_minimal_modular_import_runtime_only",
+        ],
+    },
     "backend_ir_contract": {
         "kernel": "gpu_vec4_pack_unpack",
         "source_param": "in_ptr",
@@ -251,6 +275,67 @@ run_lean_extract_fallback() {
   export SOUNIO_GPU_KNOWLEDGE_LEAN_EXTRACT_REASON="lean_extract_ptxas_pass"
 }
 
+run_minimal_import_runtime_probe() {
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_STATUS="blocked"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="not_run"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_CHECK_EXIT="-1"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_RUN_EXIT="-1"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_CHECK_EXIT="-1"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_RUN_EXIT="-1"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_LOG="$MIN_NO_IMPORT_LOG"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_LOG="$MIN_IMPORT_LOG"
+
+  local tmpdir
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/sounio-gpu-min-import.XXXXXX")"
+  cat >"$tmpdir/no_import.sio" <<'SIO'
+fn main() -> i32 with IO {
+    print(".version 7.0\n")
+    0
+}
+SIO
+  cat >"$tmpdir/import_leaf.sio" <<'SIO'
+pub fn emit_marker() with IO {
+    print(".version 7.0\n")
+}
+SIO
+  cat >"$tmpdir/import_harness.sio" <<'SIO'
+use import_leaf::*
+
+fn main() -> i32 with IO {
+    emit_marker()
+    0
+}
+SIO
+
+  : >"$MIN_NO_IMPORT_LOG"
+  : >"$MIN_IMPORT_LOG"
+
+  set +e
+  ./bin/souc check "$tmpdir/no_import.sio" >>"$MIN_NO_IMPORT_LOG" 2>&1
+  local no_import_check=$?
+  ./bin/souc run "$tmpdir/no_import.sio" >>"$MIN_NO_IMPORT_LOG" 2>&1
+  local no_import_run=$?
+  ./bin/souc check "$tmpdir/import_harness.sio" >>"$MIN_IMPORT_LOG" 2>&1
+  local import_check=$?
+  ./bin/souc run "$tmpdir/import_harness.sio" >>"$MIN_IMPORT_LOG" 2>&1
+  local import_run=$?
+  set -e
+
+  export SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_CHECK_EXIT="$no_import_check"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_NO_IMPORT_RUN_EXIT="$no_import_run"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_CHECK_EXIT="$import_check"
+  export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_RUN_EXIT="$import_run"
+
+  if [ "$no_import_check" -eq 0 ] && [ "$no_import_run" -eq 0 ] && [ "$import_check" -eq 0 ] && [ "$import_run" -eq 0 ]; then
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_STATUS="pass"
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_imported_elf_pass"
+  elif [ "$no_import_check" -eq 0 ] && [ "$no_import_run" -eq 0 ] && [ "$import_check" -eq 0 ] && [ "$import_run" -eq 139 ]; then
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_imported_elf_segfault_after_compile"
+  else
+    export SOUNIO_GPU_KNOWLEDGE_MIN_IMPORT_REASON="minimal_import_probe_unexpected_result"
+  fi
+}
+
 set +e
 ./bin/souc check "$HARNESS" >"$CHECK_LOG" 2>&1
 souc_check_exit=$?
@@ -278,6 +363,7 @@ if [ "$souc_run_exit" -ne 0 ]; then
   elif [ "$souc_run_exit" -eq 139 ] || grep -qi "Segmentation fault" "$LOG"; then
     reason="souc_runtime_segfault_after_compile"
   fi
+  run_minimal_import_runtime_probe
   run_lean_extract_fallback
   write_json "blocked" "$reason" "$souc_run_exit" "$souc_check_exit"
   echo "gpu_knowledge_vec4_backend_pack_unpack_probe: BLOCKED $reason report=${OUT_JSON#$ROOT_DIR/}"

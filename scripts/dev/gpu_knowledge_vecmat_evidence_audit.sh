@@ -283,7 +283,6 @@ for lane in lanes:
             "",
             "## Boundary",
             "This handoff is not a completion claim. It preserves owner scope and the current evidence boundary.",
-            "",
         ]) + "\n",
         encoding="utf-8",
     )

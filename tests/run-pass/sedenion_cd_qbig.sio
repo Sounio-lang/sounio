@@ -1,0 +1,320 @@
+//@ run-pass
+//@ expect-stdout: CDQBIG OK
+// FRONTIER (Paper 1 open item) — the exact Cayley-Dickson product over UNBOUNDED ℚ, ALL 16 components.
+//
+// The i64 version (sedenion_cd_full16_q.sio) does the full 16-comp ℚ product via the common-denominator
+// reduction, but caps at coefficients ~1e8 (i64 output). This closes the unbounded case with a minimal,
+// self-contained SIGNED BigInt (base 1e9 limbs) — so numerators/denominators are ARBITRARY precision.
+//
+// WHY A LOCAL BigInt. The stdlib `math::bignat` full big×big `big_mul` SIGSEGVs under souc v0.80.0
+// (a single `big_mul(a,b)`, no arrays, no loop — a clean #651/#637 struct-copy repro), and `[BigInt;16]`
+// SIGSEGVs (the array-of-structs wall). This brick CIRCUMVENTS both — it does NOT fix #651 — exactly as
+// the i64 common-denom circumvented #637: (i) a minimal in-file BigInt built only from primitives that
+// empirically compile (schoolbook big×big = big_mul_small + limb-shift + big_add-in-loop, which the spike
+// confirms runs); (ii) the 16 numerators are held in FLAT scalar arrays [i64;N], never [BigInt;16].
+//
+// Common-denom identity: a rational sedenion = 16 integer numerators A[16] over a common denom Ad;
+//   (A·B)[k] = (Σ_{i⊕j=k} σ(i,j) A[i] B[j]) / (Ad·Bd)  — an INTEGER 16-comp product of numerators.
+// Certified on two cases: (1) a known zero divisor scaled by 10^40 — product EXACTLY 0 in all 16 comps
+// at magnitude 10^80 (i64 would overflow into garbage; exactness holds); (2) a general 16-comp product
+// with unbounded rational coefficients (components up to ~10^70). Each component's residue mod 1e9+7 is
+// emitted (byte-identical across souc builds; a per-limb decimal printer is miscompiled differently by
+// bin/souc vs stage2) and cross-verified vs the Python oracle; the EXACT decimals are witnessed by Lean
+// (native Int, SounioCDqbig.lean) and the oracle (exact ℚ). Case 1's annihilation is checked structurally.
+
+struct SBig { limb: [i64; 12], len: i64, neg: i64 }
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+fn s_is_zero(a: SBig) -> bool with Mut, Panic { a.len == 1 && a.limb[0 as usize] == 0 }
+fn sfrom(x: i64) -> SBig with Mut, Panic, Div {
+    var r = SBig { limb: [0; 12], len: 1, neg: if x < 0 { 1 } else { 0 } }
+    var v = if x < 0 { 0 - x } else { x }
+    var i = 0
+    while v > 0 && i < 12 {
+        r.limb[i as usize] = v % 1000000000
+        v = v / 1000000000
+        i = i + 1
+    }
+    if i > 0 { r.len = i }
+    r
+}
+// magnitude * small (m >= 0), sign dropped
+fn smul_small(a: SBig, m: i64) -> SBig with Mut, Panic, Div {
+    var r = SBig { limb: [0; 12], len: a.len, neg: 0 }
+    var carry = 0
+    var i = 0
+    while i < a.len {
+        let p = a.limb[i as usize] * m + carry
+        r.limb[i as usize] = p % 1000000000
+        carry = p / 1000000000
+        i = i + 1
+    }
+    while carry > 0 && i < 12 {
+        r.limb[i as usize] = carry % 1000000000
+        carry = carry / 1000000000
+        r.len = i + 1
+        i = i + 1
+    }
+    r
+}
+fn sshift(a: SBig, sh: i64) -> SBig with Mut, Panic, Div {
+    if s_is_zero(a) { return a }
+    var r = SBig { limb: [0; 12], len: a.len + sh, neg: 0 }
+    var i = a.len - 1
+    while i >= 0 {
+        if (i + sh) < 12 { r.limb[(i + sh) as usize] = a.limb[i as usize] }
+        i = i - 1
+    }
+    r
+}
+fn spow10(n: i64) -> SBig with Mut, Panic, Div {
+    var r = sfrom(1)
+    var c = 0
+    while c < n { r = smul_small(r, 10)  c = c + 1 }
+    r
+}
+// magnitude compare: 1 if |a|>|b|, -1 if <, 0 eq
+fn ucmp(a: SBig, b: SBig) -> i64 with Mut, Panic, Div {
+    var i = 11
+    while i >= 0 {
+        let av = a.limb[i as usize]
+        let bv = b.limb[i as usize]
+        if av > bv { return 1 }
+        if av < bv { return 0 - 1 }
+        i = i - 1
+    }
+    0
+}
+// magnitude add
+fn uadd(a: SBig, b: SBig) -> SBig with Mut, Panic, Div {
+    var r = SBig { limb: [0; 12], len: if a.len > b.len { a.len } else { b.len }, neg: 0 }
+    var carry = 0
+    var i = 0
+    while i < r.len {
+        let s = a.limb[i as usize] + b.limb[i as usize] + carry
+        r.limb[i as usize] = s % 1000000000
+        carry = s / 1000000000
+        i = i + 1
+    }
+    if carry > 0 && r.len < 12 { r.limb[r.len as usize] = carry  r.len = r.len + 1 }
+    r
+}
+// magnitude sub, requires |a| >= |b|
+fn usub(a: SBig, b: SBig) -> SBig with Mut, Panic, Div {
+    var r = SBig { limb: [0; 12], len: a.len, neg: 0 }
+    var borrow = 0
+    var i = 0
+    while i < a.len {
+        var d = a.limb[i as usize] - b.limb[i as usize] - borrow
+        if d < 0 { d = d + 1000000000  borrow = 1 } else { borrow = 0 }
+        r.limb[i as usize] = d
+        i = i + 1
+    }
+    // trim len
+    var L = a.len
+    while L > 1 && r.limb[(L - 1) as usize] == 0 { L = L - 1 }
+    r.len = L
+    r
+}
+fn sadd(a: SBig, b: SBig) -> SBig with Mut, Panic, Div {
+    if a.neg == b.neg {
+        var r = uadd(a, b)
+        if !s_is_zero(r) { r.neg = a.neg }
+        return r
+    }
+    let c = ucmp(a, b)
+    if c == 0 { return sfrom(0) }
+    if c > 0 {
+        var r = usub(a, b)
+        if !s_is_zero(r) { r.neg = a.neg }
+        return r
+    }
+    var r = usub(b, a)
+    if !s_is_zero(r) { r.neg = b.neg }
+    r
+}
+fn smul(a: SBig, b: SBig) -> SBig with Mut, Panic, Div {
+    var acc = sfrom(0)
+    var i = 0
+    while i < b.len {
+        let part = sshift(smul_small(a, b.limb[i as usize]), i)
+        acc = uadd(acc, part)
+        i = i + 1
+    }
+    if !s_is_zero(acc) {
+        acc.neg = if a.neg == b.neg { 0 } else { 1 }
+    }
+    acc
+}
+fn sneg(a: SBig) -> SBig with Mut, Panic, Div {
+    var r = SBig { limb: [0; 12], len: a.len, neg: 0 }
+    var t = 0
+    while t < 12 { r.limb[t as usize] = a.limb[t as usize]  t = t + 1 }
+    if !s_is_zero(a) { r.neg = 1 - a.neg }
+    r
+}
+// Signed residue of a BigInt modulo a small prime p, normalized to [0, p). We emit residues (not the
+// full decimal) because printing 70-digit numbers via a per-limb helper is miscompiled DIFFERENTLY by
+// the two souc builds (bin/souc vs stage2 diverge on print-in-loop / print_int newline), whereas
+// `print("RES ") print_int(x) print("\n")` is byte-identical on both. A digit error changes the residue
+// with overwhelming probability; the EXACT decimal values are witnessed independently by Lean (native
+// Int) and the Python oracle (exact ℚ). Horner fold: r = (r*base + limb) mod p, high limb to low.
+fn smod_small(a: SBig, p: i64) -> i64 with Mut, Panic, Div {
+    var r = 0
+    var i = 11
+    while i >= 0 {
+        r = (r * 1000000000 + a.limb[i as usize]) % p
+        i = i - 1
+    }
+    if a.neg == 1 && r != 0 { r = p - r }
+    r
+}
+
+// compute (A·B)[k] for all k and print; A,B given as flat limb arrays + nz flags; dens Ad,Bd.
+// returns 1 if all 16 comps are zero (annihilation), else 0.
+fn cd16_emit(tag: i64, alimb: [i64; 192], alen: [i64; 16], aneg: [i64; 16], anz: [i64; 16],
+             blimb: [i64; 192], blen: [i64; 16], bneg: [i64; 16], bnz: [i64; 16],
+             ad: SBig, bd: SBig) -> i64 with IO, Mut, Panic, Div {
+    var allzero = 1
+    var k = 0
+    while k < 16 {
+        var acc = sfrom(0)
+        var i = 0
+        while i < 16 {
+            let j = i ^ k
+            if anz[i as usize] == 1 && bnz[j as usize] == 1 {
+                // reconstruct A[i], B[j]
+                var ai = SBig { limb: [0; 12], len: alen[i as usize], neg: aneg[i as usize] }
+                var bj = SBig { limb: [0; 12], len: blen[j as usize], neg: bneg[j as usize] }
+                var t = 0
+                while t < 12 {
+                    ai.limb[t as usize] = alimb[(i * 12 + t) as usize]
+                    bj.limb[t as usize] = blimb[(j * 12 + t) as usize]
+                    t = t + 1
+                }
+                var term = smul(ai, bj)
+                if cd_sigma_c(i, j, 4) < 0 { term = sneg(term) }
+                acc = sadd(acc, term)
+            }
+            i = i + 1
+        }
+        if !s_is_zero(acc) { allzero = 0 }
+        // emit residue mod (10^9+7); order is (case1 comp0..15, den), (case2 comp0..15, den).
+        print("RES ")
+        print_int(smod_small(acc, 1000000007))
+        print("\n")
+        k = k + 1
+    }
+    let den = smul(ad, bd)
+    print("RES ")
+    print_int(smod_small(den, 1000000007))
+    print("\n")
+    allzero
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // ---- CASE 1: (e3 + e10)(e6 - e15) scaled by 10^40 -> exact annihilation, den 1 ----
+    var A1l = [0; 192]
+    var A1len = [1; 16]
+    var A1neg = [0; 16]
+    var A1nz = [0; 16]
+    var B1l = [0; 192]
+    var B1len = [1; 16]
+    var B1neg = [0; 16]
+    var B1nz = [0; 16]
+    let S = spow10(40)
+    // A1[3] = 10^40, A1[10] = 10^40
+    var idxa = [3, 10]
+    var p = 0
+    while p < 2 {
+        let idx = idxa[p as usize]
+        var t = 0
+        while t < 12 { A1l[(idx * 12 + t) as usize] = S.limb[t as usize]  t = t + 1 }
+        A1len[idx as usize] = S.len
+        A1nz[idx as usize] = 1
+        p = p + 1
+    }
+    // B1[6] = 10^40, B1[15] = -10^40
+    var idxb = [6, 15]
+    var sgnb = [0, 1]
+    p = 0
+    while p < 2 {
+        let idx = idxb[p as usize]
+        var t = 0
+        while t < 12 { B1l[(idx * 12 + t) as usize] = S.limb[t as usize]  t = t + 1 }
+        B1len[idx as usize] = S.len
+        B1neg[idx as usize] = sgnb[p as usize]
+        B1nz[idx as usize] = 1
+        p = p + 1
+    }
+    let c1_zero = cd16_emit(1, A1l, A1len, A1neg, A1nz, B1l, B1len, B1neg, B1nz, sfrom(1), sfrom(1))
+
+    // ---- CASE 2: general 16-comp product, unbounded rational coeffs ----
+    // A2: idx {1,2,4,8,15} = {1e30, 3e28, -5e35, 1e33, 7e20} / 6
+    // B2: idx {1,5,7,10}   = {2e31, -1e29, 4e27, 9e34} / 10
+    var A2l = [0; 192]
+    var A2len = [1; 16]
+    var A2neg = [0; 16]
+    var A2nz = [0; 16]
+    var B2l = [0; 192]
+    var B2len = [1; 16]
+    var B2neg = [0; 16]
+    var B2nz = [0; 16]
+    var pa = [1, 2, 4, 8, 15]
+    var pae = [30, 28, 35, 33, 20]
+    var pam = [1, 3, 5, 1, 7]
+    var pan = [0, 0, 1, 0, 0]
+    p = 0
+    while p < 5 {
+        let idx = pa[p as usize]
+        var v = smul_small(spow10(pae[p as usize]), pam[p as usize])
+        var t = 0
+        while t < 12 { A2l[(idx * 12 + t) as usize] = v.limb[t as usize]  t = t + 1 }
+        A2len[idx as usize] = v.len
+        A2neg[idx as usize] = pan[p as usize]
+        A2nz[idx as usize] = 1
+        p = p + 1
+    }
+    var pb = [1, 5, 7, 10]
+    var pbe = [31, 29, 27, 34]
+    var pbm = [2, 1, 4, 9]
+    var pbn = [0, 1, 0, 0]
+    p = 0
+    while p < 4 {
+        let idx = pb[p as usize]
+        var v = smul_small(spow10(pbe[p as usize]), pbm[p as usize])
+        var t = 0
+        while t < 12 { B2l[(idx * 12 + t) as usize] = v.limb[t as usize]  t = t + 1 }
+        B2len[idx as usize] = v.len
+        B2neg[idx as usize] = pbn[p as usize]
+        B2nz[idx as usize] = 1
+        p = p + 1
+    }
+    let c2_zero = cd16_emit(2, A2l, A2len, A2neg, A2nz, B2l, B2len, B2neg, B2nz, sfrom(6), sfrom(10))
+
+    print("ANNIHILATION_C1 ")
+    print_int(c1_zero)
+    print("\n")
+    // Case 1 annihilates exactly at 10^80; Case 2 general product emitted (cross-checked vs oracle).
+    if c1_zero == 1 && c2_zero == 0 {
+        println("CDQBIG OK")
+    } else {
+        println("CDQBIG FAIL")
+    }
+}

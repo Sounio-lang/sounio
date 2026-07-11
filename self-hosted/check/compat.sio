@@ -56,6 +56,33 @@ pub fn compat_invariant_same_frame(a: TypeEntry, b: TypeEntry) -> bool with Pani
     true
 }
 
+// A7: integer-width coercion (matches lean_single's permissiveness).
+// Classifies the "narrow" machine integer kinds by signedness family so that an
+// i32 branch/operand and an i64 branch/operand type-check by widening to the
+// wider type. Returns 1 for the signed narrow family {i8,i32,i64}, 2 for the
+// unsigned narrow family {u8,u32,u64}, 0 for anything else (incl. the wide
+// i128/u128 kinds, which keep their exact bit-width check — the i128≠i256
+// soundness hole stays closed). Cross-signedness (i32 vs u32) is deliberately
+// NOT widened, so a genuine signed/unsigned mismatch is still rejected.
+fn int_width_family(k: TypeKind) -> i64 with Panic, Div {
+    if k == TypeKind::TyI8 { return 1 }
+    if k == TypeKind::TyI32 { return 1 }
+    if k == TypeKind::TyI64 { return 1 }
+    if k == TypeKind::TyU8 { return 2 }
+    if k == TypeKind::TyU32 { return 2 }
+    if k == TypeKind::TyU64 { return 2 }
+    0
+}
+
+// Two narrow integer types are mutually compatible iff they share a signedness
+// family. The exact-kind cases are already handled above; this covers the
+// mixed-width cases (i32<->i64, i8<->i32, u32<->u64, ...).
+pub fn int_widths_compatible(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div {
+    let fa = int_width_family(a.kind)
+    if fa == 0 { return false }
+    fa == int_width_family(b.kind)
+}
+
 pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     // Wildcard types: compatible with anything (check BOTH sides)
     if a.kind == TypeKind::TyError || b.kind == TypeKind::TyError {
@@ -115,6 +142,13 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return true
     }
     if a.kind == TypeKind::TyChar && b.kind == TypeKind::TyChar {
+        return true
+    }
+
+    // A7: narrow integer width coercion (i32<->i64, i8<->i32, u32<->u64, ...).
+    // Same signedness family only; wide i128/u128 keep their exact bit-width
+    // check above so the i128≠i256 hole stays closed.
+    if int_widths_compatible(a, b) {
         return true
     }
 
@@ -818,6 +852,14 @@ pub fn compat_is_hyper_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyHyper
 }
 
+// Primitive scalar kinds that can be the receiver of a trait/inherent method
+// (impl R for i64 { fn m(self, ...) }). These types have empty .name, so
+// method resolution disambiguates on kind via fn_sig_table_find_method_semantic.
+// Excludes TyString (handled by its own builtin-method branch) and aggregates.
+pub fn is_primitive_receiver_type(ty: TypeEntry) -> bool {
+    is_numeric_type(ty) || ty.kind == TypeKind::TyBool || ty.kind == TypeKind::TyChar
+}
+
 // ============================================================
 // Binary operator result types
 // ============================================================
@@ -953,38 +995,42 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             }
         }
 
-        // Bitwise: both i64, result = i64
+        // Bitwise: both integer, result = LEFT operand type (#638: the old always-i64
+        // result poisoned every i32 shift/mask context, e.g. `let half = 1 << (bits-1)`
+        // with bits: i32 — the whole f64 Cayley-Dickson layer failed to import).
+        // Acceptance domain unchanged (both integer, mixed widths still accepted);
+        // only the RESULT type follows the left operand, mirroring the arithmetic arms.
         BinaryOp::OpBitAnd => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpBitOr => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpBitXor => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpShl => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpShr => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }

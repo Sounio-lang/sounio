@@ -152,8 +152,24 @@ if backend_probe.get("status") == "blocked":
     if backend_reason == "souc_runtime_segfault_after_compile":
         require(souc.get("check_exit_code") == 0, "backend segfault blocker must have check pass")
         require(souc.get("run_exit_code") == 139, "backend segfault blocker must have run exit 139")
-        require(souc.get("compiled_before_runtime_failure") is True, "backend segfault blocker must compile before runtime failure")
-        require("Segmentation fault" in souc.get("run_log_tail", ""), "backend blocked log missing segfault evidence")
+        run_log_tail = souc.get("run_log_tail", "")
+        require("Segmentation fault" in run_log_tail, "backend blocked log missing segfault evidence")
+        compiled_before_failure = souc.get("compiled_before_runtime_failure")
+        require(compiled_before_failure in {True, False}, "backend segfault blocker missing compile-before-failure classification")
+        if compiled_before_failure is False:
+            require("imported_compile:" in run_log_tail or "Native compilation failed" in run_log_tail, "backend compile-path segfault missing imported-lower evidence")
+        min_import = backend_probe.get("minimal_import_runtime_probe", {})
+        require(min_import.get("classification") == "diagnostic_not_backend_contract", "backend segfault missing minimal import diagnostic classification")
+        require("diagnoses_minimal_modular_import_runtime_only" in min_import.get("boundaries", []), "minimal import diagnostic missing boundary")
+        require(min_import.get("reason") in {"minimal_imported_elf_segfault_after_compile", "minimal_imported_elf_pass"}, "minimal import diagnostic reason mismatch")
+        require(min_import.get("no_import", {}).get("check_exit_code") == 0, "minimal no-import check must pass")
+        require(min_import.get("no_import", {}).get("run_exit_code") == 0, "minimal no-import run must pass")
+        require(min_import.get("imported", {}).get("check_exit_code") == 0, "minimal imported check must pass")
+        if min_import.get("reason") == "minimal_imported_elf_segfault_after_compile":
+            require(min_import.get("imported", {}).get("run_exit_code") == 139, "minimal imported run must segfault")
+        else:
+            require(min_import.get("imported", {}).get("run_exit_code") == 0, "minimal imported run must pass")
+        require("Compilation successful!" in min_import.get("imported", {}).get("run_log_tail", ""), "minimal imported diagnostic missing compile-success evidence")
 else:
     require(backend_contract.get("status") == "proved", "backend pass did not prove contract")
     require(backend_probe.get("artifacts", {}).get("ptx", {}).get("present") is True, "backend pass missing PTX")
@@ -301,10 +317,10 @@ require(completion.get("completion_ready") is expected_completion_ready, "comple
 expected_completion_blockers = []
 if not runtime_pass:
     expected_completion_blockers.append("dgx_cuda_device_runtime_execution")
+if backend_probe.get("status") != "pass":
+    expected_completion_blockers.append("automatic_backend_pack_unpack")
 if not imported_runtime_pass:
     expected_completion_blockers.append("imported_runtime_fixture")
-if backend_probe.get("status") != "pass":
-    expected_completion_blockers.insert(1, "automatic_backend_pack_unpack")
 require(completion.get("completion_blockers", []) == expected_completion_blockers, "completion blockers mismatch")
 if backend_probe.get("status") == "pass":
     require("automatic_backend_pack_unpack" not in completion.get("completion_blockers", []), "completion audit kept closed backend blocker open")
@@ -344,13 +360,14 @@ if imported_runtime_pass:
     require(len(imported_blockers) == 1 and imported_blockers[0].get("Status") == "closed", "imported blocker record must be closed when imported probe passes")
 for field in [
     "Current-SHA:", "Current-Branch:", "Current-Worktree:", "Dirty-Status:",
-    "Owned-Files:", "Do-Not-Touch:", "Last-Green-Gates:", "Failing-Gates:",
+    "Current-Goal-Status:", "Completion-Blockers:", "Owned-Files:", "Do-Not-Touch:", "Last-Green-Gates:", "Failing-Gates:",
     "Blocker-Records:", "Artifacts:", "Next-Command:",
 ]:
     require(field in operational_handoff, f"operational handoff missing {field}")
 for blocker_id in blocker_ids:
     require(blocker_id in operational_handoff, f"operational handoff missing {blocker_id}")
 require("scripts/dev/gpu_knowledge_vec4_dgx_runtime_runbook.sh run-dgx" in operational_handoff, "operational handoff missing run-dgx next command")
+require(f"Current-Goal-Status: {'complete' if expected_completion_ready else 'not_complete'}" in operational_handoff, "operational handoff goal status mismatch")
 require("goal_status=complete" in operational_handoff, "operational handoff missing completion boundary")
 PY
 

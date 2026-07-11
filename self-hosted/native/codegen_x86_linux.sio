@@ -40,6 +40,12 @@ use io::env::{read_env}
 var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 // Write cursor — module-scope avoids &! i64 ref mutation issues in helper fns.
 var NATIVE_ELF_OFF: i64 = 0
+// Off-stack ELF-image output buffer for native_v2_write_min_elf64_to_file. Its
+// image used to be built into a `var bytes: [i8; 262144]` STACK local — too small
+// for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
+// hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
+// the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
+var NC_BIG_ELF: [i8; 4194304] = [0; 4194304]
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -1342,8 +1348,8 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
-    if len >= 0 && len < 131072 {
-        (*nc).code.bytes[len as usize] = low8(b) as i8
+    if len >= 0 && len < 2097152 {
+        NC_BIG_CODE[len as usize] = low8(b) as i8
         (*nc).code.len = len + 1
     } else {
         (*nc).code_overflow = true
@@ -1590,28 +1596,20 @@ fn nc_emit_jnz_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic, Div {
     if offset >= 0 && offset + 4 <= (*nc).code.len {
-        (*nc).code.bytes[offset as usize] = low8(val) as i8
-        (*nc).code.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
-        (*nc).code.bytes[(offset + 2) as usize] = low8(val >> 16) as i8
-        (*nc).code.bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+        NC_BIG_CODE[offset as usize] = low8(val) as i8
+        NC_BIG_CODE[(offset + 1) as usize] = low8(val >> 8) as i8
+        NC_BIG_CODE[(offset + 2) as usize] = low8(val >> 16) as i8
+        NC_BIG_CODE[(offset + 3) as usize] = low8(val >> 24) as i8
     }
 }
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
-    if idx >= 0 && idx < 4096 {
-        var offsets = (*nc).flat_reloc_offsets
-        var kinds = (*nc).flat_reloc_kind_codes
-        var flags = (*nc).flat_reloc_is_functions
-        var targets = (*nc).flat_reloc_target_indices
-        offsets[idx as usize] = patch_offset
-        kinds[idx as usize] = kind_code
-        flags[idx as usize] = is_function
-        targets[idx as usize] = target_index
-        (*nc).flat_reloc_offsets = offsets
-        (*nc).flat_reloc_kind_codes = kinds
-        (*nc).flat_reloc_is_functions = flags
-        (*nc).flat_reloc_target_indices = targets
+    if idx >= 0 && idx < 65536 {
+        NC_FLAT_RELOC_OFFSETS[idx as usize] = patch_offset
+        NC_FLAT_RELOC_KIND_CODES[idx as usize] = kind_code
+        NC_FLAT_RELOC_IS_FUNCTIONS[idx as usize] = is_function
+        NC_FLAT_RELOC_TARGET_INDICES[idx as usize] = target_index
         (*nc).flat_reloc_count = idx + 1
     }
 }
@@ -4474,8 +4472,8 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     // Patch jns displacement
     let neg_block_len = c.code.len - (jns_pos + 2)
-    if jns_pos + 1 < 131072 {
-        c.code.bytes[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
+    if jns_pos + 1 < 2097152 {
+        NC_BIG_CODE[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
     }
 
     // Integer part: cvttsd2si
@@ -4729,23 +4727,23 @@ pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrMo
 
 fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     patch_offset > 0 && patch_offset + 4 <= (*nc).code.len
-        && (*nc).code.bytes[(patch_offset - 1) as usize] == (0xe8 as i8)
+        && NC_BIG_CODE[(patch_offset - 1) as usize] == (0xe8 as i8)
 }
 
 fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     if !(patch_offset >= 3 && patch_offset + 4 <= (*nc).code.len) { return false }
     if patch_offset >= 4
-        && (*nc).code.bytes[(patch_offset - 4) as usize] == (0xf2 as i8)
-        && (*nc).code.bytes[(patch_offset - 3) as usize] == (0x0f as i8)
-        && (*nc).code.bytes[(patch_offset - 2) as usize] == (0x10 as i8) {
-        let sse_modrm = (*nc).code.bytes[(patch_offset - 1) as usize]
+        && NC_BIG_CODE[(patch_offset - 4) as usize] == (0xf2 as i8)
+        && NC_BIG_CODE[(patch_offset - 3) as usize] == (0x0f as i8)
+        && NC_BIG_CODE[(patch_offset - 2) as usize] == (0x10 as i8) {
+        let sse_modrm = NC_BIG_CODE[(patch_offset - 1) as usize]
         if sse_modrm == (0x05 as i8) || sse_modrm == (0x0d as i8) {
             return true
         }
     }
-    if (*nc).code.bytes[(patch_offset - 3) as usize] != (0x48 as i8) { return false }
-    let op = (*nc).code.bytes[(patch_offset - 2) as usize]
-    let modrm = (*nc).code.bytes[(patch_offset - 1) as usize]
+    if NC_BIG_CODE[(patch_offset - 3) as usize] != (0x48 as i8) { return false }
+    let op = NC_BIG_CODE[(patch_offset - 2) as usize]
+    let modrm = NC_BIG_CODE[(patch_offset - 1) as usize]
     (op == (0x8d as i8) && modrm == (0x05 as i8))
         || (op == (0x8b as i8) && modrm == (0x1d as i8))
         || (op == (0x89 as i8) && modrm == (0x05 as i8))
@@ -4753,11 +4751,11 @@ fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> 
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).flat_reloc_count && i < 4096 {
-        let patch_offset = (*nc).flat_reloc_offsets[i as usize]
-        let kind_code = (*nc).flat_reloc_kind_codes[i as usize]
-        let is_function = (*nc).flat_reloc_is_functions[i as usize]
-        let target_index = (*nc).flat_reloc_target_indices[i as usize]
+    while i < (*nc).flat_reloc_count && i < 65536 {
+        let patch_offset = NC_FLAT_RELOC_OFFSETS[i as usize]
+        let kind_code = NC_FLAT_RELOC_KIND_CODES[i as usize]
+        let is_function = NC_FLAT_RELOC_IS_FUNCTIONS[i as usize]
+        let target_index = NC_FLAT_RELOC_TARGET_INDICES[i as usize]
 
         if kind_code == 1 && native_v2_reloc_is_call_patch(nc, patch_offset) {
             if is_function == 1 {
@@ -5636,7 +5634,7 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     }
 }
 
-fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
+pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
@@ -5658,6 +5656,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
     if name_is_assert(name) { return 21 }
+    if name_is_str_from_bytes(name) { return 22 }
     0
 }
 
@@ -9556,42 +9555,41 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
     native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
-fn native_v2_file_put_u8(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic {
-    if pos >= 0 && pos < 131072 {
-        (*buf)[pos as usize] = (val & 255) as i8
+fn native_v2_file_put_u8(pos: i64, val: i64) with Mut, Panic {
+    if pos >= 0 && pos < 4194304 {
+        NC_BIG_ELF[pos as usize] = (val & 255) as i8
     }
 }
 
-fn native_v2_file_put_u16(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(buf, pos, val)
-    native_v2_file_put_u8(buf, pos + 1, val >> 8)
+fn native_v2_file_put_u16(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(pos, val)
+    native_v2_file_put_u8(pos + 1, val >> 8)
 }
 
-fn native_v2_file_put_u32(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(buf, pos, val)
-    native_v2_file_put_u8(buf, pos + 1, val >> 8)
-    native_v2_file_put_u8(buf, pos + 2, val >> 16)
-    native_v2_file_put_u8(buf, pos + 3, val >> 24)
+fn native_v2_file_put_u32(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(pos, val)
+    native_v2_file_put_u8(pos + 1, val >> 8)
+    native_v2_file_put_u8(pos + 2, val >> 16)
+    native_v2_file_put_u8(pos + 3, val >> 24)
 }
 
-fn native_v2_file_put_u64(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
-    native_v2_file_put_u32(buf, pos, val)
-    native_v2_file_put_u32(buf, pos + 4, val >> 32)
+fn native_v2_file_put_u64(pos: i64, val: i64) with Mut, Panic, Div {
+    native_v2_file_put_u32(pos, val)
+    native_v2_file_put_u32(pos + 4, val >> 32)
 }
 
-fn native_v2_file_emit_phdr(buf: &![i8; 131072], pos: i64, p_type: i64, flags: i64, offset: i64, vaddr: i64, filesz: i64, memsz: i64, align: i64) with Mut, Panic, Div {
-    native_v2_file_put_u32(buf, pos, p_type)
-    native_v2_file_put_u32(buf, pos + 4, flags)
-    native_v2_file_put_u64(buf, pos + 8, offset)
-    native_v2_file_put_u64(buf, pos + 16, vaddr)
-    native_v2_file_put_u64(buf, pos + 24, vaddr)
-    native_v2_file_put_u64(buf, pos + 32, filesz)
-    native_v2_file_put_u64(buf, pos + 40, memsz)
-    native_v2_file_put_u64(buf, pos + 48, align)
+fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vaddr: i64, filesz: i64, memsz: i64, align: i64) with Mut, Panic, Div {
+    native_v2_file_put_u32(pos, p_type)
+    native_v2_file_put_u32(pos + 4, flags)
+    native_v2_file_put_u64(pos + 8, offset)
+    native_v2_file_put_u64(pos + 16, vaddr)
+    native_v2_file_put_u64(pos + 24, vaddr)
+    native_v2_file_put_u64(pos + 32, filesz)
+    native_v2_file_put_u64(pos + 40, memsz)
+    native_v2_file_put_u64(pos + 48, align)
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
-    var bytes: [i8; 131072] = [0; 131072]
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -9616,81 +9614,91 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if data_len > 0 {
         file_len = data_offset + data_len
     }
-    if file_len <= 64 || file_len > 131072 { return 13 }
+    if file_len <= 64 || file_len > 4194304 { return 13 }
 
-    // Build the ELF header + program headers + segment payloads into `bytes`
+    // Zero the used region of the off-stack ELF image buffer (NC_BIG_ELF is a BSS
+    // global — zero at process start, but re-zero here so page-alignment padding
+    // gaps stay zero across repeat compiles in one process). Matches the old
+    // `var bytes: [i8; 262144] = [0; 262144]` stack-local semantics.
+    var zi: i64 = 0
+    while zi < file_len {
+        NC_BIG_ELF[zi as usize] = 0 as i8
+        zi = zi + 1
+    }
+
+    // Build the ELF header + program headers + segment payloads into NC_BIG_ELF
     // via a dedicated small helper. Splitting this out of the (large) caller
     // keeps the conditional `if rodata_len>0`/`if data_len>0` forward jumps
     // inside a short function so their branch offsets stay small — working
     // around a c634b38f branch-target miscompile that otherwise skipped this
     // whole block and fell through to `return 0` (file never written).
-    native_v2_build_elf_image_into(&! bytes, nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
+    native_v2_build_elf_image_into(nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
 
-    if bytes[0 as usize] != (0x7f as i8) { return 14 }
-    if bytes[1 as usize] != (0x45 as i8) { return 15 }
-    if bytes[2 as usize] != (0x4c as i8) { return 16 }
-    if bytes[3 as usize] != (0x46 as i8) { return 17 }
-    if write_file(output_path, bytes, file_len) < 0 { return 18 }
+    if NC_BIG_ELF[0 as usize] != (0x7f as i8) { return 14 }
+    if NC_BIG_ELF[1 as usize] != (0x45 as i8) { return 15 }
+    if NC_BIG_ELF[2 as usize] != (0x4c as i8) { return 16 }
+    if NC_BIG_ELF[3 as usize] != (0x46 as i8) { return 17 }
+    if write_file(output_path, NC_BIG_ELF, file_len) < 0 { return 18 }
     0
 }
 
 // Helper extracted from native_v2_write_min_elf64_to_file (c634b38f branch-offset
 // workaround — see caller). Writes the full ELF image into `bytes`.
-fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
-    native_v2_file_put_u8(bytes, 0, 127)
-    native_v2_file_put_u8(bytes, 1, 69)
-    native_v2_file_put_u8(bytes, 2, 76)
-    native_v2_file_put_u8(bytes, 3, 70)
-    native_v2_file_put_u8(bytes, 4, 2)
-    native_v2_file_put_u8(bytes, 5, 1)
-    native_v2_file_put_u8(bytes, 6, 1)
-    native_v2_file_put_u16(bytes, 16, 2)
-    native_v2_file_put_u16(bytes, 18, 62)
-    native_v2_file_put_u32(bytes, 20, 1)
-    native_v2_file_put_u64(bytes, 24, base_addr + text_offset + entry_offset)
-    native_v2_file_put_u64(bytes, 32, 64)
-    native_v2_file_put_u64(bytes, 40, 0)
-    native_v2_file_put_u32(bytes, 48, 0)
-    native_v2_file_put_u16(bytes, 52, 64)
-    native_v2_file_put_u16(bytes, 54, 56)
-    native_v2_file_put_u16(bytes, 56, phnum)
-    native_v2_file_put_u16(bytes, 58, 64)
-    native_v2_file_put_u16(bytes, 60, 0)
-    native_v2_file_put_u16(bytes, 62, 0)
+fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(0, 127)
+    native_v2_file_put_u8(1, 69)
+    native_v2_file_put_u8(2, 76)
+    native_v2_file_put_u8(3, 70)
+    native_v2_file_put_u8(4, 2)
+    native_v2_file_put_u8(5, 1)
+    native_v2_file_put_u8(6, 1)
+    native_v2_file_put_u16(16, 2)
+    native_v2_file_put_u16(18, 62)
+    native_v2_file_put_u32(20, 1)
+    native_v2_file_put_u64(24, base_addr + text_offset + entry_offset)
+    native_v2_file_put_u64(32, 64)
+    native_v2_file_put_u64(40, 0)
+    native_v2_file_put_u32(48, 0)
+    native_v2_file_put_u16(52, 64)
+    native_v2_file_put_u16(54, 56)
+    native_v2_file_put_u16(56, phnum)
+    native_v2_file_put_u16(58, 64)
+    native_v2_file_put_u16(60, 0)
+    native_v2_file_put_u16(62, 0)
 
     var phoff: i64 = 64
-    native_v2_file_emit_phdr(bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
+    native_v2_file_emit_phdr(phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
     phoff = phoff + 56
     if rodata_len > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
         phoff = phoff + 56
     }
     if data_len > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
         phoff = phoff + 56
     }
     if (*nc).bss_total_size > 0 {
-        native_v2_file_emit_phdr(bytes, phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
         phoff = phoff + 56
     }
-    native_v2_file_emit_phdr(bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
+    native_v2_file_emit_phdr(phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
 
     var i: i64 = 0
-    while i < code_len && (text_offset + i) < 131072 {
-        (*bytes)[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
+    while i < code_len && (text_offset + i) < 4194304 {
+        NC_BIG_ELF[(text_offset + i) as usize] = NC_BIG_CODE[i as usize]
         i = i + 1
     }
 
     if (*nc).flat_rodata_len > 0 {
         i = 0
-        while i < rodata_len && (rodata_offset + i) < 131072 {
-            (*bytes)[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+        while i < rodata_len && (rodata_offset + i) < 4194304 {
+            NC_BIG_ELF[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
             i = i + 1
         }
     } else {
         i = 0
-        while i < rodata_len && (rodata_offset + i) < 131072 {
-            (*bytes)[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
+        while i < rodata_len && (rodata_offset + i) < 4194304 {
+            NC_BIG_ELF[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
             i = i + 1
         }
     }
@@ -9785,6 +9793,40 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     var compile_ok = true
     var bss_count: i64 = 0
     while fi < (*module).fn_count {
+        // Per-function Box-arena window: everything compile_ir_function_v2_
+        // from_ir_into Box-allocates (machine-IR scratch, reg lists, …) is
+        // dead once the function's bytes/relocs/symbols are recorded in nc —
+        // and nc's whole reachable graph is fixed arrays + scalars (audited:
+        // NativeCompiler, CodeBuffer, RelocationTable, ExternRelocTable,
+        // StringTable, SymbolData — no Box anywhere), living in pre-loop
+        // storage plus BSS side tables (NV2_RELOC_*). Reset reclaims the
+        // arena churn that previously accumulated unboundedly across the
+        // whole module (measured: +11.5 GiB VmSize during this loop on the
+        // eisa_evm merged compile).
+        let cg_arena_mark = __arena_mark()
+        if str_len(read_env("SOUNIO_NV2_ARENA_TRACE")) > 0 && fi % 25 == 0 {
+            print("nv2_arena_cursor ")
+            print_int(cg_arena_mark)
+            print("\n")
+            print("nv2_pool_cursor ")
+            print_int(__pool_mark())
+            print("\n")
+            print("nv2_rtmmap_count ")
+            print_int(__rtmmap_count())
+            print("\n")
+            print("nv2_rtmmap_bytes ")
+            print_int(__rtmmap_bytes())
+            print("\n")
+            print("nv2_arena_refill_bytes ")
+            print_int(__arena_refill_bytes())
+            print("\n")
+            print("nv2_arena_unmap_bytes ")
+            print_int(__arena_unmap_bytes())
+            print("\n")
+            print("nv2_pool_refill_bytes ")
+            print_int(__pool_refill_bytes())
+            print("\n")
+        }
         let fn_body = (*module).functions[fi as usize]
         if fn_body.compile_strategy == 99 {
             bss_count = bss_count + 1
@@ -9792,6 +9834,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         if !compile_ir_function_v2_from_ir_into(&! nc, &fn_body, fi) {
             compile_ok = false
         }
+        __arena_reset(cg_arena_mark)
         fi = fi + 1
     }
     if !compile_ok {
@@ -9814,6 +9857,13 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let entry = trampoline_offset(nc)
     nc.bss_total_size = (*module).bss_total_size
     if nc.bss_total_size < 8 { nc.bss_total_size = 8 }
+    // Machine code exceeded the 128KB CodeBuffer: nc_emit_byte drops bytes past
+    // 131072 and sets code_overflow. .text is truncated and the entry trampoline
+    // lands out of bounds -> SIGSEGV at runtime. Fail with a distinct rc so the
+    // caller reports it instead of writing a broken ELF.
+    if nc.code_overflow {
+        return 19
+    }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }
 
@@ -10098,7 +10148,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     // Copy code bytes — direct BSS write + struct-ref read (both work)
     var ci: i64 = 0
     while ci < code_len {
-        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).code.bytes[ci as usize]
+        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = NC_BIG_CODE[ci as usize]
         NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
         ci = ci + 1
     }

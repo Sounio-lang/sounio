@@ -1,0 +1,137 @@
+//@ run-pass
+// The 168-theorem, EXECUTED. Sounio computes the exact sedenion product on the 84 primitive
+// zero-divisor representatives and proves — by decidable integer equality, no tolerance — that
+// there are exactly 84 -> 336 -> 168 (ordered -> unordered) projective zero-divisor classes, the
+// same census formal/lean4/SounioZeroDivisorBridge.lean proves by native_decide (168 = |PSL(2,7)|).
+//
+// SELF-CONTAINED BY DESIGN: reproduces the Lean `primProd` (pure +/-1 sign algebra over Z), so it
+// needs no [i64;2048] element type — avoiding the large-aggregate cross-module lowering segfault in
+// souc v0.80.0 (issue #637) that importing the engine would trigger. The dense engine product (cd_mul_exact_i64) is
+// exercised separately on the canonical pair in tests/run-pass/sedenion_zd_exact_smoke.sio. The
+// `cd_sigma_c` recursion is the same as stdlib/algebra/cayley_dickson.sio's cd_sigma (all i64 here,
+// so no shift/type casts are needed).
+
+// Cayley-Dickson sign at tower level `bits`: e_a * e_b = cd_sigma_c(a,b) * e_{a XOR b}, returns +/-1.
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+// primProd(u,v,k): k-th integer coefficient of the product of primitives u=e_ulo (+/-) e_uhi, v likewise.
+// uneg/vneg: 0 => +e_hi, 1 => -e_hi. Four cross-terms (lo.lo, lo.hi, hi.lo, hi.hi).
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+
+// isZeroPair: the exact product is the zero vector across all 16 components (decidable).
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // (a) Generate the 84 valid primitives: lo in 1..7, hi in 9..15, neg in {0,1}, keep (lo XOR hi) != 8.
+    var plo = [0; 98]
+    var phi = [0; 98]
+    var pneg = [0; 98]
+    var n = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 9
+        while hi <= 15 {
+            var s = 0
+            while s <= 1 {
+                if (lo ^ hi) != 8 {
+                    plo[n as usize] = lo
+                    phi[n as usize] = hi
+                    pneg[n as usize] = s
+                    n = n + 1
+                }
+                s = s + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    if n == 84 { println("VALIDPRIMS 84 PASS") } else { print("VALIDPRIMS FAIL n="); println(n) }
+
+    // (b) ordered zero-divisor pairs (u != v, isZeroPair); (c) unordered via primLt.
+    var ordered = 0
+    var unordered = 0
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            if i != j {
+                let ul = plo[i as usize]
+                let uh = phi[i as usize]
+                let un = pneg[i as usize]
+                let vl = plo[j as usize]
+                let vh = phi[j as usize]
+                let vn = pneg[j as usize]
+                let zp = is_zero_pair(ul, uh, un, vl, vh, vn)
+                if zp {
+                    ordered = ordered + 1
+                    // primLt(u,v): three disjoint cases (lo<lo; lo== & hi<hi; lo== & hi== & u.neg<v.neg)
+                    var lt = false
+                    if ul < vl { lt = true }
+                    if ul == vl && uh < vh { lt = true }
+                    if ul == vl && uh == vh && un == 0 && vn == 1 { lt = true }
+                    if lt {
+                        unordered = unordered + 1
+                        // Emit the canonical pair as DATA for cross-toolchain diff (vs the Python
+                        // oracle transcribed from Lean). A false-green stub cannot reproduce 168
+                        // specific, correct pairs — only counts would be forgeable, pairs are not.
+                        print("PAIR ")
+                        print_int(ul)
+                        print(" ")
+                        print_int(uh)
+                        print(" ")
+                        print_int(un)
+                        print(" ")
+                        print_int(vl)
+                        print(" ")
+                        print_int(vh)
+                        print(" ")
+                        print_int(vn)
+                        print("\n")
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if ordered == 336 { println("ORDERED 336 PASS") } else { print("ORDERED FAIL="); println(ordered) }
+    if unordered == 168 { println("UNORDERED 168 PASS") } else { print("UNORDERED FAIL="); println(unordered) }
+
+    // (d) Anchor: canonical pair a=e3+e10, b=e6-e15 annihilates (u=lo3,hi10,neg0 ; v=lo6,hi15,neg1).
+    if is_zero_pair(3, 10, 0, 6, 15, 1) { println("CANONICAL-ZD PASS") } else { println("CANONICAL-ZD FAIL") }
+}

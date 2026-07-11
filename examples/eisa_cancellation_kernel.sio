@@ -1,0 +1,190 @@
+// EISA E5 showcase: catastrophic-cancellation kernel through the full stack
+// (Sounio epistemic subset -> eisa::backend -> .eisax -> EVM receipts).
+//
+// Kernel: the expanded quartic (x - 1)^4 evaluated at x = 1.000001 via its
+// monomial form x^4 + 6x^2 + 1 - (4x^3 + 4x), the same reduced cancellation
+// witness as tests/stdlib/math/test_dd64_cancellation.sio. The full Rump
+// (1988) polynomial is the family's boundary case but does not fit the E3 v0
+// budget honestly (16 registers / 32 instructions with move synthesis); the
+// scientific point — the val lane collapses to exactly 0 while the receipt's
+// roundoff lane carries the true ~2^-80 value — is identical and is what the
+// two gates below witness (gate j: the O(1) operand about to be annihilated;
+// gate k: the collapsed result).
+use eisa::backend::*
+use eisa::format::*
+use eisa::evm::*
+use math::dd64::*
+use str::lib::*
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn nl_str() -> Str with Mut, Div, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 10 as i8
+    str_from_bytes_buf(&buf, 1)
+}
+
+fn concat_line(dst: &Str, line: &Str, nl: &Str) -> Str with Mut, Div, Panic {
+    let t = str_cat(dst, line)
+    str_cat(&t, nl)
+}
+
+fn append_lit(dst: &Str, s: string, nl: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(s)
+    concat_line(dst, &line, nl)
+}
+
+fn build_e5_kernel_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn k() {", &nl)
+    src = append_lit(&src, "let a = 1.000001", &nl)
+    src = append_lit(&src, "let b = a * a", &nl)
+    src = append_lit(&src, "let c = b * a", &nl)
+    src = append_lit(&src, "let d = b * b", &nl)
+    src = append_lit(&src, "let e = 6.0 * b", &nl)
+    src = append_lit(&src, "let f = d + e", &nl)
+    src = append_lit(&src, "let g = f + 1.0", &nl)
+    src = append_lit(&src, "let h = 4.0 * c", &nl)
+    src = append_lit(&src, "let i = 4.0 * a", &nl)
+    src = append_lit(&src, "let j = h + i", &nl)
+    // Gate the large operand before the cancellation: its receipt shows the
+    // O(1) magnitude that the subtraction below annihilates in the val lane.
+    src = append_lit(&src, "gate j", &nl)
+    src = append_lit(&src, "let k = g - j", &nl)
+    src = append_lit(&src, "store [r] <- k", &nl)
+    src = append_lit(&src, "gate k", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn find_gate_reg(build: &EisaxBuild, gate_ix: i64) -> i64 with Mut, Panic {
+    var seen = 0
+    var i = 0
+    while i < build.n_code {
+        if build.ops[i as usize] == op_egate() {
+            if seen == gate_ix {
+                return build.dsts[i as usize]
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn print_i64_dec(n: i64) with IO, Mut, Div {
+    if n == 0 {
+        print("0")
+        return
+    }
+    var v = n
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+    var buf: [i64; 20] = [0; 20]
+    var len = 0
+    while v > 0 {
+        buf[len as usize] = v - (v / 10) * 10
+        v = v / 10
+        len = len + 1
+    }
+    var i = len - 1
+    while i >= 0 {
+        let d = buf[i as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        i = i - 1
+    }
+}
+
+fn print_parts(label: string, x: f64) with IO, Mut, Div {
+    let p = f64_parts(x)
+    print(label)
+    print("=s")
+    print_i64_dec(p.sign)
+    print("e")
+    print_i64_dec(p.exp)
+    print("m")
+    print_i64_dec(p.mant)
+    println("")
+}
+
+fn kernel_ref_dd() -> Dd64 with Mut, Div {
+    let a = dd_from_f64(1.000001)
+    let b = dd_mul(a, a)
+    let c = dd_mul(b, a)
+    let d = dd_mul(b, b)
+    let e = dd_mul_f64(b, 6.0)
+    let f = dd_add(d, e)
+    let g = dd_add_f64(f, 1.0)
+    let h = dd_mul_f64(c, 4.0)
+    let i = dd_mul_f64(a, 4.0)
+    let j = dd_add(h, i)
+    let k = dd_sub(g, j)
+    k
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let src = build_e5_kernel_src()
+    let br = eisa_compile(src)
+    assert(br.status == 0)
+    assert(br.build.n_code <= 32)
+    assert(br.build.n_const <= 16)
+
+    let img = eisax_encode(br.build)
+    assert(eisax_validate(img) == 0)
+
+    var m = evm_load(img)
+    assert(evm_run(&!m) == 0)
+
+    let precancel_reg = find_gate_reg(&br.build, 0)
+    let cancel_reg = find_gate_reg(&br.build, 1)
+    let result_reg = cancel_reg
+    assert(precancel_reg >= 0)
+    assert(cancel_reg >= 0)
+
+    let result_val = evm_mem_val(&m, 0)
+    let result_ehi = evm_mem_ehi(&m, 0)
+    let result_elo = evm_mem_elo(&m, 0)
+    let result_u = evm_mem_u(&m, 0)
+    assert(evm_mem_poison(&m, 0) == 0)
+    assert(f64_bits_eq(result_val, evm_reg_val(&m, result_reg)))
+    assert(f64_bits_eq(result_ehi, evm_reg_ehi(&m, result_reg)))
+
+    let cancel_val = evm_reg_val(&m, cancel_reg)
+    let cancel_ehi = evm_reg_ehi(&m, cancel_reg)
+    let result_sum = dd_add(dd_from_f64(result_val), dd_from_f64(result_ehi))
+    let ref_dd = kernel_ref_dd()
+
+    println("E5 kernel witness epilogue")
+    print_parts("precancel.val", evm_reg_val(&m, precancel_reg))
+    print_parts("cancel.val", cancel_val)
+    print_parts("cancel.err_hi", cancel_ehi)
+    print_parts("result.val", result_val)
+    print_parts("result.err_hi", result_ehi)
+    print_parts("result.err_lo", result_elo)
+    print_parts("result.u", result_u)
+    print_parts("result.val_plus_err_hi", dd_to_f64(result_sum))
+    print_parts("dd_ref.hi", ref_dd.hi)
+    print_parts("dd_ref.lo", ref_dd.lo)
+    print_parts("dd_ref.sum", dd_to_f64(ref_dd))
+    print_parts("abs_delta(sum_vs_dd_ref)", abs_f64(dd_to_f64(dd_sub(result_sum, ref_dd))))
+}

@@ -1,0 +1,216 @@
+//@ run-pass
+//@ expect-stdout: SPECTRA OK
+// FRENTE B, vector 4(1) — the emergent metric: the ZD geometry's graphs have INTEGRAL spectra.
+//
+// The zero-divisor geometry is not just combinatorial — its graphs carry an exact spectral (metric)
+// structure. Both are spectrally integral:
+//   * a fiber (K_{6,6} - 3*K_{2,2}, 12 vertices, degree 4): adjacency spectrum {4, 2^2, 0^6, -2^2, -4},
+//     Laplacian {0, 2^2, 4^6, 6^2, 8}, algebraic connectivity (spectral gap) = 2;
+//   * the 2*K_7 fiber-incidence graph (7 fibers, each pair doubled, degree 12): adjacency {12, -2^6},
+//     Laplacian {0, 14^6}, algebraic connectivity = 14.
+// We certify the integral spectra by their SPECTRAL MOMENTS: trace(A^k) = sum of k-th powers of the
+// eigenvalues, computed exactly over Z by integer matrix powers. Matching the moments of a proposed
+// integral spectrum (for k up to > #distinct eigenvalues) pins the spectrum.
+//
+// Decidable integer arithmetic, no float. SELF-CONTAINED. Cross-verified vs
+// scripts/research/sedenion_spectra_oracle.py by the gate + Lean.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+// trace(A^k) for a 12x12 adjacency matrix A stored row-major in `a` (144 entries), k=1..6.
+// Returns the six traces packed as t1*P^5 + ... no — we just compare each; emit-encode below.
+fn main() with IO, Mut, Panic, Div {
+    // Build one fiber's 12 vertices (L = lo^hi == 9): participating mixed-half primitives with lo^hi==9.
+    var flo = [0; 12]
+    var fhi = [0; 12]
+    var fng = [0; 12]
+    var m = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            // fiber L=9 = participating mixed-half primitives with lo^hi==9. Participation excludes the
+            // e8 family (hi==8 or lo^hi==8); here lo^hi==9 so only hi==8 is dropped.
+            if (lo ^ hi) == 9 && hi != 8 {
+                var neg = 0
+                while neg <= 1 {
+                    if m < 12 {
+                        flo[m as usize] = lo
+                        fhi[m as usize] = hi
+                        fng[m as usize] = neg
+                        m = m + 1
+                    }
+                    neg = neg + 1
+                }
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    // 12x12 adjacency A (fiber annihilation graph)
+    var A = [0; 144]
+    var i = 0
+    while i < 12 {
+        var j = 0
+        while j < 12 {
+            if i != j {
+                if is_zero_pair(flo[i as usize], fhi[i as usize], fng[i as usize],
+                                flo[j as usize], fhi[j as usize], fng[j as usize]) {
+                    A[(i * 12 + j) as usize] = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // spectral moments trace(A^k), k=1..6, via repeated 12x12 integer matmul
+    var P = [0; 144]
+    var d = 0
+    while d < 12 { P[(d * 12 + d) as usize] = 1  d = d + 1 }
+    var moments_fib = [0; 7]
+    var kk = 1
+    while kk <= 6 {
+        // P = P * A
+        var C = [0; 144]
+        var r = 0
+        while r < 12 {
+            var c = 0
+            while c < 12 {
+                var s = 0
+                var t = 0
+                while t < 12 {
+                    s = s + P[(r * 12 + t) as usize] * A[(t * 12 + c) as usize]
+                    t = t + 1
+                }
+                C[(r * 12 + c) as usize] = s
+                c = c + 1
+            }
+            r = r + 1
+        }
+        P = C
+        var tr = 0
+        var e = 0
+        while e < 12 { tr = tr + P[(e * 12 + e) as usize]  e = e + 1 }
+        moments_fib[kk as usize] = tr
+        kk = kk + 1
+    }
+    // expected fiber moments from spectrum {4,2,2,0,0,0,0,0,0,-2,-2,-4}: [0,48,0,576,0,8448]
+    var fib_ok = 1
+    if moments_fib[1 as usize] != 0 { fib_ok = 0 }
+    if moments_fib[2 as usize] != 48 { fib_ok = 0 }
+    if moments_fib[3 as usize] != 0 { fib_ok = 0 }
+    if moments_fib[4 as usize] != 576 { fib_ok = 0 }
+    if moments_fib[5 as usize] != 0 { fib_ok = 0 }
+    if moments_fib[6 as usize] != 8448 { fib_ok = 0 }
+
+    // 2*K_7: 7x7 matrix with off-diagonal 2. moments trace(A^k) k=1..4.
+    var B = [0; 49]
+    var bi = 0
+    while bi < 7 {
+        var bj = 0
+        while bj < 7 {
+            if bi != bj { B[(bi * 7 + bj) as usize] = 2 }
+            bj = bj + 1
+        }
+        bi = bi + 1
+    }
+    var Q = [0; 49]
+    var q = 0
+    while q < 7 { Q[(q * 7 + q) as usize] = 1  q = q + 1 }
+    var mom2k7 = [0; 5]
+    var k2 = 1
+    while k2 <= 4 {
+        var D = [0; 49]
+        var r2 = 0
+        while r2 < 7 {
+            var c2 = 0
+            while c2 < 7 {
+                var s2 = 0
+                var t2 = 0
+                while t2 < 7 {
+                    s2 = s2 + Q[(r2 * 7 + t2) as usize] * B[(t2 * 7 + c2) as usize]
+                    t2 = t2 + 1
+                }
+                D[(r2 * 7 + c2) as usize] = s2
+                c2 = c2 + 1
+            }
+            r2 = r2 + 1
+        }
+        Q = D
+        var tr2 = 0
+        var e2 = 0
+        while e2 < 7 { tr2 = tr2 + Q[(e2 * 7 + e2) as usize]  e2 = e2 + 1 }
+        mom2k7[k2 as usize] = tr2
+        k2 = k2 + 1
+    }
+    // expected from spectrum {12, -2^6}: [0, 168, 1680, 20832]
+    var k7_ok = 1
+    if mom2k7[1 as usize] != 0 { k7_ok = 0 }
+    if mom2k7[2 as usize] != 168 { k7_ok = 0 }
+    if mom2k7[3 as usize] != 1680 { k7_ok = 0 }
+    if mom2k7[4 as usize] != 20832 { k7_ok = 0 }
+
+    // one moment per line (single print_int) — portable across souc builds.
+    print("FIBM2 ")
+    print_int(moments_fib[2 as usize])
+    print("\n")
+    print("FIBM4 ")
+    print_int(moments_fib[4 as usize])
+    print("\n")
+    print("FIBM6 ")
+    print_int(moments_fib[6 as usize])
+    print("\n")
+    print("K7M2 ")
+    print_int(mom2k7[2 as usize])
+    print("\n")
+    print("K7M3 ")
+    print_int(mom2k7[3 as usize])
+    print("\n")
+    print("K7M4 ")
+    print_int(mom2k7[4 as usize])
+    print("\n")
+    print("VERTS ")
+    print_int(m as i64)
+    print("\n")
+    // integral spectra confirmed: fiber {+-4, +-2^2, 0^6} ; 2K7 {12, -2^6}.
+    if fib_ok == 1 && k7_ok == 1 && m == 12 {
+        println("SPECTRA OK")
+    } else {
+        println("SPECTRA FAIL")
+    }
+}
