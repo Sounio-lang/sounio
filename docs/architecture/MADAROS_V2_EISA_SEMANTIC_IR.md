@@ -119,11 +119,37 @@ causal source tamper, E2C/E2B/E2A/E1 regression, and zero diff over the frozen
 oracle and production codegen/ABI/runtime. Run
 `scripts/dev/madaros_v2_e2d_enir_rump_dd_gate.sh`.
 
+Implementation note (2026-07-11): `E2E-ENIR-V2-QD128-ARITHMETIC-FULL`
+adds `v2_const_gate`, `v2_add`, `v2_sub`, `v2_mul`, `v2_div`, and
+`v2_sqrt`, bringing cumulative real lowering to 23/30 programs and 29/39
+observations. `lower-v2` emits schema-v2 resource-bearing single-block ENIR
+with an explicit qd128 error type. Runtime observations expose all four
+roundoff words independently; none is reconstructed from a formatted scalar.
+
+The compiler-owned interpreter uses the pinned finite-domain expansion
+algorithms in `self-hosted/enir/qd.sio`, without importing `eisa::core_v2`,
+`math::qd128`, the Metron VM, or the x86 bridge. Its receipt binds the qd
+semantics source and independent Python checker hashes. The checker separately
+parses each source, normalizes the corresponding frozen v2 image to SSA,
+replays the Hida-Li-Bailey/Priest operation order, and requires exact value,
+`error0..error3`, uncertainty, status, graph, fuel, and METRON receipt parity.
+An additional `Fraction`/300-digit `Decimal` oracle checks the reconstructed
+expansion against the exact rational operations or high-precision square root
+under the declared finite qd relative-error bound; it does not reuse the qd
+operation implementation.
+The FULL gate includes 16 source negatives, 17 artifact/canonicalization
+tampers, four runtime all-word receipt tampers, a poisoned divide-by-zero
+witness, causal source tamper, E2D/E2C/E2B/E2A/E1 regression, and zero diff over
+the shared qd runtime, frozen oracle, and production codegen/ABI/runtime. Run
+`scripts/dev/madaros_v2_e2e_enir_qd128_gate.sh`.
+
 This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs, the remaining 13 v2/qd128 programs, arbitrary nested/
-path-sensitive loops, general exceptional-value algebra, `ENIR -> MIR`, ABI
-lowering, or production-codegen selection. Those boundaries remain open and
-fail closed rather than falling back through the shadow fixture.
+30/39 programs. The remaining seven programs are `v2_rump_qd`, `v2_fuel`,
+`v2_mem`, `v2_emov`, `v2_loop`, `v2_frail`, and `v2_mem_poison` (10
+observations). Arbitrary nested/path-sensitive loops, general exceptional-value
+algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, and production-codegen
+selection also remain open and fail closed rather than falling back through
+the shadow fixture.
 
 ## 1. Decision
 
@@ -140,7 +166,7 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. Until that milestone passes, ENIR is partially implemented only for
-the explicitly gated E2A/E2B/E2C/E2D slices; broader conformance remains
+the explicitly gated E2A/E2B/E2C/E2D/E2E slices; broader conformance remains
 unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
@@ -297,8 +323,11 @@ This is therefore a finite-precision, algorithm-indexed closure contract. It is
 not a proof about exact real arithmetic beyond the declared qd algorithm,
 domain, and assumptions. Before an implementation gate can cite the equation,
 the expansion semantics artifact and an executable independent checker must
-exist. Their present absence blocks conformance; it does not weaken or
-provisionally redefine the required equation.
+exist. E2E supplies that pair for the six finite arithmetic witnesses through
+`self-hosted/enir/qd.sio` and its independently hashed Python replay. This does
+not extend the claim to exceptional inputs, Rump reconstruction, control flow,
+memory, MIR, ABI, or arbitrary qd programs; those remain blocked rather than
+provisionally redefining the equation.
 
 ### 5.3 Epistemic uncertainty
 

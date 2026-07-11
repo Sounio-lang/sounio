@@ -304,6 +304,9 @@ pass "Madaros v2 E2C fuel and loop-carried block-argument lowering"
 bash scripts/dev/madaros_v2_e2d_enir_rump_dd_gate.sh
 pass "Madaros v2 E2D v1 Rump DD64 multi-observation lowering"
 
+bash scripts/dev/madaros_v2_e2e_enir_qd128_gate.sh
+pass "Madaros v2 E2E v2 qd128 arithmetic Source-to-ENIR lowering"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt
