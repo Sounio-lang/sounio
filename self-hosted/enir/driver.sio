@@ -1,5 +1,5 @@
-// Native compiler-owned E1 ENIR shadow driver. It is intentionally a separate
-// executable so Stage0 bootstrap and the canonical codegen graph remain fixed.
+// Native compiler-owned ENIR driver for E1 shadow validation and E2 direct
+// source lowering/execution. It remains separate from production codegen.
 
 use enir::ir::*
 use enir::parser::*
@@ -7,6 +7,8 @@ use enir::canonical::*
 use enir::verify::*
 use enir::hash::*
 use enir::shadow_fixture::*
+use enir::source_lower::*
+use enir::interpreter::*
 
 fn enir_driver_read(path: string) -> string with IO, Mut, Panic, Div, Alloc {
     let size = file_size(path)
@@ -70,6 +72,37 @@ fn enir_driver_verify(path: string) with IO, Mut, Panic, Div, Alloc {
     print(receipt)
 }
 
+fn enir_driver_lower(path: string) with IO, Mut, Panic, Div, Alloc {
+    let source = enir_driver_read(path)
+    let lowered = enir_lower_source(source)
+    if !lowered.ok {
+        var error = "enir-lower-error|line=" ++ enir_i64_string(lowered.error_line)
+        error = error ++ "|code=" ++ enir_i64_string(lowered.error_code) ++ "\n"
+        print(error)
+        panic("source-to-ENIR lowering failed")
+    }
+    print(enir_print_canonical(lowered.module))
+}
+
+fn enir_driver_run(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_verify_text(input)
+    if module.stage != ENIR_STAGE_LOWERED { panic("ENIR run requires a lowered module") }
+    let result = enir_interpret(module)
+    if !result.ok {
+        var error = "enir-exec-error|code=" ++ enir_i64_string(result.error_code)
+        error = error ++ "|executed_ops=" ++ enir_i64_string(result.executed_ops)
+        error = error ++ "|observations=" ++ enir_i64_string(result.observations) ++ "\n"
+        print(error)
+        panic("ENIR interpretation failed")
+    }
+    var receipt = "enir-exec-ok|module=" ++ enir_name_to_string(module.name)
+    receipt = receipt ++ "|module_hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    receipt = receipt ++ "|executed_ops=" ++ enir_i64_string(result.executed_ops)
+    receipt = receipt ++ "|observations=" ++ enir_i64_string(result.observations) ++ "\n"
+    print(receipt)
+}
+
 fn main() with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc == 1 && get_arg(0) == "emit" {
@@ -84,5 +117,13 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         enir_driver_verify(get_arg(1))
         return
     }
-    panic("usage: madaros-enir emit | roundtrip <file> | verify <file>")
+    if argc == 2 && get_arg(0) == "lower" {
+        enir_driver_lower(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "run" {
+        enir_driver_run(get_arg(1))
+        return
+    }
+    panic("usage: madaros-enir emit | roundtrip <enir> | verify <enir> | lower <source> | run <enir>")
 }

@@ -292,6 +292,9 @@ pass "source-fresh missing-env merged checker"
 bash scripts/dev/madaros_v2_e1_enir_shadow_gate.sh
 pass "Madaros v2 E1 compiler-owned ENIR shadow"
 
+bash scripts/dev/madaros_v2_e2_enir_lowering_gate.sh
+pass "Madaros v2 E2A v0 straight-line Source-to-ENIR lowering"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt

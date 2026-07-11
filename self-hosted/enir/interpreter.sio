@@ -1,0 +1,367 @@
+// E2 ENIR interpreter for the v0 straight-line profile. Numeric operations are
+// implemented here rather than delegated to eisa::core or the Metron EVM.
+
+use enir::ir::*
+use enir::verify::*
+use enir::canonical::*
+use enir::hash::*
+
+struct EnirInterpDd {
+    hi: f64,
+    lo: f64,
+}
+
+struct EnirInterpValue {
+    val: f64,
+    err: EnirInterpDd,
+    uncertainty: f64,
+    poisoned: i64,
+}
+
+pub struct EnirInterpretResult {
+    pub ok: bool,
+    pub error_code: i64,
+    pub executed_ops: i64,
+    pub observations: i64,
+}
+
+fn enir_interp_dd_zero() -> EnirInterpDd {
+    EnirInterpDd { hi: 0.0, lo: 0.0 }
+}
+
+fn enir_interp_dd_from_f64(x: f64) -> EnirInterpDd {
+    EnirInterpDd { hi: x, lo: 0.0 }
+}
+
+fn enir_interp_two_sum(a: f64, b: f64) -> EnirInterpDd {
+    let sum = a + b
+    let b_virtual = sum - a
+    let error = (a - (sum - b_virtual)) + (b - b_virtual)
+    EnirInterpDd { hi: sum, lo: error }
+}
+
+fn enir_interp_quick_two_sum(a: f64, b: f64) -> EnirInterpDd {
+    let sum = a + b
+    EnirInterpDd { hi: sum, lo: b - (sum - a) }
+}
+
+fn enir_interp_split(a: f64) -> EnirInterpDd {
+    let c = 134217729.0 * a
+    let hi = c - (c - a)
+    EnirInterpDd { hi: hi, lo: a - hi }
+}
+
+fn enir_interp_two_prod(a: f64, b: f64) -> EnirInterpDd {
+    let product = a * b
+    let aa = enir_interp_split(a)
+    let bb = enir_interp_split(b)
+    let error = ((aa.hi * bb.hi - product) + aa.hi * bb.lo + aa.lo * bb.hi) + aa.lo * bb.lo
+    EnirInterpDd { hi: product, lo: error }
+}
+
+fn enir_interp_dd_add(x: EnirInterpDd, y: EnirInterpDd) -> EnirInterpDd {
+    let s = enir_interp_two_sum(x.hi, y.hi)
+    let t = enir_interp_two_sum(x.lo, y.lo)
+    let c = s.lo + t.hi
+    let v = enir_interp_quick_two_sum(s.hi, c)
+    enir_interp_quick_two_sum(v.hi, t.lo + v.lo)
+}
+
+fn enir_interp_dd_neg(x: EnirInterpDd) -> EnirInterpDd {
+    EnirInterpDd { hi: 0.0 - x.hi, lo: 0.0 - x.lo }
+}
+
+fn enir_interp_dd_sub(x: EnirInterpDd, y: EnirInterpDd) -> EnirInterpDd {
+    enir_interp_dd_add(x, enir_interp_dd_neg(y))
+}
+
+fn enir_interp_dd_mul_f64(x: EnirInterpDd, y: f64) -> EnirInterpDd {
+    let product = enir_interp_two_prod(x.hi, y)
+    enir_interp_quick_two_sum(product.hi, product.lo + x.lo * y)
+}
+
+fn enir_interp_dd_to_f64(x: EnirInterpDd) -> f64 {
+    x.hi + x.lo
+}
+
+fn enir_interp_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = if x > 1.0 { x * 0.5 } else { 1.0 }
+    var i: i64 = 0
+    while i < 40 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn enir_interp_clean(value: f64) -> EnirInterpValue {
+    EnirInterpValue { val: value, err: enir_interp_dd_zero(), uncertainty: 0.0, poisoned: 0 }
+}
+
+fn enir_interp_poison() -> EnirInterpValue {
+    EnirInterpValue { val: 0.0, err: enir_interp_dd_zero(), uncertainty: 0.0, poisoned: 1 }
+}
+
+fn enir_interp_finite(x: f64) -> bool {
+    let bits = f64_to_bits(x)
+    ((bits >> 52) & 2047) != 2047
+}
+
+fn enir_interp_bits_to_f64(bits: i64) -> f64 with Mut, Div {
+    let sign = (bits >> 63) & 1
+    let exponent = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if exponent == 2047 { return 0.0 / 0.0 }
+    if exponent == 0 && fraction == 0 {
+        return if sign == 1 { (0.0 - 1.0) * 0.0 } else { 0.0 }
+    }
+    var mantissa: f64 = 0.0
+    var bit_value: f64 = 0.5
+    var bit: i64 = 51
+    while bit >= 0 {
+        if ((fraction >> bit) & 1) == 1 { mantissa = mantissa + bit_value }
+        bit_value = bit_value * 0.5
+        bit = bit - 1
+    }
+    var value = if exponent == 0 { mantissa } else { 1.0 + mantissa }
+    let power = if exponent == 0 { -1022 } else { exponent - 1023 }
+    var e: i64 = 0
+    if power > 0 {
+        while e < power { value = value * 2.0; e = e + 1 }
+    } else if power < 0 {
+        while e < (0 - power) { value = value * 0.5; e = e + 1 }
+    }
+    if sign == 1 { 0.0 - value } else { value }
+}
+
+fn enir_interp_lane_valid(value: EnirInterpValue) -> bool {
+    enir_interp_finite(value.val) && enir_interp_finite(value.err.hi) &&
+    enir_interp_finite(value.err.lo) && enir_interp_finite(value.uncertainty)
+}
+
+fn enir_interp_add(x: EnirInterpValue, y: EnirInterpValue) -> EnirInterpValue with Mut, Div {
+    if x.poisoned == 1 || y.poisoned == 1 { return enir_interp_poison() }
+    let sum = enir_interp_two_sum(x.val, y.val)
+    let ux = x.uncertainty * x.uncertainty
+    let uy = y.uncertainty * y.uncertainty
+    let out = EnirInterpValue {
+        val: sum.hi,
+        err: enir_interp_dd_add(enir_interp_dd_add(x.err, y.err), enir_interp_dd_from_f64(sum.lo)),
+        uncertainty: enir_interp_sqrt(ux + uy),
+        poisoned: 0,
+    }
+    if enir_interp_lane_valid(out) { out } else { enir_interp_poison() }
+}
+
+fn enir_interp_sub(x: EnirInterpValue, y: EnirInterpValue) -> EnirInterpValue with Mut, Div {
+    if x.poisoned == 1 || y.poisoned == 1 { return enir_interp_poison() }
+    let sum = enir_interp_two_sum(x.val, 0.0 - y.val)
+    let ux = x.uncertainty * x.uncertainty
+    let uy = y.uncertainty * y.uncertainty
+    let out = EnirInterpValue {
+        val: sum.hi,
+        err: enir_interp_dd_add(enir_interp_dd_sub(x.err, y.err), enir_interp_dd_from_f64(sum.lo)),
+        uncertainty: enir_interp_sqrt(ux + uy),
+        poisoned: 0,
+    }
+    if enir_interp_lane_valid(out) { out } else { enir_interp_poison() }
+}
+
+fn enir_interp_mul(x: EnirInterpValue, y: EnirInterpValue) -> EnirInterpValue with Mut, Div {
+    if x.poisoned == 1 || y.poisoned == 1 { return enir_interp_poison() }
+    let product = enir_interp_two_prod(x.val, y.val)
+    let t1 = y.val * x.uncertainty
+    let t2 = x.val * y.uncertainty
+    let out = EnirInterpValue {
+        val: product.hi,
+        err: enir_interp_dd_add(
+            enir_interp_dd_add(enir_interp_dd_mul_f64(x.err, y.val), enir_interp_dd_mul_f64(y.err, x.val)),
+            enir_interp_dd_from_f64(product.lo)
+        ),
+        uncertainty: enir_interp_sqrt(t1 * t1 + t2 * t2),
+        poisoned: 0,
+    }
+    if enir_interp_lane_valid(out) { out } else { enir_interp_poison() }
+}
+
+fn enir_interp_div(x: EnirInterpValue, y: EnirInterpValue) -> EnirInterpValue with Mut, Div {
+    if x.poisoned == 1 || y.poisoned == 1 || y.val == 0.0 { return enir_interp_poison() }
+    let quotient = x.val / y.val
+    let product = enir_interp_two_prod(quotient, y.val)
+    let residual_dd = enir_interp_dd_sub(enir_interp_dd_from_f64(x.val), product)
+    let residual = enir_interp_dd_to_f64(residual_dd) / y.val
+    let abs_y = if y.val < 0.0 { 0.0 - y.val } else { y.val }
+    let inner = x.uncertainty * x.uncertainty +
+        (quotient * y.uncertainty) * (quotient * y.uncertainty)
+    let out = EnirInterpValue {
+        val: quotient,
+        err: enir_interp_dd_add(
+            enir_interp_dd_sub(
+                enir_interp_dd_mul_f64(x.err, 1.0 / y.val),
+                enir_interp_dd_mul_f64(y.err, quotient / y.val)
+            ),
+            enir_interp_dd_from_f64(residual)
+        ),
+        uncertainty: (1.0 / abs_y) * enir_interp_sqrt(inner),
+        poisoned: 0,
+    }
+    if enir_interp_lane_valid(out) { out } else { enir_interp_poison() }
+}
+
+fn enir_interp_sqrt_value(x: EnirInterpValue) -> EnirInterpValue with Mut, Div {
+    if x.poisoned == 1 { return enir_interp_poison() }
+    if x.val <= 0.0 { return enir_interp_clean(0.0) }
+    let root = enir_interp_sqrt(x.val)
+    let product = enir_interp_two_prod(root, root)
+    let residual_dd = enir_interp_dd_sub(enir_interp_dd_from_f64(x.val), product)
+    let residual = enir_interp_dd_to_f64(residual_dd) / (2.0 * root)
+    let out = EnirInterpValue {
+        val: root,
+        err: enir_interp_dd_add(enir_interp_dd_mul_f64(x.err, 1.0 / (2.0 * root)), enir_interp_dd_from_f64(residual)),
+        uncertainty: x.uncertainty / (2.0 * root),
+        poisoned: 0,
+    }
+    if enir_interp_lane_valid(out) { out } else { enir_interp_poison() }
+}
+
+fn enir_interp_gate_class(value: EnirInterpValue) -> i64 {
+    if value.poisoned == 1 { return 2 }
+    let roundoff_sum = value.err.hi + value.err.lo
+    let roundoff = if roundoff_sum < 0.0 { 0.0 - roundoff_sum } else { roundoff_sum }
+    let budget = value.uncertainty
+    if budget <= 0.0 { return if roundoff == 0.0 { 0 } else { 2 } }
+    if roundoff * 10.0 >= budget { return 2 }
+    if roundoff * 100.0 >= budget { return 1 }
+    0
+}
+
+fn enir_interp_receipt(
+    module: EnirModule,
+    op: EnirOp,
+    value: EnirInterpValue,
+    ordinal: i64
+) -> string with Mut, Panic, Div, Alloc {
+    let descriptor = module.values[op.a as usize]
+    let provenance = module.provenance[descriptor.provenance_id as usize]
+    let value_bits = if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) }
+    let uncertainty_bits = if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) }
+    var out = "enir-exec|schema=1|stage=2|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|module_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_print_canonical(module)))
+    out = out ++ "|ordinal=" ++ enir_i64_string(ordinal)
+    out = out ++ "|site=" ++ enir_i64_string(op.id)
+    out = out ++ "|value_id=" ++ enir_i64_string(op.a)
+    out = out ++ "|value_bits=" ++ enir_i64_string(value_bits)
+    out = out ++ "|error0_bits=" ++ enir_i64_string(f64_to_bits(value.err.hi))
+    out = out ++ "|error1_bits=" ++ enir_i64_string(f64_to_bits(value.err.lo))
+    out = out ++ "|uncertainty_bits=" ++ enir_i64_string(uncertainty_bits)
+    out = out ++ "|status=" ++ enir_i64_string(value.poisoned)
+    out = out ++ "|gate_class=" ++ enir_i64_string(enir_interp_gate_class(value))
+    out = out ++ "|source_span=" ++ enir_i64_string(provenance.source_span_id) ++ "\n"
+    out
+}
+
+fn enir_interp_memory_receipt(
+    module: EnirModule,
+    slot: i64,
+    site: i64,
+    value: EnirInterpValue
+) -> string with Mut, Panic, Div, Alloc {
+    let value_bits = if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) }
+    let uncertainty_bits = if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) }
+    var out = "enir-memory|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|slot=" ++ enir_i64_string(slot)
+    out = out ++ "|site=" ++ enir_i64_string(site)
+    out = out ++ "|value_bits=" ++ enir_i64_string(value_bits)
+    out = out ++ "|error0_bits=" ++ enir_i64_string(f64_to_bits(value.err.hi))
+    out = out ++ "|error1_bits=" ++ enir_i64_string(f64_to_bits(value.err.lo))
+    out = out ++ "|uncertainty_bits=" ++ enir_i64_string(uncertainty_bits)
+    out = out ++ "|status=" ++ enir_i64_string(value.poisoned) ++ "\n"
+    out
+}
+
+pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, Panic, Div, Alloc {
+    let verify_rc = enir_verify(module)
+    if verify_rc != 0 { return EnirInterpretResult { ok: false, error_code: 10000 + verify_rc, executed_ops: 0, observations: 0 } }
+    if module.stage != ENIR_STAGE_LOWERED || module.profile != enir_profile_eisa_v0() {
+        return EnirInterpretResult { ok: false, error_code: 1, executed_ops: 0, observations: 0 }
+    }
+    var values: [EnirInterpValue; 128] = [EnirInterpValue {
+        val: 0.0,
+        err: EnirInterpDd { hi: 0.0, lo: 0.0 },
+        uncertainty: 0.0,
+        poisoned: 1,
+    }; 128]
+    var defined: [i64; 128] = [0; 128]
+    var memory: [EnirInterpValue; 16] = [EnirInterpValue {
+        val: 0.0,
+        err: EnirInterpDd { hi: 0.0, lo: 0.0 },
+        uncertainty: 0.0,
+        poisoned: 1,
+    }; 16]
+    var memory_defined: [i64; 16] = [0; 16]
+    var memory_site: [i64; 16] = [-1; 16]
+    var observations: i64 = 0
+    var i: i64 = 0
+    while i < module.op_count {
+        let op = module.ops[i as usize]
+        if op.opcode == enir_op_econst() {
+            let descriptor = module.values[op.result_id as usize]
+            let value = enir_interp_bits_to_f64(descriptor.value_bits)
+            if f64_to_bits(value) != descriptor.value_bits {
+                return EnirInterpretResult { ok: false, error_code: 19, executed_ops: i, observations: observations }
+            }
+            values[op.result_id as usize] = if enir_interp_finite(value) { enir_interp_clean(value) } else { enir_interp_poison() }
+            defined[op.result_id as usize] = 1
+        } else if op.opcode == enir_op_eadd() || op.opcode == enir_op_esub() ||
+                  op.opcode == enir_op_emul() || op.opcode == enir_op_ediv() {
+            if defined[op.a as usize] == 0 || defined[op.b as usize] == 0 {
+                return EnirInterpretResult { ok: false, error_code: 20, executed_ops: i, observations: observations }
+            }
+            let x = values[op.a as usize]
+            let y = values[op.b as usize]
+            let result = if op.opcode == enir_op_eadd() { enir_interp_add(x, y) } else {
+                if op.opcode == enir_op_esub() { enir_interp_sub(x, y) } else {
+                    if op.opcode == enir_op_emul() { enir_interp_mul(x, y) } else { enir_interp_div(x, y) }
+                }
+            }
+            values[op.result_id as usize] = result
+            defined[op.result_id as usize] = 1
+        } else if op.opcode == enir_op_esqrt() {
+            if defined[op.a as usize] == 0 { return EnirInterpretResult { ok: false, error_code: 21, executed_ops: i, observations: observations } }
+            values[op.result_id as usize] = enir_interp_sqrt_value(values[op.a as usize])
+            defined[op.result_id as usize] = 1
+        } else if op.opcode == enir_op_emov() {
+            if defined[op.a as usize] == 0 { return EnirInterpretResult { ok: false, error_code: 22, executed_ops: i, observations: observations } }
+            values[op.result_id as usize] = values[op.a as usize]
+            defined[op.result_id as usize] = 1
+        } else if op.opcode == enir_op_estore() {
+            if defined[op.a as usize] == 0 || op.memory_slot < 0 || op.memory_slot >= 16 {
+                return EnirInterpretResult { ok: false, error_code: 23, executed_ops: i, observations: observations }
+            }
+            memory[op.memory_slot as usize] = values[op.a as usize]
+            memory_defined[op.memory_slot as usize] = 1
+            memory_site[op.memory_slot as usize] = op.id
+        } else if op.opcode == enir_op_egate() {
+            if defined[op.a as usize] == 0 || observations >= module.observation_count {
+                return EnirInterpretResult { ok: false, error_code: 24, executed_ops: i, observations: observations }
+            }
+            print(enir_interp_receipt(module, op, values[op.a as usize], observations))
+            observations = observations + 1
+        } else {
+            return EnirInterpretResult { ok: false, error_code: 30 + op.opcode, executed_ops: i, observations: observations }
+        }
+        i = i + 1
+    }
+    if observations != module.observation_count {
+        return EnirInterpretResult { ok: false, error_code: 50, executed_ops: module.op_count, observations: observations }
+    }
+    var slot: i64 = 0
+    while slot < 16 {
+        if memory_defined[slot as usize] == 1 {
+            print(enir_interp_memory_receipt(module, slot, memory_site[slot as usize], memory[slot as usize]))
+        }
+        slot = slot + 1
+    }
+    EnirInterpretResult { ok: true, error_code: 0, executed_ops: module.op_count, observations: observations }
+}

@@ -14,7 +14,7 @@ fn enir_type_valid(ty: EnirType) -> bool {
     enir_profile_valid(ty.profile)
 }
 
-fn enir_f64_class_from_bits(bits: i64) -> i64 {
+pub fn enir_f64_class_from_bits(bits: i64) -> i64 {
     let sign = (bits >> 63) & 1
     let exponent = (bits >> 52) & 2047
     let fraction = bits & 4503599627370495
@@ -95,7 +95,7 @@ fn enir_value_branchable(module: EnirModule, ids: [i64; 128], types: [i64; 128],
 
 pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     if module.schema_version != ENIR_SCHEMA_VERSION { return 101 }
-    if module.stage != ENIR_STAGE_SHADOW { return 102 }
+    if module.stage != ENIR_STAGE_SHADOW && module.stage != ENIR_STAGE_LOWERED { return 102 }
     if module.name.len <= 0 { return 103 }
     if !enir_profile_valid(module.profile) { return 104 }
     if module.type_count <= 0 || module.type_count > ENIR_MAX_TYPES { return 105 }
@@ -117,6 +117,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     while i < module.type_count {
         let ty = module.types[i as usize]
         if ty.id != i || !enir_type_valid(ty) { return 200 + i }
+        if module.stage == ENIR_STAGE_LOWERED && ty.profile != module.profile { return 220 + i }
         i = i + 1
     }
 
@@ -124,6 +125,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     while i < module.provenance_count {
         let provenance = module.provenance[i as usize]
         if provenance.id != i || provenance.source_span_id < 0 || provenance.transform_id < 0 { return 250 + i }
+        if module.stage == ENIR_STAGE_LOWERED && provenance.source_span_id <= 0 { return 260 + i }
         if provenance.input_origin_id < -1 || provenance.assumption_id < -1 || provenance.policy_id < -1 { return 270 + i }
         i = i + 1
     }
@@ -168,6 +170,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     var value_ids: [i64; 128] = [-1; 128]
     var value_types: [i64; 128] = [-1; 128]
     var value_count: i64 = 0
+    var gate_count: i64 = 0
     i = 0
     while i < module.op_count {
         let op = module.ops[i as usize]
@@ -191,6 +194,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
             if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 860 + i }
         } else if op.opcode == enir_op_egate() {
             if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || enir_policy_index(module, op.policy_id) < 0 { return 880 + i }
+            gate_count = gate_count + 1
         } else if op.opcode == enir_op_estore() {
             if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || op.memory_slot < 0 { return 900 + i }
         } else if op.opcode == enir_op_emov() {
@@ -209,6 +213,11 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
             if op.result_id < 0 || op.type_id < 0 { return 1020 + i }
             let declared_value_idx = enir_module_value_index(module, op.result_id)
             if declared_value_idx < 0 || module.values[declared_value_idx as usize].type_id != op.type_id { return 1030 + i }
+            if module.stage == ENIR_STAGE_LOWERED {
+                let provenance_id = module.values[declared_value_idx as usize].provenance_id
+                let provenance_idx = enir_provenance_index(module, provenance_id)
+                if provenance_idx < 0 || module.provenance[provenance_idx as usize].transform_id != op.opcode { return 1035 + i }
+            }
             if enir_value_defined(value_ids, value_types, value_count, op.result_id) { return 1040 + i }
             if op.opcode == enir_op_econst() && module.values[declared_value_idx as usize].known_bits != 1 { return 1050 + i }
             if value_count >= 128 { return 1060 + i }
@@ -221,6 +230,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
         i = i + 1
     }
     if value_count != module.value_count { return 1199 }
+    if module.stage == ENIR_STAGE_LOWERED && gate_count != module.observation_count { return 1198 }
 
     var programs: i64 = 0
     var previous_name = enir_name_empty()
@@ -246,5 +256,6 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
         i = i + 1
     }
     if programs != module.program_count { return 1601 }
+    if module.stage == ENIR_STAGE_LOWERED && module.program_count != 1 { return 1602 }
     0
 }
