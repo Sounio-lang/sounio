@@ -1,0 +1,452 @@
+// E2 direct source-to-ENIR lowering for the coherent EISA v0 straight-line
+// grammar. This parser does not call eisa::backend and never constructs .eisax.
+
+use enir::ir::*
+use enir::verify::*
+
+pub struct EnirLowerResult {
+    pub ok: bool,
+    pub error_line: i64,
+    pub error_code: i64,
+    pub module: EnirModule,
+}
+
+struct EnirSourceNumber {
+    ok: bool,
+    value: f64,
+}
+
+struct EnirSourceOperand {
+    ok: bool,
+    value_id: i64,
+}
+
+struct EnirSourceSymbols {
+    names: [EnirName; 32],
+    values: [i64; 32],
+    count: i64,
+    slot_names: [EnirName; 16],
+    slot_count: i64,
+}
+
+fn enir_source_symbols_new() -> EnirSourceSymbols {
+    EnirSourceSymbols {
+        names: [EnirName { buf: [0; 64], len: 0 }; 32],
+        values: [-1; 32],
+        count: 0,
+        slot_names: [EnirName { buf: [0; 64], len: 0 }; 16],
+        slot_count: 0,
+    }
+}
+
+fn enir_lower_fail(module: EnirModule, line: i64, code: i64) -> EnirLowerResult {
+    EnirLowerResult { ok: false, error_line: line, error_code: code, module: module }
+}
+
+fn enir_source_space(ch: i64) -> bool {
+    ch == 32 || ch == 9 || ch == 13
+}
+
+fn enir_source_trim_start(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    var i = start
+    while i < end && enir_source_space(str_char_at(text, i) as i64) { i = i + 1 }
+    i
+}
+
+fn enir_source_trim_end(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    var i = end
+    while i > start && enir_source_space(str_char_at(text, i - 1) as i64) { i = i - 1 }
+    i
+}
+
+fn enir_source_range_eq(text: string, start: i64, end: i64, expected: string) -> bool with Mut, Panic, Div {
+    let n = str_len(expected)
+    if end - start != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if (str_char_at(text, start + i) as i64) != (str_char_at(expected, i) as i64) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn enir_source_starts_with(text: string, start: i64, end: i64, expected: string) -> bool with Mut, Panic, Div {
+    let n = str_len(expected)
+    if end - start < n { return false }
+    enir_source_range_eq(text, start, start + n, expected)
+}
+
+fn enir_source_name(text: string, start: i64, end: i64) -> EnirName with Mut, Panic, Div {
+    let n = end - start
+    if n <= 0 || n > ENIR_NAME_CAP { return enir_name_empty() }
+    var out = enir_name_empty()
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(text, start + i) as i64
+        let alpha = (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
+        let digit = ch >= 48 && ch <= 57
+        if (!alpha && !(i > 0 && (digit || ch == 95))) { return enir_name_empty() }
+        out.buf[i as usize] = ch as i8
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+fn enir_source_number(text: string, start: i64, end: i64) -> EnirSourceNumber with Mut, Panic, Div {
+    if end <= start { return EnirSourceNumber { ok: false, value: 0.0 } }
+    var i = start
+    var negative = false
+    if (str_char_at(text, i) as i64) == 45 {
+        negative = true
+        i = i + 1
+        if i >= end { return EnirSourceNumber { ok: false, value: 0.0 } }
+    }
+    var value: f64 = 0.0
+    var integer_digits: i64 = 0
+    while i < end {
+        let ch = str_char_at(text, i) as i64
+        if ch < 48 || ch > 57 { break }
+        value = value * 10.0 + ((ch - 48) as f64)
+        integer_digits = integer_digits + 1
+        i = i + 1
+    }
+    var fraction_digits: i64 = 0
+    if i < end && (str_char_at(text, i) as i64) == 46 {
+        i = i + 1
+        var scale: f64 = 0.1
+        while i < end {
+            let ch = str_char_at(text, i) as i64
+            if ch < 48 || ch > 57 { break }
+            value = value + ((ch - 48) as f64) * scale
+            scale = scale * 0.1
+            fraction_digits = fraction_digits + 1
+            i = i + 1
+        }
+    }
+    if integer_digits == 0 || i != end { return EnirSourceNumber { ok: false, value: 0.0 } }
+    if fraction_digits == 0 && end > start && (str_char_at(text, end - 1) as i64) == 46 {
+        return EnirSourceNumber { ok: false, value: 0.0 }
+    }
+    if negative { value = 0.0 - value }
+    let bits = f64_to_bits(value)
+    if ((bits >> 52) & 2047) == 2047 { return EnirSourceNumber { ok: false, value: 0.0 } }
+    EnirSourceNumber { ok: true, value: value }
+}
+
+fn enir_source_symbol_find(symbols: EnirSourceSymbols, name: EnirName) -> i64 {
+    var i: i64 = 0
+    while i < symbols.count {
+        if enir_name_eq(symbols.names[i as usize], name) { return symbols.values[i as usize] }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_source_symbol_add(symbols: EnirSourceSymbols, name: EnirName, value_id: i64) -> EnirSourceSymbols with Mut {
+    var out = symbols
+    if out.count >= 32 { return out }
+    out.names[out.count as usize] = name
+    out.values[out.count as usize] = value_id
+    out.count = out.count + 1
+    out
+}
+
+fn enir_source_slot_find_or_add(symbols: EnirSourceSymbols, name: EnirName) -> EnirSourceSymbols with Mut {
+    var out = symbols
+    var i: i64 = 0
+    while i < out.slot_count {
+        if enir_name_eq(out.slot_names[i as usize], name) { return out }
+        i = i + 1
+    }
+    if out.slot_count >= 16 { return out }
+    out.slot_names[out.slot_count as usize] = name
+    out.slot_count = out.slot_count + 1
+    out
+}
+
+fn enir_source_slot_index(symbols: EnirSourceSymbols, name: EnirName) -> i64 {
+    var i: i64 = 0
+    while i < symbols.slot_count {
+        if enir_name_eq(symbols.slot_names[i as usize], name) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_source_push_value(
+    module: &!EnirModule,
+    opcode: i64,
+    a: i64,
+    b: i64,
+    line: i64,
+    known: i64,
+    bits: i64,
+    origin: i64
+) -> i64 with Mut, Panic, Div {
+    let value_id = module.value_count
+    if value_id >= ENIR_MAX_VALUES || module.provenance_count >= ENIR_MAX_PROVENANCE || module.op_count >= ENIR_MAX_OPS {
+        return -1
+    }
+    module.provenance[module.provenance_count as usize] = EnirProvenance {
+        id: value_id,
+        source_span_id: line,
+        input_origin_id: origin,
+        transform_id: opcode,
+        assumption_id: -1,
+        policy_id: -1,
+    }
+    module.provenance_count = module.provenance_count + 1
+    module.values[module.value_count as usize] = EnirValue {
+        id: value_id,
+        type_id: 0,
+        known_bits: known,
+        value_bits: bits,
+        fp_class: if known == 1 { enir_f64_class_from_bits(bits) } else { -1 },
+        error0_bits: 0,
+        error1_bits: 0,
+        error2_bits: 0,
+        error3_bits: 0,
+        uncertainty_bits: 0,
+        status_kind: enir_status_clean(),
+        status_reason: -1,
+        provenance_id: value_id,
+    }
+    module.value_count = module.value_count + 1
+    module.ops[module.op_count as usize] = EnirOp {
+        id: module.op_count,
+        opcode: opcode,
+        result_id: value_id,
+        type_id: 0,
+        a: a,
+        b: b,
+        target: -1,
+        policy_id: -1,
+        memory_slot: -1,
+        fuel_cost: 1,
+    }
+    module.op_count = module.op_count + 1
+    value_id
+}
+
+fn enir_source_operand(
+    module: &!EnirModule,
+    symbols: EnirSourceSymbols,
+    text: string,
+    start: i64,
+    end: i64,
+    line: i64,
+    origin: i64
+) -> EnirSourceOperand with Mut, Panic, Div {
+    let s = enir_source_trim_start(text, start, end)
+    let e = enir_source_trim_end(text, s, end)
+    let name = enir_source_name(text, s, e)
+    if name.len > 0 {
+        let value_id = enir_source_symbol_find(symbols, name)
+        if value_id >= 0 { return EnirSourceOperand { ok: true, value_id: value_id } }
+        return EnirSourceOperand { ok: false, value_id: -1 }
+    }
+    let number = enir_source_number(text, s, e)
+    if !number.ok { return EnirSourceOperand { ok: false, value_id: -1 } }
+    let value_id = enir_source_push_value(module, enir_op_econst(), -1, -1, line, 1, f64_to_bits(number.value), origin)
+    if value_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+    EnirSourceOperand { ok: true, value_id: value_id }
+}
+
+fn enir_source_lower_expr(
+    module: &!EnirModule,
+    symbols: EnirSourceSymbols,
+    text: string,
+    start: i64,
+    end: i64,
+    line: i64
+) -> EnirSourceOperand with Mut, Panic, Div {
+    let s = enir_source_trim_start(text, start, end)
+    let e = enir_source_trim_end(text, s, end)
+    if enir_source_starts_with(text, s, e, "sqrt(") && e - s >= 7 && (str_char_at(text, e - 1) as i64) == 41 {
+        let inner = enir_source_operand(module, symbols, text, s + 5, e - 1, line, line * 16)
+        if !inner.ok { return inner }
+        let value_id = enir_source_push_value(module, enir_op_esqrt(), inner.value_id, -1, line, 0, 0, -1)
+        if value_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+        return EnirSourceOperand { ok: true, value_id: value_id }
+    }
+
+    var depth: i64 = 0
+    var op_pos: i64 = -1
+    var op_kind: i64 = -1
+    var i = s
+    while i < e {
+        let ch = str_char_at(text, i) as i64
+        if ch == 40 { depth = depth + 1 }
+        else if ch == 41 { depth = depth - 1 }
+        else if depth == 0 && (ch == 43 || ch == 45 || ch == 42 || ch == 47) {
+            if i > s {
+                op_pos = i
+                op_kind = if ch == 43 { enir_op_eadd() } else {
+                    if ch == 45 { enir_op_esub() } else {
+                        if ch == 42 { enir_op_emul() } else { enir_op_ediv() }
+                    }
+                }
+                break
+            }
+        }
+        i = i + 1
+    }
+    if depth != 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+    if op_pos >= 0 {
+        let left = enir_source_operand(module, symbols, text, s, op_pos, line, line * 16)
+        if !left.ok { return left }
+        let right = enir_source_operand(module, symbols, text, op_pos + 1, e, line, line * 16 + 1)
+        if !right.ok { return right }
+        let value_id = enir_source_push_value(module, op_kind, left.value_id, right.value_id, line, 0, 0, -1)
+        if value_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+        return EnirSourceOperand { ok: true, value_id: value_id }
+    }
+
+    let name = enir_source_name(text, s, e)
+    if name.len > 0 {
+        let source_id = enir_source_symbol_find(symbols, name)
+        if source_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+        let value_id = enir_source_push_value(module, enir_op_emov(), source_id, -1, line, 0, 0, -1)
+        if value_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+        return EnirSourceOperand { ok: true, value_id: value_id }
+    }
+    let number = enir_source_number(text, s, e)
+    if number.ok {
+        let value_id = enir_source_push_value(module, enir_op_econst(), -1, -1, line, 1, f64_to_bits(number.value), line * 16)
+        if value_id < 0 { return EnirSourceOperand { ok: false, value_id: -1 } }
+        return EnirSourceOperand { ok: true, value_id: value_id }
+    }
+    EnirSourceOperand { ok: false, value_id: -1 }
+}
+
+pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    var module = enir_module_empty()
+    module.stage = ENIR_STAGE_LOWERED
+    module.profile = enir_profile_eisa_v0()
+    module = enir_module_push_type(module, EnirType {
+        id: 0,
+        value_kind: enir_value_f64(),
+        error_kind: enir_error_dd64(),
+        uncertainty_kind: enir_uncertainty_gum1(),
+        status_tracked: 1,
+        provenance_tracked: 1,
+        profile: enir_profile_eisa_v0(),
+    })
+    module = enir_module_push_policy(module, EnirPolicy {
+        id: 0,
+        name: enir_name_from_string("eisa_10_100_count_only"),
+        branch_kind: enir_branch_policy_count_only(),
+        gate_kind: enir_gate_policy_10_100(),
+    })
+
+    var symbols = enir_source_symbols_new()
+    let n = str_len(text)
+    if n <= 0 { return enir_lower_fail(module, 1, 1) }
+    var pos: i64 = 0
+    var line: i64 = 1
+    var seen_header = false
+    var seen_close = false
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if finish > start {
+            if seen_close { return enir_lower_fail(module, line, 2) }
+            if !seen_header {
+                if !enir_source_starts_with(text, start, finish, "epistemic fn ") || finish - start < 18 {
+                    return enir_lower_fail(module, line, 3)
+                }
+                let name_start = start + 13
+                let suffix_start = finish - 4
+                if suffix_start <= name_start || !enir_source_range_eq(text, suffix_start, finish, "() {") {
+                    return enir_lower_fail(module, line, 4)
+                }
+                let name = enir_source_name(text, name_start, suffix_start)
+                if name.len <= 0 { return enir_lower_fail(module, line, 5) }
+                module.name = name
+                seen_header = true
+            } else if enir_source_range_eq(text, start, finish, "}") {
+                seen_close = true
+            } else if enir_source_starts_with(text, start, finish, "let ") {
+                var eq = start + 4
+                while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
+                if eq >= finish { return enir_lower_fail(module, line, 10) }
+                let lhs_start = enir_source_trim_start(text, start + 4, eq)
+                let lhs_end = enir_source_trim_end(text, lhs_start, eq)
+                let lhs = enir_source_name(text, lhs_start, lhs_end)
+                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 32 { return enir_lower_fail(module, line, 11) }
+                let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                if !lowered.ok { return enir_lower_fail(module, line, 12) }
+                symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
+            } else if enir_source_starts_with(text, start, finish, "gate ") {
+                let name_start = enir_source_trim_start(text, start + 5, finish)
+                let name = enir_source_name(text, name_start, finish)
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 20) }
+                if module.op_count >= ENIR_MAX_OPS || module.observation_count >= ENIR_MAX_OBSERVATIONS {
+                    return enir_lower_fail(module, line, 21)
+                }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count,
+                    opcode: enir_op_egate(),
+                    result_id: -1,
+                    type_id: -1,
+                    a: value_id,
+                    b: -1,
+                    target: -1,
+                    policy_id: 0,
+                    memory_slot: -1,
+                    fuel_cost: 1,
+                })
+                module = enir_module_push_observation(module, EnirObservation {
+                    id: module.observation_count,
+                    program_name: module.name,
+                    ordinal: module.observation_count,
+                    kind: enir_observation_gate(),
+                })
+            } else if enir_source_starts_with(text, start, finish, "store ") {
+                let left = enir_source_trim_start(text, start + 6, finish)
+                if left >= finish || (str_char_at(text, left) as i64) != 91 { return enir_lower_fail(module, line, 30) }
+                var close = left + 1
+                while close < finish && (str_char_at(text, close) as i64) != 93 { close = close + 1 }
+                if close >= finish { return enir_lower_fail(module, line, 31) }
+                let slot = enir_source_name(text, left + 1, close)
+                var arrow = enir_source_trim_start(text, close + 1, finish)
+                if arrow + 2 > finish || !enir_source_range_eq(text, arrow, arrow + 2, "<-") { return enir_lower_fail(module, line, 32) }
+                let rhs_start = enir_source_trim_start(text, arrow + 2, finish)
+                let rhs = enir_source_name(text, rhs_start, finish)
+                let value_id = enir_source_symbol_find(symbols, rhs)
+                if slot.len <= 0 || rhs.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 33) }
+                let old_slots = symbols.slot_count
+                symbols = enir_source_slot_find_or_add(symbols, slot)
+                if symbols.slot_count == old_slots && enir_source_slot_index(symbols, slot) < 0 { return enir_lower_fail(module, line, 34) }
+                let slot_id = enir_source_slot_index(symbols, slot)
+                if module.op_count >= ENIR_MAX_OPS { return enir_lower_fail(module, line, 35) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count,
+                    opcode: enir_op_estore(),
+                    result_id: -1,
+                    type_id: -1,
+                    a: value_id,
+                    b: -1,
+                    target: -1,
+                    policy_id: -1,
+                    memory_slot: slot_id,
+                    fuel_cost: 1,
+                })
+            } else {
+                return enir_lower_fail(module, line, 40)
+            }
+        }
+        pos = if end < n { end + 1 } else { end }
+        line = line + 1
+    }
+    if !seen_header || !seen_close { return enir_lower_fail(module, line, 50) }
+    if module.observation_count <= 0 { return enir_lower_fail(module, line, 51) }
+    module = enir_module_finalize_counts(module, 1)
+    let rc = enir_verify(module)
+    if rc != 0 { return enir_lower_fail(module, line, 1000 + rc) }
+    EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
+}

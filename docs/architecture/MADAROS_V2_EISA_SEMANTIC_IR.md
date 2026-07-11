@@ -28,6 +28,35 @@ ENIR yet, no ENIR interpreter or ENIR-to-MIR pass exists, and code generation is
 unchanged. Run `scripts/dev/madaros_v2_e1_enir_shadow_gate.sh`; inspect or replay
 artifacts with `bin/madaros-enir emit|verify|roundtrip`.
 
+Implementation note (2026-07-11): `E2A-ENIR-V0-STRAIGHT-LINE-FULL`, the first
+closed tranche of the still-open `E2-ENIR-LOWERING-FULL` umbrella, implements the
+complete source-authored EISA v0 straight-line slice of the canonical corpus:
+`golden_mul`, `golden_add`, `golden_sqrt`, `golden_poison`, and
+`e5_cancellation` (5/30 programs, 6/39 observations). The compiler-owned parser
+lowers source text directly to stage-2 ENIR; it does not call `eisa::backend`,
+construct `.eisax`, or consult the E1 fixture. Its supported grammar is an
+`epistemic fn` with immutable `let` bindings over finite decimal literals,
+prior identifiers, one binary `+ - * /` expression, or `sqrt(operand)`, plus
+`gate` and `store [slot] <- value`. Unsupported control flow fails closed.
+
+The compiler-owned ENIR interpreter independently implements the EISA v0 f64,
+DD64, scalar GUM1, poison, gate-policy, and memory transitions. The E2 gate
+extracts the five sources from `tools/eisa/eisa_evm_run.sio`, independently
+reconstructs expected SSA/provenance in Python, checks canonical lowering and
+roundtrip, replays all error words and statuses in an independent interpreter,
+and compares the six source-observable events with a source-fresh Metron EVM.
+It also requires causal source tamper, eight malformed/unsupported source
+negatives, two artifact/canonicalization tampers, E1 regression, and zero diff
+over production lowering/codegen/ABI/runtime and oracle sources. Run
+`scripts/dev/madaros_v2_e2_enir_lowering_gate.sh`, or use
+`bin/madaros-enir lower <source>` and `bin/madaros-enir run <enir>`.
+
+This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
+30/39 programs, v1/v2 control flow, general
+exceptional-value algebra, `ENIR -> MIR`, ABI lowering, or production-codegen
+selection. Those boundaries remain open and fail closed rather than falling
+back through the shadow fixture.
+
 ## 1. Decision
 
 Any implementation claiming Madaros v2 ENIR conformance SHALL make EISA/METRON
