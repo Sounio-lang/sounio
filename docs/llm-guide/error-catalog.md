@@ -404,9 +404,9 @@ Got an error?
 
 ## Machine-Readable Error Code Reference
 
-Stable codes emitted by the compiler in `error[Exxxx]:` format. Parseable by `souc check --json` into `sounio.diagnostic.v1` JSON.
+Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `souc check --json` flag and **no** `souc explain <CODE>` subcommand in Madaros v0.80.0 (both were removed / never shipped — verify with `souc --help`). Read the per-code files under `explanations/` directly.
 
-Use `souc explain <CODE>` for a one-paragraph explanation + minimal example + canonical fix.
+> **⚠️ Enforcement reality — verified 2026-07-11 against the default `bin/souc` (Madaros).** The default compiler is **more permissive** than this table implies; several listed codes do **not** currently fire under `souc check` (the "wrong" example compiles clean). Verified non-firing: **E035** (missing IO/Div/Observe effect — effects are not enforced under `check`), **E040/E041/E042/E043** (Rust `let mut` / `&mut` / `#[...]` / `ident!()` — these surface as a bare `parse error` or `check: OK`, not a coded compat error), **E201–E207** (the `ZD` capability family — unenforced), **E208/E209** (refinement predicates — `Pos`/`Prob` treated nominally; the predicate is not evaluated), **E213** (tuple-destructure arity), **E216** (recursive struct type), **E224** (unreadable/dead import — silently ignored). Wrong code numbers: an arity mismatch surfaces as **E010** (not E006); a tail/return-type mismatch as **E008** (not E218). Confirmed firing: E001, E010, E170, E171. `check` stops before codegen, so codegen/linker codes (E007, E217–E223) are not reachable via `check`. Treat this table as the code *namespace*, not a guarantee that every guard is wired. (Note: the `lean_single` seed engine is stricter and rejects some of the above — but agents use the default Madaros.)
 
 | Code | Component | Severity | Gloss | Explanation |
 |------|-----------|----------|-------|-------------|
