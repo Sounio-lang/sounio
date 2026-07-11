@@ -8787,6 +8787,23 @@ fn emit_str_eq_regs_x86() with Mut {
     em(0x48); em(0xc7); em(0xc0); em32(1)   // equal: mov rax, 1
 }
 
+// arm64 twin of emit_str_eq_regs_x86: compare NUL-terminated strings at x1 and x0,
+// result (0/1) in x0.
+fn emit_str_eq_regs_a64() with Mut {
+    em32(0x39400029)  // loop: ldrb w9, [x1]
+    em32(0x3940000A)  //       ldrb w10, [x0]
+    em32(0x6B0A013F)  //       cmp w9, w10
+    em32(0x540000A1)  //       b.ne +5 (not_equal)
+    em32(0x340000C9)  //       cbz w9, +6 (equal)
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0x17FFFFF9)  //       b -7 (loop)
+    em32(0xD2800000)  // not_equal: mov x0, #0
+    em32(0x14000002)  //       b +2 (done)
+    em32(0xD2800020)  // equal: mov x0, #1
+    // done:
+}
+
 fn emit_starts_with_regs_x86() with Mut {
     em(0x48); em(0x89); em(0xcf)  // mov rdi, rcx
     em(0x48); em(0x89); em(0xc6)  // mov rsi, rax
@@ -8801,6 +8818,23 @@ fn emit_starts_with_regs_x86() with Mut {
     em(0x48); em(0xc7); em(0xc0); em32(1)   // match: mov rax, 1
     em(0xeb); em(3)                         // jmp done
     em(0x48); em(0x31); em(0xc0)            // no_match: xor rax, rax
+}
+
+// arm64 twin of emit_starts_with_regs_x86: does the string at x1 start with the
+// prefix at x0?  Iterates the prefix (x0); result (0/1) in x0.
+fn emit_starts_with_regs_a64() with Mut {
+    em32(0x3940000A)  // loop: ldrb w10, [x0]  (prefix byte)
+    em32(0x340000EA)  //       cbz w10, +7 (match — prefix exhausted)
+    em32(0x39400029)  //       ldrb w9, [x1]   (string byte)
+    em32(0x6B09015F)  //       cmp w10, w9
+    em32(0x540000C1)  //       b.ne +6 (no_match)
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0x17FFFFF9)  //       b -7 (loop)
+    em32(0xD2800020)  // match: mov x0, #1
+    em32(0x14000002)  //       b +2 (done)
+    em32(0xD2800000)  // no_match: mov x0, #0
+    // done:
 }
 
 fn emit_bump_counter_rsi_x86(count_off: i64, bytes_off: i64) with Mut {
@@ -32214,6 +32248,106 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if src_match(ns, ne - ns, "append_file") { emit_append_file_a64() } else { emit_write_file_a64() }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_from_bytes(buf: [i8; N], len: i64) -> string — parity with the x86-64
+            // twin (~13358): returns the byte-buffer address as a string pointer; the
+            // len arg is compiled for type-check only and discarded.
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
+                EP = EP + 1
+                compile_or_a64()   // buf -> x0 (address of byte array)
+                emit_push_a64()    // save buf address
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()   // len -> x0 (discarded)
+                emit_pop_x0_a64()  // restore buf address as the result
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
+                EXPR_TY_HASH = 0
+                return
+            }
+            // f64_to_bits(x: f64) -> i64 — parity with x86 twin: pure reinterpret;
+            // on arm64 the f64 already lives in x0 as raw bits, so no code is emitted.
+            if src_match(ns, ne - ns, "f64_to_bits") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 2 { tc_error(name_tok, "f64_to_bits requires f64 argument") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_eq(a: string, b: string) -> bool — parity with x86 twin (~13030).
+            if src_match(ns, ne - ns, "str_eq") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    emit_push_a64()  // save a
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()  // a -> x1, b already in x0
+                    emit_str_eq_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 4
+                EXPR_TY_HASH = 0
+                return
+            }
+            // starts_with(s: string, prefix: string) -> bool — parity with x86 twin.
+            if src_match(ns, ne - ns, "starts_with") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "starts_with requires string arguments") }
+                    emit_push_a64()  // save s
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "starts_with requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()  // s -> x1, prefix already in x0
+                    emit_starts_with_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 4
                 EXPR_TY_HASH = 0
                 return
             }
