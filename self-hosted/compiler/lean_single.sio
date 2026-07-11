@@ -8787,6 +8787,23 @@ fn emit_str_eq_regs_x86() with Mut {
     em(0x48); em(0xc7); em(0xc0); em32(1)   // equal: mov rax, 1
 }
 
+// arm64 twin of emit_str_eq_regs_x86: compare NUL-terminated strings at x1 and x0,
+// result (0/1) in x0.
+fn emit_str_eq_regs_a64() with Mut {
+    em32(0x39400029)  // loop: ldrb w9, [x1]
+    em32(0x3940000A)  //       ldrb w10, [x0]
+    em32(0x6B0A013F)  //       cmp w9, w10
+    em32(0x540000A1)  //       b.ne +5 (not_equal)
+    em32(0x340000C9)  //       cbz w9, +6 (equal)
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0x17FFFFF9)  //       b -7 (loop)
+    em32(0xD2800000)  // not_equal: mov x0, #0
+    em32(0x14000002)  //       b +2 (done)
+    em32(0xD2800020)  // equal: mov x0, #1
+    // done:
+}
+
 fn emit_starts_with_regs_x86() with Mut {
     em(0x48); em(0x89); em(0xcf)  // mov rdi, rcx
     em(0x48); em(0x89); em(0xc6)  // mov rsi, rax
@@ -8801,6 +8818,91 @@ fn emit_starts_with_regs_x86() with Mut {
     em(0x48); em(0xc7); em(0xc0); em32(1)   // match: mov rax, 1
     em(0xeb); em(3)                         // jmp done
     em(0x48); em(0x31); em(0xc0)            // no_match: xor rax, rax
+}
+
+// arm64 twin of emit_starts_with_regs_x86: does the string at x1 start with the
+// prefix at x0?  Iterates the prefix (x0); result (0/1) in x0.
+fn emit_starts_with_regs_a64() with Mut {
+    em32(0x3940000A)  // loop: ldrb w10, [x0]  (prefix byte)
+    em32(0x340000EA)  //       cbz w10, +7 (match — prefix exhausted)
+    em32(0x39400029)  //       ldrb w9, [x1]   (string byte)
+    em32(0x6B09015F)  //       cmp w10, w9
+    em32(0x540000C1)  //       b.ne +6 (no_match)
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0x17FFFFF9)  //       b -7 (loop)
+    em32(0xD2800020)  // match: mov x0, #1
+    em32(0x14000002)  //       b +2 (done)
+    em32(0xD2800000)  // no_match: mov x0, #0
+    // done:
+}
+
+// Copy x2 bytes from [x1] to [x0], advancing x0 and x1 (x0 ends past the region).
+fn emit_memcpy_a64() with Mut {
+    em32(0xB40000E2)  // loop: cbz x2, +7 (done)
+    em32(0x39400029)  //       ldrb w9, [x1]
+    em32(0x39000009)  //       strb w9, [x0]
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0xD1000442)  //       sub x2, x2, #1
+    em32(0x17FFFFFA)  //       b -6 (loop)
+    // done:
+}
+
+// arm64 twin of emit_str_concat_slots_x86: result string ptr in x0.
+fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
+    let slot_len_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_len_b = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_dst = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // len_a = str_len(a); len_b = str_len(b)
+    emit_load_var_a64(slot_a); emit_str_len_a64(); emit_store_var_a64(slot_len_a)
+    emit_load_var_a64(slot_b); emit_str_len_a64(); emit_store_var_a64(slot_len_b)
+    // total = len_a + len_b + 1; buffer = heap_alloc(total)
+    emit_load_var_a64(slot_len_a); emit_push_a64()
+    emit_load_var_a64(slot_len_b); emit_pop_x1_a64()  // x0 = len_b, x1 = len_a
+    em32(0x8B010000)   // add x0, x0, x1
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy a: dst=res, src=a, len=len_a
+    emit_load_var_a64(slot_len_a); em32(0xAA0003E2)  // x2 = len_a
+    emit_load_var_a64(slot_a); em32(0xAA0003E1)      // x1 = a
+    emit_load_var_a64(slot_res)                       // x0 = res
+    emit_memcpy_a64()                                 // x0 -> res + len_a
+    emit_store_var_a64(slot_dst)
+    // copy b: dst=res+len_a, src=b, len=len_b
+    emit_load_var_a64(slot_len_b); em32(0xAA0003E2)  // x2 = len_b
+    emit_load_var_a64(slot_b); em32(0xAA0003E1)      // x1 = b
+    emit_load_var_a64(slot_dst)                       // x0 = res + len_a
+    emit_memcpy_a64()                                 // x0 -> end
+    em32(0x3900001F)   // strb wzr, [x0]  (NUL terminator)
+    emit_load_var_a64(slot_res)                       // return res
+}
+
+// arm64 twin of emit_str_slice_range_slots_x86: substring s[start..end], ptr in x0.
+fn emit_str_slice_range_slots_a64(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic, Div {
+    let slot_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // len = end - start
+    emit_load_var_a64(slot_end); emit_push_a64()
+    emit_load_var_a64(slot_start); emit_pop_x1_a64()  // x0 = start, x1 = end
+    em32(0xCB000020)   // sub x0, x1, x0   (end - start)
+    emit_store_var_a64(slot_len)
+    // buffer = heap_alloc(len + 1)
+    emit_load_var_a64(slot_len)
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy: dst=res, src=s+start, len=len
+    emit_load_var_a64(slot_len); em32(0xAA0003E2)   // x2 = len
+    emit_load_var_a64(slot_s); em32(0xAA0003E1)     // x1 = s
+    emit_load_var_a64(slot_start)                    // x0 = start
+    em32(0x8B000021)   // add x1, x1, x0   (src = s + start)
+    emit_load_var_a64(slot_res)                       // x0 = res (dst)
+    emit_memcpy_a64()
+    em32(0x3900001F)   // strb wzr, [x0]  (NUL terminator)
+    emit_load_var_a64(slot_res)
 }
 
 fn emit_bump_counter_rsi_x86(count_off: i64, bytes_off: i64) with Mut {
@@ -32214,6 +32316,197 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if src_match(ns, ne - ns, "append_file") { emit_append_file_a64() } else { emit_write_file_a64() }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_from_bytes(buf: [i8; N], len: i64) -> string — parity with the x86-64
+            // twin (~13358): returns the byte-buffer address as a string pointer; the
+            // len arg is compiled for type-check only and discarded.
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
+                EP = EP + 1
+                compile_or_a64()   // buf -> x0 (address of byte array)
+                emit_push_a64()    // save buf address
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()   // len -> x0 (discarded)
+                emit_pop_x0_a64()  // restore buf address as the result
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
+                EXPR_TY_HASH = 0
+                return
+            }
+            // f64_to_bits(x: f64) -> i64 — parity with x86 twin: pure reinterpret;
+            // on arm64 the f64 already lives in x0 as raw bits, so no code is emitted.
+            if src_match(ns, ne - ns, "f64_to_bits") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 1, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 2 { tc_error(name_tok, "f64_to_bits requires f64 argument") }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 1, 2)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_eq(a: string, b: string) -> bool — parity with x86 twin (~13030).
+            if src_match(ns, ne - ns, "str_eq") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    emit_push_a64()  // save a
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()  // a -> x1, b already in x0
+                    emit_str_eq_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 4
+                EXPR_TY_HASH = 0
+                return
+            }
+            // starts_with(s: string, prefix: string) -> bool — parity with x86 twin.
+            if src_match(ns, ne - ns, "starts_with") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "starts_with requires string arguments") }
+                    emit_push_a64()  // save s
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "starts_with requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()  // s -> x1, prefix already in x0
+                    emit_starts_with_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 4
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_concat(a: string, b: string) -> string — parity with x86 twin (~13066).
+            if src_match(ns, ne - ns, "str_concat") {
+                BUILTIN_SLOT_A = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_B = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    emit_store_var_a64(BUILTIN_SLOT_A)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(BUILTIN_SLOT_B)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_concat_slots_a64(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_slice(s, start[, end]) -> string — parity with x86 twin (~13230).
+            if src_match(ns, ne - ns, "str_slice") {
+                BUILTIN_SLOT_A = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_B = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_CNT = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 3
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                compile_or_a64()
+                if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_slice requires a string receiver") }
+                emit_store_var_a64(BUILTIN_SLOT_A)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "str_slice indices must be integers") }
+                } else {
+                    em32(0xD2800000)
+                }
+                emit_store_var_a64(BUILTIN_SLOT_B)
+                if TK[EP as usize] == 28 {
+                    EP = EP + 1
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "str_slice indices must be integers") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(BUILTIN_SLOT_CNT)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 3, 4)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_slice_range_slots_a64(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_CNT)
+                } else {
+                    emit_load_var_a64(BUILTIN_SLOT_A)
+                    emit_push_a64()
+                    emit_load_var_a64(BUILTIN_SLOT_B)
+                    emit_pop_x1_a64()
+                    em32(0x8B010000)  // add x0, x0, x1   (s + start)
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 EXPR_TY_HASH = 0
                 return
             }
