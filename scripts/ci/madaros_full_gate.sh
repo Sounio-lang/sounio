@@ -310,6 +310,9 @@ pass "Madaros v2 E2E v2 qd128 arithmetic Source-to-ENIR lowering"
 bash scripts/dev/madaros_v2_e2f_enir_rump_qd_gate.sh
 pass "Madaros v2 E2F v2 Rump qd128 Source-to-ENIR lowering"
 
+bash scripts/dev/madaros_v2_e2g_enir_fuel_control_frail_gate.sh
+pass "Madaros v2 E2G v2 qd128 fuel, control, and frailty lowering"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt

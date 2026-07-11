@@ -164,10 +164,31 @@ a causal source tamper, E2E/E2D/E2C/E2B/E2A/E1 regression, and zero diff over
 the qd semantics, frozen oracle, and production codegen/ABI/runtime. Run
 `scripts/dev/madaros_v2_e2f_enir_rump_qd_gate.sh`.
 
+Implementation note (2026-07-11):
+`E2G-ENIR-V2-FUEL-CONTROL-FRAIL-FULL` adds `v2_fuel`, `v2_loop`, and
+`v2_frail`, bringing cumulative real lowering to 27/30 programs and 35/39
+observations. Profile-v2 CFG is admitted only in the canonical four-block,
+four-edge schema with an entry jump, zero-branch header, body backedge, and
+cost-one halt. The existing dominance, block-argument, reachability, edge
+ownership, and fuel-only nontermination verifier checks remain mandatory.
+
+The CFG interpreter now computes branch frailty from qd128 `error.x0` for the
+v2 profile instead of consulting the inactive DD64 lane. The frail witness has
+value-lane zero, reconstructs the exact rational value one from its four-word
+qd expansion, takes the zero edge, and increments the frail count before its
+gate. The independent checker parses and lowers all three sources, normalizes
+the frozen EISA images, replays qd arithmetic and CFG/fuel transitions, and
+requires all-word METRON receipt parity. The FULL gate adds 18 source
+negatives, 22 profile/CFG/dominance/resource/all-word/canonicalization tampers,
+five runtime receipt tampers, a causal source tamper that fails closed before
+an unreachable declared gate, E2F through E1 regression, and zero diff over
+production codegen/ABI/runtime, qd semantics, and the frozen oracle. Run
+`scripts/dev/madaros_v2_e2g_enir_fuel_control_frail_gate.sh`.
+
 This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs. The remaining six programs are `v2_fuel`, `v2_mem`,
-`v2_emov`, `v2_loop`, `v2_frail`, and `v2_mem_poison` (7 observations).
-Arbitrary nested/path-sensitive loops, general exceptional-value
+30/39 programs. The remaining three programs are `v2_mem`, `v2_emov`, and
+`v2_mem_poison` (4 observations). Arbitrary nested/path-sensitive loops,
+general exceptional-value
 algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, and production-codegen
 selection also remain open and fail closed rather than falling back through
 the shadow fixture.
@@ -187,7 +208,7 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. Until that milestone passes, ENIR is partially implemented only for
-the explicitly gated E2A/E2B/E2C/E2D/E2E/E2F slices; broader conformance
+the explicitly gated E2A/E2B/E2C/E2D/E2E/E2F/E2G slices; broader conformance
 remains unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
