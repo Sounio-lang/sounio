@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.apple-selfhost-release-gate-sigsegv-2026-07-10
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.apple-selfhost-release-gate-sigsegv-2026-07-10
+-->
+
 # Handoff — Apple Self-Host Release Gate SIGSEGV (arm64-macOS native backend)
 
 **Filed:** 2026-07-10 · **Status:** OPEN · **Owner needed:** someone with Apple Silicon hardware
