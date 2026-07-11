@@ -9604,7 +9604,7 @@ fn emit_file_size() with Mut, Panic {
     em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
     em(0xe9); let stat_done = CL; em32(0)
     let stat_fail_target = CL
-    em(0x31); em(0xc0)  // xor eax, eax
+    em(0x48); em(0xc7); em(0xc0); em32(-1)  // mov rax, -1 (missing/unreadable → sentinel)
     let stat_done_target = CL
     patch32(stat_fail, stat_fail_target)
     patch32(stat_done, stat_done_target)
@@ -30446,7 +30446,7 @@ fn emit_append_file_a64() with Mut, Panic {
 }
 
 // ─── ARM64 file_size ───
-fn emit_file_size_a64() with Mut {
+fn emit_file_size_a64() with Mut, Panic {
     // x0 = path
     if TARGET_OS == 2 {
         em32(0xD2800001)
@@ -30458,6 +30458,16 @@ fn emit_file_size_a64() with Mut {
         em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
+    // x0 = fd (or negative on failure). Missing/unreadable file → return -1 so
+    // callers (file_exists) can distinguish absent from empty. Without this the
+    // code fstat'd an invalid fd and returned a garbage stack word.
+    em32(0xF100001F)   // cmp x0, #0
+    let fsz_open_ok = CL
+    em32(0x5400000A)   // b.ge open_ok (patched)
+    em32(0x92800000)   // movn x0, #0  → x0 = -1
+    let fsz_fail_done = CL
+    em32(0x14000000)   // b done (patched)
+    patch_branch_a64(fsz_open_ok, CL)
     emit_push_a64()  // save fd
     em32(0xD1000000 | (160 << 10) | (31 << 5) | 31)  // sub sp, sp, #160
     em32(0x910003E1)  // mov x1, sp
@@ -30481,6 +30491,7 @@ fn emit_file_size_a64() with Mut {
     }
     emit_syscall_a64()
     em32(0xAA0903E0)  // mov x0, x9
+    patch_branch_a64(fsz_fail_done, CL)  // done:
 }
 
 // ─── ARM64 arg_count ───
