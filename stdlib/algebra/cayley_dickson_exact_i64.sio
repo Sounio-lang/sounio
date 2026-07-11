@@ -1,0 +1,283 @@
+//! stdlib/algebra/cayley_dickson_exact_i64.sio
+//!
+//! CONCRETE i64 EXACT Cayley-Dickson engine.
+//!
+//! Companion to `stdlib/algebra/cayley_dickson.sio` (the f64 analytic/flow layer,
+//! UNCHANGED) and `stdlib/algebra/cayley_dickson_exact.sio` (the generic `<F>`
+//! design skeleton, which does not compile yet — blocked on compiler features:
+//! generic-struct-return, `impl Trait for Type`, trait-bounded dispatch).
+//!
+//! This file is the zero-prerequisite fallback: a hand-monomorphized concrete-i64
+//! engine, NO generics, NO traits. It ships the same exact-arithmetic zero-divisor
+//! detection science today: `ab == 0` is a DECIDABLE i64 equality, not a
+//! tolerance-gated float measurement.
+//!
+//! `cd_sigma` (i32, field-independent) is INLINED VERBATIM from cayley_dickson.sio
+//! rather than imported via `use algebra::cayley_dickson::{cd_sigma}`.
+//!
+//! ⚠ DEVIATION FROM SPEC, SURFACED HERE: the spec asked for a `use` import of
+//! `cd_sigma`. That import is a HARD BLOCKER under souc v0.80.0: `cayley_dickson.sio`
+//! itself does not type-check on this compiler build, because `let half = 1 << (bits - 1)`
+//! (and the sibling `1 << bits` site in `cd_count_nonassociative`) infers the shift
+//! result as `i64` (souc v0.80.0's `<<` operator always yields i64, regardless of
+//! operand types), which then cascades into ~40 E004/E007/E008/E009 errors through
+//! that file's `cd_sigma`/`cd_count_nonassociative`. `souc check` and `souc run` both
+//! fail end-to-end on any file that imports it (confirmed via an isolated one-line
+//! probe: `use algebra::cayley_dickson::{cd_sigma}; cd_sigma(1,2,3)` fails
+//! multimodule thin-link). `cayley_dickson.sio` is out of scope to edit (explicit
+//! instruction), so this file inlines the SAME recursion / SAME sign convention,
+//! only adding the `as i32` cast the shift needs under this compiler. The sign
+//! convention is unchanged — this is a cast-only fix, not a reimplementation.
+
+// ============================================================================
+// SIGN FUNCTION — inlined verbatim from cayley_dickson::cd_sigma (see deviation
+// note above); only change is `as i32` on the `1 << (bits - 1)` shift.
+// ============================================================================
+
+/// Cayley-Dickson sign: e_a * e_b = sigma(a, b, bits) * e_{a XOR b}.
+/// Returns +1 or -1. Works for any dimension 2^bits.
+pub fn cd_sigma_exact_i64(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return (0 - 1) as i32 }
+    let half = (1 << (bits - 1)) as i32
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = (a & (half - 1)) as i32
+    let b_lo = (b & (half - 1)) as i32
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_exact_i64(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_exact_i64(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_exact_i64(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_exact_i64(a_lo, b_lo, bits - 1)
+    }
+    // a_hi == 1 && b_hi == 1
+    if b_lo == 0 { return 0 - cd_sigma_exact_i64(0, a_lo, bits - 1) }
+    cd_sigma_exact_i64(b_lo, a_lo, bits - 1)
+}
+
+// ============================================================================
+// ELEMENT TYPE — exact i64 coefficients in a fixed-size array
+// ============================================================================
+
+/// A Cayley-Dickson element with up to 2048 components (k <= 11).
+/// The actual dimension is 2^bits. Unused components are zero.
+pub struct CDElementExactI64 {
+    c: [i64; 2048], // coefficients: c[0] = real part, c[i] = e_i coefficient
+    bits: i32,      // k: algebra parameter (dimension = 2^k)
+}
+
+/// Create the zero element in the k-dimensional CD algebra.
+pub fn cd_zero_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {
+    CDElementExactI64 { c: [0; 2048], bits: k }
+}
+
+/// Create the real unit (e_0 = 1) in the k-dimensional CD algebra.
+pub fn cd_one_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {
+    var r = CDElementExactI64 { c: [0; 2048], bits: k }
+    r.c[0] = 1
+    r
+}
+
+/// Create a basis element e_idx in the k-dimensional CD algebra.
+pub fn cd_basis_exact_i64(k: i32, idx: i32) -> CDElementExactI64 with Mut, Panic {
+    var r = CDElementExactI64 { c: [0; 2048], bits: k }
+    if idx >= 0 && idx < ((1 << k) as i32) {
+        r.c[idx as usize] = 1
+    }
+    r
+}
+
+// ============================================================================
+// ARITHMETIC — exact i64, no rounding, no tolerance
+//
+// NOTE ON CODEGEN WORKAROUND: these functions construct their zero/result
+// accumulator via a direct `CDElementExactI64 { ... }` struct LITERAL rather
+// than by calling `cd_zero_exact_i64(...)`. This is deliberate, not stylistic:
+// souc v0.80.0 has a cross-module codegen bug where a function taking N
+// aggregate-by-value parameters (N >= 2) that calls ANOTHER aggregate-returning
+// function of a DIFFERENT parameter-count (e.g. a 2-struct-param function
+// calling a 1-arg `cd_zero_exact_i64`) segfaults at runtime (confirmed via
+// bisection with a scratch module: matching-arity delegation is fine, e.g. a
+// 2-struct-param fn calling another 2-struct-param aggregate-returning fn
+// works; a 3-struct-param fn calling a 2-arg one does not). Constructing the
+// accumulator inline sidesteps the mismatched-arity nested aggregate call
+// entirely, at zero cost to the exact-arithmetic semantics.
+// ============================================================================
+
+/// Addition: component-wise.
+pub fn cd_add_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {
+    let n = (1 << a.bits) as i32
+    var r = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    var i: i32 = 0
+    while i < n { r.c[i as usize] = a.c[i as usize] + b.c[i as usize]; i = i + 1 }
+    r
+}
+
+/// Subtraction: component-wise.
+pub fn cd_sub_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {
+    let n = (1 << a.bits) as i32
+    var r = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    var i: i32 = 0
+    while i < n { r.c[i as usize] = a.c[i as usize] - b.c[i as usize]; i = i + 1 }
+    r
+}
+
+/// Cayley-Dickson multiplication: the general EXACT formula.
+///
+/// (a * b)[idx] = sum_{i XOR j = idx} sigma(i, j, k) * a[i] * b[j]
+///
+/// Exact integer arithmetic: the sign is applied by ADD or SUBTRACT of the
+/// product, never by casting the sign to a float.
+pub fn cd_mul_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {
+    let n = (1 << a.bits) as i32
+    var r = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    var i: i32 = 0
+    while i < n {
+        if a.c[i as usize] != 0 {
+            var j: i32 = 0
+            while j < n {
+                if b.c[j as usize] != 0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma_exact_i64(i, j, a.bits)
+                    let prod = a.c[i as usize] * b.c[j as usize]
+                    if sign > 0 {
+                        r.c[idx as usize] = r.c[idx as usize] + prod
+                    } else {
+                        r.c[idx as usize] = r.c[idx as usize] - prod
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+/// Associator: [a, b, c] = (a*b)*c - a*(b*c), computed exactly.
+///
+/// NOTE ON CODEGEN WORKAROUND: this is a 3-aggregate-param function, so it
+/// cannot delegate to the 2-arg `cd_mul_exact_i64`/`cd_sub_exact_i64` helpers
+/// (that mismatched-arity nested aggregate call is exactly the pattern that
+/// segfaults — see the note above `cd_add_exact_i64`). The multiply/subtract
+/// logic is therefore inlined here, monolithically, operating only on local
+/// accumulators built from struct literals.
+pub fn cd_associator_exact_i64(a: CDElementExactI64, b: CDElementExactI64, c: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {
+    let n = (1 << a.bits) as i32
+
+    // ab = a * b
+    var ab = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    var i: i32 = 0
+    while i < n {
+        if a.c[i as usize] != 0 {
+            var j: i32 = 0
+            while j < n {
+                if b.c[j as usize] != 0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma_exact_i64(i, j, a.bits)
+                    let prod = a.c[i as usize] * b.c[j as usize]
+                    if sign > 0 { ab.c[idx as usize] = ab.c[idx as usize] + prod } else { ab.c[idx as usize] = ab.c[idx as usize] - prod }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // left = ab * c
+    var left = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    i = 0
+    while i < n {
+        if ab.c[i as usize] != 0 {
+            var j: i32 = 0
+            while j < n {
+                if c.c[j as usize] != 0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma_exact_i64(i, j, a.bits)
+                    let prod = ab.c[i as usize] * c.c[j as usize]
+                    if sign > 0 { left.c[idx as usize] = left.c[idx as usize] + prod } else { left.c[idx as usize] = left.c[idx as usize] - prod }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // bc = b * c
+    var bc = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    i = 0
+    while i < n {
+        if b.c[i as usize] != 0 {
+            var j: i32 = 0
+            while j < n {
+                if c.c[j as usize] != 0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma_exact_i64(i, j, a.bits)
+                    let prod = b.c[i as usize] * c.c[j as usize]
+                    if sign > 0 { bc.c[idx as usize] = bc.c[idx as usize] + prod } else { bc.c[idx as usize] = bc.c[idx as usize] - prod }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // right = a * bc
+    var right = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    i = 0
+    while i < n {
+        if a.c[i as usize] != 0 {
+            var j: i32 = 0
+            while j < n {
+                if bc.c[j as usize] != 0 {
+                    let idx = i ^ j
+                    let sign = cd_sigma_exact_i64(i, j, a.bits)
+                    let prod = a.c[i as usize] * bc.c[j as usize]
+                    if sign > 0 { right.c[idx as usize] = right.c[idx as usize] + prod } else { right.c[idx as usize] = right.c[idx as usize] - prod }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // result = left - right
+    var result = CDElementExactI64 { c: [0; 2048], bits: a.bits }
+    i = 0
+    while i < n { result.c[i as usize] = left.c[i as usize] - right.c[i as usize]; i = i + 1 }
+    result
+}
+
+// ============================================================================
+// DECIDABLE PREDICATES — exact equality, no epsilon
+// ============================================================================
+
+/// True iff all 2^bits components are exactly zero.
+pub fn cd_is_zero_exact_i64(x: CDElementExactI64) -> bool with Mut, Panic {
+    let n = (1 << x.bits) as i32
+    var i: i32 = 0
+    var all_zero = true
+    while i < n {
+        if x.c[i as usize] != 0 { all_zero = false }
+        i = i + 1
+    }
+    all_zero
+}
+
+/// True iff `a` and `b` have equal bits and all components equal.
+pub fn cd_eq_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic {
+    if a.bits != b.bits { return false }
+    let n = (1 << a.bits) as i32
+    var i: i32 = 0
+    var eq = true
+    while i < n {
+        if a.c[i as usize] != b.c[i as usize] { eq = false }
+        i = i + 1
+    }
+    eq
+}
+
+/// Zero-divisor test: true iff `a * b == 0` exactly, for nonzero a, b.
+pub fn zd_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic, Div {
+    cd_is_zero_exact_i64(cd_mul_exact_i64(a, b))
+}

@@ -1,0 +1,246 @@
+// validated_lane: lean_single
+
+use eisa::format::*
+use eisa::asm::*
+use str::lib::*
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn imgs_equal(a: EisaxImage, b: EisaxImage) -> bool with Mut, Div, Panic {
+    if a.w_len != b.w_len { return false }
+    if a.c_len != b.c_len { return false }
+
+    var i = 0
+    while i < a.w_len {
+        if a.w[i as usize] != b.w[i as usize] { return false }
+        i = i + 1
+    }
+
+    i = 0
+    while i < a.c_len {
+        if !f64_bits_eq(a.c[i as usize], b.c[i as usize]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn build_f2_program(c0: f64, c1: f64) -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b.prov_source = 0
+    b.prov_flags = 0
+    b.consts[0] = c0
+    b.consts[1] = c1
+    b.n_const = 2
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.bs_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.bs_[1] = 0
+
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_egate()
+    b.dsts[3] = 2
+    b.as_[3] = 0
+    b.bs_[3] = 0
+
+    b.ops[4] = op_estore()
+    b.dsts[4] = 2
+    b.as_[4] = 0
+    b.bs_[4] = 0
+    b.n_code = 5
+    b
+}
+
+fn nl_str() -> Str with Mut, Div, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 10 as i8
+    str_from_bytes_buf(&buf, 1)
+}
+
+fn concat_line(dst: &Str, line: &Str, nl: &Str) -> Str with Mut, Div, Panic {
+    let t = str_cat(dst, line)
+    str_cat(&t, nl)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // F1: f64 parts/unparts exact round-trip on corpus.
+    var corpus: [f64; 8] = [0.0; 8]
+    corpus[0] = 0.5
+    corpus[1] = 7.25
+    corpus[2] = 0.1
+    corpus[3] = 3.14159265358979
+    corpus[4] = 10000000000000000.0
+    corpus[5] = 1.0e-300
+    corpus[6] = 0.0
+    corpus[7] = 0.0 - 2.5
+
+    var i = 0
+    while i < 8 {
+        let p = f64_parts(corpus[i as usize])
+        let r = f64_unparts(p)
+        if !f64_bits_eq(corpus[i as usize], r) { fails = fails + 1 }
+        i = i + 1
+    }
+    let p1 = f64_parts(1.0)
+    if p1.sign != 0 || p1.exp != 1023 || p1.mant != 0 { fails = fails + 1 }
+
+    // F2: encode/validate/hash.
+    let b_f2 = build_f2_program(0.5, 7.25)
+    let img = eisax_encode(b_f2)
+    if eisax_validate(img) != 0 { fails = fails + 1 }
+    if eisax_hash(img) != eisax_prog_hash(img) { fails = fails + 1 }
+    if eisax_n_code(img) != 5 { fails = fails + 1 }
+
+    // F3: every validation error code.
+    var bad = img
+    bad.w[0] = 0
+    let v1 = eisax_validate(bad)
+    if v1 != 1 { fails = fails + 1 }
+
+    bad = img
+    bad.w[1] = 1
+    let v2 = eisax_validate(bad)
+    if v2 != 2 { fails = fails + 1 }
+
+    bad = img
+    bad.w[2] = bad.w[2] + 1
+    let e34 = eisax_validate(bad)
+    if !(e34 == 3 || e34 == 4) { fails = fails + 1 }
+
+    bad = img
+    bad.w[6] = 9
+    let v5 = eisax_validate(bad)
+    if v5 != 5 { fails = fails + 1 }
+
+    bad = img
+    bad.w[7] = 16
+    let v6 = eisax_validate(bad)
+    if v6 != 6 { fails = fails + 1 }
+
+    bad = img
+    bad.w[24] = 8
+    let v7 = eisax_validate(bad)
+    if v7 != 7 { fails = fails + 1 }
+
+    bad = img
+    bad.w[8] = 9
+    let v8 = eisax_validate(bad)
+    if v8 != 8 { fails = fails + 1 }
+
+    bad = img
+    bad.w[21] = 1
+    let v9 = eisax_validate(bad)
+    if v9 != 9 { fails = fails + 1 }
+
+    bad = img
+    bad.w[7] = 1
+    let v11 = eisax_validate(bad)
+    if v11 != 11 { fails = fails + 1 }
+
+    // Error 10: non-finite constant must be rejected before the hash check.
+    // Inf and NaN are synthesised at runtime; requires the launder-safe
+    // is_finite_f64 (see docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md).
+    // Non-finites are synthesised through memory loads so the e-graph
+    // cannot constant-fold them away (x - x -> 0 etc.).
+    var nfbuf: [f64; 3] = [0.0; 3]
+    nfbuf[0] = 0.0
+    nfbuf[1] = 1.0e308
+    nfbuf[2] = 10.0
+    let rt_inf = nfbuf[1] * nfbuf[2]
+    let rt_nan = nfbuf[0] / nfbuf[0]
+
+    bad = img
+    bad.c[0] = rt_inf
+    let v10a = eisax_validate(bad)
+    if v10a != 10 { fails = fails + 1 }
+
+    bad = img
+    bad.c[1] = rt_nan
+    let v10b = eisax_validate(bad)
+    if v10b != 10 { fails = fails + 1 }
+
+    // F4: hash sensitivity.
+    let b_h1 = build_f2_program(0.5, 7.25)
+    let b_h2 = build_f2_program(0.6, 7.25)
+    let b_h3 = build_f2_program(0.5, 7.25)
+    let h1 = eisax_prog_hash(eisax_encode(b_h1))
+    let h2 = eisax_prog_hash(eisax_encode(b_h2))
+    let h3 = eisax_prog_hash(eisax_encode(b_h3))
+    if h1 == h2 { fails = fails + 1 }
+    if h1 != h3 { fails = fails + 1 }
+
+    // F5: assembler golden.
+    let nl = nl_str()
+    var src = str_new()
+    let l0 = str_from_literal(".eisa v0")
+    src = concat_line(&src, &l0, &nl)
+    let l1 = str_from_literal("; programa com comentario")
+    src = concat_line(&src, &l1, &nl)
+    let l2 = str_from_literal("entry:")
+    src = concat_line(&src, &l2, &nl)
+    let l3 = str_from_literal("e0 <- econst 0.5")
+    src = concat_line(&src, &l3, &nl)
+    let l4 = str_from_literal("e1 <- econst 7.25")
+    src = concat_line(&src, &l4, &nl)
+    let l5 = str_from_literal("e2 <- emul e0 , e1 ; inline")
+    src = concat_line(&src, &l5, &nl)
+    let l6 = str_from_literal("egate e2")
+    src = concat_line(&src, &l6, &nl)
+    let l7 = str_from_literal("estore [ dose ] <- e2")
+    src = concat_line(&src, &l7, &nl)
+
+    let asm_ok = eisa_assemble(src)
+    if asm_ok.status != 0 { fails = fails + 1 }
+    let img_asm = eisax_encode(asm_ok.build)
+    if !imgs_equal(img, img_asm) { fails = fails + 1 }
+
+    // F6: fixed point via canonical disassembly.
+    var canon = str_new()
+    let c0 = str_from_literal(".eisa v0")
+    canon = concat_line(&canon, &c0, &nl)
+    i = 0
+    while i < eisax_n_code(img_asm) {
+        let ln = eisa_disassemble_line(img_asm, i)
+        canon = concat_line(&canon, &ln, &nl)
+        i = i + 1
+    }
+
+    let asm_canon = eisa_assemble(canon)
+    if asm_canon.status != 0 { fails = fails + 1 }
+    var canon_build = asm_canon.build
+    canon_build.n_const = asm_ok.build.n_const
+    i = 0
+    while i < asm_ok.build.n_const {
+        canon_build.consts[i as usize] = asm_ok.build.consts[i as usize]
+        i = i + 1
+    }
+    let img_canon = eisax_encode(canon_build)
+    if !imgs_equal(img_asm, img_canon) { fails = fails + 1 }
+
+    var bad_src = str_new()
+    let b0 = str_from_literal(".eisa v0")
+    bad_src = concat_line(&bad_src, &b0, &nl)
+    let b1 = str_from_literal("e0 <- enoop e1")
+    bad_src = concat_line(&bad_src, &b1, &nl)
+    let bad_res = eisa_assemble(bad_src)
+    if bad_res.status != 2 { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisax F1 F2 F3 F4 F5 F6 F7")
+    0
+}
