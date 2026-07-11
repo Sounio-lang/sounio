@@ -82,6 +82,9 @@ lean_lib «SounioCDTowerSeam» where
 lean_lib «SounioCDConverse» where
 
 @[default_target]
+lean_lib «SounioCDRecursiveSeam» where
+
+@[default_target]
 lean_lib «SounioCDqbig» where
 
 @[default_target]
