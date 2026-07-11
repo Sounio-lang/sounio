@@ -507,6 +507,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.paper | repo_only | docs/papers/main/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.preprint | repo_only | docs/papers/main/preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.readme | repo_only | docs/papers/main/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.main.shadow-lanes-arxiv.shadow-lanes-preprint | repo_only | docs/papers/main/shadow-lanes-arxiv/shadow_lanes_preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.sounio-arxiv-draft | repo_only | docs/papers/main/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.medrxiv-abstract | repo_only | docs/papers/medrxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.outline | repo_only | docs/papers/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
