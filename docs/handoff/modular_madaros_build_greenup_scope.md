@@ -33,10 +33,14 @@ Full error log captured during the merge investigation: rebuild and grep `^error
 | **W2 codegen EISA symbols** | ✅ done | `native/codegen_x86_linux.sio` | Referenced-but-never-declared EISA symbols — fixed on `gpu/epistemic-tensor-core-next` (see W2 section) |
 | **W3 ir type mismatches** | 3 | `ir/const_prop.sio:1676`, `ir/dce.sio:885`, `ir/opt_strategy.sio:229` | Field-init / call-arg type mismatch |
 | **W4 gpu kernel_ir** | ✅ done | `gpu/kernel_ir.sio` | `missing field in struct literal` in `gpu_build_gemm_shared_ir` — fixed on `gpu/epistemic-tensor-core-next` (see W4 section) |
+| **W5 kaxi buf API drift** | 2 | `compiler/main.sio:27616,27643` | `unknown field access` `kaxi.data` — `KaxiAsmBuf` refactored inline-array → heap-ptr; K-AXI write path not updated (see W5 section) |
 | **W0 items.sio is_extern** | ✅ done | `parser/items.sio:1086` | Fixed in `c6321b788` |
-| `<main>` residual | 2 | `<main>:27615,27642` | `unknown field access` — **persists after W2 AND W4**, so NOT their fallout; W1 (wasm types) or W3 (ir) downstream. Re-attribute once W1/W3 land. |
 
-Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value is not indexable`, 5 `private struct field access [struct=Lowerer]`, 2 `field initializer type mismatch`, 1 `E001`.
+Category totals (original): 93 `unknown identifier`, 33 `unknown field access`, 28 `value is not indexable`, 5 `private struct field access [struct=Lowerer]`, 2 `field initializer type mismatch`, 1 `E001`.
+
+### Stacked verification (2026-07-11): 148 → 2
+
+Applying **W1+W3 locally** (cherry-pick `67d05760c` + `8bf239a8d`, W3's `const_prop`/`dce` conflicts resolved to the loop-copy fix) on top of the committed **W2+W4** on `gpu/epistemic-tensor-core-next`, the modular typecheck drops from **148 → 2**. The only survivors are the 2 `<main>` residuals — which **persist with W1+W3 applied**, proving they are NOT W1/W3 fallout but a distinct bug (**W5**). The local stack was reverted after measurement (W1/W3 land via PRs #771/#773; re-apply = 2 cherry-picks). So once W1+W3 merge and W5 is fixed, the EISA modular typecheck is **clean (0)**.
 
 ## Work items
 
@@ -71,6 +75,13 @@ Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value i
   - 3× `GpuAdd` (dst 9/10/11) missing `rhs_reg` → **2** (comment `rdN = rdK + r2`).
   - `GpuStoreSharedPred` (F32 branch, src_reg:1) missing `lhs_reg` → **0** (predicate p0; mirrors its `GpuLoadGlobalPred dst_reg:1 lhs_reg:0`; the F64-branch twin already had it).
 - **Verified:** modular build → `kernel_ir.sio` errors 5→0, no new gpu errors. Edit is gpu-modular-only (1 file, 5 lines); `lean_single.sio` has 0 of these symbols → gen2==gen3 unaffected by construction.
+
+### W5 — KaxiAsmBuf API drift in the K-AXI write path (2 errors, **EISA-specific, OPEN**)
+- **Root cause:** `KaxiAsmBuf` (`gpu/kaxi_backend.sio:197`) was refactored from an inline `data: [i8; 2097152]` byte array to a **heap-ptr model** (`ptr: i64` into a 16 MiB `KAXI_ASM_CAP` block, `len`, `cap`; bytes accessed via `kaxi_asm_get` word-RMW because `*mut i8` isn't byte-indexable in the seed). But the K-AXI write path was not migrated:
+  - `compiler/main.sio:27616` + `:27643` read `kaxi_all.data` / `kaxi.data` — **no such field** (`unknown field access`); `.len` also now private.
+  - `io/file_write.sio` `io_write_kaxi_binary(path, bytes: [i8; 2097152], len)` still takes a 2 MB **inline array** (stale — even its doc-comment says "KaxiAsmBuf.data is [i8; 2097152]"), which is both the wrong representation and too small (buffer cap is 16 MiB). `write_file` is a builtin taking a fixed `[i8; N]` array (no ptr variant).
+- **Fix direction:** add a heap-aware writer in `kaxi_backend.sio` (same module → can read the private `len`), e.g. `io_write_kaxi_buf(path, buf: KaxiAsmBuf) -> bool`, that copies `buf.len` bytes via `kaxi_asm_get` into a **module-scope BSS** `[i8; 16777216]` staging array (NOT a stack local — mirror `NC_BIG_ELF`), then `write_file(path, staging, buf.len)`. Repoint the 2 main.sio call sites to it and drop the stale `io_write_kaxi_binary`. Touches I/O correctness — verify the emitted `.kaxi` bytes round-trip.
+- **Scope:** modular-main.sio-only (`lean_single.sio` has 0 of `io_write_kaxi_binary`/`kaxi_all.data`/`hlir_kernels_to_kaxi` → the proven compiler lacks this path; gen2==gen3 unaffected). This is the **last** blocker to a fully-clean EISA modular typecheck.
 
 ## Acceptance criteria
 
