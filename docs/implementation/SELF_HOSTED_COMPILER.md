@@ -74,7 +74,7 @@ The source tree contains more capability than the checked public artifact expose
 
 For the current checked JIT artifact:
 
-- version: `1.0.0-beta.4`
+- version: `Madaros v0.80.0`
 - enabled backend: Cranelift JIT
 - disabled in the checked artifact: LLVM, GPU codegen, LSP, SMT, ontology, distributed, package-manager features
 
