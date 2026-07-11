@@ -281,7 +281,7 @@ FILES=(
   self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
 
   # ── 22. WebAssembly backend ─────────────────────────────────────
-  self-hosted/wasm/mod.sio
+  self-hosted/wasm/emitter.sio
   self-hosted/wasm/encode.sio
   self-hosted/wasm/lower.sio
 
@@ -506,7 +506,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
-    self-hosted/wasm/mod.sio
+    self-hosted/wasm/emitter.sio
     self-hosted/wasm/encode.sio
     self-hosted/wasm/lower.sio
 
