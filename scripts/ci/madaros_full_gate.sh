@@ -24,6 +24,9 @@ receipt_ok() {
   grep -Fxq "eisa_native_conformance=39/39" "$receipt" || return 1
   grep -Fxq "eisa_native_tamper=pass" "$receipt" || return 1
   grep -Fxq "eisa_native_anti_vacuity=pass" "$receipt" || return 1
+  grep -Fxq "eisa_native_lowering=full_modular_ir_no_fallback" "$receipt" || return 1
+  grep -Fxq "eisa_native_compact_opt_in=fail_closed_no_fallback" "$receipt" || return 1
+  grep -Fxq "eisa_native_compact_overcapacity=130_functions_fail_closed_no_elf" "$receipt" || return 1
 }
 
 resolve_raw_madaros() {
@@ -152,6 +155,12 @@ run_eisa_native_gate() {
     || fail "EISA native tamper receipt is incomplete"
   grep -Fxq 'anti_vacuity=pass' "$WORK/eisa-native.receipt" \
     || fail "EISA native anti-vacuity receipt is incomplete"
+  grep -Fxq 'native_lowering=full_modular_ir_no_fallback' "$WORK/eisa-native.receipt" \
+    || fail "EISA native lowering receipt permits fallback"
+  grep -Fxq 'compact_opt_in=fail_closed_no_fallback' "$WORK/eisa-native.receipt" \
+    || fail "EISA compact opt-in negative receipt is incomplete"
+  grep -Fxq 'compact_overcapacity_witness=130_functions_fail_closed_no_elf' "$WORK/eisa-native.receipt" \
+    || fail "compact over-capacity witness receipt is incomplete"
   EISA_NATIVE_GATE_PASS=1
   pass "EISA METRON/VM to Madaros native conformance (39/39)"
 }
@@ -189,6 +198,9 @@ write_gate_receipt() {
     echo "eisa_native_conformance=39/39"
     echo "eisa_native_tamper=pass"
     echo "eisa_native_anti_vacuity=pass"
+    echo "eisa_native_lowering=full_modular_ir_no_fallback"
+    echo "eisa_native_compact_opt_in=fail_closed_no_fallback"
+    echo "eisa_native_compact_overcapacity=130_functions_fail_closed_no_elf"
   } >"$tmp"
   mv "$tmp" "$receipt"
   receipt_ok "$RAW_MADAROS" "$receipt" || fail "gate receipt validation failed after write"

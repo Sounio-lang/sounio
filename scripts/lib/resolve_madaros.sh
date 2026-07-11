@@ -34,6 +34,9 @@ _sounio_madaros_receipt_ok() {
   grep -Fxq "eisa_native_conformance=39/39" "$receipt" || return 1
   grep -Fxq "eisa_native_tamper=pass" "$receipt" || return 1
   grep -Fxq "eisa_native_anti_vacuity=pass" "$receipt" || return 1
+  grep -Fxq "eisa_native_lowering=full_modular_ir_no_fallback" "$receipt" || return 1
+  grep -Fxq "eisa_native_compact_opt_in=fail_closed_no_fallback" "$receipt" || return 1
+  grep -Fxq "eisa_native_compact_overcapacity=130_functions_fail_closed_no_elf" "$receipt" || return 1
 }
 
 # Resolve MADAROS_BIN: explicit env → repo wrapper → gated raw ELF →
