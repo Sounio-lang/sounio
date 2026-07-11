@@ -14,7 +14,11 @@ Verify the math in the supplied artifact. Check derivations symbolically; flag e
 - **GUM uncertainty propagation**: first-order delta method, variance of products and quotients, coverage factor k.
 - **Imprecise probability / p-boxes**: containment under monotone transforms, interval-extension arithmetic, four-corner enumeration for non-monotone ops.
 - **Algebraic effects**: handler commutation conditions, free-algebra-quotient soundness.
+- **Abstract / applied algebra**: group/ring/field identities, quaternion & octonion multiplication tables, associator/commutator identities, normed-division/composition-algebra laws (‖ab‖=‖a‖‖b‖), alternativity, Fano-plane orientation consistency, subalgebra projections.
+- **Statistics / ML methodology**: permutation-null exchangeability, Spearman/rank endpoints, held-out validation, capacity vs signal confounds, circularity of generator-matched targets.
 - **Lean 4**: theorem statement tightness, hypotheses sufficient for conclusion, `sorry` / `trivial` honesty.
+
+This list is illustrative, not exhaustive. If the artifact contains any mathematical, algebraic, or statistical claim, review it — do NOT reject it as out of scope.
 
 ## Output format
 
@@ -28,4 +32,4 @@ Per checked claim:
 
 If multiple errors compound, order by impact on downstream claims.
 
-If the artifact contains no mathematical claims, respond exactly: `NO MATHEMATICAL CONTENT TO REVIEW`.
+Respond `NO MATHEMATICAL CONTENT TO REVIEW` ONLY if the artifact is genuinely free of any mathematical, algebraic, or statistical claim (e.g. pure prose or config). Algebra, associators, multiplication tables, and null/permutation reasoning ARE in scope — review them, never reject them with this sentinel.

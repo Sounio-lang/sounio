@@ -66,7 +66,7 @@ mkdir -p "$WORK"
 printf '[madaros-full] madaros=%s\n' "$MADAROS"
 printf '[madaros-full] work=%s\n' "$WORK"
 
-"$MADAROS" --version | grep -Fq "Madares v0.80.0" || fail "version banner missing"
+"$MADAROS" --version | grep -Fq "Madaros v0.80.0" || fail "version banner missing"
 pass "version"
 
 : > "$WORK/empty.sio"
@@ -105,10 +105,10 @@ expect_exit 1 "$MADAROS" check tests/multimodule/visibility_enum_private_main.si
 expect_log_contains "error[E177" "$WORK/visibility_enum_private.log"
 pass "multimodule visibility diagnostics"
 
-expect_exit 1 "$MADAROS" check "$WORK/missing.sio" >"$WORK/missing.log" 2>&1
-expect_log_contains "could not read input file" "$WORK/missing.log"
-expect_exit 1 env MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check /tmp >"$WORK/wrapper_tmp_dir.log" 2>&1
-expect_log_contains "could not read input file" "$WORK/wrapper_tmp_dir.log"
+expect_exit 2 "$MADAROS" check "$WORK/missing.sio" >"$WORK/missing.log" 2>&1
+expect_log_contains "madaros check requires <source.sio> or a project with sounio.toml" "$WORK/missing.log"
+expect_exit 2 env MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check /tmp >"$WORK/wrapper_tmp_dir.log" 2>&1
+expect_log_contains "madaros check requires <source.sio> or a project with sounio.toml" "$WORK/wrapper_tmp_dir.log"
 pass "missing input diagnostic"
 
 "$MADAROS" build "$WORK/run0.sio" -o "$WORK/run0.elf" >"$WORK/build.log" 2>&1

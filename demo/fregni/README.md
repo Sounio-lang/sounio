@@ -8,7 +8,7 @@ A minimal, runnable demonstration of Sounio's unique selling point for clinical 
 
 | File | Purpose |
 |---|---|
-| `fregni_demo.sio` | Main Sounio/Madares program. Computes an AUC-based daily dose, rejects low-confidence simulated data, and rejects high-CV imputed data. |
+| `fregni_demo.sio` | Main Sounio/Madaros program. Computes an AUC-based daily dose, rejects low-confidence simulated data, and rejects high-CV imputed data. |
 | `bad_path.sio` | Compile-time provenance guard. Intentionally passes a `SimulationI64` to a `MeasuredGUMI64`-only extractor; must fail `bin/souc check`. |
 | `reference.py` | Python reference arithmetic validating the integer-scaled Sounio calculations. |
 | `run.sh` | One-command end-to-end runner. |

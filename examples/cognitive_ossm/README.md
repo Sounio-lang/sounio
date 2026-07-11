@@ -16,7 +16,10 @@ What is here:
 - `cognitive_ossm.sio`
   - runnable architecture smoke for the octonionic update rule itself
 - `run_regimes.sio`
-  - bounded parity runner that reads the compact SWOW bundle exported from `hyperbolic-semantic-networks/data/cpc2026/sounio_input/`
+  - legacy bounded smoke runner; its `process_regime` path does not execute the full reference recurrence and must not be used as parity evidence
+- `run_ossm_native_reference.sio`
+  - self-contained byte-level implementation of the reference recurrence
+  - passes current Madaros `check`; current native-v2 compilation remains blocked
 - `export_results.sio`
   - emits a small manifest for the bounded parity outputs
 
@@ -24,19 +27,22 @@ Important scope boundary:
 
 - The **full paper-scale O-SSM artifacts** live in the Python mirror:
   - `hyperbolic-semantic-networks/code/cpc2026/ossm_reference_simulator.py`
-- The Sounio lane is currently an **executable parity / smoke path**, not the source of the 10,000 x 500 full-run CSVs.
-- The parity runner intentionally defaults to the `*_nodes_parity.csv` bundle, which is a bounded 64 x 64 subset exported by:
+- The Sounio lane currently provides architecture smokes, checkable reference source, and epistemic receipts. It is **not** the source of the 10,000 x 500 full-run CSVs.
+- The legacy runner defaults to the `*_nodes_parity.csv` bundle, a bounded 64 x 64 subset exported by:
   - `hyperbolic-semantic-networks/code/cpc2026/ossm_bridge/export_to_sounio.py`
+- The committed n=100/n=1000 native JSON files are historical pre-parser-fix reruns and are explicitly excluded from parity claims.
+- A prior corrected-parser omega 1.0.0-beta.4 receipt reported an absolute delta of `2.03e-10`; omega was not available for re-verification on 2026-07-11.
 
 Recommended commands from the `sounio-lang/sounio` root:
 
 ```bash
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/cognitive_ossm.sio
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/run_regimes.sio -- --max-trajectories 8 --max-steps 64
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/export_results.sio
+./bin/souc check examples/cognitive_ossm/run_ossm_native_reference.sio
+CPC2026_SCIENTIFIC_REPO=/workspace/hyperbolic-semantic-networks \
+  bash scripts/ci/cpc2026_yale_evidence_gate.sh
+uv run --with numpy python scripts/research/cpc2026_ossm_subset_audit.py
 ```
 
-Expected output directory:
+Historical bounded output directory:
 
 - `examples/cognitive_ossm/results/`
 
@@ -45,3 +51,6 @@ Expected files:
 - `ossm_parity_{regime}.csv`
 - `ossm_parity_summary_{regime}.csv`
 - `ossm_parity_manifest.csv`
+
+These small legacy CSVs are smoke artifacts, not the paper-scale statistics.
+See `docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md` for the complete claim ledger.

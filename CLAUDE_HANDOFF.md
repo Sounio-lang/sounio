@@ -281,3 +281,21 @@ When starting work, Claude should:
 3. preserve the recovery/integration structure
 4. prefer incremental repair over large resets
 5. report clearly if a proposed action risks clobbering recovered work
+
+---
+
+## 2026-07-11 — CPC 2026 / O-SSM / compiler-naming reconciliation
+
+Verified by re-running commands (not from docs) on branch `cpc2026-ossm-native-run`. Recorded here so the next session does not re-derive or re-mistake these.
+
+1. **Compiler name is canonical `Madaros`.** The version println in `self-hosted/compiler/main.sio` said `Madares` (a typo that also propagated into the shipped ELF); fixed to `Madaros` on this date. The whole ecosystem — `make build-madaros`, `bin/madaros`, `bin/souc`, `docs/MADAROS_STATUS.md`, ~30 audits — already uses `Madaros`. **Until the next `make build-madaros`, `./bin/souc --version` still prints `Madares v0.80.0`** because the prebuilt ELF is unchanged; `artifacts/self-hosted/madaros.gate-receipt` pins its sha256 (`4243…c02e52`, source_commit `f67b323c1`) and must be regenerated on that rebuild. Recorded-output files that quote the current binary (`demo/fregni/OUTPUT.md`, `docs/ppcr/CLAIMS_LEDGER.md` evidence row) were **left unchanged** — editing them would falsify still-accurate evidence.
+
+2. **Default engine is Madaros, not lean_single.** `bin/souc` routes to Madaros; `SOUNIO_SOUC_ENGINE=lean_single` forces the seed. The `make build` fixed point is over `lean_single.sio`, **not** `main.sio` — Madaros is not fixed-point-verified.
+
+3. **CPC 2026 receipt engine split.** Re-ran under lean_single, both PASS live today: `order_spread_exact_n4.sio` → exact N=4 spread `2.044226`; `octonion_associator_gum_validation.sio` → GUM variance `0.640000` (abs err ~1.1e-16). The **parity delta `2.03e-10` is an `omega 1.0.0-beta.4` cross-language witness** (Python `0.26988247370392765` vs Sounio `0.269882473500506`), not a lean_single receipt — see `artifacts/posters/cpc2026-yale/REPRODUCE.md`. Reproducing it needs SWOW-EN input from the sibling repo.
+
+4. **Study B artifact lives in the sibling repo.** `results/cpc2026/ossm_statistical_summary.json` is at `/workspace/hyperbolic-semantic-networks/results/cpc2026/…`, **not** in Sounio. It is the frozen octonion reference (10,000 traj × 500 steps, no-training). The in-repo `examples/cognitive_ossm/results/ossm_sounio_native_n1000.json` is a historical native re-run and is **excluded** from parity claims. A same-subset independent recomputation gives `d=11.6023` and `d=-2.7346`, close to the frozen Python result, while the legacy native artifact differs by as much as 21.1% on component metrics. The repaired `run_ossm_native_reference.sio` passes Madaros `check`; native-v2 compilation still fails at the bridge and is classified check-only by `scripts/ci/cpc2026_yale_evidence_gate.sh`.
+
+5. **O-SSM algebra ceiling: octonion for the frozen reference, sedenion at the frontier.** Reference dynamics are octonion 8-D. Separate experimental brain-model files are not evidence for the frozen CPC implementation. The conversational conflict head `examples/conversational_ossm/o_ssm_conflict.sio` reaches **sedenion (16-D)**: it calls `sed_mul` / `sed_canonical_zd_z/w` from `stdlib/algebra/sedenion.sio` to read zero-divisor proximity, checks clean under lean_single, and has a live caller in `agent_cli.sio`. Do not read `[f64;16]` softmax/sequence buffers as sedenion state.
+
+6. **CPC 2026 public tagline / audience.** Workspace-only poster title (`artifacts/posters/cpc2026-yale/src/App.jsx`, not committed evidence): *"Entropic Curvature in Hyperbolic Semantic Manifolds Indexes Psychopathology-Like Transitions"*; audience = the Computational Psychiatry Conference (Yale, 14–16 Jul 2026), with the explicit poster boundary `NO PATIENT-LEVEL OR CLINICAL PREDICTION`. Before print, regenerate the compiler label from `Madares` to canonical `Madaros` and keep the omega receipt labeled as previously reproduced, not reverified in this session.
