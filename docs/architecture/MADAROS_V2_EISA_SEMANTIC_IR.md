@@ -101,11 +101,29 @@ dominance, resource, and canonicalization tampers, E2B/E2A/E1 regression, and
 zero diff over production codegen/ABI/runtime. Run
 `scripts/dev/madaros_v2_e2c_enir_fuel_blockargs_gate.sh`.
 
+Implementation note (2026-07-11): `E2D-ENIR-V1-RUMP-DD-FULL` adds the
+source-authored `v1_rump_dd` flagship, bringing cumulative lowering to 17/30
+programs and 23/39 observations. The source contains the complete Rump 1988
+DD64 graph as 26 SSA values, 29 ENIR operations, three ordered gates, and a
+cost-one halt terminator. Schema v2 now also represents a fuel-bearing
+single-block program with zero block arguments and zero edges; normal
+termination consumes exactly 30/64 fuel units and leaves 34.
+
+The E2D checker independently normalizes the destructive-register graph from
+the frozen `rump_build` image into SSA and requires exact graph identity with
+the source lowering. A Python DD64 replay checks both error words, while the
+frozen METRON v1 receipts independently check value, formatted roundoff,
+uncertainty, poison, frailty, and gate order. Its FULL gate adds 18 source
+negatives, 16 structural/resource/observation/canonicalization tampers, a
+causal source tamper, E2C/E2B/E2A/E1 regression, and zero diff over the frozen
+oracle and production codegen/ABI/runtime. Run
+`scripts/dev/madaros_v2_e2d_enir_rump_dd_gate.sh`.
+
 This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs, `v1_rump_dd`, arbitrary nested/path-sensitive v1 loops, v2/
-qd128, general exceptional-value algebra, `ENIR -> MIR`, ABI lowering, or
-production-codegen selection. Those boundaries remain open and fail closed
-rather than falling back through the shadow fixture.
+30/39 programs, the remaining 13 v2/qd128 programs, arbitrary nested/
+path-sensitive loops, general exceptional-value algebra, `ENIR -> MIR`, ABI
+lowering, or production-codegen selection. Those boundaries remain open and
+fail closed rather than falling back through the shadow fixture.
 
 ## 1. Decision
 
@@ -122,7 +140,8 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. Until that milestone passes, ENIR is partially implemented only for
-the explicitly gated E2A/E2B/E2C slices; broader conformance remains unproven.
+the explicitly gated E2A/E2B/E2C/E2D slices; broader conformance remains
+unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,

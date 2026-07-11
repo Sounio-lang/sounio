@@ -99,11 +99,10 @@ while x != 0.0 {
 }
 }
 EOF
-cat >"$TMP_DIR/negative/no_loop.eisa" <<'EOF'
-epistemic fn no_loop() {
+cat >"$TMP_DIR/negative/no_observation.eisa" <<'EOF'
+epistemic fn no_observation() {
 fuel 5
 let x=1
-gate x
 }
 EOF
 cat >"$TMP_DIR/negative/nested_loop.eisa" <<'EOF'

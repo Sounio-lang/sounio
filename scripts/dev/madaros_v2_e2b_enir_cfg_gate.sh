@@ -126,9 +126,9 @@ let x=1.0
 gate x
 }
 EOF
-cat >"$TMP_DIR/negative/unsupported_fuel.eisa" <<'EOF'
-epistemic fn unsupported_fuel() {
-fuel 24
+cat >"$TMP_DIR/negative/fuel_out_of_range.eisa" <<'EOF'
+epistemic fn fuel_out_of_range() {
+fuel 1000001
 let x=1.0
 gate x
 }
