@@ -47,31 +47,47 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | Refinement Types + SMT | Validated research | Static engine handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic. |
 | Module imports across files | Validated research | Registry: `modules.imports = validated_research`. |
 | Ownership / borrowing examples | Validated research | Registry: `ownership.borrowing = validated_research`; avoid Rust equivalence. |
-| LSP | Validated research → Prototype (per registry) | Real (`tools/lsp/sounio-lsp.sh`, JSON-RPC, 8 methods); registry row `tooling.editor` says **prototype**. |
+| Editor tooling preview | Validated research | Registry: `tooling.editor = validated_research/closed`. `scripts/ci/sounio_editor_tooling_support_gate.sh` proves public `bin/souc format`/`fmt`, file-backed `bin/souc repl`, preview `bin/souc lsp --stdio`, G5a/G5b, bash LSP smoke, initialize capability smoke, and VS Code/Helix/Neovim static wiring. This is a SOTA-preview support contract, not mature IDE support. |
+| LSP pure-Sounio server rebuild | Prototype blocker | `self-hosted/lsp/server.sio` currently fails to rebuild under the active Madaros path; the checked preview LSP route is `tools/lsp/sounio-lsp.sh` via `bin/souc lsp --stdio`. Do not claim the pure-Sounio LSP rebuild until `tools/lsp/test_protocol.sh` or an equivalent gate is green. |
 | GPU PTX backend | Validated research | Registry: `gpu.ptx = validated_research`. Named gate covers L4 fixtures; out-of-fixture behavior is research. |
 | 168 / Cayley-Dickson algebra | Validated research | Registry: `algebra.168 = validated_research`. Algebraic/formal artifacts only — no biological or EEG advantage claims. |
 | Ontology subsystem | Validated research | Registry: `ontology = validated_research`. Rebuilt ontology validation surfaces only. |
 
-### Prototype (registry: prototype / downgraded)
+Editor-tooling details:
+
+- Formatter: `souc format <file>` / `souc fmt` dispatches to
+  `tools/fmt/sounio-fmt.sh`. Phase 1 is token-level and idempotent for the
+  G5a corpus; it does not claim AST round-trip formatting or full style
+  configuration.
+- REPL: `souc repl` dispatches to `tools/repl.sh`, a file-backed eval loop
+  that accumulates definitions and runs expressions through the active `souc`
+  wrapper. A fully Sounio-native eval loop remains deferred until process-spawn
+  primitives are available.
+- LSP: `souc lsp --stdio` dispatches to the preview `tools/lsp/sounio-lsp.sh`
+  server. It is smoke-tested for JSON-RPC framing, compiler-backed diagnostics,
+  hover/definition roundtrips, multi-document isolation, timeouts, and failure
+  diagnostics. No pure-Sounio LSP rebuild under current Madaros is claimed or
+  demonstrated; that server source remains a separate rebuild blocker.
+
+### Bounded validated research surfaces and prototypes
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
-| **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
-| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **G5a landed 2026-05-28.** `souc format <file>` / `souc fmt` dispatches to `tools/fmt/sounio-fmt.sh`. Phase 1 rules (tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` + `->` spacing) normalised outside strings/comments. Idempotency gate `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
-| **REPL** | `tooling.editor = prototype` | **G5b landed 2026-05-28.** `souc repl` dispatches to `tools/repl.sh`, a souc-native file-based eval loop (each input is compiled and executed by *this* `souc` binary, not a separate Rust reimplementation). Gate: `scripts/gates/g5b_repl_eval.sh` PASS. Open: fully-Sounio eval loop in `self-hosted/repl/` deferred (needs process-spawn primitives). |
-| **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
+| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1252 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 155 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
+| **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
 | **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
 | **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
-| **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution is a maturity frontier. |
+| **Direct-driver support cohort** | `direct_driver.support = validated_research` | Claim only the bounded support cohort checked by `scripts/ci/sounio_direct_driver_support_gate.sh`: 24/24 `tests/selfhost-driver-output/*.sio` fixtures compile to ELF and execute with expected stdout/exit. **NOT PROVED:** large-surface direct-driver execution, ontology-sized semantic truth, wrapper-provenance replacement, native-v2 driver self-compile/fixed-point closure, direct-driver negative-truth restoration, or broad production readiness. |
+| **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution remains a maturity frontier. The bounded support cohort above does not promote direct-driver semantic authority on ontology-sized or compiler-sized surfaces. |
 | **Windows target** | `platform.windows = prototype` | PE/COFF lane wired; not stable. |
-| **`binary.source` (modular self-hosted tree)** | `prototype` | `lean_single.sio` remains the checked binary source until parity gates prove a swap. See "Multi-Module Bundle Gap" below. |
+| **`binary.source` (modular self-hosted tree)** | `validated_research` | The checked x86-64 Madaros prebuilt is built from `self-hosted/compiler/main.sio` and covered by the named Madaros source-to-ELF/full gates. This claim applies to `bin/madaros-linux-x86_64`, not the legacy `bin/souc-linux-x86_64`; `lean_single.sio` remains the bootstrap seed and escape hatch. |
 
 ### Active Known Bugs / Architectural Gaps
 
-**Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The gate to "modular source replaces `lean_single.sio`" is open.
+**Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The checked x86-64 Madaros prebuilt is source-built from that modular tree and covered by `scripts/ci/madaros_full_gate.sh` plus `scripts/ci/madaros_source_to_elf_gate.sh`. This is a validated-research source-built Madaros lane, not a claim that `lean_single.sio` has been retired as the bootstrap seed.
 
 Previously tracked G1 roots, all closed:
 
@@ -80,6 +96,41 @@ Previously tracked G1 roots, all closed:
 3. ~~**Nested `&!` struct-field mutation.**~~ **FIXED** (`a40989429`) — `ident.f1[i].f2[j] = v` pattern compiles correctly. Regression: `tests/run-pass/nested_ref_field_array_store.sio` ✓.
 
 See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1 and memory `[[project_closures_shipped_2026-05-27]]` for the full arc.
+
+**Impl-method signature preseed under multi-module summary lowering — FIXED 2026-07-07 (WP-A10).** Importing a module that declares an `impl` (e.g. `impl ExactRing for i64`) SIGSEGV'd the Madaros compiler *at compile time* inside `lower_program_to_ir_summary_box_with_externs_ref` (trace: `lower_array: dep_begin 1` → `module_frontend_lower: summary_begin`, never `summary_done`). Root cause: `lowerer_preseed_fn_signature_mut` (in `self-hosted/ir/lower.sio`) — the *only* caller is the impl-method summary preseed, so it stayed latent until an imported module carried an `impl` — mutated the function slot through the direct nested lvalue `(*(*lo).module).functions[fn_id].field = X`. The 512-byte aggregate store `.param_regs = [IR_INVALID_REG; 64]` hits the documented lean_single two-level-nested-store miscompile: the aggregate lvalue base address is computed wrong and the write faults. Fix: extract the module `Box` + function slot to locals, mutate the local slot, write it back once — the same safe idiom already used by `lowerer_preseed_program_items_mut`'s `ItemFn` branch. Minimal repros (both build+run green post-fix): `tests/run-pass/gen_dep_summary_min.sio` (generic `[F;2048]` dep, no impl → was already OK) and `tests/run-pass/gen_dep_summary_min2.sio` (generic dep **with** trait + `impl for i64` + trait-bounded generics → reproduced the crash, now `GEN_DEP_SUMMARY2_OK`). Single-module + non-generic paths are byte-identical (the fixed function has no other caller). **Does NOT unblock `cd_exact_generic_i64` end-to-end** — see next entry.
+
+**Multi-module dependency body-lowering memory wall + downstream segfault — OPEN (blocks `cd_exact_generic_i64` / WP-A5).** With the impl-preseed fix above, `cd_exact_generic_i64` now clears module-1 (`cayley_dickson_exact`) *summary* lowering, but still fails to produce an ELF. Two coupled residuals, both PRE-EXISTING (identical on the base branch for `algebra_g2_invariants_import` and `associator_field_octonion`, neither of which contains an `impl`, so they are unrelated to the impl fix): (1) **Pathological memory.** `IrModule` is ~250 MB (`functions: [IrFunction; 2048]`, each `instrs: [IrInstr; 1024]`); the multi-module lowerer makes many by-value module/summary copies, so compiling the 4-module cd_exact closure peaks at **~18 GB VM**. Under the `bin/madaros` wrapper's `ulimit -v 16 GiB` the allocator fails mid-`lower_program_bodies_ref` and SIGSEGVs while lowering the 5th generic `[F;2048]`-returning body (`cd_sub_exact`, structurally identical to the `cd_add_exact` that lowered fine one step earlier — i.e. accumulation, not a per-statement defect). (2) **Downstream crash.** Running the raw `madaros.elf` with NO ulimit (node has 93 GB free, so 18 GB is not an OS OOM) advances past module-1 body lowering + merge and then SIGSEGVs at `lower_array: dep_begin 2` (module-2 summary lowering) — a genuine fault, not memory pressure. Fixing this requires shrinking `IrModule`/eliminating by-value module copies in the multi-module path and/or resolving the module-2 summary fault; it is distinct from both A8 (SRET forwarding) and A10 (impl-preseed). `cd_exact_generic_i64` remains NOT verified on Madaros.
+
+**`cd_exact_generic_i64` — GREEN on Madaros 2026-07-07 (WP-A5).** Build now succeeds (the memory wall above is cleared by building the raw madaros ELF under `ulimit -v unlimited` instead of the wrapper's `ulimit -v 16 GiB`; the 18 GB VM peak is data, not a compiler bug). With the build unblocked, the last *runtime* SIGSEGV was traced (Slurm + capstone disasm of the emitted ELF) to a **transitive cross-module call drop**: generic `cd_mul_exact` calls `cd_sigma` via `use algebra::cayley_dickson::{cd_sigma}`, and on the Madaros imported-lane a direct call whose target lives in a *transitively-imported* module is silently elided — the `IrCall` never emits, and its result vreg defaults to 0, clobbering parameter slot 0 (`a`), so the next `a.c[i]` dereferences a null handle inside the nested accumulation loop → SIGSEGV. Same-module callees (`cd_zero_exact`, the `er_*` trait methods) resolve correctly; only different-module targets drop. **Fix (stdlib workaround):** define `cd_sigma_x` same-module in `cayley_dickson_exact.sio` (verbatim copy) and call it — exactly the pattern the concrete sibling `cayley_dickson_exact_i64.sio` already uses (`cd_sigma_exact_i64`, whose header documents the `use cd_sigma` "HARD BLOCKER"). Result: `ZD PROVED` / `SQ PASS` / `NONZERO PASS` / 16×`COMP i 0`, rc=0. Stdlib-only; compiler untouched.
+
+**Transitive cross-module call drop (A14) — FIXED (2026-07-07).** The residual compiler defect behind the A5 stdlib workaround is now root-caused and fixed in `module_frontend.sio`; the `cd_sigma_x` workaround has been **reverted** (`cd_mul_exact` again calls the transitively-imported `cd_sigma`). Root cause: the merged-IR call-target canonicalization (`ir_module_compact_duplicate_fn_refs` + the `ir_module_finalize_merged_calls` resolve loop) rebound a call's `fn_id` with a whole-`IrInstr` writeback (`var ins=slot; ins.fn_id=X; slot=ins`). `IrInstr` carries a `Box` (`call_args`); lean_single miscompiles that by-value copy and ZEROES the slot (`op/dst/fn → 0`), so a transitive call from a non-first function was elided (result vreg 0 aliases param slot 0 → null-handle deref → SIGSEGV, or a wrong result). Rewriting to a nested scalar store (`out.functions[fi].instrs[ii].fn_id=X`, direct or via `&!` pointer) does NOT work either — lean_single silently DROPS 3-level nested stores, leaving `fn_id` stale. Fix: rebind per WHOLE FUNCTION using the merge-append idiom (by-value `IrFunction` copy, 2-level owned `fn_id` write, 1-level array writeback), which both persists and avoids the Box-carrying `IrInstr` copy. Witnesses (Slurm, actual rc): `a13_crossmod_nonfirst_fn_drop_ctrlA/ctrlC` 139→0; new `a14_transitive_min` 0→115; `cd_exact_generic_i64` (now via transitive `cd_sigma`) 139→0 `ZD PROVED`/`SQ PASS`/`NONZERO PASS`/16×`COMP i 0`; `cd_exact_generic_vs_concrete` 139→0. Net `module_frontend.sio` +231 bytes (8MB import budget intact).
+
+**Array-field struct by-value return (SRET) — NOT a limitation; the residual was `println` dispatch.** 2026-07-06 investigation (WP-A4): returning a struct that contains an array field *by value* on the default Madaros engine works — structs are handle-based (one heap object; the array field is a separate handle stored in a slot), so the returned handle round-trips correctly at any width. Verified across `struct{c:[i64;2],x}`, `struct{c:[i64;4],bits}`, the generic `struct G4<F>{c:[F;4],bits}` @`i64`, a 3-arg callee (asymmetric args), and `[i64;256]`. The actual cause of `tests/run-pass/generic_struct_return.sio` rc=139 was the **`println` builtin dispatch**: `expr_result_scalar_kind_ref` (in `self-hosted/ir/lower.sio`) had no `ExprKind::ExprIndex` case, so an i64 array element such as `r.c[0]` classified as kind 0 → routed to the char\* printer, which dereferenced the integer value as a pointer and SIGSEGV'd. (Monomorphized generic structs register fields from the generic declaration `[F;N]`, so a declared-type i64 marker cannot fire for them.) Fix: classify a subscript's element positively as float (matching the existing `index_base_elem_is_float_ref` path → `print_f64`) and default the remaining numeric element to int (`print_int`); float-element index-println tests (`bdf_stiff`, `dissertation_pbpk28_*`, `hof_mut_struct_min`, `ode_generic_solver`) are unaffected. Regression tests: `tests/run-pass/generic_struct_return.sio`, `tests/run-pass/println_int_array_field.sio`, `tests/run-pass/sret_array4_return.sio`, `tests/run-pass/sret_array4_generic_return.sio`, `tests/run-pass/sret_array_args_return.sio`. Residual (tracked in the continuity new-gap ledger, NOT this fix): `println(<computed local>)` where the local is bound from a bare arithmetic/index initializer without an int scalar-kind marker still routes to the char\* printer.
+
+**Cross-module large-struct SRET forwarding (A8) — FIXED (2026-07-06).** A dependency-module
+function that forwards through an inner same-module struct-returning call — the shape
+`var r = zero(k); r.c[i] = 1; return r` — used to RUN-segfault (rc=139) when reached across a
+module boundary (`tests/run-pass/sret_forwarding_cross_module_min.sio`, `a8_diag_fwd/sizes/step.sio`),
+while the byte-identical single-module source ran clean. **Root cause (corrects the earlier
+body-lowering hypothesis):** the merged-IR body lowering is *correct* (verified pre-finalize:
+`Call dst=2 arg=[0] fn=<zero>`). The corruption was introduced in `ir_module_finalize_merged_calls`
+(`self-hosted/compiler/module_frontend.sio`): its final call-target-resolution pass called
+`ir_module_resolve_one_call_target(&out, ins)` passing the whole `IrInstr` **by value**. `IrInstr`
+carries a `Box` (`call_args`); under lean_single the by-value large-struct copy is miscompiled and
+scrambles the *caller's* `ins` local (`dst 2→3`, `src1 0→2`, `call_args [0]→[2]`, `fn_id`→wrong),
+which was then written back unconditionally — so `r.c[i]` / `return r` dereferenced a garbage handle.
+(`ir_module_compact_duplicate_fn_refs` used the same read/writeback but never passed `ins` by value,
+which is exactly why it was safe.) **Fix:** resolve from scalar fields only —
+`ir_module_resolve_call_target_fields(module, old_id: i64, name: Name)` (Name is a small fixed struct,
+passed by value safely throughout) — and write the slot back only when `fn_id` actually changes.
+Witnesses (Slurm, actual rc): min → rc=0 `CROSS_SRET_MIN_OK`; cd_mul → rc=0 `CD_MUL_CROSS_SRET_OK`;
+a8_diag_fwd/sizes/step/ctrl → rc=0; `fano_basics` FAIL→PASS. Zero regressions (base-vs-fix
+differential across ~20 multi-module tests: identical-or-better). **Still open (separate, pre-existing —
+NOT this fix):** `cd_exact_generic_i64` (A5 headline) SIGSEGVs at *compile time* in
+`lower_program_to_ir_summary_box_with_externs_ref` for its generic dependency module (trace stops
+between `module_frontend_lower: summary_begin` and `summary_done` on `lower_array: dep_begin 1`);
+EISA `test_eisa_isa/evm` fail earlier at "multimodule native thin-link compilation failed" (brc=1).
+Both reproduce identically on the base branch.
 
 ### Reconciliation notes (2026-05-27)
 
@@ -195,13 +246,13 @@ Cross-compiled binaries must be executed on the target OS. The compiler runs on 
 
 ---
 
-## Single-source build path (`lean_single.sio`)
+## Legacy bootstrap seed (`lean_single.sio`)
 
-**Status:** active constraint. Not a bug; a maturity-stage reality that contributors must know about before editing type-system logic.
+**Status:** bootstrap seed and escape hatch. Not a bug; a maturity-stage reality that contributors must know about before editing compiler logic.
 
 ### What the situation actually is
 
-The shipped compiler binary (`bin/souc-linux-x86_64`, consumed by the `bin/souc` launcher) is produced today from a **single self-hosted source file**:
+The preserved bootstrap compiler binary (`bin/souc-linux-x86_64`, also available through `SOUNIO_SOUC_ENGINE=lean_single`) is produced from a **single self-hosted source file**:
 
 - `self-hosted/compiler/lean_single.sio`
 
@@ -214,7 +265,7 @@ The modular directory layout most readers expect —
 - `self-hosted/ir/`
 - `self-hosted/native/`
 
-— does exist, is kept in sync by hand, and describes the architectural decomposition we aim to bootstrap from. **It is not yet the source the binary is built from.** The 2-stage bootstrap recipe below uses `lean_single.sio` exclusively:
+— is now the source for the checked x86-64 Madaros prebuilt (`bin/madaros-linux-x86_64`). The 2-stage bootstrap recipe below remains the legacy seed/escape-hatch path and uses `lean_single.sio` exclusively:
 
 ```bash
 ./bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio /tmp/souc-stage1
@@ -224,7 +275,7 @@ cp /tmp/souc-stage2 bin/souc-linux-x86_64
 
 ### Implication for contributors
 
-Any change to the type system, effects table, error codes, or surface syntax **must be made in `lean_single.sio`** to reach the binary. Changes made only to the modular tree are silently absent from the shipped compiler, even if the repo builds green and the tests pass against the stale binary.
+Changes to the default user-facing compiler path must land in the modular tree and be proven through the Madaros gates before refreshing `bin/madaros-linux-x86_64`. Changes needed for the legacy seed or explicit `SOUNIO_SOUC_ENGINE=lean_single` path still need the corresponding `lean_single.sio` update.
 
 Examples of this pattern in recent history:
 
@@ -233,14 +284,14 @@ Examples of this pattern in recent history:
 
 ### Risk of silent divergence
 
-Because the two universes are kept in lock-step by discipline rather than by a test, a change that touches only one side can pass CI without any signal. Until an operational-parity harness lands under `tests/parity/`, reviewers of a PR that modifies type-system logic should explicitly confirm that `lean_single.sio` was touched and that a 2-stage bootstrap was run.
+Because the modular compiler and legacy seed are no longer the same source file, reviewers should check which lane a PR affects. Default Madaros changes need the modular-source build plus named Madaros gates; legacy-seed changes still need a `lean_single.sio` bootstrap proof.
 
 ### Planned resolution
 
 1. **Parity harness (`tests/parity/`, planned near-term).** For a fixed set of `.sio` programs drawn from `examples/` and `tests/compile-fail/`, compile via both paths and diff the stdout/stderr and exit codes (not the binaries — timestamps and symbol ordering make binary-equality unreliable). Divergence flips CI red.
-2. **Source swap (roadmap, long term).** Rebuild `bin/souc-linux-x86_64` from the modular tree and retire `lean_single.sio`. This is a multi-week refactor and is not a Wave 9 target.
+2. **Bootstrap retirement (roadmap, long term).** Retire `lean_single.sio` as an escape hatch once the modular compiler has enough fixed-point and parity evidence.
 
-Until both land, treat `lean_single.sio` as the source of truth for the binary and treat the modular tree as the maintained future target.
+Until that lands, treat the modular tree as the source for the default Madaros prebuilt and `lean_single.sio` as the seed/escape-hatch source.
 
 ---
 

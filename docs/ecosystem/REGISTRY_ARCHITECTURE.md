@@ -12,10 +12,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.regi
 **Nome proposto:** `registry.sounio.org`
 **Versão:** 1.0 (MVP)
 **Data:** 2026-04-20
+Status: design reference only; not launched as a public registry.
 
 ## 1. Visão Geral
 
-O registry é o coração do ecossistema. Ele não é apenas um repositório de pacotes — é um **repositório de conhecimento epistêmico curado**.
+Este documento descreve uma arquitetura-alvo para um registry público futuro.
+Ele não documenta um serviço hospedado em produção, e não deve ser citado como
+evidência de publicação, login, busca hospedada ou suporte de registry pública.
+
+O registry proposto seria o coração do ecossistema. Ele não seria apenas um repositório de pacotes — seria um **repositório de conhecimento epistêmico curado**.
 
 Cada pacote carrega não apenas código, mas **metadados de confiança científica**.
 
@@ -27,8 +32,8 @@ Cada pacote carrega não apenas código, mas **metadados de confiança científi
 
 ```mermaid
 graph TD
-    CLI[souc CLI] --> API[REST API]
-    WebUI[registry.sounio.org] --> API
+    CLI[souc CLI futuro] --> API[REST API]
+    WebUI[registry futuro] --> API
     API --> Storage[S3/MinIO]
     API --> DB[PostgreSQL]
     API --> Index[Epistemic Index]
@@ -91,8 +96,8 @@ Cada pacote recebe um **Epistemic Score** calculado a partir de:
 
 ## 4. API Endpoints (MVP)
 
-- `GET /api/v1/search?q=pbpk&min_score=0.8`
-- `POST /api/v1/packages` (publish)
+- `GET /api/v1/search?q=pbpk&min_score=0.8` (futuro)
+- `POST /api/v1/packages` (publish futuro)
 - `GET /api/v1/packages/{name}/{version}`
 - `GET /api/v1/packages/{name}/epistemic-report`
 - `GET /api/v1/stats` (dashboards de adoção)
@@ -101,8 +106,8 @@ Cada pacote recebe um **Epistemic Score** calculado a partir de:
 
 ## 5. Fluxo de Publicação
 
-1. Desenvolvedor roda `souc pkg build`
-2. `souc pkg publish` envia para registry
+1. Desenvolvedor roda um comando futuro de build de pacote
+2. Um comando futuro de publish envia para registry
 3. CI executa:
    - Validação de `sounio.toml`
    - Testes de regressão

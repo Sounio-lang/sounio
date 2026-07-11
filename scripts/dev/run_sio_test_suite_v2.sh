@@ -21,6 +21,10 @@
 #
 # Usage:
 #   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
+#   bash scripts/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
+#   bash scripts/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
+#   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
+#   bash scripts/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
 
 set -uo pipefail
 
@@ -66,18 +70,44 @@ fi
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
+# If SOUC_BIN resolved to a raw ELF (not a shell script), route through the
+# subcommand wrapper so the harness can call `check`/`run`/`compile` correctly.
+if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
+    _NATIVE_WRAPPER="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+    if [[ -f "$_NATIVE_WRAPPER" ]]; then
+        export SOUNIO_SOUC_BIN="$SOUC_BIN"
+        SOUC_BIN="$_NATIVE_WRAPPER"
+        chmod +x "$_NATIVE_WRAPPER"
+    fi
+    unset _NATIVE_WRAPPER
+fi
+
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Parse arguments
 FILTER=""
+FILTER_MODE="contains"
 VERBOSE=""
 FORMAT="text"
 JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+LIST_TESTS=0
+TEST_LIST_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --filter)
             FILTER="$2"
+            FILTER_MODE="contains"
+            shift 2
+            ;;
+        --filter-prefix)
+            FILTER="$2"
+            FILTER_MODE="prefix"
+            shift 2
+            ;;
+        --filter-exact)
+            FILTER="$2"
+            FILTER_MODE="exact"
             shift 2
             ;;
         --verbose)
@@ -92,8 +122,17 @@ while [[ $# -gt 0 ]]; do
             JOBS="$2"
             shift 2
             ;;
+        --list-tests)
+            LIST_TESTS=1
+            shift
+            ;;
+        --test-list)
+            TEST_LIST_FILE="$2"
+            shift 2
+            ;;
         *)
             FILTER="$1"
+            FILTER_MODE="contains"
             shift
             ;;
     esac
@@ -136,6 +175,25 @@ fi
 if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
     mkdir -p "$SOUNIO_TEST_RESULTS_DIR"
 fi
+
+test_matches_filter() {
+    local basename="$1"
+    case "$FILTER_MODE" in
+        contains)
+            [[ -z "$FILTER" || "$basename" == *"$FILTER"* ]]
+            ;;
+        prefix)
+            [[ -z "$FILTER" || "$basename" == "$FILTER"* ]]
+            ;;
+        exact)
+            [[ -z "$FILTER" || "$basename" == "$FILTER" ]]
+            ;;
+        *)
+            echo "error: unknown filter mode: $FILTER_MODE" >&2
+            return 2
+            ;;
+    esac
+}
 
 # Function to run a single test
 run_test() {
@@ -198,7 +256,7 @@ run_test() {
     fi
     
     # Check filter
-    if [[ -n "$FILTER" && "$basename" != *"$FILTER"* ]]; then
+    if ! test_matches_filter "$basename"; then
         return
     fi
     
@@ -368,6 +426,79 @@ run_test() {
     fi
 }
 
+# Collect all test files
+TEST_FILES=()
+TEST_LIST_HEADER_MODE=""
+TEST_LIST_HEADER_FILTER=""
+if [[ -n "$TEST_LIST_FILE" ]]; then
+    if [[ ! -f "$TEST_LIST_FILE" ]]; then
+        echo "error: --test-list file not found: $TEST_LIST_FILE" >&2
+        exit 2
+    fi
+    while IFS= read -r f; do
+        if [[ "$f" == "# sounio-test-list"$'\t'* ]]; then
+            IFS=$'\t' read -r _ TEST_LIST_HEADER_MODE TEST_LIST_HEADER_FILTER <<< "$f"
+            continue
+        fi
+        f="${f%%#*}"
+        f="${f#"${f%%[![:space:]]*}"}"
+        f="${f%"${f##*[![:space:]]}"}"
+        [[ -z "$f" ]] && continue
+        if [[ "$f" != /* ]]; then
+            f="$ROOT_DIR/$f"
+        fi
+        if [[ ! -f "$f" ]]; then
+            echo "error: --test-list entry not found: $f" >&2
+            exit 2
+        fi
+        TEST_FILES+=("$f")
+    done <"$TEST_LIST_FILE"
+else
+    for f in "$ROOT_DIR"/tests/run-pass/*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
+    for f in "$ROOT_DIR"/tests/compile-fail/*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
+    for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
+    for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
+    for f in "$ROOT_DIR"/tests/gpu/*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
+fi
+
+if [[ -n "$TEST_LIST_HEADER_MODE" ]]; then
+    if [[ "$TEST_LIST_HEADER_MODE" != "$FILTER_MODE" || "$TEST_LIST_HEADER_FILTER" != "$FILTER" ]]; then
+        echo "error: --test-list filter header does not match active filter" >&2
+        echo "  header: mode=$TEST_LIST_HEADER_MODE filter=$TEST_LIST_HEADER_FILTER" >&2
+        echo "  active: mode=$FILTER_MODE filter=$FILTER" >&2
+        exit 2
+    fi
+fi
+
+if [[ -n "$TEST_LIST_FILE" && -n "$FILTER" ]]; then
+    for f in "${TEST_FILES[@]}"; do
+        basename="$(basename "$f")"
+        if ! test_matches_filter "$basename"; then
+            echo "error: --test-list entry does not match active filter: ${f#$ROOT_DIR/}" >&2
+            exit 2
+        fi
+    done
+fi
+
+if [[ "$LIST_TESTS" == "1" ]]; then
+    for f in "${TEST_FILES[@]}"; do
+        basename="$(basename "$f")"
+        test_matches_filter "$basename" || continue
+        printf '%s\n' "${f#$ROOT_DIR/}"
+    done
+    exit 0
+fi
+
 export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE
 
 # Header
@@ -378,24 +509,6 @@ if [[ -n "${SOUC_NATIVE_BIN:-}" ]]; then
     echo "Using native backend: $SOUC_NATIVE_BIN"
 fi
 echo ""
-
-# Collect all test files
-TEST_FILES=()
-for f in "$ROOT_DIR"/tests/run-pass/*.sio; do
-    [[ -f "$f" ]] && TEST_FILES+=("$f")
-done
-for f in "$ROOT_DIR"/tests/compile-fail/*.sio; do
-    [[ -f "$f" ]] && TEST_FILES+=("$f")
-done
-for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
-    [[ -f "$f" ]] && TEST_FILES+=("$f")
-done
-for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do
-    [[ -f "$f" ]] && TEST_FILES+=("$f")
-done
-for f in "$ROOT_DIR"/tests/gpu/*.sio; do
-    [[ -f "$f" ]] && TEST_FILES+=("$f")
-done
 
 echo "Found ${#TEST_FILES[@]} test files"
 echo ""

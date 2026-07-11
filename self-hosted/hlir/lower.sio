@@ -23,6 +23,19 @@ let HLIR_LOWER_MAX_SCOPES: i64 = 256
 let HLIR_LOWER_MAX_LOOP_DEPTH: i64 = 128
 let HLIR_LOWER_NO_LOOP: i64 = -1
 
+let HLIR_TYPE_CODE_NONE: i64 = 0
+let HLIR_TYPE_CODE_BOOL: i64 = 1
+let HLIR_TYPE_CODE_I8: i64 = 2
+let HLIR_TYPE_CODE_I16: i64 = 3
+let HLIR_TYPE_CODE_I32: i64 = 4
+let HLIR_TYPE_CODE_I64: i64 = 5
+let HLIR_TYPE_CODE_U8: i64 = 6
+let HLIR_TYPE_CODE_U16: i64 = 7
+let HLIR_TYPE_CODE_U32: i64 = 8
+let HLIR_TYPE_CODE_U64: i64 = 9
+let HLIR_TYPE_CODE_F32: i64 = 10
+let HLIR_TYPE_CODE_F64: i64 = 11
+
 pub fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
     if n < 0 {
         return "0"
@@ -1748,6 +1761,61 @@ pub fn hlir_ast_path_head_to_string(path: AstPath) -> string with Mut, Panic, Di
     str_from_bytes(path.segments.head_buf, path.segments.head_len)
 }
 
+fn hlir_type_code_from_type(ty: HlirType) -> i64 {
+    if ty.kind == HlirTypeKind::HlirTypeBool { return HLIR_TYPE_CODE_BOOL }
+    if ty.kind == HlirTypeKind::HlirTypeI8 { return HLIR_TYPE_CODE_I8 }
+    if ty.kind == HlirTypeKind::HlirTypeI16 { return HLIR_TYPE_CODE_I16 }
+    if ty.kind == HlirTypeKind::HlirTypeI32 { return HLIR_TYPE_CODE_I32 }
+    if ty.kind == HlirTypeKind::HlirTypeI64 { return HLIR_TYPE_CODE_I64 }
+    if ty.kind == HlirTypeKind::HlirTypeU8 { return HLIR_TYPE_CODE_U8 }
+    if ty.kind == HlirTypeKind::HlirTypeU16 { return HLIR_TYPE_CODE_U16 }
+    if ty.kind == HlirTypeKind::HlirTypeU32 { return HLIR_TYPE_CODE_U32 }
+    if ty.kind == HlirTypeKind::HlirTypeU64 { return HLIR_TYPE_CODE_U64 }
+    if ty.kind == HlirTypeKind::HlirTypeF32 { return HLIR_TYPE_CODE_F32 }
+    if ty.kind == HlirTypeKind::HlirTypeF64 { return HLIR_TYPE_CODE_F64 }
+    HLIR_TYPE_CODE_NONE
+}
+
+fn hlir_type_from_code(code: i64) -> HlirType {
+    if code == HLIR_TYPE_CODE_BOOL { return hlir_type_bool() }
+    if code == HLIR_TYPE_CODE_I8 { return hlir_type_i8() }
+    if code == HLIR_TYPE_CODE_I16 { return hlir_type_i16() }
+    if code == HLIR_TYPE_CODE_I32 { return hlir_type_i32() }
+    if code == HLIR_TYPE_CODE_I64 { return hlir_type_i64() }
+    if code == HLIR_TYPE_CODE_U8 { return hlir_type_u8() }
+    if code == HLIR_TYPE_CODE_U16 { return hlir_type_u16() }
+    if code == HLIR_TYPE_CODE_U32 { return hlir_type_u32() }
+    if code == HLIR_TYPE_CODE_U64 { return hlir_type_u64() }
+    if code == HLIR_TYPE_CODE_F32 { return hlir_type_f32() }
+    if code == HLIR_TYPE_CODE_F64 { return hlir_type_f64() }
+    hlir_type_void()
+}
+
+fn hlir_type_with_element(base: HlirType, elem: HlirType) -> HlirType with Mut {
+    var out = base
+    let code = hlir_type_code_from_type(elem)
+    if code != HLIR_TYPE_CODE_NONE {
+        out.type_elem_count = 1
+        out.type_elems[0] = code
+    }
+    out
+}
+
+fn hlir_type_element_or_void(ty: HlirType) -> HlirType {
+    if ty.type_elem_count > 0 {
+        return hlir_type_from_code(ty.type_elems[0])
+    }
+    hlir_type_void()
+}
+
+fn hlir_type_element_or_i64(ty: HlirType) -> HlirType {
+    let elem = hlir_type_element_or_void(ty)
+    if elem.kind != HlirTypeKind::HlirTypeVoid {
+        return elem
+    }
+    hlir_type_i64()
+}
+
 pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc {
     if ty.kind == TypeExprKind::TypeUnit {
         return hlir_type_void()
@@ -1779,8 +1847,31 @@ pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc 
         if tname == "bool" { return hlir_type_bool() }
         if tname == "unit" { return hlir_type_void() }
     }
+    if ty.kind == TypeExprKind::TypeArray {
+        match ty.inner {
+            Some(elem) => {
+                let elem_ty = hlir_type_from_ast(*elem)
+                return hlir_type_with_element(hlir_type_array(-1, 0), elem_ty)
+            }
+            None => return hlir_type_array(-1, 0),
+        }
+    }
     if ty.kind == TypeExprKind::TypeReference || ty.kind == TypeExprKind::TypeRefMut {
-        return hlir_type_ptr(-1)
+        match ty.inner {
+            Some(inner) => {
+                let inner_ty = *inner
+                let elem_ty = if inner_ty.kind == TypeExprKind::TypeArray {
+                    match inner_ty.inner {
+                        Some(elem) => hlir_type_from_ast(*elem),
+                        None => hlir_type_i64(),
+                    }
+                } else {
+                    hlir_type_from_ast(inner_ty)
+                }
+                return hlir_type_with_element(hlir_type_ptr(-1), elem_ty)
+            }
+            None => return hlir_type_ptr(-1),
+        }
     }
     // Conservative fallback for unsupported/unknown AST types.
     hlir_type_i64()
@@ -1818,6 +1909,25 @@ pub fn hlir_ast_binary_to_hlir(op: BinaryOp) -> i64 {
     }
 }
 
+pub fn hlir_ast_binary_to_hlir_typed(op: BinaryOp, lhs_ty: HlirType, rhs_ty: HlirType) -> i64 {
+    let is_float = lhs_ty.kind == HlirTypeKind::HlirTypeF32 || lhs_ty.kind == HlirTypeKind::HlirTypeF64 ||
+                   rhs_ty.kind == HlirTypeKind::HlirTypeF32 || rhs_ty.kind == HlirTypeKind::HlirTypeF64
+    if is_float {
+        if op == BinaryOp::OpAdd { return HLIR_BIN_FADD }
+        if op == BinaryOp::OpSub { return HLIR_BIN_FSUB }
+        if op == BinaryOp::OpMul { return HLIR_BIN_FMUL }
+        if op == BinaryOp::OpDiv { return HLIR_BIN_FDIV }
+        if op == BinaryOp::OpRem { return HLIR_BIN_FREM }
+        if op == BinaryOp::OpEq { return HLIR_BIN_FOEQ }
+        if op == BinaryOp::OpNe { return HLIR_BIN_FONE }
+        if op == BinaryOp::OpLt { return HLIR_BIN_FOLT }
+        if op == BinaryOp::OpLe { return HLIR_BIN_FOLE }
+        if op == BinaryOp::OpGt { return HLIR_BIN_FOGT }
+        if op == BinaryOp::OpGe { return HLIR_BIN_FOGE }
+    }
+    hlir_ast_binary_to_hlir(op)
+}
+
 pub fn hlir_ast_binary_result_ty(op: BinaryOp) -> HlirType {
     if op == BinaryOp::OpEq
     || op == BinaryOp::OpNe
@@ -1830,6 +1940,26 @@ pub fn hlir_ast_binary_result_ty(op: BinaryOp) -> HlirType {
         return hlir_type_bool()
     }
     hlir_type_i64()
+}
+
+pub fn hlir_ast_binary_result_ty_typed(op: BinaryOp, lhs_ty: HlirType, rhs_ty: HlirType) -> HlirType {
+    if op == BinaryOp::OpEq
+    || op == BinaryOp::OpNe
+    || op == BinaryOp::OpLt
+    || op == BinaryOp::OpLe
+    || op == BinaryOp::OpGt
+    || op == BinaryOp::OpGe
+    || op == BinaryOp::OpAnd
+    || op == BinaryOp::OpOr {
+        return hlir_type_bool()
+    }
+    if lhs_ty.kind == HlirTypeKind::HlirTypeF64 || rhs_ty.kind == HlirTypeKind::HlirTypeF64 {
+        return hlir_type_f64()
+    }
+    if lhs_ty.kind == HlirTypeKind::HlirTypeF32 || rhs_ty.kind == HlirTypeKind::HlirTypeF32 {
+        return hlir_type_f32()
+    }
+    hlir_ast_binary_result_ty(op)
 }
 
 pub fn hlir_ast_unary_to_hlir(op: UnaryOp) -> i64 {
@@ -1883,9 +2013,32 @@ pub fn hlir_lower_field_access(state: HlirLowerState, base: i64, field: i64) -> 
     hlir_lower_load(ptr_pair.0, ptr_pair.1, hlir_type_i64())
 }
 
+fn hlir_lower_value_type(state: HlirLowerState, value_id: i64) -> HlirType {
+    hlir_function_lookup_local_type(state.builder.func, value_id)
+}
+
+fn hlir_lower_index_elem_type(state: HlirLowerState, base: i64) -> HlirType {
+    let base_ty = hlir_lower_value_type(state, base)
+    hlir_type_element_or_i64(base_ty)
+}
+
+fn hlir_lower_store_index_elem_type(state: HlirLowerState, base: i64, value_id: i64) -> HlirType {
+    let base_ty = hlir_lower_value_type(state, base)
+    let elem_ty = hlir_type_element_or_void(base_ty)
+    if elem_ty.kind != HlirTypeKind::HlirTypeVoid {
+        return elem_ty
+    }
+    let value_ty = hlir_lower_value_type(state, value_id)
+    if value_ty.kind != HlirTypeKind::HlirTypeVoid {
+        return value_ty
+    }
+    hlir_type_i64()
+}
+
 pub fn hlir_lower_index(state: HlirLowerState, base: i64, index: i64) -> (HlirLowerState, i64) with Mut, Panic {
-    let ptr_pair = hlir_lower_gep(state, base, index, hlir_type_i64())
-    hlir_lower_load(ptr_pair.0, ptr_pair.1, hlir_type_i64())
+    let elem_ty = hlir_lower_index_elem_type(state, base)
+    let ptr_pair = hlir_lower_gep(state, base, index, elem_ty)
+    hlir_lower_load(ptr_pair.0, ptr_pair.1, elem_ty)
 }
 
 pub fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
@@ -1910,6 +2063,50 @@ pub fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, 
     hlir_lower_unit(state)
 }
 
+fn hlir_gpu_axis_root(e: Expr) -> bool {
+    e.kind == ExprKind::ExprIdent && hlir_ast_name_to_string(e.name) == "gpu"
+}
+
+fn hlir_gpu_axis_flat_name(e: Expr) -> string with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprFieldAccess {
+        return ""
+    }
+    if hlir_ast_name_to_string(e.name) != "x" {
+        return ""
+    }
+    match e.left {
+        Some(base) => {
+            if (*base).kind == ExprKind::ExprFieldAccess {
+                match (*base).left {
+                    Some(root) => {
+                        if hlir_gpu_axis_root(*root) {
+                            let axis_name = hlir_ast_name_to_string((*base).name)
+                            if axis_name == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_name == "block_id" { return "gpu_block_id_x" }
+                            if axis_name == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            } else if (*base).kind == ExprKind::ExprMethodCall {
+                match (*base).left {
+                    Some(root2) => {
+                        if hlir_gpu_axis_root(*root2) {
+                            let axis_method = hlir_ast_name_to_string((*base).name)
+                            if axis_method == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_method == "block_id" { return "gpu_block_id_x" }
+                            if axis_method == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    ""
+}
+
 pub fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<MatchArmList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     // Minimal bridge implementation: lower first arm body if present.
     // Full pattern dispatch is handled by match_begin/match_merge APIs.
@@ -1928,17 +2125,21 @@ pub fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i
     if target.kind == ExprKind::ExprFieldAccess {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(target.name) % 16
-        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_pair.1, field_idx, hlir_type_i64())
+        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
         s = field_ptr_pair.0
         return hlir_lower_store(s, field_ptr_pair.1, value_id)
     }
     if target.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, target.right)
         s = idx_pair.0
-        let elem_ptr_pair = hlir_lower_gep(s, base_pair.1, idx_pair.1, hlir_type_i64())
+        let idx_val = idx_pair.1
+        let elem_ty = hlir_lower_store_index_elem_type(s, base_val, value_id)
+        let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, elem_ty)
         s = elem_ptr_pair.0
         return hlir_lower_store(s, elem_ptr_pair.1, value_id)
     }
@@ -1962,10 +2163,43 @@ pub fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with
         return hlir_lower_var(s, name, ty, init_pair.1)
     }
     if stmt.kind == StmtKind::StmtAssign {
-        let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
-        s = rhs_pair.0
         match stmt.target {
-            Some(t) => hlir_lower_assign_target(s, *t, rhs_pair.1),
+            Some(t) => {
+                let target_expr = *t
+                if target_expr.kind == ExprKind::ExprFieldAccess {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let field_idx = hlir_ast_name_hash(target_expr.name) % 16
+                    let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
+                    s = field_ptr_pair.0
+                    let ptr_val = field_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                if target_expr.kind == ExprKind::ExprIndex {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let idx_pair = hlir_lower_expr_opt(s, target_expr.right)
+                    s = idx_pair.0
+                    let idx_val = idx_pair.1
+                    let elem_ty = hlir_lower_index_elem_type(s, base_val)
+                    let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, elem_ty)
+                    s = elem_ptr_pair.0
+                    let ptr_val = elem_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                s = rhs_pair.0
+                let rhs_val = rhs_pair.1
+                hlir_lower_assign_target(s, target_expr, rhs_val)
+            },
             None => hlir_lower_report_error(s),
         }
     }
@@ -2028,11 +2262,15 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprBinary {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
-        let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        let ty = hlir_ast_binary_result_ty(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, ty)
+        let rhs_val = rhs_pair.1
+        let lhs_ty = hlir_lower_value_type(s, lhs_val)
+        let rhs_ty = hlir_lower_value_type(s, rhs_val)
+        let op = hlir_ast_binary_to_hlir_typed(expr.bin_op, lhs_ty, rhs_ty)
+        let ty = hlir_ast_binary_result_ty_typed(expr.bin_op, lhs_ty, rhs_ty)
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, ty)
     }
 
     if expr.kind == ExprKind::ExprUnary {
@@ -2043,18 +2281,26 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     }
 
     if expr.kind == ExprKind::ExprFieldAccess {
+        let gpu_axis_name = hlir_gpu_axis_flat_name(expr)
+        if gpu_axis_name != "" {
+            var no_args: [i64; 64] = [0; 64]
+            return hlir_lower_call(s, gpu_axis_name, no_args, 0, hlir_type_i64())
+        }
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(expr.name) % 16
-        return hlir_lower_field_access(s, base_pair.1, field_idx)
+        return hlir_lower_field_access(s, base_val, field_idx)
     }
 
     if expr.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, expr.right)
         s = idx_pair.0
-        return hlir_lower_index(s, base_pair.1, idx_pair.1)
+        let idx_val = idx_pair.1
+        return hlir_lower_index(s, base_val, idx_val)
     }
 
     if expr.kind == ExprKind::ExprCast {
@@ -2134,8 +2380,9 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprMethodCall {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         var arg_vals: [i64; 64] = [HLIR_INVALID_VALUE; 64]
-        arg_vals[0] = base_pair.1
+        arg_vals[0] = base_val
         let args_pair = hlir_lower_expr_list(s, expr.args, arg_vals, 1)
         s = args_pair.state
         var method_vals: [i64; 64] = args_pair.values
@@ -2231,10 +2478,12 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprRange {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
+        let rhs_val = rhs_pair.1
         let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, hlir_type_i64())
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprReturn {
@@ -2317,7 +2566,10 @@ pub fn hlir_lower_items(state: HlirLowerState, items: Option<Box<ItemList>>) -> 
             let item = (*list).head
             if item.kind == ItemKind::ItemFn {
                 match item.fn_def {
-                    Some(fn_def) => { s = hlir_lower_function(s, *fn_def, (*fn_def).is_kernel) }
+                    Some(fn_def) => {
+                        let is_kernel = (*fn_def).is_kernel
+                        s = hlir_lower_function(s, *fn_def, is_kernel)
+                    }
                     None => { s = hlir_lower_report_error(s) }
                 }
             }

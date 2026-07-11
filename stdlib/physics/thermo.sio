@@ -34,6 +34,48 @@ fn th_ln_ratio_approx(ratio: f64) -> f64 with Mut, Div, Panic {
     acc[0] + acc[0]
 }
 
+// thermo_ln/thermo_exp/thermo_pow (from origin/main): needed for the
+// mathematically-correct adiabatic power-law below (see adiabatic_temp_volume).
+// Import-free (no `use` deps) so they keep the Madaros no-imports constraint above.
+fn thermo_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val: i64 = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 20 {
+        term = term * t2
+        sum = sum + term / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    2.0 * sum + (e_val as f64) * 0.6931471805599453
+}
+
+fn thermo_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 50.0 { return 1.0e20 }
+    if x < -50.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 20 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn thermo_pow(x: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    thermo_exp(p * thermo_ln(x))
+}
+
 // Ideal gas law: P V = n R T   solve for e.g. P
 pub fn ideal_gas_p(n: f64, un: f64, t: f64, ut: f64, v: f64, uv: f64) -> (f64, f64) {
     if v <= 0.0 { return (0.0, 0.0); }
@@ -96,13 +138,12 @@ pub fn boltzmann_entropy(w: f64, uw: f64) -> (f64, f64) with Mut, Div, Panic {
 pub fn adiabatic_temp_volume(T1: f64, uT1: f64, V1: f64, uV1: f64, V2: f64, uV2: f64) -> (f64, f64) with Mut, Div, Panic {
     let gamma = 1.4;
     let ratio = V1 / V2;
-    let exp_n = gamma - 1.0;
-    let ln_ratio = th_ln_ratio_approx(ratio);
-    let T2_val = T1 * (1.0 + exp_n * ln_ratio);
-    let rel_uT1 = if T1 != 0.0 { uT1 / T1 } else { 0.0 };
-    let rel_uV1 = if V1 != 0.0 { uV1 / V1 } else { 0.0 };
-    let rel_uV2 = if V2 != 0.0 { uV2 / V2 } else { 0.0 };
-    let rel = rel_uT1 + exp_n * rel_uV1 + exp_n * rel_uV2;
+    let T2_val = T1 * thermo_pow(ratio, gamma - 1.0);
+    // rough prop using log deriv
+    let rel_t1 = if T1 != 0.0 { uT1 / T1 } else { 0.0 };
+    let rel_v1 = if V1 != 0.0 { uV1 / V1 } else { 0.0 };
+    let rel_v2 = if V2 != 0.0 { uV2 / V2 } else { 0.0 };
+    let rel = rel_t1 + (gamma - 1.0) * rel_v1 + (gamma - 1.0) * rel_v2;
     let uT2 = T2_val * rel;
     (T2_val, uT2)
 }
@@ -198,11 +239,17 @@ fn th_bool_to_f64(v: bool) -> f64 {
 }
 
 fn main() -> i32 with Mut, Div, Panic, IO {
-    // Gate shard: foundations trio (ideal gas, first law, Carnot) sets exit + metrics.
+    // Gate: foundations trio (ideal gas, first law, Carnot) sets metrics;
+    // deeper suite (boltzmann/adiabatic/isobaric/carnot_cycle/entropy_prod) also gated.
     var p: i32 = 0; var f: i32 = 0;
     if test_ideal_gas() { p = p + 1 } else { f = f + 1; println("FAIL idealgas") }
     if test_first_law() { p = p + 1 } else { f = f + 1; println("FAIL firstlaw") }
     if test_carnot() { p = p + 1 } else { f = f + 1; println("FAIL carnot") }
+    if test_boltzmann() { p = p + 1 } else { f = f + 1; println("FAIL boltz") }
+    if test_adiabatic() { p = p + 1 } else { f = f + 1; println("FAIL adiabatic") }
+    if test_isobaric() { p = p + 1 } else { f = f + 1; println("FAIL isobaric") }
+    if test_carnot_cycle() { p = p + 1 } else { f = f + 1; println("FAIL carnot_cycle") }
+    if test_entropy_prod() { p = p + 1 } else { f = f + 1; println("FAIL entropy_prod") }
 
     let (p_gas, _) = ideal_gas_p(1.0, 0.001, 300.0, 0.1, 0.024, 0.0001)
     th_emit_metric("ideal_gas_P_Pa", p_gas)
@@ -213,11 +260,11 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let (eta, _) = carnot_efficiency(600.0, 1.0, 300.0, 1.0)
     th_emit_metric("carnot_eta", eta)
 
-    let thermo_ok = test_ideal_gas() && test_first_law() && test_carnot()
+    let thermo_ok = f == 0
     th_emit_metric("thermo_ok", th_bool_to_f64(thermo_ok))
 
     if f == 0 {
-        println("THERMO E2E REAL ALL PASS (foundations)")
+        println("THERMO E2E REAL ALL PASS")
         print("SCIENCE_PHYSICS_OK\n")
         return 0
     }

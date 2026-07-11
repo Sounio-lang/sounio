@@ -13,5 +13,6 @@ Serial communication types and buffer management.
 - `serial_buffer_push_rx(buf, byte)`: Push byte to RX buffer
 - `serial_buffer_pop_tx(buf)`: Pop byte from TX buffer
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+`tests/stdlib/serial/test_serial_core.sio` (check-only, Madaros gate)

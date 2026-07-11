@@ -2,6 +2,11 @@
 
 `stdlib/viz` is the first native visual frontend layer for Sounio.
 
+## Stdlib harness
+
+- `tests/stdlib/viz/test_viz_core.sio` — coord mapping + `viz_scene_new` (check-only)
+- `tests/run-pass/viz_*` — Visual IR layout, replay, physchem, workbench smokes
+
 The v1 architecture is:
 
 - `viz::ir`: fixed-capacity Visual IR owned by Sounio.

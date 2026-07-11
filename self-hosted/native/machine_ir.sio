@@ -5,10 +5,10 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
-pub let MIR_MAX_INSTRS: i64 = 512
+pub let MIR_MAX_INSTRS: i64 = 1024
 pub let MIR_MAX_CALL_ARGS: i64 = 8
 
 pub let MIR_OPERAND_NONE: i64 = 0
@@ -107,7 +107,7 @@ pub struct MachineInstr {
 }
 
 pub struct MachineBlock {
-    pub instrs: [MachineInstr; 512],
+    pub instrs: [MachineInstr; 1024],
     pub instr_count: i64,
 }
 
@@ -241,7 +241,7 @@ pub fn machine_empty_instr() -> MachineInstr with Mut, Panic, Div {
 
 pub fn machine_block_new() -> MachineBlock with Mut, Panic, Div {
     MachineBlock {
-        instrs: [machine_empty_instr(); 512],
+        instrs: [machine_empty_instr(); 1024],
         instr_count: 0,
     }
 }
@@ -589,7 +589,7 @@ pub fn native_v2_alloc_descriptor_from_tag(tag: i64) -> i64 with Mut, Panic, Div
 // By-value instruction append (avoids JIT &! bug)
 pub fn _emit_legal_byval(func: MachineFunction, instr: MachineInstr) -> MachineFunction with Mut, Panic, Div {
     var f = func
-    if f.blocks[0].instr_count < 512 {
+    if f.blocks[0].instr_count < MIR_MAX_INSTRS {
         var block = f.blocks[0]
         let idx = block.instr_count
         block.instrs[idx as usize] = instr
@@ -602,7 +602,7 @@ pub fn _emit_legal_byval(func: MachineFunction, instr: MachineInstr) -> MachineF
 
 pub fn _add_instr_byval(func: MachineFunction, instr: MachineInstr) -> MachineFunction with Mut, Panic, Div {
     var f = func
-    if f.blocks[0].instr_count < 512 {
+    if f.blocks[0].instr_count < MIR_MAX_INSTRS {
         var block = f.blocks[0]
         let idx = block.instr_count
         block.instrs[idx as usize] = instr
@@ -970,6 +970,9 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
     while i < (*func).instr_count {
         let instr = (*func).instrs[i as usize]
         if instr.op == IrOpcode::IrNop {
+            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 && instr.dst < 256 {
+                is_float_slot[instr.dst as usize] = 1
+            }
             i = i + 1
             continue
         }
@@ -1001,7 +1004,9 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
             let s2 = instr.src2
             let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
-            if s1f == 1 || s2f == 1 {
+            let s1f_marked = (instr.imm_flags / 2) & 1
+            let s2f_marked = (instr.imm_flags / 4) & 1
+            if s1f == 1 || s2f == 1 || s1f_marked == 1 || s2f_marked == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
                 if instr.dst >= 0 && instr.dst < 256 {
                     if instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
@@ -1104,6 +1109,9 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
     while i < (*func).instr_count {
         let ir_instr = (*func).instrs[i as usize]
         if ir_instr.op == IrOpcode::IrNop {
+            if ir_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && ir_instr.dst >= 0 && ir_instr.dst < 256 {
+                (*out).is_float_slot[ir_instr.dst as usize] = 1
+            }
             i = i + 1
             continue
         }
@@ -1145,8 +1153,12 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             let s2 = machine_instr_src2_value(instr)
             let s1f = if s1 >= 0 && s1 < 256 { (*out).is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { (*out).is_float_slot[s2 as usize] } else { 0 }
-            if s1f == 1 || s2f == 1 {
-                native_v2_emit_legal_instr_mut(out, native_v2_make_float_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr), s1f, s2f))
+            let s1f_marked = ((*func).instrs[i as usize].imm_flags / 2) & 1
+            let s2f_marked = ((*func).instrs[i as usize].imm_flags / 4) & 1
+            let lhs_float = if s1f == 1 || s1f_marked == 1 { 1 } else { 0 }
+            let rhs_float = if s2f == 1 || s2f_marked == 1 { 1 } else { 0 }
+            if lhs_float == 1 || rhs_float == 1 {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_float_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr), lhs_float, rhs_float))
                 let dslot = machine_instr_dst_value(instr)
                 if dslot >= 0 && dslot < 256 {
                     if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {

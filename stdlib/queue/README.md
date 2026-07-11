@@ -12,5 +12,7 @@ Fixed-capacity FIFO queue.
 - `queue_size(q)`: Get element count
 - `queue_is_empty(q)`: Check if empty
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+- `tests/stdlib/queue/test_queue_core.sio` — FIFO + FFI stubs (check-only)
+- `tests/stdlib_queue/test_queue_e2e.sio` — legacy run-pass harness

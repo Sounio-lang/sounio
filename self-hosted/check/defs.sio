@@ -25,6 +25,13 @@ fn empty_field_info() -> FieldInfo {
     }
 }
 
+fn field_info_clone(info: &FieldInfo) -> FieldInfo with Mut, Alloc {
+    FieldInfo {
+        name: (*info).name,
+        ty: type_entry_clone(&(*info).ty),
+    }
+}
+
 pub struct FieldInfoList {
     head: FieldInfo,
     tail: Option<Box<FieldInfoList>>,
@@ -70,6 +77,16 @@ fn field_info_list_count(opt: Option<Box<FieldInfoList>>) -> i64 with Mut, Panic
     match opt {
         None => 0
         Some(list) => 1 + field_info_list_count((*list).tail)
+    }
+}
+
+fn field_info_list_clone(opt: &Option<Box<FieldInfoList>>) -> Option<Box<FieldInfoList>> with Mut, Alloc {
+    match *opt {
+        None => None
+        Some(list) => Some(Box::new(FieldInfoList {
+            head: field_info_clone(&(*list).head),
+            tail: field_info_list_clone(&(*list).tail),
+        }))
     }
 }
 
@@ -147,27 +164,30 @@ fn struct_table_find(t: *mut StructTable, name: Name) -> i64 with Mut, Panic, Di
 }
 
 fn struct_table_find_by_buf8(t: *mut StructTable, buf: [i8; 128]) -> i64 with Mut, Panic, Div {
-    // Match structs whose name matches the first min(len,8) bytes of buf.
+    // Match the struct whose name equals the first 8 bytes of buf (zero-padded).
     // Called from checker_lower_ref_like_type_mut where only name.buf[0..7]
     // (TypeEntry bytes 8-15, the *mut SRET window) are reliable.
+    //
+    // The compare is over a FIXED 8-byte window, treating each entry-name byte
+    // past its length as 0. A shorter entry name must therefore be an EXACT
+    // match (its trailing window bytes are 0, matching the zero-padded `buf`),
+    // not a mere prefix of `buf`. Without this a short struct (e.g. `Str`,
+    // len 3) shadowed any longer struct sharing that prefix (`StrSplit`) when
+    // both are present in one merged multi-module table: `&StrSplit` refs then
+    // resolved to `Str`, and every `StrSplit`-only field read (`.count`,`.lens`)
+    // reported a spurious E012. make_name zero-fills Name.buf past len and the
+    // SRET window preserves those 8 bytes verbatim, so buf[len..7] == 0 for any
+    // name of length < 8; the 8-byte zero-padded compare is exact there.
     var i: i64 = 0
     while i < (*t).count {
         let en = (*t).entries[i as usize]
         if en.name.len > 0 {
-            let cmp_len = if en.name.len < 8 { en.name.len } else { 8 }
             var ok: bool = true
             var j: i64 = 0
-            while j < cmp_len {
-                if en.name.buf[j as usize] != buf[j as usize] { ok = false }
+            while j < 8 {
+                let en_byte: i8 = if j < en.name.len { en.name.buf[j as usize] } else { 0 as i8 }
+                if en_byte != buf[j as usize] { ok = false }
                 j = j + 1
-            }
-            // A short entry name must not prefix-match a longer query: for
-            // entries shorter than the 8-byte window, the query must END at
-            // the same length (NUL in buf). Without this, "Str" matched the
-            // query "StrSplit" and every out.count/out.lens access through
-            // &!StrSplit reported E012 (strictness campaign round 5).
-            if ok && en.name.len < 8 {
-                if buf[en.name.len as usize] != 0 { ok = false }
             }
             if ok { return i }
         }
@@ -396,6 +416,13 @@ fn empty_fn_param_info() -> FnParamInfo {
     }
 }
 
+fn fn_param_info_clone(info: &FnParamInfo) -> FnParamInfo with Mut, Alloc {
+    FnParamInfo {
+        name: (*info).name,
+        ty: type_entry_clone(&(*info).ty),
+    }
+}
+
 pub struct FnParamList {
     head: FnParamInfo,
     tail: Option<Box<FnParamList>>,
@@ -428,6 +455,16 @@ fn fn_param_list_get(opt: Option<Box<FnParamList>>, idx: i64) -> FnParamInfo wit
                 fn_param_list_get((*list).tail, idx - 1)
             }
         }
+    }
+}
+
+fn fn_param_list_clone(opt: &Option<Box<FnParamList>>) -> Option<Box<FnParamList>> with Mut, Alloc {
+    match *opt {
+        None => None
+        Some(list) => Some(Box::new(FnParamList {
+            head: fn_param_info_clone(&(*list).head),
+            tail: fn_param_list_clone(&(*list).tail),
+        }))
     }
 }
 

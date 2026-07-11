@@ -69,11 +69,18 @@ for release sign-off.
 
 These claim IDs currently block broad release-production-ready status:
 
+The broad `direct_driver` frontier remains `prototype` / `downgraded` and is
+explicitly out of scope for this release-support contract. The release contract
+requires the narrower `direct_driver.support` claim instead. This does not imply
+general direct-driver readiness or stability; it only locks in the named
+24-fixture research cohort while broad direct-driver support stays unsupported
+for release purposes.
+
 | Claim ID | Current status | Why it blocks broad release |
 |---|---|---|
 | `binary.source` | `prototype` / `downgraded` | The checked binary still depends on `lean_single` as the source path; modular source-swap parity is not closed. |
-| `direct_driver` | `prototype` / `downgraded` | Large-surface direct-driver execution remains a maturity frontier. |
-| `stdlib.surface` | `prototype` / `downgraded` | Broad stdlib callability is explicitly not claimed. |
+| `direct_driver.support` | `validated_research` / `closed` | Bounded 24-fixture direct-driver compile/run support is checked; large-surface direct-driver execution and semantic authority remain explicitly not claimed. |
+| `stdlib.surface` | `validated_research` / `closed` | Bounded stdlib support contract is checked; broad all-file stdlib callability remains explicitly not claimed. |
 | `tooling.package` | `prototype` / `downgraded` | There is no public package registry/support contract. |
 | `tooling.editor` | `prototype` / `downgraded` | Formatter, REPL, and editor tooling are prototype surfaces. |
 | `install` | `prototype` / `downgraded` | Installation is repo-artifact based, not a broad supported distribution path. |

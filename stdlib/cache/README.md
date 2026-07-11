@@ -33,6 +33,6 @@ cache_put(&! c, "user:2", 200)
 let v = cache_get(&c, "user:1")  // 100
 ```
 
-## Test Status
+## Tests
 
-6/6 tests passing.
+`tests/stdlib/cache/test_cache_core.sio` (check-only, Madaros gate)

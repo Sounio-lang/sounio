@@ -22,7 +22,8 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4}
+use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4_with_visibility}
+use check::specializer::{specialize_generics}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -965,7 +966,7 @@ fn compiler_bytes_contains(bytes: [i8; 65536], size: i64, needle: string) -> boo
     false
 }
 
-fn compiler_bytes_contains_seq_i64(bytes: [i8; 131072], size: i64, seq: [i64; 32], seq_len: i64) -> bool with Mut, Panic, Div {
+fn compiler_bytes_contains_seq_i64(bytes: [i8; 262144], size: i64, seq: [i64; 32], seq_len: i64) -> bool with Mut, Panic, Div {
     if seq_len <= 0 {
         return true
     }
@@ -1257,17 +1258,17 @@ fn compiler_is_render_fixture(path: string) -> bool with Mut, Panic, Div {
 }
 
 fn compiler_try_single_module_check(path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
-    let program = load_module_file(path)
+    var program = load_module_file(path)
     let parse_errors = parser_last_error_count()
     if parse_errors > 0 {
         println("error: parser reported " + int_to_string(parse_errors) + " syntax errors")
         return 0 - 1
     }
-
     let imports = extract_imports_from_ast(program)
     if imports.count > 0 {
         return 0
     }
+    program.items = specialize_generics(program.items)
 
     let resolve_result = resolve_program(program)
     if resolve_result.had_error {
@@ -1882,10 +1883,11 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
 
     if !module_frontend_file_maybe_has_use(source_path) {
         // Single-module real typecheck.
-        let main_prog = load_module_file(source_path)
+        var main_prog = load_module_file(source_path)
         if parser_last_error_count() > 0 {
             panic("check failed")
         }
+        main_prog.items = specialize_generics(main_prog.items)
         let verdict = module_frontend_check_items_with_source_context(main_prog.items, source_path)
         if verdict == 0 {
             println(compiler_check_ok_message())
@@ -1936,7 +1938,7 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
     print("run_check_mode: about to check ")
     print_int(loaded)
     print(" modules\n")
-    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    let verdict = check_modules_verdict_boot4_with_visibility(&! programs, loaded, true)
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
@@ -2879,12 +2881,58 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
 // lost on SIGSEGV). Content is irrelevant — file existence is the signal. Uses a
 // zero-fill init ([0;N] is the codegen-safe array-fill form).
 var NV2_MARKER_BUF: [i8; 4] = [0; 4]
+var NV2_RUN_ARGV: [i64; 32] = [0; 32]
+var NV2_RUN_ENVP: [i64; 1] = [0; 1]
+
+fn native_v2_wait_exit_code(status: i64) -> i64 {
+    if (status & 127) == 0 {
+        return (status >> 8) & 255
+    }
+    128 + (status & 127)
+}
+
+fn native_v2_run_elf_and_exit(path: string, args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    syscall6(90, path, 493, 0, 0, 0, 0)
+    NV2_RUN_ARGV[0] = path as i64
+    var argv_len: i64 = 1
+    var passthrough: bool = false
+    var i: i64 = flag_index + 1
+    while i < args.len && argv_len < 31 {
+        let arg = arg_list_get(args, i)
+        if passthrough {
+            NV2_RUN_ARGV[argv_len as usize] = arg as i64
+            argv_len = argv_len + 1
+        } else if arg == "--" {
+            passthrough = true
+        }
+        i = i + 1
+    }
+    NV2_RUN_ARGV[argv_len as usize] = 0
+    NV2_RUN_ENVP[0] = 0
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
+    if pid < 0 {
+        print("native_v2_compile: run fork failed\n")
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+        return
+    }
+    if pid == 0 {
+        syscall6(59, path as i64, &! NV2_RUN_ARGV, &! NV2_RUN_ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+        return
+    }
+
+    var status: i64 = 0
+    syscall6(61, pid, &! status, 0, 0, 0, 0)
+    syscall6(60, native_v2_wait_exit_code(status), 0, 0, 0, 0, 0)
+}
 
 // Bridge: real .sio SOURCE -> multimodule front-half -> IrModule -> native-v2 -> ELF.
 // Keep this on load_multimodule_ir_traced, the same front-half exercised by
 // --probe-load-ir-trace. The older boxed single-module bridge is fragile in
 // native-built Madaros before the first crash marker on trivial programs.
 fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let execute_after_compile = arg_list_get(args, flag_index) == "run"
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
     // Output path resolution: `-o <out>` wins; otherwise honor a second
     // positional argument (`mc --native-v2-compile src.sio out.elf`); else a.out.
@@ -2901,11 +2949,14 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
             print("native_v2_compile: imported front-half/backend failed rc=")
             print_int(imported_rc as i64)
             print("\n")
-            panic("native-v2-compile failed: imported path")
+            panic("native-v2-compile failed: imported front-half errors")
         }
         print("native_v2_compile: emitted path=")
         print(out_path)
         print("\n")
+        if execute_after_compile {
+            native_v2_run_elf_and_exit(out_path, args, flag_index)
+        }
         return
     }
     var trace = empty_load_multimodule_ir_trace()
@@ -2933,6 +2984,9 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print("native_v2_compile: emitted path=")
     print(out_path)
     print("\n")
+    if execute_after_compile {
+        native_v2_run_elf_and_exit(out_path, args, flag_index)
+    }
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
@@ -27417,6 +27471,56 @@ fn gpu_emit_host_glue(
 }
 
 
+fn compiler_hlir_name_matches_ast_name(hn: HlirName, an: Name) -> bool with Mut, Panic, Div {
+    if hn.len != an.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < hn.len {
+        if hn.buf[i as usize] != an.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn compiler_mark_hlir_kernel_name(module: HlirModule, name: Name) -> HlirModule with Mut, Panic, Div {
+    var out = module
+    var i: i64 = 0
+    while i < out.fn_count {
+        if compiler_hlir_name_matches_ast_name(out.functions[i as usize].name, name) {
+            var f = out.functions[i as usize]
+            f.is_kernel = true
+            out.functions[i as usize] = f
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn compiler_mark_hlir_kernels_from_items(module: HlirModule, items: Option<Box<ItemList>>) -> HlirModule with Mut, Panic, Div {
+    match items {
+        Some(list) => {
+            var out = module
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                match item.fn_def {
+                    Some(fd) => {
+                        if (*fd).is_kernel {
+                            out = compiler_mark_hlir_kernel_name(out, (*fd).name)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            compiler_mark_hlir_kernels_from_items(out, (*list).tail)
+        }
+        None => module,
+    }
+}
+
+
 // ============================================================================
 // GPU COMPILE PIPELINE
 // ============================================================================
@@ -27463,8 +27567,13 @@ fn run_gpu_compile_pipeline(
         return 1
     }
 
-    // Lower AST to HLIR SSA
-    let hlir_module = hlir_lower_module(main_prog)
+    // module_frontend_check_items_with_source_context consumes the item list on
+    // the self-hosted value path. Reload before HLIR lowering so kernel fn
+    // declarations remain visible to the GPU extraction pass.
+    let lower_prog = load_module_file(input_path)
+    var hlir_module = hlir_lower_module(lower_prog)
+    let kernel_mark_prog = load_module_file(input_path)
+    hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
 
     // Count GPU-annotated kernels
     let kcount = hlir_extract_kernel_count(hlir_module)
@@ -27620,6 +27729,7 @@ fn run_gpu_compile_pipeline(
     }
 
     // CUDA Tile IR — tensor-native execution model (Blackwell/Rubin+)
+    // Routes through hlir_kernels_to_cuda_tile -> gpu_lower_to_cuda_tile.
     if str_eq(gpu_target, "cuda-tile") {
         let tile_buf = hlir_kernels_to_cuda_tile(hlir_module)
         if str_len(output_path) > 0 {

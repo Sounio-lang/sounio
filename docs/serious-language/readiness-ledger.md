@@ -38,7 +38,8 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | macOS artifact support | `validated research` | CI `native-selfhost-macos-arm64`; `docs/guide/MINIMUM_VIABLE_SOUNIO.md` | "macOS has checked artifact lanes, but Apple support should not be described as JIT or native-v2 parity." |
 | Windows target | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` platform table | "The repository contains PE/COFF target support, but no public Windows binary should be promised from this checkout." |
 | Native-v2 | `validated research` | `scripts/ci/native_v2_epistemic_science_spine_gate.sh`; `docs/guide/MINIMUM_VIABLE_SOUNIO.md` | "native-v2 is a preview research lane for scalar-core and science-spine contracts." |
-| Large-surface direct-driver closure | `prototype` | `docs/architecture/compiler-maturity-blueprint.md` M9 frontier | "Large-surface execution is still a compiler-maturity frontier; failures must be classified, not hidden." |
+| Direct-driver support cohort | `validated research` | `scripts/ci/sounio_direct_driver_support_gate.sh`; `tests/selfhost-driver-output/*.sio`; `docs/architecture/compiler-maturity-blueprint.md` M9 frontier | "The bounded direct-driver support cohort compiles and executes 24/24 small selfhost driver-output fixtures. This is not large-surface execution, semantic authority, ontology negative-truth restoration, or wrapper replacement." |
+| Large-surface direct-driver closure | `prototype` | `docs/architecture/compiler-maturity-blueprint.md` M9 frontier; `docs/architecture/truth-frontier.md` | "Large-surface execution is still a compiler-maturity frontier; failures must be classified, not hidden." |
 
 ## Language Feature Claims
 
@@ -51,7 +52,8 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Ownership and borrowing | `validated research` | `docs/compiler/KNOWN_LIMITATIONS.md`; run/compile-fail coverage | "Ownership and borrowing are implemented for the checked examples; avoid broad Rust-equivalence claims." |
 | Traits and generics | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` turbofish/generic notes | "Generics and trait syntax exist in constrained forms; they are not a full mature trait ecosystem." |
 | Modules/imports | `validated research` | `docs/guide/MINIMUM_VIABLE_SOUNIO.md`; module resolver docs | "Imports work for active module surfaces; not every path under `stdlib/` is callable." |
-| Formatter, REPL, LSP | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` beta/stability tables | "Tooling exists, but conference demos should not depend on editor polish." |
+| Standard library support surface | `validated research` | `scripts/ci/sounio_stdlib_surface_support_gate.sh`; `scripts/ci/package_pbpk_gum_gate.sh`; `scripts/stdlib/scan_stdlib.sh` | "Sounio has a bounded stdlib support contract: checked inventory plus package-backed epistemic/GUM/units/formats/io/PBPK workflows. It is not broad all-file stdlib callability, hyper/science pipeline closure, API stability, or external-runtime/clinical validation." |
+| Formatter, REPL, LSP | `validated research` | `scripts/ci/sounio_editor_tooling_support_gate.sh`; `tools/lsp/test_smoke.sh`; G5a/G5b gates | "Sounio has SOTA-preview editor tooling: checked formatter, file-backed REPL, preview LSP over stdio, and VS Code/Helix/Neovim wiring. It is not mature IDE support; pure-Sounio LSP rebuild, semantic-token delta, notebooks, AI assistant integration, marketplace polish, and unopened-file workspace indexing remain out of scope." |
 
 ## Scientific, Formal, And Research Claims
 
@@ -69,7 +71,7 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Claim | Level | Current evidence | Safe wording |
 |---|---|---|---|
 | Installation | `prototype` | `INSTALL.md`; `docs/guide/installation.md`; checked artifacts | "For conferences, use the checked repo artifact path instead of promising broad package-manager installation." |
-| Package manager | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` beta table | "The package manager has local-registry functionality; no public registry launch should be promised." |
+| Package manager | `validated research` | `scripts/ci/sounio_package_support_gate.sh`; `docs/compiler/PACKAGE_IMPORT_RESOLUTION.md` | "Local package manifests, imports, package-tool smoke, and local registry design are checked; no public registry launch should be promised." |
 | Website/docs | `prototype` | CI website job; docs registry checks | "Docs are extensive but must be filtered through the readiness ledger before external reuse." |
 | Paper bundle | `prototype` | `docs/serious-language/paper-bundle.md`; `scripts/paper/build_serious_language_bundle.sh` | "The paper bundle exists as a reproducibility scaffold; each generated bundle must be reviewed before submission." |
 

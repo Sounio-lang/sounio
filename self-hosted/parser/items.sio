@@ -9,6 +9,24 @@ use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 
+fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    items_reverse_item_list_loop(items, None)
+}
+
+fn items_reverse_item_list_loop(
+    current: Option<Box<ItemList>>,
+    acc: Option<Box<ItemList>>,
+) -> Option<Box<ItemList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ItemList { head: (*node).head, tail: acc }
+            items_reverse_item_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
 impl Parser {
     // ============================================================
     // Parse a single item
@@ -146,11 +164,11 @@ impl Parser {
         } else if item_kind == TokenKind::Trait {
             p.parse_trait_item(visibility)
         } else if item_kind == TokenKind::Algebra {
-            p.parse_algebra_item(visibility)
+            parse_algebra_item(p, visibility)
         } else if item_kind == TokenKind::Study {
-            p.parse_study_item(visibility)
+            parse_study_item(p, visibility)
         } else if item_kind == TokenKind::Ontology {
-            p.parse_ontology_item(visibility)
+            parse_ontology_item(p, visibility)
         } else if item_kind == TokenKind::Extern {
             p.parse_extern_fn_item(visibility)
         } else if item_kind == TokenKind::Export {
@@ -863,7 +881,19 @@ impl Parser {
 
         let pair = p.parse_type()
         p = pair.0
-        let target_ty = pair.1
+        var target_ty = pair.1
+        var trait_name = empty_name()
+
+        // `impl TraitName for Type { ... }` — the first type parsed above is
+        // actually the trait name; re-parse the real target type after `for`.
+        if parser_peek(p) == TokenKind::For {
+            p = p.advance()  // skip 'for'
+            trait_name = extract_impl_name(target_ty)
+            let pair_target = p.parse_type()
+            p = pair_target.0
+            target_ty = pair_target.1
+        }
+
         p = p.expect(TokenKind::LBrace)
 
         // Build methods in reverse for O(1) cons, reverse once at the end.
@@ -896,12 +926,12 @@ impl Parser {
 
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         // Extract name from target type path
         let impl_name = extract_impl_name(target_ty)
 
-        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: empty_name() }
+        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: trait_name }
 
         (p, Item {
             kind: ItemKind::ItemImpl,
@@ -948,17 +978,33 @@ impl Parser {
         let name = p.current_name()
         p = p.advance()  // skip name
 
-        // Parse trait body: { fn m1(); fn m2(x: i64) -> i64; ... }
+        // Parse trait body: { fn m1(self, o: Self) -> Self  fn m2(x: i64) -> i64 { ... } ... }
+        // Trait methods may be bodyless signatures (no `{ ... }`) or carry a default
+        // implementation body; parse_trait_method_sig handles both.
         p = p.expect(TokenKind::LBrace)
         var rev_methods_opt: Option<Box<ItemList>> = None
         while parser_peek(p) != TokenKind::RBrace && !parser_at_eof(p) {
-            let method_pair = p.parse_item()
-            p = method_pair.0
-            let method_item = method_pair.1
-            rev_methods_opt = Some(Box::new(ItemList { head: method_item, tail: rev_methods_opt }))
+            // Ignore trivia and doc comments between method signatures.
+            while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+                p = p.advance()
+            }
+            if parser_peek(p) == TokenKind::RBrace || parser_at_eof(p) {
+                break
+            }
+            if parser_peek(p) == TokenKind::Fn {
+                let method_pair = p.parse_trait_method_sig()
+                p = method_pair.0
+                let method_item = method_pair.1
+                rev_methods_opt = Some(Box::new(ItemList { head: method_item, tail: rev_methods_opt }))
+            } else {
+                // Recovery: consume one unexpected token inside trait body.
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                p = p.advance()
+            }
         }
         p = p.expect(TokenKind::RBrace)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         let span = p.span_from(start)
         let tdef = TraitItemDef { name: name, methods: methods_opt, supertraits: None, span: span }
@@ -995,6 +1041,83 @@ impl Parser {
             study_def: None,
             ontology_def: None,
             trait_def: Some(Box::new(tdef)),
+        })
+    }
+
+    // Trait method signature: `fn name(self, o: Self) -> Self` optionally followed
+    // by a `{ ... }` default body. When no body follows, an empty Block is stored
+    // (v1: bodyless signatures are parsed and carried, not semantically dispatched).
+    fn parse_trait_method_sig(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'fn'
+        let name = p.current_name()
+        p = p.expect_ident()
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.parse_type_param_header()
+        }
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+        var effects_opt: Option<Box<EffectList>> = None
+        if parser_peek(p) == TokenKind::With {
+            let pair3 = p.parse_effect_list()
+            p = pair3.0
+            effects_opt = Some(Box::new(pair3.1))
+        }
+        var body = Block { stmts: None, span: p.current_span() }
+        if parser_peek(p) == TokenKind::LBrace {
+            let pair4 = p.parse_block()
+            p = pair4.0
+            body = pair4.1
+        }
+        let span = p.span_from(start)
+        let fn_def = FnDef {
+            name: name,
+            params: params_opt,
+            return_type: ret_ty,
+            effects: effects_opt,
+            body: body,
+            span: span,
+            is_kernel: false,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemFn,
+            span: span,
+            visibility: visibility_private(),
+            name: name,
+            fn_def: Some(Box::new(fn_def)),
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            acquisition_policy_def: None,
+            recourse_policy_def: None,
+            decision_policy_def: None,
+            deferral_policy_def: None,
+            transition_policy_def: None,
+            transition_protocol_def: None,
+            monitoring_policy_def: None,
+            alternative_policy_def: None,
+            alternative_frontier_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+            session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -3218,15 +3341,15 @@ impl Parser {
     fn parse_export_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'export'
         if parser_peek(p) == TokenKind::Extern {
-            return p.parse_extern_fn_item(true)
+            return p.parse_extern_fn_item(visibility)
         }
         if parser_peek(p) == TokenKind::StringLit {
             p = p.advance()
             if parser_peek(p) == TokenKind::Extern {
-                return p.parse_extern_fn_item(true)
+                return p.parse_extern_fn_item(visibility)
             }
         }
-        p.parse_fn_item(true, false)
+        p.parse_fn_item(visibility, false)
     }
 
 }
@@ -4395,24 +4518,25 @@ fn parse_ontology_item(p: Parser, visibility: Visibility) -> (Parser, Item) with
                             pa = pa.advance()  // consume "where"
                             pa = pa.expect_ident()  // consume variable name (should match prop_name)
 
-                            // Parse comparison operator
+                            // Parse comparison operator. The lexer emits combined
+                            // tokens for >= <= == != (GtEq/LtEq/EqEq/BangEq) — the
+                            // earlier `Gt` then `Eq` two-token form never matched a
+                            // `>=`/`<=`, leaving prop_op=0 so weakening (E041) never
+                            // fired. Check the combined tokens directly (mirrors
+                            // types.sio's refinement-predicate parser).
                             if pa.peek() == TokenKind::Gt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 2  // GtEq
-                                } else {
-                                    prop_op = 1  // Gt
-                                }
+                                prop_op = 1  // Gt
+                            } else if pa.peek() == TokenKind::GtEq {
+                                pa = pa.advance()
+                                prop_op = 2  // GtEq
                             } else if pa.peek() == TokenKind::Lt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 4  // LtEq
-                                } else {
-                                    prop_op = 3  // Lt
-                                }
-                            } else if pa.peek() == TokenKind::EqEq {
+                                prop_op = 3  // Lt
+                            } else if pa.peek() == TokenKind::LtEq {
+                                pa = pa.advance()
+                                prop_op = 4  // LtEq
+                            } else if pa.peek() == TokenKind::EqEq || pa.peek() == TokenKind::Eq {
                                 pa = pa.advance()
                                 prop_op = 5  // Eq
                             } else if pa.peek() == TokenKind::BangEq {

@@ -1,173 +1,172 @@
-//! FASTA/FASTQ format parsers
-//!
-//! Parse FASTA files into GF(4) sequences for algebraic genomics operations.
-//! FASTA format: >header\nSEQUENCE\n
+// stdlib/genomics/io/fasta.sio — FASTA in-memory parser (GF4 sequences)
+//
+// Parses FASTA text into fixed-size Seq256 buffers. No filesystem I/O here;
+// callers pass string content (e.g. from fixtures or future file readers).
 
-use types::*;
-use io::*;
+module genomics::io::fasta
 
-/// Error type for FASTA parsing
-enum FastaError {
-    IoError { message: str },
-    InvalidBase { line: i64, base: char },
-    EmptyFile,
+use genomics::core::*;
+
+pub fn fasta_err_ok() -> i32 { 0 }
+pub fn fasta_err_empty() -> i32 { 1 }
+pub fn fasta_err_no_header() -> i32 { 2 }
+pub fn fasta_err_invalid_base() -> i32 { 3 }
+pub fn fasta_err_too_long() -> i32 { 4 }
+
+pub struct FastaRecord {
+    pub header: string,
+    pub seq: Seq256,
 }
 
-/// Parse a FASTA file and return vector of records
-/// Each record contains a header and sequence as GF(4) elements
-fn parse_fasta(file_path: str) -> Result<Vec<FastaRecord>, FastaError> with IO {
-    let content = match io::read_file(file_path) {
-        Ok(c) => c,
-        Err(e) => return Err(FastaError::IoError { message: "Failed to read file" })
-    }
-
-    parse_fasta_string(content)
+pub struct FastaParseResult {
+    pub code: i32,
+    pub record: FastaRecord,
 }
 
-/// Parse FASTA format from string content
-fn parse_fasta_string(content: str) -> Result<Vec<FastaRecord>, FastaError> {
-    let lines = split_by_newline(content)
+pub struct FastaLineAppend {
+    pub seq: Seq256,
+    pub code: i32,
+}
 
-    if lines.len() == 0 {
-        return Err(FastaError::EmptyFile)
-    }
+fn fasta_seq_empty() -> Seq256 {
+    Seq256 { data: [0; 256], len: 0 }
+}
 
-    var records = Vec::new()
-    var current_header = ""
-    var current_seq = Vec::new()
-    var line_num: i64 = 0
-
-    for line in lines {
-        line_num = line_num + 1
-        let trimmed = trim(line)
-
-        // Skip empty lines
-        if trimmed.len() == 0 {
-            continue
+fn fasta_trim_line(s: string) -> string with Mut, Div, Panic {
+    let n = str_len(s)
+    var start: i64 = 0
+    while start < n {
+        let ch = str_char_at(s, start)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+            break
         }
+        start = start + 1
+    }
 
-        // Check for header line
-        if trimmed.char_at(0) == '>' {
-            // Save previous record if exists
-            if current_header.len() > 0 {
-                records.push(FastaRecord {
-                    header: current_header,
-                    sequence: current_seq
-                })
+    var end = n
+    while end > start {
+        let ch = str_char_at(s, end - 1)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+            break
+        }
+        end = end - 1
+    }
+
+    str_slice(s, start, end)
+}
+
+fn fasta_is_whitespace(ch: i64) -> bool {
+    ch == 32 || ch == 9
+}
+
+fn fasta_decode_char(ch: i64) -> i32 {
+    let base = genomics::core::ascii_to_base(ch as i32)
+    if base >= 0 { return base }
+    if ch == 78 || ch == 110 { return 0 }
+    -1
+}
+
+pub fn fasta_append_seq_line(seq: Seq256, line: string) -> FastaLineAppend with Mut, Div, Panic {
+    let n = str_len(line)
+    var cur = seq
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(line, i)
+        if !fasta_is_whitespace(ch) {
+            let base = fasta_decode_char(ch)
+            if base < 0 {
+                return FastaLineAppend { seq: cur, code: fasta_err_invalid_base() }
             }
+            if cur.len >= 256 as i32 {
+                return FastaLineAppend { seq: cur, code: fasta_err_too_long() }
+            }
+            cur.data[cur.len] = base
+            cur.len = cur.len + 1
+        }
+        i = i + 1
+    }
+    FastaLineAppend { seq: cur, code: fasta_err_ok() }
+}
 
-            // Start new record - extract header (skip '>')
-            current_header = trimmed.slice(1, trimmed.len())
-            current_seq = Vec::new()
-        } else {
-            // Sequence line - convert each character to GF(4)
-            for c in trimmed.chars() {
-                // Skip whitespace
-                if c == ' ' || c == '\t' {
-                    continue
+pub fn fasta_parse_string(content: string) -> FastaParseResult with Mut, Div, Panic {
+    var empty_record = FastaRecord { header: "", seq: fasta_seq_empty() }
+    var result = FastaParseResult { code: fasta_err_empty(), record: empty_record }
+
+    let n = str_len(content)
+    if n == 0 { return result }
+
+    var seq = fasta_seq_empty()
+    var header = ""
+    var have_header = false
+
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= n {
+        let at_end = i == n
+        let at_newline = !at_end && str_char_at(content, i) == 10
+        if at_end || at_newline {
+            let raw = str_slice(content, start, i)
+            let line = fasta_trim_line(raw)
+            let line_len = str_len(line)
+            if line_len > 0 {
+                let first = str_char_at(line, 0)
+                if first == 62 {
+                    if have_header && seq.len > 0 {
+                        result.code = fasta_err_ok()
+                        result.record = FastaRecord { header: header, seq: seq }
+                        return result
+                    }
+                    header = str_slice(line, 1, line_len)
+                    have_header = true
+                    seq = fasta_seq_empty()
+                } else if have_header {
+                    let append = fasta_append_seq_line(seq, line)
+                    if append.code != fasta_err_ok() {
+                        result.code = append.code
+                        return result
+                    }
+                    seq = append.seq
                 }
-
-                // Convert to GF(4), handling lowercase
-                let base = match c {
-                    'A' => 0,
-                    'C' => 1,
-                    'G' => 2,
-                    'T' => 3,
-                    'a' => 0,
-                    'c' => 1,
-                    'g' => 2,
-                    't' => 3,
-                    'N' => 0,  // Unknown base -> A (or could use special handling)
-                    'n' => 0,
-                    _ => return Err(FastaError::InvalidBase { line: line_num, base: c })
-                }
-                current_seq.push(base)
             }
+            start = i + 1
         }
+        i = i + 1
     }
 
-    // Don't forget the last record
-    if current_header.len() > 0 {
-        records.push(FastaRecord {
-            header: current_header,
-            sequence: current_seq
-        })
+    if !have_header {
+        result.code = fasta_err_no_header()
+        return result
     }
 
-    Ok(records)
+    result.code = fasta_err_ok()
+    result.record = FastaRecord { header: header, seq: seq }
+    result
 }
 
-/// Write FASTA records to file
-fn write_fasta(file_path: str, records: Vec<FastaRecord>) -> Result<(), FastaError> with IO {
-    var content = ""
-
-    for record in records {
-        // Write header
-        content = content ++ ">" ++ record.header ++ "\n"
-
-        // Write sequence in 80-character lines
-        var i = 0
-        while i < record.sequence.len() {
-            var line_end = i + 80
-            if line_end > record.sequence.len() {
-                line_end = record.sequence.len()
-            }
-
-            for j in i..line_end {
-                content = content ++ gf4_to_char(record.sequence[j]).to_string()
-            }
-            content = content ++ "\n"
-            i = line_end
-        }
-    }
-
-    match io::write_file(file_path, content) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(FastaError::IoError { message: "Failed to write file" })
-    }
+pub fn test_fasta_parse_basic() -> bool with Mut, Div, Panic {
+    let content = ">seq1 example\nACGT\nacgt\n"
+    let parsed = fasta_parse_string(content)
+    if parsed.code != fasta_err_ok() { return false }
+    if parsed.record.seq.len != 8 { return false }
+    if parsed.record.seq.data[0] != 0 { return false }
+    if parsed.record.seq.data[1] != 1 { return false }
+    if parsed.record.seq.data[2] != 2 { return false }
+    if parsed.record.seq.data[3] != 3 { return false }
+    if parsed.record.seq.data[4] != 0 { return false }
+    if parsed.record.seq.data[5] != 1 { return false }
+    if parsed.record.seq.data[6] != 2 { return false }
+    if parsed.record.seq.data[7] != 3 { return false }
+    if !str_eq(parsed.record.header, "seq1 example") { return false }
+    true
 }
 
-/// Parse multiple FASTA files and concatenate records
-fn parse_fasta_multi(file_paths: Vec<str>) -> Result<Vec<FastaRecord>, FastaError> with IO {
-    var all_records = Vec::new()
-
-    for path in file_paths {
-        match parse_fasta(path) {
-            Ok(records) => {
-                for record in records {
-                    all_records.push(record)
-                }
-            },
-            Err(e) => return Err(e)
-        }
-    }
-
-    Ok(all_records)
-}
-
-/// Get total sequence length across all records
-fn fasta_total_length(records: Vec<FastaRecord>) -> i64 {
-    var total: i64 = 0
-    for record in records {
-        total = total + (record.sequence.len() as i64)
-    }
-    total
-}
-
-/// Find record by header (exact match)
-fn fasta_find_by_header(records: Vec<FastaRecord>, header: str) -> Option<FastaRecord> {
-    for record in records {
-        if record.header == header {
-            return Option::Some(record)
-        }
-    }
-    Option::None
-}
-
-/// Convert FastaRecord to DnaStrand
-fn fasta_to_dna_strand(record: FastaRecord) -> DnaStrand {
-    DnaStrand {
-        sequence: record.sequence,
-        length: record.sequence.len() as bp
-    }
+pub fn test_fasta_gc_from_parse() -> bool with Mut, Div, Panic {
+    let content = ">gc\nGCGC\n"
+    let parsed = fasta_parse_string(content)
+    if parsed.code != fasta_err_ok() { return false }
+    let gc = genomics::core::dna_gc_content(&parsed.record.seq.data, parsed.record.seq.len)
+    let tol = 1.0e-9
+    let diff = gc - 1.0
+    let ad = if diff < 0.0 { 0.0 - diff } else { diff }
+    ad < tol
 }

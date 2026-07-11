@@ -6,6 +6,10 @@
 use parser::ast::*
 use lexer::token::*
 use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr, mk_expr}
+use parser::types::*
+use parser::exprs::{parse_expr_entry}
+use parser::exprs::*
+use parser::patterns::*
 
 // Legacy assignment-target side table. Keep the helpers for older parser paths,
 // but parse_expr_or_assign_stmt no longer leaves this global armed while parsing
@@ -112,6 +116,36 @@ fn tplet_emit_elems(opt: Option<Box<PatternList>>, temp: Name, span: Span, idx: 
                     kind: StmtKind::StmtLet,
                     span: span,
                     name: sub.name,
+                    ty: None,
+                    expr: Some(Box::new(field)),
+                    target: None,
+                    assign_op: AssignOp::AssignEq,
+                }
+                tplet_push(elem)
+            }
+        },
+        None => {},
+    }
+}
+
+// Emit `let <binder> = __tup.<field>` for each direct binding in a struct let.
+// This mirrors tuple-let lowering while reusing the field-access path that the
+// checker and HLIR lowering already understand.
+fn tplet_emit_struct_fields(opt: Option<Box<PatFieldList>>, temp: Name, span: Span) with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let field_pat = (*list).head
+            tplet_emit_struct_fields((*list).tail, temp, span)
+            if field_pat.pattern.kind == PatternKind::PatBinding {
+                var ident = mk_expr(ExprKind::ExprIdent, span)
+                ident.name = temp
+                var field = mk_expr(ExprKind::ExprFieldAccess, span)
+                field.name = field_pat.name
+                field.left = Some(Box::new(ident))
+                let elem = Stmt {
+                    kind: StmtKind::StmtLet,
+                    span: span,
+                    name: field_pat.pattern.name,
                     ty: None,
                     expr: Some(Box::new(field)),
                     target: None,
@@ -273,6 +307,22 @@ impl Parser {
             TPLET_COUNTER = TPLET_COUNTER + 1
             let temp = tplet_temp_name(ctr)
             tplet_emit_elems(pat.sub_patterns, temp, span, 0)
+            return (p, Stmt {
+                kind: StmtKind::StmtLet,
+                span: span,
+                name: temp,
+                ty: ty_opt,
+                expr: Some(init_box),
+                target: None,
+                assign_op: AssignOp::AssignEq,
+            })
+        }
+
+        if pat.kind == PatternKind::PatStruct {
+            let ctr = TPLET_COUNTER
+            TPLET_COUNTER = TPLET_COUNTER + 1
+            let temp = tplet_temp_name(ctr)
+            tplet_emit_struct_fields(pat.pat_fields, temp, span)
             return (p, Stmt {
                 kind: StmtKind::StmtLet,
                 span: span,

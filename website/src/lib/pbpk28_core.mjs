@@ -640,3 +640,459 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
   }
   return { ...base, vascFrac: vasc, ps };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// VENLAFAXINE XR — controlled-release witness (SISTEMA 2: Korsmeyer-Peppas matrix)
+//
+// Third canonical drug. Two coupled PBPK28 compartments: parent (venlafaxine)
+// and active metabolite ODV (O-desmethylvenlafaxine), bridged by hepatic CYP2D6
+// formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
+//
+// Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
+// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
+// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
+//
+// Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
+// Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
+// (ODV/parent Css PM 0.25 / NM 3.45 / UM 10.3 → CYP2D6 formation scaling).
+// ════════════════════════════════════════════════════════════════════════════
+
+export const VFX_MATRIX_GOHEL2008 = Object.freeze({ totalDose: 75.0, k: 0.199, n: 0.65 });
+export const VFX_F_ORAL_XR = 0.45;
+export const VFX_KA_ABS    = 0.63;
+export const VFX_CL_FORM_ODV_NM = 43.0;   // L/h, CYP2D6 formation at NM (parity reference)
+export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Klamerus 1999
+export const VFX_CL_ODV_CENTRAL    = 28.0; // L/h, Wyeth label
+
+export const VFX_KP_PARENT = Object.freeze([1.00, 4.20, 3.50, 1.20, 2.00, 2.80, 1.80, 1.20, 2.40, 1.50, 0.80, 2.00, 1.60, 0.90]);
+export const VFX_PS_PARENT = Object.freeze([0.0, 900.0, 600.0, 120.0, 200.0, 8000.0, 250.0, 80.0, 500.0, 100.0, 40.0, 120.0, 80.0, 60.0]);
+export const VFX_KP_ODV    = Object.freeze([1.00, 3.50, 3.00, 1.00, 1.60, 2.20, 1.40, 0.90, 2.00, 1.20, 0.70, 1.60, 1.30, 0.70]);
+export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000.0, 200.0, 60.0, 400.0, 80.0, 30.0, 100.0, 70.0, 50.0]);
+
+// CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
+export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
+
+// ─── Matrix transcendentals — verbatim ports of release/matrix_er.sio ────────
+function merLnUnit(x) {                       // ln(x) for x in (0,2], artanh series
+  if (x <= 0.0) return -1.0e6;
+  const y = (x - 1.0) / (x + 1.0);
+  const y2 = y * y;
+  let term = y, sum = term;
+  for (let k = 1; k < 20; k++) { term = term * y2; sum = sum + term / (2.0 * k + 1.0); }
+  return 2.0 * sum;
+}
+function merExp(x) {                          // exp via (1+x/1024)^1024
+  let r = 1.0 + x / 1024.0;
+  for (let i = 0; i < 10; i++) r = r * r;
+  return r;
+}
+function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
+  if (t <= 0.0) return 0.0;
+  if (Math.abs(n - 1.0) < 1.0e-12) return t;
+  if (Math.abs(n - 0.5) < 1.0e-12) return Math.sqrt(t);
+  let lnT = 0.0;
+  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
+  return merExp(n * lnT);
+}
+function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+  if (x >= 0.0) return 1.0;
+  let y = 1.0, term = 1.0;
+  for (let k = 1; k < 20; k++) { term = term * x / k; y = y + term; }
+  return y;
+}
+
+export function vfxMatrixFraction(rel, t) {
+  if (t <= 0.0) return 0.0;
+  const f = rel.k * merPow(t, rel.n);
+  return f > 1.0 ? 1.0 : f;
+}
+export function vfxMatrixCumulative(rel, t) { return rel.totalDose * vfxMatrixFraction(rel, t); }
+export function vfxMatrixStepAmount(rel, t, dt) {
+  return vfxMatrixCumulative(rel, t + dt) - vfxMatrixCumulative(rel, t);
+}
+
+// ─── Fully-coupled CN transport step — port of pbpk28_full_cn_step ───────────
+function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
+  const h = 0.5 * dt;
+  const vb = V_REF[0];
+  let sumQ = 0.0;
+  for (let i = 1; i < N; i++) sumQ += Q[i];
+  const bigS = h * (sumQ + clCentral) / vb;
+  const cbOld = Cv[0];
+  let rhs0 = (1.0 - bigS) * cbOld + dt * relMid / vb;
+  const aV = new Float64Array(N), bV = new Float64Array(N);
+  const aT = new Float64Array(N), bT = new Float64Array(N);
+  let sumBetaA = 0.0, sumBetaB = 0.0;
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    const vv = Math.max(vi * vf, 1e-30), vt = Math.max(vi * (1 - vf), 1e-30);
+    const kpi = kp[i], psi = ps[i], qi = Q[i];
+    const beta = h * qi / vb, gamma = h * qi / vv;
+    const p = 1.0 + h * (qi + psi) / vv;
+    const qq = h * psi / (vv * kpi);
+    const r = h * psi / vt;
+    const sb = 1.0 + h * psi / (vt * kpi);
+    const det = p * sb - qq * r;
+    rhs0 += beta * Cv[i];
+    const rhsV = gamma * cbOld + (1.0 - h * (qi + psi) / vv) * Cv[i] + qq * Ct[i];
+    const rhsT = r * Cv[i] + (1.0 - h * psi / (vt * kpi)) * Ct[i];
+    aV[i] = (sb * rhsV + qq * rhsT) / det;
+    bV[i] = (sb * gamma) / det;
+    aT[i] = (r * rhsV + p * rhsT) / det;
+    bT[i] = (r * gamma) / det;
+    sumBetaA += beta * aV[i];
+    sumBetaB += beta * bV[i];
+  }
+  const cbNew = (rhs0 + sumBetaA) / ((1.0 + bigS) - sumBetaB);
+  const outCv = new Float64Array(N), outCt = new Float64Array(N);
+  outCv[0] = cbNew < 0 ? 0 : cbNew;
+  for (let i = 1; i < N; i++) {
+    const cv = aV[i] + bV[i] * cbNew;
+    const ct = aT[i] + bT[i] * cbNew;
+    outCv[i] = cv < 0 ? 0 : cv;
+    outCt[i] = ct < 0 ? 0 : ct;
+  }
+  return { cv: outCv, ct: outCt };
+}
+
+function vfxOrganAverage(cv, ct, i) {
+  if (i === 0) return cv[0];
+  const vf = VASC_FRAC[i];
+  return vf * cv[i] + (1 - vf) * ct[i];
+}
+function vfxTotalMass(cv, ct) {
+  let total = V_REF[0] * cv[0];
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    total += vi * vf * cv[i] + vi * (1 - vf) * ct[i];
+  }
+  return total;
+}
+
+// One Lie-Trotter step: matrix → gut → ka absorption → parent CN → CYP2D6
+// liver formation (drain parent organ 1, feed ODV) → ODV CN. Mirrors
+// vfx_strang_step in scenarios/venlafaxine_xr.sio.
+function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
+  const relAmt = vfxMatrixStepAmount(rel, tStart, dt);
+  let gut = st.gut + relAmt;
+  const fracAbs = 1.0 - merExpNeg(-VFX_KA_ABS * dt);
+  const absorbAmt = VFX_F_ORAL_XR * gut * fracAbs;
+  gut = gut - absorbAmt;
+  if (gut < 0) gut = 0;
+  const parentInput = absorbAmt / dt;
+
+  const outP = vfxCnStep(st.pCv, st.pCt, VFX_KP_PARENT, VFX_PS_PARENT, VFX_CL_PARENT_CENTRAL, parentInput, dt);
+
+  const cLiver = vfxOrganAverage(outP.cv, outP.ct, 1);
+  const clForm = VFX_CL_FORM_ODV_NM * clFormScale;
+  const formMg = clForm * cLiver * dt;
+  outP.cv[1] = outP.cv[1] - formMg / V_REF[1];
+  if (outP.cv[1] < 0) outP.cv[1] = 0;
+  if (outP.cv[0] < 0) outP.cv[0] = 0;
+  const odvInput = formMg / dt;
+
+  const outO = vfxCnStep(st.oCv, st.oCt, VFX_KP_ODV, VFX_PS_ODV, VFX_CL_ODV_CENTRAL, odvInput, dt);
+  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut };
+}
+
+/**
+ * Integrate the venlafaxine XR scenario at NM (or a chosen CYP2D6 phenotype) and
+ * sample parent + ODV organ-average trajectories at the given times. Returns a
+ * record per sample with parent/ODV {cv,ct,avg}[14], cumulative matrix release,
+ * and the total-body ODV/parent mass ratio. Default dt=0.5 h matches the stdlib
+ * scenario; pheno default 2 = NM (the parity reference, R7).
+ */
+export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
+  const rel = VFX_MATRIX_GOHEL2008;
+  const clFormScale = VFX_CL_FORM_SCALE[pheno];
+  let st = {
+    pCv: new Float64Array(N), pCt: new Float64Array(N),
+    oCv: new Float64Array(N), oCt: new Float64Array(N), gut: 0.0,
+  };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) {
+      st = vfxStrangStep(st, rel, t, dt, clFormScale);
+      t += dt;
+    }
+    const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      pAvg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
+      oAvg[i] = vfxOrganAverage(st.oCv, st.oCt, i);
+    }
+    const mp = vfxTotalMass(st.pCv, st.pCt);
+    const mo = vfxTotalMass(st.oCv, st.oCt);
+    out.push({
+      t: target,
+      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), pAvg,
+      oCv: Float64Array.from(st.oCv), oCt: Float64Array.from(st.oCt), oAvg,
+      released: vfxMatrixCumulative(rel, target),
+      ratio: mp < 1.0e-12 ? 0.0 : mo / mp,
+      pMass: mp, oMass: mo,
+    });
+  }
+  return out;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// HALOPERIDOL (CASO II) — PBPK14 well-stirred + detailed BBB + D2 occupancy.
+//
+// Fourth canonical drug. Its validated science is PBPK14 + BBB(ISF/ICF) + D2
+// (no citable PBPK28 perm-limited model — empirical-first), so the canonical
+// parity surface is plasma PK · BBB Kpuu · D2 occupancy. The production scenario
+// integrates the systemic PBPK14 with adaptive Tsit5; to make Sounio↔Node parity
+// tractable, BOTH this engine and the parity ref use a FIXED-STEP RK4 systemic
+// integrator at the same dt — parity validates exactly what the viewer runs.
+// Mirrors tests/run-pass/dissertation_pbpk28_parity_ref_haloperidol.sio to f64.
+// Constants verbatim from drugs/haloperidol.sio + bbb/bbb_core.sio + pd/d2_occupancy.sio.
+// ════════════════════════════════════════════════════════════════════════════
+
+// index 0=blood,1=liver,2=kidney,3=brain,4=heart,5=lung,6=muscle,7=adipose,
+// 8=gut,9=skin,10=bone,11=spleen,12=pancreas,13=other.
+export const HALO_V  = Object.freeze([5.2, 1.69, 0.31, 1.37, 0.31, 1.17, 29.0, 18.2, 1.65, 7.8, 10.5, 0.19, 0.14, 4.5]);
+export const HALO_Q  = Object.freeze([0.0, 87.0, 72.0, 44.0, 14.4, 0.0, 73.8, 18.0, 57.6, 18.0, 21.6, 10.8, 4.5, 18.0]);
+export const HALO_KP = Object.freeze([1.0, 18.0, 8.0, 15.0, 6.0, 12.0, 35.0, 12.0, 6.0, 8.0, 6.0, 8.0, 5.0, 5.0]);
+export const HALO_CL_HEPATIC = 40.0, HALO_CL_RENAL = 0.5, HALO_FU_PLASMA = 0.08, HALO_RB = 1.0;
+export const HALO_BBB = Object.freeze({ vIsf: 0.270, vIcf: 1.080, psBbb: 2.0, psMem: 8.0, fuIsf: 0.035, fuIcf: 0.010, kpuuBrain: 3.0, kpuuCell: 0.5 });
+export const HALO_D2_KD = 0.000564;
+export const HALO_ABS = Object.freeze({ ka: 0.9, f: 0.65, tlag: 0.25 });
+
+// exp(-x) — verbatim port of absorption.sio abs_exp_neg.
+function haloAbsExpNeg(x) {
+  if (x <= 0.0) return 1.0;
+  if (x > 0.5) { const half = haloAbsExpNeg(x * 0.5); return half * half; }
+  let term = 1.0, sum = 1.0;
+  for (let k = 1; k < 16; k++) { term = term * (-x) / k; sum = sum + term; }
+  return sum;
+}
+
+// PBPK14 well-stirred RHS (pbpk_ode), array form.
+function haloSysOde(c) {
+  const cPlasma = c[0] / HALO_RB;
+  const cUnbound = cPlasma * HALO_FU_PLASMA;
+  const d = new Float64Array(14);
+  let dBlood = 0.0;
+  for (let i = 1; i < 14; i++) {
+    const flux = (HALO_Q[i] / HALO_V[i]) * (cPlasma - c[i] / HALO_KP[i]);
+    d[i] = flux;
+    dBlood = dBlood - (HALO_Q[i] / HALO_V[0]) * HALO_RB * (cPlasma - c[i] / HALO_KP[i]);
+  }
+  dBlood = dBlood - (HALO_CL_HEPATIC / HALO_V[0]) * cUnbound * HALO_RB;
+  dBlood = dBlood - (HALO_CL_RENAL / HALO_V[0]) * cUnbound * HALO_RB;
+  d[0] = dBlood;
+  return d;
+}
+function haloSysRk4(c, dt) {
+  const axpy = (y, k, a) => { const r = new Float64Array(14); for (let i = 0; i < 14; i++) r[i] = y[i] + a * k[i]; return r; };
+  const k1 = haloSysOde(c);
+  const k2 = haloSysOde(axpy(c, k1, 0.5 * dt));
+  const k3 = haloSysOde(axpy(c, k2, 0.5 * dt));
+  const k4 = haloSysOde(axpy(c, k3, dt));
+  const r = new Float64Array(14);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  for (let i = 0; i < 14; i++) r[i] = c[i] + sixth * k1[i] + third * k2[i] + third * k3[i] + sixth * k4[i];
+  return r;
+}
+
+// BBB RHS + RK4 (bbb_ode / bbb_rk4_step), c_plasma constant across the step.
+function haloBbbOde(isf, icf, cPlasma) {
+  const cpu = HALO_FU_PLASMA * cPlasma;
+  const ciu = HALO_BBB.fuIsf * isf;
+  const ccu = HALO_BBB.fuIcf * icf;
+  const bbbFlux = HALO_BBB.psBbb * (cpu - ciu / HALO_BBB.kpuuBrain);
+  const memFlux = HALO_BBB.psMem * (ciu - ccu / HALO_BBB.kpuuCell);
+  return { isf: (bbbFlux - memFlux) / HALO_BBB.vIsf, icf: memFlux / HALO_BBB.vIcf };
+}
+function haloBbbRk4(isf, icf, cPlasma, dt) {
+  const k1 = haloBbbOde(isf, icf, cPlasma);
+  const k2 = haloBbbOde(isf + 0.5 * dt * k1.isf, icf + 0.5 * dt * k1.icf, cPlasma);
+  const k3 = haloBbbOde(isf + 0.5 * dt * k2.isf, icf + 0.5 * dt * k2.icf, cPlasma);
+  const k4 = haloBbbOde(isf + dt * k3.isf, icf + dt * k3.icf, cPlasma);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  return {
+    isf: isf + sixth * k1.isf + third * k2.isf + third * k3.isf + sixth * k4.isf,
+    icf: icf + sixth * k1.icf + third * k2.icf + third * k3.icf + sixth * k4.icf,
+  };
+}
+function haloD2Occ(cIsfFree) { return cIsfFree <= 0.0 ? 0.0 : cIsfFree / (cIsfFree + HALO_D2_KD); }
+
+function haloStep(st, t, dt) {
+  let aGut = st.aGut;
+  let c = st.sys;
+  if (t + dt > HALO_ABS.tlag) {
+    const tActiveStart = t < HALO_ABS.tlag ? HALO_ABS.tlag : t;
+    const dtActive = (t + dt) - tActiveStart;
+    if (dtActive > 0.0) {
+      const decay = haloAbsExpNeg(HALO_ABS.ka * dtActive);
+      const aAfter = aGut * decay;
+      const toBlood = HALO_ABS.f * (aGut - aAfter);
+      aGut = aAfter;
+      c = Float64Array.from(c);
+      c[0] = c[0] + toBlood / HALO_V[0];
+    }
+  }
+  const b0 = c[0];
+  const s1 = haloSysRk4(c, dt);
+  const cMid = 0.5 * (b0 + s1[0]);
+  const b1 = haloBbbRk4(st.bbb.isf, st.bbb.icf, cMid, dt);
+  return { sys: s1, bbb: b1, aGut };
+}
+
+/**
+ * Integrate the haloperidol oral scenario (single dose, fixed-step RK4) and
+ * sample plasma / ISF_free / ICF_free / Kpuu / D2-occupancy at the given times.
+ * dt default 0.01 h, dose 5 mg — matches the parity ref.
+ */
+export function runHaloperidolScenario(sampleTimes, { dt = 0.002, doseMg = 5.0 } = {}) {
+  let st = { sys: new Float64Array(14), bbb: { isf: 0.0, icf: 0.0 }, aGut: doseMg };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) { st = haloStep(st, t, dt); t += dt; }
+    const plasma = st.sys[0] / HALO_RB;
+    const isfFree = HALO_BBB.fuIsf * st.bbb.isf;
+    const icfFree = HALO_BBB.fuIcf * st.bbb.icf;
+    const plasmaFree = HALO_FU_PLASMA * plasma;
+    const kpuu = plasmaFree > 1.0e-12 ? isfFree / plasmaFree : 0.0;
+    out.push({ t: target, plasma, brain: st.sys[3], isfFree, icfFree, kpuu, d2occ: haloD2Occ(isfFree) });
+  }
+  return out;
+}
+
+// ============================================================================
+// MIDAZOLAM — fifth canonical drug: oral CYP3A drug–drug interaction (DDI).
+//
+// Novel surface (none of the four prior drugs model enzyme inhibition):
+// mechanistic well-stirred oral first-pass (F = Fa·FG·FH) + competitive CYP3A
+// inhibition. A SINGLE hepatic intrinsic clearance CLint_h drives BOTH the
+// first-pass survival FH = Qh/(Qh+fu·CLint_h) AND the systemic well-stirred
+// clearance CL_h = Qh·fu·CLint_h/(Qh+fu·CLint_h). A separate gut CLint_g drives
+// FG = Qg/(Qg+fu_g·CLint_g). Competitive inhibition divides the INTRINSIC
+// clearances by (1 + I/Ki). Because FH and CL_h come from one CLint_h,
+// inhibition raises FH and lowers CL_h *consistently* — no double-count — so the
+// iconic oral midazolam+ketoconazole AUC rise (~15×) emerges honestly
+// (AUC = F·Dose/CL_h; validated in stdlib/darwin_pbpk/validation/midazolam_ddi.sio).
+//
+// Inhibitor is held STATIC at its steady-state unbound concentration (matches how
+// clinical DDI studies pre-dose the perpetrator). Systemic distribution Kp are
+// nominal midazolam-plausible values (Vss ~1.4 L/kg); the *validated* DDI
+// quantities are F, CL_h and AUCR, which are distribution-independent.
+// Units: mg, L, L/h, h, mg/L throughout.
+//
+// Sources: Heizmann 1984 (oral F~0.4), Thummel 1996 (gut+hepatic first-pass),
+// Gorski 1998 / Olkkola 1994,1996 (ketoconazole DDI ~15×), Yang 2007 (Qgut model).
+// ============================================================================
+
+// Generic 70 kg human physiology (volumes L, flows L/h) — reused; Kp are midazolam.
+export const MDZ_V  = Object.freeze([5.2, 1.69, 0.31, 1.37, 0.31, 1.17, 29.0, 18.2, 1.65, 7.8, 10.5, 0.19, 0.14, 4.5]);
+export const MDZ_Q  = Object.freeze([0.0, 90.0, 72.0, 44.0, 14.4, 0.0, 73.8, 18.0, 57.6, 18.0, 21.6, 10.8, 4.5, 18.0]);
+export const MDZ_KP = Object.freeze([1.0, 2.0, 1.5, 1.5, 1.2, 1.5, 1.0, 2.0, 1.5, 1.2, 0.6, 1.2, 1.2, 1.0]);
+export const MDZ_FU_PLASMA = 0.03, MDZ_RB = 1.0;
+export const MDZ_CL_RENAL = 0.0;  // midazolam: <1% renal — elimination is CYP3A-hepatic.
+// First-pass + CYP3A metabolism: one CLint_h -> {FH, CL_h}; CLint_g -> FG.
+export const MDZ_FP = Object.freeze({ qh: 90.0, qg: 18.0, fu: 0.03, fuGut: 1.0, fa: 0.95, clintH: 1090.0, clintG: 14.7 });
+// Absorption: rapid oral (Tmax ~0.9 h), negligible lag.
+export const MDZ_ABS = Object.freeze({ ka: 3.0, tlag: 0.0 });
+// Ketoconazole perpetrator, static steady-state UNBOUND conc (mg/L): I/Ki = 8 -> R = 9.
+export const MDZ_KETO = Object.freeze({ ki: 0.008, iSteadyState: 0.064 });
+
+// exp(-x) — verbatim port of absorption.sio abs_exp_neg (shared low-accuracy arithmetic).
+function mdzAbsExpNeg(x) {
+  if (x <= 0.0) return 1.0;
+  if (x > 0.5) { const half = mdzAbsExpNeg(x * 0.5); return half * half; }
+  let term = 1.0, sum = 1.0;
+  for (let k = 1; k < 16; k++) { term = term * (-x) / k; sum = sum + term; }
+  return sum;
+}
+
+// Competitive inhibition on CYP3A intrinsic clearance: factor in [0,1].
+function mdzInhFactor(I) { return 1.0 / (1.0 + I / MDZ_KETO.ki); }
+// Gut-wall survival FG, hepatic first-pass survival FH, systemic CL_h — each from
+// a single (inhibited) intrinsic clearance. Same enzyme/inhibitor -> same factor.
+function mdzFG(I)  { const b = MDZ_FP.fuGut * MDZ_FP.clintG * mdzInhFactor(I); return MDZ_FP.qg / (MDZ_FP.qg + b); }
+function mdzFH(I)  { const a = MDZ_FP.fu   * MDZ_FP.clintH * mdzInhFactor(I); return MDZ_FP.qh / (MDZ_FP.qh + a); }
+function mdzCLh(I) { const a = MDZ_FP.fu   * MDZ_FP.clintH * mdzInhFactor(I); return MDZ_FP.qh * a / (MDZ_FP.qh + a); }
+function mdzF(I)   { return MDZ_FP.fa * mdzFG(I) * mdzFH(I); }
+
+// PBPK14 well-stirred RHS; clH is the (inhibitor-dependent) systemic hepatic
+// clearance acting on plasma — it already embeds fu via the well-stirred form,
+// so it is NOT multiplied by fu again here.
+function mdzSysOde(c, clH) {
+  const cPlasma = c[0] / MDZ_RB;
+  const d = new Float64Array(14);
+  let dBlood = 0.0;
+  for (let i = 1; i < 14; i++) {
+    const flux = (MDZ_Q[i] / MDZ_V[i]) * (cPlasma - c[i] / MDZ_KP[i]);
+    d[i] = flux;
+    dBlood = dBlood - (MDZ_Q[i] / MDZ_V[0]) * MDZ_RB * (cPlasma - c[i] / MDZ_KP[i]);
+  }
+  dBlood = dBlood - (clH / MDZ_V[0]) * cPlasma * MDZ_RB;
+  dBlood = dBlood - (MDZ_CL_RENAL / MDZ_V[0]) * cPlasma * MDZ_RB;
+  d[0] = dBlood;
+  return d;
+}
+function mdzSysRk4(c, dt, clH) {
+  const axpy = (y, k, a) => { const r = new Float64Array(14); for (let i = 0; i < 14; i++) r[i] = y[i] + a * k[i]; return r; };
+  const k1 = mdzSysOde(c, clH);
+  const k2 = mdzSysOde(axpy(c, k1, 0.5 * dt), clH);
+  const k3 = mdzSysOde(axpy(c, k2, 0.5 * dt), clH);
+  const k4 = mdzSysOde(axpy(c, k3, dt), clH);
+  const r = new Float64Array(14);
+  const sixth = dt / 6.0, third = dt / 3.0;
+  for (let i = 0; i < 14; i++) r[i] = c[i] + sixth * k1[i] + third * k2[i] + third * k3[i] + sixth * k4[i];
+  return r;
+}
+
+// One fixed step: operator-split oral absorption (delivers Fa·FG·FH of the released
+// mass to blood) -> systemic RK4. clH, Foral are constant (static inhibitor).
+function mdzStep(st, t, dt, clH, Foral) {
+  let aGut = st.aGut;
+  let c = st.sys;
+  if (t + dt > MDZ_ABS.tlag) {
+    const tActiveStart = t < MDZ_ABS.tlag ? MDZ_ABS.tlag : t;
+    const dtActive = (t + dt) - tActiveStart;
+    if (dtActive > 0.0) {
+      const decay = mdzAbsExpNeg(MDZ_ABS.ka * dtActive);
+      const aAfter = aGut * decay;
+      const toBlood = Foral * (aGut - aAfter);
+      aGut = aAfter;
+      c = Float64Array.from(c);
+      c[0] = c[0] + toBlood / MDZ_V[0];
+    }
+  }
+  return { sys: mdzSysRk4(c, dt, clH), aGut };
+}
+
+/**
+ * Integrate the oral midazolam scenario (single dose, fixed-step RK4) under a
+ * static unbound inhibitor concentration `I` (mg/L; 0 = solo). Samples plasma
+ * (mg/L) at the given times. dt default 0.002 h, dose 5 mg — matches the ref.
+ */
+export function runMidazolamScenario(sampleTimes, { dt = 0.002, doseMg = 5.0, I = 0.0 } = {}) {
+  const clH = mdzCLh(I);
+  const Foral = mdzF(I);
+  let st = { sys: new Float64Array(14), aGut: doseMg };
+  const out = [];
+  let t = 0.0;
+  for (const target of sampleTimes) {
+    while (t + 0.5 * dt < target) { st = mdzStep(st, t, dt, clH, Foral); t += dt; }
+    out.push({ t: target, plasma: st.sys[0] / MDZ_RB });
+  }
+  return out;
+}
+
+/**
+ * Analytic DDI dose-response across a grid of I/Ki ratios: per point returns oral
+ * F, systemic CL_h, and AUC ratio vs solo (AUCR = (F/F0)·(CL_h0/CL_h)). This is
+ * the inhibition-curve parity series (case 19) — closed form, no integration.
+ */
+export function runMidazolamDDIResponse(iOverKiGrid) {
+  const F0 = mdzF(0.0), clH0 = mdzCLh(0.0);
+  return iOverKiGrid.map((r) => {
+    const I = r * MDZ_KETO.ki;
+    const F = mdzF(I), clH = mdzCLh(I);
+    return { iOverKi: r, F, clH, aucr: (F / F0) * (clH0 / clH) };
+  });
+}

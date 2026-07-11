@@ -13,5 +13,6 @@ Distributed computing types and node registry.
 - `registry_add(r, node)`: Add node to registry
 - `registry_size(r)`: Get registry size
 
-## Test Status
-5/5 tests passing.
+## Tests
+
+`tests/stdlib/distributed/test_distributed_core.sio` (check-only, Madaros gate)

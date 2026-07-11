@@ -2915,3 +2915,282 @@ checks:
   - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:40:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+intent: |
+  CLAIM (WP-A3, Madaros generic-<F> phase 2): AST specializer in the MULTI-module
+  lane. module_frontend.sio is a serialized surface SHARED with WP-B1 — coordinate
+  before pushing. Edit is additive: a new fn module_frontend_specialized_typecheck
+  + two call-site branches in module_frontend_compile_imported_to_file and
+  module_frontend_merge_imported_into; plus two pub accessors in
+  self-hosted/check/specializer.sio (spec_last_instantiated, spec_append_item_lists).
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T18:55:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - self-hosted/check/specializer.sio
+  - tests/multimodule/wp_a3/{w2_mod,w2_main,w3_mod,w3_main}.sio
+intent: |
+  RELEASE (WP-A3 DONE). Design (a): the multi-module imported-compile path now
+  runs the generic specializer over the FULLY-MERGED item list (all modules'
+  items concatenated, main first) so an imported single-letter `struct F` is a
+  known name and never misread as a free type var. It is TYPE-CHECK-ONLY: when a
+  generic is actually instantiated (spec_last_instantiated), the verdict is taken
+  from the merged+monomorphized list (drops the E008 `CDElementExact__T`
+  mono-mismatch); the per-module `programs` array is left untouched so IR lowering
+  / cross-module merge is byte-identical. A first attempt COLLAPSED the modules
+  into programs[0] for both typecheck+lowering — that regressed a working case
+  (wrap::<i64>→W<i64> went rc=9 → BUILD_NO_ELF), so the collapse was dropped in
+  favor of typecheck-only.
+checks (Slurm madaros build from main.sio, fixed vs origin/main baseline):
+  - cd_exact_generic_i64 compile: E008 CDElementExact__T count 1 (baseline) -> 0 (fixed)
+  - W2 tests/multimodule/wp_a3/w2_main.sio: rc=9 (fixed, specializer fired)
+  - W3 tests/multimodule/wp_a3/w3_main.sio: rc=7 (fixed, no misfire, collapse=0)
+  - 8-test multi-module battery: byte-identical baseline<->fixed, all collapse=0
+  - turbofish 3/3 PASS; compile-fail turbofish_type_arg_arity still REJECTED (E010)
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A3): cd_exact still blocked by E035x3 (missing Mut,Div,Panic —
+  WP-A1 effect annotations) + E019x8/E007 (primitive-receiver dispatch — WP-A2).
+  A3 removed ONLY the E008 mono-mismatch, as briefed. Umbrella gate not run on the
+  pod (heavy); no-regression argued via the byte-identical battery + identical
+  single-module guards + the spec_last_instantiated gate (non-instantiating
+  multi-module code takes the unchanged per-module path).
+
+---
+
+agent: claude
+time_utc: 2026-07-06T20:50:00Z
+files:
+  - self-hosted/check/check.sio
+intent: |
+  CLAIM (WP-A6, Madaros imported-lane effect-annotation carry / E035). Scope is
+  the type-checker's impl-method signature resolution ONLY. NOTE: the fix does
+  NOT touch self-hosted/compiler/module_frontend.sio or module_loader.sio (the
+  originally-suspected merge site) — the annotations are never dropped; the merge
+  is innocent. Root cause is a name-collision in fn_sig_table_find_method: an
+  imported struct (bound via `use` to ty_unknown, empty name) and the i64 builtin
+  (also empty TypeEntry name) both register their trait-impl methods with an empty
+  self_type_name, so the name-only lookup resolves one impl's method body against
+  the OTHER impl's (effect-empty) sig. No shared-surface conflict with WP-B1.
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-07-06T21:20:00Z
+files:
+  - self-hosted/check/check.sio
+  - tests/probe/a6_frac_def.sio
+  - tests/probe/a6_ring_mod.sio
+  - tests/probe/a6_ring_main.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  RELEASE (WP-A6 DONE). Fix: checker_check_impl_method_inplace now resolves the
+  method signature by the FULL impl-type TypeEntry (kind + name) via
+  fn_sig_table_find_method_semantic instead of name-only fn_sig_table_find_method.
+  TyUnknown (imported Rational) vs TyI64 disambiguates the two `impl ExactRing`
+  blocks, so each method body sees ITS OWN declared effects. One-line change +
+  comment; no other lanes touched.
+checks (Slurm madaros build from main.sio; A6-fixed vs proven unmodified base, job 5504/5510):
+  - W1 cd_exact_generic_i64 compile: error[E035] count 3 (base) -> 0 (fixed)
+  - W2 tests/probe/{eff_inherent,eff_trait}.sio: rc=6, E035=0 (unchanged)
+  - W3 tests/probe/a6_ring_main.sio (3-module imported witness): E035 1 (base) -> 0
+    (fixed) at type-check; runtime blocked by a SEPARATE pre-existing cross-module
+    native-lowering segfault at `lower_array: dep_begin 1` (rc=139 on base too;
+    logged as new gap).
+  - W4 zero-regression: 10 impl/trait/multimodule tests EXACT rc + total-error
+    parity base<->fixed (impl_multiple_types/impl_trait_for_type_multi/
+    impl_inherent_method/impl_trait_for_type/trait_bounded_dispatch_struct/
+    import_basic_main all rc=0; method_receiver_correct rc=139, trait_basic 1/6err,
+    trait_bounded_dispatch 1/2err, import_chain_main rc=42 — all identical to base,
+    i.e. pre-existing Madaros run-pass gaps, NOT caused by this change).
+  - A6_WITNESS_PASS=14 A6_WITNESS_FAIL=0.
+commit: pending
+status: lock-released
+notes: |
+  Residual (NOT A6): cd_exact still gates on E019/E007 (WP-A2 primitive-receiver
+  dispatch) — A6 removed ONLY the E035x3. New gap filed: imported chain-import
+  native lowering segfault (see SCOREBOARD new-gap ledger). Umbrella not run on the
+  pod (heavy); no-regression argued via the base-parity W4 battery + unchanged
+  single-module W2.
+
+---
+
+agent: claude
+time_utc: 2026-07-06T21:30:00Z
+files:
+  - self-hosted/check/compat.sio
+  - tests/probe/intwidth.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: |
+  CLAIM+RELEASE (WP-A7 DONE). KEYSTONE integer-width coercion for the Madaros
+  merged type-checker. Root cause: types_compatible required exact TypeKind match
+  for integers, so i32-vs-i64 was rejected (no widening) — unlike lean_single.
+  Fix (compat.sio): new int_width_family()/int_widths_compatible() helpers classify
+  the narrow machine ints by signedness family {i8,i32,i64}=signed, {u8,u32,u64}=
+  unsigned; types_compatible returns true for two narrow ints of the SAME family.
+  Wide i128/u128 keep their exact clifford_p bit-width check (i128!=i256 hole stays
+  closed); cross-signedness (i32 vs u32) is NOT widened. Single central site covers
+  if-branch-join (E007), arith/cmp, arg-pass, return.
+checks (Slurm madaros build from main.sio, jobs 5540/5543; FALSE-GREEN guard: ELFs run, actual rc/stdout asserted):
+  - W1 cd_exact_generic_i64: error[E007] 1 -> 0; `imported_compile: typecheck ok`
+    (error_lines=0). ELF NOT produced: build rc=139 SEGFAULT in the LOWERING phase
+    at `lower_array: dep_begin 1` — the SAME pre-existing cross-module native-lowering
+    gap A6 already logged (new-gap ledger), NOT this type-check fix. Type-check clean
+    counts as W1 success per WP brief.
+  - W2 tests/probe/intwidth.sio (i32 param, i64 return, `if bits<=6 {bits} else {7}`):
+    compiles, RUN_RC=0, stdout=3. Minimal generic-struct-return + i32/i64 if-join
+    (/tmp/minj.sio) also compiles+runs, stdout=3 (coercion lowers to valid IR).
+  - W3 regression (6 run-pass): turbofish 3/3 PASS, generic_struct_basic,
+    sret_8_field_return OK, i32_implicit_return, generic_struct_return "6"/"spike PASS",
+    generics_multi_param 2/2 PASS — all rc=0.
+  - W4 guard: tests/compile-fail/turbofish_type_arg_arity.sio still REJECTED
+    (error[E010]x2, no ELF, build rc=1).
+  - Cross-check that segfault is pre-existing: sret_forwarding_cross_module_cd_mul
+    RUN_RC=139 and sret_array4_generic_return RUN_RC=13 on this branch too.
+commit: pending
+status: lock-released
+notes: |
+  A7_WITNESS_PASS: W1(typecheck-clean), W2, W3, W4 all green. cd_exact now
+  TYPE-CHECKS CLEAN but does not yet RUN — blocked solely by the pre-existing
+  cross-module `lower_array` native-lowering segfault (WP-A4/native-lowering
+  territory), NOT by A7. No new gap introduced.
+
+---
+session: A10 (Opus, fable5 madaros generic-F)
+wp: A10 — generic-dependency summary-lowering SIGSEGV (partial; extends A6/A7 dep_begin 1 gap)
+branch: fix/madaros-generic-dep-summary-lowering (base main; base branch fix/madaros-crossmod-sret-lowering-impl + A8)
+action: CLAIM -> RELEASE
+root_cause: |
+  The compile-time SIGSEGV at `lower_array: dep_begin 1` (between summary_begin/
+  summary_done) when a program imports a module that declares an `impl` was inside
+  lowerer_preseed_fn_signature_mut (self-hosted/ir/lower.sio). That function — whose
+  ONLY caller is the impl-method summary preseed — mutated the function slot via the
+  direct nested lvalue `(*(*lo).module).functions[fn_id].field = X`. The 512-byte
+  aggregate store `.param_regs = [IR_INVALID_REG; 64]` triggers the documented
+  lean_single two-level-nested-store miscompile (aggregate lvalue base computed wrong
+  -> the write faults). It stayed latent until an imported module carried an `impl`
+  (main + prior multi-module deps had none).
+fix: |
+  Rewrote lowerer_preseed_fn_signature_mut to the extract-to-local idiom
+  (var module_box = (*lo).module; var fn_slot = (*module_box).functions[fn_id]; mutate
+  fn_slot; (*module_box).functions[fn_id] = fn_slot; (*lo).module = module_box) —
+  identical to the working ItemFn branch in lowerer_preseed_program_items_mut. +350
+  bytes; the fixed function has no other caller, so single-module/non-generic paths
+  are byte-identical.
+checks (Slurm madaros build from main.sio, jobs 5667/5668/5669/5670/5672/5673; FALSE-GREEN guard: ELFs run, actual rc/stdout asserted):
+  - W1 gen_dep_summary_min.sio  -> BUILD rc0 RUN rc0 "GEN_DEP_SUMMARY_OK"
+  - W1 gen_dep_summary_min2.sio (trait + impl for i64 + bounded [F;2048] dep; reproduced
+    the crash on base) -> BUILD rc0 RUN rc0 "GEN_DEP_SUMMARY2_OK"
+  - W4 regressions (base<->fixed): sret_forwarding_cross_module_min "CROSS_SRET_MIN_OK",
+    sret_forwarding_cross_module_cd_mul "CD_MUL_CROSS_SRET_OK", sret_8_field_return "OK",
+    generic_struct_return "6"/"spike PASS", turbofish 3/3 — all rc0. No green->red.
+  - Non-regression proof: algebra_g2_invariants_import + associator_field_octonion
+    SIGSEGV IDENTICALLY on base and fixed (both crash in dep BODY lowering; neither dep
+    has an impl -> outside my fix's only caller).
+  - W2 cd_exact_generic_i64: my fix advances it PAST module-1 summary lowering
+    (base: crash in `summary` before summary_done; fixed: reaches summary_done +
+    bodies_begin). Still no ELF -> see new gap below. NOT flipped to verified.
+new_gap: |
+  cd_exact end-to-end is blocked by a SEPARATE pre-existing wall, NOT this fix:
+  IrModule ~250 MB (functions[2048] x instrs[1024]); the multi-module lowerer makes
+  many by-value module/summary copies -> ~18 GB VM peak (VmPeak measured, job 5672)
+  compiling the 4-module cd_exact closure. Under bin/madaros' `ulimit -v 16G` the
+  allocator fails mid lower_program_bodies_ref and SIGSEGVs at the 5th generic
+  [F;2048]-returning body (cd_sub_exact, structurally identical to cd_add_exact one
+  step earlier -> accumulation). With NO ulimit (93 GB free) it advances past module-1
+  body+merge and SIGSEGVs at `lower_array: dep_begin 2` (module-2 summary) — a genuine
+  fault, not OOM. Same body-lowering wall hits g2imp/octo on base. Needs IrModule
+  shrink / by-value-copy elimination in the multi-module path + module-2 summary fix.
+commit: pending
+status: lock-released
+notes: |
+  A10_PARTIAL: summary-lowering impl-preseed SIGSEGV FIXED + verified, non-regressing.
+  Headline (WP-A5: cd_exact runs ZD PROVED/SQ PASS/NONZERO PASS/16xCOMP 0) NOT reached
+  — blocked by the memory/body-lowering wall above. PR opened (base main), NOT merged.
+
+---
+
+agent: claude
+time_utc: 2026-07-07T05:40:00Z
+files:
+  - stdlib/algebra/cayley_dickson_exact.sio
+  - docs/handoff/continuity/SCOREBOARD.md
+  - docs/compiler/KNOWN_LIMITATIONS.md
+  - docs/handoff/repros/a13_crossmod_nonfirst_fn_drop_ctrlA.sio
+  - docs/handoff/repros/a13_crossmod_nonfirst_fn_drop_ctrlC.sio
+  - docs/handoff/repros/a13_crossmod_mainfirst_ok_ctrlE.sio
+  - artifacts/omega/agent_handoff.log.md
+intent: |
+  WP-A5 CLAIM+RELEASE. cd_exact_generic_i64 now runs GREEN on the default Madaros
+  engine. The final runtime blocker was NOT the "by-value aggregate param in a nested
+  loop" codegen bug the prompt described (that repro, _a12_t3, actually hit a SEPARATE
+  bug — see gap below). The real blocker: generic cd_mul_exact calls cd_sigma via a
+  cross-module import (algebra::cayley_dickson), and a call into a transitively-imported
+  module is DROPPED by the Madaros imported-lane merge -> the IrCall is elided, its
+  result vreg defaults to 0, clobbering param slot 0 (a) -> a.c[i] null-handle deref ->
+  SIGSEGV inside the nested accumulation loop. Fix = same-module cd_sigma_x (verbatim),
+  mirroring the concrete sibling cayley_dickson_exact_i64.sio which already inlines
+  cd_sigma for this exact "HARD BLOCKER". Stdlib-only; compiler untouched.
+checks:
+  - "Slurm madaros build BUILD_RC=0 (8MB import budget intact)"
+  - "MAD build+run tests/run-pass/cd_exact_generic_i64.sio => rc=0, stdout: ZD PROVED / SQ PASS / NONZERO PASS / 16x 'COMP i 0'"
+  - "W4 regression: sret_8_field_return OK; generic_struct_return '6'/'spike PASS'; sret_forwarding_cross_module_min CROSS_SRET_MIN_OK; turbofish 3/3; for_in_loops/for_range_loop rc=0 — no green->red"
+new_gap: |
+  RESIDUAL COMPILER BUG (transitive cross-module call drop) — NOT fixed, stdlib-worked-around.
+  On the Madaros imported-lane, a direct call whose target lives in a transitively-imported
+  module is silently dropped at codegen (IrCall elided; result vreg -> 0 clobbers param slot 0).
+  Isolation (all Slurm, actual rc): a generic/cross-module call from a NON-FIRST user fn is
+  dropped (put main 2nd -> its cd_basis_exact call vanishes -> SIGSEGV), while the identical
+  call from the FIRST fn works (main 1st -> fine); same-module callee calls resolve, only
+  different-module ones drop. Repros: docs/handoff/repros/a13_crossmod_*.sio (ctrlA/ctrlC crash,
+  ctrlE ok). Likely a fn_id-resolution hole in ir_module_finalize_merged_calls / the transitive
+  -dep merge in module_frontend.sio (adjacent to the A8 fix, which only covered same-module
+  var=<inner call> finalize scramble). A real fix belongs in module_frontend.sio.
+commit: pending
+status: lock-released
+notes: |
+  WP-A5 HEADLINE REACHED: cd_exact green on Madaros. cd_exact_generic_vs_concrete still
+  shows MUL_AB DIFF (the concrete engine hits its own multi-term madaros issue when both
+  engines coexist — separate, was already red pre-fix). PR opened (base main), NOT merged.
+
+---
+
+## A14 — Madaros transitive cross-module call drop FIXED (2026-07-07)
+agent: Claude Opus (A14 lane)
+task: root-cause + fix the residual transitive cross-module call-drop bug filed by WP-A5/#684
+wp: A14
+claim: module_frontend.sio (merged-IR call finalize) + stdlib/algebra/cayley_dickson_exact.sio (revert cd_sigma_x workaround)
+result: |
+  FIXED. Root cause: ir_module_compact_duplicate_fn_refs + the ir_module_finalize_merged_calls
+  resolve loop rebind fn_id with a whole-IrInstr writeback (var ins=slot; ins.fn_id=X; slot=ins).
+  IrInstr carries a Box(call_args) -> lean_single zeroes the slot on that by-value copy -> the
+  transitive call from a non-first fn is elided (result vreg 0 aliases param slot 0). Nested
+  3-level scalar stores (out.functions[fi].instrs[ii].fn_id=X, direct OR via &! pointer) are ALSO
+  dropped by lean_single. Fix rebinds per WHOLE FUNCTION (merge-append idiom: by-value IrFunction
+  copy, 2-level owned fn_id write, 1-level array writeback). Net module_frontend.sio +231 bytes.
+witnesses: |
+  Slurm madaros, base f01ecb7a3 vs fix, SAME node r770, ELFs run, actual rc:
+  - a13_crossmod_nonfirst_fn_drop_ctrlA/ctrlC: 139 -> 0 "2"; ctrlE 0 (control)
+  - a14_transitive_min (new 3-module repro): 1/"0" -> 0/"115"
+  - cd_exact_generic_i64 (W3, workaround REVERTED -> transitive cd_sigma): 0 ZD PROVED/SQ PASS/NONZERO PASS/16xCOMP
+  - cd_exact_generic_vs_concrete: base 0 BYTECOMPARE FAIL (false-green) -> fix 0 BYTECOMPARE PASS
+  - sret_min/cdmul/sret8/gen_ret("6"/spike PASS)/turbofish 3/3/a8_diag_* all rc0 unchanged
+  - g2_import 1 -> 139 (red->red; pre-existing octonion native-lowering wall, mode shift only)
+  - W4 EISA test_eisa_isa/evm: still "multimodule native thin-link compilation failed" (distinct blocker; NOT unblocked)
+commit: PR #685 (base main), NOT merged
+status: lock-released
+notes: |
+  Removes the #684 cd_sigma_x stdlib workaround. KNOWN_LIMITATIONS + SCOREBOARD flipped OPEN->FIXED.
+  EISA thin-link + the cd_exact 18GB body-lowering memory wall remain separate open gaps.

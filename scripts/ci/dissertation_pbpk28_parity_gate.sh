@@ -690,3 +690,230 @@ awk -F'\t' '
     }
   }
 ' "$SEMA_JOINED_PD"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cases 10-13: Venlafaxine XR canonical parity (SISTEMA 2 controlled-release).
+#   10  parent PBPK28 (14 organs)          Node ↔ Sounio, cavg, <1% RMSE
+#   11  ODV PBPK28 (14 organs)             Node ↔ Sounio, cavg, <1% RMSE
+#   12  Korsmeyer-Peppas matrix release    Node ↔ Sounio  (biomaterial bridge, R8)
+#   13  ODV/parent total-mass ratio (NM)   Node ↔ Sounio  (PD-equivalent readout, R7)
+#   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
+# Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
+# tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Cases 10-13: Sounio ↔ Node venlafaxine XR (parent + ODV + matrix + ratio)"
+
+VFX_NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_venlafaxine_node.mjs"
+VFX_SIO_LOG="$OUT_DIR/vfx_sounio.txt"
+VFX_NODE_LOG="$OUT_DIR/vfx_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio > "$VFX_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref returned non-zero" >&2
+  tail -n 20 "$VFX_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_SIO_LOG"; then
+  echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref did not emit DONE" >&2; exit 1; fi
+node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner returned non-zero" >&2
+  tail -n 20 "$VFX_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_NODE_LOG"; then
+  echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner did not emit DONE" >&2; exit 1; fi
+
+# Prefixed cavg parser: $1=prefix label, $2=infile → t<TAB>i<TAB>cavg
+vfx_parse_cavg() {
+  awk -v P="$1" '
+    index($0, P"|t=")==1    { t=substr($0, length(P)+4); next }
+    index($0, P"|i=")==1    { i=substr($0, length(P)+4); next }
+    index($0, P"|cavg=")==1 { print t"\t"i"\t"substr($0, length(P)+7) }
+  ' "$2"
+}
+vfx_rmse() {  # $1=prefix $2=pass-marker $3=fail-marker
+  join -t"$(printf '\t')" -1 1 -2 1 \
+    <(vfx_parse_cavg "$1" "$VFX_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+    <(vfx_parse_cavg "$1" "$VFX_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" '
+      {split($1,a,"|"); i=a[2]+0; d=($2+0)-($3+0); SS[i]+=d*d; NN[i]++;
+       cs=($2+0); cn=($3+0); if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
+      END{bad=0;
+        printf "%-3s %-14s %-14s %-9s %s\n","i","rmse","peak","pct","status";
+        for(i=0;i<14;i++){ if(NN[i]==0){printf "%-3d MISSING\n",i; bad++; continue}
+          rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
+          if(pk==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
+          pct=100*rmse/pk; st=(pct<THR+0)?"OK":"FAIL"; if(st=="FAIL")bad++;
+          printf "%-3d %-14.6e %-14.6e %-8.4f %s\n",i,rmse,pk,pct,st }
+        if(bad>0){printf "%s %d/14 compartments exceed threshold\n",FAILM,bad; exit 1}
+        else printf "%s 14/14 compartments within %s%% RMSE\n",PASS,THR }'
+}
+
+EXPECTED_VFX=$((12 * 14))
+echo "[pbpk28-parity:case10] venlafaxine PARENT PBPK28 (14 organs)"
+VFX_SIO_P=$(vfx_parse_cavg VPARENT "$VFX_SIO_LOG" | wc -l)
+VFX_NODE_P=$(vfx_parse_cavg VPARENT "$VFX_NODE_LOG" | wc -l)
+if [[ "$VFX_SIO_P" -ne "$EXPECTED_VFX" || "$VFX_NODE_P" -ne "$EXPECTED_VFX" ]]; then
+  echo "[pbpk28-parity:case10] FAIL: parent row mismatch Sounio=$VFX_SIO_P Node=$VFX_NODE_P expected=$EXPECTED_VFX" >&2; exit 1; fi
+echo "[pbpk28-parity:case10] both runs emitted $VFX_SIO_P parent records"
+vfx_rmse VPARENT "VENLAFAXINE_PARENT_PARITY_PASS" "VENLAFAXINE_PARENT_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity:case11] venlafaxine ODV PBPK28 (14 organs)"
+vfx_rmse VODV "VENLAFAXINE_ODV_PARITY_PASS" "VENLAFAXINE_ODV_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity:case12] venlafaxine matrix Korsmeyer-Peppas release (biomaterial bridge)"
+join -t"$(printf '\t')" -1 1 -2 1 \
+  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
+  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
+      END{ if(NN==0){print "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL no rows"; exit 1}
+        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+        if(pct<THR+0) printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_PASS %d/%d samples within %s%% RMSE (Korsmeyer-Peppas n=0.65, peak=%.4g mg)\n",NN,NN,THR,PK;
+        else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+
+echo
+echo "[pbpk28-parity:case13] venlafaxine ODV/parent total-mass ratio (NM)"
+join -t"$(printf '\t')" -1 1 -2 1 \
+  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
+  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
+      END{ if(NN==0){print "VENLAFAXINE_RATIO_PARITY_FAIL no rows"; exit 1}
+        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+        if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",NN,NN,THR,PK;
+        else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+
+echo
+# Conservation: body burden (parent + ODV) can never exceed the drug the matrix
+# has released; release is monotone non-decreasing and bounded by the 75 mg dose.
+# (F is modelled as an absorption-rate scalar — the unabsorbed gut fraction is
+# retained and absorbed later — so cumulative absorption approaches the released
+# dose; full parent+ODV+eliminated bookkeeping is not separately instrumented.)
+echo "[pbpk28-parity] venlafaxine mass conservation (parent + ODV ≤ released; release monotone ≤ dose)"
+awk -F= '
+  /^VMATRIX\|rel=/{rel=$2+0}
+  /^VMASS\|p=/{mp=$2+0}
+  /^VMASS\|o=/{mo=$2+0; body=mp+mo;
+    if(body > rel + 1.0e-6){bad++; printf "  FAIL: body=%.6f > released=%.6f\n",body,rel}
+    if(body < -1.0e-9){bad++; printf "  FAIL: negative body mass %.6f\n",body}
+    if(rel > 75.0 + 1.0e-6){bad++; printf "  FAIL: released %.6f > dose 75\n",rel}
+    if(NR>1 && rel < prev - 1.0e-9){mono++; printf "  FAIL: release non-monotone (%.4f < %.4f)\n",rel,prev}
+    prev=rel; n++}
+  END{ if(bad>0 || mono>0){printf "VENLAFAXINE_MASS_CONSERVATION_FAIL\n"; exit 1}
+       else printf "VENLAFAXINE_MASS_CONSERVATION_PASS %d/%d samples (parent+ODV ≤ released ≤ 75 mg, release monotone)\n",n,n }
+' "$VFX_SIO_LOG"
+
+echo
+echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.
+#   14  plasma PK                                   Node ↔ Sounio, <1% RMSE
+#   15  BBB: ISF_free + Kpuu (brain accumulation)   Node ↔ Sounio, <1% RMSE
+#   16  D2 receptor occupancy                       Node ↔ Sounio, <1% RMSE
+# Haloperidol's validated science is PBPK14 well-stirred + detailed BBB + D2 (no
+# citable PBPK28 perm-limited model — empirical-first), so the canonical parity
+# surface is its real CASO II endpoints. Both sides use a FIXED-STEP RK4 systemic
+# integrator (the production scenario uses adaptive Tsit5 — an intractable
+# bit-for-bit parity target); the fixed-step-vs-Tsit5 fidelity gap is disclosed
+# in the gist, and the JS engine uses the same fixed-step scheme so parity
+# validates what the 3D viewer runs.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Cases 14-16: Sounio ↔ Node haloperidol (plasma + BBB Kpuu + D2 occupancy)"
+
+HALO_NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_haloperidol_node.mjs"
+HALO_SIO_LOG="$OUT_DIR/halo_sounio.txt"
+HALO_NODE_LOG="$OUT_DIR/halo_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_haloperidol.sio > "$HALO_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case14] FAIL: Sounio haloperidol ref returned non-zero" >&2
+  tail -n 20 "$HALO_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_HALOPERIDOL_PARITY_DONE$' "$HALO_SIO_LOG"; then
+  echo "[pbpk28-parity:case14] FAIL: Sounio haloperidol ref did not emit DONE" >&2; exit 1; fi
+node "$HALO_NODE_RUNNER" > "$HALO_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case14] FAIL: Node haloperidol runner returned non-zero" >&2
+  tail -n 20 "$HALO_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_HALOPERIDOL_PARITY_DONE$' "$HALO_NODE_LOG"; then
+  echo "[pbpk28-parity:case14] FAIL: Node haloperidol runner did not emit DONE" >&2; exit 1; fi
+
+# RMSE over one HALO|<series> (12 samples, both logs emit them in the same order).
+halo_series_rmse() {  # $1=series $2=label $3=pass-marker $4=fail-marker
+  paste <(grep "^HALO|$1=" "$HALO_SIO_LOG"  | sed "s/^HALO|$1=//") \
+        <(grep "^HALO|$1=" "$HALO_NODE_LOG" | sed "s/^HALO|$1=//") \
+  | awk -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$3" -v FAILM="$4" -v LAB="$2" '
+      {d=($1+0)-($2+0); ss+=d*d; n++; a=($1<0?-($1+0):($1+0)); if(a>pk)pk=a}
+      END{ if(n!=12){printf "%s row count %d != 12\n",FAILM,n; exit 1}
+        rmse=sqrt(ss/n); pct=(pk>0)?100*rmse/pk:0;
+        if(pct<THR+0) printf "%s 12/12 within %s%% RMSE (%s, peak=%.4g)\n",PASS,THR,LAB,pk;
+        else { printf "%s %.4f%% RMSE (%s)\n",FAILM,pct,LAB; exit 1 } }'
+}
+
+echo "[pbpk28-parity:case14] haloperidol plasma PK"
+halo_series_rmse plasma "plasma mg/L" "HALOPERIDOL_PLASMA_PARITY_PASS" "HALOPERIDOL_PLASMA_PARITY_FAIL"
+
+echo "[pbpk28-parity:case15] haloperidol BBB ISF_free + Kpuu (brain accumulation, Loryan 2014 Kpuu->3)"
+halo_series_rmse isf_free "ISF_free mg/L" "HALOPERIDOL_BBB_ISF_PARITY_PASS" "HALOPERIDOL_BBB_ISF_PARITY_FAIL"
+halo_series_rmse kpuu "Kpuu" "HALOPERIDOL_BBB_KPUU_PARITY_PASS" "HALOPERIDOL_BBB_KPUU_PARITY_FAIL"
+
+echo "[pbpk28-parity:case16] haloperidol D2 receptor occupancy (Kd 1.5 nM)"
+halo_series_rmse d2occ "D2 occupancy" "HALOPERIDOL_D2_OCCUPANCY_PARITY_PASS" "HALOPERIDOL_D2_OCCUPANCY_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity] haloperidol CASO II canonical: plasma + BBB Kpuu + D2 occupancy all within ${RMSE_THRESHOLD_PCT}% RMSE (4th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cases 17-19: Midazolam — fifth canonical drug, the suite's first CYP3A
+# drug–drug interaction (DDI). PBPK14 well-stirred + mechanistic oral first-pass
+# (F = Fa·FG·FH) + competitive CYP3A inhibition by ketoconazole.
+#   17  solo oral PK                         Node ↔ Sounio, <1% RMSE
+#   18  ketoconazole-inhibited oral PK       Node ↔ Sounio, <1% RMSE
+#   19  DDI inhibition curve (AUCR vs I/Ki)  Node ↔ Sounio, <1% RMSE
+# A single hepatic CLint_h drives BOTH first-pass survival FH and systemic CL_h
+# (well-stirred closed form), so inhibition raises FH and lowers CL_h
+# consistently — no double-count — and the iconic oral midazolam+ketoconazole AUC
+# rise (~15×) emerges honestly (validated in validation/midazolam_ddi.sio). The
+# inhibitor is held static at steady state; both sides use a FIXED-STEP RK4
+# systemic integrator (the production scenario uses adaptive Tsit5 — an
+# intractable bit-for-bit parity target; gap disclosed in the gist).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Cases 17-19: Sounio ↔ Node midazolam (solo PK + ketoconazole DDI + AUCR curve)"
+
+MDZ_NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_midazolam_node.mjs"
+MDZ_SIO_LOG="$OUT_DIR/mdz_sounio.txt"
+MDZ_NODE_LOG="$OUT_DIR/mdz_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_midazolam.sio > "$MDZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case17] FAIL: Sounio midazolam ref returned non-zero" >&2
+  tail -n 20 "$MDZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_MIDAZOLAM_PARITY_DONE$' "$MDZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case17] FAIL: Sounio midazolam ref did not emit DONE" >&2; exit 1; fi
+node "$MDZ_NODE_RUNNER" > "$MDZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case17] FAIL: Node midazolam runner returned non-zero" >&2
+  tail -n 20 "$MDZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_MIDAZOLAM_PARITY_DONE$' "$MDZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case17] FAIL: Node midazolam runner did not emit DONE" >&2; exit 1; fi
+
+# RMSE over one MDZ|<series> (both logs emit them in the same order).
+mdz_series_rmse() {  # $1=series $2=expected-n $3=label $4=pass-marker $5=fail-marker
+  paste <(grep "^MDZ|$1=" "$MDZ_SIO_LOG"  | sed "s/^MDZ|$1=//") \
+        <(grep "^MDZ|$1=" "$MDZ_NODE_LOG" | sed "s/^MDZ|$1=//") \
+  | awk -v THR="$RMSE_THRESHOLD_PCT" -v EXP="$2" -v PASS="$4" -v FAILM="$5" -v LAB="$3" '
+      {d=($1+0)-($2+0); ss+=d*d; n++; a=($1<0?-($1+0):($1+0)); if(a>pk)pk=a}
+      END{ if(n!=EXP+0){printf "%s row count %d != %d\n",FAILM,n,EXP; exit 1}
+        rmse=sqrt(ss/n); pct=(pk>0)?100*rmse/pk:0;
+        if(pct<THR+0) printf "%s %d/%d within %s%% RMSE (%s, peak=%.4g)\n",PASS,n,EXP,THR,LAB,pk;
+        else { printf "%s %.4f%% RMSE (%s)\n",FAILM,pct,LAB; exit 1 } }'
+}
+
+echo "[pbpk28-parity:case17] midazolam solo oral PK (5 mg)"
+mdz_series_rmse plasma_solo 12 "plasma mg/L (solo)" "MIDAZOLAM_SOLO_PK_PARITY_PASS" "MIDAZOLAM_SOLO_PK_PARITY_FAIL"
+
+echo "[pbpk28-parity:case18] midazolam + ketoconazole inhibited oral PK (CYP3A DDI)"
+mdz_series_rmse plasma_inh 12 "plasma mg/L (+keto)" "MIDAZOLAM_DDI_PK_PARITY_PASS" "MIDAZOLAM_DDI_PK_PARITY_FAIL"
+
+echo "[pbpk28-parity:case19] midazolam DDI inhibition curve (AUCR across I/Ki, oral ~15× at I/Ki=8)"
+mdz_series_rmse aucr 8 "AUC ratio" "MIDAZOLAM_AUCR_PARITY_PASS" "MIDAZOLAM_AUCR_PARITY_FAIL"
+
+echo
+echo "[pbpk28-parity] midazolam CYP3A DDI canonical: solo PK + ketoconazole-inhibited PK + AUCR curve all within ${RMSE_THRESHOLD_PCT}% RMSE (5th canonical drug)"

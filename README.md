@@ -183,7 +183,7 @@ This is an active research repository. Public claims are registry-backed; see [`
 **PL adoption audit (2026-05-27):** [`docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md`](docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md) — bone-honest stocktake of what a stranger cloning this repo will find, with live probes. The two biggest adopter-unlock gaps are (G1) closing the multi-module bundle compile and (G2) the CLI exit-code contract (G2 fixed 2026-05-27 in this commit).
 
 **Registry rows you should read before drawing conclusions:**
-`stdlib.surface = prototype` · `tooling.editor = prototype` (formatter, REPL, LSP) · `tooling.package = prototype` (no public registry) · `closures.lambdas = stale_conflicting` (spec §4.7.2 non-normative) · `generics.{structs,functions,traits} = prototype` · `binary.source = prototype` (`lean_single.sio` is the source of the checked binary, not the modular tree) · `platform.windows = prototype`.
+`stdlib.surface = validated_research` (bounded support contract only; not broad all-file callability) · `tooling.editor = validated_research` (checked formatter, REPL, preview LSP, and editor wiring; not mature IDE support) · `tooling.package = validated_research` (local packages only; no public registry) · `closures.lambdas = stale_conflicting` (spec §4.7.2 non-normative) · `generics.{structs,functions,traits} = prototype` · `binary.source = validated_research` (checked Madaros prebuilt is built from the modular tree; `lean_single.sio` remains the bootstrap seed) · `platform.windows = prototype`.
 
 **Scale (measured, 2026-05):** **4,233** tracked `.sio` files, **~1.84M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~542k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
 
@@ -248,6 +248,9 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 $SOUC --version                              # souc 1.0.0-beta.6
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
+$SOUC init hello_pkg && cd hello_pkg         # create a minimal sounio.toml project
+$SOUC check && $SOUC run && $SOUC build      # project entrypoint -> ELF
+$SOUC run examples/native/hello.sio          # compile to a temp ELF and execute it
 $SOUC compile examples/hello.sio -o /tmp/souc-next
 $SOUC run self-hosted/compiler/native_print_f64_smoke.sio
 $SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
@@ -306,11 +309,11 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 **Native startup cost.** Native execution still requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
 
-**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, and `build`, but broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
+**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, `build`, and `init`. When invoked inside a directory with `sounio.toml`, `check`, `run`, and `build` resolve the project entrypoint from `[[bin]].path`, `[project].entry`, or `src/main.sio`. Broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
 
 **Windows cross-compile.** The PE/COFF backend (3,508 lines) is production-grade. Use `--target x86_64-windows` to emit Windows binaries. No pre-built .exe is shipped in this checkout.
 
-**No REPL yet.** The checked self-hosted launcher does not support `repl`.
+**REPL.** The checked self-hosted launcher supports `souc repl` for a file-backed interactive loop.
 
 **Debug flags.** `--show-ast` and `--show-types` are supported as pass-through flags on the checked self-hosted launcher for `check`, `run`, `compile`, and `build`.
 

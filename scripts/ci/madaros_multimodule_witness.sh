@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # madaros_multimodule_witness.sh — minimal multimodule native compile/run witnesses.
 #
-# Exercises the import-aware compile path (bin/madaros build) and, for `run`
-# gates, executes the produced ELF directly. This intentionally verifies the
+# Exercises the import-aware check/compile path (bin/madaros check|build),
+# not --native-v2-compile (single-module bridge only). For `run` gates this
+# builds the imported ELF via `bin/madaros build -o` and executes it
+# directly, comparing process exit; this intentionally verifies the
 # compiled artifact while `bin/madaros run` CLI execution semantics remain
 # separate debt.
 set -euo pipefail
@@ -69,6 +71,10 @@ while IFS=$'\t' read -r case_id program_path expected_exit gate_mode || [[ -n "$
   fi
 
   case "$gate_mode" in
+    check)
+      actual_exit="n/a"
+      status="check_ok"
+      ;;
     run)
       run_log="$LOG_DIR/$case_id.run.log"
       out_bin="$BIN_DIR/$case_id.run.elf"

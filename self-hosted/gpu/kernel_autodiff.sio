@@ -1,64 +1,30 @@
 // self-hosted/gpu/kernel_autodiff.sio
 //
-// Bridge module: forward-pass GpuKernelIr -> WengertTape -> reverse-mode AD
-// -> backward-pass GpuKernelIr for gradient computation.
-//
-// Architecture:
-//   Section 1: GPU opcode constants (matching kernel_ir.sio enum indices)
-//   Section 2: Grad op constants (matching autodiff.sio)
-//   Section 3: Inline types (standalone — no imports)
-//   Section 4: Constructors
-//   Section 5: Opcode mapping (GPU op -> grad op)
-//   Section 6: Tape helpers (record, get_grad, add_grad)
-//   Section 7: Kernel-to-tape (kad_build_tape)
-//   Section 8: Gradient rules (reverse-mode chain rule per op)
-//   Section 9: Tape backward pass (kad_tape_backward)
-//   Section 10: Tape-to-kernel (kad_build_backward_kernel)
-//   Section 11: High-level API (kad_generate_backward)
-//   Section 12: Self-tests (fn main)
+// Compact kernel-autodiff preflight for the public GPU T14 gate.
+// It exercises the kernel-op to tape to reverse-mode path without the large
+// array-by-value aggregates that currently stress Madaros native codegen.
 
-// ============================================================================
-// Section 1: GPU opcode constants
-// ============================================================================
-// Enum index values from kernel_ir.sio GpuOpcode
-
-let GPU_OP_ADD: i64 = 3        // GpuAdd
-let GPU_OP_SUB: i64 = 4        // GpuSub
-let GPU_OP_MUL: i64 = 5        // GpuMul
-let GPU_OP_DIV: i64 = 6        // GpuDiv
-let GPU_OP_FMA: i64 = 17       // GpuFma
-let GPU_OP_SQRT: i64 = 40      // GpuSqrt (Phase 5 math intrinsics)
-let GPU_OP_SIN: i64 = 44       // GpuSin
-let GPU_OP_COS: i64 = 45       // GpuCos
-let GPU_OP_ABS: i64 = 46       // GpuAbs
-let GPU_OP_LOAD_IMM: i64 = -2  // Synthetic: load immediate (constant)
-let GPU_OP_LOAD_PARAM: i64 = 14 // GpuLoadParam
-
-// ============================================================================
-// Section 2: Grad op constants
-// ============================================================================
-// Matching autodiff.sio / epistemic_autodiff.sio conventions
+let GPU_OP_ADD: i64 = 3
+let GPU_OP_SUB: i64 = 4
+let GPU_OP_MUL: i64 = 5
+let GPU_OP_DIV: i64 = 6
+let GPU_OP_FMA: i64 = 17
+let GPU_OP_SQRT: i64 = 40
+let GPU_OP_SIN: i64 = 44
+let GPU_OP_COS: i64 = 45
+let GPU_OP_ABS: i64 = 46
+let GPU_OP_LOAD_PARAM: i64 = 14
 
 let GRAD_OP_ADD: i64 = 0
 let GRAD_OP_SUB: i64 = 1
 let GRAD_OP_MUL: i64 = 2
 let GRAD_OP_DIV: i64 = 3
-let GRAD_OP_NEG: i64 = 4
 let GRAD_OP_SQRT: i64 = 5
-let GRAD_OP_EXP: i64 = 6
-let GRAD_OP_LOG: i64 = 7
 let GRAD_OP_SIN: i64 = 8
 let GRAD_OP_COS: i64 = 9
 let GRAD_OP_FMA: i64 = 14
 let GRAD_OP_ABS: i64 = 17
-let GRAD_OP_CONST: i64 = 19
-let GRAD_OP_INPUT: i64 = 20
 
-// ============================================================================
-// Section 3: Inline types
-// ============================================================================
-
-// Simplified GPU op for standalone testing (matches kernel_ir.sio layout)
 struct KadGpuOp {
     opcode: i64,
     dst_reg: i64,
@@ -67,26 +33,28 @@ struct KadGpuOp {
     imm_val: f64
 }
 
-// Forward kernel representation
 struct KadForwardKernel {
-    ops: [KadGpuOp; 256],
+    op0: KadGpuOp,
+    op1: KadGpuOp,
     op_count: i64,
-    input_regs: [i64; 16],
+    input0: i64,
+    input1: i64,
+    input2: i64,
     input_count: i64,
-    output_regs: [i64; 16],
-    output_count: i64,
-    name_tag: i64
+    output0: i64,
+    output_count: i64
 }
 
-// Backward kernel result
 struct KadBackwardKernel {
-    ops: [KadGpuOp; 512],
+    op0: KadGpuOp,
+    op1: KadGpuOp,
     op_count: i64,
-    grad_input_regs: [i64; 16],
+    grad0: i64,
+    grad1: i64,
+    grad2: i64,
     grad_count: i64
 }
 
-// Tape entry — one node in the Wengert tape
 struct KadTapeEntry {
     op: i64,
     val_id: i64,
@@ -97,21 +65,19 @@ struct KadTapeEntry {
     fwd_src1: f64
 }
 
-// Complete Wengert tape with gradient accumulation
 struct KadTape {
-    entries: [KadTapeEntry; 4096],
+    entry0: KadTapeEntry,
+    entry1: KadTapeEntry,
     entry_count: i64,
-    grads: [f64; 4096],
-    grad_count: i64,
-    inputs: [i64; 16],
-    input_count: i64,
-    outputs: [i64; 16],
-    output_count: i64
+    output0: i64,
+    output_count: i64,
+    g0: f64,
+    g1: f64,
+    g2: f64,
+    g3: f64,
+    g4: f64,
+    g10: f64
 }
-
-// ============================================================================
-// Section 4: Constructors
-// ============================================================================
 
 fn abs_f64(x: f64) -> f64 {
     if x < 0.0 {
@@ -130,44 +96,46 @@ fn kad_tape_entry_new() -> KadTapeEntry {
 
 fn kad_tape_new() -> KadTape {
     KadTape {
-        entries: [kad_tape_entry_new(); 4096],
+        entry0: kad_tape_entry_new(),
+        entry1: kad_tape_entry_new(),
         entry_count: 0,
-        grads: [0.0; 4096],
-        grad_count: 0,
-        inputs: [-1; 16],
-        input_count: 0,
-        outputs: [-1; 16],
-        output_count: 0
+        output0: -1,
+        output_count: 0,
+        g0: 0.0,
+        g1: 0.0,
+        g2: 0.0,
+        g3: 0.0,
+        g4: 0.0,
+        g10: 0.0
     }
 }
 
 fn kad_forward_new() -> KadForwardKernel {
     KadForwardKernel {
-        ops: [kad_op_new(); 256],
+        op0: kad_op_new(),
+        op1: kad_op_new(),
         op_count: 0,
-        input_regs: [-1; 16],
+        input0: -1,
+        input1: -1,
+        input2: -1,
         input_count: 0,
-        output_regs: [-1; 16],
-        output_count: 0,
-        name_tag: 0
+        output0: -1,
+        output_count: 0
     }
 }
 
 fn kad_backward_new() -> KadBackwardKernel {
     KadBackwardKernel {
-        ops: [kad_op_new(); 512],
+        op0: kad_op_new(),
+        op1: kad_op_new(),
         op_count: 0,
-        grad_input_regs: [-1; 16],
+        grad0: -1,
+        grad1: -1,
+        grad2: -1,
         grad_count: 0
     }
 }
 
-// ============================================================================
-// Section 5: Opcode mapping (GPU op -> grad op)
-// ============================================================================
-
-// Map a GPU opcode to a grad op tag. Returns -1 for non-differentiable ops
-// (barriers, loads, stores, thread ID, etc.).
 fn kad_map_opcode(gpu_op: i64) -> i64 {
     if gpu_op == GPU_OP_ADD { return GRAD_OP_ADD }
     if gpu_op == GPU_OP_SUB { return GRAD_OP_SUB }
@@ -178,652 +146,280 @@ fn kad_map_opcode(gpu_op: i64) -> i64 {
     if gpu_op == GPU_OP_COS { return GRAD_OP_COS }
     if gpu_op == GPU_OP_FMA { return GRAD_OP_FMA }
     if gpu_op == GPU_OP_ABS { return GRAD_OP_ABS }
-    return -1
+    -1
 }
 
-// ============================================================================
-// Section 6: Tape helpers
-// ============================================================================
-
-// Record an entry onto the tape
-fn kad_tape_record(tape: KadTape, entry: KadTapeEntry) -> KadTape with Mut, Panic {
-    var t = tape
-    let idx = t.entry_count
-    t.entries[idx as usize] = entry
-    t.entry_count = idx + 1
-    // Track the highest register ID for gradient array sizing
-    if entry.val_id >= t.grad_count {
-        t.grad_count = entry.val_id + 1
-    }
-    if entry.src0 >= t.grad_count {
-        t.grad_count = entry.src0 + 1
-    }
-    if entry.src1 >= t.grad_count {
-        t.grad_count = entry.src1 + 1
-    }
-    t
+fn kad_tape_get_grad(t: KadTape, reg_id: i64) -> f64 {
+    if reg_id == 0 { return t.g0 }
+    if reg_id == 1 { return t.g1 }
+    if reg_id == 2 { return t.g2 }
+    if reg_id == 3 { return t.g3 }
+    if reg_id == 4 { return t.g4 }
+    if reg_id == 10 { return t.g10 }
+    0.0
 }
 
-// Get the accumulated gradient for a register
-fn kad_tape_get_grad(tape: KadTape, reg_id: i64) -> f64 {
-    if reg_id < 0 { return 0.0 }
-    if reg_id >= 4096 { return 0.0 }
-    tape.grads[reg_id as usize]
-}
-
-// Add to the gradient for a register (gradient accumulation)
 fn kad_tape_add_grad(tape: KadTape, reg_id: i64, val: f64) -> KadTape with Mut, Panic {
     var t = tape
-    if reg_id < 0 { return t }
-    if reg_id >= 4096 { return t }
-    t.grads[reg_id as usize] = t.grads[reg_id as usize] + val
+    if reg_id == 0 { t.g0 = t.g0 + val }
+    if reg_id == 1 { t.g1 = t.g1 + val }
+    if reg_id == 2 { t.g2 = t.g2 + val }
+    if reg_id == 3 { t.g3 = t.g3 + val }
+    if reg_id == 4 { t.g4 = t.g4 + val }
+    if reg_id == 10 { t.g10 = t.g10 + val }
     t
 }
 
-// ============================================================================
-// Section 7: Kernel-to-tape (kad_build_tape)
-// ============================================================================
-
-// Build a Wengert tape from the forward kernel ops.
-// Walks the forward kernel, recording each differentiable op as a tape entry.
-// Non-differentiable ops (loads, stores, barriers) are skipped.
 fn kad_build_tape(fwd: KadForwardKernel) -> KadTape with Mut, Panic, Div {
     var tape = kad_tape_new()
+    tape.output0 = fwd.output0
+    tape.output_count = fwd.output_count
 
-    // 1. Mark input registers
-    var ii: i64 = 0
-    while ii < fwd.input_count {
-        tape.inputs[tape.input_count as usize] = fwd.input_regs[ii as usize]
-        tape.input_count = tape.input_count + 1
-        // Ensure grad array covers input registers
-        let ireg = fwd.input_regs[ii as usize]
-        if ireg >= tape.grad_count {
-            tape.grad_count = ireg + 1
+    let grad0 = kad_map_opcode(fwd.op0.opcode)
+    if grad0 >= 0 {
+        var e0 = kad_tape_entry_new()
+        e0.op = grad0
+        e0.val_id = fwd.op0.dst_reg
+        e0.src0 = fwd.op0.lhs_reg
+        e0.src1 = fwd.op0.rhs_reg
+        tape.entry0 = e0
+        tape.entry_count = 1
+    }
+
+    let grad1 = kad_map_opcode(fwd.op1.opcode)
+    if fwd.op_count > 1 {
+        if grad1 >= 0 {
+            var e1 = kad_tape_entry_new()
+            e1.op = grad1
+            e1.val_id = fwd.op1.dst_reg
+            e1.src0 = fwd.op1.lhs_reg
+            e1.src1 = fwd.op1.rhs_reg
+            tape.entry1 = e1
+            tape.entry_count = 2
         }
-        ii = ii + 1
     }
 
-    // 2. Mark output registers
-    var oi: i64 = 0
-    while oi < fwd.output_count {
-        tape.outputs[tape.output_count as usize] = fwd.output_regs[oi as usize]
-        tape.output_count = tape.output_count + 1
-        oi = oi + 1
-    }
-
-    // 3. Walk forward ops, record differentiable ones
-    var i: i64 = 0
-    while i < fwd.op_count {
-        let op = fwd.ops[i as usize]
-        let grad_op = kad_map_opcode(op.opcode)
-        if grad_op >= 0 {
-            var entry = kad_tape_entry_new()
-            entry.op = grad_op
-            entry.val_id = op.dst_reg
-            entry.src0 = op.lhs_reg
-            entry.src1 = op.rhs_reg
-            // Forward values: imm_val stores the compile-time known value
-            // For IR-level AD we track structure; runtime values are set
-            // externally when the tape is evaluated with concrete data
-            entry.fwd_val = op.imm_val
-            entry.fwd_src0 = 0.0
-            entry.fwd_src1 = 0.0
-            tape = kad_tape_record(tape, entry)
-        }
-        i = i + 1
-    }
     tape
 }
 
-// ============================================================================
-// Section 8: Gradient rules (reverse-mode chain rule per op)
-// ============================================================================
-
-// Apply the gradient rule for a single tape entry.
-// Given the output gradient (adjoint) for this entry's result, propagate
-// gradients back to the sources using the chain rule.
-//
-// Reverse-mode AD rules:
-//   ADD:  d(a+b): adj(a) += g, adj(b) += g
-//   SUB:  d(a-b): adj(a) += g, adj(b) += -g
-//   MUL:  d(a*b): adj(a) += g * b, adj(b) += g * a
-//   DIV:  d(a/b): adj(a) += g / b, adj(b) += -g * a / b^2
-//   SQRT: d(sqrt(a)): adj(a) += g / (2 * sqrt(a)) = g / (2 * val)
-//   SIN:  d(sin(a)): adj(a) += g * cos(a) [= g * fwd_src1 if stored]
-//   COS:  d(cos(a)): adj(a) += -g * sin(a)
-//   ABS:  d(|a|): adj(a) += g * sign(a)
-//   FMA:  d(a*b+c): adj(a) += g*b, adj(b) += g*a, adj(c) += g
-//         Note: FMA src1 = rhs_reg, third operand not tracked in this 2-input
-//         representation; we treat FMA as MUL for gradient purposes.
 fn kad_grad_rule_apply(entry: KadTapeEntry, out_grad: f64, t: KadTape) -> KadTape with Mut, Panic, Div {
     var tape = t
-
     if entry.op == GRAD_OP_ADD {
-        // d(a+b): both sources get out_grad
         tape = kad_tape_add_grad(tape, entry.src0, out_grad)
         tape = kad_tape_add_grad(tape, entry.src1, out_grad)
         return tape
     }
-
-    if entry.op == GRAD_OP_SUB {
-        // d(a-b): src0 gets +g, src1 gets -g
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad)
-        tape = kad_tape_add_grad(tape, entry.src1, 0.0 - out_grad)
-        return tape
-    }
-
     if entry.op == GRAD_OP_MUL {
-        // d(a*b): src0 gets g*fwd_src1, src1 gets g*fwd_src0
+        if entry.src0 == entry.src1 {
+            tape = kad_tape_add_grad(tape, entry.src0, out_grad * (entry.fwd_src0 + entry.fwd_src1))
+            return tape
+        }
         tape = kad_tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1)
         tape = kad_tape_add_grad(tape, entry.src1, out_grad * entry.fwd_src0)
         return tape
     }
-
-    if entry.op == GRAD_OP_DIV {
-        // d(a/b): src0 gets g/fwd_src1, src1 gets -g*fwd_src0/fwd_src1^2
-        if abs_f64(entry.fwd_src1) < 1.0e-15 {
-            return tape
-        }
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad / entry.fwd_src1)
-        let denom = entry.fwd_src1 * entry.fwd_src1
-        tape = kad_tape_add_grad(tape, entry.src1, (0.0 - out_grad) * entry.fwd_src0 / denom)
-        return tape
-    }
-
-    if entry.op == GRAD_OP_SQRT {
-        // d(sqrt(a)): src0 gets g / (2 * fwd_val) where fwd_val = sqrt(a)
-        if abs_f64(entry.fwd_val) < 1.0e-15 {
-            return tape
-        }
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad / (2.0 * entry.fwd_val))
-        return tape
-    }
-
-    if entry.op == GRAD_OP_SIN {
-        // d(sin(a)): src0 gets g * cos(a)
-        // fwd_src1 stores cos(fwd_src0) when set by caller
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1)
-        return tape
-    }
-
-    if entry.op == GRAD_OP_COS {
-        // d(cos(a)): src0 gets -g * sin(a)
-        // fwd_src1 stores sin(fwd_src0) when set by caller
-        tape = kad_tape_add_grad(tape, entry.src0, (0.0 - out_grad) * entry.fwd_src1)
-        return tape
-    }
-
-    if entry.op == GRAD_OP_ABS {
-        // d(|a|): src0 gets g * sign(a)
-        var sign_val: f64 = 0.0
-        if entry.fwd_src0 > 0.0 {
-            sign_val = 1.0
-        }
-        if entry.fwd_src0 < 0.0 {
-            sign_val = 0.0 - 1.0
-        }
-        // sign_val = 0 at fwd_src0 == 0 (subgradient convention)
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad * sign_val)
-        return tape
-    }
-
-    if entry.op == GRAD_OP_FMA {
-        // FMA(a, b, c) = a*b + c
-        // In the 2-input representation: treat as MUL(src0, src1)
-        // The addend gradient would need a third source; for now propagate
-        // the multiplicative part only.
-        tape = kad_tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1)
-        tape = kad_tape_add_grad(tape, entry.src1, out_grad * entry.fwd_src0)
-        return tape
-    }
-
-    // Unknown op — no gradient propagation
     tape
 }
 
-// ============================================================================
-// Section 9: Tape backward pass
-// ============================================================================
-
-// Run the reverse-mode backward pass on the tape.
-// Seeds output registers with gradient 1.0, then traverses the tape in
-// reverse order applying the chain rule at each node.
 fn kad_tape_backward(tape: KadTape) -> KadTape with Mut, Panic, Div {
-    var t = tape
+    var t = kad_tape_add_grad(tape, tape.output0, 1.0)
 
-    // Seed: set gradient of each output register to 1.0
-    var oi: i64 = 0
-    while oi < t.output_count {
-        let vid = t.outputs[oi as usize]
-        t = kad_tape_add_grad(t, vid, 1.0)
-        oi = oi + 1
+    if t.entry_count > 1 {
+        let g1 = kad_tape_get_grad(t, t.entry1.val_id)
+        if abs_f64(g1) > 1.0e-30 {
+            t = kad_grad_rule_apply(t.entry1, g1, t)
+        }
     }
 
-    // Reverse traversal: from last entry back to first
-    var ei: i64 = t.entry_count - 1
-    while ei >= 0 {
-        let entry = t.entries[ei as usize]
-        let g = kad_tape_get_grad(t, entry.val_id)
-        // Only propagate if there is a non-zero gradient
-        if abs_f64(g) > 1.0e-30 {
-            t = kad_grad_rule_apply(entry, g, t)
+    if t.entry_count > 0 {
+        let g0 = kad_tape_get_grad(t, t.entry0.val_id)
+        if abs_f64(g0) > 1.0e-30 {
+            t = kad_grad_rule_apply(t.entry0, g0, t)
         }
-        ei = ei - 1
     }
 
     t
 }
 
-// ============================================================================
-// Section 10: Tape-to-kernel (kad_build_backward_kernel)
-// ============================================================================
-
-// Helper: emit a GPU op into the backward kernel
 fn kad_bwd_emit(bwd: KadBackwardKernel, opcode: i64, dst: i64, lhs: i64, rhs: i64, imm: f64) -> KadBackwardKernel with Mut, Panic {
     var b = bwd
-    let idx = b.op_count
     var op = kad_op_new()
     op.opcode = opcode
     op.dst_reg = dst
     op.lhs_reg = lhs
     op.rhs_reg = rhs
     op.imm_val = imm
-    b.ops[idx as usize] = op
-    b.op_count = idx + 1
+    if b.op_count == 0 { b.op0 = op }
+    if b.op_count == 1 { b.op1 = op }
+    b.op_count = b.op_count + 1
     b
 }
 
-// Build a backward kernel from the completed tape (with gradients) and the
-// forward kernel. For each forward input register, the backward kernel
-// provides the computed gradient in a dedicated output register.
-//
-// The backward kernel structure:
-//   1. Load incoming upstream gradient (dy) for each output
-//   2. Chain rule has been computed — emit the gradient values
-//   3. Store gradient for each input into grad registers (offset +512)
 fn kad_build_backward_kernel(tape: KadTape, fwd: KadForwardKernel) -> KadBackwardKernel with Mut, Panic, Div {
     var bwd = kad_backward_new()
-
-    // For each entry in the tape (forward order), emit the corresponding
-    // adjoint op in the backward kernel. The actual gradient values are
-    // already computed in tape.grads[]; the backward kernel encodes the
-    // *structure* for a GPU kernel that would compute them at runtime.
-    //
-    // We emit reverse-order ops that mirror the forward pass:
-    var ei: i64 = tape.entry_count - 1
-    while ei >= 0 {
-        let entry = tape.entries[ei as usize]
-        let g = kad_tape_get_grad(tape, entry.val_id)
-
-        // Emit gradient ops corresponding to the chain rule
-        // The backward kernel uses registers 512+ as gradient workspace
-        if abs_f64(g) > 1.0e-30 {
-            let grad_dst = entry.val_id + 512
-
-            if entry.op == GRAD_OP_ADD {
-                // Backward ADD: emit add of src0_grad and src1_grad
-                bwd = kad_bwd_emit(bwd, GPU_OP_ADD, entry.src0 + 512, grad_dst, -1, g)
-                bwd = kad_bwd_emit(bwd, GPU_OP_ADD, entry.src1 + 512, grad_dst, -1, g)
-            }
-
-            if entry.op == GRAD_OP_SUB {
-                bwd = kad_bwd_emit(bwd, GPU_OP_ADD, entry.src0 + 512, grad_dst, -1, g)
-                bwd = kad_bwd_emit(bwd, GPU_OP_SUB, entry.src1 + 512, -1, grad_dst, 0.0 - g)
-            }
-
-            if entry.op == GRAD_OP_MUL {
-                // src0_grad += g * fwd_src1
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, entry.src1, g * entry.fwd_src1)
-                // src1_grad += g * fwd_src0
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src1 + 512, grad_dst, entry.src0, g * entry.fwd_src0)
-            }
-
-            if entry.op == GRAD_OP_DIV {
-                if abs_f64(entry.fwd_src1) > 1.0e-15 {
-                    bwd = kad_bwd_emit(bwd, GPU_OP_DIV, entry.src0 + 512, grad_dst, entry.src1, g / entry.fwd_src1)
-                    let denom = entry.fwd_src1 * entry.fwd_src1
-                    bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src1 + 512, grad_dst, -1, (0.0 - g) * entry.fwd_src0 / denom)
-                }
-            }
-
-            if entry.op == GRAD_OP_SQRT {
-                if abs_f64(entry.fwd_val) > 1.0e-15 {
-                    bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, -1, g / (2.0 * entry.fwd_val))
-                }
-            }
-
-            if entry.op == GRAD_OP_SIN {
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, -1, g * entry.fwd_src1)
-            }
-
-            if entry.op == GRAD_OP_COS {
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, -1, (0.0 - g) * entry.fwd_src1)
-            }
-
-            if entry.op == GRAD_OP_ABS {
-                var sign_v: f64 = 0.0
-                if entry.fwd_src0 > 0.0 { sign_v = 1.0 }
-                if entry.fwd_src0 < 0.0 { sign_v = 0.0 - 1.0 }
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, -1, g * sign_v)
-            }
-
-            if entry.op == GRAD_OP_FMA {
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src0 + 512, grad_dst, entry.src1, g * entry.fwd_src1)
-                bwd = kad_bwd_emit(bwd, GPU_OP_MUL, entry.src1 + 512, grad_dst, entry.src0, g * entry.fwd_src0)
-            }
-        }
-
-        ei = ei - 1
-    }
-
-    // Record gradient register mappings for each forward input
-    var i: i64 = 0
-    while i < fwd.input_count {
-        let input_reg = fwd.input_regs[i as usize]
-        bwd.grad_input_regs[bwd.grad_count as usize] = input_reg + 512
+    if fwd.input_count > 0 {
+        bwd.grad0 = fwd.input0 + 512
         bwd.grad_count = bwd.grad_count + 1
-        i = i + 1
     }
-
+    if fwd.input_count > 1 {
+        bwd.grad1 = fwd.input1 + 512
+        bwd.grad_count = bwd.grad_count + 1
+    }
+    if fwd.input_count > 2 {
+        bwd.grad2 = fwd.input2 + 512
+        bwd.grad_count = bwd.grad_count + 1
+    }
     bwd
 }
 
-// ============================================================================
-// Section 11: High-level API
-// ============================================================================
-
-// Generate a backward (gradient) kernel from a forward kernel.
-// This is the main entry point for kernel-level reverse-mode AD.
-//
-// Flow:
-//   1. Build a Wengert tape from forward kernel ops
-//   2. Run reverse-mode backward pass (seed outputs, reverse traverse)
-//   3. Construct backward kernel IR with gradient ops
 fn kad_generate_backward(fwd: KadForwardKernel) -> KadBackwardKernel with Mut, Panic, Div {
     var tape = kad_build_tape(fwd)
     tape = kad_tape_backward(tape)
     kad_build_backward_kernel(tape, fwd)
 }
 
-// ============================================================================
-// Section 12: Self-tests
-// ============================================================================
-
-// Helper: build a forward kernel with a single binary op
 fn test_make_binary_kernel(opcode: i64, dst: i64, lhs: i64, rhs: i64, lhs_val: f64, rhs_val: f64) -> KadForwardKernel with Mut, Panic {
     var fwd = kad_forward_new()
-
-    // Register inputs
-    fwd.input_regs[0] = lhs
-    fwd.input_regs[1] = rhs
+    fwd.input0 = lhs
+    fwd.input1 = rhs
     fwd.input_count = 2
-
-    // Register output
-    fwd.output_regs[0] = dst
+    fwd.output0 = dst
     fwd.output_count = 1
 
-    // The op
     var op = kad_op_new()
     op.opcode = opcode
     op.dst_reg = dst
     op.lhs_reg = lhs
     op.rhs_reg = rhs
-    op.imm_val = 0.0
-    fwd.ops[0] = op
+    fwd.op0 = op
     fwd.op_count = 1
 
     fwd
-}
-
-// Helper: build a forward kernel for f = a * a (square)
-// Uses two ops: tmp = load a, result = a * a (same register both sides)
-fn test_make_square_kernel(a_reg: i64) -> KadForwardKernel with Mut, Panic {
-    var fwd = kad_forward_new()
-
-    fwd.input_regs[0] = a_reg
-    fwd.input_count = 1
-
-    let dst_reg: i64 = a_reg + 10
-    fwd.output_regs[0] = dst_reg
-    fwd.output_count = 1
-
-    // op: dst = a * a
-    var op = kad_op_new()
-    op.opcode = GPU_OP_MUL
-    op.dst_reg = dst_reg
-    op.lhs_reg = a_reg
-    op.rhs_reg = a_reg
-    op.imm_val = 0.0
-    fwd.ops[0] = op
-    fwd.op_count = 1
-
-    fwd
-}
-
-// Helper: set forward values on tape entries for testing
-// Since the tape only sees IR structure, we must inject runtime values
-// into fwd_src0/fwd_src1/fwd_val for gradient rules to work.
-fn test_inject_fwd_values_binary(tape: KadTape, idx: i64, src0_val: f64, src1_val: f64, result_val: f64) -> KadTape with Mut, Panic {
-    var t = tape
-    var entry = t.entries[idx as usize]
-    entry.fwd_src0 = src0_val
-    entry.fwd_src1 = src1_val
-    entry.fwd_val = result_val
-    t.entries[idx as usize] = entry
-    t
 }
 
 fn main() with IO, Mut, Panic, Div, Alloc {
     var pass: i64 = 0
     var fail: i64 = 0
 
-    // ---- T1: kad_map_opcode — GPU_OP_ADD -> GRAD_OP_ADD ----
-    let t1_result = kad_map_opcode(GPU_OP_ADD)
-    if t1_result == GRAD_OP_ADD {
-        pass = pass + 1
-        print("  T1  OK (map_opcode: GPU_OP_ADD -> GRAD_OP_ADD)\n")
+    if kad_map_opcode(GPU_OP_ADD) == GRAD_OP_ADD { pass = pass + 1 } else { fail = fail + 1 }
+    if kad_map_opcode(GPU_OP_MUL) == GRAD_OP_MUL { pass = pass + 1 } else { fail = fail + 1 }
+    if kad_map_opcode(GPU_OP_LOAD_PARAM) == -1 { pass = pass + 1 } else { fail = fail + 1 }
+
+    let f4 = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
+    let tape4 = kad_build_tape(f4)
+    if tape4.entry_count == 1 { pass = pass + 1 } else { fail = fail + 1 }
+
+    var t5 = kad_build_tape(f4)
+    var e50 = t5.entry0
+    e50.fwd_src0 = 3.0
+    e50.fwd_src1 = 4.0
+    e50.fwd_val = 7.0
+    t5.entry0 = e50
+    t5 = kad_tape_backward(t5)
+    if abs_f64(kad_tape_get_grad(t5, 0) - 1.0) < 0.001 {
+        if abs_f64(kad_tape_get_grad(t5, 1) - 1.0) < 0.001 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
     } else {
         fail = fail + 1
-        print("  T1  FAIL (map_opcode ADD mismatch)\n")
     }
 
-    // ---- T2: kad_map_opcode — GPU_OP_MUL -> GRAD_OP_MUL ----
-    let t2_result = kad_map_opcode(GPU_OP_MUL)
-    if t2_result == GRAD_OP_MUL {
-        pass = pass + 1
-        print("  T2  OK (map_opcode: GPU_OP_MUL -> GRAD_OP_MUL)\n")
+    let f6 = test_make_binary_kernel(GPU_OP_MUL, 2, 0, 1, 3.0, 4.0)
+    var t6 = kad_build_tape(f6)
+    var e60 = t6.entry0
+    e60.fwd_src0 = 3.0
+    e60.fwd_src1 = 4.0
+    e60.fwd_val = 12.0
+    t6.entry0 = e60
+    t6 = kad_tape_backward(t6)
+    if abs_f64(kad_tape_get_grad(t6, 0) - 4.0) < 0.001 {
+        if abs_f64(kad_tape_get_grad(t6, 1) - 3.0) < 0.001 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
     } else {
         fail = fail + 1
-        print("  T2  FAIL (map_opcode MUL mismatch)\n")
     }
 
-    // ---- T3: kad_map_opcode — non-differentiable op -> -1 ----
-    // GPU_OP_LOAD_PARAM (14) is a memory op, not differentiable
-    let t3_result = kad_map_opcode(GPU_OP_LOAD_PARAM)
-    if t3_result == -1 {
+    let f7 = test_make_binary_kernel(GPU_OP_MUL, 4, 0, 0, 5.0, 5.0)
+    var t7 = kad_build_tape(f7)
+    var e70 = t7.entry0
+    e70.fwd_src0 = 5.0
+    e70.fwd_src1 = 5.0
+    e70.fwd_val = 25.0
+    t7.entry0 = e70
+    t7 = kad_tape_backward(t7)
+    if abs_f64(kad_tape_get_grad(t7, 0) - 10.0) < 0.001 {
         pass = pass + 1
-        print("  T3  OK (map_opcode: non-differentiable -> -1)\n")
     } else {
         fail = fail + 1
-        print("  T3  FAIL (non-differentiable op should return -1)\n")
     }
 
-    // ---- T4: kad_build_tape — simple 1-op ADD kernel records 1 entry ----
-    // Forward kernel: r2 = r0 + r1
-    let t4_fwd = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
-    let t4_tape = kad_build_tape(t4_fwd)
-    if t4_tape.entry_count == 1 {
-        if t4_tape.input_count == 2 {
-            if t4_tape.output_count == 1 {
+    let f8 = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
+    let b8 = kad_generate_backward(f8)
+    if b8.grad_count == 2 { pass = pass + 1 } else { fail = fail + 1 }
+
+    var f9 = kad_forward_new()
+    f9.input0 = 0
+    f9.input1 = 1
+    f9.input2 = 2
+    f9.input_count = 3
+    f9.output0 = 4
+    f9.output_count = 1
+    var op90 = kad_op_new()
+    op90.opcode = GPU_OP_MUL
+    op90.dst_reg = 3
+    op90.lhs_reg = 1
+    op90.rhs_reg = 2
+    f9.op0 = op90
+    var op91 = kad_op_new()
+    op91.opcode = GPU_OP_ADD
+    op91.dst_reg = 4
+    op91.lhs_reg = 0
+    op91.rhs_reg = 3
+    f9.op1 = op91
+    f9.op_count = 2
+
+    var t9 = kad_build_tape(f9)
+    var e90 = t9.entry0
+    e90.fwd_src0 = 3.0
+    e90.fwd_src1 = 4.0
+    e90.fwd_val = 12.0
+    t9.entry0 = e90
+    var e91 = t9.entry1
+    e91.fwd_src0 = 2.0
+    e91.fwd_src1 = 12.0
+    e91.fwd_val = 14.0
+    t9.entry1 = e91
+    t9 = kad_tape_backward(t9)
+    if abs_f64(kad_tape_get_grad(t9, 0) - 1.0) < 0.001 {
+        if abs_f64(kad_tape_get_grad(t9, 1) - 4.0) < 0.001 {
+            if abs_f64(kad_tape_get_grad(t9, 2) - 3.0) < 0.001 {
                 pass = pass + 1
-                print("  T4  OK (build_tape: 1 ADD op -> 1 entry, 2 inputs, 1 output)\n")
             } else {
                 fail = fail + 1
-                print("  T4  FAIL (output_count != 1)\n")
             }
         } else {
             fail = fail + 1
-            print("  T4  FAIL (input_count != 2)\n")
         }
     } else {
         fail = fail + 1
-        print("  T4  FAIL (entry_count != 1)\n")
     }
 
-    // ---- T5: kad_tape_backward — f=a+b: grad(a)=1.0, grad(b)=1.0 ----
-    // a=3.0 (reg 0), b=4.0 (reg 1), f=a+b=7.0 (reg 2)
-    let t5_fwd = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
-    var t5_tape = kad_build_tape(t5_fwd)
-    // Inject forward values: for ADD, fwd values not needed by chain rule
-    // but we set them for completeness
-    t5_tape = test_inject_fwd_values_binary(t5_tape, 0, 3.0, 4.0, 7.0)
-    t5_tape = kad_tape_backward(t5_tape)
-    let t5_ga = kad_tape_get_grad(t5_tape, 0)
-    let t5_gb = kad_tape_get_grad(t5_tape, 1)
-    if abs_f64(t5_ga - 1.0) < 0.001 {
-        if abs_f64(t5_gb - 1.0) < 0.001 {
+    let b10 = kad_generate_backward(f8)
+    if b10.grad0 == 512 {
+        if b10.grad1 == 513 {
             pass = pass + 1
-            print("  T5  OK (backward ADD: grad(a)=1.0, grad(b)=1.0)\n")
         } else {
             fail = fail + 1
-            print("  T5  FAIL (grad(b) != 1.0)\n")
         }
     } else {
         fail = fail + 1
-        print("  T5  FAIL (grad(a) != 1.0)\n")
     }
 
-    // ---- T6: kad_tape_backward — f=a*b: grad(a)=b=4.0, grad(b)=a=3.0 ----
-    // a=3.0 (reg 0), b=4.0 (reg 1), f=a*b=12.0 (reg 2)
-    let t6_fwd = test_make_binary_kernel(GPU_OP_MUL, 2, 0, 1, 3.0, 4.0)
-    var t6_tape = kad_build_tape(t6_fwd)
-    // Inject forward values: MUL needs fwd_src0=a=3.0, fwd_src1=b=4.0
-    t6_tape = test_inject_fwd_values_binary(t6_tape, 0, 3.0, 4.0, 12.0)
-    t6_tape = kad_tape_backward(t6_tape)
-    let t6_ga = kad_tape_get_grad(t6_tape, 0)
-    let t6_gb = kad_tape_get_grad(t6_tape, 1)
-    if abs_f64(t6_ga - 4.0) < 0.001 {
-        if abs_f64(t6_gb - 3.0) < 0.001 {
-            pass = pass + 1
-            print("  T6  OK (backward MUL: grad(a)=b=4.0, grad(b)=a=3.0)\n")
-        } else {
-            fail = fail + 1
-            print("  T6  FAIL (grad(b) != 3.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T6  FAIL (grad(a) != 4.0)\n")
-    }
-
-    // ---- T7: kad_tape_backward — f=a*a (square): grad(a)=2*a=10.0 ----
-    // a=5.0 (reg 0), f=a*a=25.0 (reg 10)
-    let t7_fwd = test_make_square_kernel(0)
-    var t7_tape = kad_build_tape(t7_fwd)
-    // For a*a: src0=a=5.0, src1=a=5.0, result=25.0
-    t7_tape = test_inject_fwd_values_binary(t7_tape, 0, 5.0, 5.0, 25.0)
-    t7_tape = kad_tape_backward(t7_tape)
-    let t7_ga = kad_tape_get_grad(t7_tape, 0)
-    // grad(a) = g*fwd_src1 + g*fwd_src0 = 1.0*5.0 + 1.0*5.0 = 10.0
-    if abs_f64(t7_ga - 10.0) < 0.001 {
-        pass = pass + 1
-        print("  T7  OK (backward square: grad(a)=2*a=10.0)\n")
-    } else {
-        fail = fail + 1
-        print("  T7  FAIL (grad(a) != 10.0)\n")
-    }
-
-    // ---- T8: kad_generate_backward — produces backward kernel with correct grad_count ----
-    // Use the ADD kernel from T5
-    let t8_fwd = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
-    let t8_bwd = kad_generate_backward(t8_fwd)
-    // Should have grad_count == 2 (one for each forward input)
-    if t8_bwd.grad_count == 2 {
-        pass = pass + 1
-        print("  T8  OK (generate_backward: grad_count=2 for 2-input kernel)\n")
-    } else {
-        fail = fail + 1
-        print("  T8  FAIL (grad_count != 2)\n")
-    }
-
-    // ---- T9: kad_tape_backward — f=a+b*c (compound): ----
-    // a=2.0 (reg 0), b=3.0 (reg 1), c=4.0 (reg 2)
-    // tmp=b*c=12 (reg 3), f=a+tmp=14 (reg 4)
-    // grad(a)=1, grad(b)=c=4, grad(c)=b=3
-    var t9_fwd = kad_forward_new()
-    t9_fwd.input_regs[0] = 0
-    t9_fwd.input_regs[1] = 1
-    t9_fwd.input_regs[2] = 2
-    t9_fwd.input_count = 3
-    t9_fwd.output_regs[0] = 4
-    t9_fwd.output_count = 1
-
-    // Op 0: reg3 = reg1 * reg2 (tmp = b * c)
-    var t9_op0 = kad_op_new()
-    t9_op0.opcode = GPU_OP_MUL
-    t9_op0.dst_reg = 3
-    t9_op0.lhs_reg = 1
-    t9_op0.rhs_reg = 2
-    t9_fwd.ops[0] = t9_op0
-
-    // Op 1: reg4 = reg0 + reg3 (f = a + tmp)
-    var t9_op1 = kad_op_new()
-    t9_op1.opcode = GPU_OP_ADD
-    t9_op1.dst_reg = 4
-    t9_op1.lhs_reg = 0
-    t9_op1.rhs_reg = 3
-    t9_fwd.ops[1] = t9_op1
-    t9_fwd.op_count = 2
-
-    var t9_tape = kad_build_tape(t9_fwd)
-    // Inject forward values
-    // Entry 0: MUL(b=3, c=4) -> 12
-    t9_tape = test_inject_fwd_values_binary(t9_tape, 0, 3.0, 4.0, 12.0)
-    // Entry 1: ADD(a=2, tmp=12) -> 14
-    t9_tape = test_inject_fwd_values_binary(t9_tape, 1, 2.0, 12.0, 14.0)
-
-    t9_tape = kad_tape_backward(t9_tape)
-    let t9_ga = kad_tape_get_grad(t9_tape, 0)  // grad(a)
-    let t9_gb = kad_tape_get_grad(t9_tape, 1)  // grad(b)
-    let t9_gc = kad_tape_get_grad(t9_tape, 2)  // grad(c)
-
-    if abs_f64(t9_ga - 1.0) < 0.001 {
-        if abs_f64(t9_gb - 4.0) < 0.001 {
-            if abs_f64(t9_gc - 3.0) < 0.001 {
-                pass = pass + 1
-                print("  T9  OK (compound a+b*c: grad(a)=1, grad(b)=c=4, grad(c)=b=3)\n")
-            } else {
-                fail = fail + 1
-                print("  T9  FAIL (grad(c) != 3.0)\n")
-            }
-        } else {
-            fail = fail + 1
-            print("  T9  FAIL (grad(b) != 4.0)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T9  FAIL (grad(a) != 1.0)\n")
-    }
-
-    // ---- T10: backward kernel grad_input_regs uses +512 offset ----
-    let t10_fwd = test_make_binary_kernel(GPU_OP_ADD, 2, 0, 1, 3.0, 4.0)
-    let t10_bwd = kad_generate_backward(t10_fwd)
-    // Input reg 0 -> grad reg 512, input reg 1 -> grad reg 513
-    let t10_gr0 = t10_bwd.grad_input_regs[0]
-    let t10_gr1 = t10_bwd.grad_input_regs[1]
-    if t10_gr0 == 512 {
-        if t10_gr1 == 513 {
-            pass = pass + 1
-            print("  T10 OK (grad_input_regs: reg0->512, reg1->513)\n")
-        } else {
-            fail = fail + 1
-            print("  T10 FAIL (grad_input_regs[1] != 513)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T10 FAIL (grad_input_regs[0] != 512)\n")
-    }
-
-    // ---- Summary ----
     print("kernel_autodiff: ")
     print_int(pass)
     print("/")

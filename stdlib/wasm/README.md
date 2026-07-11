@@ -2,18 +2,16 @@
 
 WebAssembly runtime support and memory management.
 
-## Key Types
-- `WasmMemory`: WASM linear memory
-- `WasmTable`: WASM function table
-- `WasmGlobal`: WASM global variable
+## Pure API (`wasm::pure::types`)
 
-## Key Functions
-- `wasm_memory_new()`: Create new memory
-- `wasm_memory_grow(mem, pages)`: Grow memory by pages
-- `wasm_memory_size(mem)`: Get current size in pages
-- `wasm_table_new(size)`: Create function table
-- `wasm_table_size(tbl)`: Get table size
-- `wasm_global_new(value, mutable)`: Create global
+- `WasmModule` — fixed bytecode buffer + export name table
+- `wasm_module_new`, `wasm_module_load`, `wasm_module_add_export`
 
-## Test Status
-2/2 tests passing.
+## FFI stubs
+
+- `wasm::ffi::bindings::wasmtime_available()` → `false`
+- `wasm::ffi::wrapper::wasm_runtime_ready()` → `false`
+
+## Tests
+
+- `tests/stdlib/wasm/test_wasm_core.sio` (check-only)

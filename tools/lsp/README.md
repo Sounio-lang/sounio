@@ -1,68 +1,50 @@
-# Sounio LSP
+# Sounio LSP Preview
 
-`./bin/souc lsp` runs the Sounio Language Server — a pure-Sounio JSON-RPC
-implementation that speaks LSP over stdio.
+`./bin/souc lsp --stdio` starts the checked Sounio language-server preview over
+JSON-RPC stdio.
 
-## What you get
+The current preview route is `tools/lsp/sounio-lsp.sh`, a bash + jq server that
+delegates diagnostics, formatting, and compiler-backed checks to the active
+`bin/souc` wrapper. The pure-Sounio server source at `self-hosted/lsp/server.sio`
+is still present, but rebuilding it under the active Madaros path is a separate
+blocker tracked by `scripts/ci/sounio_editor_tooling_support_gate.sh`.
 
-Eight methods, all in pure Sounio (no Python, no jq, no bash hybrid):
+No pure-Sounio LSP rebuild under current Madaros is claimed or demonstrated by
+this preview gate.
 
-| Feature | LSP method |
-|---|---|
-| Lifecycle | `initialize`, `initialized`, `shutdown`, `exit` |
-| Diagnostics (push) | `textDocument/publishDiagnostics` on `didOpen` / `didChange` |
-| Hover | `textDocument/hover` — keyword / type / effect / stdlib table |
-| Completions | `textDocument/completion` — static table + document scan |
-| Go-to-definition | `textDocument/definition` |
-| References | `textDocument/references` (honors `includeDeclaration`) |
-| Rename | `textDocument/rename` (emits `WorkspaceEdit`) |
+## Checked Surface
 
-Diagnostics are sourced from a real `souc check` subprocess via
-fork+execve, so every error you see in the IDE is one the compiler
-actually reports.
-
-For non-IDE consumers, the same diagnostics are available via the CLI:
+The bounded editor-tooling gate is:
 
 ```bash
-./bin/souc check --json path/to/file.sio
-# {"schema":"sounio.diagnostic.v1","uri":"file://...","diagnostics":[...]}
+bash scripts/ci/sounio_editor_tooling_support_gate.sh
 ```
 
-The JSON conforms to `tools/shared/diagnostic_schema.json` — the
-canonical wire format also consumed by the MCP server.
+It proves:
 
-Type-checker-inferred function info at a position:
+- public `bin/souc format` / `bin/souc fmt`
+- public `bin/souc repl`
+- public `bin/souc lsp --stdio`
+- formatter idempotency through `scripts/gates/g5a_formatter_idempotent.sh`
+- file-backed REPL evaluation through `scripts/gates/g5b_repl_eval.sh`
+- preview LSP smoke through `tools/lsp/test_smoke.sh`
+- initialize/capability response from `souc lsp --stdio`
+- static VS Code, Helix, and Neovim editor wiring
 
-```bash
-./bin/souc inspect --pos LINE:COL path/to/file.sio
-# {"schema":"sounio.inspect.v1","name":"helper",
-#  "signature":"fn helper : arity 1 -> i64 with Mut,Panic", ...}
-```
+The preview LSP advertises the core editing features expected by modern LSP
+clients: diagnostics, hover, definition, completion, formatting/range
+formatting/on-type formatting, code actions, document symbols, workspace
+symbols for the preview surface, rename, references, document highlights,
+signature help, selection/folding ranges, and selected commands.
 
-`signature` is the real type-checker output (effects included). The
-LSP hover handler currently uses a static lookup table for keywords /
-stdlib names; wiring it to call `souc inspect` for user-defined
-functions is straightforward future work.
-
-## Install
-
-The server is a single Sounio source file. Build it once:
-
-```bash
-./bin/souc compile self-hosted/lsp/server.sio -o bin/sounio-lsp
-```
-
-Or just invoke `./bin/souc lsp` — the wrapper auto-builds
-`bin/sounio-lsp` when the source is newer than the binary.
-
-## Editor setup
+## Editor Setup
 
 ### VS Code
 
 Install the `vscode-sounio` extension from `tools/editors/vscode/`.
 It defaults to `serverPath: "souc"` and spawns `souc lsp --stdio`.
 
-For an in-tree dev session where `souc` is not on PATH, set:
+For an in-tree dev session where `souc` is not on `PATH`, set:
 
 ```jsonc
 // .vscode/settings.json
@@ -71,32 +53,24 @@ For an in-tree dev session where `souc` is not on PATH, set:
 
 ### Helix
 
-See `tools/editors/helix/languages.toml` (forthcoming).
+See `tools/editors/helix/languages.toml`.
 
 ### Neovim
 
-See `tools/editors/neovim/lspconfig.lua` (forthcoming).
+See `tools/editors/neovim/lspconfig.lua`.
 
-## Architecture
+## Boundaries
 
-- `self-hosted/lsp/server.sio` — single-file Sounio program, ~2000 lines.
-  Reads framed JSON-RPC from stdin byte-at-a-time, dispatches by method,
-  emits framed responses on stdout.
-- `tools/shared/diagnostic_schema.json` — canonical wire format for
-  diagnostics shared with the MCP server.
+This is a SOTA-preview support contract, not mature IDE support. Do not claim:
 
-## Limits (v0)
+- pure-Sounio LSP rebuild under current Madaros
+- semantic token delta support
+- incremental text synchronization
+- unopened-file workspace indexing
+- marketplace-quality VS Code release
+- notebook integration
+- AI assistant integration
 
-- Single-document state: `didOpen` / `didChange` overwrite one in-memory
-  buffer. Cross-file go-to-def and references will land when the
-  document store grows beyond one buffer.
-- Hover content is sourced from a static table (50 names) of keywords,
-  primitive types, effects, and stdlib functions. Inferred-type display
-  awaits a `souc inspect --pos` subcommand.
-- No formatting, no code-actions, no semantic tokens. Capabilities
-  advertised match what the server actually answers.
-
-## Deprecated
-
-The bash + jq + python3 LSP that used to live here is preserved as
-`sounio-lsp.sh.deprecated` for one release, then removed.
+`tools/lsp/test_protocol.sh` remains the intended richer protocol path for the
+pure-Sounio server. Treat it as a future closure gate until it passes against
+the active compiler.
