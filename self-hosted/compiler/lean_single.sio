@@ -2087,6 +2087,24 @@ fn emit_store_var_a64(slot: i64) with Mut, Panic {
     em32(0xF9000120)
 }
 
+// a64 twin of emit_bulk_copy_to_slots_x86: x0 = source pointer, copy `nslots`
+// qwords to stack slots [base .. base+nslots-1] (slot base+nslots-1 at the
+// lowest address = the returned pointer). emit_store_var_a64 clobbers x9, so the
+// source pointer is kept in a temp slot and reloaded each iteration rather than
+// held in a register.
+fn emit_bulk_copy_to_slots_a64(nslots: i64, base: i64) with Mut, Panic, Div {
+    // x0 = source pointer on entry. Copy nslots qwords into stack slots
+    // [base .. base+nslots-1] (slot base+nslots-1 = lowest address), then leave
+    // x0 = that base. Uses the runtime byte-copy loop (constant code size) — a
+    // large aggregate element (e.g. a Checker-sized tuple field, ~500k slots)
+    // must NOT unroll or it blows the code buffer.
+    em32(0xAA0003E1)                     // mov x1, x0  (src)
+    emit_lea_var_a64(base + nslots - 1)  // x0 = dst base (lowest slot address)
+    emit_imm64_reg_a64(2, nslots * 8)    // x2 = byte count
+    emit_memcpy_a64()                    // copy x2 bytes src(x1) -> dst(x0)
+    emit_lea_var_a64(base + nslots - 1)  // x0 = dst base (memcpy advanced x0)
+}
+
 fn emit_push_a64() with Mut { em32(0xF81F0FE0) }  // str x0, [sp, #-16]!
 
 fn emit_pop_x1_a64() with Mut { em32(0xF84107E1) }  // ldr x1, [sp], #16
@@ -33767,6 +33785,91 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
+            }
+            // Tuple field access: expr.0, expr.1 — a64 port of the x86 twin
+            // (compile_primary :~16301). Scalar (nslots==1) element → load the value
+            // into x0; aggregate element → copy it to fresh slots, leave x0 as the
+            // pointer. Without this `pair.0` produced EXPR_TY=0, so `var c = pair.0`
+            // left `c` untyped and `c.field` blind-scanned onto the wrong struct
+            // (the private-field [Lowerer] cascade, #740).
+            if TK[EP as usize] == 4 {
+                let tup_idx = TV[EP as usize]
+                EP = EP + 1
+                if tup_idx > 1 {
+                    tc_error_hard(method_tok, "tuple index out of bounds")
+                }
+                let tup_first_slots = tup_first_slots_true(EXPR_TY_HASH)
+                let tup_total_slots = tup_total_slots_true(EXPR_TY_HASH)
+                let tup_last_slots = tup_total_slots - tup_first_slots
+                let fa_ci = tup_cache_lookup(EXPR_TY_HASH)
+                var elem1_slots_true: i64 = tup_last_slots
+                if fa_ci >= 0 && TUP_CACHE_TCOUNT[fa_ci as usize] > 2 && tup_idx == 1 {
+                    let e1s = ty_slot_count(TUP_CACHE_ELEM_TY[(fa_ci * 16 + 1) as usize], TUP_CACHE_ELEM_HASH[(fa_ci * 16 + 1) as usize])
+                    if e1s > 0 { elem1_slots_true = e1s }
+                }
+                let elem_slots = if tup_idx == 0 { tup_first_slots } else { elem1_slots_true }
+                if tup_idx == 0 {
+                    // x0 already points to element 0
+                } else {
+                    let byte_offset = tup_first_slots * 8   // .1 offset
+                    if byte_offset > 0 {
+                        if byte_offset < 4096 { em32(0x91000000 | ((byte_offset & 0xFFF) << 10)) }  // add x0, x0, #off
+                        else { emit_imm64_reg_a64(9, byte_offset); em32(0x8B090000) }                // x9=off; add x0,x0,x9
+                    }
+                }
+                if elem_slots == 1 {
+                    em32(0xF9400000)  // ldr x0, [x0] — scalar element value
+                    let sc_ci = tup_cache_lookup(EXPR_TY_HASH)
+                    if sc_ci >= 0 {
+                        if tup_idx == 0 {
+                            EXPR_TY = TUP_CACHE_FIRST_TY[sc_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[sc_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[sc_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(sc_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(sc_ci * 16 + 1) as usize]
+                        } else {
+                            EXPR_TY = TUP_CACHE_LAST_TY[sc_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_LAST_HASH[sc_ci as usize]
+                        }
+                        if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    } else {
+                        let elem_kind = if tup_idx == 0 { (EXPR_TY_HASH / 10000000) % 10 } else { (EXPR_TY_HASH / 1000000) % 10 }
+                        if elem_kind == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 } else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
+                        EXPR_TY_HASH = 0
+                    }
+                } else {
+                    EXPR_IS_F64 = 0
+                    let tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+                    if tup_ci >= 0 {
+                        if tup_idx == 0 {
+                            EXPR_TY = TUP_CACHE_FIRST_TY[tup_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+                        } else if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+                            EXPR_TY = TUP_CACHE_ELEM_TY[(tup_ci * 16 + 1) as usize]
+                            EXPR_TY_HASH = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + 1) as usize]
+                        } else {
+                            EXPR_TY = TUP_CACHE_LAST_TY[tup_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_LAST_HASH[tup_ci as usize]
+                        }
+                    } else {
+                        EXPR_TY = 6
+                        if tup_idx == 0 {
+                            if tup_first_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_first_slots } else { EXPR_TY_HASH = 0 }
+                        } else {
+                            if tup_last_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_last_slots } else { EXPR_TY_HASH = 0 }
+                        }
+                    }
+                    var tup_mat_n: i64 = 128
+                    if elem_slots > 0 { tup_mat_n = elem_slots }
+                    if tup_ci >= 0 {
+                        let true_mat_n = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                        if true_mat_n > 0 { tup_mat_n = true_mat_n }
+                    }
+                    let tup_mat_base = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + tup_mat_n
+                    emit_bulk_copy_to_slots_a64(tup_mat_n, tup_mat_base)
+                }
+                continue
             }
             let base_ty = EXPR_TY
             let base_hash = EXPR_TY_HASH
