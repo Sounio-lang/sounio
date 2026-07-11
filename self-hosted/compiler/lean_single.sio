@@ -29848,6 +29848,21 @@ fn emit_syscall_a64() with Mut {
     }
 }
 
+// a64 twin of emit_syscall6_x86 for `syscall6(number, a1..a6)`: 7 args are on the
+// a64 stack (16-byte stride, arg0/number highest). Load number→x8, a1..a6→x0..x5,
+// then svc; result in x0. (arm64 syscall ABI vs x86 rax/rdi/rsi/rdx/r10/r8/r9.)
+fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
+    if argc >= 1 { em32(0xF94003E8 | ((((argc - 1) * 16) / 8) << 10)) }  // ldr x8, [sp, #(argc-1)*16]  (number)
+    if argc >= 2 { em32(0xF94003E0 | ((((argc - 2) * 16) / 8) << 10)) }  // ldr x0, [sp, ...]  (a1)
+    if argc >= 3 { em32(0xF94003E1 | ((((argc - 3) * 16) / 8) << 10)) }  // ldr x1  (a2)
+    if argc >= 4 { em32(0xF94003E2 | ((((argc - 4) * 16) / 8) << 10)) }  // ldr x2  (a3)
+    if argc >= 5 { em32(0xF94003E3 | ((((argc - 5) * 16) / 8) << 10)) }  // ldr x3  (a4)
+    if argc >= 6 { em32(0xF94003E4 | ((((argc - 6) * 16) / 8) << 10)) }  // ldr x4  (a5)
+    if argc >= 7 { em32(0xF94003E5 | ((((argc - 7) * 16) / 8) << 10)) }  // ldr x5  (a6)
+    emit_syscall_a64()
+    emit_drop_call_args_a64(argc)
+}
+
 // ─── ARM64 print("string") ───
 fn emit_print_a64(tok: i64) with Mut, Panic, Div {
     let ss = TS[tok as usize] + 1
@@ -32191,6 +32206,29 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_load_abs_qword_a64(GL_BSS_BASE + POOL_REFILL_BYTES_BSS_OFF)
+                EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0
+                return
+            }
+            // syscall6(number, a1..a6) → raw syscall (a64 mirror of x86 :~13157).
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "syscall6") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                var sys_argc: i64 = 0
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or_a64()
+                    materialize_aggregate_expr_a64()
+                    emit_push_a64()
+                    sys_argc = sys_argc + 1
+                    if TK[EP as usize] == 28 { EP = EP + 1 }
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if sys_argc != 7 {
+                    tc_wrong_arity(name_tok, 7, sys_argc)
+                    emit_drop_call_args_a64(sys_argc)
+                    em32(0xD2800000)  // mov x0, #0
+                } else {
+                    emit_syscall6_a64(sys_argc)
+                }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0
                 return
             }
