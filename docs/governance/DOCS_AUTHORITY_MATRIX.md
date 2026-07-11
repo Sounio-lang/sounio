@@ -375,6 +375,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.eisa-w4-v2-bridge-continuation | repo_only | docs/handoff/eisa_w4_v2_bridge_continuation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.exact-engine-prereqs | repo_only | docs/handoff/exact_engine_prereqs.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.gpu-knowledge-vecmat-swarm-plan | repo_only | docs/handoff/gpu_knowledge_vecmat_swarm_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.madaros-plan-overview | repo_only | docs/handoff/madaros_plan_overview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.modular-madaros-build-greenup-scope | repo_only | docs/handoff/modular_madaros_build_greenup_scope.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.native-v2-maturity-reframe | repo_only | docs/handoff/native_v2_maturity_reframe.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.neurodyn-ab-fixed-octmul-reaudit-2026-07-07 | repo_only | docs/handoff/neurodyn_ab_fixed_octmul_reaudit_2026-07-07.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
