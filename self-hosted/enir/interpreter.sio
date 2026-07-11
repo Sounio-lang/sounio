@@ -24,6 +24,35 @@ pub struct EnirInterpretResult {
     pub error_code: i64,
     pub executed_ops: i64,
     pub observations: i64,
+    pub fuel_left: i64,
+    pub stop_kind: i64,
+    pub last_write: i64,
+    pub branch_poisoned: i64,
+    pub frail_branches: i64,
+}
+
+fn enir_interp_result(
+    ok: bool,
+    error_code: i64,
+    executed_ops: i64,
+    observations: i64,
+    fuel_left: i64,
+    stop_kind: i64,
+    last_write: i64,
+    branch_poisoned: i64,
+    frail_branches: i64
+) -> EnirInterpretResult {
+    EnirInterpretResult {
+        ok: ok,
+        error_code: error_code,
+        executed_ops: executed_ops,
+        observations: observations,
+        fuel_left: fuel_left,
+        stop_kind: stop_kind,
+        last_write: last_write,
+        branch_poisoned: branch_poisoned,
+        frail_branches: frail_branches,
+    }
 }
 
 fn enir_interp_dd_zero() -> EnirInterpDd {
@@ -259,7 +288,7 @@ fn enir_interp_receipt(
     let provenance = module.provenance[descriptor.provenance_id as usize]
     let value_bits = if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) }
     let uncertainty_bits = if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) }
-    var out = "enir-exec|schema=1|stage=2|module=" ++ enir_name_to_string(module.name)
+    var out = "enir-exec|schema=" ++ enir_i64_string(module.schema_version) ++ "|stage=2|module=" ++ enir_name_to_string(module.name)
     out = out ++ "|module_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_print_canonical(module)))
     out = out ++ "|ordinal=" ++ enir_i64_string(ordinal)
     out = out ++ "|site=" ++ enir_i64_string(op.id)
@@ -316,12 +345,200 @@ fn enir_interp_memory_receipt(
     out
 }
 
+fn enir_interp_cfg_control_receipt(
+    module: EnirModule,
+    block: EnirBlock,
+    edge: EnirEdge,
+    taken: i64,
+    poisoned: i64,
+    frail: i64
+) -> string with Mut, Panic, Div, Alloc {
+    var out = "enir-control|schema=" ++ enir_i64_string(module.schema_version) ++ "|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|block=" ++ enir_i64_string(block.id)
+    out = out ++ "|term=" ++ enir_i64_string(block.terminator_kind)
+    out = out ++ "|condition=" ++ enir_i64_string(block.condition_value)
+    out = out ++ "|edge=" ++ enir_i64_string(edge.id)
+    out = out ++ "|to=" ++ enir_i64_string(edge.to_block)
+    out = out ++ "|taken=" ++ enir_i64_string(taken)
+    out = out ++ "|poisoned=" ++ enir_i64_string(poisoned)
+    out = out ++ "|frail=" ++ enir_i64_string(frail) ++ "\n"
+    out
+}
+
+fn enir_interp_fuel_receipt(
+    module: EnirModule,
+    value_id: i64,
+    value: EnirInterpValue,
+    branch_poisoned: i64,
+    frail_branches: i64
+) -> string with Mut, Panic, Div, Alloc {
+    let descriptor = module.values[value_id as usize]
+    let provenance = module.provenance[descriptor.provenance_id as usize]
+    let value_bits = if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) }
+    let uncertainty_bits = if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) }
+    var out = "enir-fuel|schema=" ++ enir_i64_string(module.schema_version) ++ "|stage=2|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|module_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_print_canonical(module)))
+    out = out ++ "|ordinal=0|fuel_initial=" ++ enir_i64_string(module.fuel_limit)
+    out = out ++ "|fuel_left=0|stop_kind=1|last_value_id=" ++ enir_i64_string(value_id)
+    out = out ++ "|value_bits=" ++ enir_i64_string(value_bits)
+    out = out ++ "|error0_bits=" ++ enir_i64_string(f64_to_bits(value.err.hi))
+    out = out ++ "|error1_bits=" ++ enir_i64_string(f64_to_bits(value.err.lo))
+    out = out ++ "|uncertainty_bits=" ++ enir_i64_string(uncertainty_bits)
+    // METRON marks a fuel-stop receipt poisoned even when the last register
+    // payload itself remains finite and source-observable.
+    out = out ++ "|status=1"
+    out = out ++ "|branch_poisoned=" ++ enir_i64_string(branch_poisoned)
+    out = out ++ "|frail_branches=" ++ enir_i64_string(frail_branches)
+    out = out ++ "|source_span=" ++ enir_i64_string(provenance.source_span_id) ++ "\n"
+    out
+}
+
+fn enir_interp_cfg_stop(
+    module: EnirModule,
+    values: [EnirInterpValue; 128],
+    defined: [i64; 128],
+    executed: i64,
+    observations: i64,
+    last_write: i64,
+    branch_poisoned: i64,
+    frail_branches: i64
+) -> EnirInterpretResult with IO, Mut, Panic, Div, Alloc {
+    if module.observation_count != 1 || module.observations[0].kind != enir_observation_fuel() ||
+       observations != 0 || last_write < 0 || defined[last_write as usize] == 0 {
+        return enir_interp_result(false, 70, executed, observations, 0, 1, last_write, branch_poisoned, frail_branches)
+    }
+    print(enir_interp_fuel_receipt(module, last_write, values[last_write as usize], branch_poisoned, frail_branches))
+    enir_interp_result(true, 0, executed, 1, 0, 1, last_write, branch_poisoned, frail_branches)
+}
+
+fn enir_interpret_cfg(module: EnirModule) -> EnirInterpretResult with IO, Mut, Panic, Div, Alloc {
+    var values: [EnirInterpValue; 128] = [EnirInterpValue {
+        val: 0.0, err: EnirInterpDd { hi: 0.0, lo: 0.0 }, uncertainty: 0.0, poisoned: 1,
+    }; 128]
+    var defined: [i64; 128] = [0; 128]
+    var fuel_left = module.fuel_limit
+    var observations: i64 = 0
+    var executed: i64 = 0
+    var last_write: i64 = -1
+    var branch_poisoned: i64 = 0
+    var frail_branches: i64 = 0
+    var block_id: i64 = 0
+    var halted = false
+    while !halted {
+        if block_id < 0 || block_id >= module.block_count {
+            return enir_interp_result(false, 71, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
+        }
+        let block = module.blocks[block_id as usize]
+        var pc = block.first_op
+        while pc < block.first_op + block.op_count {
+            if fuel_left <= 0 {
+                return enir_interp_cfg_stop(module, values, defined, executed, observations, last_write, branch_poisoned, frail_branches)
+            }
+            fuel_left = fuel_left - 1
+            let op = module.ops[pc as usize]
+            if !enir_cfg_op_allowed(op.opcode) { return enir_interp_result(false, 30 + op.opcode, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+            if op.opcode == enir_op_econst() {
+                let descriptor = module.values[op.result_id as usize]
+                let value = enir_interp_bits_to_f64(descriptor.value_bits)
+                if f64_to_bits(value) != descriptor.value_bits { return enir_interp_result(false, 19, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                values[op.result_id as usize] = if enir_interp_finite(value) { enir_interp_clean(value) } else { enir_interp_poison() }
+                defined[op.result_id as usize] = 1
+                last_write = op.result_id
+            } else if op.opcode == enir_op_eadd() || op.opcode == enir_op_esub() || op.opcode == enir_op_emul() || op.opcode == enir_op_ediv() {
+                if defined[op.a as usize] == 0 || defined[op.b as usize] == 0 { return enir_interp_result(false, 20, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                let x = values[op.a as usize]
+                let y = values[op.b as usize]
+                values[op.result_id as usize] = if op.opcode == enir_op_eadd() { enir_interp_add(x, y) } else {
+                    if op.opcode == enir_op_esub() { enir_interp_sub(x, y) } else {
+                        if op.opcode == enir_op_emul() { enir_interp_mul(x, y) } else { enir_interp_div(x, y) }
+                    }
+                }
+                defined[op.result_id as usize] = 1
+                last_write = op.result_id
+            } else if op.opcode == enir_op_esqrt() {
+                if defined[op.a as usize] == 0 { return enir_interp_result(false, 21, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                values[op.result_id as usize] = enir_interp_sqrt_value(values[op.a as usize])
+                defined[op.result_id as usize] = 1
+                last_write = op.result_id
+            } else if op.opcode == enir_op_emov() {
+                if defined[op.a as usize] == 0 { return enir_interp_result(false, 22, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                values[op.result_id as usize] = values[op.a as usize]
+                defined[op.result_id as usize] = 1
+                last_write = op.result_id
+            } else if op.opcode == enir_op_egate() {
+                if defined[op.a as usize] == 0 || observations >= module.observation_count || module.observations[observations as usize].kind != enir_observation_gate() { return enir_interp_result(false, 24, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                print(enir_interp_receipt(module, op, values[op.a as usize], observations, branch_poisoned, frail_branches))
+                observations = observations + 1
+            } else {
+                return enir_interp_result(false, 30 + op.opcode, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
+            }
+            executed = executed + 1
+            pc = pc + 1
+        }
+
+        if block.terminator_fuel_cost == 1 {
+            if fuel_left <= 0 {
+                return enir_interp_cfg_stop(module, values, defined, executed, observations, last_write, branch_poisoned, frail_branches)
+            }
+            fuel_left = fuel_left - 1
+            executed = executed + 1
+        }
+        if block.terminator_kind == enir_term_halt() {
+            halted = true
+        } else {
+            var edge_id = block.edge0
+            var taken: i64 = 1
+            var poisoned: i64 = 0
+            var frail: i64 = 0
+            if block.terminator_kind == enir_term_branch_zero() || block.terminator_kind == enir_term_branch_negative() {
+                if defined[block.condition_value as usize] == 0 { return enir_interp_result(false, 25, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                let condition = values[block.condition_value as usize]
+                taken = 0
+                if condition.poisoned == 1 {
+                    poisoned = 1
+                    branch_poisoned = 1
+                    edge_id = block.edge1
+                } else {
+                    if enir_interp_branch_frail(condition) { frail = 1; frail_branches = frail_branches + 1 }
+                    if block.terminator_kind == enir_term_branch_zero() && condition.val == 0.0 { taken = 1 }
+                    if block.terminator_kind == enir_term_branch_negative() && condition.val < 0.0 { taken = 1 }
+                    edge_id = if taken == 1 { block.edge0 } else { block.edge1 }
+                }
+            }
+            let edge = module.edges[edge_id as usize]
+            print(enir_interp_cfg_control_receipt(module, block, edge, taken, poisoned, frail))
+            var incoming: [EnirInterpValue; 4] = [EnirInterpValue {
+                val: 0.0, err: EnirInterpDd { hi: 0.0, lo: 0.0 }, uncertainty: 0.0, poisoned: 1,
+            }; 4]
+            var a: i64 = 0
+            while a < edge.arg_count {
+                let source_id = if a == 0 { edge.arg0 } else { if a == 1 { edge.arg1 } else { if a == 2 { edge.arg2 } else { edge.arg3 } } }
+                if source_id < 0 || defined[source_id as usize] == 0 { return enir_interp_result(false, 26, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+                incoming[a as usize] = values[source_id as usize]
+                a = a + 1
+            }
+            let target = module.blocks[edge.to_block as usize]
+            a = 0
+            while a < edge.arg_count {
+                let target_arg = module.block_args[(target.arg_start + a) as usize]
+                values[target_arg.value_id as usize] = incoming[a as usize]
+                defined[target_arg.value_id as usize] = 1
+                a = a + 1
+            }
+            block_id = edge.to_block
+        }
+    }
+    if observations != module.observation_count { return enir_interp_result(false, 50, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches) }
+    enir_interp_result(true, 0, executed, observations, fuel_left, 0, last_write, branch_poisoned, frail_branches)
+}
+
 pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, Panic, Div, Alloc {
     let verify_rc = enir_verify(module)
-    if verify_rc != 0 { return EnirInterpretResult { ok: false, error_code: 10000 + verify_rc, executed_ops: 0, observations: 0 } }
+    if verify_rc != 0 { return enir_interp_result(false, 10000 + verify_rc, 0, 0, 0, 0, -1, 0, 0) }
+    if module.schema_version == ENIR_SCHEMA_CFG_VERSION { return enir_interpret_cfg(module) }
     if module.stage != ENIR_STAGE_LOWERED ||
        (module.profile != enir_profile_eisa_v0() && module.profile != enir_profile_eisa_v1()) {
-        return EnirInterpretResult { ok: false, error_code: 1, executed_ops: 0, observations: 0 }
+        return enir_interp_result(false, 1, 0, 0, 0, 0, -1, 0, 0)
     }
     var values: [EnirInterpValue; 128] = [EnirInterpValue {
         val: 0.0,
@@ -346,7 +563,7 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
     var pc: i64 = 0
     while pc < module.op_count && !halted {
         if executed >= ENIR_MAX_OPS * 4 {
-            return EnirInterpretResult { ok: false, error_code: 51, executed_ops: executed, observations: observations }
+            return enir_interp_result(false, 51, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
         }
         let op = module.ops[pc as usize]
         var next_pc = pc + 1
@@ -354,14 +571,14 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
             let descriptor = module.values[op.result_id as usize]
             let value = enir_interp_bits_to_f64(descriptor.value_bits)
             if f64_to_bits(value) != descriptor.value_bits {
-                return EnirInterpretResult { ok: false, error_code: 19, executed_ops: executed, observations: observations }
+                return enir_interp_result(false, 19, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
             }
             values[op.result_id as usize] = if enir_interp_finite(value) { enir_interp_clean(value) } else { enir_interp_poison() }
             defined[op.result_id as usize] = 1
         } else if op.opcode == enir_op_eadd() || op.opcode == enir_op_esub() ||
                   op.opcode == enir_op_emul() || op.opcode == enir_op_ediv() {
             if defined[op.a as usize] == 0 || defined[op.b as usize] == 0 {
-                return EnirInterpretResult { ok: false, error_code: 20, executed_ops: executed, observations: observations }
+                return enir_interp_result(false, 20, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
             }
             let x = values[op.a as usize]
             let y = values[op.b as usize]
@@ -373,23 +590,23 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
             values[op.result_id as usize] = result
             defined[op.result_id as usize] = 1
         } else if op.opcode == enir_op_esqrt() {
-            if defined[op.a as usize] == 0 { return EnirInterpretResult { ok: false, error_code: 21, executed_ops: executed, observations: observations } }
+            if defined[op.a as usize] == 0 { return enir_interp_result(false, 21, executed, observations, 0, 0, -1, branch_poisoned, frail_branches) }
             values[op.result_id as usize] = enir_interp_sqrt_value(values[op.a as usize])
             defined[op.result_id as usize] = 1
         } else if op.opcode == enir_op_emov() {
-            if defined[op.a as usize] == 0 { return EnirInterpretResult { ok: false, error_code: 22, executed_ops: executed, observations: observations } }
+            if defined[op.a as usize] == 0 { return enir_interp_result(false, 22, executed, observations, 0, 0, -1, branch_poisoned, frail_branches) }
             values[op.result_id as usize] = values[op.a as usize]
             defined[op.result_id as usize] = 1
         } else if op.opcode == enir_op_estore() {
             if defined[op.a as usize] == 0 || op.memory_slot < 0 || op.memory_slot >= 16 {
-                return EnirInterpretResult { ok: false, error_code: 23, executed_ops: executed, observations: observations }
+                return enir_interp_result(false, 23, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
             }
             memory[op.memory_slot as usize] = values[op.a as usize]
             memory_defined[op.memory_slot as usize] = 1
             memory_site[op.memory_slot as usize] = op.id
         } else if op.opcode == enir_op_egate() {
             if defined[op.a as usize] == 0 || observations >= module.observation_count {
-                return EnirInterpretResult { ok: false, error_code: 24, executed_ops: executed, observations: observations }
+                return enir_interp_result(false, 24, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
             }
             print(enir_interp_receipt(module, op, values[op.a as usize], observations, branch_poisoned, frail_branches))
             observations = observations + 1
@@ -398,7 +615,7 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
             print(enir_interp_control_receipt(module, op, 1, 0, 0, next_pc))
         } else if op.opcode == enir_op_ebrz() || op.opcode == enir_op_ebrn() {
             if defined[op.a as usize] == 0 {
-                return EnirInterpretResult { ok: false, error_code: 25, executed_ops: executed, observations: observations }
+                return enir_interp_result(false, 25, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
             }
             let condition = values[op.a as usize]
             var taken: i64 = 0
@@ -420,13 +637,13 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
         } else if op.opcode == enir_op_ehalt() {
             halted = true
         } else {
-            return EnirInterpretResult { ok: false, error_code: 30 + op.opcode, executed_ops: executed, observations: observations }
+            return enir_interp_result(false, 30 + op.opcode, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
         }
         executed = executed + 1
         pc = next_pc
     }
     if observations != module.observation_count {
-        return EnirInterpretResult { ok: false, error_code: 50, executed_ops: executed, observations: observations }
+        return enir_interp_result(false, 50, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
     }
     var slot: i64 = 0
     while slot < 16 {
@@ -435,5 +652,5 @@ pub fn enir_interpret(module: EnirModule) -> EnirInterpretResult with IO, Mut, P
         }
         slot = slot + 1
     }
-    EnirInterpretResult { ok: true, error_code: 0, executed_ops: executed, observations: observations }
+    enir_interp_result(true, 0, executed, observations, 0, 0, -1, branch_poisoned, frail_branches)
 }

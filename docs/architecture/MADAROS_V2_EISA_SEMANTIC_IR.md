@@ -67,9 +67,10 @@ immutable preheader value and its body must be empty. An `if` body may contain
 gates require path-sensitive observation regions. The standalone verifier
 recognizes the structured CFG shape, requires final `ehalt`, rejects
 arbitrary targets and policies, and rejects conditional definitions. Values
-carried across a backedge or merge require block arguments/phi and are deferred
-to E2C rather than represented as mutable pseudo-SSA. Explicit `fuel` is also
-rejected until ENIR has a canonical fuel field and fuel-stop receipts. The E2B
+carried across a backedge or merge require block arguments/phi and are rejected
+by the schema-v1 path rather than represented as mutable pseudo-SSA. Explicit
+`fuel` is likewise rejected by schema v1; E2C provides the separate schema-v2
+path described below. The E2B
 gate performs a three-way EISA VM/native ENIR/independent Python differential,
 causal tamper, 14 source negatives, four artifact tampers, one canonicalization
 tamper, E2A/E1 regression,
@@ -77,11 +78,34 @@ and a protected-surface zero diff. Run
 `scripts/dev/madaros_v2_e2b_enir_cfg_gate.sh`, or use
 `bin/madaros-enir lower-v1 <source>` followed by `run <enir>`.
 
+Implementation note (2026-07-11): `E2C-ENIR-FUEL-BLOCKARGS-FULL` adds
+`v1_fuel`, `v1e_fixedpoint`, and `v1_fuel_high`, bringing cumulative real
+lowering to 16/30 programs and 20/39 observations. A canonical schema-v2
+resource row carries the exact fuel limit. Four explicit basic blocks
+(`entry`, `header`, `body`, `exit`), typed edges, and SSA block arguments model
+loop-carried values; source `set` lowers through an alias-safe fresh expression
+value and `emov`. The verifier proves canonical predecessor/argument ranges,
+edge arity and types, reachability, dominance, and source-value availability.
+For a fuel-only observation it additionally proves an immutable empty loop
+with a known non-zero entry condition and identity backedge, so exhaustion is a
+structural consequence rather than a corpus assumption.
+
+The schema-v2 interpreter binds edge arguments simultaneously and debits fuel
+before every cost-one operation or terminator, matching METRON instruction
+accounting. The fixed-point witness reaches exactly `2.0` in 15 instructions
+with 85/100 fuel left; the two non-terminating witnesses stop at zero fuel and
+preserve their true last writes, including value ID 20. The FULL gate requires
+a source-fresh EISA/METRON differential, an independent Python parser/lowerer/
+interpreter, byte-identical roundtrip, 16 source negatives, 16 structural,
+dominance, resource, and canonicalization tampers, E2B/E2A/E1 regression, and
+zero diff over production codegen/ABI/runtime. Run
+`scripts/dev/madaros_v2_e2c_enir_fuel_blockargs_gate.sh`.
+
 This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs, v1 fuel-stop and loop-carried state, v2/qd128, general
-exceptional-value algebra, `ENIR -> MIR`, ABI lowering, or production-codegen
-selection. Those boundaries remain open and fail closed rather than falling
-back through the shadow fixture.
+30/39 programs, `v1_rump_dd`, arbitrary nested/path-sensitive v1 loops, v2/
+qd128, general exceptional-value algebra, `ENIR -> MIR`, ABI lowering, or
+production-codegen selection. Those boundaries remain open and fail closed
+rather than falling back through the shadow fixture.
 
 ## 1. Decision
 
@@ -98,7 +122,7 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. Until that milestone passes, ENIR is partially implemented only for
-the explicitly gated E2A/E2B slices; broader conformance remains unproven.
+the explicitly gated E2A/E2B/E2C slices; broader conformance remains unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,

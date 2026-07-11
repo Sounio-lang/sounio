@@ -179,6 +179,15 @@ fn enir_source_symbol_add(symbols: EnirSourceSymbols, name: EnirName, value_id: 
     out
 }
 
+fn enir_source_symbol_index(symbols: EnirSourceSymbols, name: EnirName) -> i64 {
+    var i: i64 = symbols.count - 1
+    while i >= 0 {
+        if enir_name_eq(symbols.names[i as usize], name) { return i }
+        i = i - 1
+    }
+    -1
+}
+
 fn enir_source_parse_control_name(
     text: string,
     start: i64,
@@ -365,6 +374,300 @@ fn enir_source_lower_expr(
         return EnirSourceOperand { ok: true, value_id: value_id }
     }
     EnirSourceOperand { ok: false, value_id: -1 }
+}
+
+fn enir_source_has_fuel(text: string) -> bool with Mut, Panic, Div {
+    let n = str_len(text)
+    var pos: i64 = 0
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if enir_source_starts_with(text, start, finish, "fuel ") { return true }
+        pos = if end < n { end + 1 } else { end }
+    }
+    false
+}
+
+fn enir_source_positive_i64(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    let s = enir_source_trim_start(text, start, end)
+    let e = enir_source_trim_end(text, s, end)
+    if s >= e { return -1 }
+    var value: i64 = 0
+    var i = s
+    while i < e {
+        let ch = str_char_at(text, i) as i64
+        if ch < 48 || ch > 57 { return -1 }
+        if value > 100000 { return -1 }
+        value = value * 10 + ch - 48
+        i = i + 1
+    }
+    if value <= 0 || value > 1000000 { -1 } else { value }
+}
+
+fn enir_source_push_block_value(module: &!EnirModule, line: i64) -> i64 with Mut, Panic {
+    let value_id = module.value_count
+    if value_id >= ENIR_MAX_VALUES || module.provenance_count >= ENIR_MAX_PROVENANCE { return -1 }
+    module.provenance[module.provenance_count as usize] = EnirProvenance {
+        id: value_id,
+        source_span_id: line,
+        input_origin_id: -1,
+        transform_id: enir_transform_block_arg(),
+        assumption_id: -1,
+        policy_id: -1,
+    }
+    module.provenance_count = module.provenance_count + 1
+    module.values[module.value_count as usize] = EnirValue {
+        id: value_id,
+        type_id: 0,
+        known_bits: 0,
+        value_bits: 0,
+        fp_class: -1,
+        error0_bits: 0,
+        error1_bits: 0,
+        error2_bits: 0,
+        error3_bits: 0,
+        uncertainty_bits: 0,
+        status_kind: enir_status_clean(),
+        status_reason: -1,
+        provenance_id: value_id,
+    }
+    module.value_count = module.value_count + 1
+    value_id
+}
+
+// E2C's source subset has one top-level while. The loop is represented with
+// block arguments instead of mutable virtual registers; set remains alias-safe
+// by lowering through a fresh expression value followed by emov.
+fn enir_lower_source_v1_cfg(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    var module = enir_module_empty()
+    module.schema_version = ENIR_SCHEMA_CFG_VERSION
+    module.stage = ENIR_STAGE_LOWERED
+    module.profile = enir_profile_eisa_v1()
+    module = enir_module_push_type(module, EnirType {
+        id: 0,
+        value_kind: enir_value_f64(),
+        error_kind: enir_error_dd64(),
+        uncertainty_kind: enir_uncertainty_gum1(),
+        status_tracked: 1,
+        provenance_tracked: 1,
+        profile: enir_profile_eisa_v1(),
+    })
+    module = enir_module_push_policy(module, EnirPolicy {
+        id: 0,
+        name: enir_name_from_string("eisa_10_100_count_only"),
+        branch_kind: enir_branch_policy_count_only(),
+        gate_kind: enir_gate_policy_10_100(),
+    })
+
+    var symbols = enir_source_symbols_new()
+    var initial_values: [i64; 4] = [-1; 4]
+    var header_values: [i64; 4] = [-1; 4]
+    var exit_values: [i64; 4] = [-1; 4]
+    var carried_indices: [i64; 4] = [-1; 4]
+    var carry_count: i64 = 0
+    var root_count: i64 = 0
+    var body_first_op: i64 = -1
+    var entry_op_count: i64 = -1
+    var exit_first_op: i64 = -1
+    var condition_index: i64 = -1
+    var condition_value_id: i64 = -1
+    var loop_line: i64 = -1
+    var inside_loop = false
+    var loop_closed = false
+    var seen_header = false
+    var seen_fuel = false
+    var seen_close = false
+    var gate_count: i64 = 0
+    let n = str_len(text)
+    if n <= 0 { return enir_lower_fail(module, 1, 1) }
+    var pos: i64 = 0
+    var line: i64 = 1
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if finish > start {
+            if seen_close { return enir_lower_fail(module, line, 2) }
+            if !seen_header {
+                if !enir_source_starts_with(text, start, finish, "epistemic fn ") || finish - start < 18 { return enir_lower_fail(module, line, 3) }
+                let name_start = start + 13
+                let suffix_start = finish - 4
+                if suffix_start <= name_start || !enir_source_range_eq(text, suffix_start, finish, "() {") { return enir_lower_fail(module, line, 4) }
+                module.name = enir_source_name(text, name_start, suffix_start)
+                if module.name.len <= 0 { return enir_lower_fail(module, line, 5) }
+                seen_header = true
+            } else if enir_source_range_eq(text, start, finish, "}") {
+                if inside_loop {
+                    inside_loop = false
+                    loop_closed = true
+                    let body_op_count = module.op_count - body_first_op
+                    if root_count > 4 && body_op_count != 0 { return enir_lower_fail(module, line, 84) }
+
+                    var back_args: [i64; 4] = [-1; 4]
+                    var i: i64 = 0
+                    while i < carry_count {
+                        back_args[i as usize] = symbols.values[carried_indices[i as usize] as usize]
+                        i = i + 1
+                    }
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 0, first_op: 0, op_count: entry_op_count, arg_start: 0, arg_count: 0,
+                        terminator_kind: enir_term_jump(), condition_value: -1, edge0: 0, edge1: -1,
+                        terminator_fuel_cost: 0,
+                    })
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 1, first_op: entry_op_count, op_count: 0, arg_start: 0, arg_count: carry_count,
+                        terminator_kind: enir_term_branch_zero(), condition_value: condition_value_id, edge0: 1, edge1: 2,
+                        terminator_fuel_cost: 1,
+                    })
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 2, first_op: body_first_op, op_count: body_op_count, arg_start: carry_count, arg_count: 0,
+                        terminator_kind: enir_term_jump(), condition_value: -1, edge0: 3, edge1: -1,
+                        terminator_fuel_cost: 1,
+                    })
+                    exit_first_op = module.op_count
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 3, first_op: exit_first_op, op_count: 0, arg_start: carry_count, arg_count: carry_count,
+                        terminator_kind: enir_term_halt(), condition_value: -1, edge0: -1, edge1: -1,
+                        terminator_fuel_cost: 0,
+                    })
+                    module = enir_module_push_edge(module, EnirEdge {
+                        id: 0, from_block: 0, to_block: 1, arg_count: carry_count,
+                        arg0: initial_values[0], arg1: initial_values[1], arg2: initial_values[2], arg3: initial_values[3],
+                    })
+                    module = enir_module_push_edge(module, EnirEdge {
+                        id: 1, from_block: 1, to_block: 3, arg_count: carry_count,
+                        arg0: header_values[0], arg1: header_values[1], arg2: header_values[2], arg3: header_values[3],
+                    })
+                    module = enir_module_push_edge(module, EnirEdge {
+                        id: 2, from_block: 1, to_block: 2, arg_count: 0,
+                        arg0: -1, arg1: -1, arg2: -1, arg3: -1,
+                    })
+                    module = enir_module_push_edge(module, EnirEdge {
+                        id: 3, from_block: 2, to_block: 1, arg_count: carry_count,
+                        arg0: back_args[0], arg1: back_args[1], arg2: back_args[2], arg3: back_args[3],
+                    })
+                    symbols.count = root_count
+                    i = 0
+                    while i < carry_count {
+                        symbols.values[carried_indices[i as usize] as usize] = exit_values[i as usize]
+                        i = i + 1
+                    }
+                } else {
+                    seen_close = true
+                }
+            } else if enir_source_starts_with(text, start, finish, "fuel ") {
+                if seen_fuel || symbols.count != 0 || inside_loop || loop_closed { return enir_lower_fail(module, line, 60) }
+                let fuel = enir_source_positive_i64(text, start + 5, finish)
+                if fuel < 0 { return enir_lower_fail(module, line, 61) }
+                module.fuel_limit = fuel
+                seen_fuel = true
+            } else if enir_source_starts_with(text, start, finish, "while ") {
+                if !seen_fuel || inside_loop || loop_closed || symbols.count <= 0 { return enir_lower_fail(module, line, 62) }
+                let condition = enir_source_parse_control_name(text, start, finish, "while ", "!=")
+                condition_index = enir_source_symbol_index(symbols, condition)
+                if condition.len <= 0 || condition_index < 0 { return enir_lower_fail(module, line, 63) }
+                root_count = symbols.count
+                carry_count = if root_count <= 4 { root_count } else { 1 }
+                var i: i64 = 0
+                while i < carry_count {
+                    let symbol_index = if root_count <= 4 { i } else { condition_index }
+                    carried_indices[i as usize] = symbol_index
+                    initial_values[i as usize] = symbols.values[symbol_index as usize]
+                    let header_value = enir_source_push_block_value(&!module, line)
+                    let exit_value = enir_source_push_block_value(&!module, line)
+                    if header_value < 0 || exit_value < 0 { return enir_lower_fail(module, line, 80) }
+                    header_values[i as usize] = header_value
+                    exit_values[i as usize] = exit_value
+                    if symbol_index == condition_index { condition_value_id = header_value }
+                    symbols.values[symbol_index as usize] = header_value
+                    i = i + 1
+                }
+                // Canonical block-argument rows are grouped by block.
+                i = 0
+                while i < carry_count {
+                    module = enir_module_push_block_arg(module, EnirBlockArg {
+                        id: module.block_arg_count, block_id: 1, ordinal: i, value_id: header_values[i as usize],
+                        type_id: 0, provenance_id: header_values[i as usize],
+                    })
+                    i = i + 1
+                }
+                i = 0
+                while i < carry_count {
+                    module = enir_module_push_block_arg(module, EnirBlockArg {
+                        id: module.block_arg_count, block_id: 3, ordinal: i, value_id: exit_values[i as usize],
+                        type_id: 0, provenance_id: exit_values[i as usize],
+                    })
+                    i = i + 1
+                }
+                entry_op_count = module.op_count
+                body_first_op = module.op_count
+                loop_line = line
+                if condition_value_id < 0 { return enir_lower_fail(module, line, 81) }
+                inside_loop = true
+            } else if enir_source_starts_with(text, start, finish, "let ") {
+                if !seen_fuel || loop_closed || (inside_loop && root_count > 4) { return enir_lower_fail(module, line, 10) }
+                var eq = start + 4
+                while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
+                if eq >= finish { return enir_lower_fail(module, line, 10) }
+                let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
+                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 64 { return enir_lower_fail(module, line, 11) }
+                let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                if !lowered.ok { return enir_lower_fail(module, line, 12) }
+                symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
+            } else if enir_source_starts_with(text, start, finish, "set ") {
+                if !inside_loop || root_count > 4 { return enir_lower_fail(module, line, 70) }
+                var eq = start + 4
+                while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
+                if eq >= finish { return enir_lower_fail(module, line, 71) }
+                let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
+                let target_index = enir_source_symbol_index(symbols, lhs)
+                if lhs.len <= 0 || target_index < 0 || target_index >= root_count { return enir_lower_fail(module, line, 72) }
+                var carried = false
+                var i: i64 = 0
+                while i < carry_count {
+                    if carried_indices[i as usize] == target_index { carried = true }
+                    i = i + 1
+                }
+                if !carried { return enir_lower_fail(module, line, 73) }
+                let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                if !lowered.ok { return enir_lower_fail(module, line, 74) }
+                let assigned = enir_source_push_value(&!module, enir_op_emov(), lowered.value_id, -1, line, 0, 0, -1)
+                if assigned < 0 { return enir_lower_fail(module, line, 75) }
+                symbols.values[target_index as usize] = assigned
+            } else if enir_source_starts_with(text, start, finish, "gate ") {
+                if inside_loop || !loop_closed || gate_count != 0 { return enir_lower_fail(module, line, 20) }
+                let name = enir_source_name(text, enir_source_trim_start(text, start + 5, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 21) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count, opcode: enir_op_egate(), result_id: -1, type_id: -1,
+                    a: value_id, b: -1, target: -1, policy_id: 0, memory_slot: -1, fuel_cost: 1,
+                })
+                module = enir_module_push_observation(module, EnirObservation {
+                    id: 0, program_name: module.name, ordinal: 0, kind: enir_observation_gate(),
+                })
+                gate_count = 1
+            } else {
+                return enir_lower_fail(module, line, 40)
+            }
+        }
+        pos = if end < n { end + 1 } else { end }
+        line = line + 1
+    }
+    if !seen_header || !seen_fuel || !loop_closed || !seen_close || inside_loop || loop_line < 0 { return enir_lower_fail(module, line, 50) }
+    module.blocks[3].op_count = module.op_count - exit_first_op
+    if gate_count == 0 {
+        module = enir_module_push_observation(module, EnirObservation {
+            id: 0, program_name: module.name, ordinal: 0, kind: enir_observation_fuel(),
+        })
+    }
+    module = enir_module_finalize_cfg_counts(module, 1)
+    let rc = enir_verify(module)
+    if rc != 0 { return enir_lower_fail(module, line, 2000 + rc) }
+    EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
 }
 
 fn enir_lower_source_profile(text: string, profile: i64) -> EnirLowerResult with Mut, Panic, Div, Alloc {
@@ -618,5 +921,5 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
 }
 
 pub fn enir_lower_source_v1(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
-    enir_lower_source_profile(text, enir_profile_eisa_v1())
+    if enir_source_has_fuel(text) { enir_lower_source_v1_cfg(text) } else { enir_lower_source_profile(text, enir_profile_eisa_v1()) }
 }
