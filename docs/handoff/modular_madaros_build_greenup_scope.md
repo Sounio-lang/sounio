@@ -32,9 +32,9 @@ Full error log captured during the merge investigation: rebuild and grep `^error
 | **W1 wasm backend** | 136 | `wasm/lower.sio` (70), `wasm/encode.sio` (66) | Import-path mismatch, **not** missing code |
 | **W2 codegen EISA symbols** | ✅ done | `native/codegen_x86_linux.sio` | Referenced-but-never-declared EISA symbols — fixed on `gpu/epistemic-tensor-core-next` (see W2 section) |
 | **W3 ir type mismatches** | 3 | `ir/const_prop.sio:1676`, `ir/dce.sio:885`, `ir/opt_strategy.sio:229` | Field-init / call-arg type mismatch |
-| **W4 gpu kernel_ir** | 5 | `gpu/kernel_ir.sio:2525,2582,2600,2618,2669` | `missing field in struct literal` — struct gained a field the literals don't set (EISA gpu lane) |
+| **W4 gpu kernel_ir** | ✅ done | `gpu/kernel_ir.sio` | `missing field in struct literal` in `gpu_build_gemm_shared_ir` — fixed on `gpu/epistemic-tensor-core-next` (see W4 section) |
 | **W0 items.sio is_extern** | ✅ done | `parser/items.sio:1086` | Fixed in `c6321b788` |
-| `<main>` residual | 2 | `<main>:27615,27642` | `unknown field access` — **persists after W2 fix**, so NOT W1/W2 fallout; likely W1 (wasm types) or W4 (gpu) downstream. Re-attribute once W1 lands. |
+| `<main>` residual | 2 | `<main>:27615,27642` | `unknown field access` — **persists after W2 AND W4**, so NOT their fallout; W1 (wasm types) or W3 (ir) downstream. Re-attribute once W1/W3 land. |
 
 Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value is not indexable`, 5 `private struct field access [struct=Lowerer]`, 2 `field initializer type mismatch`, 1 `E001`.
 
@@ -63,6 +63,14 @@ Category totals: 93 `unknown identifier`, 33 `unknown field access`, 28 `value i
 - `ir/const_prop.sio:1676` + `ir/dce.sio:885`: `field initializer type does not match struct field`. `ir/opt_strategy.sio:229`: `E001` call-argument type mismatch. These three files **differ from main** (EISA-modified), so the mismatches are EISA-carried.
 - **Fix direction:** localized — inspect each struct-field/call type and correct the initializer/argument. Likely a widened/narrowed int type or a changed struct shape.
 - **Effort:** small (hours).
+
+### W4 — gpu kernel_ir missing struct fields (✅ DONE, **EISA-specific**)
+- **Root cause:** `gpu/kernel_ir.sio` fn `gpu_build_gemm_shared_ir` has 5 `GpuOp { … }` literals that each omit one required field (Sounio struct literals must set all fields; `GpuOp` has 23). Not a shape mismatch — hand-written literals that dropped a field.
+- **Resolution** (each value recovered from code comments + sibling literals, not defaulted — the missing fields are real operands, so `-1` would miscompile):
+  - `GpuSetpLt` p0 (dst_reg:0) missing `rhs_reg` → **6** (`p0=(r1<m)`, m=param3→r6; siblings p1/p2 use r7/r8).
+  - 3× `GpuAdd` (dst 9/10/11) missing `rhs_reg` → **2** (comment `rdN = rdK + r2`).
+  - `GpuStoreSharedPred` (F32 branch, src_reg:1) missing `lhs_reg` → **0** (predicate p0; mirrors its `GpuLoadGlobalPred dst_reg:1 lhs_reg:0`; the F64-branch twin already had it).
+- **Verified:** modular build → `kernel_ir.sio` errors 5→0, no new gpu errors. Edit is gpu-modular-only (1 file, 5 lines); `lean_single.sio` has 0 of these symbols → gen2==gen3 unaffected by construction.
 
 ## Acceptance criteria
 
