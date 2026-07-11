@@ -8837,6 +8837,49 @@ fn emit_starts_with_regs_a64() with Mut {
     // done:
 }
 
+// Copy x2 bytes from [x1] to [x0], advancing x0 and x1 (x0 ends past the region).
+fn emit_memcpy_a64() with Mut {
+    em32(0xB40000E2)  // loop: cbz x2, +7 (done)
+    em32(0x39400029)  //       ldrb w9, [x1]
+    em32(0x39000009)  //       strb w9, [x0]
+    em32(0x91000421)  //       add x1, x1, #1
+    em32(0x91000400)  //       add x0, x0, #1
+    em32(0xD1000442)  //       sub x2, x2, #1
+    em32(0x17FFFFFA)  //       b -6 (loop)
+    // done:
+}
+
+// arm64 twin of emit_str_concat_slots_x86: result string ptr in x0.
+fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
+    let slot_len_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_len_b = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let slot_dst = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // len_a = str_len(a); len_b = str_len(b)
+    emit_load_var_a64(slot_a); emit_str_len_a64(); emit_store_var_a64(slot_len_a)
+    emit_load_var_a64(slot_b); emit_str_len_a64(); emit_store_var_a64(slot_len_b)
+    // total = len_a + len_b + 1; buffer = heap_alloc(total)
+    emit_load_var_a64(slot_len_a); emit_push_a64()
+    emit_load_var_a64(slot_len_b); emit_pop_x1_a64()  // x0 = len_b, x1 = len_a
+    em32(0x8B010000)   // add x0, x0, x1
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy a: dst=res, src=a, len=len_a
+    emit_load_var_a64(slot_len_a); em32(0xAA0003E2)  // x2 = len_a
+    emit_load_var_a64(slot_a); em32(0xAA0003E1)      // x1 = a
+    emit_load_var_a64(slot_res)                       // x0 = res
+    emit_memcpy_a64()                                 // x0 -> res + len_a
+    emit_store_var_a64(slot_dst)
+    // copy b: dst=res+len_a, src=b, len=len_b
+    emit_load_var_a64(slot_len_b); em32(0xAA0003E2)  // x2 = len_b
+    emit_load_var_a64(slot_b); em32(0xAA0003E1)      // x1 = b
+    emit_load_var_a64(slot_dst)                       // x0 = res + len_a
+    emit_memcpy_a64()                                 // x0 -> end
+    em32(0x3900001F)   // strb wzr, [x0]  (NUL terminator)
+    emit_load_var_a64(slot_res)                       // return res
+}
+
 fn emit_bump_counter_rsi_x86(count_off: i64, bytes_off: i64) with Mut {
     // increment [count_off] and add rsi (length) to [bytes_off]; preserves rax/rcx? NO —
     // clobbers rcx; preserves rax and rsi via push/pop.
@@ -32348,6 +32391,41 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 4
+                EXPR_TY_HASH = 0
+                return
+            }
+            // str_concat(a: string, b: string) -> string — parity with x86 twin (~13066).
+            if src_match(ns, ne - ns, "str_concat") {
+                BUILTIN_SLOT_A = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_B = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    emit_store_var_a64(BUILTIN_SLOT_A)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(BUILTIN_SLOT_B)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_concat_slots_a64(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 EXPR_TY_HASH = 0
                 return
             }
