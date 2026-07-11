@@ -36,6 +36,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.kaxi-bidirectional-return-channel | repo_only | docs/architecture/KAXI_BIDIRECTIONAL_RETURN_CHANNEL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.kaxi-bidirectional.v1 | repo_only | docs/architecture/kaxi_bidirectional.v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.llvm-codegen | repo_only | docs/architecture/LLVM_CODEGEN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.madaros-v2-eisa-semantic-ir | repo_only | docs/architecture/MADAROS_V2_EISA_SEMANTIC_IR.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-cranelift-integration-report | repo_only | docs/architecture/MIR_CRANELIFT_INTEGRATION_REPORT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-pases-documentation | repo_only | docs/architecture/MIR_OPTIMIZATION_PASES_DOCUMENTATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-strategy | repo_only | docs/architecture/MIR_OPTIMIZATION_STRATEGY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
