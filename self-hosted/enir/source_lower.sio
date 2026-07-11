@@ -525,8 +525,10 @@ fn enir_lower_source_resource_straight(text: string, profile: i64) -> EnirLowerR
                 let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
                 if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 64 { return enir_lower_fail(module, line, 11) }
                 let rhs_start = enir_source_trim_start(text, eq + 1, finish)
+                let is_load = enir_source_starts_with(text, rhs_start, finish, "load [") && (str_char_at(text, finish - 1) as i64) == 93
+                if loop_closed && !is_load { return enir_lower_fail(module, line, 15) }
                 var lowered = EnirSourceOperand { ok: false, value_id: -1 }
-                if enir_source_starts_with(text, rhs_start, finish, "load [") && (str_char_at(text, finish - 1) as i64) == 93 {
+                if is_load {
                     let slot_name = enir_source_name(text, rhs_start + 6, finish - 1)
                     let slot_id = enir_source_slot_index(symbols, slot_name)
                     if slot_name.len <= 0 || slot_id < 0 || symbols.slot_sites[slot_id as usize] < 0 { return enir_lower_fail(module, line, 13) }
@@ -773,13 +775,25 @@ fn enir_lower_source_cfg(text: string, profile: i64) -> EnirLowerResult with Mut
                 if condition_value_id < 0 { return enir_lower_fail(module, line, 81) }
                 inside_loop = true
             } else if enir_source_starts_with(text, start, finish, "let ") {
-                if !seen_fuel || loop_closed || (inside_loop && root_count > 4) { return enir_lower_fail(module, line, 10) }
+                if !seen_fuel || (inside_loop && root_count > 4) { return enir_lower_fail(module, line, 10) }
                 var eq = start + 4
                 while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
                 if eq >= finish { return enir_lower_fail(module, line, 10) }
                 let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
                 if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 64 { return enir_lower_fail(module, line, 11) }
-                let lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                let rhs_start = enir_source_trim_start(text, eq + 1, finish)
+                var lowered = EnirSourceOperand { ok: false, value_id: -1 }
+                if enir_source_starts_with(text, rhs_start, finish, "load [") && (str_char_at(text, finish - 1) as i64) == 93 {
+                    let slot_name = enir_source_name(text, rhs_start + 6, finish - 1)
+                    let slot_id = enir_source_slot_index(symbols, slot_name)
+                    if slot_name.len <= 0 || slot_id < 0 { return enir_lower_fail(module, line, 13) }
+                    let value_id = enir_source_push_value(&!module, enir_op_eload(), -1, -1, line, 0, 0, -1)
+                    if value_id < 0 { return enir_lower_fail(module, line, 14) }
+                    module.ops[(module.op_count - 1) as usize].memory_slot = slot_id
+                    lowered = EnirSourceOperand { ok: true, value_id: value_id }
+                } else {
+                    lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                }
                 if !lowered.ok { return enir_lower_fail(module, line, 12) }
                 symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
             } else if enir_source_starts_with(text, start, finish, "set ") {
@@ -802,6 +816,27 @@ fn enir_lower_source_cfg(text: string, profile: i64) -> EnirLowerResult with Mut
                 let assigned = enir_source_push_value(&!module, enir_op_emov(), lowered.value_id, -1, line, 0, 0, -1)
                 if assigned < 0 { return enir_lower_fail(module, line, 75) }
                 symbols.values[target_index as usize] = assigned
+            } else if enir_source_starts_with(text, start, finish, "store ") {
+                if !seen_fuel || loop_closed { return enir_lower_fail(module, line, 30) }
+                let left = enir_source_trim_start(text, start + 6, finish)
+                if left >= finish || (str_char_at(text, left) as i64) != 91 { return enir_lower_fail(module, line, 31) }
+                var close = left + 1
+                while close < finish && (str_char_at(text, close) as i64) != 93 { close = close + 1 }
+                if close >= finish { return enir_lower_fail(module, line, 32) }
+                let slot_name = enir_source_name(text, left + 1, close)
+                let arrow = enir_source_trim_start(text, close + 1, finish)
+                if arrow + 2 > finish || !enir_source_range_eq(text, arrow, arrow + 2, "<-") { return enir_lower_fail(module, line, 33) }
+                let value_name = enir_source_name(text, enir_source_trim_start(text, arrow + 2, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, value_name)
+                if slot_name.len <= 0 || value_name.len <= 0 || value_id < 0 || module.op_count >= ENIR_MAX_OPS { return enir_lower_fail(module, line, 34) }
+                symbols = enir_source_slot_find_or_add(symbols, slot_name)
+                let slot_id = enir_source_slot_index(symbols, slot_name)
+                if slot_id < 0 { return enir_lower_fail(module, line, 35) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count, opcode: enir_op_estore(), result_id: -1, type_id: -1,
+                    a: value_id, b: -1, target: -1, policy_id: -1, memory_slot: slot_id, fuel_cost: 1,
+                })
+                symbols.slot_sites[slot_id as usize] = module.op_count - 1
             } else if enir_source_starts_with(text, start, finish, "gate ") {
                 if inside_loop || !loop_closed || gate_count != 0 { return enir_lower_fail(module, line, 20) }
                 let name = enir_source_name(text, enir_source_trim_start(text, start + 5, finish), finish)

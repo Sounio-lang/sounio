@@ -333,8 +333,54 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
         if !changed { round = module.block_count } else { round = round + 1 }
     }
 
+    // Definite memory initialization is a forward must-analysis. Non-entry
+    // blocks start at top and predecessor intersection converges through loops.
+    let all_memory_slots: i64 = (1 << 16) - 1
+    var memory_in: [i64; 16] = [65535; 16]
+    var memory_out: [i64; 16] = [65535; 16]
+    memory_in[0] = 0
+    memory_out[0] = 0
+    round = 0
+    var memory_changed = true
+    // At most block_count rounds can change a descending must fact; the extra
+    // round is the explicit fixed-point witness.
+    while round <= module.block_count && memory_changed {
+        memory_changed = false
+        var block_id: i64 = 0
+        while block_id < module.block_count {
+            var incoming: i64 = 0
+            if block_id > 0 {
+                incoming = all_memory_slots
+                i = 0
+                while i < module.edge_count {
+                    let edge = module.edges[i as usize]
+                    if edge.to_block == block_id { incoming = incoming & memory_out[edge.from_block as usize] }
+                    i = i + 1
+                }
+            }
+            var outgoing = incoming
+            let block = module.blocks[block_id as usize]
+            var p = block.first_op
+            while p < block.first_op + block.op_count {
+                let op = module.ops[p as usize]
+                if op.opcode == enir_op_estore() && op.memory_slot >= 0 && op.memory_slot < 16 {
+                    outgoing = outgoing | (1 << op.memory_slot)
+                }
+                p = p + 1
+            }
+            if memory_in[block_id as usize] != incoming || memory_out[block_id as usize] != outgoing { memory_changed = true }
+            memory_in[block_id as usize] = incoming; memory_out[block_id as usize] = outgoing
+            block_id = block_id + 1
+        }
+        round = round + 1
+    }
+    if memory_changed { return 2619 }
+
     var gate_count: i64 = 0
-    var memory_sites: [i64; 16] = [-1; 16]
+    var block_memory: [i64; 16] = [0; 16]
+    var linear_memory_sites: [i64; 16] = [-1; 16]
+    i = 0
+    while i < module.block_count { block_memory[i as usize] = memory_in[i as usize]; i = i + 1 }
     i = 0
     while i < module.op_count {
         let op = module.ops[i as usize]
@@ -346,8 +392,8 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
             if op.a != -1 || op.b != -1 || op.type_id < 0 { return 2640 + i }
         } else if op.opcode == enir_op_eload() {
             produces = true
-            if module.block_count != 1 || op.a != -1 || op.b != -1 || op.memory_slot < 0 || op.memory_slot >= 16 ||
-               memory_sites[op.memory_slot as usize] < 0 { return 2660 + i }
+            if op.a != -1 || op.b != -1 || op.memory_slot < 0 || op.memory_slot >= 16 ||
+               (block_memory[block_id as usize] & (1 << op.memory_slot)) == 0 { return 2660 + i }
         } else if op.opcode >= enir_op_eadd() && op.opcode <= enir_op_ediv() {
             produces = true
             if !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || !enir_cfg_value_available(op.b, block_id, i, def_blocks, def_positions, dominators) { return 2680 + i }
@@ -358,19 +404,24 @@ fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
             if op.result_id != -1 || op.type_id != -1 || enir_policy_index(module, op.policy_id) < 0 || !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2720 + i }
             gate_count = gate_count + 1
         } else if op.opcode == enir_op_estore() {
-            if module.block_count != 1 || op.result_id != -1 || op.type_id != -1 || op.b != -1 ||
+            if op.result_id != -1 || op.type_id != -1 || op.b != -1 ||
                op.memory_slot < 0 || op.memory_slot >= 16 ||
                !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2740 + i }
-            memory_sites[op.memory_slot as usize] = i
+            block_memory[block_id as usize] = block_memory[block_id as usize] | (1 << op.memory_slot)
         }
         if produces {
             if op.result_id < 0 || op.result_id >= module.value_count || op.type_id < 0 || module.values[op.result_id as usize].type_id != op.type_id || def_blocks[op.result_id as usize] != -1 { return 2760 + i }
             let provenance = module.provenance[module.values[op.result_id as usize].provenance_id as usize]
             if provenance.transform_id != op.opcode { return 2780 + i }
-            if op.opcode == enir_op_eload() && provenance.input_origin_id != memory_sites[op.memory_slot as usize] { return 2790 + i }
+            if op.opcode == enir_op_eload() {
+                if module.block_count == 1 {
+                    if provenance.input_origin_id != linear_memory_sites[op.memory_slot as usize] { return 2790 + i }
+                } else if provenance.input_origin_id != -1 { return 2790 + i }
+            }
             def_blocks[op.result_id as usize] = block_id
             def_positions[op.result_id as usize] = i
         } else if op.type_id != -1 { return 2800 + i }
+        if op.opcode == enir_op_estore() { linear_memory_sites[op.memory_slot as usize] = i }
         i = i + 1
     }
     i = 0
@@ -469,7 +520,7 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     if module.op_count <= 0 || module.op_count > ENIR_MAX_OPS { return 109 }
     if module.observation_count <= 0 || module.observation_count > ENIR_MAX_OBSERVATIONS { return 110 }
     if module.program_count <= 0 || module.program_count > module.observation_count { return 111 }
-    if module.declared_type_count != module.type_count { return 110 }
+    if module.declared_type_count != module.type_count { return 118 }
     if module.declared_value_count != module.value_count { return 112 }
     if module.declared_provenance_count != module.provenance_count { return 113 }
     if module.declared_policy_count != module.policy_count { return 114 }

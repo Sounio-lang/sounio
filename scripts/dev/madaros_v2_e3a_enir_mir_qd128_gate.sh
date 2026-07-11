@@ -22,12 +22,9 @@ fail() {
 
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" -- \
-  self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu \
-  stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio \
-  self-hosted/enir/ir.sio self-hosted/enir/source_lower.sio self-hosted/enir/interpreter.sio \
-  self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio \
-  || fail "E3A changed production codegen/ABI/runtime, ENIR semantics/lowering/interpreter, pinned qd semantics, or frozen METRON oracle"
+E3A_PROTECTED=(self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio self-hosted/enir/ir.sio self-hosted/enir/interpreter.sio self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio)
+if [[ "${E3A_ALLOW_DOWNSTREAM_ENIR_EXTENSION:-0}" != "1" ]]; then E3A_PROTECTED+=(self-hosted/enir/source_lower.sio); fi
+git diff --quiet "$BASE_REF" -- "${E3A_PROTECTED[@]}" || fail "E3A changed protected production, ENIR, qd, or oracle surfaces"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "ENIR/MIR driver build produced no ELF"
