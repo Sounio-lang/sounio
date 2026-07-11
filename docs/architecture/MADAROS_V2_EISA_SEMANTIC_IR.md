@@ -205,13 +205,36 @@ witness, causal source tamper, E2G through E1 regression, and zero diff over
 production codegen/ABI/runtime, qd semantics, and the frozen oracle. Run
 `scripts/dev/madaros_v2_e2h_enir_memory_move_poison_gate.sh`.
 
-This completes only the declared, finite `E2-ENIR-LOWERING-FULL` corpus. It
-does **not** establish arbitrary nested/path-sensitive loops, general
+This completes only the declared, finite `E2-ENIR-LOWERING-FULL` corpus. By
+itself E2 does **not** establish arbitrary nested/path-sensitive loops, general
 exceptional-value algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, or
 production-codegen selection. Memory in multi-block CFG is explicitly rejected
 rather than assigned an unsound path-insensitive store provenance. Those stages
-remain absent or separately gated; there is no fallback through the shadow
-fixture.
+require separate gates; there is no fallback through the shadow fixture.
+
+Implementation note (2026-07-11):
+`E3A-ENIR-MIR-QD128-ARITHMETIC-FULL` implements the first translation-validated
+`ENIR -> MIR` slice for `v2_const_gate`, `v2_add`, `v2_sub`, `v2_mul`, `v2_div`,
+and `v2_sqrt`. The new semantic MIR is not the target-specific x86 MachineIR.
+It retains ABI-independent logical epistemic products, SSA value identity,
+source provenance, observation effects, explicit poison-on-invalid trap policy,
+one semantic fuel tick per instruction, and an explicit halt terminator.
+
+Every MIR artifact binds the canonical source ENIR hash. A compiler-owned
+relation checker and a separately implemented Python checker both validate the
+type, value, provenance, operation, effect, trap, observation, and fuel mapping.
+The MIR interpreter is separate from the ENIR interpreter; an independent
+Python replay checks the same artifact, and all six logical receipts must be
+bit-identical across ENIR, MIR, and source-fresh METRON execution. The FULL gate
+also includes a divide-by-zero poison witness, eight fail-closed out-of-scope
+ENIRs, 30 structural/relational/canonicalization tampers, eleven runtime receipt
+tampers, cross-name and same-name source-hash rejection, causal source tamper,
+and E2H through E1
+regression. Run `scripts/dev/madaros_v2_e3a_enir_mir_qd128_gate.sh`.
+
+E3A does **not** lower memory, `emov`, profile v0/v1, fuel-only programs, or
+multi-block CFG. It does not choose ABI layout, MachineIR instructions, runtime
+helpers, or production codegen. Those remain later E3 slices and fail closed.
 
 ## 1. Decision
 
@@ -228,8 +251,9 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. That bounded milestone is implemented by the explicitly gated
-E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. Broader language conformance and the
-next `ENIR -> MIR` stage remain unproven.
+E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. The first E3A arithmetic
+`ENIR -> MIR` slice is now implemented. Broader E3
+memory/control coverage and every later ABI/codegen stage remain unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,
