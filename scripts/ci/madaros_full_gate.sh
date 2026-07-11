@@ -66,7 +66,7 @@ mkdir -p "$WORK"
 printf '[madaros-full] madaros=%s\n' "$MADAROS"
 printf '[madaros-full] work=%s\n' "$WORK"
 
-"$MADAROS" --version | grep -Fq "Madares v0.80.0" || fail "version banner missing"
+"$MADAROS" --version | grep -Fq "Madaros v0.80.0" || fail "version banner missing"
 pass "version"
 
 : > "$WORK/empty.sio"
