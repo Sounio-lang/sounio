@@ -2497,3 +2497,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xai/grok-4-1-fast-reasoning = **DONE, no blockers or major issues**. The review confirms that the manuscript distinguishes the original `offSeam` loHi predicate from the new recursive full-box predicate and accurately states the proved equivalences and remaining external item.
 - Required multi-provider fan-out was attempted with xAI, Gemini, and Groq. Gemini failed with OpenRouter HTTP 402 insufficient credits and Groq failed with invalid API key, so only xAI completed. This incomplete fan-out is explicitly logged for re-review when a second provider is restored, as required by the policy failure-mode rule.
 - Raw review directory: `/tmp/llm-offload-IrOS6u/`.
+
+## 2026-07-11 — M1/M3 review: CPC 2026 Yale evidence rescue
+- Files: `run_ossm_native_reference.sio`, `cpc2026_ossm_subset_audit.py`, `cpc2026_yale_evidence_dossier_2026-07-11.md`, and `cpc2026_yale_evidence_gate.sh`.
+- Task: adversarial review of O-SSM formulas, effect-size signs, parser correctness, evidence boundaries, poster-safe wording, and the unresolved native-v2 blocker contract.
+- Providers: xAI/Grok 4.3 = **PASS** on the mathematical reconstruction and final dossier; GitHub Copilot/Gemini 3.1 Pro = **BUG FOUND**, identifying that the Sounio CSV parser ignored scientific notation and that the native-v2 failure lacked a complete blocker record. Both findings were fixed with an exponent-aware parser, an executable regression test, and `BLK-20260711-CPC-OSSM-NATIVE-V2`. Z.AI/GLM-5.2 = **UNAVAILABLE** (usage limit, code 1308). MiniMax M3 = **UNAVAILABLE** (no response before timeout).
+- Verification after repair: `tests/run-pass/cpc2026_scientific_float_parser.sio` prints `CPC2026_SCIENTIFIC_FLOAT_OK`; `scripts/ci/cpc2026_yale_evidence_gate.sh` prints `CPC2026_YALE_EVIDENCE_OK`; frozen Python effect sizes remain `d=11.650868078041157` and `d=-2.781365869022835`; current Madaros native-v2 remains classified, not promoted.
+- Verdict: pass for the evidence dossier and check-only Sounio source. Native O-SSM execution remains blocked and is explicitly excluded from parity claims.
+- Raw reviews: `/tmp/llm-offload-eDy7wx/`, `/tmp/llm-offload-HYSx3e/`, `/tmp/llm-offload-AiVb4r/`, and `/tmp/gemini_pr745_review.txt`.

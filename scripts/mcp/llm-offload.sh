@@ -5,7 +5,9 @@
 #
 # Available providers:
 #   deepseek     — DeepSeek Coder (code intuition, different training data)
-#   xai|grok     — Grok 4.1 Fast Reasoning (blunt realist, no flattery)
+#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
+#   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
+#   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
 #   grok-code    — Grok Code Fast 1 (fast code tasks)
 #   groq         — Llama 3.3 70B on Groq (fast inference)
 #   gemini       — Gemini 2.5 Pro via OpenRouter (1M ctx, best long-context)
@@ -15,10 +17,11 @@
 #   cohere       — Command R+ via OpenRouter (structured analysis, lit review)
 #   openrouter   — OpenRouter Auto (auto-routes to best model)
 #   minimax      — MiniMax M2.7 (Anthropic-compat, long context)
-#   all          — ALL providers (11 models)
+#   all          — ALL providers (13 models)
 #
 # Keys read from env vars (set in ~/.sounio-keys.env):
-#   DEEPSEEK_API_KEY, XAI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY
+#   DEEPSEEK_API_KEY, XAI_API_KEY, ZAI_API_KEY or ZHIPU_API_KEY,
+#   GROQ_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY
 
 set -euo pipefail
 
@@ -50,7 +53,7 @@ call_openai_compat() {
             google/gemini-2.5-pro*) max_tok=2048 ;;
             mistralai/mistral-large*) max_tok=3000 ;;
             cohere/command-a*) max_tok=2048 ;;
-            glm-5*|glm-4.7*|*reasoning*) max_tok=64000 ;;  # reasoning models emit long reasoning_content; 64k lets GLM-5.x finish (finish=stop) instead of truncating
+            glm-5*|glm-4.7*|*reasoning*) max_tok=8192 ;;  # raise explicitly with OFFLOAD_MAX_TOKENS for deep audits
             *) max_tok=8192 ;;
         esac
     fi
