@@ -25,8 +25,8 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - Dual-canon topics: 13
 - Authority count `archived`: 25
 - Authority count `dual`: 13
-- Authority count `historical`: 197
-- Authority count `repo_only`: 542
+- Authority count `historical`: 212
+- Authority count `repo_only`: 527
 - Authority count `website_only`: 150
 
 ## Ownership Summary

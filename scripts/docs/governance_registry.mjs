@@ -19,16 +19,13 @@ const ACTIVE_IMPLEMENTATION_DOCS = new Set([
   'docs/implementation/SELFHOST_CHECKLIST.md',
   'docs/implementation/SELFHOST_REPRODUCIBILITY_REPORT.md',
   'docs/implementation/SELF_HOSTED_COMPILER.md',
-  'docs/implementation/SELF_HOSTING_PHASES.md',
   'docs/implementation/TOOLING_SUMMARY.md',
 ]);
 
 const ACTIVE_FEATURE_DOCS = new Set([
-  'docs/features/GENOMICS_FEATURES.md',
   'docs/features/GPU_RUNTIME.md',
   'docs/features/HOT_RELOAD.md',
   'docs/features/PLATFORM_SUPPORT.md',
-  'docs/features/SMT_INTEGRATION_GUIDE.md',
   'docs/features/VISUAL_SHOWCASE_INTEGRATION.md',
 ]);
 
@@ -162,6 +159,22 @@ const MANUAL_REPO_TOPIC_OVERRIDES = {
     authority: 'repo_only',
     related_artifacts: [],
   },
+  // --- Retired Rust/LLVM/Cranelift/MIR architecture (2026-07-11 doc-reality audit).
+  // These describe a Rust codebase (crates/, compiler/src/*.rs, inkwell, Cranelift
+  // JIT, MIR) that no longer exists; the compiler is self-hosted Madaros emitting
+  // x86-64 ELF. Demoted to `historical` so readers are not misled.
+  'docs/architecture/LLVM_CODEGEN.md': { topic_id: 'repo.docs.architecture.llvm-codegen', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/MIR_CRANELIFT_INTEGRATION_REPORT.md': { topic_id: 'repo.docs.architecture.mir-cranelift-integration-report', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/MIR_OPTIMIZATION_PASES_DOCUMENTATION.md': { topic_id: 'repo.docs.architecture.mir-optimization-pases-documentation', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/MIR_OPTIMIZATION_STRATEGY.md': { topic_id: 'repo.docs.architecture.mir-optimization-strategy', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/MIR_RESEARCH_STRATEGY.md': { topic_id: 'repo.docs.architecture.mir-research-strategy', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/CPS_PIPELINE_INTEGRATION.md': { topic_id: 'repo.docs.architecture.cps-pipeline-integration', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/EFFECT_HANDLERS_IMPLEMENTATION.md': { topic_id: 'repo.docs.architecture.effect-handlers-implementation', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/architecture/ASYNC_RUNTIME.md': { topic_id: 'repo.docs.architecture.async-runtime', audience: 'users', owner_agent: 'A2', authority: 'historical', related_artifacts: [] },
+  'docs/compiler/EFFECT_DISPATCH_INTEGRATION.md': { topic_id: 'repo.docs.compiler.effect-dispatch-integration', audience: 'contributors', owner_agent: 'A4', authority: 'historical', related_artifacts: [] },
+  'docs/compiler/PHASE2_OPTIMIZATIONS.md': { topic_id: 'repo.docs.compiler.phase2-optimizations', audience: 'contributors', owner_agent: 'A4', authority: 'historical', related_artifacts: [] },
+  'docs/compiler/INCREMENTAL_QUERY_OPT_P0.md': { topic_id: 'repo.docs.compiler.incremental-query-opt-p0', audience: 'contributors', owner_agent: 'A4', authority: 'historical', related_artifacts: [] },
+  'docs/compiler/RELEASE_v0.29.0.md': { topic_id: 'repo.docs.compiler.release-v0.29.0', audience: 'contributors', owner_agent: 'A4', authority: 'historical', related_artifacts: [] },
 };
 
 const SKIP_REPO_PATHS = new Set([
