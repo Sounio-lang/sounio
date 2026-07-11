@@ -298,6 +298,9 @@ pass "Madaros v2 E2A v0 straight-line Source-to-ENIR lowering"
 bash scripts/dev/madaros_v2_e2b_enir_cfg_gate.sh
 pass "Madaros v2 E2B v1 finite-CFG Source-to-ENIR lowering"
 
+bash scripts/dev/madaros_v2_e2c_enir_fuel_blockargs_gate.sh
+pass "Madaros v2 E2C fuel and loop-carried block-argument lowering"
+
 run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt
