@@ -194,6 +194,13 @@ fn kaxi_txn_stream_append(s: KaxiTxnStream, value: i64, variance: i64, pl: i64, 
 // through *mut i64 (kaxi_asm_get/kaxi_asm_set).
 let KAXI_ASM_CAP: i64 = 16777216   // 16 MiB reservation (mmap; cheap until touched)
 
+// BSS staging buffer for kaxi_asm_write_file. The byte block lives on the heap
+// (reached via ptr / kaxi_asm_get) and can't be handed to the write_file
+// builtin, which needs a fixed [i8; N] array; copy into this module-scope BSS
+// array (demand-paged, ~0 RSS) sized to the full cap so no artifact truncates.
+// NOT a stack local (16 MiB). Value matches KAXI_ASM_CAP (must be a literal here).
+var KAXI_WRITE_STAGING: [i8; 16777216] = [0; 16777216]
+
 pub struct KaxiAsmBuf {
     ptr: i64,     // heap address of the byte block
     len: i64,
@@ -206,6 +213,22 @@ pub fn kaxi_asm_new() -> KaxiAsmBuf with Alloc {
         len: 0,
         cap: KAXI_ASM_CAP,
     }
+}
+
+// Write a KaxiAsmBuf's bytes to a file. The buffer is heap-backed (bytes at ptr,
+// read via kaxi_asm_get word-RMW), so copy buf.len bytes into the BSS staging
+// array and hand that to the write_file builtin. Returns true on success.
+// Supersedes the old io_write_kaxi_binary(path, [i8; 2097152], len), which
+// assumed the pre-refactor inline-array KaxiAsmBuf and could not see the heap
+// bytes (and was capped at 2 MiB < the 16 MiB buffer).
+pub fn kaxi_asm_write_file(path: string, buf: KaxiAsmBuf) -> bool with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.len && i < 16777216 {
+        KAXI_WRITE_STAGING[i as usize] = kaxi_asm_get(buf, i) as i8
+        i = i + 1
+    }
+    let result = write_file(path, KAXI_WRITE_STAGING, buf.len)
+    result >= 0
 }
 
 // byte read: word at (ptr + (i>>3)*8); extract byte (i&7). *mut is deref-only
