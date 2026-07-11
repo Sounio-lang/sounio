@@ -2623,6 +2623,68 @@ fn emit_load_abs_qword_a64(addr: i64) with Mut {
     em32(0xF9400000)           // ldr x0, [x0]
 }
 
+// a64 twin of emit_store_rax_to_abs_qword_x86: [addr] = x0 (x0 preserved; x9 scratch).
+fn emit_store_x0_to_abs_qword_a64(addr: i64) with Mut {
+    emit_image_addr_reg_a64(9, addr)  // x9 = addr (does not touch x0)
+    em32(0xF9000120)                  // str x0, [x9]
+}
+
+// a64 twin of the x86 __arena_reset chunk-walk (compile_primary :~12331). x0 = the
+// mark m on entry. If m is in the current chunk [base, limit], cursor = m; else the
+// current chunk is younger than the mark and dead — follow its {prev_base,prev_limit}
+// back-link header, munmap it, and repeat. Terminator (prev_base==0, invalid mark):
+// recycle the initial chunk (cursor = base+16). munmap number is arm64/OS-specific
+// (macOS x16=73 / Linux x8=215), unlike the x86 twin's eax=11.
+fn emit_arena_reset_a64() with Mut, Panic, Div {
+    em32(0xAA0003ED)  // mov x13, x0  (x13 = m; survives svc)
+    let arst_loop = CL
+    emit_load_abs_qword_a64(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)   // x0 = base
+    em32(0xEB0001BF)  // cmp x13, x0
+    let arst_walk1 = CL
+    em32(0x54000003)  // b.lo walk  (m < base)
+    emit_load_abs_qword_a64(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)  // x0 = limit
+    em32(0xEB0001BF)  // cmp x13, x0
+    let arst_walk2 = CL
+    em32(0x54000008)  // b.hi walk  (m > limit)
+    // in range: cursor = m
+    em32(0xAA0D03E0)  // mov x0, x13
+    emit_store_x0_to_abs_qword_a64(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+    let arst_done1 = CL
+    em32(0x14000000)  // b done
+    // walk: current chunk is dead — follow back-link, munmap
+    patch_branch_a64(arst_walk1, CL)
+    patch_branch_a64(arst_walk2, CL)
+    emit_load_abs_qword_a64(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)   // x0 = base
+    em32(0xAA0003EE)  // mov x14, x0  (x14 = base = munmap addr)
+    em32(0xF94001CF)  // ldr x15, [x14]  (prev_base)
+    let arst_do_unmap = CL
+    em32(0xB500000F)  // cbnz x15, do_unmap
+    // terminator: invalid mark — recycle initial chunk, keep it mapped
+    em32(0x910041C0)  // add x0, x14, #16
+    emit_store_x0_to_abs_qword_a64(GL_BSS_BASE + AST_ARENA_CURSOR_BSS_OFF)
+    let arst_done2 = CL
+    em32(0x14000000)  // b done
+    // do_unmap:
+    patch_branch_a64(arst_do_unmap, CL)
+    em32(0xF94001C9)  // ldr x9, [x14]     (prev_base)
+    em32(0xF94005CA)  // ldr x10, [x14,#8] (prev_limit)
+    emit_load_abs_qword_a64(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)  // x0 = limit
+    em32(0xCB0E0001)  // sub x1, x0, x14   (len = limit - base)
+    em32(0xAA0E03E0)  // mov x0, x14       (munmap addr = base)
+    if TARGET_OS == 2 { emit_imm64_reg_a64(16, 73) }
+    else { em32(0xD2800000 | ((215 & 0xFFFF) << 5) | 8) }  // movz x8, #215 (SYS_munmap Linux arm64)
+    emit_syscall_a64()
+    em32(0xAA0903E0)  // mov x0, x9   (prev_base)
+    emit_store_x0_to_abs_qword_a64(GL_BSS_BASE + AST_ARENA_BASE_BSS_OFF)
+    em32(0xAA0A03E0)  // mov x0, x10  (prev_limit)
+    emit_store_x0_to_abs_qword_a64(GL_BSS_BASE + AST_ARENA_LIMIT_BSS_OFF)
+    em32(0x14000000 | (((arst_loop - CL) / 4) & 0x3FFFFFF))  // b loop
+    // done:
+    patch_branch_a64(arst_done1, CL)
+    patch_branch_a64(arst_done2, CL)
+    em32(0xD2800000)  // mov x0, #0
+}
+
 // Patch ARM64 branch instruction at off to jump to target
 fn patch_branch_a64(off: i64, target: i64) with Mut, Panic {
     let rel = (target - off) / 4
@@ -29852,7 +29914,12 @@ fn emit_syscall_a64() with Mut {
 // a64 stack (16-byte stride, arg0/number highest). Load number→x8, a1..a6→x0..x5,
 // then svc; result in x0. (arm64 syscall ABI vs x86 rax/rdi/rsi/rdx/r10/r8/r9.)
 fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
-    if argc >= 1 { em32(0xF94003E8 | ((((argc - 1) * 16) / 8) << 10)) }  // ldr x8, [sp, #(argc-1)*16]  (number)
+    // Syscall number: x16 on macOS (svc #0x80), x8 on Linux (svc #0) — mirror the
+    // OS split the rest of the a64 backend uses (e.g. emit_write_file_a64).
+    if argc >= 1 {
+        if TARGET_OS == 2 { em32(0xF94003F0 | ((((argc - 1) * 16) / 8) << 10)) }  // ldr x16, [sp, #(argc-1)*16]
+        else { em32(0xF94003E8 | ((((argc - 1) * 16) / 8) << 10)) }              // ldr x8
+    }
     if argc >= 2 { em32(0xF94003E0 | ((((argc - 2) * 16) / 8) << 10)) }  // ldr x0, [sp, ...]  (a1)
     if argc >= 3 { em32(0xF94003E1 | ((((argc - 3) * 16) / 8) << 10)) }  // ldr x1  (a2)
     if argc >= 4 { em32(0xF94003E2 | ((((argc - 4) * 16) / 8) << 10)) }  // ldr x2  (a3)
@@ -32230,6 +32297,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_syscall6_a64(sys_argc)
                 }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0
+                return
+            }
+            // __arena_reset(m) — restore the Box-arena cursor to mark m, munmapping
+            // any chunks younger than the mark (a64 mirror of x86 :~12315).
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "__arena_reset") {
+                EP = EP + 1
+                compile_or_a64()  // x0 = m
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_arena_reset_a64()
+                EXPR_IS_F64 = 0; EXPR_TY = 5; EXPR_TY_HASH = 0
                 return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print") {
