@@ -31308,7 +31308,100 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized
-    if k == 6 { EP = EP + 1; compile_or_a64(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    if k == 6 {
+        EP = EP + 1
+        compile_or_a64()
+        if TK[EP as usize] == 28 {
+            // Tuple literal `(e0, e1, …, eN)` — a64 port of the x86 twin
+            // (compile_primary :~11310). Save each element's x0 to its own temp
+            // slot immediately (so the next element's compile_or_a64 can't clobber
+            // it), then copy every element into one buffer at its cumulative
+            // offset. Without this the a64 paren handler compiled ONLY the first
+            // element and left EP at the comma; the enclosing match/expr arm loop
+            // then skipped that comma and mis-parsed the 2nd element as a new arm
+            // pattern — spuriously binding it and stamping the scrutinee's (box)
+            // type onto an i64 var (the int→box #740 cascade in tuple-returning
+            // fns like collect_module_exports_variant_list).
+            var elem_ty: [i64; 16] = [0; 16]
+            var elem_hash: [i64; 16] = [0; 16]
+            var elem_nslots: [i64; 16] = [0; 16]
+            var elem_slot: [i64; 16] = [0; 16]
+            var n: i64 = 0
+            elem_ty[0] = EXPR_TY
+            elem_hash[0] = EXPR_TY_HASH
+            elem_nslots[0] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            elem_slot[0] = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(elem_slot[0])
+            n = 1
+            while ep_before_body_close() && TK[EP as usize] == 28 {
+                EP = EP + 1  // skip ,
+                if TK[EP as usize] == 7 { break }  // trailing comma
+                compile_or_a64()
+                if n >= 16 {
+                    tc_error_hard(EP, "tuple literal exceeds maximum of 16 elements")
+                    n = n + 1
+                } else {
+                    elem_ty[n as usize] = EXPR_TY
+                    elem_hash[n as usize] = EXPR_TY_HASH
+                    elem_nslots[n as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                    elem_slot[n as usize] = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(elem_slot[n as usize])
+                    n = n + 1
+                }
+            }
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            let tup_count = n
+            var real_n = n
+            if real_n > 16 { real_n = 16 }
+            var total_slots: i64 = 0
+            var i: i64 = 0
+            while i < real_n { total_slots = total_slots + elem_nslots[i as usize]; i = i + 1 }
+            let tup_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + total_slots
+            // Element 0 at the highest slot (lowest address = the returned pointer),
+            // later elements at successively higher addresses.
+            var prefix: i64 = 0
+            i = 0
+            while i < real_n {
+                let dst_start = tup_base + total_slots - 1 - prefix
+                emit_load_var_a64(elem_slot[i as usize])  // restore this element's x0
+                if elem_nslots[i as usize] > 1 {
+                    copy_agg_into_struct_slots_a64(dst_start, elem_ty[i as usize], elem_hash[i as usize])
+                } else {
+                    emit_store_var_a64(dst_start)
+                }
+                prefix = prefix + elem_nslots[i as usize]
+                i = i + 1
+            }
+            emit_lea_var_a64(tup_base + total_slots - 1)  // return pointer to element 0
+            EXPR_IS_F64 = 0
+            EXPR_TY = 6
+            let first_ty = elem_ty[0]
+            let first_hash = elem_hash[0]
+            let first_nslots = elem_nslots[0]
+            let last_ty = elem_ty[(real_n - 1) as usize]
+            let last_hash = elem_hash[(real_n - 1) as usize]
+            let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
+            var first_f64_flag: i64 = 0
+            if first_ty == 2 { first_f64_flag = 1 } else if first_ty == 4 { first_f64_flag = 2 }
+            var last_f64_flag: i64 = 0
+            if last_ty == 2 { last_f64_flag = 1 } else if last_ty == 4 { last_f64_flag = 2 }
+            EXPR_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            i = 0
+            while i < real_n {
+                TUP_SCRATCH_ELEM_TY[i as usize] = elem_ty[i as usize]
+                TUP_SCRATCH_ELEM_HASH[i as usize] = elem_hash[i as usize]
+                i = i + 1
+            }
+            TUP_SCRATCH_COUNT = real_n
+            tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
+            return
+        }
+        if TK[EP as usize] == 7 { EP = EP + 1 }
+        return
+    }
     // Address-of
     if k == 44 {
         EP = EP + 1
