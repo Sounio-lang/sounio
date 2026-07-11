@@ -1336,18 +1336,21 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
-// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id.
+// Resolve one IrCall/IrCallSret to the merged module's canonical fn_id without
+// passing the boxed IrInstr by value through the bootstrap compiler.
 // Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
-// callee symbol at the current fn_id when instr.name is empty.
-fn ir_module_resolve_one_call_target(module: &IrModule, instr: IrInstr) -> i64 with Mut, Div, Panic {
-    let old_id = instr.fn_id
-    var resolve_name = instr.name
+// callee symbol at the current fn_id when instr_name is empty.
+fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
+    var resolve_name = instr_name
     if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
         resolve_name = (*module).functions[old_id as usize].name
     }
     if resolve_name.len > 0 {
         let new_id = ir_merge_find_function_name_index(module, resolve_name)
-        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
+        // A canonical zero-body symbol can be a native builtin (str_char_at,
+        // print, math intrinsics). Preserve symbol identity here; codegen owns
+        // the supported-builtin or unresolved-extern verdict.
+        if new_id >= 0 {
             return new_id
         }
     }
@@ -1374,9 +1377,12 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
         while ii < (*module).functions[fi as usize].instr_count {
             let op = (*module).functions[fi as usize].instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_one_call_target(
+                let cur_fn = (*module).functions[fi as usize].instrs[ii as usize].fn_id
+                let cur_nm = (*module).functions[fi as usize].instrs[ii as usize].name
+                (*module).functions[fi as usize].instrs[ii as usize].fn_id = ir_module_resolve_call_target_fields(
                     module,
-                    (*module).functions[fi as usize].instrs[ii as usize]
+                    cur_fn,
+                    cur_nm
                 )
             }
             ii = ii + 1
@@ -1631,70 +1637,69 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
     fn_id
 }
 
-// Post-finalize compaction: rewrite every direct fn-ref opcode to the canonical
-// body index for the callee symbol. Whole IrInstr slot writes avoid the
-// &!Box<IrModule> in-place fn_id mutation drop.
-fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+// WP-A11: compact fn-refs in place (&! IrModule, no ~500MB by-value copy). Per-fn slot
+// to a local, mutated, written back whole (2-level, no miscompiled 3-level store).
+fn ir_module_compact_duplicate_fn_refs_ip(module: &! IrModule) with Mut, Div, Panic {
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
-        while fi < out.fn_count {
+        while fi < (*module).fn_count {
+            var f = (*module).functions[fi as usize]
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                if ir_merge_is_direct_fn_ref_opcode(out.functions[fi as usize].instrs[ii as usize].op) {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
+            while ii < f.instr_count {
+                if ir_merge_is_direct_fn_ref_opcode(f.instrs[ii as usize].op) {
+                    var ins = f.instrs[ii as usize]
                     let old_id = ins.fn_id
                     var canon: i64 = old_id
                     if ins.name.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, ins.name)
-                        if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
+                        let by_name = ir_merge_find_function_name_index(module, ins.name)
+                        if by_name >= 0 && (*module).functions[by_name as usize].instr_count > 0 {
                             canon = by_name
                         }
                     } else if old_id >= 0 {
-                        canon = ir_module_canonical_fn_id_for_index(&out, old_id)
+                        canon = ir_module_canonical_fn_id_for_index(module, old_id)
                     }
                     if canon >= 0
-                        && canon < out.fn_count
-                        && out.functions[canon as usize].instr_count > 0
+                        && canon < (*module).fn_count
+                        && (*module).functions[canon as usize].instr_count > 0
                         && canon != old_id {
                         ins.fn_id = canon
-                        out.functions[fi as usize].instrs[ii as usize] = ins
+                        f.instrs[ii as usize] = ins
                     }
                 }
                 ii = ii + 1
             }
+            (*module).functions[fi as usize] = f
             fi = fi + 1
         }
         pass = pass + 1
     }
-    out
 }
 
 // Imported/module-merged aggregate-return callees can arrive with IrReturnSret
 // bodies after stub promotion even when the IrFunction SRET metadata was lost
 // on the copied slot. Reconstruct the callee-side ABI marker from the body so
 // native-v2 shifts argument registers exactly as it does for local SRET.
-fn ir_module_restore_sret_metadata_from_body(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+fn ir_module_restore_sret_metadata_from_body_ip(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
-    while fi < out.fn_count {
+    while fi < (*module).fn_count {
+        var f = (*module).functions[fi as usize]
         var ii: i64 = 0
-        while ii < out.functions[fi as usize].instr_count {
-            let ins = out.functions[fi as usize].instrs[ii as usize]
+        while ii < f.instr_count {
+            let ins = f.instrs[ii as usize]
             if ins.op == IrOpcode::IrReturnSret {
-                out.functions[fi as usize].is_sret = 1
+                f.is_sret = 1
                 if ins.src1 >= 0 {
-                    out.functions[fi as usize].sret_dest_reg = ins.src1
+                    f.sret_dest_reg = ins.src1
                 }
-                ii = out.functions[fi as usize].instr_count
+                ii = f.instr_count
             } else {
                 ii = ii + 1
             }
         }
+        (*module).functions[fi as usize] = f
         fi = fi + 1
     }
-    out
 }
 
 // Deep-copy an IrFunction so lean_single struct assignment does not alias instr slots.
@@ -1711,66 +1716,72 @@ fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
 // When merge leaves import stubs (ic=0) alongside lowered duplicates at higher
 // fn_id, copy the canonical body into the stub slot so codegen fn_offsets for
 // stale low indices still reach real implementations.
-fn ir_module_promote_canonical_into_stub_slots(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+fn ir_module_promote_canonical_into_stub_slots_ip(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
-    while fi < out.fn_count {
-        if out.functions[fi as usize].instr_count == 0 {
-            let sym_name = out.functions[fi as usize].name
+    while fi < (*module).fn_count {
+        if (*module).functions[fi as usize].instr_count == 0 {
+            let sym_name = (*module).functions[fi as usize].name
             if sym_name.len > 0 {
-                let canon = ir_merge_find_function_name_index(&out, sym_name)
-                if canon >= 0 && canon != fi && out.functions[canon as usize].instr_count > 0 {
-                    out.functions[fi as usize] = ir_function_deep_copy(out.functions[canon as usize])
+                let canon = ir_merge_find_function_name_index(module, sym_name)
+                if canon >= 0 && canon != fi && (*module).functions[canon as usize].instr_count > 0 {
+                    let promoted = ir_function_deep_copy((*module).functions[canon as usize])
+                    (*module).functions[fi as usize] = promoted
                 }
             }
         }
         fi = fi + 1
     }
-    out
 }
 
 // Materialize merged IR, resolve call targets on an owned IrModule (not through
 // &! Box<IrModule> — lean_single drops those writes), and return the finalized module.
-fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
-    ir_module_resolve_named_calls(&! out)
+// WP-A11: finalize in place through &! IrModule (was by-value threading that copied the
+// ~500MB module 5+ times -> ~18GB VM / OOM on multi-module builds).
+fn ir_module_finalize_merged_calls_ip(module: &! IrModule) with Mut, Div, Panic {
+    ir_module_resolve_named_calls(module)
     // Promote before compaction so import stubs at low fn_id gain bodies while
     // seed main still references those indices.
-    out = ir_module_promote_canonical_into_stub_slots(out)
-    out = ir_module_compact_duplicate_fn_refs(out)
-    out = ir_module_promote_canonical_into_stub_slots(out)
+    ir_module_promote_canonical_into_stub_slots_ip(module)
+    ir_module_compact_duplicate_fn_refs_ip(module)
+    ir_module_promote_canonical_into_stub_slots_ip(module)
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
-        while fi < out.fn_count {
+        while fi < (*module).fn_count {
+            var f = (*module).functions[fi as usize]
             var ii: i64 = 0
-            while ii < out.functions[fi as usize].instr_count {
-                let op = out.functions[fi as usize].instrs[ii as usize].op
+            while ii < f.instr_count {
+                let op = f.instrs[ii as usize].op
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    var ins = out.functions[fi as usize].instrs[ii as usize]
-                    ins.fn_id = ir_module_resolve_one_call_target(&out, ins)
-                    out.functions[fi as usize].instrs[ii as usize] = ins
+                    // A8 fix: resolve from scalar fields (no IrInstr by-value copy).
+                    let cur_fn = f.instrs[ii as usize].fn_id
+                    let cur_nm = f.instrs[ii as usize].name
+                    let new_id = ir_module_resolve_call_target_fields(module, cur_fn, cur_nm)
+                    if new_id != cur_fn {
+                        var ins = f.instrs[ii as usize]
+                        ins.fn_id = new_id
+                        f.instrs[ii as usize] = ins
+                    }
                 }
                 ii = ii + 1
             }
+            (*module).functions[fi as usize] = f
             fi = fi + 1
         }
         pass = pass + 1
     }
-    out = ir_module_restore_sret_metadata_from_body(out)
-    out
+    ir_module_restore_sret_metadata_from_body_ip(module)
 }
 
 // Reinstall seed user main after finalize: owned-module finalize passes can clobber
 // fn=0 under the lean_single JIT. Stub slots are already promoted; keep seed fn_ids.
-fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) -> IrModule with Mut, Div, Panic {
-    var out = module
-    if out.fn_count <= 0 {
-        return out
+fn ir_module_restore_user_main_calls_ip(module: &! IrModule, user_main: IrFunction) with Mut, Div, Panic {
+    if (*module).fn_count <= 0 {
+        return
     }
-    var slot = out.functions[0 as usize]
+    var slot = (*module).functions[0 as usize]
     slot.name = user_main.name
     slot.instr_count = user_main.instr_count
     slot.reg_count = user_main.reg_count
@@ -1795,9 +1806,8 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
         slot.instrs[ii as usize] = user_main.instrs[ii as usize]
         ii = ii + 1
     }
-    out.functions[0 as usize] = slot
-    out = ir_module_restore_sret_metadata_from_body(out)
-    out
+    (*module).functions[0 as usize] = slot
+    ir_module_restore_sret_metadata_from_body_ip(module)
 }
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
@@ -4297,6 +4307,202 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
     verdict
 }
 
+// ============================================================================
+// Per-module arena-reset scratch (Box-arena churn reclaim, see docs/handoff).
+//
+// module_frontend_lower_programs_array_direct_box lowers each imported module
+// into a fresh Box<IrModule> (dep_box, ~hundreds of MB: [IrFunction; 2048])
+// purely as scratch to extract a handful of merged functions into the
+// running accumulator (acc_box). Everything in dep_box's Box-arena window
+// is dead once its functions/strings/epistemic/algebras are copied into
+// acc_box BY VALUE -- except IrInstr.call_args: Option<Box<IrRegList>>,
+// whose Box POINTER is copied shallow by struct assignment. Left alone,
+// that pointer would keep referencing dep_box's soon-to-be-reset memory.
+//
+// Fix: before resetting the arena, walk the newly-appended function range
+// [old_fn_count, new_fn_count) and extract every call_args chain (bounded
+// to 64 args/call-site, matching LowerExprArgsResult capacity) into this
+// BSS scratch buffer -- plain
+// fixed arrays, NOT Box-arena memory, so __arena_reset never touches them.
+// After the reset, rebuild fresh Box<IrRegList> chains from the scratch
+// buffer (landing in the just-freed, now-reused window) and write them
+// back into acc_box's instrs. If a module's call-arg sites exceed the
+// bounded capacity, the reset is skipped for that module only (strictly
+// correctness-preserving fallback -- just reclaims less memory).
+// ============================================================================
+let MF_AREBOX_CAP: i64 = 8192
+var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
+var MF_AREBOX_II: [i64; 8192] = [0; 8192]
+var MF_AREBOX_ARGC: [i64; 8192] = [0; 8192]
+var MF_AREBOX_ARGS: [i64; 524288] = [0; 524288]
+var MF_AREBOX_COUNT: i64 = 0
+var MF_AREBOX_OVERFLOW: bool = false
+
+fn mf_arebox_reset_scratch() with Mut {
+    MF_AREBOX_COUNT = 0
+    MF_AREBOX_OVERFLOW = false
+}
+
+// Extract up to 64 regs from a call_args chain into MF_AREBOX_ARGS[slot*64 ..].
+fn mf_arebox_extract(slot: i64, args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = args
+    while n < 64 {
+        match cur {
+            Some(node) => {
+                MF_AREBOX_ARGS[(slot * 64 + n) as usize] = (*node).head
+                cur = (*node).tail
+                n = n + 1
+            }
+            _ => { return n }
+        }
+    }
+    n
+}
+
+// Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
+// args NOW while the source (pre-reset) memory is still valid.
+fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>, expected_argc: i64) with Mut, Panic, Div {
+    if MF_AREBOX_COUNT >= MF_AREBOX_CAP {
+        MF_AREBOX_OVERFLOW = true
+        return
+    }
+    let slot = MF_AREBOX_COUNT
+    let n = mf_arebox_extract(slot, args)
+    if expected_argc > n {
+        MF_AREBOX_OVERFLOW = true
+        if module_frontend_lower_trace_enabled() {
+            print("lower_array: call_args_pre_reset_truncated fi=")
+            print_int(fi)
+            print(" ii=")
+            print_int(ii)
+            print(" expected=")
+            print_int(expected_argc)
+            print(" captured=")
+            print_int(n)
+            print("\n")
+        }
+        return
+    }
+    MF_AREBOX_FI[slot as usize] = fi
+    MF_AREBOX_II[slot as usize] = ii
+    MF_AREBOX_ARGC[slot as usize] = n
+    MF_AREBOX_COUNT = slot + 1
+}
+
+// Rebuild a fresh Box<IrRegList> chain from scratch slot `slot`, preserving
+// original head-first arg order. Must only be called AFTER __arena_reset so
+// the Box::new allocations land in the freed (reused) window.
+fn mf_arebox_list_len(args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = args
+    while n < 64 {
+        match cur {
+            Some(node) => {
+                n = n + 1
+                cur = (*node).tail
+            }
+            _ => return n,
+        }
+    }
+    n
+}
+
+fn mf_arebox_payload_matches(slot: i64, args: Option<Box<IrRegList>>) -> bool with Mut, Panic, Div {
+    let expected = MF_AREBOX_ARGC[slot as usize]
+    var index: i64 = 0
+    var cur = args
+    while index < expected && index < 64 {
+        match cur {
+            Some(node) => {
+                if (*node).head != MF_AREBOX_ARGS[(slot * 64 + index) as usize] {
+                    return false
+                }
+                index = index + 1
+                cur = (*node).tail
+            }
+            _ => return false,
+        }
+    }
+    index == expected
+}
+
+fn mf_arebox_rebuild(slot: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic, Div {
+    let n = MF_AREBOX_ARGC[slot as usize]
+    if n <= 0 {
+        return None
+    }
+    var out = ir_reg_list_single(MF_AREBOX_ARGS[(slot * 64) as usize])
+    var k: i64 = 1
+    while k < n {
+        out = ir_reg_list_append(out, MF_AREBOX_ARGS[(slot * 64 + k) as usize])
+        k = k + 1
+    }
+    Some(Box::new(out))
+}
+
+// Scan functions [fn_lo, fn_hi) of `module` for instrs carrying a live
+// call_args chain, recording each for post-reset re-boxing. Returns false
+// (capacity exceeded, MF_AREBOX_OVERFLOW set) if the caller must skip the
+// arena reset for this module.
+fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, Panic, Div {
+    mf_arebox_reset_scratch()
+    var fi = fn_lo
+    while fi < fn_hi {
+        let ic = (*module).functions[fi as usize].instr_count
+        var ii: i64 = 0
+        while ii < ic {
+            match (*module).functions[fi as usize].instrs[ii as usize].call_args {
+                Some(_) => mf_arebox_record(
+                    fi,
+                    ii,
+                    (*module).functions[fi as usize].instrs[ii as usize].call_args,
+                    (*module).functions[fi as usize].instrs[ii as usize].arg_count
+                )
+                _ => {}
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    !MF_AREBOX_OVERFLOW
+}
+
+// Write the rebuilt (post-reset) call_args chains back into `module`. Must be
+// called strictly after __arena_reset.
+fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
+    var s: i64 = 0
+    while s < MF_AREBOX_COUNT {
+        let fi = MF_AREBOX_FI[s as usize]
+        let ii = MF_AREBOX_II[s as usize]
+        let rebuilt = mf_arebox_rebuild(s)
+        if module_frontend_lower_trace_enabled() {
+            let rebuilt_count = mf_arebox_list_len(rebuilt)
+            if rebuilt_count != MF_AREBOX_ARGC[s as usize] {
+                print("lower_array: call_args_post_reset_truncated fi=")
+                print_int(fi)
+                print(" ii=")
+                print_int(ii)
+                print(" expected=")
+                print_int(MF_AREBOX_ARGC[s as usize])
+                print(" rebuilt=")
+                print_int(rebuilt_count)
+                print("\n")
+            } else if !mf_arebox_payload_matches(s, rebuilt) {
+                print("lower_array: call_args_post_reset_payload_mismatch fi=")
+                print_int(fi)
+                print(" ii=")
+                print_int(ii)
+                print(" argc=")
+                print_int(rebuilt_count)
+                print("\n")
+            }
+        }
+        (*module).functions[fi as usize].instrs[ii as usize].call_args = rebuilt
+        s = s + 1
+    }
+}
+
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
     loaded: i64,
@@ -4332,6 +4538,14 @@ fn module_frontend_lower_programs_array_direct_box(
                 print("lower_array: dep_begin ")
                 print_int(i)
                 print("\n")
+                // Mark the Box-arena BEFORE lowering module i. dep_items itself
+                // (programs[i].items) was already parsed earlier in the
+                // load/typecheck phase and must stay live for OTHER modules'
+                // extern resolution, so it is intentionally allocated before
+                // this mark and is untouched by the reset below -- only the
+                // per-module lowering scratch (dep_box and everything it
+                // pulls in) falls inside [mark, reset).
+                let dep_arena_mark = __arena_mark()
                 let dep_items = (*programs)[i as usize].items
                 let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
@@ -4346,6 +4560,11 @@ fn module_frontend_lower_programs_array_direct_box(
                         print_int(i)
                         print("\n")
                         let dep_fn_count = (*dep_box).fn_count
+                        // Snapshot before this module's functions are appended --
+                        // acc_box.fn_count only grows in the mfi loop below, so
+                        // this is the exact appended range [old_fn_count, ..).
+                        let dep_merge_old_fn_count = (*acc_box).fn_count
+                        let string_offset = (*acc_box).string_count
                         let contest_offset = (*acc_box).epistemic.contest_count
                         let robust_offset = (*acc_box).epistemic.robust_proof_count
                         let decision_offset = (*acc_box).epistemic.decision_certificate_count
@@ -4357,23 +4576,38 @@ fn module_frontend_lower_programs_array_direct_box(
                         let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
                         let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
                         let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
+                        // Functions with index < acc_fn_before existed before this dep merge;
+                        // a fn_remap target below this marks a DEDUP reuse (skip re-placing).
+                        let acc_fn_before = (*acc_box).fn_count
                         var fn_remap: [i64; 2048] = [-1; 2048]
                         var append_count: i64 = 0
                         var rfi: i64 = 0
                         while rfi < dep_fn_count {
                             let dep_ic = (*dep_box).functions[rfi as usize].instr_count
                             var stub_idx: i64 = 0 - 1
+                            var existing_body_idx: i64 = 0 - 1
                             var sfi: i64 = 0
                             while sfi < (*acc_box).fn_count {
                                 if ir_name_eq(
                                     (*acc_box).functions[sfi as usize].name,
                                     (*dep_box).functions[rfi as usize].name
-                                ) && (*acc_box).functions[sfi as usize].instr_count <= 0 {
-                                    stub_idx = sfi
+                                ) {
+                                    if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                        stub_idx = sfi
+                                    } else {
+                                        existing_body_idx = sfi
+                                    }
                                 }
                                 sfi = sfi + 1
                             }
-                            if stub_idx >= 0 && dep_ic > 0 {
+                            if existing_body_idx >= 0 {
+                                // DEDUP: this function's body is already merged (a shared
+                                // import pulled in via another module). Point dep's callers
+                                // at the existing copy and skip re-appending the duplicate
+                                // body. Post-merge call finalize (ir_module_finalize_merged_calls)
+                                // resolves every call by name to this kept copy.
+                                fn_remap[rfi as usize] = existing_body_idx
+                            } else if stub_idx >= 0 && dep_ic > 0 {
                                 // Keep import stubs (ic=0) at low fn_id indices and append
                                 // lowered bodies — matches the 3-module clinical+knightian
                                 // layout where stub slots survive for post-finalize promotion.
@@ -4395,7 +4629,9 @@ fn module_frontend_lower_programs_array_direct_box(
                         var mfi: i64 = 0
                         while mfi < dep_fn_count {
                             let dst_fi = fn_remap[mfi as usize]
-                            if dst_fi >= 0 {
+                            // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
+                            // skip re-placing it. Only place newly-appended functions.
+                            if dst_fi >= acc_fn_before {
                                 // Remap cross-module call targets by symbol name while fn_id
                                 // values are still in the dependency module index space.
                                 var dep_func = (*dep_box).functions[mfi as usize]
@@ -4435,6 +4671,24 @@ fn module_frontend_lower_programs_array_direct_box(
                         }
                         (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
                         (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
+                        // Every field copied into acc_box above (functions incl.
+                        // instrs, string_table entries, epistemic, algebras) is a
+                        // plain value copy with no Box field except IrInstr.call_args
+                        // (Option<Box<IrRegList>> -- audited: the only Box reachable
+                        // from IrModule/IrFunction/IrInstr). Re-box those chains
+                        // before reclaiming dep_box's arena window: extract now
+                        // (source still valid), reset, then rebuild fresh in the
+                        // freed window.
+                        let dep_merge_new_fn_count = (*acc_box).fn_count
+                        let dep_arena_can_reset = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                        if dep_arena_can_reset {
+                            __arena_reset(dep_arena_mark)
+                            mf_arebox_apply(&! (*acc_box))
+                        } else {
+                            print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                            print_int(i)
+                            print("\n")
+                        }
                         print("lower_array: merge_done ")
                         print_int(i)
                         print("\n")
@@ -4603,14 +4857,16 @@ fn module_frontend_merge_imported_into(
         print("\n")
         return false
     }
-    let module_box = lowered.module
+    var module_box = lowered.module
     if (*module_box).fn_count <= 0 {
         print("IR lowering produced empty module\n")
         return false
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    var finalized = ir_module_finalize_merged_calls(*module_box)
-    (*out_module) = ir_module_restore_user_main_calls(finalized, user_main_snapshot)
+    // WP-A11: finalize + restore in place, then one copy into out_module.
+    ir_module_finalize_merged_calls_ip(&! (*module_box))
+    ir_module_restore_user_main_calls_ip(&! (*module_box), user_main_snapshot)
+    (*out_module) = (*module_box)
     true
 }
 
@@ -4712,15 +4968,17 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         return 1
     }
 
-    let module_box = lowered.module
+    var module_box = lowered.module
     if module_frontend_dump_merged_calls_enabled() {
         print("MERGE_DUMP: pre_finalize\n")
         ir_module_dump_merge_calls(&(*module_box))
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    var merged_module = ir_module_finalize_merged_calls(*module_box)
-    merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
-    let fn_count = merged_module.fn_count
+    // WP-A11: finalize + restore in place on the Box pointee (was *module_box by-value
+    // deref + merged_module stack local + 5 internal copies -> ~18GB VM / OOM).
+    ir_module_finalize_merged_calls_ip(&! (*module_box))
+    ir_module_restore_user_main_calls_ip(&! (*module_box), user_main_snapshot)
+    let fn_count = (*module_box).fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
@@ -4732,11 +4990,11 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
         return 1
     }
     if module_frontend_dump_merged_calls_enabled() {
-        ir_module_dump_merge_calls(&merged_module)
+        ir_module_dump_merge_calls(&(*module_box))
     }
     parser_reset_last_errors()
     let target_spec = native_resolve_target("native", "auto", false)
-    let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)
+    let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
@@ -4831,11 +5089,11 @@ pub fn module_frontend_lower_imported_to_module_box(main_path: string) -> Module
         return module_frontend_lower_box_error(lowered.error_msg)
     }
 
-    let module_box = lowered.module
+    var module_box = lowered.module
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    var merged_module = ir_module_finalize_merged_calls(*module_box)
-    merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
-    let fn_count = merged_module.fn_count
+    ir_module_finalize_merged_calls_ip(&! (*module_box))
+    ir_module_restore_user_main_calls_ip(&! (*module_box), user_main_snapshot)
+    let fn_count = (*module_box).fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
@@ -4847,7 +5105,7 @@ pub fn module_frontend_lower_imported_to_module_box(main_path: string) -> Module
         return module_frontend_lower_box_error("ir_lowering_empty_module")
     }
     parser_reset_last_errors()
-    module_frontend_lower_box_ok(Box::new(merged_module), ir_empty_validated_patch_stats())
+    module_frontend_lower_box_ok(module_box, ir_empty_validated_patch_stats())
 }
 
 fn load_multimodule_lower_program_traced(

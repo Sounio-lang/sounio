@@ -20,7 +20,7 @@ _SOUNIO_MADAROS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SOUNIO_MADAROS_ROOT_DIR="${_SOUNIO_MADAROS_ROOT_DIR:-$(cd "$_SOUNIO_MADAROS_LIB_DIR/../.." && pwd)}"
 
 # A raw artifacts/self-hosted/madaros is trusted only when its gate receipt
-# contains the current ELF sha256 and proves the SMT gate was not skipped.
+# binds the current ELF and proves SMT plus EISA native behavioral gates.
 # Otherwise it is demoted below relocgate.
 _sounio_madaros_receipt_ok() {
   local elf="$1"
@@ -30,7 +30,10 @@ _sounio_madaros_receipt_ok() {
   want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
   [[ -n "$want" ]] || return 1
   grep -Fq "$want" "$receipt" || return 1
-  grep -Fxq "smt_skip=0" "$receipt"
+  grep -Fxq "smt_skip=0" "$receipt" || return 1
+  grep -Fxq "eisa_native_conformance=39/39" "$receipt" || return 1
+  grep -Fxq "eisa_native_tamper=pass" "$receipt" || return 1
+  grep -Fxq "eisa_native_anti_vacuity=pass" "$receipt" || return 1
 }
 
 # Resolve MADAROS_BIN: explicit env → repo wrapper → gated raw ELF →

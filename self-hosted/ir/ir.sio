@@ -10,7 +10,7 @@ use check::types::{TypeEntry, empty_type_entry}
 // the lowering path can use the capacity that is already physically allocated.
 pub let IR_MAX_FUNCS: i64 = 2048
 pub let IR_MAX_STRINGS: i64 = 4096
-pub let IR_MAX_INSTRS: i64 = 1024
+pub let IR_MAX_INSTRS: i64 = 2048
 pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
 pub let IR_INVALID_LABEL: i64 = -1
@@ -709,7 +709,7 @@ pub fn ir_strategy_name(s: i64) -> string {
 
 pub struct IrFunction {
     pub name: Name,
-    pub instrs: [IrInstr; 1024],
+    pub instrs: [IrInstr; 2048],
     pub instr_count: i64,
     pub reg_count: i64,
     pub label_count: i64,
@@ -3279,12 +3279,14 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         imm_f64: base.imm_f64,
         label_id: base.label_id,
         fn_id: fn_id,
-        field_idx: base.field_idx,
+        // Lowered calls normalize arguments into a contiguous vreg window;
+        // retain its base independently of the recursive call_args chain.
+        field_idx: arg0,
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: fn_name,
-        // Keep the full argument list. src1/src2 cache the first two for compatibility.
+        // Keep the full list for validation and the scalar mirrors for recovery.
         call_args: args,
         arg_count: arg_count,
     }
@@ -3319,17 +3321,39 @@ pub fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, first_ar
 // guaranteed to be a contiguous first_arg..first_arg+n range.
 pub fn ir_call_sret_args(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrCallSret)
-    let first_two = ir_reg_list_first_two(args)
     IrInstr {
         op: base.op,
         dst: dst,
         src1: dest_reg,
-        src2: first_two.1,
+        src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
         label_id: base.label_id,
         fn_id: fn_id,
-        field_idx: first_two.0,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: fn_name,
+        call_args: args,
+        arg_count: arg_count,
+    }
+}
+
+// SRET call whose explicit arguments were normalized into a contiguous vreg
+// window by lowering. Avoid re-reading the recursive Box list before storing it.
+pub fn ir_call_sret_window(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, args: Option<Box<IrRegList>>, arg_count: i64, first_arg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrCallSret)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: dest_reg,
+        src2: if arg_count > 1 { first_arg + 1 } else { base.src2 },
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: first_arg,
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,

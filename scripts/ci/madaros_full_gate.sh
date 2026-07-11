@@ -20,7 +20,10 @@ receipt_ok() {
   want="$(sha256sum "$elf" 2>/dev/null | cut -d' ' -f1)"
   [[ -n "$want" ]] || return 1
   grep -Fq "$want" "$receipt" || return 1
-  grep -Fxq "smt_skip=0" "$receipt"
+  grep -Fxq "smt_skip=0" "$receipt" || return 1
+  grep -Fxq "eisa_native_conformance=39/39" "$receipt" || return 1
+  grep -Fxq "eisa_native_tamper=pass" "$receipt" || return 1
+  grep -Fxq "eisa_native_anti_vacuity=pass" "$receipt" || return 1
 }
 
 resolve_raw_madaros() {
@@ -55,6 +58,8 @@ WORK="${SOUNIO_MADAROS_FULL_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-full.XXXXX
 KEEP_WORK="${SOUNIO_MADAROS_FULL_GATE_KEEP:-0}"
 SMT_GATE_RAN=0
 SMT_GATE_PASS=0
+EISA_NATIVE_GATE_RAN=0
+EISA_NATIVE_GATE_PASS=0
 
 if [[ "$KEEP_WORK" != "1" ]]; then
   trap 'rm -rf "$WORK"' EXIT
@@ -135,9 +140,26 @@ run_imported_smt_gate() {
   pass "imported-SMT solver gate (6/6)"
 }
 
+run_eisa_native_gate() {
+  EISA_NATIVE_GATE_RAN=1
+  env MADAROS_RAW_BIN="$RAW_MADAROS" \
+    EISA_MADAROS_NATIVE_WORK_DIR="$WORK/eisa-native" \
+    EISA_MADAROS_NATIVE_RECEIPT_PATH="$WORK/eisa-native.receipt" \
+    bash scripts/ci/eisa_madaros_native_conformance_gate.sh
+  grep -Fxq 'receipts=39/39' "$WORK/eisa-native.receipt" \
+    || fail "EISA native conformance receipt is incomplete"
+  grep -Fxq 'tamper=pass' "$WORK/eisa-native.receipt" \
+    || fail "EISA native tamper receipt is incomplete"
+  grep -Fxq 'anti_vacuity=pass' "$WORK/eisa-native.receipt" \
+    || fail "EISA native anti-vacuity receipt is incomplete"
+  EISA_NATIVE_GATE_PASS=1
+  pass "EISA METRON/VM to Madaros native conformance (39/39)"
+}
+
 write_gate_receipt() {
-  if [[ "$SMT_GATE_RAN" != "1" || "$SMT_GATE_PASS" != "1" ]]; then
-    echo "[madaros-full] note: no gate receipt written (SMT gate did not run/pass)"
+  if [[ "$SMT_GATE_RAN" != "1" || "$SMT_GATE_PASS" != "1" || \
+        "$EISA_NATIVE_GATE_RAN" != "1" || "$EISA_NATIVE_GATE_PASS" != "1" ]]; then
+    echo "[madaros-full] note: no gate receipt written (SMT or EISA native gate did not run/pass)"
     return
   fi
 
@@ -164,6 +186,9 @@ write_gate_receipt() {
     echo "gate=madaros_full_gate.sh"
     echo "smt_tests=6/6"
     echo "smt_skip=0"
+    echo "eisa_native_conformance=39/39"
+    echo "eisa_native_tamper=pass"
+    echo "eisa_native_anti_vacuity=pass"
   } >"$tmp"
   mv "$tmp" "$receipt"
   receipt_ok "$RAW_MADAROS" "$receipt" || fail "gate receipt validation failed after write"
@@ -252,6 +277,7 @@ pass "package manager self-test"
 bash scripts/ci/madaros_read_env_absence_gate.sh
 pass "source-fresh missing-env merged checker"
 
+run_eisa_native_gate
 run_imported_smt_gate
 write_gate_receipt
 
