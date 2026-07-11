@@ -202,6 +202,22 @@ pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 
+// Off-stack flat relocation table for the native_v2 x86 Linux path. This is
+// module-WIDE (accumulates across ALL functions of a compile, reset via
+// flat_reloc_count=0 in compiler_new). It used to be four [i64; 4096] arrays
+// inline in NativeCompiler — but a large multi-function program overflows 4096
+// (e.g. the EISA isa suite emits ~9700 relocations across its 467 functions),
+// silently dropping every reloc past 4096, so calls/rodata refs (incl. the entry
+// trampoline's call to main) stay unpatched → jump to garbage → SIGSEGV. Raising
+// the inline arrays would add ~2MB to NativeCompiler's stack frame (rc=14 zone),
+// so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
+// in NativeCompiler and indexes these. Accessed INLINE only (never a returning
+// helper — that miscompiles under the seed).
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 65536] = [0; 65536]
+
 // ============================================================================
 // Compiler state
 // ============================================================================
@@ -210,10 +226,8 @@ pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
     pub relocs: RelocationTable,
-    pub flat_reloc_offsets: [i64; 4096],
-    pub flat_reloc_kind_codes: [i64; 4096],
-    pub flat_reloc_is_functions: [i64; 4096],
-    pub flat_reloc_target_indices: [i64; 4096],
+    // flat_reloc storage moved off-stack to module globals NC_FLAT_RELOC_* (above);
+    // only the count remains here (module-wide, indexes the globals).
     pub flat_reloc_count: i64,
     pub flat_rodata_bytes: [i8; 8192],
     pub flat_rodata_len: i64,
@@ -316,6 +330,7 @@ pub struct NativeCompiler {
 pub fn compiler_new() -> NativeCompiler {
     var out: NativeCompiler
     out.code = code_buffer_new()
+    out.code_overflow = false
     out.relocs = reloc_table_new()
     out.flat_reloc_count = 0
     out.flat_rodata_len = 0
@@ -463,10 +478,13 @@ pub fn patch_return_jumps_mut(nc: &! NativeCompiler, epilogue_offset: i64) with 
     while i < (*nc).return_jump_count && i < 16 {
         let imm_offset = (*nc).return_jumps[i as usize]
         if imm_offset > 0 && imm_offset + 4 <= (*nc).code.len
-            && (*nc).code.bytes[(imm_offset - 1) as usize] == (0xe9 as i8) {
+            && NC_BIG_CODE[(imm_offset - 1) as usize] == (0xe9 as i8) {
             let next_ip = imm_offset + 4
             let rel = epilogue_offset - next_ip
-            (*nc).code = patch_u32_le((*nc).code, imm_offset, rel)
+            NC_BIG_CODE[imm_offset as usize] = low8(rel) as i8
+            NC_BIG_CODE[(imm_offset + 1) as usize] = low8(rel >> 8) as i8
+            NC_BIG_CODE[(imm_offset + 2) as usize] = low8(rel >> 16) as i8
+            NC_BIG_CODE[(imm_offset + 3) as usize] = low8(rel >> 24) as i8
         }
         i = i + 1
     }
@@ -501,12 +519,12 @@ pub fn record_label_patch_mut(nc: &! NativeCompiler, label_id: i64, rel32_offset
 
 fn label_patch_is_rel32_branch(nc: &NativeCompiler, patch_off: i64) -> bool with Panic, Div {
     if patch_off > 0 && patch_off + 4 <= (*nc).code.len
-        && (*nc).code.bytes[(patch_off - 1) as usize] == (0xe9 as i8) {
+        && NC_BIG_CODE[(patch_off - 1) as usize] == (0xe9 as i8) {
         return true
     }
     if patch_off >= 2 && patch_off + 4 <= (*nc).code.len
-        && (*nc).code.bytes[(patch_off - 2) as usize] == (0x0f as i8) {
-        let op = (*nc).code.bytes[(patch_off - 1) as usize]
+        && NC_BIG_CODE[(patch_off - 2) as usize] == (0x0f as i8) {
+        let op = NC_BIG_CODE[(patch_off - 1) as usize]
         return op == (0x84 as i8) || op == (0x85 as i8)
     }
     false
@@ -524,10 +542,10 @@ pub fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         let target = NC_V2_LABEL_OFFSETS[patch_lid as usize]
         if target >= 0 && patch_off >= 0 && label_patch_is_rel32_branch(nc, patch_off) {
             let rel = target - (patch_off + 4)
-            (*nc).code.bytes[patch_off as usize] = low8(rel) as i8
-            (*nc).code.bytes[(patch_off + 1) as usize] = low8(rel >> 8) as i8
-            (*nc).code.bytes[(patch_off + 2) as usize] = low8(rel >> 16) as i8
-            (*nc).code.bytes[(patch_off + 3) as usize] = low8(rel >> 24) as i8
+            NC_BIG_CODE[patch_off as usize] = low8(rel) as i8
+            NC_BIG_CODE[(patch_off + 1) as usize] = low8(rel >> 8) as i8
+            NC_BIG_CODE[(patch_off + 2) as usize] = low8(rel >> 16) as i8
+            NC_BIG_CODE[(patch_off + 3) as usize] = low8(rel >> 24) as i8
         }
         i = i + 1
     }

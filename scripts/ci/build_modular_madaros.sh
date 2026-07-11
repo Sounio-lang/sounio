@@ -6,13 +6,22 @@
 #
 # Default OUTPUT_PATH: bin/madaros
 #
-# The build uses the checked-in Stage0 compiler (bin/souc or bin/souc-linux-x86_64)
-# as the seed. Because compiling main.sio is CPU-heavy, this script serializes
-# through scripts/dev/souc-build-lock.sh so multiple agents do not stampede the
-# workspace pod.
+# The build derives a *source-tracking* seed from the current lean_single.sio
+# before compiling main.sio. The checked-in bin/souc-lean-single-x86_64 seed lags
+# the source (it predates the #719 arena/vmem fixes: the 16MB resolve_imports SRC
+# guard and __arena_*/__pool_* intrinsics) and fails main.sio at the import wall
+# ("import too large for SRC buffer: patterns.sio"). Rather than freeze a new seed
+# binary (bootstrap-chain provenance rot is tracked separately in #725), we compile
+# the current lean_single.sio with a committed bootstrap ELF to obtain a fresh seed
+# that carries the current source's features, then compile main.sio with THAT seed.
+# Because these compiles are CPU-heavy, the script serializes through
+# scripts/dev/souc-build-lock.sh so multiple agents do not stampede the workspace pod.
 #
 # Environment:
-#   SOUC_BIN / SOUNIO_SOUC_BIN — override the seed compiler
+#   SOUC_BIN / SOUNIO_SOUC_BIN — override the bootstrap ELF. If it already points at
+#                                a fresh source-tracking seed (e.g. a gen3.elf from
+#                                `make build`), it is used directly for main.sio with
+#                                no extra lean_single derivation.
 #   SOUNIO_STDLIB_PATH         — forwarded to the seed compiler
 #   SOUNIO_BUILD_LOCK          — override the global build lock path
 
@@ -27,27 +36,30 @@ if [[ "$OUT" == -* ]]; then
     exit 2
 fi
 
-# Resolve seed compiler. The seed MUST be the lean_single bootstrap ELF — never
-# the bin/souc wrapper (a #!-script that now routes to Madaros). Seeding from the
-# wrapper would make Madaros build itself: an unverified self-host fixed point,
-# out of scope here. The `#!` guard skips any wrapper script; the lean_single ELF
-# is preferred explicitly.
-resolve_seed() {
+# Resolve the bootstrap ELF used to derive the source-tracking seed. It MUST be an
+# ELF — never the bin/souc wrapper (a #!-script that now routes to Madaros); the
+# `#!` guard skips any wrapper. bin/souc-linux-x86_64 is preferred over the older
+# bin/souc-lean-single-x86_64 seed because it tracks the current lean_single.sio
+# source (it can compile it), whereas the committed lean_single seed lags (#725).
+# An explicitly-provided SOUC_BIN/SOUNIO_SOUC_BIN wins (e.g. a fresh gen3.elf from
+# `make build`).
+resolve_bootstrap_elf() {
     local cand
     for cand in "${SOUC_BIN:-}" "${SOUNIO_SOUC_BIN:-}" \
-                "$ROOT_DIR/bin/souc-lean-single-x86_64" "$ROOT_DIR/bin/souc-linux-x86_64" \
+                "$ROOT_DIR/bin/souc-linux-x86_64" "$ROOT_DIR/bin/souc-lean-single-x86_64" \
                 "$ROOT_DIR/bin/souc"; do
         if [[ -n "$cand" && -x "$cand" && "$(head -c2 "$cand" 2>/dev/null)" != '#!' ]]; then
             echo "$cand"
             return 0
         fi
     done
-    echo "error: build_modular_madaros: no lean_single seed ELF found" >&2
-    echo "  tried (ELF only): SOUC_BIN, SOUNIO_SOUC_BIN, $ROOT_DIR/bin/souc-lean-single-x86_64, $ROOT_DIR/bin/souc-linux-x86_64, $ROOT_DIR/bin/souc" >&2
+    echo "error: build_modular_madaros: no bootstrap ELF found" >&2
+    echo "  tried (ELF only): SOUC_BIN, SOUNIO_SOUC_BIN, $ROOT_DIR/bin/souc-linux-x86_64, $ROOT_DIR/bin/souc-lean-single-x86_64, $ROOT_DIR/bin/souc" >&2
     return 1
 }
 
-SEED="$(resolve_seed)"
+BOOTSTRAP_ELF="$(resolve_bootstrap_elf)"
+LEAN_SRC="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 SRC="$ROOT_DIR/self-hosted/compiler/main.sio"
 
 if [[ ! -f "$SRC" ]]; then
@@ -57,6 +69,38 @@ fi
 
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
+
+# Derive a source-tracking seed. If SOUC_BIN/SOUNIO_SOUC_BIN was explicitly set we
+# trust it as an already-fresh seed (e.g. a gen3.elf) and use it directly. Otherwise
+# the bootstrap ELF is a committed binary that may lag the source, so we first
+# compile the CURRENT lean_single.sio with it to obtain a fresh seed that carries the
+# current source's features (arena/vmem #719 etc.), then compile main.sio with that.
+TMP_SEED_DIR=""
+cleanup() { [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]] && rm -rf "$TMP_SEED_DIR"; }
+trap cleanup EXIT
+
+if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+    SEED="$BOOTSTRAP_ELF"
+    echo "→ using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
+else
+    if [[ ! -f "$LEAN_SRC" ]]; then
+        echo "error: lean_single source not found for seed derivation: $LEAN_SRC" >&2
+        exit 1
+    fi
+    TMP_SEED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-seed.XXXXXX")"
+    SEED="$TMP_SEED_DIR/gen_seed.elf"
+    echo "→ deriving source-tracking seed from lean_single.sio (committed seed lags; see #725)"
+    echo "  bootstrap ELF: $BOOTSTRAP_ELF"
+    echo "  lean src:      $LEAN_SRC"
+    echo "  gen seed:      $SEED"
+    # One generation is sufficient — it carries the current source's features.
+    scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+    if [[ ! -s "$SEED" ]]; then
+        echo "error: seed derivation produced no output: $SEED" >&2
+        exit 1
+    fi
+    chmod +x "$SEED"
+fi
 
 echo "Building Madaros (modular compiler):"
 echo "  seed:  $SEED"

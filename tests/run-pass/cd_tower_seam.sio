@@ -1,0 +1,184 @@
+//@ run-pass
+//@ expect-stdout: TOWER OK
+// The e_top-seam bridge is a Cayley-Dickson TOWER phenomenon, certified at dim 16, 32, 64.
+//
+// In the sedenion brick (sedenion_seam_bridge.sio) the operator non-anticommutation, the state-level
+// zero-division, and the e₈ seam were shown to be one locus. This brick certifies that the SAME
+// coincidence holds at the next levels of the Cayley-Dickson tower: for the 2ⁿ-dim algebra A_n with top
+// imaginary unit e_top (top = 2ⁿ⁻¹), and lower×upper index-pairs (l ∈ 1..top-1, u ∈ top..2ⁿ-1):
+//
+//   {L_l, L_u} ≠ 0   ⟺   (L_l L_u)² ≠ −I   ⟺   e_l + e_u is a left zero divisor   ⟺   off the e_top seam.
+//
+// PROVED (dimension-independent, not per-level): once L_l² = L_u² = −I, the forward obstruction is pure
+// linear algebra — {L_l,L_u}=0 ⟹ (L_lL_u)² = −L_l²L_u² = −I ⟹ +1 ∉ spec ⟹ L_l+L_u nonsingular ⟹
+// e_l+e_u is not a ZD; and (L_l+L_u singular ⟺ +1∈spec ⟺ e_l+e_u a ZD) is linear algebra too. The
+// spectral/singular members therefore need no computation. The base fact L_i²=−I is the cocycle lemma
+//   σ(i,j)·σ(i,i⊕j) = −1   (all i≥1, all j),
+// certified here at each dim (and proved by induction on bits in the Lean leg → forward holds for ALL n).
+//
+// COMPUTED here (the content — that two independently-defined sets coincide): the non-anticommuting set,
+// the zero-divisor set, and the off-seam set are equal. Sizes = (top-1)(top-2) [= number of off-seam
+// pairs by definition; a footnote, not the result]: 42, 210, 930 at dim 16, 32, 64.
+// OPEN (all n): the CONVERSE off-seam ⟹ ZD is verified at n=4,5,6, not proved — a tower-wide conjecture.
+//
+// Sizes: dim 64 zero-divisor scan is left to the oracle (kept out of this test to stay fast); here dim 64
+// certifies the cocycle lemma + the operator/seam coincidence + counts. Decidable integer arithmetic.
+// SELF-CONTAINED. Cross-verified vs the oracle + Lean.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+fn anti0(l: i64, u: i64, bits: i64, n: i64) -> bool with Mut, Panic, Div {
+    var c = 0
+    while c < n {
+        if cd_sigma_c(l, u ^ c, bits) * cd_sigma_c(u, c, bits) + cd_sigma_c(u, l ^ c, bits) * cd_sigma_c(l, c, bits) != 0 { return false }
+        c = c + 1
+    }
+    true
+}
+fn llsq_negI(l: i64, u: i64, bits: i64, n: i64) -> bool with Mut, Panic, Div {
+    var c = 0
+    while c < n {
+        if cd_sigma_c(l, l ^ c, bits) * cd_sigma_c(u, l ^ u ^ c, bits) * cd_sigma_c(l, u ^ c, bits) * cd_sigma_c(u, c, bits) != (0 - 1) { return false }
+        c = c + 1
+    }
+    true
+}
+fn off_seam(l: i64, u: i64, top: i64) -> bool with Mut, Panic {
+    if u == top { return false }
+    if (l ^ u) == top { return false }
+    true
+}
+fn annihilates(l: i64, u: i64, a: i64, b: i64, s: i64, bits: i64, n: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < n {
+        var acc = 0
+        if (l ^ a) == k { acc = acc + cd_sigma_c(l, a, bits) }
+        if (l ^ b) == k { acc = acc + s * cd_sigma_c(l, b, bits) }
+        if (u ^ a) == k { acc = acc + cd_sigma_c(u, a, bits) }
+        if (u ^ b) == k { acc = acc + s * cd_sigma_c(u, b, bits) }
+        if acc != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+fn is_zd(l: i64, u: i64, bits: i64, n: i64) -> bool with Mut, Panic, Div {
+    var a = 1
+    while a < n {
+        var b = a + 1
+        while b < n {
+            if annihilates(l, u, a, b, 1, bits, n) { return true }
+            if annihilates(l, u, a, b, 0 - 1, bits, n) { return true }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    false
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // per-dim results, index 0->dim16, 1->dim32, 2->dim64
+    var lsq = [0; 3]
+    var fwd = [0; 3]
+    var seam = [0; 3]
+    var zdeq = [0; 3]        // -1 if not computed (dim 64)
+    var na = [0; 3]
+    var os = [0; 3]
+
+    var di = 0
+    while di < 3 {
+        let bits = 4 + di
+        let n = 1 << bits
+        let top = n >> 1
+
+        // cocycle lemma L_i^2 = -I : sigma(i,j) sigma(i,i^j) = -1, all i>=1, all j
+        var lsq_ok = 1
+        var i = 1
+        while i < n {
+            var j = 0
+            while j < n {
+                if cd_sigma_c(i, j, bits) * cd_sigma_c(i, i ^ j, bits) != (0 - 1) { lsq_ok = 0 }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        lsq[di as usize] = lsq_ok
+
+        // sweep lower x upper pairs
+        var fwd_ok = 1
+        var seam_ok = 1
+        var zd_ok = 1
+        var do_zd = if bits <= 5 { 1 } else { 0 }    // skip the O(n^3) ZD scan at dim 64 (oracle covers it)
+        var nonanti = 0
+        var offseam = 0
+        var l = 1
+        while l < top {
+            var u = top
+            while u < n {
+                let ac = anti0(l, u, bits, n)
+                let sq = llsq_negI(l, u, bits, n)
+                let off = off_seam(l, u, top)
+                if ac != sq { fwd_ok = 0 }              // {L,L}=0 <=> (LL)^2=-I
+                if ac == off { seam_ok = 0 }            // ac true <=> off false
+                if do_zd == 1 {
+                    let zd = is_zd(l, u, bits, n)
+                    if off != zd { zd_ok = 0 }          // off-seam <=> ZD
+                }
+                if !ac { nonanti = nonanti + 1 }
+                if off { offseam = offseam + 1 }
+                u = u + 1
+            }
+            l = l + 1
+        }
+        fwd[di as usize] = fwd_ok
+        seam[di as usize] = seam_ok
+        zdeq[di as usize] = if do_zd == 1 { zd_ok } else { 0 - 1 }
+        na[di as usize] = nonanti
+        os[di as usize] = offseam
+        di = di + 1
+    }
+
+    // emit (single print_int per line: byte-identical across souc builds)
+    print("LSQ16 ")   print_int(lsq[0 as usize])   print("\n")
+    print("FWD16 ")   print_int(fwd[0 as usize])   print("\n")
+    print("SEAM16 ")  print_int(seam[0 as usize])  print("\n")
+    print("ZDEQ16 ")  print_int(zdeq[0 as usize])  print("\n")
+    print("NA16 ")    print_int(na[0 as usize])    print("\n")
+    print("OS16 ")    print_int(os[0 as usize])    print("\n")
+    print("LSQ32 ")   print_int(lsq[1 as usize])   print("\n")
+    print("FWD32 ")   print_int(fwd[1 as usize])   print("\n")
+    print("SEAM32 ")  print_int(seam[1 as usize])  print("\n")
+    print("ZDEQ32 ")  print_int(zdeq[1 as usize])  print("\n")
+    print("NA32 ")    print_int(na[1 as usize])    print("\n")
+    print("OS32 ")    print_int(os[1 as usize])    print("\n")
+    print("LSQ64 ")   print_int(lsq[2 as usize])   print("\n")
+    print("FWD64 ")   print_int(fwd[2 as usize])   print("\n")
+    print("SEAM64 ")  print_int(seam[2 as usize])  print("\n")
+    print("NA64 ")    print_int(na[2 as usize])    print("\n")
+    print("OS64 ")    print_int(os[2 as usize])    print("\n")
+
+    // all invariants: cocycle lemma at each dim; operator<->seam coincidence at each dim; ZD coincidence
+    // at 16 & 32; counts (top-1)(top-2) = 42,210,930.
+    var ok = 1
+    if lsq[0 as usize] != 1 || lsq[1 as usize] != 1 || lsq[2 as usize] != 1 { ok = 0 }
+    if fwd[0 as usize] != 1 || fwd[1 as usize] != 1 || fwd[2 as usize] != 1 { ok = 0 }
+    if seam[0 as usize] != 1 || seam[1 as usize] != 1 || seam[2 as usize] != 1 { ok = 0 }
+    if zdeq[0 as usize] != 1 || zdeq[1 as usize] != 1 { ok = 0 }
+    if na[0 as usize] != 42 || na[1 as usize] != 210 || na[2 as usize] != 930 { ok = 0 }
+    if os[0 as usize] != 42 || os[1 as usize] != 210 || os[2 as usize] != 930 { ok = 0 }
+    if ok == 1 { println("TOWER OK") } else { println("TOWER FAIL") }
+}

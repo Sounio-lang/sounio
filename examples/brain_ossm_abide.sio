@@ -49,6 +49,7 @@ var CFG_OCT_ASSOC_SCHEDULE_END_BP: i64 = 0
 var CFG_OCT_ASSOC_DRIFT_REG_BP: i64 = 0
 var CFG_OCT_HEAD_TRUST_REGION_BP: i64 = 0
 var CFG_OCT_HEAD_RENORM: i64 = 1
+var CFG_OCT_ASSOCIATIVE_PROJECTION: i64 = 0
 var CFG_OCT_INPUT_PROJ_MODE: i64 = 0
 var CFG_OCT_PROJ_LR_SCALE_BP: i64 = 600000
 var CFG_OCT_PROJ_STRUCTURED_SCALE_BP: i64 = 350000
@@ -61,6 +62,7 @@ var CFG_H_WARMUP_EPOCHS: i64 = 0
 var CFG_H_INIT_PRESET: i64 = 0
 var CFG_H_INPUT_PROJ_MODE: i64 = 0
 var CFG_H_PROJ_LR_SCALE_BP: i64 = 600000
+var CFG_TRACE_HIDDEN_STATE: i64 = 0
 var TRAIN_MASK: [i64; 2048] = [0; 2048]
 var DROP_MASK: [i64; 64] = [0; 64]
 var FOLD_NOISE_KEY: i64 = 0
@@ -160,7 +162,7 @@ fn f64_to_bp(v: f64) -> i64 {
     if scaled > 1000000.0 { 1000000 } else { scaled as i64 }
 }
 
-fn scaled_keep_count(total: i64, bp: i64) -> i64 with Div {
+fn scaled_keep_count(total: i64, bp: i64) -> i64 with Mut, Div {
     if total <= 0 { return 0 }
     if bp >= 1000000 { return total }
     var keep = (total * bp + 500000) / 1000000
@@ -344,7 +346,7 @@ fn scheduled_assoc_target() -> f64 with Div {
     }
 }
 
-fn scaled_optional_count(total: i64, bp: i64) -> i64 with Div {
+fn scaled_optional_count(total: i64, bp: i64) -> i64 with Mut, Div {
     if total <= 0 || bp <= 0 { return 0 }
     if bp >= 1000000 { return total }
     var keep = (total * bp + 500000) / 1000000
@@ -472,6 +474,7 @@ fn load_run_config(path: string) -> i64 with IO, Mut, Panic, Div {
     CFG_OCT_ASSOC_DRIFT_REG_BP = 0
     CFG_OCT_HEAD_TRUST_REGION_BP = 0
     CFG_OCT_HEAD_RENORM = 1
+    CFG_OCT_ASSOCIATIVE_PROJECTION = 0
     CFG_OCT_INPUT_PROJ_MODE = 0
     CFG_OCT_PROJ_LR_SCALE_BP = 600000
     CFG_OCT_PROJ_STRUCTURED_SCALE_BP = 350000
@@ -545,6 +548,11 @@ fn load_run_config(path: string) -> i64 with IO, Mut, Panic, Div {
             pos = line_end
             continue
         }
+        if starts_with(line, "oct_associative_projection=") {
+            CFG_OCT_ASSOCIATIVE_PROJECTION = parse_i64_basic(str_slice(line, 27, line_n))
+            pos = line_end
+            continue
+        }
         if starts_with(line, "oct_input_proj_mode=") {
             CFG_OCT_INPUT_PROJ_MODE = parse_i64_basic(str_slice(line, 20, line_n))
             pos = line_end
@@ -577,6 +585,15 @@ fn load_run_config(path: string) -> i64 with IO, Mut, Panic, Div {
         }
         if starts_with(line, "h_proj_lr_scale=") {
             CFG_H_PROJ_LR_SCALE_BP = f64_to_bp(parse_f64_basic(str_slice(line, 16, line_n)))
+            pos = line_end
+            continue
+        }
+        if starts_with(line, "trace_hidden_state=") {
+            if parse_i64_basic(str_slice(line, 19, line_n)) != 0 {
+                CFG_TRACE_HIDDEN_STATE = 1
+            } else {
+                CFG_TRACE_HIDDEN_STATE = 0
+            }
             pos = line_end
             continue
         }
@@ -1313,7 +1330,7 @@ fn prepare_train_standardization() with Mut, Div, Panic {
     }
 }
 
-fn perturb_feature(subj: i64, step: i64, dim: i64, value: f64) -> f64 with Div {
+fn perturb_feature(subj: i64, step: i64, dim: i64, value: f64) -> f64 with Mut, Div {
     var out = value
     if dim < 64 && DROP_MASK[dim as usize] == 1 {
         out = 0.0
@@ -1337,7 +1354,32 @@ fn do_oct_mul(
     TMP_OCT[4] = a0 * b4 + a4 * b0 - a1 * b5 + a5 * b1 - a2 * b6 + a6 * b2 - a3 * b7 + a7 * b3
     TMP_OCT[5] = a0 * b5 + a5 * b0 + a1 * b4 - a4 * b1 - a2 * b7 + a7 * b2 + a3 * b6 - a6 * b3
     TMP_OCT[6] = a0 * b6 + a6 * b0 + a1 * b7 - a7 * b1 + a2 * b4 - a4 * b2 - a3 * b5 + a5 * b3
-    TMP_OCT[7] = a0 * b7 + a7 * b0 - a1 * b6 + a6 * b1 - a2 * b5 + a5 * b2 + a3 * b4 - a4 * b3
+    TMP_OCT[7] = a0 * b7 + a7 * b0 - a1 * b6 + a6 * b1 + a2 * b5 - a5 * b2 + a3 * b4 - a4 * b3
+}
+
+fn do_assoc_projected_mul(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64
+) with Mut {
+    TMP_OCT[0] = a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3
+    TMP_OCT[1] = a0 * b1 + a1 * b0 + a2 * b3 - a3 * b2
+    TMP_OCT[2] = a0 * b2 - a1 * b3 + a2 * b0 + a3 * b1
+    TMP_OCT[3] = a0 * b3 + a1 * b2 - a2 * b1 + a3 * b0
+    TMP_OCT[4] = a4 * b4 - a5 * b5 - a6 * b6 - a7 * b7
+    TMP_OCT[5] = a4 * b5 + a5 * b4 + a6 * b7 - a7 * b6
+    TMP_OCT[6] = a4 * b6 - a5 * b7 + a6 * b4 + a7 * b5
+    TMP_OCT[7] = a4 * b7 + a5 * b6 - a6 * b5 + a7 * b4
+}
+
+fn do_o_step_mul(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64
+) with Mut {
+    if CFG_OCT_ASSOCIATIVE_PROJECTION != 0 {
+        do_assoc_projected_mul(a0, a1, a2, a3, a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7)
+    } else {
+        do_oct_mul(a0, a1, a2, a3, a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7)
+    }
 }
 
 fn ws(i: i64, v: f64) with Mut {
@@ -1384,7 +1426,7 @@ fn assoc_g(head: i64) -> f64 with Div {
     (ASSOC_ACC[head as usize] as f64) / 100000000.0
 }
 
-fn assoc_mean_all() -> f64 with Div {
+fn assoc_mean_all() -> f64 with Mut, Div {
     var s = 0.0
     var head: i64 = 0
     while head < head_count() {
@@ -1668,7 +1710,7 @@ fn reset_state() with Mut {
 
 fn oct_step_head(head: i64, x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64, x6: f64, x7: f64) with Mut, Div, Panic {
     let base = head_base(head)
-    do_oct_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7))
+    do_o_step_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7))
     let t0 = TMP_OCT[0]
     let t1 = TMP_OCT[1]
     let t2 = TMP_OCT[2]
@@ -1677,14 +1719,14 @@ fn oct_step_head(head: i64, x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64
     let t5 = TMP_OCT[5]
     let t6 = TMP_OCT[6]
     let t7 = TMP_OCT[7]
-    do_oct_mul(t0, t1, t2, t3, t4, t5, t6, t7, x0, x1, x2, x3, x4, x5, x6, x7)
+    do_o_step_mul(t0, t1, t2, t3, t4, t5, t6, t7, x0, x1, x2, x3, x4, x5, x6, x7)
     var left: [f64; 8] = [0.0; 8]
     var d: i64 = 0
     while d < 8 {
         left[d as usize] = TMP_OCT[d as usize]
         d = d + 1
     }
-    do_oct_mul(hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7), x0, x1, x2, x3, x4, x5, x6, x7)
+    do_o_step_mul(hg(base), hg(base + 1), hg(base + 2), hg(base + 3), hg(base + 4), hg(base + 5), hg(base + 6), hg(base + 7), x0, x1, x2, x3, x4, x5, x6, x7)
     let hx0 = TMP_OCT[0]
     let hx1 = TMP_OCT[1]
     let hx2 = TMP_OCT[2]
@@ -1693,7 +1735,7 @@ fn oct_step_head(head: i64, x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64
     let hx5 = TMP_OCT[5]
     let hx6 = TMP_OCT[6]
     let hx7 = TMP_OCT[7]
-    do_oct_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hx0, hx1, hx2, hx3, hx4, hx5, hx6, hx7)
+    do_o_step_mul(A[base as usize], A[(base + 1) as usize], A[(base + 2) as usize], A[(base + 3) as usize], A[(base + 4) as usize], A[(base + 5) as usize], A[(base + 6) as usize], A[(base + 7) as usize], hx0, hx1, hx2, hx3, hx4, hx5, hx6, hx7)
     var asq = 0.0
     var i: i64 = 0
     while i < 8 {
@@ -2199,6 +2241,26 @@ fn std20(xs: [f64; 20], mean: f64) -> f64 with Mut, Div, Panic {
     sqrt_q(s / 20.0)
 }
 
+fn emit_state_trace(is_oct: i64, seed: i64, subject_index: i64, holdout_key: i64, label: i64) with IO, Mut, Div {
+    print("STATE_TRACE\t")
+    if is_oct == 1 { print("O-SSM") } else { print("H-SSM") }
+    print("\t")
+    print_int(seed)
+    print("\t")
+    print_int(subject_index)
+    print("\t")
+    print_int(holdout_key)
+    print("\t")
+    print_int(label)
+    var d: i64 = 0
+    while d < hidden_dim() {
+        print("\t")
+        print_int((hg(d) * 1000000.0) as i64)
+        d = d + 1
+    }
+    print("\n")
+}
+
 fn run_fold(is_oct: i64, s1: i64, s2: i64, holdout_key: i64) -> f64 with IO, Mut, Div, Panic {
     let train_epochs = cfg_train_epochs(is_oct)
     let train_lr = cfg_train_lr(is_oct)
@@ -2217,10 +2279,10 @@ fn run_fold(is_oct: i64, s1: i64, s2: i64, holdout_key: i64) -> f64 with IO, Mut
         let allow_core = if ep >= warmup_epochs { 1 } else { 0 }
         var seen: i64 = 0
         while seen < train_count {
-            let subj = (rng_next() / 100) % SUBJECT_COUNT
-            if SITE_KEYS[subj as usize] != holdout_key && TRAIN_MASK[subj as usize] == 1 {
-                forward_subject(subj, is_oct)
-                update_binary(LABELS[subj as usize], train_lr, is_oct, allow_core)
+            let sampled_subj = (rng_next() / 100) % SUBJECT_COUNT
+            if SITE_KEYS[sampled_subj as usize] != holdout_key && TRAIN_MASK[sampled_subj as usize] == 1 {
+                forward_subject(sampled_subj, is_oct)
+                update_binary(LABELS[sampled_subj as usize], train_lr, is_oct, allow_core)
             }
             seen = seen + 1
         }
@@ -2260,6 +2322,9 @@ fn run_fold(is_oct: i64, s1: i64, s2: i64, holdout_key: i64) -> f64 with IO, Mut
             print("\t")
             print(assoc_value)
             print("\n")
+            if CFG_TRACE_HIDDEN_STATE != 0 {
+                emit_state_trace(is_oct, s1, subj, holdout_key, label)
+            }
             if pred == 1 && label == 1 { tp = tp + 1 }
             if pred == 0 && label == 0 { tn = tn + 1 }
             if pred == 1 && label == 0 { fp = fp + 1 }
@@ -2450,6 +2515,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print(" oct_assoc_drift_reg="); print(bp_to_f64(CFG_OCT_ASSOC_DRIFT_REG_BP))
         print(" oct_head_trust_region="); print(bp_to_f64(CFG_OCT_HEAD_TRUST_REGION_BP))
         print(" oct_head_renorm="); print_int(CFG_OCT_HEAD_RENORM)
+        print(" oct_associative_projection="); print_int(CFG_OCT_ASSOCIATIVE_PROJECTION)
         print(" oct_input_proj="); print(proj_mode_name(CFG_OCT_INPUT_PROJ_MODE))
         print(" oct_proj_lr_scale="); print(bp_to_f64(CFG_OCT_PROJ_LR_SCALE_BP))
         print(" oct_proj_structured_scale="); print(bp_to_f64(CFG_OCT_PROJ_STRUCTURED_SCALE_BP))

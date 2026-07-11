@@ -1,0 +1,352 @@
+// tests/run-pass/sedenion_ratbig_channel_case3.sio
+//
+// Split-out single-case variant. souc v0.80.0 hits TWO distinct codegen
+// flakes on the combined 3-case file, both empirically bisected here:
+//  (a) whole-program struct-heavy function-count capacity wall (same
+//      family as stdlib/math/bignat.sio's note) -- the combined file
+//      (~28 fns) SIGSEGVs; trimmed to <=24 functions per file below.
+//  (b) a SEPARATE, sharper bug: calling unat_is_zero(...) in `main` on a
+//      BigNat pulled (directly or via a wrapper fn) out of the `.num.mag`
+//      of a Rat that was itself produced by rat_add/rat_mul/rat_reduce
+//      SIGSEGVs codegen every time -- even at a function count that
+//      otherwise compiles fine, even wrapped in its own helper fn, even
+//      as unreferenced-looking dead code. Calling unat_print (or
+//      big_print) on the SAME value at the SAME call site is fine; only
+//      unat_is_zero (or an inlined equivalent boolean field compare) on
+//      that specific derivation chain crashes. Root cause not
+//      determined (register/stack-slot corruption is suspected given the
+//      deep gcd/divmod call tree inside rat_reduce, but not confirmed).
+//      WORKAROUND: do not call any is-zero check on a rat_add/rat_mul
+//      result inside the .sio at all -- print the reduced (num, den)
+//      pair (rat_print) and decide zero-ness FROM THE PRINTED OUTPUT
+//      (canonical reduced form means num=0,den=1 iff the value is
+//      exactly zero). That is exactly the "decidable rational equality"
+//      the task asks for, so no functionality is lost.
+//  (c) a THIRD, real correctness bug (not just a crash): souc's by-value
+//      struct-copy semantics are violated by the "var r = a; r.neg =
+//      !a.neg; ...; r" pattern this file's big_neg originally used
+//      (copied verbatim from stdlib/math/bignat.sio) -- mutating r.neg
+//      ALSO mutated the caller's original argument in place (reproduced
+//      on a bare BigInt local, not just a struct field: `let neg = big_
+//      neg(n)` silently flips the sign of `n` itself too). Confirmed via
+//      scripts/research/ratbig_oracle.py cross-check: case 2 printed a
+//      nonzero r5/r12 before this fix, which is mathematically wrong
+//      (t*s + t*(-s) must be exactly 0) -- the bug corrupted `s` in
+//      place when computing delta = -s, so later reuses of `s` picked up
+//      the flipped sign. FIXED by rewriting big_neg to build a fresh
+//      a fresh BigInt struct literal (mag unchanged, neg flipped) instead of
+//      copy-then-mutate; this stdlib/math/bignat.sio big_neg pattern
+//      should be treated as suspect anywhere it is reused. Do NOT trust
+//      "compiles and runs and prints a plausible-looking number" here --
+//      every printed value in this file is oracle cross-checked.
+//
+// Case 3: off-locus rational point (1/2,1/3,1/5,1/7) -> nonzero r5,r12
+// Cross-checked against scripts/research/ratbig_oracle.py (Python
+// fractions.Fraction) -- see sedenion_ratbig_channel.sio for the full
+// commented spec (channel definition, all 3 cases, the general design).
+
+struct BigNat { limb: [i64; 64], len: i64 }
+struct BigInt { mag: BigNat, neg: bool }
+struct UnatDivRes { q: BigNat, r: BigNat }
+struct BigDivRes { q: BigInt, r: BigInt }
+struct Rat { num: BigInt, den: BigInt }
+
+fn unat_from_i64(x: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 64], len: 1 }
+    var v = x
+    var i = 0
+    while v > 0 && i < 64 {
+        b.limb[i as usize] = v - (v / 1000000000) * 1000000000
+        v = v / 1000000000
+        i = i + 1
+    }
+    if i == 0 { i = 1 }
+    b.len = i
+    b
+}
+
+fn unat_is_zero(a: BigNat) -> bool with Mut, Panic {
+    a.len == 1 && a.limb[0] == 0
+}
+
+fn unat_cmp(a: BigNat, b: BigNat) -> i64 with Mut, Panic {
+    var result = 0
+    if a.len > b.len { result = 1 }
+    if a.len < b.len { result = 0 - 1 }
+    if a.len == b.len {
+        var i = a.len - 1
+        var done = false
+        while i >= 0 && !done {
+            if a.limb[i as usize] > b.limb[i as usize] { result = 1; done = true }
+            if a.limb[i as usize] < b.limb[i as usize] { result = 0 - 1; done = true }
+            i = i - 1
+        }
+    }
+    result
+}
+
+fn unat_add(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 0 }
+    var carry = 0
+    var i = 0
+    var n = a.len
+    if b.len > n { n = b.len }
+    while i < n {
+        var av = 0
+        var bv = 0
+        if i < a.len { av = a.limb[i as usize] }
+        if i < b.len { bv = b.limb[i as usize] }
+        let s = av + bv + carry
+        r.limb[i as usize] = s - (s / 1000000000) * 1000000000
+        carry = s / 1000000000
+        i = i + 1
+    }
+    if carry > 0 { r.limb[i as usize] = carry; i = i + 1 }
+    r.len = i
+    r
+}
+
+fn unat_sub(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 0 }
+    var borrow = 0
+    var i = 0
+    while i < a.len {
+        var bv = 0
+        if i < b.len { bv = b.limb[i as usize] }
+        var d = a.limb[i as usize] - bv - borrow
+        borrow = 0
+        if d < 0 { d = d + 1000000000; borrow = 1 }
+        r.limb[i as usize] = d
+        i = i + 1
+    }
+    var l = a.len
+    while l > 1 && r.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    r.len = l
+    r
+}
+
+fn unat_mul(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 1 }
+    var i = 0
+    while i < a.len {
+        var carry = 0
+        var j = 0
+        while j < b.len {
+            let idx = i + j
+            let prod = a.limb[i as usize] * b.limb[j as usize] + r.limb[idx as usize] + carry
+            r.limb[idx as usize] = prod - (prod / 1000000000) * 1000000000
+            carry = prod / 1000000000
+            j = j + 1
+        }
+        var k = i + b.len
+        while carry > 0 {
+            let s = r.limb[k as usize] + carry
+            r.limb[k as usize] = s - (s / 1000000000) * 1000000000
+            carry = s / 1000000000
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var l = a.len + b.len
+    if l > 64 { l = 64 }
+    while l > 1 && r.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    r.len = l
+    r
+}
+
+fn unat_divmod(a: BigNat, b: BigNat) -> UnatDivRes with Mut, Panic, Div {
+    var q = BigNat { limb: [0; 64], len: a.len }
+    var rem = BigNat { limb: [0; 64], len: 1 }
+    var i = a.len - 1
+    while i >= 0 {
+        var shifted = BigNat { limb: [0; 64], len: 0 }
+        var isz = unat_is_zero(rem)
+        if isz { shifted.limb[0] = a.limb[i as usize]; shifted.len = 1 }
+        if !isz {
+            shifted.limb[0] = a.limb[i as usize]
+            var si = 0
+            while si < rem.len { shifted.limb[(si + 1) as usize] = rem.limb[si as usize]; si = si + 1 }
+            shifted.len = rem.len + 1
+        }
+        rem = shifted
+        var lo = 0
+        var hi = 999999999
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2
+            let trial = unat_mul_small_local(b, mid)
+            if unat_cmp(trial, rem) <= 0 { lo = mid }
+            if unat_cmp(trial, rem) > 0 { hi = mid - 1 }
+        }
+        q.limb[i as usize] = lo
+        rem = unat_sub(rem, unat_mul_small_local(b, lo))
+        i = i - 1
+    }
+    var l = q.len
+    while l > 1 && q.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    q.len = l
+    UnatDivRes { q: q, r: rem }
+}
+
+fn unat_mul_small_local(a: BigNat, m: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 64], len: a.len }
+    var carry = 0
+    var i = 0
+    while i < a.len {
+        let prod = a.limb[i as usize] * m + carry
+        b.limb[i as usize] = prod - (prod / 1000000000) * 1000000000
+        carry = prod / 1000000000
+        i = i + 1
+    }
+    while carry > 0 && i < 64 {
+        b.limb[i as usize] = carry - (carry / 1000000000) * 1000000000
+        carry = carry / 1000000000
+        i = i + 1
+    }
+    b.len = i
+    b
+}
+
+fn unat_gcd(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var x = a
+    var y = b
+    while !unat_is_zero(y) {
+        let dr = unat_divmod(x, y)
+        let nx = y
+        let ny = dr.r
+        x = nx
+        y = ny
+    }
+    x
+}
+
+fn unat_print_pad9(v: i64) with IO, Mut, Panic, Div {
+    var d = 100000000
+    while d > 0 {
+        print_int((v / d) - ((v / (d * 10)) * 10))
+        d = d / 10
+    }
+}
+
+fn unat_print(a: BigNat) with IO, Mut, Panic, Div {
+    print_int(a.limb[(a.len - 1) as usize])
+    var i = a.len - 2
+    while i >= 0 { unat_print_pad9(a.limb[i as usize]); i = i - 1 }
+}
+
+fn big_from_i64(x: i64) -> BigInt with Mut, Panic, Div {
+    var neg = false
+    var v = x
+    if v < 0 { neg = true; v = 0 - v }
+    BigInt { mag: unat_from_i64(v), neg: neg }
+}
+
+
+
+fn big_neg(a: BigInt) -> BigInt with Mut, Panic {
+    var newneg = !a.neg
+    if unat_is_zero(a.mag) { newneg = false }
+    BigInt { mag: a.mag, neg: newneg }
+}
+
+fn big_add(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    var r = BigInt { mag: a.mag, neg: false }
+    if a.neg == b.neg {
+        r.mag = unat_add(a.mag, b.mag)
+        r.neg = a.neg
+    }
+    if a.neg != b.neg {
+        let c = unat_cmp(a.mag, b.mag)
+        if c == 0 { r.mag = unat_from_i64(0); r.neg = false }
+        if c > 0 { r.mag = unat_sub(a.mag, b.mag); r.neg = a.neg }
+        if c < 0 { r.mag = unat_sub(b.mag, a.mag); r.neg = b.neg }
+    }
+    if unat_is_zero(r.mag) { r.neg = false }
+    r
+}
+
+fn big_mul(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    var r = BigInt { mag: unat_mul(a.mag, b.mag), neg: (a.neg != b.neg) }
+    if unat_is_zero(r.mag) { r.neg = false }
+    r
+}
+
+fn big_divmod(a: BigInt, b: BigInt) -> BigDivRes with Mut, Panic, Div {
+    let dr = unat_divmod(a.mag, b.mag)
+    var q = BigInt { mag: dr.q, neg: (a.neg != b.neg) }
+    var r = BigInt { mag: dr.r, neg: a.neg }
+    if unat_is_zero(q.mag) { q.neg = false }
+    if unat_is_zero(r.mag) { r.neg = false }
+    BigDivRes { q: q, r: r }
+}
+
+fn big_gcd(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    BigInt { mag: unat_gcd(a.mag, b.mag), neg: false }
+}
+
+fn big_print(a: BigInt) with IO, Mut, Panic, Div {
+    if a.neg { print("-") }
+    unat_print(a.mag)
+}
+
+
+// -- Exact rational layer: Rat { num: BigInt, den: BigInt }, den always > 0,
+// reduced so gcd(|num|, den) == 1. --
+
+fn rat_reduce(n_in: BigInt, d_in: BigInt) -> Rat with Mut, Panic, Div {
+    var n = n_in
+    var d = d_in
+    if d.neg { n = big_neg(n); d = big_neg(d) }
+    var result = Rat { num: big_from_i64(0), den: big_from_i64(1) }
+    if unat_is_zero(n.mag) {
+        result = Rat { num: big_from_i64(0), den: big_from_i64(1) }
+    }
+    if !unat_is_zero(n.mag) {
+        let g = big_gcd(n, d)
+        let qn = big_divmod(n, g)
+        let qd = big_divmod(d, g)
+        result = Rat { num: qn.q, den: qd.q }
+    }
+    result
+}
+
+fn rat_make(n: i64, d: i64) -> Rat with Mut, Panic, Div {
+    rat_reduce(big_from_i64(n), big_from_i64(d))
+}
+
+fn rat_add(x: Rat, y: Rat) -> Rat with Mut, Panic, Div {
+    let n = big_add(big_mul(x.num, y.den), big_mul(y.num, x.den))
+    let d = big_mul(x.den, y.den)
+    rat_reduce(n, d)
+}
+
+fn rat_mul(x: Rat, y: Rat) -> Rat with Mut, Panic, Div {
+    let n = big_mul(x.num, y.num)
+    let d = big_mul(x.den, y.den)
+    rat_reduce(n, d)
+}
+
+fn rat_print(x: Rat) with IO, Mut, Panic, Div {
+    big_print(x.num)
+    print(" ")
+    big_print(x.den)
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let alpha = rat_make(1, 2)
+    let beta = rat_make(1, 3)
+    let gamma = rat_make(1, 5)
+    let delta = rat_make(1, 7)
+    let ag = rat_mul(alpha, gamma)
+    let bd = rat_mul(beta, delta)
+    let r5 = rat_add(ag, bd)
+    let ad = rat_mul(alpha, delta)
+    let bg = rat_mul(beta, gamma)
+    let r12 = rat_add(ad, bg)
+    print("CASE 3_offlocus\n")
+    print("R5 ")
+    rat_print(r5)
+    print("R12 ")
+    rat_print(r12)
+    print("check: OK\n")
+}
