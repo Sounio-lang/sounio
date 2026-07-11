@@ -10,6 +10,8 @@ KEEP_WORK="${EISA_MADAROS_NATIVE_KEEP:-0}"
 MADAROS="${MADAROS_RAW_BIN:-${SOUNIO_MADAROS_BIN:-$ROOT_DIR/bin/madaros}}"
 CORPUS="$ROOT_DIR/tools/eisa/eisa_evm_run.sio"
 RECEIPT_PATH="${EISA_MADAROS_NATIVE_RECEIPT_PATH:-$WORK_DIR/eisa-native-conformance.receipt}"
+COMPACT_SIMPLE_IR_CAP=128
+COMPACT_OVERCAPACITY_FN_COUNT=$((COMPACT_SIMPLE_IR_CAP + 2))
 
 if [[ "$KEEP_WORK" != "1" && -z "${EISA_MADAROS_NATIVE_WORK_DIR:-}" ]]; then
   trap 'rm -rf "$WORK_DIR"' EXIT
@@ -22,6 +24,9 @@ fail() {
 
 [[ -x "$MADAROS" ]] || fail "Madaros compiler is not executable: $MADAROS"
 [[ -f "$CORPUS" ]] || fail "missing EISA corpus: $CORPUS"
+grep -Fqx "const MODULE_FRONTEND_IMPORTED_SIMPLE_CAP: i64 = $COMPACT_SIMPLE_IR_CAP" \
+  self-hosted/compiler/module_frontend.sio \
+  || fail "compact simple IR witness capacity drifted from compiler source"
 mkdir -p "$WORK_DIR"
 
 run_vm() {
@@ -58,6 +63,13 @@ compile_and_run_native() {
   [[ -s "$elf" ]] || fail "native compilation produced no ELF for $(basename "$source")"
   chmod +x "$elf"
 
+  grep -Fq 'module_native_driver: imported source selected full modular IR path' "$compile_log" \
+    || fail "$(basename "$source") did not select the full modular IR path"
+  if grep -Eq 'compact simple IR|compact modular IR|falling back to full modular IR path|imported_simple_ir_over_capacity|IR lowering failed' "$compile_log"; then
+    tail -120 "$compile_log" >&2 || true
+    fail "$(basename "$source") reached a forbidden compact/fallback lowering path"
+  fi
+
   set +e
   timeout "$CASE_TIMEOUT" "$elf" >"$output" 2>"$run_log"
   local run_rc=$?
@@ -89,6 +101,56 @@ require_not_baked() {
       fail "$label bakes source-observable receipt digits into the ELF: $run"
     fi
   done
+}
+
+require_compact_opt_in_fails_closed() {
+  local source="$1"
+  local elf="$2"
+  local log="$3"
+  rm -f "$elf"
+  set +e
+  env SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" SOUNIO_MADAROS_COMPACT_SIMPLE_IR=1 \
+    timeout "$CASE_TIMEOUT" "$MADAROS" --native-compile "$source" -o "$elf" \
+    >"$log" 2>&1
+  local rc=$?
+  set -e
+  [[ "$rc" -ne 0 && "$rc" -ne 124 && "$rc" -ne 139 ]] \
+    || fail "compact simple IR opt-in did not fail closed cleanly (rc=$rc)"
+  [[ ! -e "$elf" ]] || fail "compact simple IR opt-in wrote an ELF after rejection"
+  grep -Fq 'module_native_driver: imported source explicitly selected compact simple IR path' "$log" \
+    || fail "compact simple IR negative did not enter the explicit opt-in path"
+  grep -Fq 'module_native_driver: compact simple IR failed closed: imported_simple_ir_over_capacity' "$log" \
+    || fail "compact simple IR negative lacked the classified capacity verdict"
+  if grep -Fq 'module_native_driver: imported source selected full modular IR path' "$log"; then
+    fail "compact simple IR rejection silently fell back to full modular IR"
+  fi
+}
+
+make_compact_overcapacity_case() {
+  # This replaces eisa_madaros_native_fail_closed_gate.sh: the success corpus,
+  # EISA compact rejection, and synthetic capacity rejection now share one receipt.
+  local case_dir="$WORK_DIR/compact-overcapacity"
+  mkdir -p "$case_dir/overcap"
+  {
+    echo 'use overcap::mod::*'
+    echo
+    echo 'fn main() -> i64 {'
+    echo '    var total: i64 = 0'
+    local j=0
+    while [[ "$j" -lt "$COMPACT_OVERCAPACITY_FN_COUNT" ]]; do
+      printf '    total = total + f%03d()\n' "$j"
+      j=$((j + 1))
+    done
+    echo '    total'
+    echo '}'
+  } >"$case_dir/main.sio"
+  : >"$case_dir/overcap/mod.sio"
+  local i=0
+  while [[ "$i" -lt "$COMPACT_OVERCAPACITY_FN_COUNT" ]]; do
+    printf 'fn f%03d() -> i64 {\n    %d\n}\n\n' "$i" "$i" >>"$case_dir/overcap/mod.sio"
+    i=$((i + 1))
+  done
+  printf '%s\n' "$case_dir/main.sio"
 }
 
 VM_OUT="$WORK_DIR/metron-vm.stdout"
@@ -135,6 +197,16 @@ CHANGED_RECEIPTS="$(awk 'NR == FNR { original[NR] = $0; next } original[FNR] != 
   || fail "tamper did not change any source-observable receipt line"
 require_not_baked "$TAMPER_ELF" "$TAMPER_NATIVE_OUT" "tampered corpus"
 
+COMPACT_REJECT_ELF="$WORK_DIR/compact-opt-in-rejected.elf"
+COMPACT_REJECT_LOG="$WORK_DIR/compact-opt-in-rejected.compile.log"
+require_compact_opt_in_fails_closed "$CORPUS" "$COMPACT_REJECT_ELF" "$COMPACT_REJECT_LOG"
+
+COMPACT_OVERCAPACITY_SOURCE="$(make_compact_overcapacity_case)"
+COMPACT_OVERCAPACITY_ELF="$WORK_DIR/compact-overcapacity-rejected.elf"
+COMPACT_OVERCAPACITY_LOG="$WORK_DIR/compact-overcapacity-rejected.compile.log"
+require_compact_opt_in_fails_closed \
+  "$COMPACT_OVERCAPACITY_SOURCE" "$COMPACT_OVERCAPACITY_ELF" "$COMPACT_OVERCAPACITY_LOG"
+
 mkdir -p "$(dirname "$RECEIPT_PATH")"
 RECEIPT_TMP="$RECEIPT_PATH.tmp.$$"
 {
@@ -146,6 +218,9 @@ RECEIPT_TMP="$RECEIPT_PATH.tmp.$$"
   echo "native_stdout_sha256=$(sha256sum "$NATIVE_OUT" | cut -d' ' -f1)"
   echo "tampered_stdout_sha256=$(sha256sum "$TAMPER_NATIVE_OUT" | cut -d' ' -f1)"
   echo "tampered_receipts_changed=$CHANGED_RECEIPTS"
+  echo "native_lowering=full_modular_ir_no_fallback"
+  echo "compact_opt_in=fail_closed_no_fallback"
+  echo "compact_overcapacity_witness=130_functions_fail_closed_no_elf"
   echo "receipts=39/39"
   echo "tamper=pass"
   echo "anti_vacuity=pass"
