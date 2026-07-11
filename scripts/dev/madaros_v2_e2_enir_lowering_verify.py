@@ -104,11 +104,10 @@ def decimal_like_source(token: str) -> float:
     value = 0.0
     for ch in integer:
         value = value * 10.0 + float(ord(ch) - 48)
-    scale = 0.1
     if dot:
         for ch in fraction:
-            value = value + float(ord(ch) - 48) * scale
-            scale = scale * 0.1
+            value = value * 10.0 + float(ord(ch) - 48)
+        value = value / (10.0 ** len(fraction))
     return -value if negative else value
 
 

@@ -1,5 +1,5 @@
-// E2 direct source-to-ENIR lowering for the EISA v0 straight-line grammar and
-// the finite v1 structured-control subset. This parser does not call
+// E2 direct source-to-ENIR lowering for EISA v0, finite v1 control/resource
+// forms, and the finite v2 qd128 straight-line subset. This parser does not call
 // eisa::backend and never constructs .eisax.
 
 use enir::ir::*
@@ -139,12 +139,10 @@ fn enir_source_number(text: string, start: i64, end: i64) -> EnirSourceNumber wi
     var fraction_digits: i64 = 0
     if i < end && (str_char_at(text, i) as i64) == 46 {
         i = i + 1
-        var scale: f64 = 0.1
         while i < end {
             let ch = str_char_at(text, i) as i64
             if ch < 48 || ch > 57 { break }
-            value = value + ((ch - 48) as f64) * scale
-            scale = scale * 0.1
+            value = value * 10.0 + ((ch - 48) as f64)
             fraction_digits = fraction_digits + 1
             i = i + 1
         }
@@ -153,6 +151,13 @@ fn enir_source_number(text: string, start: i64, end: i64) -> EnirSourceNumber wi
     if fraction_digits == 0 && end > start && (str_char_at(text, end - 1) as i64) == 46 {
         return EnirSourceNumber { ok: false, value: 0.0 }
     }
+    var divisor: f64 = 1.0
+    var decimal_place: i64 = 0
+    while decimal_place < fraction_digits {
+        divisor = divisor * 10.0
+        decimal_place = decimal_place + 1
+    }
+    value = value / divisor
     if negative { value = 0.0 - value }
     let bits = f64_to_bits(value)
     if ((bits >> 52) & 2047) == 2047 { return EnirSourceNumber { ok: false, value: 0.0 } }
@@ -454,19 +459,22 @@ fn enir_source_push_block_value(module: &!EnirModule, line: i64) -> i64 with Mut
 // Fuel-bearing straight-line v1 programs use schema v2 even without CFG
 // edges. The halt terminator costs one fuel unit, matching the EVM's explicit
 // ehalt instruction while keeping control out of the operation stream.
-fn enir_lower_source_v1_resource_straight(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+fn enir_lower_source_resource_straight(text: string, profile: i64) -> EnirLowerResult with Mut, Panic, Div, Alloc {
     var module = enir_module_empty()
+    if profile != enir_profile_eisa_v1() && profile != enir_profile_eisa_v2() {
+        return enir_lower_fail(module, 1, 70)
+    }
     module.schema_version = ENIR_SCHEMA_CFG_VERSION
     module.stage = ENIR_STAGE_LOWERED
-    module.profile = enir_profile_eisa_v1()
+    module.profile = profile
     module = enir_module_push_type(module, EnirType {
         id: 0,
         value_kind: enir_value_f64(),
-        error_kind: enir_error_dd64(),
+        error_kind: if profile == enir_profile_eisa_v2() { enir_error_qd128() } else { enir_error_dd64() },
         uncertainty_kind: enir_uncertainty_gum1(),
         status_tracked: 1,
         provenance_tracked: 1,
-        profile: enir_profile_eisa_v1(),
+        profile: profile,
     })
     module = enir_module_push_policy(module, EnirPolicy {
         id: 0,
@@ -1043,8 +1051,17 @@ pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, 
 
 pub fn enir_lower_source_v1(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
     if enir_source_has_fuel(text) {
-        if enir_source_has_while(text) { enir_lower_source_v1_cfg(text) } else { enir_lower_source_v1_resource_straight(text) }
+        if enir_source_has_while(text) { enir_lower_source_v1_cfg(text) } else { enir_lower_source_resource_straight(text, enir_profile_eisa_v1()) }
     } else {
         enir_lower_source_profile(text, enir_profile_eisa_v1())
     }
+}
+
+pub fn enir_lower_source_v2(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    if !enir_source_has_fuel(text) || enir_source_has_while(text) {
+        var module = enir_module_empty()
+        module.profile = enir_profile_eisa_v2()
+        return enir_lower_fail(module, 1, 71)
+    }
+    enir_lower_source_resource_straight(text, enir_profile_eisa_v2())
 }
