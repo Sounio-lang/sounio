@@ -23,10 +23,11 @@ manifest under `self-hosted/enir/`. Its gate includes independent checking,
 byte-identical roundtrip, nine invalid mutations, valid numeric hash tamper,
 manifest tamper, and a zero-diff assertion over compiler lowering/codegen/ABI
 surfaces. This is an implemented **shadow foundation**, not the
-`E1-ENIR-CORPUS-FULL` lowering claimed below: no source program lowers through
-ENIR yet, no ENIR interpreter or ENIR-to-MIR pass exists, and code generation is
-unchanged. Run `scripts/dev/madaros_v2_e1_enir_shadow_gate.sh`; inspect or replay
-artifacts with `bin/madaros-enir emit|verify|roundtrip`.
+`E1-ENIR-CORPUS-FULL` lowering claimed below. The historical "no source
+lowering/interpreter" boundary was superseded by E2A and E2B below; ENIR-to-MIR
+and production code generation remain absent. Run
+`scripts/dev/madaros_v2_e1_enir_shadow_gate.sh`; inspect or replay artifacts
+with `bin/madaros-enir emit|verify|roundtrip`.
 
 Implementation note (2026-07-11): `E2A-ENIR-V0-STRAIGHT-LINE-FULL`, the first
 closed tranche of the still-open `E2-ENIR-LOWERING-FULL` umbrella, implements the
@@ -45,14 +46,39 @@ extracts the five sources from `tools/eisa/eisa_evm_run.sio`, independently
 reconstructs expected SSA/provenance in Python, checks canonical lowering and
 roundtrip, replays all error words and statuses in an independent interpreter,
 and compares the six source-observable events with a source-fresh Metron EVM.
-It also requires causal source tamper, eight malformed/unsupported source
+It also requires causal source tamper, nine malformed/unsupported source
 negatives, two artifact/canonicalization tampers, E1 regression, and zero diff
 over production lowering/codegen/ABI/runtime and oracle sources. Run
 `scripts/dev/madaros_v2_e2_enir_lowering_gate.sh`, or use
 `bin/madaros-enir lower <source>` and `bin/madaros-enir run <enir>`.
 
+Implementation note (2026-07-11): `E2B-ENIR-V1-FINITE-CFG-FULL` adds the
+finite v1 slice `v1_loop`, `v1_if_both`, `v1_i6`, `v1_highreg`, `v1e_frail`,
+`v1e_emov_negzero`, `v1_arith_high`, and `v1_branch_high` (8 programs and 11
+observations). Cumulative real lowering is therefore 13/30 programs and 17/39
+observations. `lower-v1` emits explicit `ebr`, `ebrz`, `ebrn`, and `ehalt`
+targets; the interpreter executes a dynamic PC and records taken, not-taken,
+poisoned, and frail branch decisions. High-value-ID cases reach IDs 20, 23,
+and 20, and negative-zero comparison uses raw bits rather than formatted zero.
+
+The E2B SSA boundary is deliberate and executable. A `while` condition is an
+immutable preheader value and its body must be empty. An `if` body may contain
+`store` operations but may not define values or contain gates; conditional
+gates require path-sensitive observation regions. The standalone verifier
+recognizes the structured CFG shape, requires final `ehalt`, rejects
+arbitrary targets and policies, and rejects conditional definitions. Values
+carried across a backedge or merge require block arguments/phi and are deferred
+to E2C rather than represented as mutable pseudo-SSA. Explicit `fuel` is also
+rejected until ENIR has a canonical fuel field and fuel-stop receipts. The E2B
+gate performs a three-way EISA VM/native ENIR/independent Python differential,
+causal tamper, 14 source negatives, four artifact tampers, one canonicalization
+tamper, E2A/E1 regression,
+and a protected-surface zero diff. Run
+`scripts/dev/madaros_v2_e2b_enir_cfg_gate.sh`, or use
+`bin/madaros-enir lower-v1 <source>` followed by `run <enir>`.
+
 This does **not** complete the `E2-ENIR-LOWERING-FULL` umbrella or claim all
-30/39 programs, v1/v2 control flow, general
+30/39 programs, v1 fuel-stop and loop-carried state, v2/qd128, general
 exceptional-value algebra, `ENIR -> MIR`, ABI lowering, or production-codegen
 selection. Those boundaries remain open and fail closed rather than falling
 back through the shadow fixture.
@@ -71,7 +97,8 @@ assert that a corresponding pass or checker exists today. The first
 implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
-fallback. Until that milestone passes, ENIR is specified but not implemented.
+fallback. Until that milestone passes, ENIR is partially implemented only for
+the explicitly gated E2A/E2B slices; broader conformance remains unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,

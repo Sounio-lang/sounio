@@ -201,12 +201,12 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
             produces = true
             if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 920 + i }
         } else if op.opcode == enir_op_ebr() {
-            if op.result_id != -1 || op.target < 0 || op.target >= module.op_count { return 940 + i }
+            if op.result_id != -1 || op.a != -1 || op.b != -1 || op.target < 0 || op.target >= module.op_count || op.policy_id != -1 || op.memory_slot != -1 { return 940 + i }
         } else if op.opcode == enir_op_ebrz() || op.opcode == enir_op_ebrn() {
-            if op.result_id != -1 || op.target < 0 || op.target >= module.op_count || enir_policy_index(module, op.policy_id) < 0 { return 960 + i }
+            if op.result_id != -1 || op.b != -1 || op.target < 0 || op.target >= module.op_count || enir_policy_index(module, op.policy_id) < 0 || op.memory_slot != -1 { return 960 + i }
             if !enir_value_branchable(module, value_ids, value_types, value_count, op.a) { return 980 + i }
         } else if op.opcode == enir_op_ehalt() {
-            if op.result_id != -1 { return 1000 + i }
+            if op.result_id != -1 || op.a != -1 || op.b != -1 || op.target != -1 || op.policy_id != -1 || op.memory_slot != -1 { return 1000 + i }
         }
 
         if produces {
@@ -231,6 +231,43 @@ pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
     }
     if value_count != module.value_count { return 1199 }
     if module.stage == ENIR_STAGE_LOWERED && gate_count != module.observation_count { return 1198 }
+
+    if module.stage == ENIR_STAGE_LOWERED && module.profile == enir_profile_eisa_v1() {
+        if module.ops[(module.op_count - 1) as usize].opcode != enir_op_ehalt() { return 1701 }
+        i = 0
+        while i < module.op_count {
+            let op = module.ops[i as usize]
+            if op.opcode == enir_op_ebrz() {
+                // target=i+2 plus the backedge at i+1 proves the loop body is
+                // structurally empty. Loop-carried values remain an E2C job.
+                if op.target != i + 2 { return 1710 + i }
+                let back = module.ops[(i + 1) as usize]
+                if back.opcode != enir_op_ebr() || back.target != i { return 1720 + i }
+            } else if op.opcode == enir_op_ebrn() {
+                if op.target != i + 2 || i + 1 >= module.op_count { return 1730 + i }
+                let skip = module.ops[(i + 1) as usize]
+                if skip.opcode != enir_op_ebr() || skip.target <= i + 1 || skip.target >= module.op_count { return 1740 + i }
+                var body = i + 2
+                while body < skip.target {
+                    let body_opcode = module.ops[body as usize].opcode
+                    if body_opcode == enir_op_econst() || body_opcode == enir_op_eload() || body_opcode == enir_op_egate() ||
+                       (body_opcode >= enir_op_eadd() && body_opcode <= enir_op_esqrt()) ||
+                       body_opcode == enir_op_emov() {
+                        return 1750 + body
+                    }
+                    body = body + 1
+                }
+            } else if op.opcode == enir_op_ebr() {
+                var owned = false
+                if i > 0 && module.ops[(i - 1) as usize].opcode == enir_op_ebrn() { owned = true }
+                if op.target < i && module.ops[op.target as usize].opcode == enir_op_ebrz() && module.ops[op.target as usize].target == i + 1 { owned = true }
+                if !owned { return 1760 + i }
+            } else if op.opcode == enir_op_ehalt() && i != module.op_count - 1 {
+                return 1770 + i
+            }
+            i = i + 1
+        }
+    }
 
     var programs: i64 = 0
     var previous_name = enir_name_empty()
