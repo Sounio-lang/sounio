@@ -1,0 +1,101 @@
+//@ run-pass
+// Frente A, UNBOUNDED: the measure claim over Q with a from-scratch BIGINT, past the i64 wall.
+//
+// The i64 sweep (sedenion_measure_annihilation_general.sio) was exact only to k=9 and censored
+// OVERFLOW beyond. Here a minimal arbitrary-precision BigNat (base 1e9 limbs) computes the EXACT
+// off-locus variance  Var = 2/(3*10^(2k))  reduced to  1/((3*10^(2k))/2)  for k = 1..20 -- with no
+// ceiling. Emits `BIG k 1 <den>` for element-wise cross-check against the unbounded Python fractions
+// oracle. souc's exactness is no longer i64-bounded; the boundary at k=9 is REMOVED.
+//
+// Honest reduction: gcd(2, 3*10^(2k)) = 2 exactly for all k>=1 (3*10^(2k) is even), so 2/(3*10^(2k))
+// reduces to 1/((3*10^(2k))/2), numerator 1. Only big_mul_small + big_div_small are needed (no full
+// bigint division/gcd). Self-contained (#637); bigint limb loops avoid the D5 global+division guard.
+
+struct BigNat { limb: [i64; 48], len: i64 }   // base 1e9, limb[0] = least significant
+
+fn big_from_i64(x: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 48], len: 1 }
+    var v = x
+    var i = 0
+    while v > 0 && i < 48 {
+        b.limb[i as usize] = v - (v / 1000000000) * 1000000000
+        v = v / 1000000000
+        i = i + 1
+    }
+    if i == 0 { i = 1 }
+    b.len = i
+    b
+}
+
+fn big_mul_small(a: BigNat, m: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 48], len: a.len }
+    var carry = 0
+    var i = 0
+    while i < a.len {
+        let prod = a.limb[i as usize] * m + carry
+        b.limb[i as usize] = prod - (prod / 1000000000) * 1000000000
+        carry = prod / 1000000000
+        i = i + 1
+    }
+    while carry > 0 && i < 48 {
+        b.limb[i as usize] = carry - (carry / 1000000000) * 1000000000
+        carry = carry / 1000000000
+        i = i + 1
+    }
+    b.len = i
+    b
+}
+
+fn big_div_small(a: BigNat, m: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 48], len: a.len }
+    var carry = 0
+    var i = a.len - 1
+    while i >= 0 {
+        let cur = carry * 1000000000 + a.limb[i as usize]
+        b.limb[i as usize] = cur / m
+        carry = cur - (cur / m) * m
+        i = i - 1
+    }
+    var l = a.len
+    while l > 1 && b.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    b.len = l
+    b
+}
+
+fn big_pow10(n: i64) -> BigNat with Mut, Panic, Div {
+    var b = big_from_i64(1)
+    var c = 0
+    while c < n { b = big_mul_small(b, 10); c = c + 1 }
+    b
+}
+
+// Reduced Var denominator at scale k: (3 * 10^(2k)) / 2. (numerator = 1)
+fn var_den(k: i64) -> BigNat with Mut, Panic, Div {
+    big_div_small(big_mul_small(big_pow10(2 * k), 3), 2)
+}
+
+fn print_pad9(v: i64) with IO, Mut, Panic, Div {
+    var d = 100000000
+    while d > 0 {
+        print_int((v / d) - ((v / (d * 10)) * 10))
+        d = d / 10
+    }
+}
+fn big_print(a: BigNat) with IO, Mut, Panic, Div {
+    print_int(a.limb[(a.len - 1) as usize])
+    var i = a.len - 2
+    while i >= 0 { print_pad9(a.limb[i as usize]); i = i - 1 }
+}
+
+fn main() with IO, Mut, Panic, Div {
+    var k = 1
+    while k <= 20 {
+        print("BIG ")
+        print_int(k)
+        print(" 1 ")            // numerator (reduced)
+        big_print(var_den(k))
+        print("\n")
+        k = k + 1
+    }
+    println("BIGINT-SWEEP-UNBOUNDED PASS")
+}

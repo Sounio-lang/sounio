@@ -1,8 +1,10 @@
 <!-- docs:meta
-topic_id: handoff.pending_changes_triage.2026-07-11
+topic_id: repo.docs.handoff.pending-changes-triage-2026-07-11
 authority: repo_only
-audience: maintainers
-last_validated: 2026-07-11
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.pending-changes-triage-2026-07-11
 -->
 
 # Pending working-tree changes — triage (2026-07-11)
