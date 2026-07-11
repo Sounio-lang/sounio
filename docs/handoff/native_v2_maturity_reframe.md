@@ -9,6 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.native
 
 # Reframe — native-v2 "backend maturity" track (empirical baseline, 2026-07-11)
 
+**Tracking issue:** [#789](https://github.com/Sounio-lang/sounio/issues/789)
 **Authored by:** Claude (EISA lane, `gpu/epistemic-tensor-core-next` @ `b638354c0`), 2026-07-11
 **Type:** compiler-internals characterization (modular `main.sio` / native-v2). No code changes — measurement + scoping only.
 **Priority:** informational. Corrects the working premise before anyone invests in the track.
