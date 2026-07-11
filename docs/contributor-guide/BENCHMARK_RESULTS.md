@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-gu
 
 # Natural Gradient Descent Benchmark Results
 
+> **⚠️ Path reality updated 2026-07-11.** The cited `crates/souc/benches/*.rs`, `crates/souc/src/epistemic/*.rs`, and `cargo bench` do **not** exist in this self-hosted checkout (no Rust tree). The epistemic/benchmark code is self-hosted `.sio` under `stdlib/` and `benchmarks/`. The numeric results below are historical Rust-era figures.
+
+
 ## Summary
 
 Comprehensive benchmarking of natural gradient descent vs Euclidean gradient descent for Beta parameter estimation.
