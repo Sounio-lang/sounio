@@ -19,7 +19,7 @@ compile_rejects() {
   local marker="$3"
   local log="$TMP_DIR/$name.log"
 
-  if (cd "$SOURCE_ROOT" && timeout 30 "$MADAROS_BIN" build "$source" -o "$TMP_DIR/$name") >"$log" 2>&1; then
+  if (cd "$SOURCE_ROOT" && timeout 30 "$MADAROS_BIN" compile "$source" -o "$TMP_DIR/$name") >"$log" 2>&1; then
     cat "$log" >&2
     fail "$name unexpectedly compiled"
   fi
@@ -34,14 +34,15 @@ compile_accepts() {
   local source="$2"
   local log="$TMP_DIR/$name.log"
 
-  (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" build "$source" -o "$TMP_DIR/$name") >"$log" 2>&1 || {
+  (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" compile "$source" -o "$TMP_DIR/$name") >"$log" 2>&1 || {
     cat "$log" >&2
     fail "$name did not compile"
   }
-  grep -Fq "native_v2_compile: emitted path=$TMP_DIR/$name" "$log" || {
+  grep -Fq 'Compilation successful!' "$log" || {
     cat "$log" >&2
     fail "$name compiled without the native emission marker"
   }
+  [[ -s "$TMP_DIR/$name" ]] || fail "$name reported success without an output artifact"
 }
 
 [[ -x "$MADAROS_BIN" ]] || fail "rebuilt Madaros not executable: $MADAROS_BIN"
@@ -67,7 +68,7 @@ compile_accepts generic-public tests/multimodule/wp_a3/w2_main.sio
 compile_accepts zero-event-positive tests/known_failures/zero_event_stdlib_native_v2_probe.sio
 
 eisa_log="$TMP_DIR/eisa.log"
-if (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" build \
+if (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" compile \
     tests/known_failures/eisa_zero_flags_native_v2_probe.sio \
     -o "$TMP_DIR/eisa") >"$eisa_log" 2>&1; then
   :
