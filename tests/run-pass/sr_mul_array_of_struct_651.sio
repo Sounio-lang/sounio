@@ -1,0 +1,50 @@
+//@ run-pass
+//@ requires: madaros
+// Regression guard for issue #651 — the [struct;N] array-of-struct multiply-
+// accumulate loop. This exact shape once miscompiled (N=16 → garbage, N=2048 →
+// SIGSEGV) due to struct-value-copy aliasing; fixed by commit ff7afab69
+// ("value semantics for aggregate ident-init — deep copy, not alias"). This is
+// the single-module, non-generic form (the [i64;N] analogue was always correct)
+// so CI can glob it. If struct-value semantics regress, this prints "651 FAIL".
+//
+// Values chosen so the accumulate crosses several slots: a.c[i]*b.c[i] lands in
+// idx = i^i = 0, so c[0] = 2*3 + 5*7 = 6 + 35 = 41 (den 1 under naive rat_add).
+use math::rational::{Rational, rat_zero, rat_one, rat_add, rat_mul}
+
+struct SmallR { c: [Rational; 16] }
+
+// e_i * e_j accumulate over idx = i XOR j (sign dropped — this guards codegen,
+// not the algebra), writing back into the array-of-struct slot each iteration.
+fn sr_mul(a: SmallR, b: SmallR) -> SmallR with Mut, Panic, Div {
+    var r = SmallR { c: [rat_zero(); 16] }
+    var i: i32 = 0
+    while i < 16 {
+        var j: i32 = 0
+        while j < 16 {
+            let idx = i ^ j
+            r.c[idx as usize] = rat_add(r.c[idx as usize], rat_mul(a.c[i as usize], b.c[j as usize]))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var a = SmallR { c: [rat_zero(); 16] }
+    var b = SmallR { c: [rat_zero(); 16] }
+    a.c[1 as usize] = Rational { num: 2, den: 1 }
+    b.c[1 as usize] = Rational { num: 3, den: 1 }
+    a.c[2 as usize] = Rational { num: 5, den: 1 }
+    b.c[2 as usize] = Rational { num: 7, den: 1 }
+    let p = sr_mul(a, b)
+    let c0 = p.c[0 as usize]
+    print("c0="); print_int(c0.num); print("/"); print_int(c0.den); print("\n")
+    if c0.num == 41 && c0.den == 1 {
+        print("651 PASS\n")
+        return 0
+    } else {
+        print("651 FAIL\n")
+        return 1
+    }
+}
