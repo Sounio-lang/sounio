@@ -226,7 +226,7 @@ type, value, provenance, operation, effect, trap, observation, and fuel mapping.
 The MIR interpreter is separate from the ENIR interpreter; an independent
 Python replay checks the same artifact, and all six logical receipts must be
 bit-identical across ENIR, MIR, and source-fresh METRON execution. The FULL gate
-also includes a divide-by-zero poison witness, eight fail-closed out-of-scope
+also includes a divide-by-zero poison witness, five fail-closed out-of-scope
 ENIRs, 30 structural/relational/canonicalization tampers, eleven runtime receipt
 tampers, cross-name and same-name source-hash rejection, causal source tamper,
 and E2H through E1
@@ -235,6 +235,35 @@ regression. Run `scripts/dev/madaros_v2_e3a_enir_mir_qd128_gate.sh`.
 E3A does **not** lower memory, `emov`, profile v0/v1, fuel-only programs, or
 multi-block CFG. It does not choose ABI layout, MachineIR instructions, runtime
 helpers, or production codegen. Those remain later E3 slices and fail closed.
+
+Implementation note (2026-07-11):
+`E3B-ENIR-MIR-QD128-MEMORY-MOVE-FULL` extends semantic MIR with explicit
+`LOAD`, `STORE`, and `MOVE` instructions for the bounded single-block v2
+profile. A memory instruction carries a logical slot and a load carries the
+exact latest dominating store site. Memory read and write are distinct effects;
+non-memory instructions must carry no memory metadata. A store and every
+load/move copy the complete qd128 epistemic product atomically: value, four
+roundoff limbs, uncertainty, and poison status.
+
+The compiler-owned verifier rejects load-before-store, stale/future store
+origins, slot/effect disagreement, provenance disagreement, undefined operands,
+and memory metadata on `MOVE`. The relational validator independently checks
+the one-to-one ENIR mapping. A separate Python validator reconstructs that
+relation, replays logical memory, and requires exact ENIR == MIR == METRON
+observations for `v2_mem`, `v2_emov`, and `v2_mem_poison`. Runtime memory
+receipts bind source ENIR hash, slot, MIR/source site, and all product words.
+
+The FULL gate includes a two-store latest-dominance witness, negative-zero
+store/load/move, poison preservation, 38 artifact tampers, 32 runtime receipt
+tampers, cross-source and same-name hash rejection, causal source tamper, and
+E3A-through-E1 regression. Run
+`scripts/dev/madaros_v2_e3b_enir_mir_memory_gate.sh`.
+
+E3B is deliberately not Memory SSA. Its verifier and translation validator
+check linear latest-store provenance only for one block. Phi-like memory
+versions, joins, loops, alias analysis,
+multi-block CFG, ABI selection, MachineIR, and code generation remain E3C or
+later and must continue to fail closed.
 
 ## 1. Decision
 
@@ -251,9 +280,9 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. That bounded milestone is implemented by the explicitly gated
-E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. The first E3A arithmetic
-`ENIR -> MIR` slice is now implemented. Broader E3
-memory/control coverage and every later ABI/codegen stage remain unproven.
+E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. E3A arithmetic and E3B bounded
+single-block memory/move `ENIR -> MIR` slices are now implemented. Multi-block
+control and Memory SSA, and every later ABI/codegen stage, remain unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,

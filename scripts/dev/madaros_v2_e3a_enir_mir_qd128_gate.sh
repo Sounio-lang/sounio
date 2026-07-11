@@ -51,9 +51,9 @@ python3 scripts/dev/madaros_v2_e3a_enir_mir_qd128_verify.py \
   --driver "$DRIVER" --source-dir tools/eisa --corpus tools/eisa/eisa_evm_run.sio \
   --oracle "$ORACLE_OUT" --out-dir "$TMP_DIR/cases" --receipt "$RECEIPT" --root "$ROOT_DIR"
 
-# The first E3 slice must reject memory, move, profiles v0/v1, and multi-block CFG.
+# E3A remains the arithmetic regression slice; E3B owns memory and move.
 mkdir -p "$TMP_DIR/unsupported"
-for name in v2_mem v2_emov v2_mem_poison v2_loop v2_frail v2_fuel; do
+for name in v2_loop v2_frail v2_fuel; do
   "$DRIVER" lower-v2 "tools/eisa/eisa_enir_${name}.eisa" >"$TMP_DIR/unsupported/${name}.enir"
 done
 "$DRIVER" lower-v1 tools/eisa/eisa_enir_v1_rump_dd.eisa >"$TMP_DIR/unsupported/v1_rump_dd.enir"
@@ -72,7 +72,7 @@ for artifact in "$TMP_DIR"/unsupported/*.enir; do
   fi
   grep -Fq 'mir-lower-error|' "$artifact.out" || fail "unsupported ENIR lacks classified MIR lowering error: $(basename "$artifact")"
 done
-[[ "$unsupported_count" == "8" ]] || fail "unsupported ENIR count drifted: $unsupported_count"
+[[ "$unsupported_count" == "5" ]] || fail "unsupported ENIR count drifted: $unsupported_count"
 
 # Poison is an explicit arithmetic trap outcome, not a crash or omitted row.
 cat >"$TMP_DIR/poison.eisa" <<'EOF'
@@ -104,8 +104,8 @@ out = Path(sys.argv[3]); out.mkdir()
 def write(name, text):
     (out / f"{name}.emir").write_text(text, encoding="ascii")
 
-write("schema", mir.replace("emir|1|3|", "emir|2|3|", 1))
-write("stage", mir.replace("emir|1|3|", "emir|1|2|", 1))
+write("schema", mir.replace("emir|2|3|", "emir|1|3|", 1))
+write("stage", mir.replace("emir|2|3|", "emir|2|2|", 1))
 write("profile", mir.replace("|v2_add|2|12|", "|v2_add|1|12|", 1))
 write("fuel", mir.replace("|v2_add|2|12|", "|v2_add|2|4|", 1))
 write("source_hash", mir.replace(mir.splitlines()[0].rsplit("|", 1)[1], "1", 1))
@@ -230,4 +230,4 @@ if [[ -n "$KEEP_DIR" ]]; then
 fi
 
 RECEIPT_SHA="$(sha256sum "$RECEIPT" | cut -d' ' -f1)"
-echo "E3A_ENIR_MIR_QD128_ARITHMETIC_FULL_GATE_PASS receipt_sha256=$RECEIPT_SHA programs=6 observations=6 unsupported_enir=$unsupported_count artifact_tampers=$artifact_tamper_count runtime_tampers=$runtime_tamper_count poison=explicit source_hash_binding=cross-name+same-name relation=native+independent execution=enir==mir==metron semantic_ticks=exact abi=independent machine_ir=unused memory=fail-closed cfg=single-block source_tamper=pass e2h_regression=pass e2g_regression=pass e2f_regression=pass e2e_regression=pass e2d_regression=pass e2c_regression=pass e2b_regression=pass e2a_regression=pass e1_regression=pass codegen_diff=0"
+echo "E3A_ENIR_MIR_QD128_ARITHMETIC_FULL_GATE_PASS receipt_sha256=$RECEIPT_SHA programs=6 observations=6 unsupported_enir=$unsupported_count artifact_tampers=$artifact_tamper_count runtime_tampers=$runtime_tamper_count poison=explicit source_hash_binding=cross-name+same-name relation=native+independent execution=enir==mir==metron semantic_ticks=exact abi=independent machine_ir=unused memory=e3b-separate cfg=single-block source_tamper=pass e2h_regression=pass e2g_regression=pass e2f_regression=pass e2e_regression=pass e2d_regression=pass e2c_regression=pass e2b_regression=pass e2a_regression=pass e1_regression=pass codegen_diff=0"
