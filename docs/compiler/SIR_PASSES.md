@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.sir-p
 
 # SIR Transformation Passes
 
+> **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but the SIR/IR passes now live in `self-hosted/ir/` (`const_prop.sio`, `dce.sio`, `inline.sio`, `loop_opt.sio`, `lower.sio`, `normalize.sio`, `optimize.sio`, …) and refinement handling in `self-hosted/check/refinement.sio` — not any `compiler/src/sir/*.rs` or `compiler/src/types/*.rs`. Do not look for the `.rs` paths below.
+
+
 This document describes the modular SIR transformation pass infrastructure.
 
 ## Architecture
