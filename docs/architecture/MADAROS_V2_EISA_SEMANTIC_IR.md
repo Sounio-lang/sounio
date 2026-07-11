@@ -208,9 +208,11 @@ production codegen/ABI/runtime, qd semantics, and the frozen oracle. Run
 This completes only the declared, finite `E2-ENIR-LOWERING-FULL` corpus. By
 itself E2 does **not** establish arbitrary nested/path-sensitive loops, general
 exceptional-value algebra, `ENIR -> MIR`, ABI lowering, GPU lowering, or
-production-codegen selection. Memory in multi-block CFG is explicitly rejected
-rather than assigned an unsound path-insensitive store provenance. Those stages
-require separate gates; there is no fallback through the shadow fixture.
+production-codegen selection. The original E2H slice rejects multi-block memory
+rather than assigning an unsound path-insensitive store provenance. E3C below
+adds one separately gated canonical loop-memory profile; other multi-block
+memory shapes still fail closed. There is no fallback through the shadow
+fixture.
 
 Implementation note (2026-07-11):
 `E3A-ENIR-MIR-QD128-ARITHMETIC-FULL` implements the first translation-validated
@@ -261,9 +263,45 @@ E3A-through-E1 regression. Run
 
 E3B is deliberately not Memory SSA. Its verifier and translation validator
 check linear latest-store provenance only for one block. Phi-like memory
-versions, joins, loops, alias analysis,
-multi-block CFG, ABI selection, MachineIR, and code generation remain E3C or
-later and must continue to fail closed.
+versions, joins, and loops belong to the E3C schema rather than being encoded as
+E3B store-site metadata.
+
+Implementation note (2026-07-11):
+`E3C-CFG-MEMORY-SSA-FULL` introduces semantic CFG-MIR schema 3 as the explicit
+multi-block successor to frozen E3A/E3B schema 2. It copies four canonical ENIR
+blocks, block arguments, edges, branch conditions, terminators, and semantic
+ticks into machine-checkable MIR rows. `STORE` defines a memory-version SSA
+value; `LOAD` consumes one. The loop header defines a memory phi whose incoming
+pairs are bound to the entry edge/store version and the backedge/body-store
+version.
+
+Two source-authored witnesses make the phi non-vacuous. `v2_mem_phi_zero`
+takes the zero-trip edge and observes the entry-store product (`7.25`).
+`v2_mem_phi_once` executes one body store, traverses the backedge, and observes
+that version (`8.5`). On each edge into the header, the interpreter checks the
+concrete current version against the declared incoming version before changing
+it to the phi result. The exit load consumes that phi result, while the complete
+qd128 epistemic product remains atomic.
+
+Compiler-owned structural and relational verifiers are complemented by a
+separate Python relation checker and CFG/Memory-SSA replay. The three existing
+E2G control programs remain exact against source-fresh METRON; the two new
+memory witnesses are checked ENIR == CFG-MIR == independent replay. The FULL
+gate rejects three path-initialization/source shapes, 59 artifact tampers, and
+54 runtime receipt tampers, and runs E3B through E1 as regressions. Run
+`scripts/dev/madaros_v2_e3c_cfg_memory_ssa_gate.sh`.
+
+The E3A/E3B regression scripts remain strict by default. E3C invokes their
+documented `E3A_ALLOW_DOWNSTREAM_ENIR_EXTENSION=1` and
+`E3B_ALLOW_DOWNSTREAM_ENIR_EXTENSION=1` modes only after E3C itself has checked
+that production codegen, ABI/runtime, ENIR IR/interpreter, qd semantics, and the
+frozen METRON oracle are unchanged. The opt-in excludes only the E3C source
+lowering extension from the historical stage-local diff check.
+
+E3C checks behavior only for the declared reducible four-block qd128 loop and
+one logical memory slot. Multiple/aliased slots, arbitrary joins, irreducible
+CFG, calls, exceptions, Memory SSA optimization, ABI selection, MachineIR, and
+code generation remain later stages and fail closed.
 
 ## 1. Decision
 
@@ -280,9 +318,10 @@ implementation milestone is not one more opaque `EReg2` helper call.
 It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. That bounded milestone is implemented by the explicitly gated
-E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. E3A arithmetic and E3B bounded
-single-block memory/move `ENIR -> MIR` slices are now implemented. Multi-block
-control and Memory SSA, and every later ABI/codegen stage, remain unproven.
+E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. E3A arithmetic, E3B bounded
+single-block memory/move, and the E3C canonical four-block CFG/Memory-SSA
+`ENIR -> MIR` slices are now implemented. General CFG/alias coverage and every
+later ABI/codegen stage remain unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,

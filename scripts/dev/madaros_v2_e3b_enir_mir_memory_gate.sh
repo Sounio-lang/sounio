@@ -22,12 +22,9 @@ fail() {
 
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" -- \
-  self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu \
-  stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio \
-  self-hosted/enir/ir.sio self-hosted/enir/source_lower.sio self-hosted/enir/interpreter.sio \
-  self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio \
-  || fail "E3B changed production codegen/ABI/runtime, ENIR semantics, pinned qd semantics, or frozen METRON oracle"
+E3B_PROTECTED=(self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio self-hosted/enir/ir.sio self-hosted/enir/interpreter.sio self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio)
+if [[ "${E3B_ALLOW_DOWNSTREAM_ENIR_EXTENSION:-0}" != "1" ]]; then E3B_PROTECTED+=(self-hosted/enir/source_lower.sio); fi
+git diff --quiet "$BASE_REF" -- "${E3B_PROTECTED[@]}" || fail "E3B changed protected production, ENIR, qd, or oracle surfaces"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "ENIR/MIR driver build produced no ELF"
@@ -246,7 +243,7 @@ if python3 scripts/dev/madaros_v2_e3b_enir_mir_memory_verify.py \
   fail "causal source tamper passed MIR/METRON validation"
 fi
 
-E3A_BASE_REF="$BASE_REF" bash scripts/dev/madaros_v2_e3a_enir_mir_qd128_gate.sh >"$TMP_DIR/e3a-regression.log"
+E3A_BASE_REF="$BASE_REF" E3A_ALLOW_DOWNSTREAM_ENIR_EXTENSION="${E3B_ALLOW_DOWNSTREAM_ENIR_EXTENSION:-0}" bash scripts/dev/madaros_v2_e3a_enir_mir_qd128_gate.sh >"$TMP_DIR/e3a-regression.log"
 grep -Fq 'E3A_ENIR_MIR_QD128_ARITHMETIC_FULL_GATE_PASS' "$TMP_DIR/e3a-regression.log" || fail "E3A-through-E1 regression chain failed"
 
 if [[ -n "$KEEP_DIR" ]]; then
