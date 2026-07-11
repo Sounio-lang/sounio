@@ -49,7 +49,7 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_file_maybe_has_use}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
@@ -2943,43 +2943,15 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
-    if module_frontend_file_maybe_has_use(source_path) {
-        let imported_rc = module_frontend_compile_imported_to_file(source_path, out_path)
-        if imported_rc != 0 {
-            print("native_v2_compile: imported front-half/backend failed rc=")
-            print_int(imported_rc as i64)
-            print("\n")
-            panic("native-v2-compile failed: imported front-half errors")
-        }
-        print("native_v2_compile: emitted path=")
-        print(out_path)
-        print("\n")
-        if execute_after_compile {
-            native_v2_run_elf_and_exit(out_path, args, flag_index)
-        }
-        return
-    }
-    var trace = empty_load_multimodule_ir_trace()
-    let ir_result = load_multimodule_ir_traced(source_path, &! trace)
-    write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
-    if !ir_result.ok {
-        print("native_v2_compile: front-half failed: ")
-        print(ir_result.error_msg)
-        print("\n")
-        panic("native-v2-compile failed: front-half errors")
-    }
-    if ir_result.module.fn_count <= 0 {
-        panic("native-v2-compile failed: no module produced")
-    }
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
-    write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
-    write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
-    let rc = compile_native_v2_preview_to_file(&ir_result.module, spec, out_path)
+    // The boxed compile-to-file route is SRET-safe for both imported and
+    // single-module programs. Returning MultiModuleIrResult by value embeds a
+    // full IrModule and crashes larger sources before the backend is reached.
+    let rc = module_frontend_compile_imported_to_file(source_path, out_path)
     if rc != 0 {
-        print("native_v2_compile: FAIL to_file rc=")
+        print("native_v2_compile: front-half/backend failed rc=")
         print_int(rc as i64)
         print("\n")
-        return
+        panic("native-v2-compile failed")
     }
     print("native_v2_compile: emitted path=")
     print(out_path)
@@ -3025,20 +2997,7 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    var trace = empty_load_multimodule_ir_trace()
-    let ir_result = load_multimodule_ir_traced(opts.input_file, &! trace)
-    if !ir_result.ok {
-        print("Compilation failed!\n\nErrors:\n  ")
-        print(ir_result.error_msg)
-        print("\n")
-        panic("compile failed")
-    }
-    if ir_result.module.fn_count <= 0 {
-        print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge produced no module\n")
-        panic("compile failed")
-    }
-    let emit_spec = native_resolve_target("x86_64-linux", "auto", true)
-    let bridge_exit = compile_native_v2_preview_to_file(&ir_result.module, emit_spec, opts.output_file)
+    let bridge_exit = module_frontend_compile_imported_to_file(opts.input_file, opts.output_file)
     if bridge_exit != 0 {
         print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge compilation failed\n")
         panic("compile failed")
@@ -27869,7 +27828,7 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         run_version_json_mode()
         return
     }
-    println("Madares v0.80.0 -- the Sounio self-hosted compiler")
+    println("Madaros v0.80.0 -- the Sounio self-hosted compiler")
     println("the bare highland that does not negotiate with ill-formed code -- Sfakia, Crete")
     println("Horizon 3: self-hosted primary compiler.")
     println("")

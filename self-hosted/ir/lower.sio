@@ -490,6 +490,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.returns_float = (*summary.module).functions[i as usize].returns_float
         func.return_struct_name = (*summary.module).functions[i as usize].return_struct_name
         func.prof_counter_id = (*summary.module).functions[i as usize].prof_counter_id
+        func.hyper_algebra_kind = (*summary.module).functions[i as usize].hyper_algebra_kind
         func.bss_size = (*summary.module).functions[i as usize].bss_size
         (*module_box).functions[i as usize] = func
         i = i + 1
@@ -563,6 +564,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.returns_float = summary.module.functions[i as usize].returns_float
         func.return_struct_name = summary.module.functions[i as usize].return_struct_name
         func.prof_counter_id = summary.module.functions[i as usize].prof_counter_id
+        func.hyper_algebra_kind = summary.module.functions[i as usize].hyper_algebra_kind
         func.bss_size = summary.module.functions[i as usize].bss_size
         (*module_box).functions[i as usize] = func
         i = i + 1
@@ -1032,6 +1034,30 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
     }
 }
 
+fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
+    match *ty_opt {
+        Some(ty) => {
+            if (*ty).kind != TypeExprKind::TypeArray { return 8 }
+            match (*ty).inner {
+                Some(elem) => {
+                    if (*elem).kind == TypeExprKind::TypeNamed {
+                        let name = ir_path_first_name((*elem).path)
+                        if name.len == 2 {
+                            let first = name.buf[0] as i64
+                            if (first == 105 || first == 117) && (name.buf[1] as i64) == 56 {
+                                return 1
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            8
+        }
+        _ => 8,
+    }
+}
+
 fn lowerer_preseed_program_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
@@ -1105,6 +1131,7 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.compile_strategy = 99
                                     bss_slot.param_count = bss_off
                                     bss_slot.bss_size = bss_size
+                                    bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                     let init_val = ast_lookup_global_var_init(name)
                                     if init_val != 0 {
                                         bss_slot.returns_float = 1
@@ -1537,6 +1564,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
                                         bss_slot.param_count = bss_mod.bss_total_size
                                         bss_slot.bss_size = bss_size
+                                        bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                         let init_val = ast_lookup_global_var_init(name)
                                         if init_val != 0 {
                                             bss_slot.returns_float = 1
@@ -1644,6 +1672,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
                                 bss_slot.param_count = module.bss_total_size
                                 bss_slot.bss_size = bss_size
+                                bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                 let init_val = ast_lookup_global_var_init(name)
                                 if init_val != 0 {
                                     bss_slot.returns_float = 1
@@ -7766,6 +7795,22 @@ impl Lowerer {
                             _ => (lo.report_error(), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let target_global_elem_size = match (*target_expr).left {
+                            Some(target_base_expr) => {
+                                if (*target_base_expr).kind == ExprKind::ExprIdent {
+                                    let global_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*target_base_expr).name)
+                                    if global_fn_id >= 0 && global_fn_id < lo.module.fn_count
+                                        && lo.module.functions[global_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        lo.module.functions[global_fn_id as usize].hyper_algebra_kind
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
+                            }
+                            _ => 0,
+                        }
                         let target_base_is_ref = match (*target_expr).left {
                             Some(target_base_expr) => {
                                 if (*target_base_expr).kind == ExprKind::ExprIdent {
@@ -7792,7 +7837,9 @@ impl Lowerer {
                             lower_body_trace_append("assign_index after_idx idx=" + io_trace_i64_string(idx_reg) + " rhs=" + io_trace_i64_string(rhs))
                         }
                         var index_set_instr = ir_index_set(base_reg, idx_reg, rhs)
-                        if target_base_is_ref {
+                        if target_global_elem_size > 0 {
+                            index_set_instr.label_id = if target_global_elem_size == 1 { 3 } else { 2 }
+                        } else if target_base_is_ref {
                             index_set_instr.label_id = 1
                         }
                         lo = lo.emit(index_set_instr)
@@ -9815,6 +9862,22 @@ impl Lowerer {
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
+        let global_elem_size = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    let global_fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*base_expr_ref).name)
+                    if global_fn_id >= 0 && global_fn_id < self.module.fn_count
+                        && self.module.functions[global_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                        self.module.functions[global_fn_id as usize].hyper_algebra_kind
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
                 if (*base_expr_ref).kind == ExprKind::ExprIdent {
@@ -9847,7 +9910,9 @@ impl Lowerer {
         let lo3 = pair_d.0
         let dst = pair_d.1
         var instr = ir_index_get(dst, base, idx)
-        if base_is_ref {
+        if global_elem_size > 0 {
+            instr.label_id = if global_elem_size == 1 { 3 } else { 2 }
+        } else if base_is_ref {
             instr.label_id = 1
         }
         if index_elem_is_float {

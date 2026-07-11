@@ -220,11 +220,15 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
   via `Q(c)=P(c)`). Axioms `[propext, Quot.sound]` throughout — **fully anchor-free**: the octonion
   base `Q_base` is proved structurally (`both_low_witness_disagree`/`both_high_witness_disagree`), so
   no `native_decide` appears anywhere in the ∀n chain.
-- **Proved (∀n, FULL box — not just loHi):** the two *intrinsic* zero-divisor characterizations for
+- **Proved (∀n, FULL box — not just loHi):** a recursive geometric characterization and the two
+  *intrinsic* zero-divisor characterizations for
   *every* distinct nonzero pair (`1≤l,u<2^n`, `l≠u`) — `isZD = hasXorAnnih` (`isZD_eq_hasXorAnnih_full`)
   and `anti0 = ¬isZD` (`anti0_eq_not_isZD_full`), both via the general `P0_neg_general` (`P(0)=−1`
-  everywhere kills the `a=0` corner and collapses the `{0,d}` orbit). `[propext, Quot.sound]`. Only the
-  geometric `isZD = offSeam` reading stays loHi-only — it is *false* off the locus.
+  everywhere kills the `a=0` corner and collapses the `{0,d}` orbit), plus
+  `recursiveOffSeam = hasXorAnnih = isZD = ¬anti0` (`SounioCDRecursiveSeam`). The new predicate deletes
+  shared leading CD bits until the first mixed cut, then applies the local `offSeam`; it stops below the
+  sedenions. `[propext, Quot.sound]`. The *one-cut* `offSeam` remains loHi-only and false off that locus;
+  `recursiveOffSeam` is the honest geometric widening.
 - **Decided (fixed n), retained as fast regressions:** `xorAnnih_eq_isZD_16` (necessity n=4, superseded
   ∀n); `coincidence_16/32` (n=4,5,6 — **all three members now superseded ∀n**: `anti0==!offSeam` /
   `anti0==!isZD` via the coincidence theorems, and `anti0==llsqNegI` `{L_l,L_u}=0 ⟺ (L_lL_u)²=−I` via
@@ -249,9 +253,10 @@ observation: `≥ 8`, taking tower-shaped values `8·(2^k−1)` at the tested le
 
 ```bash
 export PATH="$HOME/.elan/bin:$PATH"
-(cd formal/lean4 && lake build SounioCDConverse SounioCDTowerSeam SounioCDCocycle)   # green, no sorry
+(cd formal/lean4 && lake build SounioCDRecursiveSeam SounioCDConverse SounioCDTowerSeam SounioCDCocycle)
 python3 scripts/research/cd_tower_converse_probe.py     # validate O(N) vs brute n≤6, then n=7..10
 python3 scripts/research/cd_tower_seam_oracle.py        # forward / seam tower
+python3 scripts/research/cd_tower_recursive_seam_oracle.py  # full-box recursive geometry, n=4..8
 ```
 
 **Done — the seam coincidence is fully closed ∀n on loHi** (`seam_coincidence`): `Door 1 — L_i²=−I +
@@ -300,7 +305,8 @@ remaining. (This supersedes the provisional "genuinely hard case, cf. Zhilina" n
 **Done — the octonion base is now structural**: `Q_base` is proved by the six-way seam split with no
 `native_decide`, so the *entire* ∀n chain is anchor-free `[propext, Quot.sound]`.
 
-**Done — the ZD characterization is widened past the `loHi` locus.** The *coincidence* `isZD = offSeam`
+**Done — the ZD characterization is widened past the `loHi` locus.** The naive coincidence
+`isZD = offSeam`
 is inherently loHi-specific: `offSeam` only tests the seam element `H`, so it reads `true` for every
 both-low / both-high pair, which is **not** the zero-divisor set off the locus (e.g. `e₁+e₂` in the
 sedenions is off-seam by that test but is *not* a ZD — 49 such mismatches at dim 16 alone). So the naive
@@ -314,9 +320,13 @@ loHi-dependent step in the necessity proof — the `a=0`/`{0,d}` corner — is *
 cocycles + `cdSigma_cross_neg`), so no annihilator can have low index `0`; the same lemma handles the
 `{0,d}` orbit that makes `anti0` (a `∀c` test) collapse onto `¬hasXorAnnih`. Cross-checked
 `isZD == hasXorAnnih` and `anti0 == ¬isZD` over the entire box to dim 64 (0 mismatches; dim-16 anchor
-`isZD_eq_hasXorAnnih_box_16`). **Only the *geometric* `offSeam` predicate stays loHi-bound** — because it
-merely tests the seam element `H`, it is genuinely false off the locus; the operator and winner readings,
-being intrinsic, are not.
+`isZD_eq_hasXorAnnih_box_16`). The *one-cut* `offSeam` predicate stays loHi-bound because it merely tests
+the current seam element `H`. The new `recursiveOffSeam` supplies the missing global geometry: it strips
+common high bits, rejects zero residues and octonion-or-lower bases, and applies `offSeam` at the first
+mixed cut. Lean proves `recursiveOffSeam = hasXorAnnih = isZD = ¬anti0` on the full box for every level
+(`recursiveOffSeam_eq_hasXorAnnih_full`, `recursiveOffSeam_eq_isZD_full`,
+`anti0_eq_not_recursiveOffSeam_full`), with `[propext, Quot.sound]` and no native anchor in the ∀n chain.
+The independent oracle checks every pair through dim 256 with zero mismatches.
 
 **Done — the Moreno seam-index bridge is checked.** Exact-integer computation
 (`moreno_thm29_bridge_oracle.py`) certifies over every loHi pair at dims 16/32/64 that our `isZD` is

@@ -63,18 +63,20 @@ This lane is paired with the repository:
 
 - `github.com/agourakis82/hyperbolic-semantic-networks`
 
-Workflow split:
+Workflow split and current boundary:
 
-- Sounio provides the executable parity path and canonical `.sio` implementation scaffolding.
+- Sounio provides checkable `.sio` implementation scaffolding and separately executable epistemic receipts.
 - The hyperbolic repo exports the compact SWOW bundle in `data/cpc2026/sounio_input/`.
 - The hyperbolic repo's Python mirror currently generates the full paper-scale O-SSM artifacts.
+- The repaired native reference passes Madaros `check`, but current native-v2 compilation is blocked. Historical native n=100/n=1000 JSON files are excluded from parity claims.
 
 From the Sounio repo root:
 
 ```bash
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/cognitive_ossm.sio
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/run_regimes.sio -- --max-trajectories 8 --max-steps 64
-./artifacts/omega/souc-bin/souc-linux-x86_64-gpu run examples/cognitive_ossm/export_results.sio
+./bin/souc check examples/cognitive_ossm/run_ossm_native_reference.sio
+CPC2026_SCIENTIFIC_REPO=/workspace/hyperbolic-semantic-networks \
+  bash scripts/ci/cpc2026_yale_evidence_gate.sh
+uv run --with numpy python scripts/research/cpc2026_ossm_subset_audit.py
 ```
 
 ---

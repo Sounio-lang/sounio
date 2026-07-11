@@ -210,7 +210,7 @@ madaros() {
   env MADAROS_RAW_BIN="$RAW_MADAROS" SOUNIO_STDLIB_PATH="$GATE_STDLIB" "$MADAROS" "$@"
 }
 
-madaros --version | grep -Fq "Madares v0.80.0" || fail "version banner missing"
+madaros --version | grep -Fq "Madaros v0.80.0" || fail "version banner missing"
 pass "version"
 
 : > "$WORK/empty.sio"
@@ -250,9 +250,9 @@ expect_log_contains "error[E177" "$WORK/visibility_enum_private.log"
 pass "multimodule visibility diagnostics"
 
 expect_exit 2 madaros check "$WORK/missing.sio" >"$WORK/missing.log" 2>&1
-expect_log_contains "requires <source.sio> or a project with sounio.toml" "$WORK/missing.log"
+expect_log_contains "madaros check requires <source.sio> or a project with sounio.toml" "$WORK/missing.log"
 expect_exit 2 madaros check /tmp >"$WORK/wrapper_tmp_dir.log" 2>&1
-expect_log_contains "requires <source.sio> or a project with sounio.toml" "$WORK/wrapper_tmp_dir.log"
+expect_log_contains "madaros check requires <source.sio> or a project with sounio.toml" "$WORK/wrapper_tmp_dir.log"
 pass "missing input diagnostic"
 
 madaros build "$WORK/run0.sio" -o "$WORK/run0.elf" >"$WORK/build.log" 2>&1
