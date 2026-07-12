@@ -103,6 +103,14 @@ if [[ "$OUT" == -* ]]; then
     exit 2
 fi
 FORCE_SOURCE_BOOTSTRAP="${SOUNIO_FORCE_SOURCE_BOOTSTRAP:-0}"
+NATIVE_SEED_OVERRIDE="${SOUNIO_NATIVE_SEED:-}"
+if [[ -n "$NATIVE_SEED_OVERRIDE" ]]; then
+    if [[ ! -x "$NATIVE_SEED_OVERRIDE" ]]; then
+        echo "error: SOUNIO_NATIVE_SEED is not executable: $NATIVE_SEED_OVERRIDE" >&2
+        exit 2
+    fi
+    FORCE_SOURCE_BOOTSTRAP=1
+fi
 LEAN_BYTES="$(portable_size "$LEAN")"
 BOOT4_DIRECT_SRC_CAP=1048576
 
@@ -132,6 +140,12 @@ case "$HOST_PLATFORM" in
         ;;
 esac
 
+SOURCE_BOOTSTRAP_SEEDS=("${HOST_PREBUILTS[@]}")
+if [[ -n "$NATIVE_SEED_OVERRIDE" ]]; then
+    SOURCE_BOOTSTRAP_SEEDS=("$NATIVE_SEED_OVERRIDE" "${SOURCE_BOOTSTRAP_SEEDS[@]}")
+    echo "Using explicit source-bootstrap seed: $NATIVE_SEED_OVERRIDE"
+fi
+
 # Strategy 0: Use checked-in self-hosted native compiler (fast path -- copy)
 if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
     for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
@@ -150,12 +164,12 @@ else
     echo "Skipping checked-in native compiler artifact copy (SOUNIO_FORCE_SOURCE_BOOTSTRAP=1)"
 fi
 
-# Strategy 0.5: Staged bootstrap from checked-in binary when source bootstrap is forced.
+# Strategy 0.5: Staged bootstrap from an explicit or checked-in seed.
 # boot4.elf is stale and miscompiles current lean_single.sio; use the checked-in
 # artifact as a correct seed for a staged bootstrap instead.
-for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
+for NATIVE_PREBUILT in "${SOURCE_BOOTSTRAP_SEEDS[@]}"; do
     if [ -x "$NATIVE_PREBUILT" ]; then
-        echo "Staged bootstrap from checked-in artifact: $NATIVE_PREBUILT"
+        echo "Staged bootstrap from seed: $NATIVE_PREBUILT"
         if bootstrap_direct_lean "$NATIVE_PREBUILT"; then
             if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
                 sounio_ad_hoc_codesign "$OUT"
