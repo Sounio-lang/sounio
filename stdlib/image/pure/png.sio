@@ -1,0 +1,138 @@
+// stdlib/image/pure/png.sio — Pure-Sounio PNG encoder (no FFI, no libpng)
+//
+// Writes a spec-valid 8-bit RGB PNG straight to disk via the `write_file` builtin.
+// DEFLATE is emitted as *stored* (uncompressed) blocks, so output is a valid PNG
+// that every decoder reads, at the cost of no compression (file ~= raw RGB size).
+// This is the self-contained alternative to the `image::ffi` libpng/stb path.
+//
+// Pixel format: each `u32` in `Image.pixels` is interpreted as 0x00RRGGBB
+// (low 24 bits; the top byte is ignored).
+//
+// Size bound: `Image` caps at 65536 pixels (256x256). The scratch buffer below
+// holds the worst-case PNG for that cap: 256*(1+256*3) raw + chunk overhead.
+
+module image::pure::png
+
+use image::pure::types::{Image}
+
+// Scratch byte buffer with a running length. A struct wrapper is used because
+// bare `&![i8; N]` element mutation is not reliable under the current JIT.
+struct PngBuf { data: [i8; 262144], len: i64 }
+
+fn put(b: &!PngBuf, v: i64) with Mut, Panic {
+    (*b).data[(*b).len as usize] = (v & 255) as i8
+    (*b).len = (*b).len + 1
+}
+
+fn put_be32(b: &!PngBuf, v: i64) with Mut, Panic {
+    put(b, (v >> 24) & 255)
+    put(b, (v >> 16) & 255)
+    put(b, (v >> 8) & 255)
+    put(b, v & 255)
+}
+
+// CRC-32 (PNG polynomial 0xEDB88320 = 3988292384) over data[start..end].
+fn crc_range(b: &PngBuf, start: i64, end: i64) -> i64 with Mut, Panic {
+    var crc = 4294967295
+    var i = start
+    while i < end {
+        let byte = ((*b).data[i as usize] as i64) & 255
+        crc = crc ^ byte
+        var k = 0
+        while k < 8 {
+            if (crc & 1) == 1 { crc = (crc >> 1) ^ 3988292384 } else { crc = crc >> 1 }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    (crc ^ 4294967295) & 4294967295
+}
+
+// Encode `img` as an 8-bit RGB PNG and write it to `filename`.
+// Returns true on success.
+pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic {
+    let w = img.width as i64
+    let h = img.height as i64
+    if w <= 0 || h <= 0 { return false }
+
+    // ---- filtered raw scanlines: a leading filter byte (0 = none) per row ----
+    var raw = PngBuf { data: [0; 262144], len: 0 }
+    var y = 0
+    while y < h {
+        put(&!raw, 0)
+        var x = 0
+        while x < w {
+            let p = (img.pixels[(y * w + x) as usize] as i64) & 16777215
+            put(&!raw, (p >> 16) & 255)
+            put(&!raw, (p >> 8) & 255)
+            put(&!raw, p & 255)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // ---- Adler-32 over the raw stream ----
+    var s1 = 1
+    var s2 = 0
+    var ai = 0
+    while ai < raw.len {
+        let byte = (raw.data[ai as usize] as i64) & 255
+        s1 = (s1 + byte) % 65521
+        s2 = (s2 + s1) % 65521
+        ai = ai + 1
+    }
+    let adler = ((s2 << 16) | s1) & 4294967295
+
+    // ---- assemble the PNG ----
+    var png = PngBuf { data: [0; 262144], len: 0 }
+    // signature
+    put(&!png, 137); put(&!png, 80); put(&!png, 78); put(&!png, 71)
+    put(&!png, 13); put(&!png, 10); put(&!png, 26); put(&!png, 10)
+    // IHDR
+    put_be32(&!png, 13)
+    let ihdr_start = png.len
+    put(&!png, 73); put(&!png, 72); put(&!png, 68); put(&!png, 82)  // "IHDR"
+    put_be32(&!png, w); put_be32(&!png, h)
+    put(&!png, 8); put(&!png, 2); put(&!png, 0); put(&!png, 0); put(&!png, 0)
+    let ihdr_crc = crc_range(&png, ihdr_start, png.len)
+    put_be32(&!png, ihdr_crc)
+    // IDAT — zlib stream length is analytic for stored blocks
+    var nblocks = raw.len / 65535
+    if (raw.len % 65535) != 0 { nblocks = nblocks + 1 }
+    if nblocks == 0 { nblocks = 1 }
+    let zlen = 2 + 5 * nblocks + raw.len + 4
+    put_be32(&!png, zlen)
+    let idat_start = png.len
+    put(&!png, 73); put(&!png, 68); put(&!png, 65); put(&!png, 84)  // "IDAT"
+    put(&!png, 120); put(&!png, 1)  // zlib header 0x78 0x01
+    var pos = 0
+    var remaining = raw.len
+    while remaining > 0 {
+        var blk = remaining
+        if blk > 65535 { blk = 65535 }
+        var bfinal = 0
+        if blk == remaining { bfinal = 1 }
+        put(&!png, bfinal)
+        put(&!png, blk & 255); put(&!png, (blk >> 8) & 255)
+        let nlen = 65535 - blk
+        put(&!png, nlen & 255); put(&!png, (nlen >> 8) & 255)
+        var j = 0
+        while j < blk {
+            put(&!png, (raw.data[(pos + j) as usize] as i64) & 255)
+            j = j + 1
+        }
+        pos = pos + blk
+        remaining = remaining - blk
+    }
+    put_be32(&!png, adler)
+    let idat_crc = crc_range(&png, idat_start, png.len)
+    put_be32(&!png, idat_crc)
+    // IEND
+    put_be32(&!png, 0)
+    let iend_start = png.len
+    put(&!png, 73); put(&!png, 69); put(&!png, 78); put(&!png, 68)  // "IEND"
+    let iend_crc = crc_range(&png, iend_start, png.len)
+    put_be32(&!png, iend_crc)
+
+    write_file(filename, png.data, png.len) >= 0
+}
