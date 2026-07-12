@@ -3,7 +3,7 @@
 // A minimal publication-figure layer over image::pure::types::Image and the pure
 // PNG encoder: axis frame + ticks + numeric labels, a filled uncertainty band,
 // and a data polyline — written to a PNG with no window, no FFI, no Python.
-// Reuses display::font::font_glyph for glyph bitmaps (pure font data).
+// Uses image::plotfont (a clean 5x7 dot-matrix font) for glyph bitmaps.
 //
 //   var img = image_new(640, 420)
 //   plot_background(&!img, 640, 420, 0x0E1420)
@@ -20,7 +20,7 @@ module image::plot
 
 use image::pure::types::{Image, image_set_pixel}
 use image::pure::png::{png_write}
-use display::font::{font_glyph}
+use image::plotfont::{pfont_glyph}
 
 // Pixel plot rectangle [x0,x1]×[y0,y1] mapped to data range [xmin,xmax]×[ymin,ymax].
 pub struct Area { x0: i64, y0: i64, x1: i64, y1: i64, xmin: f64, xmax: f64, ymin: f64, ymax: f64 }
@@ -44,6 +44,22 @@ fn setpx(img: &!Image, x: i64, y: i64, c: i64) with Mut {
     }
 }
 
+// Alpha-blend colour c (0xRRGGBB) over the current pixel at coverage `a` (0..255).
+fn blend(img: &!Image, x: i64, y: i64, c: i64, a: i64) with Mut, Div, Panic {
+    if x < 0 || y < 0 || x >= (img.width as i64) || y >= (img.height as i64) { return }
+    if a <= 0 { return }
+    var av = a; if av > 255 { av = 255 }
+    let idx = (y * (img.width as i64) + x) as usize
+    let bg = (img.pixels[idx] as i64) & 16777215
+    let fr = (c >> 16) & 255; let fg = (c >> 8) & 255; let fb = c & 255
+    let br = (bg >> 16) & 255; let bgc = (bg >> 8) & 255; let bb = bg & 255
+    let ia = 255 - av
+    let nr = (fr * av + br * ia) / 255
+    let ng = (fg * av + bgc * ia) / 255
+    let nb = (fb * av + bb * ia) / 255
+    image_set_pixel(img, x as i32, y as i32, ((nr << 16) | (ng << 8) | nb) as u32)
+}
+
 // Fill the whole canvas with a background colour.
 pub fn plot_background(img: &!Image, w: i64, h: i64, c: i64) with Mut {
     var y = 0
@@ -55,27 +71,6 @@ fn vspan(img: &!Image, x: i64, ya: i64, yb: i64, c: i64) with Mut {
     if lo > hi { let t = lo; lo = hi; hi = t }
     var y = lo
     while y <= hi { setpx(img, x, y, c); y = y + 1 }
-}
-
-// Bresenham line.
-fn draw_seg(img: &!Image, xa: i64, ya: i64, xb: i64, yb: i64, c: i64) with Mut {
-    var x0 = xa; var y0 = ya
-    var dx = xb - x0; if dx < 0 { dx = 0 - dx }
-    var dy = yb - y0; if dy < 0 { dy = 0 - dy }
-    let sx = if xb >= x0 { 1 } else { 0 - 1 }
-    let sy = if yb >= y0 { 1 } else { 0 - 1 }
-    var err = dx - dy
-    var guard = 0
-    while guard < 20000 {
-        setpx(img, x0, y0, c)
-        if x0 == xb && y0 == yb { guard = 20000 }
-        else {
-            let e2 = 2 * err
-            if e2 > (0 - dy) { err = err - dy; x0 = x0 + sx }
-            if e2 < dx { err = err + dx; y0 = y0 + sy }
-        }
-        guard = guard + 1
-    }
 }
 
 // Filled uncertainty band between lo[i] and hi[i], as trapezoids per segment.
@@ -119,11 +114,22 @@ pub fn plot_vline(img: &!Image, a: &Area, x: f64, c: i64) with Mut, Div, Panic {
     while y <= (*a).y1 { setpx(img, px, y, c); y = y + 1 }
 }
 
-// Filled square marker of half-size `r` at data (dx,dy).
+// Anti-aliased filled disc marker of radius `r` at data (dx,dy).
 pub fn plot_point(img: &!Image, a: &Area, dx: f64, dy: f64, c: i64, r: i64) with Mut, Div, Panic {
     let cx = mapx(a, dx); let cy = mapy(a, dy)
-    var yy = 0 - r
-    while yy <= r { var xx = 0 - r; while xx <= r { setpx(img, cx + xx, cy + yy, c); xx = xx + 1 } yy = yy + 1 }
+    let rf = r as f64
+    var yy = 0 - r - 1
+    while yy <= r + 1 {
+        var xx = 0 - r - 1
+        while xx <= r + 1 {
+            let d = sqrt(((xx * xx) + (yy * yy)) as f64)
+            var av = 0
+            if d <= rf { av = 255 } else { if d <= rf + 1.0 { av = ((rf + 1.0 - d) * 255.0) as i64 } }
+            if av > 0 { blend(img, cx + xx, cy + yy, c, av) }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
 }
 
 // Vertical error bar from dylo to dyhi at data x, with end caps.
@@ -134,39 +140,83 @@ pub fn plot_errbar(img: &!Image, a: &Area, dx: f64, dylo: f64, dyhi: f64, c: i64
     while t <= 3 { setpx(img, px + t, mapy(a, dylo), c); setpx(img, px + t, mapy(a, dyhi), c); t = t + 1 }
 }
 
-// Data polyline.
-pub fn plot_line(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
-    var i = 0
-    while i + 1 < n {
-        draw_seg(img, mapx(a, xs[i as usize]), mapy(a, ys[i as usize]),
-                      mapx(a, xs[(i + 1) as usize]), mapy(a, ys[(i + 1) as usize]), c)
-        i = i + 1
+// Anti-aliased thick segment: per-pixel coverage from distance to the segment.
+fn seg_aa(img: &!Image, xa: i64, ya: i64, xb: i64, yb: i64, hw: f64, c: i64) with Mut, Div, Panic {
+    var minx = if xa < xb { xa } else { xb }; minx = minx - 2
+    var maxx = if xa > xb { xa } else { xb }; maxx = maxx + 2
+    var miny = if ya < yb { ya } else { yb }; miny = miny - 2
+    var maxy = if ya > yb { ya } else { yb }; maxy = maxy + 2
+    let dx = (xb - xa) as f64; let dy = (yb - ya) as f64
+    let len2 = dx * dx + dy * dy
+    var py = miny
+    while py <= maxy {
+        var px = minx
+        while px <= maxx {
+            var t = if len2 > 0.0 { (((px - xa) as f64) * dx + ((py - ya) as f64) * dy) / len2 } else { 0.0 }
+            if t < 0.0 { t = 0.0 }
+            if t > 1.0 { t = 1.0 }
+            let ex = (px as f64) - ((xa as f64) + t * dx)
+            let ey = (py as f64) - ((ya as f64) + t * dy)
+            let d = sqrt(ex * ex + ey * ey)
+            var av = 0
+            if d <= hw { av = 255 } else { if d <= hw + 1.0 { av = ((hw + 1.0 - d) * 255.0) as i64 } }
+            if av > 0 { blend(img, px, py, c, av) }
+            px = px + 1
+        }
+        py = py + 1
     }
 }
 
-// One 8×8 glyph into the Image at integer scale `sc` (font.sio bit convention:
-// row = byte, col bit (7-col) = leftmost; matches font_draw_char, verified pixel-exact).
-fn draw_char(img: &!Image, ch: i64, px: i64, py: i64, c: i64, sc: i64) with Mut {
-    let glyph = font_glyph(ch)
-    var row = 0
-    while row < 8 {
-        let bits = (glyph >> (row * 8)) & 255
-        var col = 0
-        while col < 8 {
-            if ((bits >> (7 - col)) & 1) == 1 {
-                var by = 0
-                while by < sc { var bx = 0; while bx < sc { setpx(img, px + col*sc + bx, py + row*sc + by, c); bx = bx + 1 } by = by + 1 }
+// Data polyline, anti-aliased with thickness `hw` (half-width in px, e.g. 1.3).
+pub fn plot_line_w(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64, hw: f64) with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < n {
+        seg_aa(img, mapx(a, xs[i as usize]), mapy(a, ys[i as usize]),
+                    mapx(a, xs[(i + 1) as usize]), mapy(a, ys[(i + 1) as usize]), hw, c)
+        i = i + 1
+    }
+}
+pub fn plot_line(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
+    plot_line_w(img, a, xs, ys, n, c, 1.3)
+}
+
+// Anti-aliased glyph: each output pixel takes its coverage from a 3×3 grid of
+// sub-samples of the 8×8 bitmap, blended over the background — so scaled text
+// has smooth edges instead of blocky steps.
+fn draw_char(img: &!Image, ch: i64, px: i64, py: i64, c: i64, sc: i64) with Mut, Div, Panic {
+    let glyph = pfont_glyph(ch)
+    let ss = 3
+    let span = sc * ss
+    var i = 0
+    while i < 8 * sc {
+        var j = 0
+        while j < 8 * sc {
+            var cnt = 0
+            var si = 0
+            while si < ss {
+                var sj = 0
+                while sj < ss {
+                    let gc = (i * ss + si) / span
+                    let gr = (j * ss + sj) / span
+                    if gc < 8 && gr < 8 {
+                        let bits = (glyph >> (gr * 8)) & 255
+                        if ((bits >> (7 - gc)) & 1) == 1 { cnt = cnt + 1 }
+                    }
+                    sj = sj + 1
+                }
+                si = si + 1
             }
-            col = col + 1
+            if cnt > 0 { blend(img, px + i, py + j, c, cnt * 255 / (ss * ss)) }
+            j = j + 1
         }
-        row = row + 1
+        i = i + 1
     }
 }
 
 // Draw an ASCII string at scale `sc` (advance 8*sc px per glyph). Returns end x.
 pub fn plot_text_sc(img: &!Image, s: string, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Panic, Div {
     var x = px; var i = 0; let n = str_len(s)
-    while i < n { draw_char(img, str_char_at(s, i), x, py, c, sc); x = x + 8*sc; i = i + 1 }
+    while i < n { draw_char(img, str_char_at(s, i), x, py, c, sc); x = x + 6*sc; i = i + 1 }
     x
 }
 // Default 2× text (legible for figure titles / axis labels).
@@ -178,7 +228,7 @@ pub fn plot_text(img: &!Image, s: string, px: i64, py: i64, c: i64) -> i64 with 
 fn draw_number(img: &!Image, val: f64, dec: i64, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Div, Panic {
     var x = px
     var v = val
-    if v < 0.0 { draw_char(img, 45, x, py, c, sc); x = x + 8*sc; v = 0.0 - v }  // '-'
+    if v < 0.0 { draw_char(img, 45, x, py, c, sc); x = x + 6*sc; v = 0.0 - v }  // '-'
     let ip = v as i64
     var digs: [i64; 16] = [0; 16]
     var nd = 0
@@ -186,12 +236,12 @@ fn draw_number(img: &!Image, val: f64, dec: i64, px: i64, py: i64, c: i64, sc: i
     if q == 0 { digs[0 as usize] = 0; nd = 1 }
     else { while q > 0 { digs[nd as usize] = q % 10; nd = nd + 1; q = q / 10 } }
     var k = nd - 1
-    while k >= 0 { draw_char(img, 48 + digs[k as usize], x, py, c, sc); x = x + 8*sc; k = k - 1 }
+    while k >= 0 { draw_char(img, 48 + digs[k as usize], x, py, c, sc); x = x + 6*sc; k = k - 1 }
     if dec > 0 {
-        draw_char(img, 46, x, py, c, sc); x = x + 8*sc  // '.'
+        draw_char(img, 46, x, py, c, sc); x = x + 6*sc  // '.'
         var frac = v - (ip as f64)
         var d = 0
-        while d < dec { frac = frac * 10.0; let dg = (frac as i64) % 10; draw_char(img, 48 + dg, x, py, c, sc); x = x + 8*sc; d = d + 1 }
+        while d < dec { frac = frac * 10.0; let dg = (frac as i64) % 10; draw_char(img, 48 + dg, x, py, c, sc); x = x + 6*sc; d = d + 1 }
     }
     x
 }
