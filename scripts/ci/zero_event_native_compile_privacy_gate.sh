@@ -68,6 +68,17 @@ compile_accepts generic-public tests/multimodule/wp_a3/w2_main.sio
 compile_accepts zero-event-positive tests/known_failures/zero_event_stdlib_native_v2_probe.sio
 compile_accepts eisa-core tests/stdlib/eisa/test_eisa_core.sio
 
+eisa_core_run_log="$TMP_DIR/eisa-core.run.log"
+chmod +x "$TMP_DIR/eisa-core"
+timeout 30 "$TMP_DIR/eisa-core" >"$eisa_core_run_log" 2>&1 || {
+  cat "$eisa_core_run_log" >&2
+  fail "eisa-core compiled but failed at runtime"
+}
+grep -Fq 'ALL PASS: eisa core W1 W2 W3 W4 W5' "$eisa_core_run_log" || {
+  cat "$eisa_core_run_log" >&2
+  fail "eisa-core runtime did not emit the W1-W5 receipt"
+}
+
 eisa_log="$TMP_DIR/eisa.log"
 if (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" compile \
     tests/known_failures/eisa_zero_flags_native_v2_probe.sio \
@@ -84,4 +95,4 @@ else
   }
 fi
 
-echo '[zero-native-privacy] PASS: native compile rejects private constructors and preserves public, generic, zero-event, and EISA frontends'
+echo '[zero-native-privacy] PASS: private constructors rejected; public, generic, zero-event, and EISA compile paths preserved; EISA W1-W5 runtime receipt verified'
