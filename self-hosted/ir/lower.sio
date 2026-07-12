@@ -10994,12 +10994,23 @@ impl Lowerer {
                 // method on a STRUCT array element, so this cannot misroute a green
                 // struct-method call (those already fail today at the empty-name path).
                 if (*recv).kind == ExprKind::ExprIndex {
-                    if self.index_base_elem_is_float_ref(&(*recv).left) {
-                        return make_name("f64")
-                    }
+                    // Resolve the receiver's ACTUAL struct field element type FIRST —
+                    // authoritative from its own struct layout (`a.c[i]` with
+                    // `c: [Rational; N]` -> "Rational"; `[f64; N]` -> "f64";
+                    // `[i64; N]` -> "i64"). This MUST precede the float check below:
+                    // index_base_elem_is_float_ref falls back to a by-NAME search
+                    // that misfires when a DIFFERENT struct has a same-named [f64;N]
+                    // field (the f64 `CDElement.c` vs `CDElementExact.c` over an exact
+                    // ring), wrongly classifying the struct element as f64 and
+                    // dispatching to a body-less `f64_<method>` that crashes codegen.
                     let struct_elem = self.index_base_elem_struct_type_ref(&(*recv).left)
                     if struct_elem.len > 0 {
                         return struct_elem
+                    }
+                    // Local array element (no owning struct): fall back to the float /
+                    // i64 heuristics for `arr[i].method()` where `arr` is a local.
+                    if self.index_base_elem_is_float_ref(&(*recv).left) {
+                        return make_name("f64")
                     }
                     return make_name("i64")
                 }
