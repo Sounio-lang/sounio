@@ -2518,3 +2518,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**; it confirmed the gate, documentation, resolved execution blocker, and `parity_claim=false` boundary are internally consistent.
 - Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
 - Raw review directory: `/tmp/llm-offload-sZlKAw/`.
+
+## 2026-07-12 — C2-v0 second-order compilation semantic review
+- File: `docs/architecture/second-order-compilation.md`.
+- Provider: xAI/Grok 4.3 via `bin/llm-offload -t review -p xai`.
+- Outcome: **FINDINGS ADDRESSED**. The review challenged witness status, the use of "formal", paired-run terminology, requested-versus-realised enforcement, clinical-safety scope, intervention versioning, and receipt classification integrity. The specification now states that no witness exists, remains `hypothesis`, labels its notation as an operational model rather than proof, makes repetition necessary but insufficient, classifies unauthorised semantic fallback as `BLOCKED`, denies clinical-use authorisation, routes new intervention classes through the Semantic Lane Contract and schema versioning, and adds evidence identity, classification basis, and integrity status. A demand for a Lean proof at architecture-v0 stage was not adopted; the text explicitly disclaims machine-checked semantics.
+- Claude Opus review was attempted first but unavailable because Claude Code was not logged in and the worktree was not trusted. No Claude verdict was claimed.
+- A DeepSeek second-provider review was also attempted and returned `Insufficient Balance`; the xAI review is therefore the only completed external review for this lane.
+- Raw review directory: `/tmp/llm-offload-OTGkvg/`.
+- DeepSeek failure directory: `/tmp/llm-offload-Rzt9rw/`.

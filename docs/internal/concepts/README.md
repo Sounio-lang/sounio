@@ -49,6 +49,7 @@ concept.
 - [Explicit Discharge](explicit-discharge.md)
 - [Physical Observation](physical-observation.md)
 - [Precision Preservation](precision-preservation.md)
+- [Second-Order Compilation](second-order-compilation.md)
 
 ```bash
 bash scripts/dev/sounio_semantic_status.sh
