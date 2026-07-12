@@ -69,9 +69,21 @@ RELATION TO PRIOR WORK (narrow lit-check, 2026-07-11 -- primary sources read).
       count coincidence + Fano labeling frame.  The words orbit/stabilizer/fixed-point (group sense) on
       the ZD set appear in NONE of the nine papers.  His box-kite tallies (7,35,155,651=Trip_{N-2};
       4^{n-4} missing) do NOT match our 2^{n-4}x[7] -> structurally distinct, not a re-derivation.
-      RESIDUAL CAVEAT: one paywalled proceedings (ICGTMP 2006, "The Marriage of Nothing and All",
-      Springer) could not be read; low-but-nonzero risk it overturns (b) -- retrieve via institutional
-      access before any external/published novelty claim.
+      RESIDUAL CAVEAT (SUBSTANTIALLY RESOLVED 2026-07-12, convergent secondary evidence):
+      the one item not in the arXiv corpus was the ICGTMP-2006 talk, full title now recovered as
+      "The Marriage of Nothing and All: ZERO-DIVISOR BOX-KITES IN A 'TOE' SKY" (26th ICGTMP, CUNY,
+      Jun 2006).  Three findings drop the overturn risk to very low: (1) SUBJECT -- title/subtitle put
+      it squarely in his box-kite + physics-TOE program, not group-orbit theory; (2) NEVER PUBLISHED --
+      the official ICGTMP conferences page lists NO proceedings for Group26 (nor 25/27); it was only
+      ever cited "forthcoming from Springer" and no such Springer volume exists, so there is no paywalled
+      venue to be locked out of (at most a talk/preprint, and his talks fold into the read arXiv corpus);
+      (3) HIS OWN DESCRIPTION -- Placeholder Substructures I (math/0703745, 2007) cites it as ref [4]
+      ONLY in a QM aside ("the QM case is a degenerate form ... see [4]"), pinning its content to the
+      QM/TOE zero-divisor angle, NOT an orbit/stabilizer/fixed-point decomposition; that citing paper and
+      the whole corpus carry no such group-action-on-the-ZD-set statement (168/PSL(2,7) stay in box-kite /
+      Fano-labeling roles).  NOT DONE: the talk's own text was not read (apparently unavailable anywhere
+      public).  Verdict (b) ADJACENT stands with high (not certain) confidence; if the talk text ever
+      surfaces, re-check before a *published* priority claim, but it no longer blocks the novelty scoping.
   NOVELTY SCOPE (honest -- pin the claim exactly here): the novelty is the explicit ORBIT + STABILIZER
   + FIXED-POINT decomposition of the DISCRETE ZD/fiber set under the FINITE signed-monomial (CD-loop)
   automorphism group (permutation part PSL(2,7)) -- 2^{n-4} size-7 Fano orbits + (2^{n-4}-1) fixed seams,

@@ -42,6 +42,44 @@ Kirshtein's Thm 41** by an independent exact/cohomological route. The genuine co
 partial Lean leg — not the numerical fact. The title's "freezes at 168" must be read in this scoped
 sense; the full signed-monomial group does not freeze.
 
+### Novelty ledger for the *action* (Result 3) — and the honest frontier
+
+The freezing above is Kirshtein-known. The genuinely new object is the **action of the frozen finite
+group on the growing discrete ZD/fiber set**. Pinned exactly:
+
+- **NOVEL (not found in the literature).** The explicit **orbit + stabilizer + fixed-point
+  decomposition of the DISCRETE ZD/fiber set** under the finite signed-monomial automorphism group
+  (permutation part `PSL(2,7)`): `2ⁿ⁻⁴` size-7 Fano orbits `+` `(2ⁿ⁻⁴−1)` fixed seams, stabilizer `S₄`
+  (order 24), **PROVEN ∀n** (block-lemma freezing `+` `GL(3,2)` transitivity on `F₂³\{0}`;
+  VERIFIED n=4..7). The continuous picture gives *one* orbit; this refines it into a growing discrete
+  partition.
+- **NOT novel — do not claim.**
+  - *"`PSL(2,7)` is a symmetry of the ZDs."* de Marrais uses `168 ↔ ZD` as a count coincidence `+`
+    Fano-labeling frame to **classify box-kites** (full arXiv corpus deep-read 2026-07-11, 9 papers;
+    verdict **(b) ADJACENT** — the surrounding pieces, not the orbit-decomposition; the words
+    orbit/stabilizer/fixed-point *in the group sense on the ZD set* appear in none of them, and his
+    box-kite tallies `7,35,155,651` / `4ⁿ⁻⁴` do not match our `2ⁿ⁻⁴×[7]`).
+  - *"a group acts on the ZDs, scaling with n."* Moreno 1998 (`q-alg/9710013`) / Reggiani 2024
+    (`arXiv:2411.18881`): the **continuous** `G₂` (`× S₃ᵏ` up the tower) acts **transitively**, one
+    orbit, `SU(2)` isotropy, `ZD(𝕊) ≅ G₂/SU(2)`. Ours is the finite/discrete refinement, a different
+    object.
+- **Frontier (open, stated honestly).**
+  - **de Marrais, ICGTMP-2006 talk** *"The Marriage of Nothing and All: Zero-Divisor Box-Kites in a
+    'TOE' Sky"* — the one item outside the arXiv corpus. **Caveat SUBSTANTIALLY RESOLVED (2026-07-12,
+    convergent secondary evidence):** it was **never published** (the official ICGTMP record lists no
+    Group26 proceedings — a "forthcoming from Springer" that did not appear), its subject is
+    box-kites `+` TOE-physics, and de Marrais's own 2007 self-citation (`math/0703745`, ref [4]) places
+    it as a **QM-degeneracy aside**, not an orbit-decomposition. The talk text itself was **not read**
+    (apparently unavailable anywhere public); re-check only if it surfaces, before any *published*
+    priority claim. It no longer blocks the novelty scoping.
+  - **Physics 3-generation bridge = NULL (computed 2026-07-12).** The generation `Z₃` is the
+    *continuous* order-3 automorphism `ψ` (a `2π/3` rotation with `√3/2` coefficients — it **mixes
+    basis directions**, so it acts on the continuous ZD manifold, not our discrete fibers). The only
+    *discrete* order-3 structure inside our 168 is the point-stabilizer `S₄ → S₃` the orbit theorem
+    already contains (the 168 is 2-transitive/**primitive** on the 7 Fano points — no finer block
+    system exists). So the physics motivation contextualizes but adds no bridge; **the novelty is
+    pure-math, not physics.**
+
 ## Prior art this generalizes (credit)
 
 This lifts the Frente-B **sedenion** (dim 16) Fano / zero-divisor program up the CD tower to dim 32:
