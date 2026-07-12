@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.proposals.native-heap-allocation-2026-07-12
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.proposals.native-heap-allocation-2026-07-12
+-->
+
 # Proposal: a heap-allocation primitive for the native (`souc run`) ELF
 
 **Status:** proposal · **Date:** 2026-07-12 · **Motivating work:** PR #828 (pure-Sounio PNG encoder, `image::pure::png`)
