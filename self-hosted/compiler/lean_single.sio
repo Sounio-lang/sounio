@@ -21094,6 +21094,132 @@ fn compile_indexed_field_field_array_store_a64() with IO, Mut, Panic, Div {
     else { em32(0x3821680A) }
 }
 
+// root.array_field[idx].leaf = expr — AArch64 mirror of
+// compile_indexed_field_field_store_x86. Array-of-struct elements are stored as
+// pointers, so load the element pointer before applying the leaf-field offset.
+fn compile_indexed_field_field_store_a64() with IO, Mut, Panic, Div {
+    let root_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    let array_field_tok = EP + 2
+    let afns = TS[array_field_tok as usize]
+    let afne = TE[array_field_tok as usize]
+    let array_fh = gl_name_hash(afns, afne)
+
+    EP = EP + 4
+    let slot_idx = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or_a64()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    emit_store_var_a64(slot_idx)
+    if TK[EP as usize] == 50 { EP = EP + 1 }
+
+    let leaf_field_tok = EP
+    let lfns = TS[EP as usize]
+    let lfne = TE[EP as usize]
+    let leaf_fh = gl_name_hash(lfns, lfne)
+    EP = EP + 1
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+
+    let slot_val = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or_a64()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    emit_store_var_a64(slot_val)
+
+    ST_QUERY_NS = afns
+    ST_QUERY_NE = afne
+    let root_si = resolve_field_struct_index(ns, ne, array_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if root_si < 0 {
+        tc_error(array_field_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(root_si, array_field_tok) {
+        tc_error_hard(array_field_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = afns
+    ST_QUERY_NE = afne
+    let array_off = st_field_offset(root_si, array_fh)
+    let array_ty = st_field_ty(root_si, array_fh)
+    let array_hash = st_field_hash(root_si, array_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if array_ty != 8 || arr_hash_elem_ty(array_hash) != 6 {
+        tc_error(array_field_tok, "indexed field store requires struct array element")
+        return
+    }
+
+    var elem_si: i64 = -1
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    ST_QUERY_NS = lfns
+    ST_QUERY_NE = lfne
+    if elem_si < 0 { elem_si = resolve_struct_index_by_field(leaf_fh) }
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if elem_si < 0 {
+        tc_error(leaf_field_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(elem_si, leaf_field_tok) {
+        tc_error_hard(leaf_field_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = lfns
+    ST_QUERY_NE = lfne
+    let leaf_off = st_field_offset(elem_si, leaf_fh)
+    let leaf_ty = st_field_ty(elem_si, leaf_fh)
+    let leaf_hash = st_field_hash(elem_si, leaf_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if leaf_off < 0 {
+        tc_error(leaf_field_tok, "unknown field access")
+        return
+    }
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error_hard(EP - 1, "assignment type mismatch")
+    }
+
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var_a64(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        else { tc_undefined_var(root_tok); em32(0xD2800000) }
+    }
+    if array_off != 0 {
+        emit_imm64_reg_a64(11, array_off)
+        em32(0x8B0B0000)
+    }
+    let slot_array_base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(slot_array_base)
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)  // mov x1, x0 (index)
+    emit_load_var_a64(slot_array_base)
+    em32(0xF8617800)  // ldr x0, [x0, x1, lsl #3] (element pointer)
+    if leaf_off != 0 {
+        emit_imm64_reg_a64(11, leaf_off)
+        em32(0x8B0B0000)
+    }
+    let slot_leaf_ptr = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(slot_leaf_ptr)
+    emit_load_var_a64(slot_val)
+    em32(0xAA0003EA)  // mov x10, x0 (value/source pointer)
+    emit_load_var_a64(slot_leaf_ptr)
+    if type_is_aggregate(leaf_ty, leaf_hash) {
+        emit_copy_agg_to_ptr_a64(leaf_ty, leaf_hash)
+    } else {
+        em32(0xF900000A)  // str x10, [x0]
+    }
+}
+
 fn resolve_struct_index_by_field(fh: i64) -> i64 with Panic, Div, Mut {
     var si: i64 = 0
     while si < ST_COUNT {
@@ -35307,6 +35433,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_indexed_field_field_array_store_a64()
+        return
+    }
+    // x.array_field[idx].leaf = expr
+    if stmt_is_indexed_field_field_store(EP) {
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        compile_indexed_field_field_store_a64()
         return
     }
     // x.field[idx] = expr
