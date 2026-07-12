@@ -15,29 +15,33 @@ expect() {
   }
 }
 
-docs="$($CLASSIFIER docs/internal/concepts/README.md)"
+classify_pr() {
+  CI_EVENT_NAME=pull_request "$CLASSIFIER" "$@"
+}
+
+docs="$(classify_pr docs/internal/concepts/README.md)"
 expect "$docs" docs true
 expect "$docs" compiler false
 expect "$docs" lean false
 
-lean="$($CLASSIFIER formal/lean4/SounioGradedModal.lean)"
+lean="$(classify_pr formal/lean4/SounioGradedModal.lean)"
 expect "$lean" lean true
 expect "$lean" math true
 expect "$lean" compiler false
 
-compiler="$($CLASSIFIER self-hosted/compiler/main.sio)"
+compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true
 
-unknown="$($CLASSIFIER newly-introduced/build.graph)"
+unknown="$(classify_pr newly-introduced/build.graph)"
 expect "$unknown" full true
 expect "$unknown" compiler true
 expect "$unknown" lean true
 
-root_build="$($CLASSIFIER Makefile)"
+root_build="$(classify_pr Makefile)"
 expect "$root_build" full true
 
-workflow="$($CLASSIFIER .github/workflows/ci.yml)"
+workflow="$(classify_pr .github/workflows/ci.yml)"
 for key in docs website compiler runtime stdlib tests lean math ontology clinical sio full; do
   expect "$workflow" "$key" true
 done
