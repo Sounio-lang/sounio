@@ -1,42 +1,34 @@
 // stdlib/image/pure/png.sio — Pure-Sounio PNG encoder (no FFI, no libpng)
 //
 // Writes a spec-valid 8-bit RGB PNG straight to disk via the `write_file` builtin.
-// Compression is real DEFLATE: fixed-Huffman blocks with LZ77 back-references
-// found by a capped hash-chain matcher. If the compressed body would be larger
-// than the input (e.g. smooth high-entropy data), it falls back to a stored
-// (uncompressed) block, so output is never worse than raw + a few bytes.
+// Compression is real DEFLATE with DYNAMIC Huffman codes: a two-pass LZ77
+// (count symbol frequencies, build per-image Huffman trees, emit) with matches
+// found by a capped hash chain, code lengths run-length encoded per RFC 1951.
+// If the compressed body would exceed the input (incompressible data), it falls
+// back to a stored block, so output is never worse than raw + a few bytes.
 // This is the self-contained alternative to the `image::ffi` libpng/stb path.
 //
-// Pixel format: each `u32` in `Image.pixels` is interpreted as 0x00RRGGBB
-// (low 24 bits; the top byte is ignored).
-//
-// Size bound: `Image` caps at 65536 pixels (256x256). Scratch buffers below
-// hold the worst-case PNG and hash state for that cap.
+// Pixel format: each `u32` in `Image.pixels` is 0x00RRGGBB (top byte ignored).
+// Size bound: `Image` caps at 65536 pixels (256x256).
 
 module image::pure::png
 
 use image::pure::types::{Image}
 
-// Scratch byte buffer with a running length. A struct wrapper is used because
-// bare `&![i8; N]` element mutation is not reliable under the current JIT.
 struct PngBuf { data: [i8; 262144], len: i64 }
-
-// Bit-level output for the DEFLATE stream (LSB-first bit packing).
 struct BitOut { data: [i8; 262144], len: i64, acc: i64, nbits: i64 }
+struct Hash { head: [i64; 32768], prev: [i64; 200000] }
+struct Huff { len: [i64; 288], code: [i64; 288] }
+struct Match { len: i64, dist: i64 }
+struct LC { sym: i64, xb: i64, xval: i64 }
 
 fn put(b: &!PngBuf, v: i64) with Mut, Panic {
     (*b).data[(*b).len as usize] = (v & 255) as i8
     (*b).len = (*b).len + 1
 }
-
 fn put_be32(b: &!PngBuf, v: i64) with Mut, Panic {
-    put(b, (v >> 24) & 255)
-    put(b, (v >> 16) & 255)
-    put(b, (v >> 8) & 255)
-    put(b, v & 255)
+    put(b, (v >> 24) & 255); put(b, (v >> 16) & 255); put(b, (v >> 8) & 255); put(b, v & 255)
 }
-
-// CRC-32 (PNG polynomial 0xEDB88320 = 3988292384) over data[start..end].
 fn crc_range(b: &PngBuf, start: i64, end: i64) -> i64 with Mut, Panic {
     var crc = 4294967295
     var i = start
@@ -44,208 +36,398 @@ fn crc_range(b: &PngBuf, start: i64, end: i64) -> i64 with Mut, Panic {
         let byte = ((*b).data[i as usize] as i64) & 255
         crc = crc ^ byte
         var k = 0
-        while k < 8 {
-            if (crc & 1) == 1 { crc = (crc >> 1) ^ 3988292384 } else { crc = crc >> 1 }
-            k = k + 1
-        }
+        while k < 8 { if (crc & 1) == 1 { crc = (crc >> 1) ^ 3988292384 } else { crc = crc >> 1 } k = k + 1 }
         i = i + 1
     }
     (crc ^ 4294967295) & 4294967295
 }
 
-// ---- DEFLATE (fixed Huffman + LZ77) ----------------------------------------
-
+// ---- DEFLATE bit output ----------------------------------------------------
 fn bo_put(d: &!BitOut, v: i64) with Mut, Panic {
     (*d).data[(*d).len as usize] = (v & 255) as i8
     (*d).len = (*d).len + 1
 }
-
 fn bit_write(d: &!BitOut, val: i64, n: i64) with Mut, Panic {
     (*d).acc = (*d).acc | (val << (*d).nbits)
     (*d).nbits = (*d).nbits + n
-    while (*d).nbits >= 8 {
-        bo_put(d, (*d).acc & 255)
-        (*d).acc = (*d).acc >> 8
-        (*d).nbits = (*d).nbits - 8
-    }
+    while (*d).nbits >= 8 { bo_put(d, (*d).acc & 255); (*d).acc = (*d).acc >> 8; (*d).nbits = (*d).nbits - 8 }
 }
-
 fn flush_bits(d: &!BitOut) with Mut, Panic {
-    if (*d).nbits > 0 {
-        bo_put(d, (*d).acc & 255)
-        (*d).acc = 0
-        (*d).nbits = 0
-    }
+    if (*d).nbits > 0 { bo_put(d, (*d).acc & 255); (*d).acc = 0; (*d).nbits = 0 }
 }
-
 fn reverse_bits(code: i64, n: i64) -> i64 with Mut {
-    var r = 0
-    var i = 0
+    var r = 0; var i = 0
     while i < n { r = (r << 1) | ((code >> i) & 1); i = i + 1 }
     r
 }
-
-// Fixed literal/length Huffman code for symbol 0..287.
-fn emit_litlen(d: &!BitOut, sym: i64) with Mut, Panic {
-    if sym <= 143 { bit_write(d, reverse_bits(48 + sym, 8), 8); return }
-    if sym <= 255 { bit_write(d, reverse_bits(400 + (sym - 144), 9), 9); return }
-    if sym <= 279 { bit_write(d, reverse_bits(sym - 256, 7), 7); return }
-    bit_write(d, reverse_bits(192 + (sym - 280), 8), 8)
+fn emit_code(d: &!BitOut, h: &Huff, sym: i64) with Mut, Panic {
+    let L = (*h).len[sym as usize]
+    bit_write(d, reverse_bits((*h).code[sym as usize], L), L)
 }
 
-// Length symbol (257..285) + extra bits, for match length 3..258.
-fn emit_len(d: &!BitOut, len: i64) with Mut, Panic {
-    if len <= 10 { emit_litlen(d, len + 254); return }
-    if len <= 12 { emit_litlen(d, 265); bit_write(d, len - 11, 1); return }
-    if len <= 14 { emit_litlen(d, 266); bit_write(d, len - 13, 1); return }
-    if len <= 16 { emit_litlen(d, 267); bit_write(d, len - 15, 1); return }
-    if len <= 18 { emit_litlen(d, 268); bit_write(d, len - 17, 1); return }
-    if len <= 22 { emit_litlen(d, 269); bit_write(d, len - 19, 2); return }
-    if len <= 26 { emit_litlen(d, 270); bit_write(d, len - 23, 2); return }
-    if len <= 30 { emit_litlen(d, 271); bit_write(d, len - 27, 2); return }
-    if len <= 34 { emit_litlen(d, 272); bit_write(d, len - 31, 2); return }
-    if len <= 42 { emit_litlen(d, 273); bit_write(d, len - 35, 3); return }
-    if len <= 50 { emit_litlen(d, 274); bit_write(d, len - 43, 3); return }
-    if len <= 58 { emit_litlen(d, 275); bit_write(d, len - 51, 3); return }
-    if len <= 66 { emit_litlen(d, 276); bit_write(d, len - 59, 3); return }
-    if len <= 82 { emit_litlen(d, 277); bit_write(d, len - 67, 4); return }
-    if len <= 98 { emit_litlen(d, 278); bit_write(d, len - 83, 4); return }
-    if len <= 114 { emit_litlen(d, 279); bit_write(d, len - 99, 4); return }
-    if len <= 130 { emit_litlen(d, 280); bit_write(d, len - 115, 4); return }
-    if len <= 162 { emit_litlen(d, 281); bit_write(d, len - 131, 5); return }
-    if len <= 194 { emit_litlen(d, 282); bit_write(d, len - 163, 5); return }
-    if len <= 226 { emit_litlen(d, 283); bit_write(d, len - 195, 5); return }
-    if len <= 257 { emit_litlen(d, 284); bit_write(d, len - 227, 5); return }
-    emit_litlen(d, 285)
+// ---- DEFLATE length / distance symbol tables (single source) ---------------
+fn len_code(len: i64) -> LC {
+    if len <= 10 { return LC { sym: len + 254, xb: 0, xval: 0 } }
+    if len <= 12 { return LC { sym: 265, xb: 1, xval: len - 11 } }
+    if len <= 14 { return LC { sym: 266, xb: 1, xval: len - 13 } }
+    if len <= 16 { return LC { sym: 267, xb: 1, xval: len - 15 } }
+    if len <= 18 { return LC { sym: 268, xb: 1, xval: len - 17 } }
+    if len <= 22 { return LC { sym: 269, xb: 2, xval: len - 19 } }
+    if len <= 26 { return LC { sym: 270, xb: 2, xval: len - 23 } }
+    if len <= 30 { return LC { sym: 271, xb: 2, xval: len - 27 } }
+    if len <= 34 { return LC { sym: 272, xb: 2, xval: len - 31 } }
+    if len <= 42 { return LC { sym: 273, xb: 3, xval: len - 35 } }
+    if len <= 50 { return LC { sym: 274, xb: 3, xval: len - 43 } }
+    if len <= 58 { return LC { sym: 275, xb: 3, xval: len - 51 } }
+    if len <= 66 { return LC { sym: 276, xb: 3, xval: len - 59 } }
+    if len <= 82 { return LC { sym: 277, xb: 4, xval: len - 67 } }
+    if len <= 98 { return LC { sym: 278, xb: 4, xval: len - 83 } }
+    if len <= 114 { return LC { sym: 279, xb: 4, xval: len - 99 } }
+    if len <= 130 { return LC { sym: 280, xb: 4, xval: len - 115 } }
+    if len <= 162 { return LC { sym: 281, xb: 5, xval: len - 131 } }
+    if len <= 194 { return LC { sym: 282, xb: 5, xval: len - 163 } }
+    if len <= 226 { return LC { sym: 283, xb: 5, xval: len - 195 } }
+    if len <= 257 { return LC { sym: 284, xb: 5, xval: len - 227 } }
+    LC { sym: 285, xb: 0, xval: 0 }
+}
+fn dist_code(dist: i64) -> LC {
+    if dist <= 4 { return LC { sym: dist - 1, xb: 0, xval: 0 } }
+    if dist <= 6 { return LC { sym: 4, xb: 1, xval: dist - 5 } }
+    if dist <= 8 { return LC { sym: 5, xb: 1, xval: dist - 7 } }
+    if dist <= 12 { return LC { sym: 6, xb: 2, xval: dist - 9 } }
+    if dist <= 16 { return LC { sym: 7, xb: 2, xval: dist - 13 } }
+    if dist <= 24 { return LC { sym: 8, xb: 3, xval: dist - 17 } }
+    if dist <= 32 { return LC { sym: 9, xb: 3, xval: dist - 25 } }
+    if dist <= 48 { return LC { sym: 10, xb: 4, xval: dist - 33 } }
+    if dist <= 64 { return LC { sym: 11, xb: 4, xval: dist - 49 } }
+    if dist <= 96 { return LC { sym: 12, xb: 5, xval: dist - 65 } }
+    if dist <= 128 { return LC { sym: 13, xb: 5, xval: dist - 97 } }
+    if dist <= 192 { return LC { sym: 14, xb: 6, xval: dist - 129 } }
+    if dist <= 256 { return LC { sym: 15, xb: 6, xval: dist - 193 } }
+    if dist <= 384 { return LC { sym: 16, xb: 7, xval: dist - 257 } }
+    if dist <= 512 { return LC { sym: 17, xb: 7, xval: dist - 385 } }
+    if dist <= 768 { return LC { sym: 18, xb: 8, xval: dist - 513 } }
+    if dist <= 1024 { return LC { sym: 19, xb: 8, xval: dist - 769 } }
+    if dist <= 1536 { return LC { sym: 20, xb: 9, xval: dist - 1025 } }
+    if dist <= 2048 { return LC { sym: 21, xb: 9, xval: dist - 1537 } }
+    if dist <= 3072 { return LC { sym: 22, xb: 10, xval: dist - 2049 } }
+    if dist <= 4096 { return LC { sym: 23, xb: 10, xval: dist - 3073 } }
+    if dist <= 6144 { return LC { sym: 24, xb: 11, xval: dist - 4097 } }
+    if dist <= 8192 { return LC { sym: 25, xb: 11, xval: dist - 6145 } }
+    if dist <= 12288 { return LC { sym: 26, xb: 12, xval: dist - 8193 } }
+    if dist <= 16384 { return LC { sym: 27, xb: 12, xval: dist - 12289 } }
+    if dist <= 24576 { return LC { sym: 28, xb: 13, xval: dist - 16385 } }
+    LC { sym: 29, xb: 13, xval: dist - 24577 }
 }
 
-// Distance symbol (0..29, 5-bit code) + extra bits, for distance 1..32768.
-fn emit_dist(d: &!BitOut, dist: i64) with Mut, Panic {
-    if dist <= 4 { bit_write(d, reverse_bits(dist - 1, 5), 5); return }
-    if dist <= 6 { bit_write(d, reverse_bits(4, 5), 5); bit_write(d, dist - 5, 1); return }
-    if dist <= 8 { bit_write(d, reverse_bits(5, 5), 5); bit_write(d, dist - 7, 1); return }
-    if dist <= 12 { bit_write(d, reverse_bits(6, 5), 5); bit_write(d, dist - 9, 2); return }
-    if dist <= 16 { bit_write(d, reverse_bits(7, 5), 5); bit_write(d, dist - 13, 2); return }
-    if dist <= 24 { bit_write(d, reverse_bits(8, 5), 5); bit_write(d, dist - 17, 3); return }
-    if dist <= 32 { bit_write(d, reverse_bits(9, 5), 5); bit_write(d, dist - 25, 3); return }
-    if dist <= 48 { bit_write(d, reverse_bits(10, 5), 5); bit_write(d, dist - 33, 4); return }
-    if dist <= 64 { bit_write(d, reverse_bits(11, 5), 5); bit_write(d, dist - 49, 4); return }
-    if dist <= 96 { bit_write(d, reverse_bits(12, 5), 5); bit_write(d, dist - 65, 5); return }
-    if dist <= 128 { bit_write(d, reverse_bits(13, 5), 5); bit_write(d, dist - 97, 5); return }
-    if dist <= 192 { bit_write(d, reverse_bits(14, 5), 5); bit_write(d, dist - 129, 6); return }
-    if dist <= 256 { bit_write(d, reverse_bits(15, 5), 5); bit_write(d, dist - 193, 6); return }
-    if dist <= 384 { bit_write(d, reverse_bits(16, 5), 5); bit_write(d, dist - 257, 7); return }
-    if dist <= 512 { bit_write(d, reverse_bits(17, 5), 5); bit_write(d, dist - 385, 7); return }
-    if dist <= 768 { bit_write(d, reverse_bits(18, 5), 5); bit_write(d, dist - 513, 8); return }
-    if dist <= 1024 { bit_write(d, reverse_bits(19, 5), 5); bit_write(d, dist - 769, 8); return }
-    if dist <= 1536 { bit_write(d, reverse_bits(20, 5), 5); bit_write(d, dist - 1025, 9); return }
-    if dist <= 2048 { bit_write(d, reverse_bits(21, 5), 5); bit_write(d, dist - 1537, 9); return }
-    if dist <= 3072 { bit_write(d, reverse_bits(22, 5), 5); bit_write(d, dist - 2049, 10); return }
-    if dist <= 4096 { bit_write(d, reverse_bits(23, 5), 5); bit_write(d, dist - 3073, 10); return }
-    if dist <= 6144 { bit_write(d, reverse_bits(24, 5), 5); bit_write(d, dist - 4097, 11); return }
-    if dist <= 8192 { bit_write(d, reverse_bits(25, 5), 5); bit_write(d, dist - 6145, 11); return }
-    if dist <= 12288 { bit_write(d, reverse_bits(26, 5), 5); bit_write(d, dist - 8193, 12); return }
-    if dist <= 16384 { bit_write(d, reverse_bits(27, 5), 5); bit_write(d, dist - 12289, 12); return }
-    if dist <= 24576 { bit_write(d, reverse_bits(28, 5), 5); bit_write(d, dist - 16385, 13); return }
-    bit_write(d, reverse_bits(29, 5), 5); bit_write(d, dist - 24577, 13)
+// ---- LZ77 hash chain -------------------------------------------------------
+fn hash_reset(hh: &!Hash) with Mut, Panic {
+    var i = 0
+    while i < 32768 { (*hh).head[i as usize] = 0 - 1; i = i + 1 }
+}
+fn hash_of(raw: &PngBuf, p: i64) -> i64 with Panic {
+    let a = ((*raw).data[p as usize] as i64) & 255
+    let b = ((*raw).data[(p + 1) as usize] as i64) & 255
+    let c = ((*raw).data[(p + 2) as usize] as i64) & 255
+    ((a << 10) + (b << 5) + c) & 32767
+}
+fn hash_insert(raw: &PngBuf, q: i64, n: i64, hh: &!Hash) with Mut, Panic {
+    if q + 2 < n {
+        let h = hash_of(raw, q)
+        (*hh).prev[q as usize] = (*hh).head[h as usize]
+        (*hh).head[h as usize] = q
+    }
+}
+fn find_match(raw: &PngBuf, pos: i64, n: i64, hh: &!Hash) -> Match with Mut, Panic {
+    var best_len = 0; var best_dist = 0
+    if pos + 2 < n {
+        let h = hash_of(raw, pos)
+        var cand = (*hh).head[h as usize]
+        var chain = 0
+        while cand >= 0 && chain < 128 {
+            let dist = pos - cand
+            if dist > 32768 { cand = 0 - 1 }
+            else {
+                var l = 0
+                while l < 258 && (pos + l) < n && (*raw).data[(cand + l) as usize] == (*raw).data[(pos + l) as usize] { l = l + 1 }
+                if l > best_len { best_len = l; best_dist = dist }
+                cand = (*hh).prev[cand as usize]
+                chain = chain + 1
+            }
+        }
+        (*hh).prev[pos as usize] = (*hh).head[h as usize]
+        (*hh).head[h as usize] = pos
+    }
+    Match { len: best_len, dist: best_dist }
 }
 
-// One fixed-Huffman DEFLATE block (BFINAL=1) over raw[0..raw.len], with LZ77
-// matches from a capped hash chain. Local hash state (head/prev) avoids passing
-// bare `&![i64; N]` array refs.
-fn deflate_fixed(out: &!BitOut, raw: &PngBuf) with Mut, Panic {
+// ---- canonical length-limited Huffman --------------------------------------
+fn build_huff(freq: &[i64; 288], n: i64, maxbits: i64, h: &!Huff) with Mut, Panic, Div {
+    var i = 0
+    while i < n { (*h).len[i as usize] = 0; (*h).code[i as usize] = 0; i = i + 1 }
+    var nleaf = 0
+    i = 0
+    while i < n { if freq[i as usize] > 0 { nleaf = nleaf + 1 } i = i + 1 }
+    if nleaf == 0 { return }
+    if nleaf == 1 {
+        i = 0
+        while i < n { if freq[i as usize] > 0 { (*h).len[i as usize] = 1 } i = i + 1 }
+    } else {
+        var wt: [i64; 600] = [0; 600]
+        var par: [i64; 600] = [0; 600]
+        var alive: [i64; 600] = [0; 600]
+        var na = 0
+        i = 0
+        while i < n {
+            if freq[i as usize] > 0 { wt[i as usize] = freq[i as usize]; par[i as usize] = 0 - 1; alive[na as usize] = i; na = na + 1 }
+            i = i + 1
+        }
+        var next = n
+        while na > 1 {
+            var m1 = 0; var m2 = 1
+            if wt[alive[m1 as usize] as usize] > wt[alive[m2 as usize] as usize] { let t = m1; m1 = m2; m2 = t }
+            var k = 2
+            while k < na {
+                let wk = wt[alive[k as usize] as usize]
+                if wk < wt[alive[m1 as usize] as usize] { m2 = m1; m1 = k }
+                else { if wk < wt[alive[m2 as usize] as usize] { m2 = k } }
+                k = k + 1
+            }
+            let a1 = alive[m1 as usize]; let a2 = alive[m2 as usize]
+            wt[next as usize] = wt[a1 as usize] + wt[a2 as usize]
+            par[next as usize] = 0 - 1; par[a1 as usize] = next; par[a2 as usize] = next
+            alive[m1 as usize] = next; alive[m2 as usize] = alive[(na - 1) as usize]
+            na = na - 1; next = next + 1
+        }
+        var overflow = 0
+        i = 0
+        while i < n {
+            if freq[i as usize] > 0 {
+                var dd = 0; var node = i
+                while par[node as usize] >= 0 { node = par[node as usize]; dd = dd + 1 }
+                if dd > maxbits { dd = maxbits; overflow = overflow + 1 }
+                (*h).len[i as usize] = dd
+            }
+            i = i + 1
+        }
+        if overflow > 0 {
+            var bl: [i64; 32] = [0; 32]
+            i = 0
+            while i < n { let li = (*h).len[i as usize]; if li > 0 { bl[li as usize] = bl[li as usize] + 1 } i = i + 1 }
+            var ov = overflow
+            while ov > 0 {
+                var bb = maxbits - 1
+                while bl[bb as usize] == 0 { bb = bb - 1 }
+                bl[bb as usize] = bl[bb as usize] - 1
+                bl[(bb + 1) as usize] = bl[(bb + 1) as usize] + 2
+                bl[maxbits as usize] = bl[maxbits as usize] - 1
+                ov = ov - 2
+            }
+            var order: [i64; 288] = [0; 288]
+            var oc = 0
+            i = 0
+            while i < n { if freq[i as usize] > 0 { order[oc as usize] = i; oc = oc + 1 } i = i + 1 }
+            var a = 1
+            while a < oc {
+                let key = order[a as usize]; let kf = freq[key as usize]
+                var jj = a - 1
+                while jj >= 0 && freq[order[jj as usize] as usize] > kf { order[(jj + 1) as usize] = order[jj as usize]; jj = jj - 1 }
+                order[(jj + 1) as usize] = key
+                a = a + 1
+            }
+            i = 0
+            while i < n { (*h).len[i as usize] = 0; i = i + 1 }
+            var idx = 0
+            var bb2 = maxbits
+            while bb2 >= 1 {
+                var cnt = bl[bb2 as usize]
+                while cnt > 0 { (*h).len[order[idx as usize] as usize] = bb2; idx = idx + 1; cnt = cnt - 1 }
+                bb2 = bb2 - 1
+            }
+        }
+    }
+    var blc: [i64; 32] = [0; 32]
+    i = 0
+    while i < n { let li = (*h).len[i as usize]; if li > 0 { blc[li as usize] = blc[li as usize] + 1 } i = i + 1 }
+    var nextcode: [i64; 32] = [0; 32]
+    var code = 0
+    var bits = 1
+    while bits <= maxbits { code = (code + blc[(bits - 1) as usize]) << 1; nextcode[bits as usize] = code; bits = bits + 1 }
+    i = 0
+    while i < n {
+        let li = (*h).len[i as usize]
+        if li > 0 { (*h).code[i as usize] = nextcode[li as usize]; nextcode[li as usize] = nextcode[li as usize] + 1 }
+        i = i + 1
+    }
+}
+
+// ---- one dynamic-Huffman DEFLATE block over raw[0..raw.len] -----------------
+fn deflate_dynamic(out: &!BitOut, raw: &PngBuf) with Mut, Div, Panic {
     let n = (*raw).len
-    var head: [i64; 32768] = [0; 32768]
-    var prev: [i64; 200000] = [0; 200000]
-    var hi = 0
-    while hi < 32768 { head[hi as usize] = 0 - 1; hi = hi + 1 }
+    var hash = Hash { head: [0; 32768], prev: [0; 200000] }
+    var freq_ll: [i64; 288] = [0; 288]
+    var freq_d: [i64; 288] = [0; 288]
 
-    bit_write(out, 1, 1)  // BFINAL = 1
-    bit_write(out, 1, 2)  // BTYPE  = 01 (fixed Huffman)
-
-    let max_match = 258
-    let max_dist = 32768
-    let max_chain = 128
+    // pass 1 — count
+    hash_reset(&!hash)
     var pos = 0
     while pos < n {
-        var best_len = 0
-        var best_dist = 0
-        if pos + 2 < n {
-            let a = ((*raw).data[pos as usize] as i64) & 255
-            let b = ((*raw).data[(pos + 1) as usize] as i64) & 255
-            let c = ((*raw).data[(pos + 2) as usize] as i64) & 255
-            let h = ((a << 10) + (b << 5) + c) & 32767
-            var cand = head[h as usize]
-            var chain = 0
-            while cand >= 0 && chain < max_chain {
-                let dist = pos - cand
-                if dist > max_dist { cand = 0 - 1 }
-                else {
-                    var l = 0
-                    while l < max_match && (pos + l) < n
-                          && (*raw).data[(cand + l) as usize] == (*raw).data[(pos + l) as usize] {
-                        l = l + 1
-                    }
-                    if l > best_len { best_len = l; best_dist = dist }
-                    cand = prev[cand as usize]
-                    chain = chain + 1
-                }
-            }
-            prev[pos as usize] = head[h as usize]
-            head[h as usize] = pos
-        }
-        if best_len >= 3 {
-            emit_len(out, best_len)
-            emit_dist(out, best_dist)
+        let m = find_match(raw, pos, n, &!hash)
+        if m.len >= 3 {
+            let lc = len_code(m.len)
+            freq_ll[lc.sym as usize] = freq_ll[lc.sym as usize] + 1
+            let dc = dist_code(m.dist)
+            freq_d[dc.sym as usize] = freq_d[dc.sym as usize] + 1
             var q = pos + 1
-            let stop = pos + best_len
-            while q < stop {
-                if q + 2 < n {
-                    let a2 = ((*raw).data[q as usize] as i64) & 255
-                    let b2 = ((*raw).data[(q + 1) as usize] as i64) & 255
-                    let c2 = ((*raw).data[(q + 2) as usize] as i64) & 255
-                    let h2 = ((a2 << 10) + (b2 << 5) + c2) & 32767
-                    prev[q as usize] = head[h2 as usize]
-                    head[h2 as usize] = q
-                }
-                q = q + 1
-            }
-            pos = pos + best_len
+            let stop = pos + m.len
+            while q < stop { hash_insert(raw, q, n, &!hash); q = q + 1 }
+            pos = pos + m.len
         } else {
-            emit_litlen(out, ((*raw).data[pos as usize] as i64) & 255)
+            let byte = ((*raw).data[pos as usize] as i64) & 255
+            freq_ll[byte as usize] = freq_ll[byte as usize] + 1
             pos = pos + 1
         }
     }
-    emit_litlen(out, 256)  // end of block
+    freq_ll[256 as usize] = freq_ll[256 as usize] + 1
+    var anyd = 0; var td = 0
+    while td < 30 { if freq_d[td as usize] > 0 { anyd = 1 } td = td + 1 }
+    if anyd == 0 { freq_d[0 as usize] = 1 }
+
+    var huff_ll = Huff { len: [0; 288], code: [0; 288] }
+    var huff_d = Huff { len: [0; 288], code: [0; 288] }
+    build_huff(&freq_ll, 286, 15, &!huff_ll)
+    build_huff(&freq_d, 30, 15, &!huff_d)
+
+    var numll = 257
+    var s = 285
+    while s >= 257 { if huff_ll.len[s as usize] > 0 { numll = s + 1; s = 256 } else { s = s - 1 } }
+    var numd = 1
+    s = 29
+    while s >= 1 { if huff_d.len[s as usize] > 0 { numd = s + 1; s = 0 } else { s = s - 1 } }
+
+    // combined code-length list
+    var cl: [i64; 320] = [0; 320]
+    var cln = 0
+    var i = 0
+    while i < numll { cl[cln as usize] = huff_ll.len[i as usize]; cln = cln + 1; i = i + 1 }
+    i = 0
+    while i < numd { cl[cln as usize] = huff_d.len[i as usize]; cln = cln + 1; i = i + 1 }
+
+    // RLE of code lengths
+    var rsym: [i64; 640] = [0; 640]
+    var rxb: [i64; 640] = [0; 640]
+    var rxv: [i64; 640] = [0; 640]
+    var rn = 0
+    var freq_cl: [i64; 288] = [0; 288]
+    var p = 0
+    while p < cln {
+        let cur = cl[p as usize]
+        var run = 1
+        while (p + run) < cln && cl[(p + run) as usize] == cur { run = run + 1 }
+        if cur == 0 {
+            while run >= 11 {
+                var r = run; if r > 138 { r = 138 }
+                rsym[rn as usize] = 18; rxb[rn as usize] = 7; rxv[rn as usize] = r - 11; rn = rn + 1
+                freq_cl[18 as usize] = freq_cl[18 as usize] + 1; run = run - r; p = p + r
+            }
+            while run >= 3 {
+                var r2 = run; if r2 > 10 { r2 = 10 }
+                rsym[rn as usize] = 17; rxb[rn as usize] = 3; rxv[rn as usize] = r2 - 3; rn = rn + 1
+                freq_cl[17 as usize] = freq_cl[17 as usize] + 1; run = run - r2; p = p + r2
+            }
+            while run > 0 {
+                rsym[rn as usize] = 0; rxb[rn as usize] = 0; rxv[rn as usize] = 0; rn = rn + 1
+                freq_cl[0 as usize] = freq_cl[0 as usize] + 1; run = run - 1; p = p + 1
+            }
+        } else {
+            rsym[rn as usize] = cur; rxb[rn as usize] = 0; rxv[rn as usize] = 0; rn = rn + 1
+            freq_cl[cur as usize] = freq_cl[cur as usize] + 1; run = run - 1; p = p + 1
+            while run >= 3 {
+                var r3 = run; if r3 > 6 { r3 = 6 }
+                rsym[rn as usize] = 16; rxb[rn as usize] = 2; rxv[rn as usize] = r3 - 3; rn = rn + 1
+                freq_cl[16 as usize] = freq_cl[16 as usize] + 1; run = run - r3; p = p + r3
+            }
+            while run > 0 {
+                rsym[rn as usize] = cur; rxb[rn as usize] = 0; rxv[rn as usize] = 0; rn = rn + 1
+                freq_cl[cur as usize] = freq_cl[cur as usize] + 1; run = run - 1; p = p + 1
+            }
+        }
+    }
+
+    var huff_cl = Huff { len: [0; 288], code: [0; 288] }
+    build_huff(&freq_cl, 19, 7, &!huff_cl)
+
+    var perm: [i64; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    var numcl = 19
+    s = 18
+    while s >= 4 { if huff_cl.len[perm[s as usize] as usize] > 0 { numcl = s + 1; s = 3 } else { s = s - 1 } }
+    if numcl < 4 { numcl = 4 }
+
+    // emit block header
+    bit_write(out, 1, 1)               // BFINAL
+    bit_write(out, 2, 2)               // BTYPE = 10 (dynamic)
+    bit_write(out, numll - 257, 5)     // HLIT
+    bit_write(out, numd - 1, 5)        // HDIST
+    bit_write(out, numcl - 4, 4)       // HCLEN
+    var j = 0
+    while j < numcl { bit_write(out, huff_cl.len[perm[j as usize] as usize], 3); j = j + 1 }
+    j = 0
+    while j < rn {
+        emit_code(out, &huff_cl, rsym[j as usize])
+        if rxb[j as usize] > 0 { bit_write(out, rxv[j as usize], rxb[j as usize]) }
+        j = j + 1
+    }
+
+    // pass 2 — emit data with the dynamic codes
+    hash_reset(&!hash)
+    pos = 0
+    while pos < n {
+        let m = find_match(raw, pos, n, &!hash)
+        if m.len >= 3 {
+            let lc = len_code(m.len)
+            emit_code(out, &huff_ll, lc.sym)
+            if lc.xb > 0 { bit_write(out, lc.xval, lc.xb) }
+            let dc = dist_code(m.dist)
+            emit_code(out, &huff_d, dc.sym)
+            if dc.xb > 0 { bit_write(out, dc.xval, dc.xb) }
+            var q = pos + 1
+            let stop = pos + m.len
+            while q < stop { hash_insert(raw, q, n, &!hash); q = q + 1 }
+            pos = pos + m.len
+        } else {
+            emit_code(out, &huff_ll, ((*raw).data[pos as usize] as i64) & 255)
+            pos = pos + 1
+        }
+    }
+    emit_code(out, &huff_ll, 256)
     flush_bits(out)
 }
 
 // ----------------------------------------------------------------------------
 
-// Encode `img` as an 8-bit RGB PNG and write it to `filename`.
-// Returns true on success.
+// Encode `img` as an 8-bit RGB PNG and write it to `filename`. Returns true on success.
 pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic {
     let w = img.width as i64
     let h = img.height as i64
     if w <= 0 || h <= 0 { return false }
 
-    // ---- filtered raw scanlines: a leading filter byte (0 = none) per row ----
+    // filtered raw scanlines (filter byte 0 per row)
     var raw = PngBuf { data: [0; 262144], len: 0 }
     var y = 0
     while y < h {
         put(&!raw, 0)
         var x = 0
         while x < w {
-            let p = (img.pixels[(y * w + x) as usize] as i64) & 16777215
-            put(&!raw, (p >> 16) & 255)
-            put(&!raw, (p >> 8) & 255)
-            put(&!raw, p & 255)
+            let px = (img.pixels[(y * w + x) as usize] as i64) & 16777215
+            put(&!raw, (px >> 16) & 255)
+            put(&!raw, (px >> 8) & 255)
+            put(&!raw, px & 255)
             x = x + 1
         }
         y = y + 1
     }
 
-    // ---- Adler-32 over the raw stream ----
+    // Adler-32
     var s1 = 1
     var s2 = 0
     var ai = 0
@@ -257,16 +439,15 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     }
     let adler = ((s2 << 16) | s1) & 4294967295
 
-    // ---- DEFLATE, with stored-block fallback if it would expand ----
+    // DEFLATE (dynamic Huffman) with stored-block fallback
     var bo = BitOut { data: [0; 262144], len: 0, acc: 0, nbits: 0 }
-    deflate_fixed(&!bo, &raw)
+    deflate_dynamic(&!bo, &raw)
     let use_deflate = bo.len < raw.len
 
-    // ---- assemble the PNG ----
+    // assemble PNG
     var png = PngBuf { data: [0; 262144], len: 0 }
     put(&!png, 137); put(&!png, 80); put(&!png, 78); put(&!png, 71)
     put(&!png, 13); put(&!png, 10); put(&!png, 26); put(&!png, 10)
-    // IHDR
     put_be32(&!png, 13)
     let ihdr_start = png.len
     put(&!png, 73); put(&!png, 72); put(&!png, 68); put(&!png, 82)  // "IHDR"
@@ -274,7 +455,6 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     put(&!png, 8); put(&!png, 2); put(&!png, 0); put(&!png, 0); put(&!png, 0)
     let ihdr_crc = crc_range(&png, ihdr_start, png.len)
     put_be32(&!png, ihdr_crc)
-    // IDAT — zlib stream: header + (deflate | stored) + Adler-32
     var zlen = 0
     var nblocks = raw.len / 65535
     if (raw.len % 65535) != 0 { nblocks = nblocks + 1 }
@@ -283,7 +463,7 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     put_be32(&!png, zlen)
     let idat_start = png.len
     put(&!png, 73); put(&!png, 68); put(&!png, 65); put(&!png, 84)  // "IDAT"
-    put(&!png, 120); put(&!png, 1)  // zlib header 0x78 0x01
+    put(&!png, 120); put(&!png, 1)  // zlib header
     if use_deflate {
         var i = 0
         while i < bo.len { put(&!png, (bo.data[i as usize] as i64) & 255); i = i + 1 }
@@ -300,10 +480,7 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
             let nlen = 65535 - blk
             put(&!png, nlen & 255); put(&!png, (nlen >> 8) & 255)
             var j = 0
-            while j < blk {
-                put(&!png, (raw.data[(pos + j) as usize] as i64) & 255)
-                j = j + 1
-            }
+            while j < blk { put(&!png, (raw.data[(pos + j) as usize] as i64) & 255); j = j + 1 }
             pos = pos + blk
             remaining = remaining - blk
         }
@@ -311,7 +488,6 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     put_be32(&!png, adler)
     let idat_crc = crc_range(&png, idat_start, png.len)
     put_be32(&!png, idat_crc)
-    // IEND
     put_be32(&!png, 0)
     let iend_start = png.len
     put(&!png, 73); put(&!png, 69); put(&!png, 78); put(&!png, 68)  // "IEND"
