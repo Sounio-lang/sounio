@@ -427,6 +427,46 @@ Phase 5 attempted to "close the butterfly" at the compiler level (commit reverte
 - **Dynamic `.so` linking / GOT–PLT**: The native toolchain emits statically linked executables on the default bring-up path. Relocation metadata records `R_X86_64_PLT32` for ET_REL objects (`self-hosted/native/reloc.sio`), but wiring arbitrary shared-library symbols end-to-end (libc-style `-lfoo`, full GOT/PLT for external calls) remains future work. FFI tests that require `libzstd` stay behind `//@ ignore` until dynamic link and stable stubs land consistently.
 - **`*const u8` in callee position**: Passing `expr as *const u8` can still produce arity/type mismatch diagnostics versus `*mut u8` in some FFI-heavy shapes; stdlib wrappers prefer `*mut u8` until call lowering treats `*const T` and `*mut T` uniformly at the invocation site. See the header comment in `tests/stdlib/compress/test_zstd_e2e.sio`.
 
+## Zero-event native-v2 frontier (open)
+
+The zero-event receipt layer is checkable, its receipt witness now executes on
+default Madaros, and constructor opacity is enforced by both `check` and
+`compile`. Two neighboring native limitations remain:
+
+1. **Minimal `qd128` import fails closed during native emission.**
+   `tests/known_failures/qd128_import_native_v2_probe.sio` now completes
+   imported-module lowering without a segmentation fault, then reports backend
+   `rc=12`. The neighboring `dd64` control executes successfully.
+2. **Minimal sedenion import executes but does not prove its semantic marker.**
+   `tests/known_failures/sedenion_import_native_v2_probe.sio` reaches
+   `Compilation successful!`; the generated executable exits `1`, without a
+   segmentation fault and without `SEDENION_IMPORT_NATIVE_V2 PASS`.
+
+Constructor privacy was closed by running the same visibility preflight used
+by `check` before the canonical native `compile` path. The receipt and erased
+constructors are compile-fail tests with E176. Direct reads of private fields
+remain a separate language-wide visibility limitation and are not treated as
+constructor authority.
+
+The classified compiler handoff, root-cause boundary, and required acceptance
+matrix are recorded in
+`docs/handoff/zero_event_native_compile_privacy_2026-07-11.md`. In particular,
+globally enabling the merged checker's visibility bit is not an accepted fix:
+the native path must preserve legitimate import edges and cover the generic
+specialization branch as well as the ordinary fallback.
+
+Reproduce the classified matrix with:
+
+```bash
+bash scripts/ci/zero_event_native_v2_matrix.sh
+bash scripts/ci/zero_event_gate.sh
+```
+
+Do not promote the known-failure probes to `run-pass` until the default engine
+executes the same markers without `SOUNIO_SOUC_ENGINE=lean_single`. Do not alter
+the semantic oracles while repairing compiler lowering, aggregate return, or
+privacy enforcement.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:
