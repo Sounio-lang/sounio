@@ -242,9 +242,9 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
     }
     let idx = t.count
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, is_array: 0, array_len: 0 }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, is_array: 0, array_len: 0 }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, is_array: 0, array_len: 0 }
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, is_array: 0, array_len: 0, elem_type_name: ir_empty_name() }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, is_array: 0, array_len: 0, elem_type_name: ir_empty_name() }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, is_array: 0, array_len: 0, elem_type_name: ir_empty_name() }
     t.entries[idx as usize] = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
@@ -829,6 +829,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_i64(&(*flist).head.ty) { 3 } else { 0 },
                                                 is_array: if lower_type_expr_is_array(&(*flist).head.ty) { 1 } else { 0 },
                                                 array_len: lower_type_expr_array_len(&(*flist).head.ty),
+                                                elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -909,6 +910,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_i64(&(*flist).head.ty) { 3 } else { 0 },
                     is_array: if lower_type_expr_is_array(&(*flist).head.ty) { 1 } else { 0 },
                     array_len: lower_type_expr_array_len(&(*flist).head.ty),
+                    elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -967,6 +969,7 @@ fn lowerer_register_struct_fields_mut(
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                         is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
                         array_len: lower_type_expr_array_len(&(*list).head.ty),
+                        elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                     }
                     lay_entry.field_count = fc + 1
                     struct_layouts.entries[layout_idx as usize] = lay_entry
@@ -1055,6 +1058,19 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
             8
         }
         _ => 8,
+    }
+}
+
+fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeArray { return ir_empty_name() }
+    match (*te).inner {
+        Some(elem) => {
+            if (*elem).kind == TypeExprKind::TypeNamed {
+                return ir_path_first_name((*elem).path)
+            }
+            ir_empty_name()
+        }
+        _ => ir_empty_name()
     }
 }
 
@@ -1497,6 +1513,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                     is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
                     array_len: lower_type_expr_array_len(&(*list).head.ty),
+                    elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -5552,6 +5569,49 @@ impl Lowerer {
         }
     }
 
+    fn field_array_elem_type_name_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
+    fn field_array_elem_type_name_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(owner_expr) => {
+                if (*owner_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*owner_expr).name)
+                    return self.field_array_elem_type_name_for_struct(type_name, field_name)
+                }
+                ir_empty_name()
+            }
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                    return self.field_array_elem_type_name_for_base_ref(&(*base_expr).left, (*base_expr).name)
+                }
+                ir_empty_name()
+            }
+            _ => ir_empty_name(),
+        }
+    }
+
     fn opt_expr_result_is_float_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *opt {
             Some(expr) => self.expr_result_is_float_ref(&(*expr)),
@@ -5856,6 +5916,7 @@ impl Lowerer {
                             // (safe: preserves the old handle-copy for it, no crash).
                             is_array: 0,
                             array_len: 0,
+                            elem_type_name: ir_empty_name(),
                         }
                         (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                     }
@@ -5961,6 +6022,7 @@ impl Lowerer {
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 3 } else { 0 },
                             is_array: if lower_type_expr_is_array(&(*list).head.ty) { 1 } else { 0 },
                             array_len: lower_type_expr_array_len(&(*list).head.ty),
+                            elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                         }
                         (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                     }
@@ -10045,6 +10107,10 @@ impl Lowerer {
                 if (*recv).kind == ExprKind::ExprIndex {
                     if self.index_base_elem_is_float_ref(&(*recv).left) {
                         return make_name("f64")
+                    }
+                    let struct_elem = self.index_base_elem_struct_type_ref(&(*recv).left)
+                    if struct_elem.len > 0 {
+                        return struct_elem
                     }
                     return make_name("i64")
                 }
