@@ -1116,6 +1116,199 @@ fn enir_lower_source_profile(text: string, profile: i64) -> EnirLowerResult with
     EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
 }
 
+// E3D source profile: one acyclic diamond with a single scalar join argument
+// and exactly two independently named memory slots defined on both arms.
+fn enir_lower_source_join(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    var module = enir_module_empty()
+    module.schema_version = ENIR_SCHEMA_JOIN_VERSION
+    module.stage = ENIR_STAGE_LOWERED
+    module.profile = enir_profile_eisa_v2()
+    module = enir_module_push_type(module, EnirType {
+        id: 0, value_kind: enir_value_f64(), error_kind: enir_error_qd128(),
+        uncertainty_kind: enir_uncertainty_gum1(), status_tracked: 1,
+        provenance_tracked: 1, profile: enir_profile_eisa_v2(),
+    })
+    module = enir_module_push_policy(module, EnirPolicy {
+        id: 0, name: enir_name_from_string("eisa_10_100_count_only"),
+        branch_kind: enir_branch_policy_count_only(), gate_kind: enir_gate_policy_10_100(),
+    })
+    var symbols = enir_source_symbols_new()
+    var then_stores: [i64; 2] = [0; 2]
+    var else_stores: [i64; 2] = [0; 2]
+    var phase: i64 = 0
+    var condition_value: i64 = -1
+    var then_yield: i64 = -1
+    var else_yield: i64 = -1
+    var join_value: i64 = -1
+    var entry_count: i64 = -1
+    var then_count: i64 = -1
+    var else_first: i64 = -1
+    var else_count: i64 = -1
+    var join_first: i64 = -1
+    var seen_header = false
+    var seen_fuel = false
+    var seen_close = false
+    var gate_count: i64 = 0
+    let n = str_len(text)
+    if n <= 0 { return enir_lower_fail(module, 1, 1) }
+    var pos: i64 = 0
+    var line: i64 = 1
+    while pos < n {
+        var end = pos
+        while end < n && (str_char_at(text, end) as i64) != 10 { end = end + 1 }
+        let start = enir_source_trim_start(text, pos, end)
+        let finish = enir_source_trim_end(text, start, end)
+        if finish > start {
+            if seen_close { return enir_lower_fail(module, line, 2) }
+            if !seen_header {
+                if !enir_source_starts_with(text, start, finish, "epistemic fn ") || finish - start < 18 { return enir_lower_fail(module, line, 3) }
+                let name_start = start + 13
+                let suffix_start = finish - 4
+                if suffix_start <= name_start || !enir_source_range_eq(text, suffix_start, finish, "() {") { return enir_lower_fail(module, line, 4) }
+                module.name = enir_source_name(text, name_start, suffix_start)
+                if module.name.len <= 0 { return enir_lower_fail(module, line, 5) }
+                seen_header = true
+            } else if enir_source_range_eq(text, start, finish, "} else {") {
+                if phase != 1 || then_yield < 0 { return enir_lower_fail(module, line, 100) }
+                then_count = module.op_count - entry_count
+                else_first = module.op_count
+                phase = 2
+            } else if enir_source_range_eq(text, start, finish, "}") {
+                if phase == 2 {
+                    if else_yield < 0 || symbols.slot_count != 2 { return enir_lower_fail(module, line, 101) }
+                    if then_stores[0] != 1 || then_stores[1] != 1 || else_stores[0] != 1 || else_stores[1] != 1 { return enir_lower_fail(module, line, 102) }
+                    else_count = module.op_count - else_first
+                    join_value = enir_source_push_block_value(&!module, line)
+                    if join_value < 0 { return enir_lower_fail(module, line, 103) }
+                    module = enir_module_push_block_arg(module, EnirBlockArg {
+                        id: 0, block_id: 3, ordinal: 0, value_id: join_value, type_id: 0, provenance_id: join_value,
+                    })
+                    join_first = module.op_count
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 0, first_op: 0, op_count: entry_count, arg_start: 0, arg_count: 0,
+                        terminator_kind: enir_term_branch_zero(), condition_value: condition_value, edge0: 0, edge1: 1, terminator_fuel_cost: 1,
+                    })
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 1, first_op: entry_count, op_count: then_count, arg_start: 0, arg_count: 0,
+                        terminator_kind: enir_term_jump(), condition_value: -1, edge0: 2, edge1: -1, terminator_fuel_cost: 1,
+                    })
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 2, first_op: else_first, op_count: else_count, arg_start: 0, arg_count: 0,
+                        terminator_kind: enir_term_jump(), condition_value: -1, edge0: 3, edge1: -1, terminator_fuel_cost: 1,
+                    })
+                    module = enir_module_push_block(module, EnirBlock {
+                        id: 3, first_op: join_first, op_count: 0, arg_start: 0, arg_count: 1,
+                        terminator_kind: enir_term_halt(), condition_value: -1, edge0: -1, edge1: -1, terminator_fuel_cost: 1,
+                    })
+                    module = enir_module_push_edge(module, EnirEdge { id: 0, from_block: 0, to_block: 1, arg_count: 0, arg0: -1, arg1: -1, arg2: -1, arg3: -1 })
+                    module = enir_module_push_edge(module, EnirEdge { id: 1, from_block: 0, to_block: 2, arg_count: 0, arg0: -1, arg1: -1, arg2: -1, arg3: -1 })
+                    module = enir_module_push_edge(module, EnirEdge { id: 2, from_block: 1, to_block: 3, arg_count: 1, arg0: then_yield, arg1: -1, arg2: -1, arg3: -1 })
+                    module = enir_module_push_edge(module, EnirEdge { id: 3, from_block: 2, to_block: 3, arg_count: 1, arg0: else_yield, arg1: -1, arg2: -1, arg3: -1 })
+                    phase = 3
+                } else if phase == 4 && gate_count == 1 {
+                    seen_close = true
+                } else {
+                    return enir_lower_fail(module, line, 104)
+                }
+            } else if enir_source_starts_with(text, start, finish, "fuel ") {
+                if seen_fuel || phase != 0 || symbols.count != 0 { return enir_lower_fail(module, line, 60) }
+                let fuel = enir_source_positive_i64(text, start + 5, finish)
+                if fuel < 0 { return enir_lower_fail(module, line, 61) }
+                module.fuel_limit = fuel
+                seen_fuel = true
+            } else if enir_source_starts_with(text, start, finish, "if_zero ") {
+                if !seen_fuel || phase != 0 || symbols.count <= 0 { return enir_lower_fail(module, line, 62) }
+                let condition = enir_source_parse_control_name(text, start, finish, "if_zero ", "==")
+                condition_value = enir_source_symbol_find(symbols, condition)
+                if condition.len <= 0 || condition_value < 0 { return enir_lower_fail(module, line, 63) }
+                entry_count = module.op_count
+                phase = 1
+            } else if enir_source_starts_with(text, start, finish, "yield ") {
+                if phase != 1 && phase != 2 { return enir_lower_fail(module, line, 70) }
+                let name = enir_source_name(text, enir_source_trim_start(text, start + 6, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 71) }
+                if phase == 1 { if then_yield >= 0 { return enir_lower_fail(module, line, 72) }; then_yield = value_id }
+                else { if else_yield >= 0 { return enir_lower_fail(module, line, 73) }; else_yield = value_id }
+            } else if enir_source_starts_with(text, start, finish, "join ") {
+                if phase != 3 || join_value < 0 { return enir_lower_fail(module, line, 80) }
+                let name = enir_source_name(text, enir_source_trim_start(text, start + 5, finish), finish)
+                if name.len <= 0 || enir_source_symbol_find(symbols, name) >= 0 { return enir_lower_fail(module, line, 81) }
+                symbols = enir_source_symbol_add(symbols, name, join_value)
+                phase = 4
+            } else if enir_source_starts_with(text, start, finish, "store ") {
+                if phase != 1 && phase != 2 { return enir_lower_fail(module, line, 30) }
+                let left = enir_source_trim_start(text, start + 6, finish)
+                if left >= finish || (str_char_at(text, left) as i64) != 91 { return enir_lower_fail(module, line, 31) }
+                var close = left + 1
+                while close < finish && (str_char_at(text, close) as i64) != 93 { close = close + 1 }
+                if close >= finish { return enir_lower_fail(module, line, 32) }
+                let slot_name = enir_source_name(text, left + 1, close)
+                let arrow = enir_source_trim_start(text, close + 1, finish)
+                if arrow + 2 > finish || !enir_source_range_eq(text, arrow, arrow + 2, "<-") { return enir_lower_fail(module, line, 33) }
+                let value_name = enir_source_name(text, enir_source_trim_start(text, arrow + 2, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, value_name)
+                if slot_name.len <= 0 || value_name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 34) }
+                symbols = enir_source_slot_find_or_add(symbols, slot_name)
+                let slot_id = enir_source_slot_index(symbols, slot_name)
+                if slot_id < 0 || slot_id > 1 { return enir_lower_fail(module, line, 35) }
+                if phase == 1 { if then_stores[slot_id as usize] != 0 { return enir_lower_fail(module, line, 36) }; then_stores[slot_id as usize] = 1 }
+                else { if else_stores[slot_id as usize] != 0 { return enir_lower_fail(module, line, 37) }; else_stores[slot_id as usize] = 1 }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count, opcode: enir_op_estore(), result_id: -1, type_id: -1,
+                    a: value_id, b: -1, target: -1, policy_id: -1, memory_slot: slot_id, fuel_cost: 1,
+                })
+            } else if enir_source_starts_with(text, start, finish, "let ") {
+                if !seen_fuel || (phase != 0 && phase != 4) { return enir_lower_fail(module, line, 10) }
+                var eq = start + 4
+                while eq < finish && (str_char_at(text, eq) as i64) != 61 { eq = eq + 1 }
+                if eq >= finish { return enir_lower_fail(module, line, 10) }
+                let lhs = enir_source_name(text, enir_source_trim_start(text, start + 4, eq), enir_source_trim_end(text, start + 4, eq))
+                if lhs.len <= 0 || enir_source_symbol_find(symbols, lhs) >= 0 || symbols.count >= 64 { return enir_lower_fail(module, line, 11) }
+                let rhs_start = enir_source_trim_start(text, eq + 1, finish)
+                var lowered = EnirSourceOperand { ok: false, value_id: -1 }
+                if enir_source_starts_with(text, rhs_start, finish, "load [") && (str_char_at(text, finish - 1) as i64) == 93 {
+                    if phase != 4 { return enir_lower_fail(module, line, 13) }
+                    let slot_name = enir_source_name(text, rhs_start + 6, finish - 1)
+                    let slot_id = enir_source_slot_index(symbols, slot_name)
+                    if slot_name.len <= 0 || slot_id < 0 || slot_id > 1 { return enir_lower_fail(module, line, 14) }
+                    let value_id = enir_source_push_value(&!module, enir_op_eload(), -1, -1, line, 0, 0, -1)
+                    if value_id < 0 { return enir_lower_fail(module, line, 15) }
+                    module.ops[(module.op_count - 1) as usize].memory_slot = slot_id
+                    lowered = EnirSourceOperand { ok: true, value_id: value_id }
+                } else {
+                    lowered = enir_source_lower_expr(&!module, symbols, text, eq + 1, finish, line)
+                }
+                if !lowered.ok { return enir_lower_fail(module, line, 12) }
+                symbols = enir_source_symbol_add(symbols, lhs, lowered.value_id)
+            } else if enir_source_starts_with(text, start, finish, "gate ") {
+                if phase != 4 || gate_count != 0 { return enir_lower_fail(module, line, 20) }
+                let name = enir_source_name(text, enir_source_trim_start(text, start + 5, finish), finish)
+                let value_id = enir_source_symbol_find(symbols, name)
+                if name.len <= 0 || value_id < 0 { return enir_lower_fail(module, line, 21) }
+                module = enir_module_push_op(module, EnirOp {
+                    id: module.op_count, opcode: enir_op_egate(), result_id: -1, type_id: -1,
+                    a: value_id, b: -1, target: -1, policy_id: 0, memory_slot: -1, fuel_cost: 1,
+                })
+                module = enir_module_push_observation(module, EnirObservation { id: 0, program_name: module.name, ordinal: 0, kind: enir_observation_gate() })
+                gate_count = 1
+            } else {
+                return enir_lower_fail(module, line, 40)
+            }
+        }
+        pos = if end < n { end + 1 } else { end }
+        line = line + 1
+    }
+    if !seen_header || !seen_fuel || !seen_close || phase != 4 || gate_count != 1 || join_first < 0 { return enir_lower_fail(module, line, 50) }
+    module.blocks[3].op_count = module.op_count - join_first
+    let arm_count = if then_count > else_count { then_count } else { else_count }
+    if module.fuel_limit < entry_count + arm_count + module.blocks[3].op_count + 3 { return enir_lower_fail(module, line, 51) }
+    module = enir_module_finalize_cfg_counts(module, 1)
+    let rc = enir_verify(module)
+    if rc != 0 { return enir_lower_fail(module, line, 3000 + rc) }
+    EnirLowerResult { ok: true, error_line: 0, error_code: 0, module: module }
+}
+
 pub fn enir_lower_source(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
     enir_lower_source_profile(text, enir_profile_eisa_v0())
 }
@@ -1139,4 +1332,8 @@ pub fn enir_lower_source_v2(text: string) -> EnirLowerResult with Mut, Panic, Di
     } else {
         enir_lower_source_resource_straight(text, enir_profile_eisa_v2())
     }
+}
+
+pub fn enir_lower_source_join_v2(text: string) -> EnirLowerResult with Mut, Panic, Div, Alloc {
+    enir_lower_source_join(text)
 }
