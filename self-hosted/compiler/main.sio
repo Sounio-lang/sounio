@@ -1876,30 +1876,17 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
     }
 }
 
-fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let source_path = compiler_mode_source_arg(args, flag_index, "--check")
-    if !compiler_preflight_source_input(source_path) {
-        panic("check failed")
-    }
-
+fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     if !module_frontend_file_maybe_has_use(source_path) {
-        // Single-module real typecheck.
         var main_prog = load_module_file(source_path)
         if parser_last_error_count() > 0 {
-            panic("check failed")
+            return false
         }
         main_prog.items = specialize_generics(main_prog.items)
         let verdict = module_frontend_check_items_with_source_context(main_prog.items, source_path)
-        if verdict == 0 {
-            println(compiler_check_ok_message())
-            return
-        }
-        panic("check failed")
+        return verdict == 0
     }
 
-    // Multi-module: load transitive deps, resolve imports against exports, then
-    // typecheck all modules together so cross-module visibility (E175-E177) is
-    // enforced against the real defining_module of each item.
     var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
     var paths: [string; 256] = [""; 256]
     var loaded: i64 = 0
@@ -1943,7 +1930,15 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
-    if verdict == 0 {
+    verdict == 0
+}
+
+fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--check")
+    if !compiler_preflight_source_input(source_path) {
+        panic("check failed")
+    }
+    if compiler_visibility_preflight(source_path) {
         println(compiler_check_ok_message())
         return
     }
@@ -2943,6 +2938,9 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     let out_path = compiler_mode_output_path(args, out_positional)
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
+    }
+    if !compiler_visibility_preflight(source_path) {
+        panic("native-v2-compile failed: visibility preflight")
     }
     // The boxed compile-to-file route is SRET-safe for both imported and
     // single-module programs. Returning MultiModuleIrResult by value embeds a
@@ -4924,6 +4922,16 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         return CompileResult {
             success: false,
             errors: parse_like_errors,
+            output: "",
+        }
+    }
+
+    if !compiler_visibility_preflight(opts.input_file) {
+        var visibility_errors = compile_errors_new()
+        visibility_errors = compile_errors_push(visibility_errors, "error: visibility preflight failed")
+        return CompileResult {
+            success: false,
+            errors: visibility_errors,
             output: "",
         }
     }
