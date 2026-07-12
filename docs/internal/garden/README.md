@@ -11,6 +11,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garde
 
 > **Status**: Internal lineage | **Last validated**: 2026-05-09 | **Source**: `docs/archived/GARDEN_ROSETTA.md`
 
+Ideas that cross from Garden into formal or executable work should link to the
+[Concept Registry](../concepts/README.md). The Garden preserves genesis; the
+registry preserves meaning across agents and implementation layers.
+
 The Garden is the repo-local seedbed for ideas that matter before they are ready
 to become specifications, proofs, public claims, or implementation gates.
 
@@ -62,6 +66,10 @@ Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
 - [`Epistemic Fermentation`](seeds/2026-05-10-epistemic-fermentation.md) — a
   path-bearing truth witness: same value and confidence, different admissible
   knowledge.
+- [`The Zero of Encounter`](seeds/2026-07-11-the-zero-of-encounter.md) — the
+  executable butterfly showing that absence, cancellation, annihilation,
+  resolution, and rounding can remain distinct when their surface value is
+  zero; default native-v2 execution remains blocked.
 
 ## Hard Boundaries
 

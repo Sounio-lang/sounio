@@ -14,6 +14,17 @@ cd /workspace/sounio && ./sounio-whereami --quick
 Ele reporta: pod, usuário, repo, **branch atual**, nó K8s, compilador selecionado,
 GPU owner, estado do Slurm e OrangeFS. Não adivinhe o mapa — leia o whereami.
 
+Antes de interpretar, contestar ou normalizar a direção científica do projeto,
+leia também `FOUNDER_INTENT.md`. Ele preserva a intenção entre threads e
+modelos; não substitui evidência executável nem as regras operacionais deste
+arquivo.
+
+Antes de abrir uma lane que altere o significado de tipos, efeitos, campos de
+IR ou claims científicas, leia também
+`docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md` e
+`docs/internal/concepts/registry.tsv`. O estado vivo pode ser inspecionado com
+`bash scripts/dev/sounio_semantic_status.sh`.
+
 ## 1. Dois mundos — não confunda
 
 | Mundo | Caminho | whereami |
