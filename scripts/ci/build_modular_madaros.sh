@@ -76,7 +76,11 @@ rm -f "$OUT"
 # compile the CURRENT lean_single.sio with it to obtain a fresh seed that carries the
 # current source's features (arena/vmem #719 etc.), then compile main.sio with that.
 TMP_SEED_DIR=""
-cleanup() { [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]] && rm -rf "$TMP_SEED_DIR"; }
+cleanup() {
+    if [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]]; then
+        rm -rf "$TMP_SEED_DIR"
+    fi
+}
 trap cleanup EXIT
 
 if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
