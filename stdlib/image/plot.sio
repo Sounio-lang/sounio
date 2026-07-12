@@ -1,0 +1,194 @@
+// stdlib/image/plot.sio — headless scientific line plots with uncertainty bands.
+//
+// A minimal publication-figure layer over image::pure::types::Image and the pure
+// PNG encoder: axis frame + ticks + numeric labels, a filled uncertainty band,
+// and a data polyline — written to a PNG with no window, no FFI, no Python.
+// Reuses display::font::font_glyph for glyph bitmaps (pure font data).
+//
+//   var img = image_new(640, 420)
+//   plot_background(&!img, 640, 420, 0x0E1420)
+//   let a = area_new(64, 20, 620, 360, 0.0, 24.0, 0.0, 20.0)
+//   plot_band(&!img, &a, &t, &lo, &hi, n, 0x2A3E66)
+//   plot_line(&!img, &a, &t, &c,  n, 0xFFB020)
+//   plot_axes(&!img, &a, 6, 6, 0x8090A8)
+//   plot_save(&img, "curve.png")
+
+// NOTE: the PNG encoder caps image WIDTH at 512 (filter row buffers); keep
+// plots <= 512 px wide (height up to 262144/width).
+//
+module image::plot
+
+use image::pure::types::{Image, image_set_pixel}
+use image::pure::png::{png_write}
+use display::font::{font_glyph}
+
+// Pixel plot rectangle [x0,x1]×[y0,y1] mapped to data range [xmin,xmax]×[ymin,ymax].
+pub struct Area { x0: i64, y0: i64, x1: i64, y1: i64, xmin: f64, xmax: f64, ymin: f64, ymax: f64 }
+
+pub fn area_new(x0: i64, y0: i64, x1: i64, y1: i64, xmin: f64, xmax: f64, ymin: f64, ymax: f64) -> Area {
+    Area { x0: x0, y0: y0, x1: x1, y1: y1, xmin: xmin, xmax: xmax, ymin: ymin, ymax: ymax }
+}
+
+fn mapx(a: &Area, dx: f64) -> i64 with Div {
+    let sp = if (*a).xmax - (*a).xmin == 0.0 { 1.0 } else { (*a).xmax - (*a).xmin }
+    (*a).x0 + ((dx - (*a).xmin) / sp * (((*a).x1 - (*a).x0) as f64)) as i64
+}
+fn mapy(a: &Area, dy: f64) -> i64 with Div {
+    let sp = if (*a).ymax - (*a).ymin == 0.0 { 1.0 } else { (*a).ymax - (*a).ymin }
+    (*a).y1 - ((dy - (*a).ymin) / sp * (((*a).y1 - (*a).y0) as f64)) as i64  // y inverted (down = smaller)
+}
+
+fn setpx(img: &!Image, x: i64, y: i64, c: i64) with Mut {
+    if x >= 0 && y >= 0 && x < (img.width as i64) && y < (img.height as i64) {
+        image_set_pixel(img, x as i32, y as i32, c as u32)
+    }
+}
+
+// Fill the whole canvas with a background colour.
+pub fn plot_background(img: &!Image, w: i64, h: i64, c: i64) with Mut {
+    var y = 0
+    while y < h { var x = 0; while x < w { setpx(img, x, y, c); x = x + 1 } y = y + 1 }
+}
+
+fn vspan(img: &!Image, x: i64, ya: i64, yb: i64, c: i64) with Mut {
+    var lo = ya; var hi = yb
+    if lo > hi { let t = lo; lo = hi; hi = t }
+    var y = lo
+    while y <= hi { setpx(img, x, y, c); y = y + 1 }
+}
+
+// Bresenham line.
+fn draw_seg(img: &!Image, xa: i64, ya: i64, xb: i64, yb: i64, c: i64) with Mut {
+    var x0 = xa; var y0 = ya
+    var dx = xb - x0; if dx < 0 { dx = 0 - dx }
+    var dy = yb - y0; if dy < 0 { dy = 0 - dy }
+    let sx = if xb >= x0 { 1 } else { 0 - 1 }
+    let sy = if yb >= y0 { 1 } else { 0 - 1 }
+    var err = dx - dy
+    var guard = 0
+    while guard < 20000 {
+        setpx(img, x0, y0, c)
+        if x0 == xb && y0 == yb { guard = 20000 }
+        else {
+            let e2 = 2 * err
+            if e2 > (0 - dy) { err = err - dy; x0 = x0 + sx }
+            if e2 < dx { err = err + dx; y0 = y0 + sy }
+        }
+        guard = guard + 1
+    }
+}
+
+// Filled uncertainty band between lo[i] and hi[i], as trapezoids per segment.
+pub fn plot_band(img: &!Image, a: &Area, xs: &[f64; 512], lo: &[f64; 512], hi: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < n {
+        let xa = mapx(a, xs[i as usize]); let xb = mapx(a, xs[(i + 1) as usize])
+        let la = mapy(a, lo[i as usize]); let lb = mapy(a, lo[(i + 1) as usize])
+        let ha = mapy(a, hi[i as usize]); let hb = mapy(a, hi[(i + 1) as usize])
+        var x = xa
+        let span = if xb - xa == 0 { 1 } else { xb - xa }
+        while x <= xb {
+            let f = ((x - xa) as f64) / (span as f64)
+            let yl = (la as f64) + ((lb - la) as f64) * f
+            let yh = (ha as f64) + ((hb - ha) as f64) * f
+            vspan(img, x, yl as i64, yh as i64, c)
+            x = x + 1
+        }
+        i = i + 1
+    }
+}
+
+// Data polyline.
+pub fn plot_line(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < n {
+        draw_seg(img, mapx(a, xs[i as usize]), mapy(a, ys[i as usize]),
+                      mapx(a, xs[(i + 1) as usize]), mapy(a, ys[(i + 1) as usize]), c)
+        i = i + 1
+    }
+}
+
+// One 8×8 glyph into the Image at integer scale `sc` (font.sio bit convention:
+// row = byte, col bit 0 = leftmost after the fix verified against font_glyph).
+fn draw_char(img: &!Image, ch: i64, px: i64, py: i64, c: i64, sc: i64) with Mut {
+    let glyph = font_glyph(ch)
+    var row = 0
+    while row < 8 {
+        let bits = (glyph >> (row * 8)) & 255
+        var col = 0
+        while col < 8 {
+            if ((bits >> col) & 1) == 1 {
+                var by = 0
+                while by < sc { var bx = 0; while bx < sc { setpx(img, px + col*sc + bx, py + row*sc + by, c); bx = bx + 1 } by = by + 1 }
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+// Draw an ASCII string at scale `sc` (advance 8*sc px per glyph). Returns end x.
+pub fn plot_text_sc(img: &!Image, s: string, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Panic, Div {
+    var x = px; var i = 0; let n = str_len(s)
+    while i < n { draw_char(img, str_char_at(s, i), x, py, c, sc); x = x + 8*sc; i = i + 1 }
+    x
+}
+// Default 2× text (legible for figure titles / axis labels).
+pub fn plot_text(img: &!Image, s: string, px: i64, py: i64, c: i64) -> i64 with Mut, Panic, Div {
+    plot_text_sc(img, s, px, py, c, 2)
+}
+
+// Draw a number with `dec` decimal places at (px,py), scale `sc`. Returns end x.
+fn draw_number(img: &!Image, val: f64, dec: i64, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Div, Panic {
+    var x = px
+    var v = val
+    if v < 0.0 { draw_char(img, 45, x, py, c, sc); x = x + 8*sc; v = 0.0 - v }  // '-'
+    let ip = v as i64
+    var digs: [i64; 16] = [0; 16]
+    var nd = 0
+    var q = ip
+    if q == 0 { digs[0 as usize] = 0; nd = 1 }
+    else { while q > 0 { digs[nd as usize] = q % 10; nd = nd + 1; q = q / 10 } }
+    var k = nd - 1
+    while k >= 0 { draw_char(img, 48 + digs[k as usize], x, py, c, sc); x = x + 8*sc; k = k - 1 }
+    if dec > 0 {
+        draw_char(img, 46, x, py, c, sc); x = x + 8*sc  // '.'
+        var frac = v - (ip as f64)
+        var d = 0
+        while d < dec { frac = frac * 10.0; let dg = (frac as i64) % 10; draw_char(img, 48 + dg, x, py, c, sc); x = x + 8*sc; d = d + 1 }
+    }
+    x
+}
+
+// Axis frame + `nx`/`ny` ticks with numeric labels.
+pub fn plot_axes(img: &!Image, a: &Area, nx: i64, ny: i64, c: i64) with Mut, Div, Panic {
+    // frame
+    var x = (*a).x0
+    while x <= (*a).x1 { setpx(img, x, (*a).y0, c); setpx(img, x, (*a).y1, c); x = x + 1 }
+    var y = (*a).y0
+    while y <= (*a).y1 { setpx(img, (*a).x0, y, c); setpx(img, (*a).x1, y, c); y = y + 1 }
+    // x ticks + labels
+    let dx = if (*a).xmax - (*a).xmin == 0.0 { 1.0 } else { (*a).xmax - (*a).xmin }
+    var i = 0
+    while i <= nx {
+        let vx = (*a).xmin + dx * ((i as f64) / (nx as f64))
+        let sx = mapx(a, vx)
+        var t = 0; while t < 4 { setpx(img, sx, (*a).y1 + t, c); t = t + 1 }
+        draw_number(img, vx, if dx < 10.0 { 1 } else { 0 }, sx - 8, (*a).y1 + 7, c, 1)
+        i = i + 1
+    }
+    // y ticks + labels
+    let dy = if (*a).ymax - (*a).ymin == 0.0 { 1.0 } else { (*a).ymax - (*a).ymin }
+    var j = 0
+    while j <= ny {
+        let vy = (*a).ymin + dy * ((j as f64) / (ny as f64))
+        let sy = mapy(a, vy)
+        var t2 = 0; while t2 < 4 { setpx(img, (*a).x0 - t2, sy, c); t2 = t2 + 1 }
+        draw_number(img, vy, if dy < 10.0 { 1 } else { 0 }, (*a).x0 - 34, sy - 3, c, 1)
+        j = j + 1
+    }
+}
+
+pub fn plot_save(img: &Image, filename: string) -> bool with IO, Mut, Div, Panic {
+    png_write(filename, img)
+}
