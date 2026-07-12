@@ -23,6 +23,11 @@ branches or worktrees that happen to exist.
 classifications mean:
 
 - `INTEGRATED`: the clean worktree tip is contained in the configured main ref.
+- `CONTENT_INTEGRATED`: Git topology differs, commonly after a squash merge,
+  but every committed compiler path is byte-identical to main.
+- `FRONTIER`: the canonical ENIR/MIR frontier worktree.
+- `FRONTIER_INTEGRATED`: the clean worktree tip is contained in the configured
+  frontier ref rather than awaiting review against main.
 - `REVIEW_READY`: the worktree is clean but its tip is not contained in main.
 - `ACTIVE`: a compiler path has a recent working-tree modification.
 - `STALE_WITH_RESIDUE`: compiler changes remain, but no recent file activity was

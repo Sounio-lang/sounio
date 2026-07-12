@@ -78,6 +78,9 @@ mapfile -t WORKTREES < <(
 
 now="$(date +%s)"
 integrated=0
+content_integrated=0
+frontier=0
+frontier_integrated=0
 active=0
 review_ready=0
 stale=0
@@ -101,8 +104,11 @@ for wt in "${WORKTREES[@]}"; do
   short_head="${head:0:10}"
   head_epoch="$(git -C "$wt" show -s --format=%ct HEAD 2>/dev/null || echo 0)"
   dirty_count=0
+  committed_count=0
+  committed_same_main=0
   latest_epoch=0
   compiler_paths=()
+  committed_paths=()
 
   while IFS= read -r status_line; do
     [[ -n "$status_line" ]] || continue
@@ -116,7 +122,31 @@ for wt in "${WORKTREES[@]}"; do
     ((file_epoch > latest_epoch)) && latest_epoch="$file_epoch"
   done < <(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)
 
+  if [[ -n "$head" ]]; then
+    if git -C "$ROOT_DIR" merge-base --is-ancestor "$head" "$MAIN_REF" 2>/dev/null; then
+      committed_source=(git -C "$wt" diff-tree --no-commit-id --name-only -r "$head")
+    else
+      committed_source=(git -C "$wt" diff --name-only "$MAIN_REF...$head")
+    fi
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      is_compiler_path "$path" || continue
+      committed_paths+=("$path")
+      committed_count=$((committed_count + 1))
+      head_blob="$(git -C "$wt" rev-parse "$head:$path" 2>/dev/null || echo missing)"
+      main_blob="$(git -C "$wt" rev-parse "$MAIN_REF:$path" 2>/dev/null || echo missing)"
+      [[ "$head_blob" == "$main_blob" ]] && committed_same_main=$((committed_same_main + 1))
+    done < <("${committed_source[@]}" 2>/dev/null || true)
+  fi
+
+  # A clean docs/research worktree is not a compiler lane merely because its
+  # branch is not an ancestor of main.
+  ((dirty_count > 0 || committed_count > 0)) || continue
+
   age_seconds=-1
+  if ((latest_epoch == 0 && committed_count > 0)); then
+    latest_epoch="$head_epoch"
+  fi
   if ((latest_epoch > 0)); then
     age_seconds=$((now - latest_epoch))
     ((age_seconds < 0)) && age_seconds=0
@@ -130,20 +160,30 @@ for wt in "${WORKTREES[@]}"; do
     state="STALE_WITH_RESIDUE"; stale=$((stale + 1))
   elif [[ -n "$head" ]] && git -C "$ROOT_DIR" merge-base --is-ancestor "$head" "$MAIN_REF" 2>/dev/null; then
     state="INTEGRATED"; integrated=$((integrated + 1))
+  elif ((committed_count > 0 && committed_same_main == committed_count)); then
+    state="CONTENT_INTEGRATED"; content_integrated=$((content_integrated + 1))
+  elif [[ -n "$head" ]] && git -C "$ROOT_DIR" rev-parse --verify "$FRONTIER_REF^{commit}" >/dev/null 2>&1 && \
+       git -C "$ROOT_DIR" merge-base --is-ancestor "$head" "$FRONTIER_REF" 2>/dev/null; then
+    if [[ "$head" == "$(git -C "$ROOT_DIR" rev-parse "$FRONTIER_REF")" ]]; then
+      state="FRONTIER"; frontier=$((frontier + 1))
+    else
+      state="FRONTIER_INTEGRATED"; frontier_integrated=$((frontier_integrated + 1))
+    fi
   elif [[ -n "$head" ]]; then
     state="REVIEW_READY"; review_ready=$((review_ready + 1))
   else
     state="UNCLASSIFIED"; unclassified=$((unclassified + 1))
   fi
 
-  printf 'state=%s branch=%s head=%s dirty_compiler_paths=%s age_seconds=%s worktree=%s\n' \
-    "$state" "$branch" "${short_head:-unknown}" "$dirty_count" "$age_seconds" "$wt"
+  printf 'state=%s branch=%s head=%s dirty_compiler_paths=%s committed_compiler_paths=%s same_as_main=%s age_seconds=%s worktree=%s\n' \
+    "$state" "$branch" "${short_head:-unknown}" "$dirty_count" "$committed_count" "$committed_same_main" "$age_seconds" "$wt"
   if [[ "$VERBOSE" == "1" ]]; then
     for path in "${compiler_paths[@]}"; do printf '  path=%s\n' "$path"; done
+    for path in "${committed_paths[@]}"; do printf '  committed_path=%s\n' "$path"; done
   fi
 done
 
 printf '\n== Summary ==\n'
-printf 'integrated=%s\nactive=%s\nreview_ready=%s\nstale_with_residue=%s\nscratch_copy=%s\nunclassified=%s\n' \
-  "$integrated" "$active" "$review_ready" "$stale" "$scratch" "$unclassified"
+printf 'integrated=%s\ncontent_integrated=%s\nfrontier=%s\nfrontier_integrated=%s\nactive=%s\nreview_ready=%s\nstale_with_residue=%s\nscratch_copy=%s\nunclassified=%s\n' \
+  "$integrated" "$content_integrated" "$frontier" "$frontier_integrated" "$active" "$review_ready" "$stale" "$scratch" "$unclassified"
 printf 'scanner_mode=%s\n' "$( [[ "$CURRENT_ONLY" == "1" ]] && echo current-only || echo all-worktrees )"
