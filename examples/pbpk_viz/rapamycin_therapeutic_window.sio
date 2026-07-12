@@ -1,12 +1,9 @@
 // examples/pbpk_viz/rapamycin_therapeutic_window.sio
-// Native dose-certification figure: steady-state rapamycin trough vs dose, with
-// the 4-20 ng/mL therapeutic window shaded and a 95% GUM interval per dose.
-// A dose is "certified" when its whole 95% CI lies inside the window. Consumes
-// the existing stdlib/pbpk assay + expanded-uncertainty + dose-cert modules.
+// Dose-certification figure: steady-state rapamycin trough vs dose, therapeutic
+// window shaded, 95% expanded-uncertainty per dose, D_min/D_max certified bounds.
 //   souc run examples/pbpk_viz/rapamycin_therapeutic_window.sio -> rapamycin_window.png
-
 use image::pure::types::{Image, image_new}
-use image::plot::{Area, area_new, plot_background, plot_hband, plot_hline, plot_vline, plot_point, plot_errbar, plot_axes, plot_text}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_hband, plot_hline, plot_vline, plot_point, plot_errbar, plot_axes, plot_text_sc}
 use image::pure::png::{png_write}
 use pbpk::rapamycin_params::{rap_ke, rap_bioavailability}
 use pbpk::rapamycin_assay::{as_trough_mg_l}
@@ -14,49 +11,41 @@ use pbpk::rapamycin_expanded_u::{eu_U95}
 use pbpk::rapamycin_dose_cert::{dc_d_min, dc_d_max}
 use pbpk::rapamycin_oral_budget::{ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std}
 use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
-
 fn main() with IO, Mut, Div, Panic {
     let ke_e = rap_ke(); let ke = ke_e.val()
     let f_e = rap_bioavailability(); let f = f_e.val()
     let ka_v = ob_ka_var_std(); let f_v = ob_f_var_std()
     let ke_v = ob_ke_var_std(); let k12_v = ob_k12_var_std(); let k21_v = ob_k21_var_std()
     let n = 14
-    let floor_ng = trough_floor_mg_l() * 1000.0   // 4 ng/mL
-    let ceil_ng  = trough_ceil_mg_l() * 1000.0    // 20 ng/mL
+    let floor_ng = trough_floor_mg_l() * 1000.0
+    let ceil_ng  = trough_ceil_mg_l() * 1000.0
     let dmin = dc_d_min(5.0, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
     let dmax = dc_d_max(5.0, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
-
-    let w = 512; let h = 360
+    let w = 1200; let h = 760
     var img = image_new(w as i32, h as i32)
-    plot_background(&!img, w as i64, h as i64, 0x0E1420)
-    let a = area_new(56, 46, 496, 306, 0.0, 11.0, 0.0, 28.0)
-    // therapeutic window + its edges + certified dose interval
-    plot_hband(&!img, &a, floor_ng, ceil_ng, 0x14322A)
-    plot_hline(&!img, &a, floor_ng, 0x3FA372)
-    plot_hline(&!img, &a, ceil_ng, 0x3FA372)
-    plot_vline(&!img, &a, dmin, 0x3A5170)
-    plot_vline(&!img, &a, dmax, 0x3A5170)
-
-    // per-dose trough +/- 95% expanded uncertainty; colour by certification
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, 0.0, 11.0, 0.0, 28.0)
+    plot_grid(&!img, &a, 11, 7, 0xEEEEEE)
+    plot_hband(&!img, &a, floor_ng, ceil_ng, 0xDDF0E2)
+    plot_hline(&!img, &a, floor_ng, 0x4AA06A); plot_hline(&!img, &a, ceil_ng, 0x4AA06A)
+    plot_vline(&!img, &a, dmin, 0xB8B8B8); plot_vline(&!img, &a, dmax, 0xB8B8B8)
+    plot_axes(&!img, &a, 11, 7, 0x555555, 3)
     var d = 1
     while d <= 10 {
         let dose = d as f64
         let tr = as_trough_mg_l(dose, n, ke, f) * 1000.0
         let u95 = eu_U95(dose, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v) * 1000.0
         var lo = tr - u95; if lo < 0.0 { lo = 0.0 }
-        let hi = tr + u95
-        let certified = lo >= floor_ng && hi <= ceil_ng
-        let cbar = if certified { 0x2E8F5A } else { 0x9A6A2A }
-        let cpt  = if certified { 0x5FE89A } else { 0xFFB24D }
-        plot_errbar(&!img, &a, dose, lo, hi, cbar)
-        plot_point(&!img, &a, dose, tr, cpt, 3)
-        print("D="); print(d); print("mg trough="); print(tr); print(" +/-"); print(u95); print(if certified { " CERT\n" } else { " ---\n" })
+        let cert = lo >= floor_ng && (tr + u95) <= ceil_ng
+        let cbar = if cert { 0x3E9B63 } else { 0xCF8A3A }
+        let cpt  = if cert { 0x2E8B57 } else { 0xE07B39 }
+        plot_errbar(&!img, &a, dose, lo, tr + u95, cbar)
+        plot_point(&!img, &a, dose, tr, cpt, 5)
         d = d + 1
     }
-    plot_axes(&!img, &a, 5, 7, 0x7F8CA6)
-    let _t1 = plot_text(&!img, "Rapamycin dose certification", 60, 8, 0xE8EEF7)
-    let _t2 = plot_text(&!img, "dose  mg", 220, 330, 0xB8C2D4)
-    let _t3 = plot_text(&!img, "trough  ng/mL", 56, 28, 0xB8C2D4)
+    let _t1 = plot_text_sc(&!img, "Rapamycin dose certification", 150, 40, 0x111111, 4)
+    let _t2 = plot_text_sc(&!img, "dose (mg)", 560, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "trough (ng/mL)", 150, 78, 0x333333, 3)
     let ok = png_write("rapamycin_window.png", &img)
-    print("D_min="); print(dmin); print(" D_max="); print(dmax); print(" wrote="); print(ok); print("\n")
+    print("Dmin="); print(dmin); print(" Dmax="); print(dmax); print(" wrote="); print(ok); print("\n")
 }
