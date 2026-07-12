@@ -66,6 +66,7 @@ compile_rejects private-enum \
 compile_accepts public-struct tests/multimodule/visibility_struct_pub_main.sio
 compile_accepts generic-public tests/multimodule/wp_a3/w2_main.sio
 compile_accepts zero-event-positive tests/known_failures/zero_event_stdlib_native_v2_probe.sio
+compile_accepts eisa-core tests/stdlib/eisa/test_eisa_core.sio
 
 eisa_log="$TMP_DIR/eisa.log"
 if (cd "$SOURCE_ROOT" && timeout 60 "$MADAROS_BIN" compile \
