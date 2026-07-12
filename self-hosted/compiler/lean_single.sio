@@ -30458,16 +30458,29 @@ fn emit_file_size_a64() with Mut, Panic {
         em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
-    // x0 = fd (or negative on failure). Missing/unreadable file → return -1 so
-    // callers (file_exists) can distinguish absent from empty. Without this the
-    // code fstat'd an invalid fd and returned a garbage stack word.
-    em32(0xF100001F)   // cmp x0, #0
-    let fsz_open_ok = CL
-    em32(0x5400000A)   // b.ge open_ok (patched)
-    em32(0x92800000)   // movn x0, #0  → x0 = -1
-    let fsz_fail_done = CL
-    em32(0x14000000)   // b done (patched)
-    patch_branch_a64(fsz_open_ok, CL)
+    // Detect open() failure and return -1 so callers (file_exists) can tell an
+    // absent file from an empty one. macOS signals errors with the CARRY flag set
+    // and x0 = a POSITIVE errno (e.g. ENOENT=2) — NOT a negative fd; checking
+    // `fd < 0` (the Linux convention) would treat errno 2 as a valid fd, fstat
+    // stderr, and return a garbage positive size → file_exists true for a missing
+    // file → wrong import-path resolution. So branch on carry for macOS.
+    var fsz_fail_done: i64 = 0
+    if TARGET_OS == 2 {
+        let fsz_open_ok = CL
+        em32(0x54000003)   // b.cc open_ok (carry clear = success; patched)
+        em32(0x92800000)   // movn x0, #0  → x0 = -1
+        fsz_fail_done = CL
+        em32(0x14000000)   // b done (patched)
+        patch_branch_a64(fsz_open_ok, CL)
+    } else {
+        em32(0xF100001F)   // cmp x0, #0
+        let fsz_open_ok = CL
+        em32(0x5400000A)   // b.ge open_ok (patched)
+        em32(0x92800000)   // movn x0, #0  → x0 = -1
+        fsz_fail_done = CL
+        em32(0x14000000)   // b done (patched)
+        patch_branch_a64(fsz_open_ok, CL)
+    }
     emit_push_a64()  // save fd
     em32(0xD1000000 | (160 << 10) | (31 << 5) | 31)  // sub sp, sp, #160
     em32(0x910003E1)  // mov x1, sp
