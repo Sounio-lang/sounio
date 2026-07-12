@@ -12,10 +12,11 @@
 #
 # WHAT THIS DOES
 # --------------
-# Takes a single exclusive flock on a repo-wide lockfile, then execs the build
-# command. Concurrent heavy builds queue instead of stampeding the CPU, so the
-# load never spikes high enough to trip the probe. Cheap `souc check` calls do
-# NOT need this wrapper — only full self-compiles / bundle checks.
+# Takes a single exclusive advisory lock on a repo-wide lockfile, then execs the
+# build command. Linux uses flock(1); macOS falls back to Python's fcntl.flock.
+# Concurrent heavy builds queue instead of stampeding the CPU, so the load never
+# spikes high enough to trip the probe. Cheap `souc check` calls do NOT need this
+# wrapper — only full self-compiles / bundle checks.
 #
 # USAGE
 # -----
@@ -33,10 +34,18 @@ if [ "$#" -eq 0 ]; then
 fi
 
 LOCK="${SOUNIO_BUILD_LOCK:-/tmp/sounio-souc-build.lock}"
-exec 9>"$LOCK"
 
+if ! command -v flock >/dev/null 2>&1; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: build locking requires flock(1) or python3 with fcntl support" >&2
+    exit 69
+  fi
+  exec python3 "$(dirname "$0")/souc_build_lock.py" "$LOCK" "$@"
+fi
+
+exec 9>"$LOCK"
 if ! flock -n 9; then
-  echo "[souc-build-lock] another heavy build holds the lock; waiting…" >&2
+  echo "[souc-build-lock] another heavy build holds the lock; waiting..." >&2
   flock 9
 fi
 echo "[souc-build-lock] acquired ($LOCK); running: $*" >&2
