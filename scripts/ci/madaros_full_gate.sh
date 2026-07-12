@@ -322,8 +322,11 @@ pass "Madaros v2 E3A qd128 arithmetic ENIR-to-MIR translation validation"
 E3B_ALLOW_DOWNSTREAM_ENIR_EXTENSION=1 bash scripts/dev/madaros_v2_e3b_enir_mir_memory_gate.sh
 pass "Madaros v2 E3B qd128 memory/move ENIR-to-MIR translation validation"
 
-bash scripts/dev/madaros_v2_e3c_cfg_memory_ssa_gate.sh
+E3C_ALLOW_DOWNSTREAM_ENIR_EXTENSION=1 bash scripts/dev/madaros_v2_e3c_cfg_memory_ssa_gate.sh
 pass "Madaros v2 E3C explicit CFG and Memory SSA translation validation"
+
+bash scripts/dev/madaros_v2_e3d_multipred_scalar_memory_ssa_gate.sh
+pass "Madaros v2 E3D multi-predecessor scalar and multi-slot Memory SSA translation validation"
 
 run_eisa_native_gate
 run_imported_smt_gate

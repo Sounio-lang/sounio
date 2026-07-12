@@ -299,9 +299,49 @@ frozen METRON oracle are unchanged. The opt-in excludes only the E3C source
 lowering extension from the historical stage-local diff check.
 
 E3C checks behavior only for the declared reducible four-block qd128 loop and
-one logical memory slot. Multiple/aliased slots, arbitrary joins, irreducible
-CFG, calls, exceptions, Memory SSA optimization, ABI selection, MachineIR, and
-code generation remain later stages and fail closed.
+one logical memory slot. Its schema does not admit multiple or aliased slots,
+arbitrary joins, irreducible CFG, calls, exceptions, Memory SSA optimisation,
+ABI selection, MachineIR, or code generation; E3D below introduces a separate
+bounded multi-slot join schema rather than widening those E3C claims.
+
+Implementation note (2026-07-12):
+`E3D-MULTIPRED-SCALAR-MEMORY-SSA-FULL` adds ENIR schema 3 and Join-MIR schema 4
+for one acyclic four-block diamond. The entry condition selects one of two real
+predecessor blocks. Each predecessor supplies a different scalar value to one
+explicit join block argument and defines two independently named memory slots.
+Join-MIR represents the scalar merge as one `jsphi` relation and the memory
+merge as four store versions plus two result versions and two `jmphi` rows.
+
+The source witnesses execute opposite predecessors. `v2_join_then` selects
+scalar `2`, slot products `10` and `100`, and observes `202`.
+`v2_join_else` selects scalar `3`, slot products `20` and `200`, and observes
+`403`. The post-join computation is `selected + 10*slot0 + slot1`; therefore a
+wrong predecessor, exchanged slot, missing phi, or path-insensitive latest
+store changes source-observable bits.
+
+The compiler-owned verifier checks exact diamond topology, dominance, scalar
+phi edge/value pairs, per-arm slot definitions, six memory versions, two memory
+phis, load consumers, effects, ticks, and canonical serialization. A separate
+Python checker parses and evaluates the source, reconstructs ENIR-to-Join-MIR,
+replays qd128 execution, and requires source == ENIR == Join-MIR == independent
+observables. Runtime receipts expose control choice, scalar-phi choice, both
+memory-phi choices, final slot products, and final execution state. The FULL
+gate rejects 12 source shapes, 72 artifact mutations, and 60 runtime-receipt
+mutations; checks cross-source binding and a causal source mutation; and reruns
+E3C through E1. Run
+`scripts/dev/madaros_v2_e3d_multipred_scalar_memory_ssa_gate.sh`.
+
+E3A, E3B, and E3C remain strict when invoked directly. E3D invokes their
+`*_ALLOW_DOWNSTREAM_ENIR_EXTENSION=1` modes only after protecting production
+codegen, ABI/runtime, frozen E3C MIR, qd128 semantics, and the METRON oracle;
+the historical witnesses are then rebuilt and executed through E1.
+
+E3D is not general SSA construction. Its implemented FULL profile is exactly
+one reducible acyclic diamond, one scalar join value, and two non-aliased
+logical slots. N-way joins, multiple scalar phis, nested diamonds, loops in the
+same schema, alias/pointer analysis, calls, exceptions, Memory SSA
+optimisation, ABI selection, MachineIR, and production code generation remain
+deferred and are not implied by this gate.
 
 ## 1. Decision
 
@@ -319,9 +359,10 @@ It is a complete, source-observable lowering of the existing 30-program,
 39-observation corpus through ENIR, with per-stage receipts and no silent
 fallback. That bounded milestone is implemented by the explicitly gated
 E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H slices. E3A arithmetic, E3B bounded
-single-block memory/move, and the E3C canonical four-block CFG/Memory-SSA
-`ENIR -> MIR` slices are now implemented. General CFG/alias coverage and every
-later ABI/codegen stage remain unproven.
+single-block memory/move, the E3C canonical loop CFG/Memory-SSA, and the E3D
+acyclic two-predecessor scalar/multi-slot SSA `ENIR -> MIR` slices are now
+implemented. General CFG/alias coverage and every later ABI/codegen stage
+remain unproven.
 
 This document is intentionally bolder than the historical `MetronIR` sketch.
 It treats numerical class, roundoff trail, epistemic uncertainty, provenance,
