@@ -2518,3 +2518,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**; it confirmed the gate, documentation, resolved execution blocker, and `parity_claim=false` boundary are internally consistent.
 - Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
 - Raw review directory: `/tmp/llm-offload-sZlKAw/`.
+
+## 2026-07-12 — math-review: stats::student_t distribution module
+- File: `stdlib/stats/student_t.sio` (new). Student's t pdf/cdf/sf/two-tail, quantile (inverse CDF), CI multiplier, and sample-mean CI.
+- Trigger: mandatory math-review (new numerical/statistical distribution — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: pdf = A&S 26.7.1; the identity I_x(df/2,1/2)=P(|T|>|t|) with x=df/(df+t²) and the symmetry-derived CDF/Sf; quantile inversion via `ibeta_inv`; Cornish–Fisher coefficients vs Fisher & Cornish (1960); the df>500 ibeta_inv guard and large-df normal fallback; all table/round-trip tolerances. Verdict: "NO MATHEMATICAL ERRORS FOUND."
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries; xAI is the §10-designated provider for math-review.
+- Upstream finding (separate issue): `special::beta::ibeta`/`ibeta_inv` return out-of-range values at extreme parameters (ibeta at a~5e4; ibeta_inv at a~1e3 and a=0.5). The module stays inside validated regions and routes around these; the beta breakdown is recorded here for a follow-up stdlib fix.
+- Raw review directory: `/tmp/llm-offload-Qy6zAD/`.
