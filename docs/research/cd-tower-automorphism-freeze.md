@@ -53,8 +53,14 @@ group on the growing discrete ZD/fiber set**. Pinned exactly:
   decomposition of the DISCRETE ZD/fiber set** under the finite signed-monomial automorphism group
   (permutation part `PSL(2,7)`): `2ⁿ⁻⁴` size-7 Fano orbits `+` `(2ⁿ⁻⁴−1)` fixed seams, stabilizer `S₄`
   (order 24), **PROVEN ∀n** (block-lemma freezing `+` `GL(3,2)` transitivity on `F₂³\{0}`;
-  VERIFIED n=4..7). The continuous picture gives *one* orbit; this refines it into a growing discrete
-  partition.
+  VERIFIED n=4..7). The continuous picture gives *one* orbit; this partitions it into a growing discrete
+  orbit set. Claim scope, honestly: this is the *combinatorial orbit decomposition* (counts, stabilizer,
+  fixed points) — a group-action fact. It is **not** claimed that the orbits are geometrically
+  distinguishable: an adversarial nauty audit (2026-07-12) refuted a distinct-geometries conjecture at
+  n=6 (a Fano orbit and a fixed seam share an isomorphic annihilation graph). The fiber geometry instead
+  obeys a **parity collapse law** (`γ(Seam(y)) = γ(Fano(y & (y−1)))` iff `wt(y)` even; nauty-complete
+  n≤8), which is itself a genuine ℤ₂ structural fact but means the orbit→geometry map is non-injective.
+  See `scripts/research/cd_tower_fiber_geometry_collision.py`.
 - **NOT novel — do not claim.**
   - *"`PSL(2,7)` is a symmetry of the ZDs."* de Marrais uses `168 ↔ ZD` as a count coincidence `+`
     Fano-labeling frame to **classify box-kites** (full arXiv corpus deep-read 2026-07-11, 9 papers;

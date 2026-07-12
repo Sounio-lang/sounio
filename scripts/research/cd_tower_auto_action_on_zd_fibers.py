@@ -7,7 +7,8 @@ divisors.  Here the frozen group ACTS on the ZD-fibers, and the action's orbit s
 OBJECT.  A_n (dim 2^n) has zero divisors first at n=4 (sedenions).  The mixed-half ZD primitives
 e_lo +/- e_hi partition into FIBERS indexed by the label L = lo XOR hi, reduced to its lower part
 Llo in F2^{n-1}\{0} -- so there are 2^{n-1}-1 fibers (7, 15, 31, 63, ... at n=4,5,6,7).  The fibers
-carry distinct GEOMETRY (edge counts / degrees): e.g. at n=5, type-A (72 edges) vs type-B (168 edges).
+carry a per-fiber GEOMETRY (annihilation graph; edge counts / degrees) constant on each orbit -- but the
+map orbit -> geometry is NOT injective (Fano/seam collisions; see the RETRACTED note in the THEOREM).
 
 ACTION.  The 168 valid index-maps M in GL(n,2) all fix the seam H=2^{n-1} and (block lemma, forall n)
 have the form [[A,0],[0,1]] with A a valid auto of A_{n-1}; iterating, A = (a copy of GL(3,2) on the
@@ -25,10 +26,24 @@ THEOREM (orbit structure -- PROVEN forall n; VERIFIED n=4..7 below).
     * the fixed points are exactly the nonzero vectors of the SEAM SUBSPACE <8,16,...,2^{n-2}> =
       F2^{n-3}\{0} -- i.e. the tower of inner doubling seams e_8, e_16, e_24, ... (the lifted seams);
     * the action is EQUIVARIANT with the fiber geometry: each orbit is MONOCHROMATIC (all its fibers
-      share one geometric shape = verts/edges/degree-range), and distinct orbits realize distinct
-      geometries.  Verified: n=5 two 7-orbits = type-B {Llo 1..7} (168-edge) and type-A {Llo 9..15}
-      (72-edge); n=6 the FOUR 7-orbits carry FOUR DISTINCT shapes (840, 456, 552, 168 edges) -- the
-      richness grows with n, so the action is a genuine geometric invariant, not a coincidence.
+      share one annihilation-graph shape) -- this MUCH is PROVEN forall n (M is an algebra automorphism;
+      see proof below).
+      *** RETRACTED 2026-07-12 (adversarial nauty audit -- the claim below was FALSE and was tagged
+      VERIFIED; it is refuted inside that range).  The CONVERSE "distinct orbits realize distinct
+      geometries" DOES NOT HOLD.  Counterexample at n=6: the Fano orbit y=2 (fiber Llo=17) and the fixed
+      SEAM y=3 (Llo=24) have ISOMORPHIC annihilation graphs -- identical nauty canonical cert; 60 verts,
+      168 edges, degree histogram {4:56, 28:4}.  Confirmed INDEPENDENTLY here (fiber_geom histogram +
+      Weisfeiler-Leman, both agreeing with the reviewer's nauty; control Seam y=2 correctly differs).
+      So the orbit->geometry map is NOT injective, and the finite orbit decomposition is NOT read off
+      the fiber geometry.  What actually holds is the PARITY COLLAPSE LAW (reviewer; nauty-complete
+      n<=8): gamma(Seam(y)) = gamma(Fano(y & (y-1))) exactly when wt(y) is EVEN (y!=0); hence
+      #geometries = 3*2^{n-5} < #orbits = 2^{n-3}-1, deficit 2^{n-5}-1 (=0 at n=5, so the old n=5
+      "type-A vs type-B" pair was fine; the false generalization first breaks at n=6).  The FANO stratum
+      alone looks separated (n=6: the four Fano orbits have distinct edge counts 840/456/552/168), but
+      Fano-stratum injectivity forall n is OPEN and needs SPECTRAL data, not degrees (at n=8 Fano(0) and
+      several seams share a degree sequence yet are pairwise non-isomorphic).  Regression witness:
+      cd_tower_fiber_geometry_collision.py.  Net: monochromaticity is a remark; geometric DISTINCTNESS
+      is dead; the parity-collapse law is the replacement theorem-shaped object.
   So the permutation REPRESENTATION grows without bound (2^{n-4} -> infinity Fano copies + a growing
   fixed seam-subspace) while the GROUP stays frozen at 168.  Counts check: 7*2^{n-4}+(2^{n-4}-1)=2^{n-1}-1.
 
@@ -93,7 +108,9 @@ RELATION TO PRIOR WORK (narrow lit-check, 2026-07-11 -- primary sources read).
   orbit-decomposition is the surviving kernel; the continuous G2 gives ONE transitive orbit, ours REFINES
   into a growing discrete partition.
 
-STATUS: orbit multiset + stabilizer + seam-fixed-points + fiber-geometry equivariance VERIFIED n=4..7
+STATUS: orbit multiset + stabilizer + seam-fixed-points VERIFIED n=4..7 (orbit theorem PROVEN forall n).
+        fiber-geometry MONOCHROMATICITY holds (equivariance); geometric DISTINCTNESS was FALSE (retracted
+        2026-07-12) -- replaced by the parity-collapse law, reviewer nauty n<=8.
 here; the orbit theorem is PROVEN forall n (proof above, on block-form freezing + GL(3,2)-transitivity).
 Novelty = "no published finite-Aut ZD-orbit decomposition found" (de Marrais adjacent; full corpus
 unread -> deep-read in progress); cleanly distinct from Reggiani's continuous transitive G2-action.
