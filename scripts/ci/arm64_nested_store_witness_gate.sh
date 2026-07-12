@@ -14,6 +14,10 @@ COMPILE_LOG="$OUT_DIR/compile.log"
 RUN_LOG="$OUT_DIR/run.log"
 SUMMARY="$OUT_DIR/summary.txt"
 
+portable_sha256() {
+  shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'
+}
+
 if [[ -z "$COMPILER" || ! -x "$COMPILER" ]]; then
   echo "error: set SOUNIO_ARM64_WITNESS_COMPILER to an executable source-fresh compiler" >&2
   exit 2
@@ -40,7 +44,9 @@ mode=attest
 target=$TARGET
 source=$SOURCE
 compiler=$COMPILER
+compiler_sha256=$(portable_sha256 "$COMPILER")
 artifact=$BIN
+artifact_sha256=$(portable_sha256 "$BIN")
 semantic_execution=not_run
 EOF
   echo "ARM64_NESTED_STORE_WITNESS_ATTESTED target=$TARGET semantic_execution=not_run"
@@ -77,7 +83,9 @@ mode=execute
 target=$TARGET
 source=$SOURCE
 compiler=$COMPILER
+compiler_sha256=$(portable_sha256 "$COMPILER")
 artifact=$BIN
+artifact_sha256=$(portable_sha256 "$BIN")
 semantic_execution=pass
 EOF
 echo "ARM64_NESTED_STORE_WITNESS_EXECUTED target=$TARGET semantic_execution=pass"
