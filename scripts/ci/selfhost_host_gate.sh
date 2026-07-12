@@ -193,7 +193,7 @@ chmod +x "$STAGE3_BIN" 2>/dev/null || true
 maybe_codesign "$STAGE3_BIN"
 assert_file_kind "$STAGE3_BIN" "$HOST_FILE_KIND"
 
-if ! cmp -s "$STAGE2_BIN" "$STAGE3_BIN"; then
+if ! bash "$ROOT_DIR/scripts/lib/compare_executable_payloads.sh" "$STAGE2_BIN" "$STAGE3_BIN"; then
   echo "error: self-host fixed-point mismatch for $HOST_TARGET" >&2
   exit 1
 fi
