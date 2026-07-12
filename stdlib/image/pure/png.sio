@@ -1,15 +1,17 @@
 // stdlib/image/pure/png.sio — Pure-Sounio PNG encoder (no FFI, no libpng)
 //
 // Writes a spec-valid 8-bit RGB PNG straight to disk via the `write_file` builtin.
-// DEFLATE is emitted as *stored* (uncompressed) blocks, so output is a valid PNG
-// that every decoder reads, at the cost of no compression (file ~= raw RGB size).
+// Compression is real DEFLATE: fixed-Huffman blocks with LZ77 back-references
+// found by a capped hash-chain matcher. If the compressed body would be larger
+// than the input (e.g. smooth high-entropy data), it falls back to a stored
+// (uncompressed) block, so output is never worse than raw + a few bytes.
 // This is the self-contained alternative to the `image::ffi` libpng/stb path.
 //
 // Pixel format: each `u32` in `Image.pixels` is interpreted as 0x00RRGGBB
 // (low 24 bits; the top byte is ignored).
 //
-// Size bound: `Image` caps at 65536 pixels (256x256). The scratch buffer below
-// holds the worst-case PNG for that cap: 256*(1+256*3) raw + chunk overhead.
+// Size bound: `Image` caps at 65536 pixels (256x256). Scratch buffers below
+// hold the worst-case PNG and hash state for that cap.
 
 module image::pure::png
 
@@ -18,6 +20,9 @@ use image::pure::types::{Image}
 // Scratch byte buffer with a running length. A struct wrapper is used because
 // bare `&![i8; N]` element mutation is not reliable under the current JIT.
 struct PngBuf { data: [i8; 262144], len: i64 }
+
+// Bit-level output for the DEFLATE stream (LSB-first bit packing).
+struct BitOut { data: [i8; 262144], len: i64, acc: i64, nbits: i64 }
 
 fn put(b: &!PngBuf, v: i64) with Mut, Panic {
     (*b).data[(*b).len as usize] = (v & 255) as i8
@@ -47,6 +52,175 @@ fn crc_range(b: &PngBuf, start: i64, end: i64) -> i64 with Mut, Panic {
     }
     (crc ^ 4294967295) & 4294967295
 }
+
+// ---- DEFLATE (fixed Huffman + LZ77) ----------------------------------------
+
+fn bo_put(d: &!BitOut, v: i64) with Mut, Panic {
+    (*d).data[(*d).len as usize] = (v & 255) as i8
+    (*d).len = (*d).len + 1
+}
+
+fn bit_write(d: &!BitOut, val: i64, n: i64) with Mut, Panic {
+    (*d).acc = (*d).acc | (val << (*d).nbits)
+    (*d).nbits = (*d).nbits + n
+    while (*d).nbits >= 8 {
+        bo_put(d, (*d).acc & 255)
+        (*d).acc = (*d).acc >> 8
+        (*d).nbits = (*d).nbits - 8
+    }
+}
+
+fn flush_bits(d: &!BitOut) with Mut, Panic {
+    if (*d).nbits > 0 {
+        bo_put(d, (*d).acc & 255)
+        (*d).acc = 0
+        (*d).nbits = 0
+    }
+}
+
+fn reverse_bits(code: i64, n: i64) -> i64 with Mut {
+    var r = 0
+    var i = 0
+    while i < n { r = (r << 1) | ((code >> i) & 1); i = i + 1 }
+    r
+}
+
+// Fixed literal/length Huffman code for symbol 0..287.
+fn emit_litlen(d: &!BitOut, sym: i64) with Mut, Panic {
+    if sym <= 143 { bit_write(d, reverse_bits(48 + sym, 8), 8); return }
+    if sym <= 255 { bit_write(d, reverse_bits(400 + (sym - 144), 9), 9); return }
+    if sym <= 279 { bit_write(d, reverse_bits(sym - 256, 7), 7); return }
+    bit_write(d, reverse_bits(192 + (sym - 280), 8), 8)
+}
+
+// Length symbol (257..285) + extra bits, for match length 3..258.
+fn emit_len(d: &!BitOut, len: i64) with Mut, Panic {
+    if len <= 10 { emit_litlen(d, len + 254); return }
+    if len <= 12 { emit_litlen(d, 265); bit_write(d, len - 11, 1); return }
+    if len <= 14 { emit_litlen(d, 266); bit_write(d, len - 13, 1); return }
+    if len <= 16 { emit_litlen(d, 267); bit_write(d, len - 15, 1); return }
+    if len <= 18 { emit_litlen(d, 268); bit_write(d, len - 17, 1); return }
+    if len <= 22 { emit_litlen(d, 269); bit_write(d, len - 19, 2); return }
+    if len <= 26 { emit_litlen(d, 270); bit_write(d, len - 23, 2); return }
+    if len <= 30 { emit_litlen(d, 271); bit_write(d, len - 27, 2); return }
+    if len <= 34 { emit_litlen(d, 272); bit_write(d, len - 31, 2); return }
+    if len <= 42 { emit_litlen(d, 273); bit_write(d, len - 35, 3); return }
+    if len <= 50 { emit_litlen(d, 274); bit_write(d, len - 43, 3); return }
+    if len <= 58 { emit_litlen(d, 275); bit_write(d, len - 51, 3); return }
+    if len <= 66 { emit_litlen(d, 276); bit_write(d, len - 59, 3); return }
+    if len <= 82 { emit_litlen(d, 277); bit_write(d, len - 67, 4); return }
+    if len <= 98 { emit_litlen(d, 278); bit_write(d, len - 83, 4); return }
+    if len <= 114 { emit_litlen(d, 279); bit_write(d, len - 99, 4); return }
+    if len <= 130 { emit_litlen(d, 280); bit_write(d, len - 115, 4); return }
+    if len <= 162 { emit_litlen(d, 281); bit_write(d, len - 131, 5); return }
+    if len <= 194 { emit_litlen(d, 282); bit_write(d, len - 163, 5); return }
+    if len <= 226 { emit_litlen(d, 283); bit_write(d, len - 195, 5); return }
+    if len <= 257 { emit_litlen(d, 284); bit_write(d, len - 227, 5); return }
+    emit_litlen(d, 285)
+}
+
+// Distance symbol (0..29, 5-bit code) + extra bits, for distance 1..32768.
+fn emit_dist(d: &!BitOut, dist: i64) with Mut, Panic {
+    if dist <= 4 { bit_write(d, reverse_bits(dist - 1, 5), 5); return }
+    if dist <= 6 { bit_write(d, reverse_bits(4, 5), 5); bit_write(d, dist - 5, 1); return }
+    if dist <= 8 { bit_write(d, reverse_bits(5, 5), 5); bit_write(d, dist - 7, 1); return }
+    if dist <= 12 { bit_write(d, reverse_bits(6, 5), 5); bit_write(d, dist - 9, 2); return }
+    if dist <= 16 { bit_write(d, reverse_bits(7, 5), 5); bit_write(d, dist - 13, 2); return }
+    if dist <= 24 { bit_write(d, reverse_bits(8, 5), 5); bit_write(d, dist - 17, 3); return }
+    if dist <= 32 { bit_write(d, reverse_bits(9, 5), 5); bit_write(d, dist - 25, 3); return }
+    if dist <= 48 { bit_write(d, reverse_bits(10, 5), 5); bit_write(d, dist - 33, 4); return }
+    if dist <= 64 { bit_write(d, reverse_bits(11, 5), 5); bit_write(d, dist - 49, 4); return }
+    if dist <= 96 { bit_write(d, reverse_bits(12, 5), 5); bit_write(d, dist - 65, 5); return }
+    if dist <= 128 { bit_write(d, reverse_bits(13, 5), 5); bit_write(d, dist - 97, 5); return }
+    if dist <= 192 { bit_write(d, reverse_bits(14, 5), 5); bit_write(d, dist - 129, 6); return }
+    if dist <= 256 { bit_write(d, reverse_bits(15, 5), 5); bit_write(d, dist - 193, 6); return }
+    if dist <= 384 { bit_write(d, reverse_bits(16, 5), 5); bit_write(d, dist - 257, 7); return }
+    if dist <= 512 { bit_write(d, reverse_bits(17, 5), 5); bit_write(d, dist - 385, 7); return }
+    if dist <= 768 { bit_write(d, reverse_bits(18, 5), 5); bit_write(d, dist - 513, 8); return }
+    if dist <= 1024 { bit_write(d, reverse_bits(19, 5), 5); bit_write(d, dist - 769, 8); return }
+    if dist <= 1536 { bit_write(d, reverse_bits(20, 5), 5); bit_write(d, dist - 1025, 9); return }
+    if dist <= 2048 { bit_write(d, reverse_bits(21, 5), 5); bit_write(d, dist - 1537, 9); return }
+    if dist <= 3072 { bit_write(d, reverse_bits(22, 5), 5); bit_write(d, dist - 2049, 10); return }
+    if dist <= 4096 { bit_write(d, reverse_bits(23, 5), 5); bit_write(d, dist - 3073, 10); return }
+    if dist <= 6144 { bit_write(d, reverse_bits(24, 5), 5); bit_write(d, dist - 4097, 11); return }
+    if dist <= 8192 { bit_write(d, reverse_bits(25, 5), 5); bit_write(d, dist - 6145, 11); return }
+    if dist <= 12288 { bit_write(d, reverse_bits(26, 5), 5); bit_write(d, dist - 8193, 12); return }
+    if dist <= 16384 { bit_write(d, reverse_bits(27, 5), 5); bit_write(d, dist - 12289, 12); return }
+    if dist <= 24576 { bit_write(d, reverse_bits(28, 5), 5); bit_write(d, dist - 16385, 13); return }
+    bit_write(d, reverse_bits(29, 5), 5); bit_write(d, dist - 24577, 13)
+}
+
+// One fixed-Huffman DEFLATE block (BFINAL=1) over raw[0..raw.len], with LZ77
+// matches from a capped hash chain. Local hash state (head/prev) avoids passing
+// bare `&![i64; N]` array refs.
+fn deflate_fixed(out: &!BitOut, raw: &PngBuf) with Mut, Panic {
+    let n = (*raw).len
+    var head: [i64; 32768] = [0; 32768]
+    var prev: [i64; 200000] = [0; 200000]
+    var hi = 0
+    while hi < 32768 { head[hi as usize] = 0 - 1; hi = hi + 1 }
+
+    bit_write(out, 1, 1)  // BFINAL = 1
+    bit_write(out, 1, 2)  // BTYPE  = 01 (fixed Huffman)
+
+    let max_match = 258
+    let max_dist = 32768
+    let max_chain = 128
+    var pos = 0
+    while pos < n {
+        var best_len = 0
+        var best_dist = 0
+        if pos + 2 < n {
+            let a = ((*raw).data[pos as usize] as i64) & 255
+            let b = ((*raw).data[(pos + 1) as usize] as i64) & 255
+            let c = ((*raw).data[(pos + 2) as usize] as i64) & 255
+            let h = ((a << 10) + (b << 5) + c) & 32767
+            var cand = head[h as usize]
+            var chain = 0
+            while cand >= 0 && chain < max_chain {
+                let dist = pos - cand
+                if dist > max_dist { cand = 0 - 1 }
+                else {
+                    var l = 0
+                    while l < max_match && (pos + l) < n
+                          && (*raw).data[(cand + l) as usize] == (*raw).data[(pos + l) as usize] {
+                        l = l + 1
+                    }
+                    if l > best_len { best_len = l; best_dist = dist }
+                    cand = prev[cand as usize]
+                    chain = chain + 1
+                }
+            }
+            prev[pos as usize] = head[h as usize]
+            head[h as usize] = pos
+        }
+        if best_len >= 3 {
+            emit_len(out, best_len)
+            emit_dist(out, best_dist)
+            var q = pos + 1
+            let stop = pos + best_len
+            while q < stop {
+                if q + 2 < n {
+                    let a2 = ((*raw).data[q as usize] as i64) & 255
+                    let b2 = ((*raw).data[(q + 1) as usize] as i64) & 255
+                    let c2 = ((*raw).data[(q + 2) as usize] as i64) & 255
+                    let h2 = ((a2 << 10) + (b2 << 5) + c2) & 32767
+                    prev[q as usize] = head[h2 as usize]
+                    head[h2 as usize] = q
+                }
+                q = q + 1
+            }
+            pos = pos + best_len
+        } else {
+            emit_litlen(out, ((*raw).data[pos as usize] as i64) & 255)
+            pos = pos + 1
+        }
+    }
+    emit_litlen(out, 256)  // end of block
+    flush_bits(out)
+}
+
+// ----------------------------------------------------------------------------
 
 // Encode `img` as an 8-bit RGB PNG and write it to `filename`.
 // Returns true on success.
@@ -83,9 +257,13 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     }
     let adler = ((s2 << 16) | s1) & 4294967295
 
+    // ---- DEFLATE, with stored-block fallback if it would expand ----
+    var bo = BitOut { data: [0; 262144], len: 0, acc: 0, nbits: 0 }
+    deflate_fixed(&!bo, &raw)
+    let use_deflate = bo.len < raw.len
+
     // ---- assemble the PNG ----
     var png = PngBuf { data: [0; 262144], len: 0 }
-    // signature
     put(&!png, 137); put(&!png, 80); put(&!png, 78); put(&!png, 71)
     put(&!png, 13); put(&!png, 10); put(&!png, 26); put(&!png, 10)
     // IHDR
@@ -96,33 +274,39 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     put(&!png, 8); put(&!png, 2); put(&!png, 0); put(&!png, 0); put(&!png, 0)
     let ihdr_crc = crc_range(&png, ihdr_start, png.len)
     put_be32(&!png, ihdr_crc)
-    // IDAT — zlib stream length is analytic for stored blocks
+    // IDAT — zlib stream: header + (deflate | stored) + Adler-32
+    var zlen = 0
     var nblocks = raw.len / 65535
     if (raw.len % 65535) != 0 { nblocks = nblocks + 1 }
     if nblocks == 0 { nblocks = 1 }
-    let zlen = 2 + 5 * nblocks + raw.len + 4
+    if use_deflate { zlen = 2 + bo.len + 4 } else { zlen = 2 + 5 * nblocks + raw.len + 4 }
     put_be32(&!png, zlen)
     let idat_start = png.len
     put(&!png, 73); put(&!png, 68); put(&!png, 65); put(&!png, 84)  // "IDAT"
     put(&!png, 120); put(&!png, 1)  // zlib header 0x78 0x01
-    var pos = 0
-    var remaining = raw.len
-    while remaining > 0 {
-        var blk = remaining
-        if blk > 65535 { blk = 65535 }
-        var bfinal = 0
-        if blk == remaining { bfinal = 1 }
-        put(&!png, bfinal)
-        put(&!png, blk & 255); put(&!png, (blk >> 8) & 255)
-        let nlen = 65535 - blk
-        put(&!png, nlen & 255); put(&!png, (nlen >> 8) & 255)
-        var j = 0
-        while j < blk {
-            put(&!png, (raw.data[(pos + j) as usize] as i64) & 255)
-            j = j + 1
+    if use_deflate {
+        var i = 0
+        while i < bo.len { put(&!png, (bo.data[i as usize] as i64) & 255); i = i + 1 }
+    } else {
+        var pos = 0
+        var remaining = raw.len
+        while remaining > 0 {
+            var blk = remaining
+            if blk > 65535 { blk = 65535 }
+            var bfinal = 0
+            if blk == remaining { bfinal = 1 }
+            put(&!png, bfinal)
+            put(&!png, blk & 255); put(&!png, (blk >> 8) & 255)
+            let nlen = 65535 - blk
+            put(&!png, nlen & 255); put(&!png, (nlen >> 8) & 255)
+            var j = 0
+            while j < blk {
+                put(&!png, (raw.data[(pos + j) as usize] as i64) & 255)
+                j = j + 1
+            }
+            pos = pos + blk
+            remaining = remaining - blk
         }
-        pos = pos + blk
-        remaining = remaining - blk
     }
     put_be32(&!png, adler)
     let idat_crc = crc_range(&png, idat_start, png.len)
