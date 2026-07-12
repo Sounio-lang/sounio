@@ -2,6 +2,37 @@
 
 **Status:** proposal · **Date:** 2026-07-12 · **Motivating work:** PR #828 (pure-Sounio PNG encoder, `image::pure::png`)
 
+## Dispatch to the compiler lane (per `.claude/PARALLEL_BLOCKER_CONTRACT.md`)
+
+```text
+Blocker-ID: BLK-20260712-image-heap
+Status: proposed
+Severity: B1
+Class: compiler-semantics
+Owner: Codex-2 (lane-4 nv2-compiler-hardening)
+Lane: native-image-encoding (large-image sub-goal of PR #828)
+Worktree: /tmp/claude-1000/-workspace-sounio/51dcb45e-4018-4254-b1cb-e9fc1d11d1e3/scratchpad/wt-png
+Branch: feat/native-png-encoder
+Files-Owned: stdlib/image/pure/png.sio, stdlib/image/pure/types.sio, docs/proposals/NATIVE_HEAP_ALLOCATION_2026-07-12.md
+Files-Read-Only: stdlib/mem/box.sio, stdlib/display/window.sio
+Do-Not-Touch: self-hosted/native/* (compiler lane owns codegen/linking)
+Repro: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run p.sio` where p.sio is
+       `use mem::box::{heap_alloc}` + `fn main() with IO,Mut,Div,Panic,Alloc { print("START\n"); let p = heap_alloc(64) as *mut i8; write_i8(p,7,123); print(read_i8(p,7) as i64); print("\n") }`
+Observed: process exits 1 at startup; "START" never prints (extern "C" calloc/malloc unresolved — native ELF not linked against libc)
+Expected: heap_alloc returns a usable block; program prints "START" then "123"
+Acceptance-Gate: the repro program runs to completion and prints 123 under `souc run`
+Evidence-Level: E2
+Evidence: this document (measured-probe table below); reproducible with the Repro command
+Fallback-Path: fixed-array arena buffers — 512×512 shipped (PR #828 commit 0102f7b64), 1024×1024 by a one-line constant change (~46 MB/call). Named, not silent.
+Legacy-Kept: n/a
+LLM-Offload: not-required (no math/clinical/external claim; pure runtime capability)
+Next-Action: Codex-2 — link libc (or crt) into the native ELF so the existing `extern "C" { malloc/calloc/free }` resolve (option 1 below); alternatively expose an mmap syscall intrinsic (option 2).
+```
+
+**Note:** this does NOT block PR #828 itself — the 512×512 encoder is complete and
+independently mergeable. It blocks only the *unbounded-size* follow-up, which
+depends on this compiler capability.
+
 ## Ask (one line)
 
 Give user code a **working heap allocator under the `lean_single` native ELF**, so
