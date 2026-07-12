@@ -53,6 +53,7 @@ Grounded in: commit, artifact, or empirical result
 | 004 | Capacity guards over silent corruption | accepted | 2026-03-30 |
 | 005 | `algebra` keyword is compiler infrastructure | accepted | 2026-03-30 |
 | 006 | Self-hosting fixed-point as trust anchor | accepted | 2026-03-30 |
+| 007 | Madaros second-order compilation | experimental | 2026-07-12 |
 
 ## Files
 
@@ -62,6 +63,7 @@ Grounded in: commit, artifact, or empirical result
 - [ADR-004](./adr-004-capacity-guards-over-silent-corruption.md)
 - [ADR-005](./adr-005-algebra-keyword-compiler-infrastructure.md)
 - [ADR-006](./adr-006-fixed-point-trust-anchor.md)
+- [ADR-007](./adr-007-second-order-compilation.md)
 
 ## Related Docs
 
