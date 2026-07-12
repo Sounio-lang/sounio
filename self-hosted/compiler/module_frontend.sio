@@ -4907,6 +4907,20 @@ fn module_frontend_lower_program_full_traced(
 // per-module check_modules_verdict_boot4 so ordinary multi-module code stays
 // byte-identical. handled=true means `verdict` is the authoritative merged
 // verdict (0 ok / 1 reject).
+// Build the merged + monomorphized item list for LOWERING (the collapse-to-one-
+// module half of the WP-A3 design). Separate from module_frontend_specialized_
+// typecheck because that pass feeds its list to check_items_verdict_boot4, which
+// consumes it by value. Same merge (all modules, main first) + specialize_generics.
+fn module_frontend_build_specialized_merged(programs: &! [Program; 256], count: i64) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    var merged: Option<Box<ItemList>> = None
+    var i: i64 = count - 1
+    while i >= 0 {
+        merged = spec_append_item_lists((*programs)[i as usize].items, merged)
+        i = i - 1
+    }
+    specialize_generics(merged)
+}
+
 fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64) -> (bool, i64) with IO, Mut, Panic, Div, Alloc {
     if count <= 0 {
         return (false, 0)
@@ -5070,6 +5084,20 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     }
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
+
+    // WP-A3 completion: when a cross-module generic was actually instantiated, the
+    // per-module bodies still carry SYMBOLIC type params (an imported
+    // `cd_add_exact<F>` body's `a.c[i].er_add(...)` on a `[F;N]` field dispatches
+    // to a body-less `F_er_add` and crashes codegen). Collapse the merged +
+    // monomorphized program into ONE module and lower THAT — the intended-but-
+    // unfinished half of the specializer design (see spec_last_instantiated doc).
+    // Only fires when a generic was instantiated, so plain multi-module code stays
+    // on the per-module lowering path unchanged.
+    if spec_tc.0 {
+        (*programs)[0 as usize].items = module_frontend_build_specialized_merged(&! programs, loaded)
+        loaded = 1
+        print("imported_compile: collapsed to specialized single module\n")
+    }
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
