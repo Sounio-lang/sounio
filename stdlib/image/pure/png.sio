@@ -21,6 +21,7 @@ struct Hash { head: [i64; 32768], prev: [i64; 200000] }
 struct Huff { len: [i64; 288], code: [i64; 288] }
 struct Match { len: i64, dist: i64 }
 struct LC { sym: i64, xb: i64, xval: i64 }
+struct Freqs { ll: [i64; 288], d: [i64; 288] }
 
 fn put(b: &!PngBuf, v: i64) with Mut, Panic {
     (*b).data[(*b).len as usize] = (v & 255) as i8
@@ -138,13 +139,14 @@ fn hash_insert(raw: &PngBuf, q: i64, n: i64, hh: &!Hash) with Mut, Panic {
         (*hh).head[h as usize] = q
     }
 }
-fn find_match(raw: &PngBuf, pos: i64, n: i64, hh: &!Hash) -> Match with Mut, Panic {
+// Longest match at pos among already-inserted earlier positions (no insert).
+fn search_match(raw: &PngBuf, pos: i64, n: i64, hh: &!Hash) -> Match with Mut, Panic {
     var best_len = 0; var best_dist = 0
     if pos + 2 < n {
         let h = hash_of(raw, pos)
         var cand = (*hh).head[h as usize]
         var chain = 0
-        while cand >= 0 && chain < 128 {
+        while cand >= 0 && chain < 256 {
             let dist = pos - cand
             if dist > 32768 { cand = 0 - 1 }
             else {
@@ -155,8 +157,6 @@ fn find_match(raw: &PngBuf, pos: i64, n: i64, hh: &!Hash) -> Match with Mut, Pan
                 chain = chain + 1
             }
         }
-        (*hh).prev[pos as usize] = (*hh).head[h as usize]
-        (*hh).head[h as usize] = pos
     }
     Match { len: best_len, dist: best_dist }
 }
@@ -261,42 +261,70 @@ fn build_huff(freq: &[i64; 288], n: i64, maxbits: i64, h: &!Huff) with Mut, Pani
     }
 }
 
+// Greedy LZ77, run in one of two modes so the count and emit passes make
+// identical decisions. mode 0: accumulate symbol frequencies into `fr`.
+// mode 1: emit tokens with the built `hll`/`hd` codes. (Lazy matching was
+// implemented and measured but regressed periodic/run-heavy image content, so
+// greedy with a deep hash chain is used — it never loses to a shallower search.)
+fn lz_tokenize(raw: &PngBuf, n: i64, hh: &!Hash, mode: i64, fr: &!Freqs,
+               out: &!BitOut, hll: &Huff, hd: &Huff) with Mut, Div, Panic {
+    hash_reset(hh)
+    var pos = 0
+    while pos < n {
+        var mlen = 0
+        var mdist = 0
+        if pos + 2 < n {
+            let m = search_match(raw, pos, n, hh)
+            mlen = m.len
+            mdist = m.dist
+        }
+        hash_insert(raw, pos, n, hh)
+        if mlen >= 3 {
+            let lc = len_code(mlen)
+            let dc = dist_code(mdist)
+            if mode == 0 {
+                (*fr).ll[lc.sym as usize] = (*fr).ll[lc.sym as usize] + 1
+                (*fr).d[dc.sym as usize] = (*fr).d[dc.sym as usize] + 1
+            } else {
+                emit_code(out, hll, lc.sym)
+                if lc.xb > 0 { bit_write(out, lc.xval, lc.xb) }
+                emit_code(out, hd, dc.sym)
+                if dc.xb > 0 { bit_write(out, dc.xval, dc.xb) }
+            }
+            var q = pos + 1
+            let stop = pos + mlen
+            while q < stop { hash_insert(raw, q, n, hh); q = q + 1 }
+            pos = pos + mlen
+        } else {
+            let byte = ((*raw).data[pos as usize] as i64) & 255
+            if mode == 0 { (*fr).ll[byte as usize] = (*fr).ll[byte as usize] + 1 }
+            else { emit_code(out, hll, byte) }
+            pos = pos + 1
+        }
+    }
+}
+
 // ---- one dynamic-Huffman DEFLATE block over raw[0..raw.len] -----------------
 fn deflate_dynamic(out: &!BitOut, raw: &PngBuf) with Mut, Div, Panic {
     let n = (*raw).len
     var hash = Hash { head: [0; 32768], prev: [0; 200000] }
-    var freq_ll: [i64; 288] = [0; 288]
-    var freq_d: [i64; 288] = [0; 288]
-
-    // pass 1 — count
-    hash_reset(&!hash)
-    var pos = 0
-    while pos < n {
-        let m = find_match(raw, pos, n, &!hash)
-        if m.len >= 3 {
-            let lc = len_code(m.len)
-            freq_ll[lc.sym as usize] = freq_ll[lc.sym as usize] + 1
-            let dc = dist_code(m.dist)
-            freq_d[dc.sym as usize] = freq_d[dc.sym as usize] + 1
-            var q = pos + 1
-            let stop = pos + m.len
-            while q < stop { hash_insert(raw, q, n, &!hash); q = q + 1 }
-            pos = pos + m.len
-        } else {
-            let byte = ((*raw).data[pos as usize] as i64) & 255
-            freq_ll[byte as usize] = freq_ll[byte as usize] + 1
-            pos = pos + 1
-        }
-    }
-    freq_ll[256 as usize] = freq_ll[256 as usize] + 1
-    var anyd = 0; var td = 0
-    while td < 30 { if freq_d[td as usize] > 0 { anyd = 1 } td = td + 1 }
-    if anyd == 0 { freq_d[0 as usize] = 1 }
-
+    var fr = Freqs { ll: [0; 288], d: [0; 288] }
     var huff_ll = Huff { len: [0; 288], code: [0; 288] }
     var huff_d = Huff { len: [0; 288], code: [0; 288] }
-    build_huff(&freq_ll, 286, 15, &!huff_ll)
-    build_huff(&freq_d, 30, 15, &!huff_d)
+
+    // pass 1 — count symbol frequencies (out/huffs unused in mode 0)
+    lz_tokenize(raw, n, &!hash, 0, &!fr, out, &huff_ll, &huff_d)
+    fr.ll[256 as usize] = fr.ll[256 as usize] + 1
+    var anyd = 0; var td = 0
+    while td < 30 { if fr.d[td as usize] > 0 { anyd = 1 } td = td + 1 }
+    if anyd == 0 { fr.d[0 as usize] = 1 }
+
+    var llf: [i64; 288] = [0; 288]
+    var df: [i64; 288] = [0; 288]
+    var ci = 0
+    while ci < 288 { llf[ci as usize] = fr.ll[ci as usize]; df[ci as usize] = fr.d[ci as usize]; ci = ci + 1 }
+    build_huff(&llf, 286, 15, &!huff_ll)
+    build_huff(&df, 30, 15, &!huff_d)
 
     var numll = 257
     var s = 285
@@ -378,29 +406,89 @@ fn deflate_dynamic(out: &!BitOut, raw: &PngBuf) with Mut, Div, Panic {
         j = j + 1
     }
 
-    // pass 2 — emit data with the dynamic codes
-    hash_reset(&!hash)
-    pos = 0
-    while pos < n {
-        let m = find_match(raw, pos, n, &!hash)
-        if m.len >= 3 {
-            let lc = len_code(m.len)
-            emit_code(out, &huff_ll, lc.sym)
-            if lc.xb > 0 { bit_write(out, lc.xval, lc.xb) }
-            let dc = dist_code(m.dist)
-            emit_code(out, &huff_d, dc.sym)
-            if dc.xb > 0 { bit_write(out, dc.xval, dc.xb) }
-            var q = pos + 1
-            let stop = pos + m.len
-            while q < stop { hash_insert(raw, q, n, &!hash); q = q + 1 }
-            pos = pos + m.len
-        } else {
-            emit_code(out, &huff_ll, ((*raw).data[pos as usize] as i64) & 255)
-            pos = pos + 1
-        }
-    }
+    // pass 2 — emit data with the dynamic codes (fr unused in mode 1)
+    lz_tokenize(raw, n, &!hash, 1, &!fr, out, &huff_ll, &huff_d)
     emit_code(out, &huff_ll, 256)
     flush_bits(out)
+}
+
+// PNG Paeth predictor (a=left, b=up, c=up-left).
+fn paeth(a: i64, b: i64, c: i64) -> i64 with Mut {
+    let p = a + b - c
+    var pa = p - a; if pa < 0 { pa = 0 - pa }
+    var pb = p - b; if pb < 0 { pb = 0 - pb }
+    var pc = p - c; if pc < 0 { pc = 0 - pc }
+    if pa <= pb && pa <= pc { return a }
+    if pb <= pc { return b }
+    c
+}
+
+// One filtered byte for filter type f at row index i (bpp = 3).
+fn filt_byte(cur: &[i64; 768], prev: &[i64; 768], i: i64, f: i64) -> i64 with Mut, Panic, Div {
+    let a = if i >= 3 { cur[(i - 3) as usize] } else { 0 }
+    let up = prev[i as usize]
+    let c = if i >= 3 { prev[(i - 3) as usize] } else { 0 }
+    if f == 0 { return cur[i as usize] & 255 }
+    if f == 1 { return (cur[i as usize] - a) & 255 }
+    if f == 2 { return (cur[i as usize] - up) & 255 }
+    if f == 3 { return (cur[i as usize] - ((a + up) / 2)) & 255 }
+    (cur[i as usize] - paeth(a, up, c)) & 255
+}
+
+// Build the filtered raw scanlines. `adaptive`: 0 = filter None on every row,
+// 1 = pick the filter (0..4) with the smallest sum of |signed residual| per row.
+fn build_filtered_raw(img: &Image, adaptive: i64, raw: &!PngBuf) with Mut, Div, Panic {
+    let w = img.width as i64
+    let h = img.height as i64
+    let rowlen = w * 3
+    var cur: [i64; 768] = [0; 768]
+    var prev: [i64; 768] = [0; 768]
+    var y = 0
+    while y < h {
+        var x = 0
+        while x < w {
+            let px = (img.pixels[(y * w + x) as usize] as i64) & 16777215
+            cur[(x * 3) as usize] = (px >> 16) & 255
+            cur[(x * 3 + 1) as usize] = (px >> 8) & 255
+            cur[(x * 3 + 2) as usize] = px & 255
+            x = x + 1
+        }
+        var best_f = 0
+        if adaptive == 1 {
+            var best_sad = 0 - 1
+            var f = 0
+            while f < 5 {
+                var sad = 0
+                var i = 0
+                while i < rowlen {
+                    let v = filt_byte(&cur, &prev, i, f)
+                    sad = sad + (if v < 128 { v } else { 256 - v })
+                    i = i + 1
+                }
+                if best_sad < 0 || sad < best_sad { best_sad = sad; best_f = f }
+                f = f + 1
+            }
+        }
+        put(raw, best_f)
+        var i2 = 0
+        while i2 < rowlen { put(raw, filt_byte(&cur, &prev, i2, best_f)); i2 = i2 + 1 }
+        var i3 = 0
+        while i3 < rowlen { prev[i3 as usize] = cur[i3 as usize]; i3 = i3 + 1 }
+        y = y + 1
+    }
+}
+
+fn adler32(raw: &PngBuf) -> i64 with Mut, Div, Panic {
+    var s1 = 1
+    var s2 = 0
+    var ai = 0
+    while ai < (*raw).len {
+        let byte = ((*raw).data[ai as usize] as i64) & 255
+        s1 = (s1 + byte) % 65521
+        s2 = (s2 + s1) % 65521
+        ai = ai + 1
+    }
+    ((s2 << 16) | s1) & 4294967295
 }
 
 // ----------------------------------------------------------------------------
@@ -411,38 +499,24 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     let h = img.height as i64
     if w <= 0 || h <= 0 { return false }
 
-    // filtered raw scanlines (filter byte 0 per row)
-    var raw = PngBuf { data: [0; 262144], len: 0 }
-    var y = 0
-    while y < h {
-        put(&!raw, 0)
-        var x = 0
-        while x < w {
-            let px = (img.pixels[(y * w + x) as usize] as i64) & 16777215
-            put(&!raw, (px >> 16) & 255)
-            put(&!raw, (px >> 8) & 255)
-            put(&!raw, px & 255)
-            x = x + 1
-        }
-        y = y + 1
-    }
+    // Try adaptive filtering and no filtering; DEFLATE both and keep the smaller.
+    // (Adaptive helps smooth gradients hugely but can hurt LZ-matchable content.)
+    var raw_a = PngBuf { data: [0; 262144], len: 0 }
+    var raw_n = PngBuf { data: [0; 262144], len: 0 }
+    build_filtered_raw(img, 1, &!raw_a)
+    build_filtered_raw(img, 0, &!raw_n)
+    var bo_a = BitOut { data: [0; 262144], len: 0, acc: 0, nbits: 0 }
+    var bo_n = BitOut { data: [0; 262144], len: 0, acc: 0, nbits: 0 }
+    deflate_dynamic(&!bo_a, &raw_a)
+    deflate_dynamic(&!bo_n, &raw_n)
 
-    // Adler-32
-    var s1 = 1
-    var s2 = 0
-    var ai = 0
-    while ai < raw.len {
-        let byte = (raw.data[ai as usize] as i64) & 255
-        s1 = (s1 + byte) % 65521
-        s2 = (s2 + s1) % 65521
-        ai = ai + 1
-    }
-    let adler = ((s2 << 16) | s1) & 4294967295
-
-    // DEFLATE (dynamic Huffman) with stored-block fallback
-    var bo = BitOut { data: [0; 262144], len: 0, acc: 0, nbits: 0 }
-    deflate_dynamic(&!bo, &raw)
-    let use_deflate = bo.len < raw.len
+    // pick the smaller compressed body; raw is the matching filtered stream
+    var use_adaptive = 1
+    if bo_n.len < bo_a.len { use_adaptive = 0 }
+    let best_deflate = if use_adaptive == 1 { bo_a.len } else { bo_n.len }
+    let raw_len = if use_adaptive == 1 { raw_a.len } else { raw_n.len }
+    let adler = if use_adaptive == 1 { adler32(&raw_a) } else { adler32(&raw_n) }
+    let use_deflate = best_deflate < raw_len
 
     // assemble PNG
     var png = PngBuf { data: [0; 262144], len: 0 }
@@ -456,20 +530,24 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     let ihdr_crc = crc_range(&png, ihdr_start, png.len)
     put_be32(&!png, ihdr_crc)
     var zlen = 0
-    var nblocks = raw.len / 65535
-    if (raw.len % 65535) != 0 { nblocks = nblocks + 1 }
+    var nblocks = raw_len / 65535
+    if (raw_len % 65535) != 0 { nblocks = nblocks + 1 }
     if nblocks == 0 { nblocks = 1 }
-    if use_deflate { zlen = 2 + bo.len + 4 } else { zlen = 2 + 5 * nblocks + raw.len + 4 }
+    if use_deflate { zlen = 2 + best_deflate + 4 } else { zlen = 2 + 5 * nblocks + raw_len + 4 }
     put_be32(&!png, zlen)
     let idat_start = png.len
     put(&!png, 73); put(&!png, 68); put(&!png, 65); put(&!png, 84)  // "IDAT"
     put(&!png, 120); put(&!png, 1)  // zlib header
     if use_deflate {
         var i = 0
-        while i < bo.len { put(&!png, (bo.data[i as usize] as i64) & 255); i = i + 1 }
+        while i < best_deflate {
+            if use_adaptive == 1 { put(&!png, (bo_a.data[i as usize] as i64) & 255) }
+            else { put(&!png, (bo_n.data[i as usize] as i64) & 255) }
+            i = i + 1
+        }
     } else {
         var pos = 0
-        var remaining = raw.len
+        var remaining = raw_len
         while remaining > 0 {
             var blk = remaining
             if blk > 65535 { blk = 65535 }
@@ -480,7 +558,11 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
             let nlen = 65535 - blk
             put(&!png, nlen & 255); put(&!png, (nlen >> 8) & 255)
             var j = 0
-            while j < blk { put(&!png, (raw.data[(pos + j) as usize] as i64) & 255); j = j + 1 }
+            while j < blk {
+                if use_adaptive == 1 { put(&!png, (raw_a.data[(pos + j) as usize] as i64) & 255) }
+                else { put(&!png, (raw_n.data[(pos + j) as usize] as i64) & 255) }
+                j = j + 1
+            }
             pos = pos + blk
             remaining = remaining - blk
         }
