@@ -23,6 +23,11 @@ If a command fails with a quota error, inform the user and suggest `npx ctx7@lat
 
 This file is the Codex-facing project contract for the Sounio repository.
 
+Before interpreting or challenging the founder's research direction, read
+`FOUNDER_INTENT.md`. It is the shared identity and collaboration contract across
+AI threads. It does not override executable evidence or this file's operational
+rules.
+
 It does **not** replace `CLAUDE.md`.
 Instead:
 
@@ -110,6 +115,16 @@ Blocker ownership, severity, evidence level, handoff shape, and merge eligibilit
 for parallel work are governed by:
 
 - `.claude/PARALLEL_BLOCKER_CONTRACT.md`
+
+Lanes that alter concept, type, effect, IR-field, scientific-interpretation, or
+claim meaning must also declare their Concept-IDs and semantic boundaries under:
+
+- `docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md`
+- `docs/internal/concepts/registry.tsv`
+
+Use `bash scripts/dev/sounio_semantic_status.sh` before assigning overlapping
+semantic work. Scanner output is observational; dirty worktrees are potential
+writers, not automatic ownership claims.
 
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,

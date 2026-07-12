@@ -6,6 +6,9 @@ If you are a human reader: see §11.
 
 | Quick reference | |
 |---|---|
+| Founder intent and collaboration contract | [`FOUNDER_INTENT.md`](FOUNDER_INTENT.md) |
+| Semantic concept registry | [`docs/internal/concepts/README.md`](docs/internal/concepts/README.md) |
+| Semantic lane contract | [`docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md`](docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md) |
 | Recovery context | [`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md) |
 | Codex contract | [`AGENTS.md`](AGENTS.md) |
 | Programming guide | [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md) |
