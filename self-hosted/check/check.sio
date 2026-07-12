@@ -6891,6 +6891,13 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
 // non-recursive `let (a,b)=..` survived). This version mutates (*c) directly and returns
 // nothing, so no Checker is ever moved. if/else-if (not match on pat.kind) dodges the
 // discriminant-0 *mut match miscompile.
+fn pattern_list_count(opt: Option<Box<PatternList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        None => 0
+        Some(list) => 1 + pattern_list_count((*list).tail)
+    }
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
@@ -6910,6 +6917,17 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
     } else if pat.kind == PatternKind::PatStruct {
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
+        // E213: tuple-destructure arity must match the scrutinee tuple's element
+        // count. Fire ONLY on a KNOWN tuple type (never on unknown/incomplete
+        // inference), so valid code with matching arity is untouched. Sounio has
+        // no tuple rest-pattern (`(a, ..)`), so strict equality is correct.
+        if scrut_ty.kind == TypeKind::TyTuple {
+            let pat_n = pattern_list_count(pat.sub_patterns)
+            let ty_n = type_entry_list_count(scrut_ty.tuple_elems)
+            if pat_n != ty_n {
+                checker_report_error_at_inplace(c, pat.span, 213, pat_n, ty_n, 0)
+            }
+        }
         checker_bind_tuple_pattern_list_idx_inplace(c, pat.sub_patterns, scrut_ty, 0)
     } else if pat.kind == PatternKind::PatOr {
         checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
@@ -11517,6 +11535,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
+    else if code == 213 { print("tuple destructure arity mismatch") }
     else { print("unknown error") }
 }
 
