@@ -29,6 +29,14 @@ compiler="$($CLASSIFIER self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true
 
+unknown="$($CLASSIFIER newly-introduced/build.graph)"
+expect "$unknown" full true
+expect "$unknown" compiler true
+expect "$unknown" lean true
+
+root_build="$($CLASSIFIER Makefile)"
+expect "$root_build" full true
+
 workflow="$($CLASSIFIER .github/workflows/ci.yml)"
 for key in docs website compiler runtime stdlib tests lean math ontology clinical sio full; do
   expect "$workflow" "$key" true

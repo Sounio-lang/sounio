@@ -41,36 +41,45 @@ else
 
   for path in "${paths[@]}"; do
     [[ -n "$path" ]] || continue
+    recognized=false
 
     case "$path" in
       .github/workflows/*|scripts/ci/classify_ci_impact.sh|scripts/ci/evaluate_ci_decision.py|scripts/ci/impact_ci_selftest.sh|scripts/dev/check_workflow_script_refs.sh)
         mark full
+        recognized=true
         ;;
     esac
 
     case "$path" in
       *.md|docs/*|AGENTS.md|CLAUDE.md|CLAUDE_HANDOFF.md|FOUNDER_INTENT.md|ONBOARDING.md|README.md)
         mark docs
+        recognized=true
         ;;
     esac
-    case "$path" in website/*) mark website ;; esac
+    case "$path" in website/*) mark website; recognized=true ;; esac
     case "$path" in
       self-hosted/*|bin/*|scripts/lib/*|scripts/ci/build_*|scripts/ci/selfhost_*|scripts/selfhost/*|scripts/run_sio_test_suite.sh)
         mark compiler
+        recognized=true
         ;;
     esac
-    case "$path" in stdlib/runtime/*|self-hosted/native/*) mark runtime ;; esac
-    case "$path" in stdlib/*) mark stdlib ;; esac
-    case "$path" in tests/*|check_sounio.sh) mark tests ;; esac
-    case "$path" in formal/lean4/*) mark lean ;; esac
+    case "$path" in stdlib/runtime/*|self-hosted/native/*) mark runtime; recognized=true ;; esac
+    case "$path" in stdlib/*) mark stdlib; recognized=true ;; esac
+    case "$path" in tests/*|check_sounio.sh) mark tests; recognized=true ;; esac
+    case "$path" in formal/lean4/*) mark lean; recognized=true ;; esac
     case "$path" in
       formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/research/sedenion_*|scripts/research/cd_tower_*)
         mark math
+        recognized=true
         ;;
     esac
-    case "$path" in stdlib/compiler/ontology/*|scripts/ci/*ontology*|docs/ontology/*) mark ontology ;; esac
-    case "$path" in stdlib/clinical/*|tests/*vancomycin*|docs/clinical/*|docs/*pbpk*|scripts/ci/*pbpk*|scripts/ci/*clinical*) mark clinical ;; esac
-    case "$path" in *.sio) mark sio ;; esac
+    case "$path" in stdlib/compiler/ontology/*|scripts/ci/*ontology*|docs/ontology/*) mark ontology; recognized=true ;; esac
+    case "$path" in stdlib/clinical/*|tests/*vancomycin*|docs/clinical/*|docs/*pbpk*|scripts/ci/*pbpk*|scripts/ci/*clinical*) mark clinical; recognized=true ;; esac
+    case "$path" in *.sio) mark sio; recognized=true ;; esac
+
+    # A newly introduced surface must receive the full matrix until this
+    # classifier explicitly learns its dependency boundary.
+    [[ "$recognized" == true ]] || mark full
   done
 
   if [[ "${impact[full]}" == true ]]; then
