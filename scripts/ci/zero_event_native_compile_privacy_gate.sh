@@ -48,10 +48,10 @@ compile_accepts() {
 [[ -x "$MADAROS_BIN" ]] || fail "rebuilt Madaros not executable: $MADAROS_BIN"
 
 compile_rejects receipt \
-  tests/known_failures/zero_event_direct_receipt_construction_native_compile_probe.sio \
+  tests/compile-fail/zero_event_direct_receipt_construction.sio \
   'error[E176'
 compile_rejects erased \
-  tests/known_failures/zero_event_direct_erased_construction_native_compile_probe.sio \
+  tests/compile-fail/zero_event_direct_erased_construction.sio \
   'error[E176'
 compile_rejects private-struct \
   tests/multimodule/visibility_struct_private_main.sio \
