@@ -1,10 +1,12 @@
 <!-- docs:meta
 topic_id: repo.docs.research.cd-tower-automorphism-freeze
-authority: research
+authority: repo_only
 audience: researchers
-last_validated: 2026-07-11
-validated_by: oracle scripts/research/cd_tower_automorphism_oracle.py
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-tower-automorphism-freeze
 -->
+
 
 # The signed-monomial automorphism group of the Cayley-Dickson tower FREEZES at 168, while the zero-divisor fiber geometry grows
 

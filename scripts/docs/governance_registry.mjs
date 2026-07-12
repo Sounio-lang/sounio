@@ -36,6 +36,7 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
+  'docs/research/cd-tower-automorphism-freeze.md',
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {

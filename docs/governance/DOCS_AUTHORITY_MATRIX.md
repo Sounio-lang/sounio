@@ -559,6 +559,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.brain-ossm.robustness-plan | historical | docs/research/brain-ossm/ROBUSTNESS_PLAN.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.brain-ossm.validation-plan | historical | docs/research/brain-ossm/VALIDATION_PLAN.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.categorical-knowledge-monad | historical | docs/research/categorical_knowledge_monad.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-automorphism-freeze | repo_only | docs/research/cd-tower-automorphism-freeze.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-seam | historical | docs/research/cd_tower_seam.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
