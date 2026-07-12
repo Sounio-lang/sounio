@@ -18,6 +18,16 @@ host_platform() {
     printf '%s:%s\n' "$host_os" "$host_arch"
 }
 
+host_target() {
+    case "$1" in
+        Linux:x86_64|Linux:amd64) printf '%s\n' "x86_64-linux" ;;
+        Linux:arm64|Linux:aarch64) printf '%s\n' "aarch64-linux" ;;
+        Darwin:arm64|Darwin:aarch64) printf '%s\n' "aarch64-macos" ;;
+        Darwin:x86_64|Darwin:amd64) printf '%s\n' "x86_64-macos" ;;
+        *) return 1 ;;
+    esac
+}
+
 portable_size() {
     local path="$1"
     stat -c%s "$path" 2>/dev/null || stat -f%z "$path"
@@ -27,13 +37,18 @@ run_bootstrap_step() {
     local compiler_bin="$1"
     local src_path="$2"
     local out_path="$3"
+    local target="${4:-}"
 
     if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
         sounio_ad_hoc_codesign "$compiler_bin"
     fi
 
     set +e
-    "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
+    if [[ -n "$target" ]]; then
+        "$compiler_bin" "$src_path" "$out_path" --target "$target" >/dev/null 2>&1
+    else
+        "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
+    fi
     local rc=$?
     set -e
 
@@ -51,11 +66,11 @@ bootstrap_direct_lean() {
     stage1_bin="$(mktemp /tmp/sounio-lean-stage1.XXXXXX)"
 
     rm -f "$stage1_bin"
-    if ! run_bootstrap_step "$seed_bin" "$LEAN" "$stage1_bin"; then
+    if ! run_bootstrap_step "$seed_bin" "$LEAN" "$stage1_bin" "$HOST_TARGET"; then
         rm -f "$stage1_bin"
         return 1
     fi
-    if ! run_bootstrap_step "$stage1_bin" "$LEAN" "$OUT"; then
+    if ! run_bootstrap_step "$stage1_bin" "$LEAN" "$OUT" "$HOST_TARGET"; then
         rm -f "$stage1_bin"
         return 1
     fi
@@ -115,6 +130,7 @@ LEAN_BYTES="$(portable_size "$LEAN")"
 BOOT4_DIRECT_SRC_CAP=1048576
 
 HOST_PLATFORM="$(host_platform)"
+HOST_TARGET="$(host_target "$HOST_PLATFORM")"
 HOST_PREBUILTS=()
 
 case "$HOST_PLATFORM" in
