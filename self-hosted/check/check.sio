@@ -3132,11 +3132,33 @@ fn checker_collect_field_defs_mut(c: *mut Checker, opt: Option<Box<FieldDefList>
     }
 }
 
+// E216: a struct whose field is the struct itself, by value (TyNamed == own
+// name), has infinite size. `Box<Node>` lowers to ty_named("Box") and `&Node`
+// to TyRef, so neither matches — pointer-wrapped recursion stays valid. Scope:
+// DIRECT self-reference only; mutual/transitive recursion is a documented
+// follow-on (needs a post-collection occurs-check over the struct graph).
+fn struct_field_list_has_direct_self_ref(opt: Option<Box<FieldInfoList> >, self_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            let f = (*list).head
+            if f.ty.kind == TypeKind::TyNamed && name_eq(f.ty.name, self_name) {
+                true
+            } else {
+                struct_field_list_has_direct_self_ref((*list).tail, self_name)
+            }
+        }
+    }
+}
+
 fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<StructDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(sd) => {
             let tp_result = collect_type_params((*sd).type_params)
             let fc = checker_collect_field_defs_mut(c, (*sd).fields)
+            if struct_field_list_has_direct_self_ref(fc.fields, name) {
+                checker_report_error_at_inplace(c, (*sd).span, 216, 0, 0, 0)
+            }
             let info = StructInfo {
                 name: name,
                 fields: fc.fields,
@@ -11536,6 +11558,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
     else if code == 213 { print("tuple destructure arity mismatch") }
+    else if code == 216 { print("infinite recursive type") }
     else { print("unknown error") }
 }
 
