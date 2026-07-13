@@ -135,4 +135,7 @@ pass "native-v2 ABI/backend witnesses"
 expect_log_contains "SPM self-tests: ALL PASSED" "$WORK/pkg_self_test.log"
 pass "package manager self-test"
 
-echo "[madaros-full] PASS: public CLI, source ELF path, ABI witnesses, visibility, and pkg self-test"
+bash "$ROOT_DIR/scripts/ci/madaros_imported_deref_f64_array_gate.sh"
+pass "current-source imported dereferenced f64-array lowering"
+
+echo "[madaros-full] PASS: public CLI, source ELF path, ABI witnesses, visibility, pkg self-test, and current-source dereferenced f64-array lowering"
