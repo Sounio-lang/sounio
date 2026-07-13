@@ -26,6 +26,9 @@ MODULES=(
   stdlib/stats/proportion.sio
   stdlib/stats/densities.sio
   stdlib/stats/bayes_conjugate.sio
+  stdlib/stats/diagnostic.sio
+  stdlib/stats/cohen_kappa.sio
+  stdlib/stats/roc.sio
 )
 
 fail=0

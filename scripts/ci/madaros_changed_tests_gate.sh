@@ -52,6 +52,52 @@ if [[ "$SELECT_ONLY" == "1" ]]; then
   exit 0
 fi
 
+# This gate is wired to the Linux current-source CI job. Darwin's common
+# 65532 KiB ceiling is intentionally not normalized into this Linux contract.
+stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-65536}"
+[[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] \
+  || fail "invalid_stack_kb"
+
+if ! stack_soft_before="$(ulimit -S -s 2>/dev/null)"; then
+  fail "stack_soft_limit_unavailable"
+fi
+if ! stack_hard_before="$(ulimit -H -s 2>/dev/null)"; then
+  fail "stack_hard_limit_unavailable"
+fi
+[[ "$stack_soft_before" == "unlimited" || "$stack_soft_before" =~ ^[0-9]+$ ]] \
+  || fail "invalid_stack_soft_limit"
+[[ "$stack_hard_before" == "unlimited" || "$stack_hard_before" =~ ^[0-9]+$ ]] \
+  || fail "invalid_stack_hard_limit"
+
+if [[ "$stack_soft_before" != "unlimited" ]] && ((stack_soft_before < stack_kb)); then
+  if [[ "$stack_hard_before" != "unlimited" ]] && ((stack_hard_before < stack_kb)); then
+    echo "MADAROS_CHANGED_TESTS_STACK status=blocked scope=linux_ci requested_kb=$stack_kb soft_before_kb=$stack_soft_before hard_before_kb=$stack_hard_before soft_after_kb=$stack_soft_before hard_after_kb=$stack_hard_before"
+    fail "stack_hard_limit_too_low"
+  fi
+  if ! ulimit -S -s "$stack_kb" 2>/dev/null; then
+    stack_soft_after="$(ulimit -S -s 2>/dev/null || echo unavailable)"
+    stack_hard_after="$(ulimit -H -s 2>/dev/null || echo unavailable)"
+    echo "MADAROS_CHANGED_TESTS_STACK status=blocked scope=linux_ci requested_kb=$stack_kb soft_before_kb=$stack_soft_before hard_before_kb=$stack_hard_before soft_after_kb=$stack_soft_after hard_after_kb=$stack_hard_after"
+    fail "stack_raise_failed"
+  fi
+fi
+
+if ! stack_soft_after="$(ulimit -S -s 2>/dev/null)"; then
+  fail "stack_soft_limit_after_unavailable"
+fi
+if ! stack_hard_after="$(ulimit -H -s 2>/dev/null)"; then
+  fail "stack_hard_limit_after_unavailable"
+fi
+[[ "$stack_soft_after" == "unlimited" || "$stack_soft_after" =~ ^[0-9]+$ ]] \
+  || fail "invalid_stack_soft_limit_after"
+[[ "$stack_hard_after" == "unlimited" || "$stack_hard_after" =~ ^[0-9]+$ ]] \
+  || fail "invalid_stack_hard_limit_after"
+if [[ "$stack_soft_after" != "unlimited" ]] && ((stack_soft_after < stack_kb)); then
+  echo "MADAROS_CHANGED_TESTS_STACK status=blocked scope=linux_ci requested_kb=$stack_kb soft_before_kb=$stack_soft_before hard_before_kb=$stack_hard_before soft_after_kb=$stack_soft_after hard_after_kb=$stack_hard_after"
+  fail "stack_raise_not_effective"
+fi
+echo "MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=$stack_kb soft_before_kb=$stack_soft_before hard_before_kb=$stack_hard_before soft_after_kb=$stack_soft_after hard_after_kb=$stack_hard_after"
+
 if ((${#selected[@]} == 0)); then
   echo 'MADAROS_CHANGED_TESTS_SKIP reason=no_changed_requires_madaros_tests'
   exit 0

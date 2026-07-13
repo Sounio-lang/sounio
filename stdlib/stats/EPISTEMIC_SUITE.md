@@ -362,6 +362,37 @@ N(0,1) prior + x̄=2 (n=4) → posterior 1.6 ± credible [0.723, 2.477].
 A capstone example, `examples/stats/full_analysis_report.sio`, drives seven of
 these modules over one dataset and prints a formatted report.
 
+### `stats::diagnostic` — diagnostic test accuracy (2×2)
+
+`pub fn diag_metrics(tp: i64, fp: i64, fn_: i64, tn: i64, conf: f64) -> DiagResult with Mut, Div, Panic`
+— sensitivity, specificity, PPV, NPV, accuracy, likelihood ratios (LR±), Youden's J,
+with Wilson CIs on sensitivity and specificity. Validated: TP/FP/FN/TN=90/20/10/80 →
+sens 0.9, spec 0.8, LR+ 4.5, LR− 0.125, J 0.7.
+
+### `stats::cohen_kappa` — chance-corrected agreement
+
+| Function | Signature |
+|---|---|
+| `cohen_kappa` | `pub fn cohen_kappa(table: &[f64; 256], k: i32, conf: f64) -> KappaResult with Mut, Div, Panic` |
+| `cohen_kappa_weighted` | `pub fn cohen_kappa_weighted(table: &[f64; 256], k: i32, wtype: i32, conf: f64) -> KappaResult with Mut, Div, Panic` |
+
+κ = (p_o − p_e)/(1 − p_e) from a k×k rating table, unweighted or weighted (0=linear,
+1=quadratic), with a Landis–Koch interpretation code. The SE/CI are exact for the
+unweighted kappa and approximate for the weighted. Validated: 2×2 → p_o 0.7, p_e 0.5,
+κ 0.4.
+
+### `stats::roc` — ROC area under the curve
+
+| Function | Signature |
+|---|---|
+| `roc_auc` | `pub fn roc_auc(score: &[f64; 256], label: &[i64; 256], n: i32, conf: f64) -> AUCResult with Mut, Div, Panic` |
+| `roc_point` | `pub fn roc_point(score: &[f64; 256], label: &[i64; 256], n: i32, threshold: f64) -> (f64, f64) with Mut, Div, Panic` |
+
+AUC = normalised Mann-Whitney U (probability a positive outscores a negative),
+computed exactly by pairwise concordance; SE by Hanley & McNeil (1982), CI clipped
+to [0,1]. `roc_point` gives one (TPR, FPR) operating point. Validated: AUC 0.75 on
+the classic 4-point example; perfect separation → 1; a tied pair → 0.5.
+
 ## Importing
 
 Import each tool directly from its module:
@@ -384,6 +415,9 @@ use stats::effect_size::{EffectSize, cohens_d, eta_squared_from_f}
 use stats::proportion::{TwoPropResult, wilson_ci, clopper_pearson_ci, two_prop_z}
 use stats::densities::{normal_pdf, gamma_pdf, beta_pdf, lognormal_pdf, poisson_pmf, binomial_pmf, geometric_pmf}
 use stats::bayes_conjugate::{BetaPosterior, NormalPosterior, beta_binomial, normal_normal}
+use stats::diagnostic::{DiagResult, diag_metrics}
+use stats::cohen_kappa::{KappaResult, cohen_kappa, cohen_kappa_weighted}
+use stats::roc::{AUCResult, roc_auc, roc_point}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
