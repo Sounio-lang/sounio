@@ -53,11 +53,14 @@ fn ff_ln(x: f64) -> f64 with Mut, Div, Panic {
     return 2.0 * sum + (e as f64) * 0.6931471805599453
 }
 
+// Robust exp: reflect negatives FIRST (a 28-term Taylor of exp(x) for x in
+// roughly [-20,-10] suffers catastrophic cancellation and returns garbage — the
+// mechanism behind much of issue #841), then range-reduce positive x to [0,2]
+// where the series is essentially exact.
 fn ff_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ff_exp(0.0 - x) }
     if x > 709.0 { return 1.0e300 }
-    if x < 0.0 - 709.0 { return 0.0 }
-    if x > 20.0 { return ff_exp(x / 2.0) * ff_exp(x / 2.0) }
-    if x < 0.0 - 20.0 { return 1.0 / ff_exp(0.0 - x) }
+    if x > 2.0 { return ff_exp(x / 2.0) * ff_exp(x / 2.0) }
     var sum = 1.0
     var term = 1.0
     var i = 1
@@ -95,9 +98,42 @@ pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
     return ibeta(d1 / 2.0, d2 / 2.0, y)
 }
 
+// Regularized incomplete beta I_w(a,b) for SMALL w, via the log-leading term and
+// the convergent hypergeometric series I_w(a,b) = w^a(1-w)^b/(a·B(a,b))·₂F₁(1,a+b;a+1;w).
+// This avoids special::beta::ibeta's direct-branch continued-fraction divergence
+// at small w (issue #841), which otherwise corrupts the far F tail.
+fn ff_ibeta_smallx(a: f64, b: f64, w: f64) -> f64 with Mut, Div, Panic {
+    if w <= 0.0 { return 0.0 }
+    if w >= 1.0 { return 1.0 }
+    let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b)
+    let log_lead = a * ff_ln(w) + b * ff_ln(1.0 - w) - ff_ln(a) - lbeta_ab
+    var term = 1.0
+    var sum = 1.0
+    var nn = 1
+    while nn < 300 {
+        term = term * (a + b + (nn - 1) as f64) / (a + (nn as f64)) * w
+        sum = sum + term
+        let at = if term < 0.0 { 0.0 - term } else { term }
+        let as_ = if sum < 0.0 { 0.0 - sum } else { sum }
+        if at < 1.0e-16 * as_ { nn = 300 } else { nn = nn + 1 }
+    }
+    return ff_exp(log_lead) * sum
+}
+
 /// Survival function S(x) = 1 - F(x) = P(X > x).
+///
+/// Equals I_w(d2/2, d1/2) with w = d2/(d1·x + d2). For a large F (small w — the
+/// significant tail) it uses the convergent small-w series above, so p-values in
+/// the tail are accurate despite the special::beta breakdown (issue #841).
 pub fn f_sf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
-    return 1.0 - f_cdf(x, d1, d2)
+    if x <= 0.0 { return 1.0 }
+    let a = d2 / 2.0
+    let b = d1 / 2.0
+    let w = d2 / (d1 * x + d2)   // survival = I_w(d2/2, d1/2)
+    if w < 0.2 {
+        return ff_ibeta_smallx(a, b, w)
+    }
+    return ibeta(a, b, w)
 }
 
 /// Inverse CDF: the value x with F(x) = p, for p in (0, 1).
@@ -205,12 +241,25 @@ fn test_var_ratio_ci() -> bool with IO, Mut, Div, Panic {
     return ok
 }
 
+// Survival in the far tail (large F) must be accurate, not the special::beta
+// garbage. f_sf(2,2,12)=0.177978 (moderate); f_sf(300,2,6)=I_0.0099(3,1)=w^3≈9.7e-7.
+fn test_sf_tail() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(40, approx(f_sf(2.0, 2.0, 12.0), 0.177978, 1.0e-4)) && ok
+    ok = check(41, approx(f_sf(300.0, 2.0, 6.0), 9.70590e-7, 1.0e-9)) && ok
+    ok = check(42, f_sf(300.0, 2.0, 6.0) > 0.0 && f_sf(300.0, 2.0, 6.0) < 0.001) && ok
+    // consistency with the reliable-region CDF: f_cdf + f_sf ≈ 1 at a moderate F
+    ok = check(43, approx(f_cdf(2.0, 5.0, 10.0) + f_sf(2.0, 5.0, 10.0), 1.0, 1.0e-4)) && ok
+    return ok
+}
+
 pub fn run_tests() -> bool with IO, Mut, Div, Panic {
     var ok = true
     ok = test_quantile_table() && ok
     ok = test_cdf_roundtrip() && ok
     ok = test_pdf() && ok
     ok = test_var_ratio_ci() && ok
+    ok = test_sf_tail() && ok
     return ok
 }
 

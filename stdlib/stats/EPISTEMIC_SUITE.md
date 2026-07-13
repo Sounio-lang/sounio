@@ -175,6 +175,131 @@ the fixed normal factor 1.96, per Bland & Altman.
 | `n_outside` | `i64` | points beyond `[loa_lo, loa_hi]` |
 | `pct_outside` | `f64` | `100 · n_outside / n` |
 
+### `stats::power` — statistical power & sample size
+
+Power and required sample size for one-sample/paired and two-sample t-tests,
+using the *shifted-t* approximation to the non-central t power function (Cohen
+1988). `d` is Cohen's standardised effect size (mean difference / SD). Sample
+sizes are found by searching up from the normal-approximation closed form to the
+smallest `n` meeting the target power.
+
+| Function | Signature |
+|---|---|
+| `power_ttest_onesample` | `pub fn power_ttest_onesample(d: f64, n: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic` |
+| `power_ttest_twosample` | `pub fn power_ttest_twosample(d: f64, n_per_group: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic` |
+| `n_for_power_onesample` | `pub fn n_for_power_onesample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic` |
+| `n_for_power_twosample` | `pub fn n_for_power_twosample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic` |
+
+Power is returned in `[0, 1]`; sample sizes are `>= 2` (two-sample returns the
+size of **each** group), capped at 1 000 000. Validated against G*Power: one-sample
+`d=0.5, n=34` → power ≈ 0.807; two-sample `d=0.5, n=64/group` → ≈ 0.801; the
+classic `d=0.5, power=0.80` needs `n≈34` (one-sample) / `n≈64` per group. The
+shifted-t approximation is tight for `n ≳ 20` and slightly over-states power at
+very small `n`.
+
+### `stats::qq_normal` — normal quantile-quantile (probability) plot
+
+The visual normality diagnostic that pairs with the tests above: before a t-test
+or ANOVA, check the data (or residuals) are plausibly normal. Computes the Q-Q plot
+coordinates and the probability-plot correlation coefficient (PPCC) — near 1 for
+normal data, lower for skew/heavy tails.
+
+| Function | Signature |
+|---|---|
+| `qq_normal` | `pub fn qq_normal(data: &[f64; 256], n: i32, out_theoretical: &![f64; 256], out_sample: &![f64; 256]) -> QQResult with Mut, Div, Panic` |
+
+Uses Blom's plotting position `p_i = (i - 0.375)/(n + 0.25)` and `z_i = Φ⁻¹(p_i)`.
+`out_theoretical` receives the theoretical normal quantiles (plot x); `out_sample`
+receives the sorted sample (plot y).
+
+**Returns — `struct QQResult`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `n` | `i64` | sample size |
+| `ppcc` | `f64` | probability-plot correlation coefficient (~1 = normal) |
+| `slope` | `f64` | LS slope of sample on theoretical quantile (≈ SD) |
+| `intercept` | `f64` | LS intercept (≈ mean) |
+| `mean` | `f64` | sample mean |
+| `sd` | `f64` | sample standard deviation (n-1 basis) |
+
+### `stats::anova` — one-way analysis of variance
+
+The headline group-comparison test and the first real consumer of `stats::fisher_f`.
+Partitions the response variation into between- and within-groups components and
+tests H0 "all group means equal" with F = MS_between / MS_within.
+
+| Function | Signature |
+|---|---|
+| `anova_oneway` | `pub fn anova_oneway(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> AnovaResult with Mut, Div, Panic` |
+
+`data` holds the groups concatenated end to end; `sizes[j]` is group j's size;
+`k` is the number of groups (2 ≤ k ≤ 16, total N ≤ 256).
+
+**Returns — `struct AnovaResult`:** `k`, `n_total`, `ss_between`, `ss_within`,
+`ss_total`, `df_between`, `df_within`, `ms_between`, `ms_within`, `f_stat`,
+`p_value` (F survival), `eta_squared` (SS_between/SS_total). Validated against a
+hand-computed table (SS 10/30, F=2.0, p=0.178, η²=0.25) and a well-separated case
+(F≫1, p<0.001). The p-value uses the tail-hardened `f_sf` (accurate far tail — see
+below).
+
+### `stats::reg_bands` — linear regression with confidence & prediction bands
+
+A minimal OLS fit that carries the quantities the bands need (residual sigma, x̄,
+Sxx), plus the t-based confidence band (mean response) and prediction band (a new
+observation) at each x — what a calibration / dose-response figure needs.
+
+| Function | Signature |
+|---|---|
+| `reg_fit` | `pub fn reg_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> RegFit with Mut, Div, Panic` |
+| `reg_predict` | `pub fn reg_predict(fit: &RegFit, x: f64) -> f64` |
+| `reg_conf_band` | `pub fn reg_conf_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `reg_pred_band` | `pub fn reg_pred_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `reg_slope_ci` | `pub fn reg_slope_ci(fit: &RegFit, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+
+`RegFit` fields: `n`, `slope`, `intercept`, `sigma` (residual SE), `r2`, `xbar`,
+`sxx`, `df` (n-2). Band half-widths use `t·sigma·sqrt(1/n + (x-x̄)²/Sxx)`
+(confidence) and `t·sigma·sqrt(1 + 1/n + (x-x̄)²/Sxx)` (prediction). Validated
+against a hand-computed example (slope 0.6, sigma √0.8, slope CI [-0.30, 1.50],
+conf/pred half at x̄ = 1.273 / 3.118).
+
+### `stats::correlation` — Pearson & Spearman with inference
+
+| Function | Signature |
+|---|---|
+| `pearson` | `pub fn pearson(x: &[f64; 256], y: &[f64; 256], n: i32, conf: f64) -> CorrResult with Mut, Div, Panic` |
+| `spearman` | `pub fn spearman(x: &[f64; 256], y: &[f64; 256], n: i32) -> SpearmanCorr with Mut, Div, Panic` |
+
+Pearson r with a **Fisher-z confidence interval** (`atanh(r) ± z/√(n-3)`, back-
+transformed) and a t-test; Spearman rho is Pearson on the average ranks. `CorrResult`:
+`n, r, t_stat, df, p_value, ci_lo, ci_hi`. `SpearmanCorr`: `n, rho, t_stat, df, p_value`.
+Validated: `r=0.7746`, `t=2.121`, 95% CI `[-0.340, 0.984]`; Spearman `rho=0.738`.
+
+### `stats::kruskal_wallis` — non-parametric one-way ANOVA
+
+| Function | Signature |
+|---|---|
+| `kruskal_wallis` | `pub fn kruskal_wallis(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> KWResult with Mut, Div, Panic` |
+
+Rank-based H test (tie-corrected), `p = chi2_sf(H, k-1)`. `KWResult`: `k, n_total, h,
+h_uncorrected, df, p_value, tie_factor`. Validated: no-ties `H=7.2, p=0.0273`;
+tie-corrected `H=3.333` (factor 0.9143).
+
+### `stats::tukey` — Tukey HSD post-hoc (studentized range)
+
+| Function | Signature |
+|---|---|
+| `tukey_q_crit` | `pub fn tukey_q_crit(alpha: f64, k: i32, nu: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_hsd` | `pub fn tukey_hsd(ms_within: f64, n: i64, k: i32, dfw: f64, alpha: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_pair_p` | `pub fn tukey_pair_p(diff: f64, ms_within: f64, n: i64, k: i32, dfw: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_q_cdf` / `q_range_cdf` | studentized-range / range CDFs (numerical integration) |
+
+Post-hoc pairwise comparisons after a significant ANOVA, controlling family-wise
+error via the studentized range distribution q — computed here by Simpson
+integration of the defining double integral (no closed form). Validated against
+Harter's q tables: `q(0.05,3,10)=3.877`, `q(0.05,4,20)=3.958`, `q(0.05,3,∞)=3.314`
+to ~1e-2. (The double integral makes this the one slow module — ~10s.)
+
 ## Importing
 
 Import each tool directly from its module:
@@ -185,6 +310,13 @@ use stats::chi_square::{VarCI, chi2_pdf, chi2_cdf, chi2_sf, chi2_quantile, chi2_
 use stats::fisher_f::{VarRatioCI, f_pdf, f_cdf, f_sf, f_quantile, f_var_ratio_ci}
 use stats::wilcoxon::{WilcoxonResult, wilcoxon_signed_rank, wilcoxon_one_sample}
 use stats::bland_altman::{BAResult, bland_altman}
+use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_onesample, n_for_power_twosample}
+use stats::qq_normal::{QQResult, qq_normal}
+use stats::anova::{AnovaResult, anova_oneway}
+use stats::reg_bands::{RegFit, reg_fit, reg_predict, reg_conf_band, reg_pred_band, reg_slope_ci}
+use stats::correlation::{CorrResult, SpearmanCorr, pearson, spearman}
+use stats::kruskal_wallis::{KWResult, kruskal_wallis}
+use stats::tukey::{tukey_q_crit, tukey_hsd, tukey_pair_p, tukey_q_cdf, q_range_cdf}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
@@ -251,6 +383,7 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/chi_square.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/fisher_f.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/wilcoxon.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/bland_altman.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/power.sio
 ```
 
 Each command should print exactly `ALL PASS`. When running from outside the repo

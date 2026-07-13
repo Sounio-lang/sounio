@@ -1,0 +1,267 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/qq_normal.sio — normal quantile-quantile (probability) plot
+//
+// The visual normality diagnostic that pairs with the rest of the suite: before
+// a t-test or ANOVA you check that the data (or model residuals) are plausibly
+// normal. This module computes the coordinates of a normal Q-Q plot and a
+// quantitative summary — the probability-plot correlation coefficient (PPCC):
+//
+//   qq_normal(data, n, out_theoretical, out_sample) -> QQResult
+//
+// For each order statistic i = 1..n it uses Blom's plotting position
+//   p_i = (i - 0.375) / (n + 0.25)
+// and the theoretical normal quantile z_i = Phi^{-1}(p_i) (special::erf). The
+// sorted sample is regressed on the theoretical quantiles: the least-squares
+// slope estimates the SD, the intercept estimates the mean, and the correlation
+// of the two is the PPCC — near 1 for normal data, lower for skew/heavy tails.
+// A rough normality reference: PPCC < ~0.98 at n≈20, or < ~0.99 at n≈50, is
+// evidence against normality (Filliben 1975; critical values are n-dependent).
+//
+// The two output arrays hold the plot coordinates (x = theoretical z, y = sorted
+// sample), ready for image::plot.
+//
+// Pure Sounio; the only dependency is the normal quantile (special::erf).
+//
+// References:
+//   Blom (1958) "Statistical Estimates and Transformed Beta-Variables"
+//   Filliben (1975) "The probability plot correlation coefficient test for
+//     normality", Technometrics 17(1)
+//   Wilk & Gnanadesikan (1968) "Probability plotting methods for the analysis
+//     of data", Biometrika 55(1)
+
+module stats::qq_normal
+
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn qq_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct QQResult {
+    pub n: i64,          // sample size used
+    pub ppcc: f64,       // probability-plot correlation coefficient (~1 = normal)
+    pub slope: f64,      // LS slope of sample on theoretical quantile (≈ SD)
+    pub intercept: f64,  // LS intercept (≈ mean)
+    pub mean: f64,       // sample mean
+    pub sd: f64,         // sample standard deviation (n-1)
+}
+
+// ============================================================================
+// ANALYSIS
+// ============================================================================
+
+/// Normal Q-Q plot coordinates and the probability-plot correlation coefficient.
+///
+/// Parâmetros: data — the sample; n — size (2 <= n <= 256);
+///             out_theoretical — filled with the theoretical normal quantiles z_i
+///               (the plot's x-axis); out_sample — filled with the sorted sample
+///               (the plot's y-axis).
+/// Retorno: QQResult (n, PPCC, LS slope/intercept, sample mean/SD).
+/// Complexidade: O(n²) (selection sort) + n normal-quantile evaluations.
+/// Referências: Blom (1958); Filliben (1975).
+pub fn qq_normal(
+    data: &[f64; 256], n: i32,
+    out_theoretical: &![f64; 256],
+    out_sample: &![f64; 256]
+) -> QQResult with Mut, Div, Panic {
+    if n < 2 {
+        return QQResult { n: n as i64, ppcc: 0.0, slope: 0.0, intercept: 0.0, mean: 0.0, sd: 0.0 }
+    }
+    let nf = n as f64
+
+    // Copy and selection-sort the sample ascending into out_sample.
+    var i = 0
+    while i < n {
+        out_sample[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    var a = 0
+    while a < n - 1 {
+        var min_i = a
+        var b = a + 1
+        while b < n {
+            if out_sample[b as usize] < out_sample[min_i as usize] { min_i = b }
+            b = b + 1
+        }
+        if min_i != a {
+            let t = out_sample[a as usize]
+            out_sample[a as usize] = out_sample[min_i as usize]
+            out_sample[min_i as usize] = t
+        }
+        a = a + 1
+    }
+
+    // Theoretical quantiles via Blom's plotting position.
+    var k = 0
+    while k < n {
+        let p = ((k + 1) as f64 - 0.375) / (nf + 0.25)
+        out_theoretical[k as usize] = normal_quantile(p)
+        k = k + 1
+    }
+
+    // Means of theoretical (≈0) and sample.
+    var sum_z = 0.0
+    var sum_x = 0.0
+    var j = 0
+    while j < n {
+        sum_z = sum_z + out_theoretical[j as usize]
+        sum_x = sum_x + out_sample[j as usize]
+        j = j + 1
+    }
+    let mz = sum_z / nf
+    let mx = sum_x / nf
+
+    // Regression of sample on theoretical quantile + correlation.
+    var s_zz = 0.0
+    var s_xx = 0.0
+    var s_zx = 0.0
+    var m = 0
+    while m < n {
+        let dz = out_theoretical[m as usize] - mz
+        let dx = out_sample[m as usize] - mx
+        s_zz = s_zz + dz * dz
+        s_xx = s_xx + dx * dx
+        s_zx = s_zx + dz * dx
+        m = m + 1
+    }
+
+    var slope = 0.0
+    if s_zz > 1.0e-300 { slope = s_zx / s_zz }
+    let intercept = mx - slope * mz
+
+    var ppcc = 0.0
+    let denom = s_zz * s_xx
+    if denom > 1.0e-300 { ppcc = s_zx / qq_sqrt(denom) }
+
+    let sd = qq_sqrt(s_xx / (nf - 1.0))
+
+    return QQResult {
+        n: n as i64, ppcc: ppcc, slope: slope, intercept: intercept, mean: mx, sd: sd,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Perfectly normal sample: data_i = z_i (the theoretical quantiles themselves)
+// => PPCC = 1, slope = 1, intercept = 0.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    let n = 9
+    var i = 0
+    while i < n {
+        let p = ((i + 1) as f64 - 0.375) / ((n as f64) + 0.25)
+        data[i as usize] = normal_quantile(p)
+        i = i + 1
+    }
+    let r = qq_normal(&data, n, &!theo, &!samp)
+    var ok = true
+    ok = check(1, approx(r.ppcc, 1.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.slope, 1.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.intercept, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+// Affine transform data_i = 2*z_i + 5 => slope=2, intercept=5, PPCC=1.
+fn test_affine() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    let n = 12
+    var i = 0
+    while i < n {
+        let p = ((i + 1) as f64 - 0.375) / ((n as f64) + 0.25)
+        data[i as usize] = 2.0 * normal_quantile(p) + 5.0
+        i = i + 1
+    }
+    let r = qq_normal(&data, n, &!theo, &!samp)
+    var ok = true
+    ok = check(10, approx(r.ppcc, 1.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(12, approx(r.intercept, 5.0, 1.0e-9)) && ok
+    ok = check(13, approx(r.mean, 5.0, 1.0e-9)) && ok
+    return ok
+}
+
+// Sorting + coordinates: unsorted input, check the sample column is ascending
+// and the theoretical column is symmetric around 0.
+fn test_sort_and_symmetry() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    data[0] = 3.0; data[1] = 0.0 - 1.0; data[2] = 2.0; data[3] = 0.0; data[4] = 1.0
+    let r = qq_normal(&data, 5, &!theo, &!samp)
+    var ok = true
+    // sorted sample ascending
+    ok = check(20, samp[0] <= samp[1] && samp[1] <= samp[2] && samp[2] <= samp[3] && samp[3] <= samp[4]) && ok
+    // middle theoretical quantile is 0 (odd n), extremes symmetric
+    ok = check(21, approx(theo[2], 0.0, 1.0e-9)) && ok
+    ok = check(22, approx(theo[0], 0.0 - theo[4], 1.0e-6)) && ok
+    // data are integers -0.  1..3 -> not perfectly normal, PPCC high but < 1
+    ok = check(23, r.ppcc > 0.95 && r.ppcc < 1.0) && ok
+    return ok
+}
+
+// A right-skewed sample lowers the PPCC noticeably.
+fn test_skew_lowers_ppcc() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    // strong right skew: most values small, a few large
+    let n = 10
+    data[0]=1.0; data[1]=1.0; data[2]=1.0; data[3]=2.0; data[4]=2.0
+    data[5]=2.0; data[6]=3.0; data[7]=4.0; data[8]=8.0; data[9]=20.0
+    let r = qq_normal(&data, n, &!theo, &!samp)
+    var ok = true
+    ok = check(30, r.ppcc < 0.95) && ok   // clearly non-normal
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_affine() && ok
+    ok = test_sort_and_symmetry() && ok
+    ok = test_skew_lowers_ppcc() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
