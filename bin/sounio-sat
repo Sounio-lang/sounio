@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Run the native Sounio CDCL solver on a DIMACS CNF and emit a receipt."""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import hashlib
+import importlib.util
+import json
+import resource
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+EMBED_PATH = ROOT / "scripts" / "research" / "embed_dimacs_cdcl.py"
+MAX_CHILD_OUTPUT_BYTES = 8 * 1024 * 1024
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_embed_module():
+    spec = importlib.util.spec_from_file_location(
+        "sounio_embed_dimacs_cdcl", EMBED_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load DIMACS adapter: {EMBED_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def child_limits(memory_mb: int, cpu_seconds: int):
+    def apply() -> None:
+        memory_bytes = memory_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+
+    return apply
+
+
+def run_checked(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 120,
+    memory_mb: int = 1024,
+) -> subprocess.CompletedProcess[str]:
+    result = run_bounded(command, cwd=cwd, timeout=timeout, memory_mb=memory_mb)
+    if result.returncode != 0:
+        rendered = " ".join(command)
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {rendered}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    return result
+
+
+def run_bounded(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int,
+    memory_mb: int,
+) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=cwd,
+                    text=True,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    check=False,
+                    timeout=timeout,
+                    preexec_fn=child_limits(memory_mb, timeout),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"command timed out after {timeout}s: {' '.join(command)}"
+                ) from exc
+            except subprocess.SubprocessError as exc:
+                raise RuntimeError(
+                    f"subprocess setup failed: {' '.join(command)}: {exc}"
+                ) from exc
+
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read(MAX_CHILD_OUTPUT_BYTES + 1)
+            stderr = stderr_file.read(MAX_CHILD_OUTPUT_BYTES + 1)
+            if len(stdout.encode("utf-8")) > MAX_CHILD_OUTPUT_BYTES:
+                raise RuntimeError(
+                    f"command stdout exceeded {MAX_CHILD_OUTPUT_BYTES} bytes"
+                )
+            if len(stderr.encode("utf-8")) > MAX_CHILD_OUTPUT_BYTES:
+                raise RuntimeError(
+                    f"command stderr exceeded {MAX_CHILD_OUTPUT_BYTES} bytes"
+                )
+            return subprocess.CompletedProcess(
+                command, result.returncode, stdout, stderr
+            )
+
+
+def parse_native_output(stdout: str, instance_id: str) -> dict[str, object]:
+    prefix = "SOUNIO_CDCL_"
+    result_code: int | None = None
+    native_rup: int | None = None
+    model: dict[int, int] = {}
+    proof: list[list[int]] = []
+    pending_model_var: int | None = None
+    pending_proof_clause: list[int] | None = None
+    pending_proof_len = 0
+    seen_result = False
+    seen_rup = False
+    known_scalar_markers = {
+        "SOUNIO_CDCL_CONFLICTS",
+        "SOUNIO_CDCL_DECISIONS",
+        "SOUNIO_CDCL_RESTARTS",
+    }
+    seen_scalars: set[str] = set()
+
+    for line in stdout.splitlines():
+        if not line.startswith(prefix):
+            continue
+        parts = line.split()
+        if len(parts) < 2 or parts[1] != instance_id:
+            raise RuntimeError(
+                f"native protocol line has wrong instance ID or arity: {line}"
+            )
+        if parts[0] == "SOUNIO_CDCL_RESULT" and len(parts) == 3:
+            if seen_result:
+                raise RuntimeError("native protocol emitted duplicate RESULT")
+            result_code = int(parts[2])
+            seen_result = True
+        elif parts[0] == "SOUNIO_CDCL_RUP_VERIFY" and len(parts) == 3:
+            if seen_rup:
+                raise RuntimeError("native protocol emitted duplicate RUP_VERIFY")
+            native_rup = int(parts[2])
+            seen_rup = True
+        elif parts[0] in known_scalar_markers and len(parts) == 3:
+            if parts[0] in seen_scalars:
+                raise RuntimeError(f"native protocol emitted duplicate {parts[0]}")
+            int(parts[2])
+            seen_scalars.add(parts[0])
+        elif parts[0] == "SOUNIO_CDCL_MODEL_VAR" and len(parts) == 3:
+            if pending_model_var is not None:
+                raise RuntimeError(
+                    "native model emitted two variable IDs without a value"
+                )
+            pending_model_var = int(parts[2])
+        elif parts[0] == "SOUNIO_CDCL_MODEL_VALUE" and len(parts) == 3:
+            if pending_model_var is None:
+                raise RuntimeError("native model value has no preceding variable ID")
+            if pending_model_var in model:
+                raise RuntimeError(
+                    f"native model repeated variable {pending_model_var}"
+                )
+            model[pending_model_var] = int(parts[2])
+            pending_model_var = None
+        elif parts[0] == "SOUNIO_CDCL_PROOF_CLAUSE" and len(parts) == 3:
+            if pending_proof_clause is not None:
+                raise RuntimeError(
+                    "native proof started a clause before completing the prior clause"
+                )
+            pending_proof_len = int(parts[2])
+            if pending_proof_len < 0:
+                raise RuntimeError("native proof emitted a negative clause length")
+            pending_proof_clause = []
+            if pending_proof_len == 0:
+                proof.append(pending_proof_clause)
+                pending_proof_clause = None
+        elif parts[0] == "SOUNIO_CDCL_PROOF_LIT" and len(parts) == 3:
+            if pending_proof_clause is None:
+                raise RuntimeError("native proof literal has no active clause")
+            pending_proof_clause.append(int(parts[2]))
+            if len(pending_proof_clause) == pending_proof_len:
+                proof.append(pending_proof_clause)
+                pending_proof_clause = None
+        else:
+            raise RuntimeError(f"unknown or malformed native protocol line: {line}")
+
+    if result_code not in (0, 1):
+        raise RuntimeError(
+            f"native solver returned unsupported result code: {result_code}"
+        )
+    if pending_model_var is not None:
+        raise RuntimeError("native model ended before emitting a value")
+    if pending_proof_clause is not None:
+        raise RuntimeError("native proof ended before completing a clause")
+    if result_code == 1 and (native_rup is not None or proof):
+        raise RuntimeError("SAT result emitted UNSAT proof material")
+    if result_code == 0 and model:
+        raise RuntimeError("UNSAT result emitted SAT model material")
+    return {
+        "result_code": result_code,
+        "native_rup": native_rup,
+        "model": model,
+        "proof": proof,
+    }
+
+
+def verify_sat_model(
+    clauses: list[tuple[int, ...]], model: dict[int, int], n_vars: int
+) -> bool:
+    if set(model) != set(range(1, n_vars + 1)):
+        return False
+    if any(value not in (-1, 1) for value in model.values()):
+        return False
+    for clause in clauses:
+        if not any(model[abs(lit)] == (1 if lit > 0 else -1) for lit in clause):
+            return False
+    return True
+
+
+def complete_sat_model(model: dict[int, int], n_vars: int) -> dict[int, int]:
+    unexpected = sorted(set(model) - set(range(1, n_vars + 1)))
+    if unexpected:
+        raise RuntimeError(f"native model emitted out-of-range variables: {unexpected}")
+    completed: dict[int, int] = {}
+    for var in range(1, n_vars + 1):
+        value = model.get(var, 0)
+        if value == 0:
+            value = -1
+        if value not in (-1, 1):
+            raise RuntimeError(
+                f"native model emitted invalid value {value} for variable {var}"
+            )
+        completed[var] = value
+    return completed
+
+
+def write_model(path: Path, model: dict[int, int]) -> None:
+    literals = [str(var if model[var] == 1 else -var) for var in sorted(model)]
+    path.write_text("v " + " ".join(literals) + " 0\n", encoding="ascii")
+
+
+def write_drat(path: Path, proof: list[list[int]]) -> None:
+    body = "".join(
+        ((" ".join(str(lit) for lit in clause) + " ") if clause else "") + "0\n"
+        for clause in proof
+    )
+    path.write_text(body, encoding="ascii")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("cnf", type=Path, help="DIMACS CNF input")
+    parser.add_argument("--out-dir", type=Path, help="artifact directory")
+    parser.add_argument("--phase-mode", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--require-external-checker", action="store_true")
+    parser.add_argument("--compile-timeout", type=int, default=120)
+    parser.add_argument("--solve-timeout", type=int, default=300)
+    parser.add_argument("--checker-timeout", type=int, default=120)
+    parser.add_argument("--memory-mb", type=int, default=1024)
+    args = parser.parse_args()
+
+    for name in ("compile_timeout", "solve_timeout", "checker_timeout", "memory_mb"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+
+    source_cnf = args.cnf.resolve()
+    if not source_cnf.is_file():
+        parser.error(f"CNF does not exist: {source_cnf}")
+    out_dir = (
+        args.out_dir or source_cnf.with_suffix(source_cnf.suffix + ".sounio-sat")
+    ).resolve()
+    if out_dir.exists():
+        raise RuntimeError(f"artifact directory already exists: {out_dir}")
+    out_dir.mkdir(parents=True)
+
+    def cleanup_partial_artifacts() -> None:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+    atexit.register(cleanup_partial_artifacts)
+
+    embed_module = load_embed_module()
+    with source_cnf.open("rb") as source_handle:
+        snapshot_bytes = source_handle.read(embed_module.CDCL_INPUT_MAX_BYTES + 1)
+    if len(snapshot_bytes) > embed_module.CDCL_INPUT_MAX_BYTES:
+        raise RuntimeError(
+            f"DIMACS input exceeds {embed_module.CDCL_INPUT_MAX_BYTES} bytes"
+        )
+    cnf = out_dir / "input.cnf"
+    cnf.write_bytes(snapshot_bytes)
+    n_vars, clauses, expected = embed_module.parse_dimacs(cnf)
+    instance_id = hashlib.sha256(cnf.read_bytes()).hexdigest()[:16]
+    generated = out_dir / "instance.sio"
+    executable = out_dir / "instance.elf"
+    stdout_path = out_dir / "solver.stdout"
+    stderr_path = out_dir / "solver.stderr"
+    receipt_path = out_dir / "receipt.json"
+
+    metadata = embed_module.embed(
+        cnf,
+        generated,
+        instance_id=instance_id,
+        emit_unsat_proof=True,
+        phase_mode=args.phase_mode,
+    )
+    compiler = ROOT / "bin" / "souc"
+    compiler_version = run_checked(
+        [str(compiler), "--version"], timeout=30
+    ).stdout.strip()
+    run_checked(
+        [str(compiler), str(generated), str(executable)],
+        cwd=ROOT,
+        timeout=args.compile_timeout,
+        memory_mb=args.memory_mb,
+    )
+    executable.chmod(executable.stat().st_mode | 0o111)
+    executable_sha256 = sha256(executable)
+
+    runtime = run_bounded(
+        [str(executable)],
+        cwd=out_dir,
+        timeout=args.solve_timeout,
+        memory_mb=args.memory_mb,
+    )
+    stdout_path.write_text(runtime.stdout, encoding="utf-8")
+    stderr_path.write_text(runtime.stderr, encoding="utf-8")
+    if runtime.returncode != 0:
+        raise RuntimeError(
+            f"native solver executable failed ({runtime.returncode}); "
+            f"see {stdout_path} and {stderr_path}"
+        )
+
+    parsed = parse_native_output(runtime.stdout, instance_id)
+    result_code = int(parsed["result_code"])
+    result_name = "SAT" if result_code == 1 else "UNSAT"
+    if expected in ("SAT", "UNSAT") and result_name != expected:
+        raise RuntimeError(
+            f"solver result {result_name} disagrees with fixture expectation {expected}"
+        )
+    model = parsed["model"]
+    proof = parsed["proof"]
+    model_verified = False
+    native_rup = parsed["native_rup"]
+    proof_path: Path | None = None
+    model_path: Path | None = None
+    external_checker = "not_applicable"
+
+    if result_name == "SAT":
+        model = complete_sat_model(model, n_vars)
+        model_verified = verify_sat_model(clauses, model, n_vars)
+        if not model_verified:
+            raise RuntimeError("native SAT model failed independent host replay")
+        model_path = out_dir / "model.txt"
+        write_model(model_path, model)
+    else:
+        if native_rup != 1:
+            raise RuntimeError(f"native RUP verification failed: {native_rup}")
+        if not proof:
+            raise RuntimeError("UNSAT result did not emit a proof trace")
+        proof_path = out_dir / "proof.drat"
+        write_drat(proof_path, proof)
+        lrat_path = out_dir / "proof.lrat"
+        host_checker = ROOT / "examples" / "erdos" / "drup_to_lrat_rup.py"
+        host_check = run_checked(
+            [
+                sys.executable,
+                str(host_checker),
+                str(cnf),
+                str(proof_path),
+                str(lrat_path),
+            ],
+            cwd=out_dir,
+            timeout=args.checker_timeout,
+            memory_mb=args.memory_mb,
+        )
+        (out_dir / "host-rup.stdout").write_text(host_check.stdout, encoding="utf-8")
+        (out_dir / "host-rup.stderr").write_text(host_check.stderr, encoding="utf-8")
+        drat_trim = shutil.which("drat-trim")
+        if drat_trim:
+            check = run_bounded(
+                [drat_trim, str(cnf), str(proof_path)],
+                cwd=out_dir,
+                timeout=args.checker_timeout,
+                memory_mb=args.memory_mb,
+            )
+            (out_dir / "drat-trim.stdout").write_text(check.stdout, encoding="utf-8")
+            (out_dir / "drat-trim.stderr").write_text(check.stderr, encoding="utf-8")
+            if check.returncode != 0:
+                raise RuntimeError("drat-trim rejected the native proof")
+            external_checker = "drat-trim:accepted"
+        else:
+            external_checker = "drat-trim:unavailable"
+            if args.require_external_checker:
+                raise RuntimeError("drat-trim is required but not installed")
+
+    receipt = {
+        "schema": "sounio.native-sat-receipt.v1",
+        "result": result_name,
+        "instance_id": instance_id,
+        "n_vars": n_vars,
+        "n_clauses": len(clauses),
+        "phase_mode": args.phase_mode,
+        "compiler": compiler_version,
+        "cnf_sha256": sha256(cnf),
+        "generated_sio_sha256": sha256(generated),
+        "executable_sha256": executable_sha256,
+        "solver_source_sha256": sha256(ROOT / "stdlib" / "theorem" / "cdcl.sio"),
+        "stdout_sha256": sha256(stdout_path),
+        "model_verified": model_verified,
+        "model_sha256": sha256(model_path) if model_path else None,
+        "native_rup_verified": native_rup == 1 if result_name == "UNSAT" else None,
+        "host_rup_verified": result_name == "UNSAT",
+        "host_rup_checker_sha256": sha256(
+            ROOT / "examples" / "erdos" / "drup_to_lrat_rup.py"
+        )
+        if proof_path
+        else None,
+        "lrat_sha256": sha256(out_dir / "proof.lrat") if proof_path else None,
+        "proof_format": "DRUP_SUBSET_OF_DRAT" if proof_path else None,
+        "proof_sha256": sha256(proof_path) if proof_path else None,
+        "external_checker": external_checker,
+        "generated_metadata": metadata,
+    }
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    print(f"SOUNIO_SAT_{result_name}: {receipt_path}", file=sys.stderr)
+    atexit.unregister(cleanup_partial_artifacts)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"SOUNIO_SAT_ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2)
