@@ -213,10 +213,14 @@ independent oracle").
    the reference tool.
 4. No file under `self-hosted/` or `bootstrap/` is modified. Existing pbpk/petab tests still pass.
 
-## 10. Open questions (resolve at plan time, not blocking)
+## 10. Resolved decisions (defaults taken 2026-07-13)
 
-- Datetime storage unit: epoch nanoseconds vs seconds (Parquet/HDF5 favour ns; netCDF often uses
-  "days/seconds since epoch" via attrs). Lean: store i64 + explicit unit tag.
-- Artifact bundle shape: single file vs data + `.meta.json` sidecar. Lean: sidecar.
-- Whether N-D arrays land as a `Tensor` type or stay flattened-with-shape inside the frame metadata.
+- **Datetime storage** — store epoch as `i64` **nanoseconds** plus an explicit unit tag on the column
+  (so netCDF "seconds/days since epoch" attrs convert into the same representation). Nanoseconds match
+  Parquet/HDF5 conventions and avoid lossy sub-second truncation.
+- **Artifact bundle shape** — data file + `.meta.json` **sidecar** carrying schema, per-column units,
+  provenance, row/col counts, and content checksum. (Not a single packed file.)
+- **N-D arrays** — **flattened data + shape in column/frame metadata** for this release; a dedicated
+  `Tensor` type is not introduced (avoids a new cross-module dependency). N-D netCDF/HDF5 variables land
+  as a flat buffer plus a `shape: [usize]` tag; 1-D variables land as ordinary columns.
 ```
