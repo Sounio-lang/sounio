@@ -43,6 +43,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.module-closure-truth | repo_only | docs/architecture/module-closure-truth.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.phase2-hir-generation | repo_only | docs/architecture/PHASE2_HIR_GENERATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.scientific-core | repo_only | docs/architecture/scientific-core.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.second-order-compilation | repo_only | docs/architecture/second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.semantic-contracts | repo_only | docs/architecture/semantic-contracts.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.soir-reference | repo_only | docs/architecture/SOIR_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.truth-frontier | repo_only | docs/architecture/truth-frontier.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -257,6 +258,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.decisions.adr-004-capacity-guards-over-silent-corruption | repo_only | docs/decisions/adr-004-capacity-guards-over-silent-corruption.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-005-algebra-keyword-compiler-infrastructure | repo_only | docs/decisions/adr-005-algebra-keyword-compiler-infrastructure.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-006-fixed-point-trust-anchor | repo_only | docs/decisions/adr-006-fixed-point-trust-anchor.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-007-second-order-compilation | repo_only | docs/decisions/adr-007-second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.readme | repo_only | docs/decisions/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.epistemic-tensor-core-gum-turing | repo_only | docs/design/EPISTEMIC_TENSOR_CORE_GUM_TURING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.gpu-rendering-roadmap | repo_only | docs/design/gpu_rendering_roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -402,10 +404,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.ui-type-deignore-candidates | historical | docs/implementation/UI_TYPE_DEIGNORE_CANDIDATES.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.epistemic-numeric-value | repo_only | docs/internal/concepts/epistemic-numeric-value.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.explicit-discharge | repo_only | docs/internal/concepts/explicit-discharge.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.nonassociative-order | repo_only | docs/internal/concepts/nonassociative-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.second-order-compilation | repo_only | docs/internal/concepts/second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.semantic-lane-contract | repo_only | docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.zero-provenance | repo_only | docs/internal/concepts/zero-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.ci-watch-contract | repo_only | docs/internal/coordination/CI_WATCH_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -559,6 +563,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.preprint.rapamycin-des-combo-outline | repo_only | docs/preprint/rapamycin_des_combo_outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-meta-analysis | repo_only | docs/proposals/epistemic-meta-analysis.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-workflows | repo_only | docs/proposals/epistemic-workflows.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.proposals.native-heap-allocation-2026-07-12 | repo_only | docs/proposals/NATIVE_HEAP_ALLOCATION_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.nma-nonassociative-algebra-note | repo_only | docs/proposals/nma_nonassociative_algebra_note.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.pbpk-osp-interop-roadmap | repo_only | docs/proposals/pbpk-osp-interop-roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn.api.comparison-guide | repo_only | docs/qnn/api/COMPARISON_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

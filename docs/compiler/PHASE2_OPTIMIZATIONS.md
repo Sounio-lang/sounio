@@ -7,6 +7,7 @@ validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.phase2-optimizations
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
