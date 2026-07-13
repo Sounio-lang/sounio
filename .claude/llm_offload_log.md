@@ -2637,3 +2637,7 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 
 ## 2026-07-13 — math-review: stats::densities (direct pdf/cdf/pmf)
 - File: `stdlib/stats/densities.sio` (new). Direct-value pdf/cdf/pmf for normal, exponential, gamma, beta, lognormal, uniform, poisson, binomial, geometric. Provider: xAI/Grok 4.3 = **PASS** — all densities, all CDFs (gamma via igamma_lower, poisson via igamma_upper, binomial via ibeta), the robust de_exp/de_ln/de_sqrt, and edge handling verified. Complements prob::distributions (log-densities) and adds the missing binomial/lognormal/geometric.
+
+## 2026-07-13 — math-review: stats::bayes_conjugate
+- File: `stdlib/stats/bayes_conjugate.sio` (new). Beta-Binomial + Normal-Normal conjugate updates with credible intervals. Provider: xAI/Grok 4.3 = **PASS** — conjugate update formulas, posterior moments, Normal-Normal precision/mean derivation, and credible-interval construction (Beta quantiles by bisection, normal z) all verified.
+- Survival module (stats::survival) attempted but REMOVED: blocked by a lean_single engine limitation — a module with several [128]/[256] arrays live across a nested function call (sv_sqrt / chi2_sf) produces a crashing binary. Documented in EPISTEMIC_SUITE.md and memory. medical::survival has a full private impl that hits the same wall.
