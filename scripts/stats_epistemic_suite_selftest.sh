@@ -17,6 +17,7 @@ MODULES=(
   stdlib/stats/power.sio
   stdlib/stats/qq_normal.sio
   stdlib/stats/anova.sio
+  stdlib/stats/reg_bands.sio
 )
 
 fail=0

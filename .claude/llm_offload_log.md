@@ -2596,3 +2596,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**. Verified SS_total=SS_between+SS_within; df=k-1, N-k; MS=SS/df; F=MS_b/MS_w; eta²=SS_between/SS_total; worked example (SS 10/30, F=2, eta²=0.25); f_sf p-value usage. All ANOVA identities correct.
 - Also this commit: root-cause fix for #841 in the suite's *_exp helpers. `ff_exp`/`st_exp`/`cs_exp` reflected negatives only at |x|>20, so exp(x) for x in ~[-20,-10] cancelled catastrophically (exp(-13.855)→98.7 instead of 9.6e-7) — the mechanism corrupting ibeta's prefix and the t/F tails. Fixed by reflecting negatives first + reducing positives to [0,2]; added a small-x series `ff_ibeta_smallx` so `f_sf` far-tail is accurate (f_sf(300,2,6)=9.7e-7). Root cause + one-line fix for special::beta::bt_exp commented on #841.
 - Raw review directory: /tmp/llm-offload-KBWjo9/.
+
+## 2026-07-13 — math-review: stats::reg_bands (regression confidence/prediction bands)
+- File: `stdlib/stats/reg_bands.sio` (new). OLS fit + confidence band (mean response), prediction band (new obs), and slope CI, using the Student-t multiplier at n-2 df.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified the classical Draper & Smith §1.4/§3.1 band formulas (df=n-2, correct t multiplier), the worked example (slope 0.6, sigma √0.8, r²=0.6, slope CI [-0.30,1.50], conf/pred half at x̄ = 1.273/3.118), edge guards, and rb_sqrt. "No mathematical errors or leaps."
+- Raw review directory: /tmp/llm-offload-XakelW/.

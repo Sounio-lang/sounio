@@ -243,6 +243,26 @@ hand-computed table (SS 10/30, F=2.0, p=0.178, η²=0.25) and a well-separated c
 (F≫1, p<0.001). The p-value uses the tail-hardened `f_sf` (accurate far tail — see
 below).
 
+### `stats::reg_bands` — linear regression with confidence & prediction bands
+
+A minimal OLS fit that carries the quantities the bands need (residual sigma, x̄,
+Sxx), plus the t-based confidence band (mean response) and prediction band (a new
+observation) at each x — what a calibration / dose-response figure needs.
+
+| Function | Signature |
+|---|---|
+| `reg_fit` | `pub fn reg_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> RegFit with Mut, Div, Panic` |
+| `reg_predict` | `pub fn reg_predict(fit: &RegFit, x: f64) -> f64` |
+| `reg_conf_band` | `pub fn reg_conf_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `reg_pred_band` | `pub fn reg_pred_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `reg_slope_ci` | `pub fn reg_slope_ci(fit: &RegFit, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+
+`RegFit` fields: `n`, `slope`, `intercept`, `sigma` (residual SE), `r2`, `xbar`,
+`sxx`, `df` (n-2). Band half-widths use `t·sigma·sqrt(1/n + (x-x̄)²/Sxx)`
+(confidence) and `t·sigma·sqrt(1 + 1/n + (x-x̄)²/Sxx)` (prediction). Validated
+against a hand-computed example (slope 0.6, sigma √0.8, slope CI [-0.30, 1.50],
+conf/pred half at x̄ = 1.273 / 3.118).
+
 ## Importing
 
 Import each tool directly from its module:
@@ -256,6 +276,7 @@ use stats::bland_altman::{BAResult, bland_altman}
 use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_onesample, n_for_power_twosample}
 use stats::qq_normal::{QQResult, qq_normal}
 use stats::anova::{AnovaResult, anova_oneway}
+use stats::reg_bands::{RegFit, reg_fit, reg_predict, reg_conf_band, reg_pred_band, reg_slope_ci}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
