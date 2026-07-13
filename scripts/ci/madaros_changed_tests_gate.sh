@@ -135,59 +135,6 @@ compiler_sha256="$(sha256sum "$MADAROS_BIN" | cut -d' ' -f1)"
 echo "MADAROS_CHANGED_TESTS_START count=${#selected[@]} event=$EVENT_NAME compiler=$MADAROS_BIN compiler_sha256=$compiler_sha256"
 printf 'test=%s\n' "${selected[@]}"
 
-diagnostic_parent="${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-$work_dir}"
-diagnostic_root="$diagnostic_parent/changed-tests"
-native_wrapper="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
-mkdir -p "$diagnostic_root"
-
-for index in "${!selected[@]}"; do
-  path="${selected[$index]}"
-  test_name="$(basename "$path" .sio)"
-  test_dir="$diagnostic_root/$(printf '%03d-%s' "$index" "$test_name")"
-  compile_log="$test_dir/compile.log"
-  run_log="$test_dir/run.log"
-  test_elf="$test_dir/test.elf"
-  mkdir -p "$test_dir"
-  rm -f "$compile_log" "$run_log" "$test_elf"
-
-  set +e
-  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
-  SOUNIO_SOUC_BIN="$MADAROS_BIN" \
-  SOUNIO_SOUC_RAW_MODE=modular \
-    "$native_wrapper" compile "$ROOT_DIR/$path" -o "$test_elf" \
-      >"$compile_log" 2>&1
-  compile_rc=$?
-  set -e
-
-  source_sha256="$(sha256sum "$ROOT_DIR/$path" | cut -d' ' -f1)"
-  elf_status=missing
-  elf_sha256=none
-  if [[ -s "$test_elf" ]]; then
-    elf_status=present
-    elf_sha256="$(sha256sum "$test_elf" | cut -d' ' -f1)"
-  fi
-  echo "MADAROS_CHANGED_TEST_DIAG_COMPILE test=$path source_sha256=$source_sha256 compile_rc=$compile_rc elf_status=$elf_status elf_sha256=$elf_sha256 log=$compile_log"
-
-  if [[ "$compile_rc" != "0" || "$elf_status" != "present" ]]; then
-    echo "MADAROS_CHANGED_TEST_DIAG_COMPILE_LOG_TAIL_BEGIN test=$path"
-    tail -n 40 "$compile_log" || true
-    echo "MADAROS_CHANGED_TEST_DIAG_COMPILE_LOG_TAIL_END test=$path"
-    continue
-  fi
-
-  chmod +x "$test_elf"
-  set +e
-  timeout 30 "$test_elf" >"$run_log" 2>&1
-  run_rc=$?
-  set -e
-  echo "MADAROS_CHANGED_TEST_DIAG_RUN test=$path run_rc=$run_rc log=$run_log"
-  if [[ "$run_rc" != "0" ]]; then
-    echo "MADAROS_CHANGED_TEST_DIAG_RUN_LOG_TAIL_BEGIN test=$path"
-    tail -n 40 "$run_log" || true
-    echo "MADAROS_CHANGED_TEST_DIAG_RUN_LOG_TAIL_END test=$path"
-  fi
-done
-
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_SOUC_RAW_MODE=modular \
 SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
