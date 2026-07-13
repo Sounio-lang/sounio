@@ -20,10 +20,30 @@ const sourceChecks = [
   {
     file: 'src/components/home/Hero.astro',
     mustContain: [
-      'assets/original-artworks/pappou_hero',
-      'assets/original-artworks/yiayia_hero',
-      '/assets/stamps/emblem_badge_monochrome_on_navy.png',
+      "import ZeroEventObservatory from './ZeroEventObservatory'",
+      'id="observatory-title"',
+      'Madaros v0.80.0',
     ],
+  },
+  {
+    file: 'src/components/home/PowerAtlas.astro',
+    mustContain: [
+      'id="power-atlas"',
+      '6,144',
+      'madaros_full_gate.sh',
+      '635b4cc95',
+    ],
+  },
+  {
+    file: 'src/pages/index.astro',
+    mustContain: [
+      "import PowerAtlas from '../components/home/PowerAtlas.astro'",
+      '<PowerAtlas locale={locale} />',
+    ],
+  },
+  {
+    file: 'src/components/common/Header.astro',
+    mustContain: ['/assets/sounio-logo.svg', 'Sounio'],
   },
   {
     file: 'src/components/common/Footer.astro',
