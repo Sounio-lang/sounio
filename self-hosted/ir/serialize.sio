@@ -6,7 +6,7 @@ use parser::ast::*
 use ir::ir::*
 use check::types::*
 //
-// SOIR v3 Binary Format:
+// SOIR v5 Binary Format:
 // ─────────────────────────
 // Header (8 bytes):
 //   - Magic: "SOIR" (0x534F4952 little-endian)
@@ -31,6 +31,7 @@ use check::types::*
 //   - compile_strategy: i64
 //   - prof_counter_id: i64
 //   - hyper_algebra_kind: i64 (v3+)
+//   - defining_module_id: i64 (v5+; older artifacts deserialize as UNKNOWN)
 //   - instrs: array of IrInstr
 //
 // IrInstr encoding (fixed-size, 128 bytes):
@@ -45,7 +46,7 @@ use check::types::*
 //   - arg_count: i64
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 4
+let SOIR_VERSION: i8 = 5
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -581,6 +582,12 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
         p = hyper_alg_pair.1
     }
 
+    if SOIR_VERSION >= 5 {
+        let defining_module_pair = write_i64(b, p, func.defining_module_id)
+        b = defining_module_pair.0
+        p = defining_module_pair.1
+    }
+
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
@@ -642,6 +649,13 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         p = hyper_alg_pair.1
     }
 
+    var defining_module_id: i64 = IR_DEFINING_MODULE_UNKNOWN
+    if version >= 5 {
+        let defining_module_pair = read_i64(buf, p)
+        defining_module_id = defining_module_pair.0
+        p = defining_module_pair.1
+    }
+
     // Read instructions
     var instrs: [IrInstr; 2048] = [ir_nop(); 2048]
     var j: i64 = 0
@@ -654,6 +668,7 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
 
     let func = IrFunction {
         name: name,
+        defining_module_id: defining_module_id,
         instrs: instrs,
         instr_count: instr_count,
         reg_count: reg_count,
@@ -4447,7 +4462,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
 
     let version = buf[4]
-    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != SOIR_VERSION {
+    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != 4 as i8 && version != SOIR_VERSION {
         return ir_empty_module()
     }
 
