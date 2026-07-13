@@ -2583,3 +2583,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**. Verified: ncp definitions (δ=|d|√n one-sample, |d|√(n/2) two-sample); shifted-t power formula; the pw_tcdf tail fallback (|x|>3 → normal_cdf, immaterial where power≈0/1); normal-closed-form sample-size guess + exact search; monotonicity; and the G*Power-validated test values (n≈34/64, power≈0.807/0.801).
 - Discovery during build: the direct-CF branch of special::beta::ibeta diverges at moderate a (df≈39), corrupting stats::student_t::t_two_tail / t_cdf for |t|≳4 — documented on issue #841 (new comment). power sidesteps it with the pw_tcdf normal-tail fallback; that trick is valid for power (tail ≈ 0/1) but NOT for p-values, so the root fix stays in special::beta.
 - Raw review directory: /tmp/llm-offload-DCHvg8/.
+
+## 2026-07-13 — math-review: stats::qq_normal (normal Q-Q / PPCC)
+- File: `stdlib/stats/qq_normal.sio` (new). Normal quantile-quantile plot coordinates + probability-plot correlation coefficient (PPCC).
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: Blom plotting position p_i=(i-0.375)/(n+0.25); z_i=Φ⁻¹(p_i); LS slope/intercept and PPCC = s_zx/√(s_zz·s_xx); unbiased sd; perfect/affine → PPCC=1; sorted-output + odd-n symmetry. "No mathematical content beyond the above."
+- Raw review directory: /tmp/llm-offload-vd9qdn/.

@@ -197,6 +197,32 @@ classic `d=0.5, power=0.80` needs `n≈34` (one-sample) / `n≈64` per group. Th
 shifted-t approximation is tight for `n ≳ 20` and slightly over-states power at
 very small `n`.
 
+### `stats::qq_normal` — normal quantile-quantile (probability) plot
+
+The visual normality diagnostic that pairs with the tests above: before a t-test
+or ANOVA, check the data (or residuals) are plausibly normal. Computes the Q-Q plot
+coordinates and the probability-plot correlation coefficient (PPCC) — near 1 for
+normal data, lower for skew/heavy tails.
+
+| Function | Signature |
+|---|---|
+| `qq_normal` | `pub fn qq_normal(data: &[f64; 256], n: i32, out_theoretical: &![f64; 256], out_sample: &![f64; 256]) -> QQResult with Mut, Div, Panic` |
+
+Uses Blom's plotting position `p_i = (i - 0.375)/(n + 0.25)` and `z_i = Φ⁻¹(p_i)`.
+`out_theoretical` receives the theoretical normal quantiles (plot x); `out_sample`
+receives the sorted sample (plot y).
+
+**Returns — `struct QQResult`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `n` | `i64` | sample size |
+| `ppcc` | `f64` | probability-plot correlation coefficient (~1 = normal) |
+| `slope` | `f64` | LS slope of sample on theoretical quantile (≈ SD) |
+| `intercept` | `f64` | LS intercept (≈ mean) |
+| `mean` | `f64` | sample mean |
+| `sd` | `f64` | sample standard deviation (n-1 basis) |
+
 ## Importing
 
 Import each tool directly from its module:
@@ -208,6 +234,7 @@ use stats::fisher_f::{VarRatioCI, f_pdf, f_cdf, f_sf, f_quantile, f_var_ratio_ci
 use stats::wilcoxon::{WilcoxonResult, wilcoxon_signed_rank, wilcoxon_one_sample}
 use stats::bland_altman::{BAResult, bland_altman}
 use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_onesample, n_for_power_twosample}
+use stats::qq_normal::{QQResult, qq_normal}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
