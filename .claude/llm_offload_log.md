@@ -2576,3 +2576,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
   - fisher_f: f_cdf/f_pdf vs A&S §26.6.1, quantile inversion x=d2·y/(d1·(1−y)), and the var-ratio duality F_{α/2}(ν1,ν2)=1/F_{1-α/2}(ν2,ν1) all verified; table critical values match. One [OVERREACH] note (not an error): the truncated ff_ln/ff_exp series are empirically adequate within test tolerances rather than proven to machine ε — same helper pattern used across the special modules; values match published F tables.
 - Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
 - Raw review dirs: chi_square /tmp/llm-offload-tQnWk2/, fisher_f /tmp/llm-offload-nuUrHI/.
+
+## 2026-07-13 — math-review: stats::power (power & sample size)
+- File: `stdlib/stats/power.sio` (new). Power and required sample size for one-sample/paired and two-sample t-tests via the shifted-t approximation.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: ncp definitions (δ=|d|√n one-sample, |d|√(n/2) two-sample); shifted-t power formula; the pw_tcdf tail fallback (|x|>3 → normal_cdf, immaterial where power≈0/1); normal-closed-form sample-size guess + exact search; monotonicity; and the G*Power-validated test values (n≈34/64, power≈0.807/0.801).
+- Discovery during build: the direct-CF branch of special::beta::ibeta diverges at moderate a (df≈39), corrupting stats::student_t::t_two_tail / t_cdf for |t|≳4 — documented on issue #841 (new comment). power sidesteps it with the pw_tcdf normal-tail fallback; that trick is valid for power (tail ≈ 0/1) but NOT for p-values, so the root fix stays in special::beta.
+- Raw review directory: /tmp/llm-offload-DCHvg8/.

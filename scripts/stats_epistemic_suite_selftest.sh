@@ -14,6 +14,7 @@ MODULES=(
   stdlib/stats/fisher_f.sio
   stdlib/stats/wilcoxon.sio
   stdlib/stats/bland_altman.sio
+  stdlib/stats/power.sio
 )
 
 fail=0

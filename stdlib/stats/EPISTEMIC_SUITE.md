@@ -175,6 +175,28 @@ the fixed normal factor 1.96, per Bland & Altman.
 | `n_outside` | `i64` | points beyond `[loa_lo, loa_hi]` |
 | `pct_outside` | `f64` | `100 · n_outside / n` |
 
+### `stats::power` — statistical power & sample size
+
+Power and required sample size for one-sample/paired and two-sample t-tests,
+using the *shifted-t* approximation to the non-central t power function (Cohen
+1988). `d` is Cohen's standardised effect size (mean difference / SD). Sample
+sizes are found by searching up from the normal-approximation closed form to the
+smallest `n` meeting the target power.
+
+| Function | Signature |
+|---|---|
+| `power_ttest_onesample` | `pub fn power_ttest_onesample(d: f64, n: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic` |
+| `power_ttest_twosample` | `pub fn power_ttest_twosample(d: f64, n_per_group: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic` |
+| `n_for_power_onesample` | `pub fn n_for_power_onesample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic` |
+| `n_for_power_twosample` | `pub fn n_for_power_twosample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic` |
+
+Power is returned in `[0, 1]`; sample sizes are `>= 2` (two-sample returns the
+size of **each** group), capped at 1 000 000. Validated against G*Power: one-sample
+`d=0.5, n=34` → power ≈ 0.807; two-sample `d=0.5, n=64/group` → ≈ 0.801; the
+classic `d=0.5, power=0.80` needs `n≈34` (one-sample) / `n≈64` per group. The
+shifted-t approximation is tight for `n ≳ 20` and slightly over-states power at
+very small `n`.
+
 ## Importing
 
 Import each tool directly from its module:
@@ -185,6 +207,7 @@ use stats::chi_square::{VarCI, chi2_pdf, chi2_cdf, chi2_sf, chi2_quantile, chi2_
 use stats::fisher_f::{VarRatioCI, f_pdf, f_cdf, f_sf, f_quantile, f_var_ratio_ci}
 use stats::wilcoxon::{WilcoxonResult, wilcoxon_signed_rank, wilcoxon_one_sample}
 use stats::bland_altman::{BAResult, bland_altman}
+use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_onesample, n_for_power_twosample}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
@@ -251,6 +274,7 @@ SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/chi_square.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/fisher_f.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/wilcoxon.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/bland_altman.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/power.sio
 ```
 
 Each command should print exactly `ALL PASS`. When running from outside the repo
