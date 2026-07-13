@@ -2543,3 +2543,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Local visual evidence reviewed before offload: `/tmp/sounio-proofrail-desktop-bridge.png`, `/tmp/sounio-proofrail-mobile-bridge.png`, and `/tmp/sounio-proofrail-desktop-top.png`.
 - Raw review directory: `/tmp/llm-offload-1taQ19/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio compile-refusal scene
+- File: `website/src/components/home/ProofMoment.astro`.
+- Task: adversarial review of the clinical proof moment upgrade from a plain code example into a measured-confidence refusal scene.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed that the `0.71` versus `0.82` visual and "no executable produced" outcome strengthen the clinical story without overclaiming.
+- Follow-up applied before commit: localized the new verdict strings for Greek, Chinese, and Japanese, and added tighter small-screen spacing/font safeguards for the code and verdict panels.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Local visual evidence reviewed before offload: `/tmp/sounio-refusal-desktop.png`, `/tmp/sounio-refusal-mobile.png`, and `/tmp/sounio-refusal-flow.png`.
+- Raw review directory: `/tmp/llm-offload-M6sL4X/`.
