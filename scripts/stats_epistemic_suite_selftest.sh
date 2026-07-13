@@ -21,6 +21,9 @@ MODULES=(
   stdlib/stats/correlation.sio
   stdlib/stats/kruskal_wallis.sio
   stdlib/stats/tukey.sio
+  stdlib/stats/chi2_independence.sio
+  stdlib/stats/effect_size.sio
+  stdlib/stats/proportion.sio
 )
 
 fail=0

@@ -300,6 +300,37 @@ integration of the defining double integral (no closed form). Validated against
 Harter's q tables: `q(0.05,3,10)=3.877`, `q(0.05,4,20)=3.958`, `q(0.05,3,∞)=3.314`
 to ~1e-2. (The double integral makes this the one slow module — ~10s.)
 
+### `stats::chi2_independence` — chi-squared test of independence
+
+`pub fn chi2_independence(table: &[f64; 256], r: i32, c: i32) -> ChiIndep with Mut, Div, Panic`
+— association in an r×c contingency table (row-major counts). `ChiIndep`: `chi2, df,
+p_value, n, cramers_v, min_expected`. Validated: 2×2 `[[20,30],[30,20]]` → χ²=4, p=0.0455,
+Cramér V=0.2.
+
+### `stats::effect_size` — standardised effect sizes
+
+| Function | Signature |
+|---|---|
+| `cohens_d` | `pub fn cohens_d(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, conf: f64) -> EffectSize with Mut, Div, Panic` |
+| `eta_squared_from_f` | `pub fn eta_squared_from_f(f: f64, df1: f64, df2: f64) -> f64` |
+
+Cohen's d + Hedges' g (bias-corrected) with SE and CI; `EffectSize`: `d, hedges_g,
+se, ci_lo, ci_hi, magnitude` (0 negligible … 3 large). Validated: d=−1.2649,
+g=−1.1425, 95% CI [−2.623, 0.093].
+
+### `stats::proportion` — proportion CIs and two-proportion test
+
+| Function | Signature |
+|---|---|
+| `wilson_ci` | `pub fn wilson_ci(k: i64, n: i64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `clopper_pearson_ci` | `pub fn clopper_pearson_ci(k: i64, n: i64, conf: f64) -> (f64, f64) with Mut, Div, Panic` |
+| `two_prop_z` | `pub fn two_prop_z(k1: i64, n1: i64, k2: i64, n2: i64) -> TwoPropResult with Mut, Div, Panic` |
+
+Wilson score and exact Clopper-Pearson intervals (the latter by bisection on the
+forward `ibeta`, avoiding an `ibeta_inv` upper-tail weakness), plus the pooled
+two-proportion z-test. Validated: Wilson 8/10 → [0.490, 0.943]; CP 8/10 →
+[0.444, 0.975]; 30/100 vs 20/100 → z=1.633, p=0.1025.
+
 ## Importing
 
 Import each tool directly from its module:
@@ -317,6 +348,9 @@ use stats::reg_bands::{RegFit, reg_fit, reg_predict, reg_conf_band, reg_pred_ban
 use stats::correlation::{CorrResult, SpearmanCorr, pearson, spearman}
 use stats::kruskal_wallis::{KWResult, kruskal_wallis}
 use stats::tukey::{tukey_q_crit, tukey_hsd, tukey_pair_p, tukey_q_cdf, q_range_cdf}
+use stats::chi2_independence::{ChiIndep, chi2_independence}
+use stats::effect_size::{EffectSize, cohens_d, eta_squared_from_f}
+use stats::proportion::{TwoPropResult, wilson_ci, clopper_pearson_ci, two_prop_z}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
