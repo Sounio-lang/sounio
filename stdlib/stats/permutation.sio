@@ -1,0 +1,88 @@
+// stdlib/stats/permutation.sio — two-sample permutation test (difference of means)
+//
+// A distribution-free test of whether two samples differ in location: it compares
+// the observed mean difference to the distribution of mean differences under all
+// random relabellings of the pooled data (approximated by `iters` random
+// permutations). No normality assumption.
+//
+//   perm_test_means(x, nx, y, ny, iters, seed) -> p_value   (two-sided)
+//
+// p = (1 + #{ |Δ*| >= |Δ_obs| }) / (iters + 1)   (add-one, so p is never 0).
+//
+// The one-sample / mean bootstrap CI already lives in
+// stats::epistemic::bootstrap (bootstrap_mean_ci, incl. BCa); this adds the
+// permutation test, which was missing.
+//
+// Uses a small self-contained LCG (fully inlined, so the routine makes no nested
+// call while its pooled array is live — issue #852). Deterministic given `seed`.
+//
+// References:
+//   Fisher (1935) "The Design of Experiments"; Ernst (2004) "Permutation methods"
+//   Good (2005) "Permutation, Parametric, and Bootstrap Tests of Hypotheses"
+
+module stats::permutation
+
+/// Two-sample permutation test on the difference of means.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes (nx+ny <= 256);
+///             iters — number of random permutations (e.g. 1000); seed — RNG seed.
+/// Retorno: two-sided p-value (add-one corrected, in (0,1]).
+/// Complexidade: O(iters · (nx+ny)).
+/// Referências: Fisher (1935); Ernst (2004).
+pub fn perm_test_means(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, iters: i32, seed: i64) -> f64 with Mut, Div, Panic {
+    if nx < 1 || ny < 1 { return 1.0 }
+    let nxf = nx as f64
+    let nyf = ny as f64
+
+    // observed |mean(x) - mean(y)|
+    var sx = 0.0
+    var i = 0
+    while i < nx { sx = sx + x[i as usize]; i = i + 1 }
+    var sy = 0.0
+    var j = 0
+    while j < ny { sy = sy + y[j as usize]; j = j + 1 }
+    var obs = sx / nxf - sy / nyf
+    if obs < 0.0 { obs = 0.0 - obs }
+
+    // pool the data
+    let n = nx + ny
+    var pool: [f64; 256] = [0.0; 256]
+    var k = 0
+    while k < nx { pool[k as usize] = x[k as usize]; k = k + 1 }
+    var q = 0
+    while q < ny { pool[(nx + q) as usize] = y[q as usize]; q = q + 1 }
+
+    // LCG state (kept in [0, 2^31))
+    var state = seed
+    if state < 0 { state = 0 - state }
+    state = state % 2147483648
+
+    let tol = 1.0e-12
+    var count = 0
+    var it = 0
+    while it < iters {
+        // Fisher-Yates shuffle of pool[0..n] with the inline LCG
+        var a = n - 1
+        while a >= 1 {
+            state = (state * 1103515245 + 12345) % 2147483648
+            let b = (state % ((a + 1) as i64)) as i32
+            let tmp = pool[a as usize]
+            pool[a as usize] = pool[b as usize]
+            pool[b as usize] = tmp
+            a = a - 1
+        }
+        // mean of first nx vs the remaining ny
+        var s1 = 0.0
+        var u = 0
+        while u < nx { s1 = s1 + pool[u as usize]; u = u + 1 }
+        var s2 = 0.0
+        var v = 0
+        while v < ny { s2 = s2 + pool[(nx + v) as usize]; v = v + 1 }
+        var d = s1 / nxf - s2 / nyf
+        if d < 0.0 { d = 0.0 - d }
+        if d >= obs - tol { count = count + 1 }
+        it = it + 1
+    }
+
+    return ((count + 1) as f64) / ((iters + 1) as f64)
+}
