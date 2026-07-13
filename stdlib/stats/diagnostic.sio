@@ -1,0 +1,138 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/diagnostic.sio — diagnostic test accuracy from a 2×2 table
+//
+// The standard metrics for evaluating a binary classifier / diagnostic test
+// against a gold standard, from the confusion counts TP/FP/FN/TN:
+//
+//   diag_metrics(tp, fp, fn, tn, conf) -> DiagResult
+//
+//   sensitivity = TP/(TP+FN)      specificity = TN/(TN+FP)
+//   PPV = TP/(TP+FP)              NPV = TN/(TN+FN)
+//   LR+ = sens/(1−spec)          LR− = (1−sens)/spec
+//   accuracy = (TP+TN)/N         Youden's J = sens + spec − 1
+//
+// Sensitivity, specificity, PPV and NPV each come with a Wilson score confidence
+// interval (stats::proportion).
+//
+// Pure Sounio; the only dependency is stats::proportion::wilson_ci.
+//
+// References:
+//   Altman & Bland (1994) "Diagnostic tests", BMJ series
+//   Youden (1950) "Index for rating diagnostic tests"
+
+module stats::diagnostic
+
+use stats::proportion::{wilson_ci}
+
+pub struct DiagResult {
+    pub sensitivity: f64,
+    pub specificity: f64,
+    pub ppv: f64,
+    pub npv: f64,
+    pub accuracy: f64,
+    pub lr_pos: f64,      // positive likelihood ratio
+    pub lr_neg: f64,      // negative likelihood ratio
+    pub youden_j: f64,    // sens + spec - 1
+    pub sens_lo: f64,     // Wilson CI on sensitivity
+    pub sens_hi: f64,
+    pub spec_lo: f64,     // Wilson CI on specificity
+    pub spec_hi: f64,
+}
+
+/// Diagnostic accuracy metrics from the confusion counts.
+///
+/// Parâmetros: tp, fp, fn_, tn — counts; conf — CI level for sens/spec.
+/// Retorno: DiagResult (sens, spec, PPV, NPV, accuracy, LR±, Youden J, Wilson CIs).
+/// Referências: Altman & Bland (1994).
+pub fn diag_metrics(tp: i64, fp: i64, fn_: i64, tn: i64, conf: f64) -> DiagResult with Mut, Div, Panic {
+    let tpf = tp as f64
+    let fpf = fp as f64
+    let fnf = fn_ as f64
+    let tnf = tn as f64
+    let total = tpf + fpf + fnf + tnf
+
+    var sens = 0.0
+    if tpf + fnf > 0.0 { sens = tpf / (tpf + fnf) }
+    var spec = 0.0
+    if tnf + fpf > 0.0 { spec = tnf / (tnf + fpf) }
+    var ppv = 0.0
+    if tpf + fpf > 0.0 { ppv = tpf / (tpf + fpf) }
+    var npv = 0.0
+    if tnf + fnf > 0.0 { npv = tnf / (tnf + fnf) }
+    var acc = 0.0
+    if total > 0.0 { acc = (tpf + tnf) / total }
+
+    var lr_pos = 0.0
+    if spec < 1.0 { lr_pos = sens / (1.0 - spec) }
+    var lr_neg = 0.0
+    if spec > 0.0 { lr_neg = (1.0 - sens) / spec }
+
+    let (slo, shi) = wilson_ci(tp, tp + fn_, conf)
+    let (plo, phi) = wilson_ci(tn, tn + fp, conf)
+
+    return DiagResult {
+        sensitivity: sens, specificity: spec, ppv: ppv, npv: npv, accuracy: acc,
+        lr_pos: lr_pos, lr_neg: lr_neg, youden_j: sens + spec - 1.0,
+        sens_lo: slo, sens_hi: shi, spec_lo: plo, spec_hi: phi,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// TP=90, FP=20, FN=10, TN=80. sens=0.9, spec=0.8, PPV=90/110=0.818182,
+// NPV=80/90=0.888889, acc=170/200=0.85, LR+=4.5, LR-=0.125, J=0.7.
+fn test_metrics() -> bool with IO, Mut, Div, Panic {
+    let r = diag_metrics(90, 20, 10, 80, 0.95)
+    var ok = true
+    ok = check(1, approx(r.sensitivity, 0.9, 1.0e-12)) && ok
+    ok = check(2, approx(r.specificity, 0.8, 1.0e-12)) && ok
+    ok = check(3, approx(r.ppv, 0.818182, 1.0e-5)) && ok
+    ok = check(4, approx(r.npv, 0.888889, 1.0e-5)) && ok
+    ok = check(5, approx(r.accuracy, 0.85, 1.0e-12)) && ok
+    ok = check(6, approx(r.lr_pos, 4.5, 1.0e-9)) && ok
+    ok = check(7, approx(r.lr_neg, 0.125, 1.0e-9)) && ok
+    ok = check(8, approx(r.youden_j, 0.7, 1.0e-12)) && ok
+    // Wilson CI on sensitivity (90/100) brackets 0.9 and is in (0,1)
+    ok = check(9, r.sens_lo > 0.0 && r.sens_lo < 0.9 && r.sens_hi > 0.9 && r.sens_hi < 1.0) && ok
+    return ok
+}
+
+// perfect test: TP=50, FN=0, TN=50, FP=0 -> sens=spec=1, J=1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    let r = diag_metrics(50, 0, 0, 50, 0.95)
+    var ok = true
+    ok = check(20, approx(r.sensitivity, 1.0, 1.0e-12)) && ok
+    ok = check(21, approx(r.specificity, 1.0, 1.0e-12)) && ok
+    ok = check(22, approx(r.youden_j, 1.0, 1.0e-12)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_metrics() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

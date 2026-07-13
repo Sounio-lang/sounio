@@ -2641,3 +2641,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 ## 2026-07-13 — math-review: stats::bayes_conjugate
 - File: `stdlib/stats/bayes_conjugate.sio` (new). Beta-Binomial + Normal-Normal conjugate updates with credible intervals. Provider: xAI/Grok 4.3 = **PASS** — conjugate update formulas, posterior moments, Normal-Normal precision/mean derivation, and credible-interval construction (Beta quantiles by bisection, normal z) all verified.
 - Survival module (stats::survival) attempted but REMOVED: blocked by a lean_single engine limitation — a module with several [128]/[256] arrays live across a nested function call (sv_sqrt / chi2_sf) produces a crashing binary. Documented in EPISTEMIC_SUITE.md and memory. medical::survival has a full private impl that hits the same wall.
+
+## 2026-07-13 — math-review: diagnostic + cohen_kappa + roc
+- Files: `stdlib/stats/{diagnostic,cohen_kappa,roc}.sio` (new). Provider: xAI/Grok 4.3.
+- **diagnostic = PASS**: sens/spec/PPV/NPV/LR±/accuracy/Youden, Wilson CIs. "No errors or leaps."
+- **roc = PASS**: AUC=(wins+0.5·ties)/(n_pos·n_neg), Hanley-McNeil q1/q2/variance, CI clipping, roc_point TPR/FPR. "All verified."
+- **cohen_kappa = PASS on formulas** (κ=(po-pe)/(1-pe), weighted linear/quadratic, Landis-Koch). One **[TIGHTENABLE] was a legitimate caveat** (unlike the previous two reviewer false-flags): the Fleiss SE is exact for unweighted kappa but only approximate for weighted — documented in the module and the weighted fn doc; the kappa value itself is exact for both.
