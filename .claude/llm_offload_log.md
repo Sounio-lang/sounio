@@ -2602,3 +2602,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
 - Provider: xAI/Grok 4.3 = **PASS**. Verified the classical Draper & Smith §1.4/§3.1 band formulas (df=n-2, correct t multiplier), the worked example (slope 0.6, sigma √0.8, r²=0.6, slope CI [-0.30,1.50], conf/pred half at x̄ = 1.273/3.118), edge guards, and rb_sqrt. "No mathematical errors or leaps."
 - Raw review directory: /tmp/llm-offload-XakelW/.
+
+## 2026-07-13 — math-review: special::beta bt_exp root-cause fix (#841)
+- File: `stdlib/special/beta.sio`. Fixed `bt_exp` to reflect negatives first + reduce positives to [0,2] (was: 28-term Taylor on [-20,20], catastrophic cancellation for x∈~[-20,-10]). This was the root of #841 — the incomplete-beta prefix `exp(log_prefix)` landed in the bad range for small x / large a, so `ibeta`/`ibeta_inv` and the t/F/chi2 tails returned garbage.
+- Provider: xAI/Grok 4.3 = **PASS**. Confirmed bt_exp reflection + Taylor + halving correct, bt_ln/bt_lgamma/Lentz CF/ibeta prefix+symmetry/ibeta_inv Newton all sound; one [TIGHTENABLE] comment mislabel ("Wilson-Hilferty" → plain normal approx) — corrected in this commit.
+- Verification: adversarial grid (analytic identities I_x(1,b)/I_x(a,1)/I_x(0.5,0.5), reflection, extremes a=19.5/50000/0.5) ALL PASS; t_two_tail(4,39)=2.7e-4 and (6,39)≈1e-6 (were 20.9 / 2760); ibeta_inv round-trips at a=0.5 and a=1000 now correct; extended tests/stdlib/special/test_beta.sio (14 cases) exit 0; full stats suite ALL GREEN; pre-existing prob::beta e2e failure unrelated (fails before and after).
+- Raw review directory: /tmp/llm-offload-ijJpQN/.
