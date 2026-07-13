@@ -9,15 +9,15 @@
 // This is the self-contained alternative to the `image::ffi` libpng/stb path.
 //
 // Pixel format: each `u32` in `Image.pixels` is 0x00RRGGBB (top byte ignored).
-// Size bound: `Image` caps at 262144 pixels (512x512).
+// Size bound: `Image` caps at 1000000 pixels (up to ~1200x800; width<=1200).
 
 module image::pure::png
 
 use image::pure::types::{Image}
 
-struct PngBuf { data: [i8; 800000], len: i64 }
-struct BitOut { data: [i8; 800000], len: i64, acc: i64, nbits: i64 }
-struct Hash { head: [i64; 32768], prev: [i64; 800000] }
+struct PngBuf { data: [i8; 3000000], len: i64 }
+struct BitOut { data: [i8; 3000000], len: i64, acc: i64, nbits: i64 }
+struct Hash { head: [i64; 32768], prev: [i64; 3000000] }
 struct Huff { len: [i64; 288], code: [i64; 288] }
 struct Match { len: i64, dist: i64 }
 struct LC { sym: i64, xb: i64, xval: i64 }
@@ -307,7 +307,7 @@ fn lz_tokenize(raw: &PngBuf, n: i64, hh: &!Hash, mode: i64, fr: &!Freqs,
 // ---- one dynamic-Huffman DEFLATE block over raw[0..raw.len] -----------------
 fn deflate_dynamic(out: &!BitOut, raw: &PngBuf) with Mut, Div, Panic {
     let n = (*raw).len
-    var hash = Hash { head: [0; 32768], prev: [0; 800000] }
+    var hash = Hash { head: [0; 32768], prev: [0; 3000000] }
     var fr = Freqs { ll: [0; 288], d: [0; 288] }
     var huff_ll = Huff { len: [0; 288], code: [0; 288] }
     var huff_d = Huff { len: [0; 288], code: [0; 288] }
@@ -424,7 +424,7 @@ fn paeth(a: i64, b: i64, c: i64) -> i64 with Mut {
 }
 
 // One filtered byte for filter type f at row index i (bpp = 3).
-fn filt_byte(cur: &[i64; 1536], prev: &[i64; 1536], i: i64, f: i64) -> i64 with Mut, Panic, Div {
+fn filt_byte(cur: &[i64; 3600], prev: &[i64; 3600], i: i64, f: i64) -> i64 with Mut, Panic, Div {
     let a = if i >= 3 { cur[(i - 3) as usize] } else { 0 }
     let up = prev[i as usize]
     let c = if i >= 3 { prev[(i - 3) as usize] } else { 0 }
@@ -441,8 +441,8 @@ fn build_filtered_raw(img: &Image, adaptive: i64, raw: &!PngBuf) with Mut, Div, 
     let w = img.width as i64
     let h = img.height as i64
     let rowlen = w * 3
-    var cur: [i64; 1536] = [0; 1536]
-    var prev: [i64; 1536] = [0; 1536]
+    var cur: [i64; 3600] = [0; 3600]
+    var prev: [i64; 3600] = [0; 3600]
     var y = 0
     while y < h {
         var x = 0
@@ -497,16 +497,18 @@ fn adler32(raw: &PngBuf) -> i64 with Mut, Div, Panic {
 pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic {
     let w = img.width as i64
     let h = img.height as i64
-    if w <= 0 || h <= 0 { return false }
+    // width is bounded by the filter row buffers ([i64; 3600] = 512*3); wider
+    // images would silently overflow them, so refuse rather than corrupt.
+    if w <= 0 || h <= 0 || w > 1200 { return false }
 
     // Try adaptive filtering and no filtering; DEFLATE both and keep the smaller.
     // (Adaptive helps smooth gradients hugely but can hurt LZ-matchable content.)
-    var raw_a = PngBuf { data: [0; 800000], len: 0 }
-    var raw_n = PngBuf { data: [0; 800000], len: 0 }
+    var raw_a = PngBuf { data: [0; 3000000], len: 0 }
+    var raw_n = PngBuf { data: [0; 3000000], len: 0 }
     build_filtered_raw(img, 1, &!raw_a)
     build_filtered_raw(img, 0, &!raw_n)
-    var bo_a = BitOut { data: [0; 800000], len: 0, acc: 0, nbits: 0 }
-    var bo_n = BitOut { data: [0; 800000], len: 0, acc: 0, nbits: 0 }
+    var bo_a = BitOut { data: [0; 3000000], len: 0, acc: 0, nbits: 0 }
+    var bo_n = BitOut { data: [0; 3000000], len: 0, acc: 0, nbits: 0 }
     deflate_dynamic(&!bo_a, &raw_a)
     deflate_dynamic(&!bo_n, &raw_n)
 
@@ -519,7 +521,7 @@ pub fn png_write(filename: string, img: &Image) -> bool with IO, Mut, Div, Panic
     let use_deflate = best_deflate < raw_len
 
     // assemble PNG
-    var png = PngBuf { data: [0; 800000], len: 0 }
+    var png = PngBuf { data: [0; 3000000], len: 0 }
     put(&!png, 137); put(&!png, 80); put(&!png, 78); put(&!png, 71)
     put(&!png, 13); put(&!png, 10); put(&!png, 26); put(&!png, 10)
     put_be32(&!png, 13)
