@@ -2534,3 +2534,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Local visual evidence reviewed before offload: `/tmp/sounio-hardreset-desktop-final-clean.png` and `/tmp/sounio-hardreset-mobile-final-clean.png`.
 - Raw review directory: `/tmp/llm-offload-0ebFGx/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio homepage evidence rail
+- File: `website/src/components/home/ManifestoPulse.astro`.
+- Task: adversarial review of the immediate post-hero manifesto/evidence bridge, checking whether the homepage now proves scale without becoming a dashboard or widening public claims.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed that the clinical, proof, and self-hosting receipts add credible substance while preserving the gold/mono Sounio identity.
+- Follow-up applied before commit: restored Portuguese diacritics and reduced the repeated card minimum height from `15.5rem` to `14rem`.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Local visual evidence reviewed before offload: `/tmp/sounio-proofrail-desktop-bridge.png`, `/tmp/sounio-proofrail-mobile-bridge.png`, and `/tmp/sounio-proofrail-desktop-top.png`.
+- Raw review directory: `/tmp/llm-offload-1taQ19/`.
