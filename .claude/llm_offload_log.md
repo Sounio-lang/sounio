@@ -2518,3 +2518,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**; it confirmed the gate, documentation, resolved execution blocker, and `parity_claim=false` boundary are internally consistent.
 - Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
 - Raw review directory: `/tmp/llm-offload-sZlKAw/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio homepage brand correction
+- Files: `website/src/components/home/Hero.astro`, `PowerAtlas.astro`, `SystemAtlas.astro`, `ZeroEventObservatory.css`, `ZeroEventObservatory.tsx`, and `website/src/pages/index.astro`.
+- Task: adversarial review of the public homepage correction after the living-observatory redesign drifted away from the Sounio visual identity.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed that the navy/gold palette, Greek temple artwork, logo emblem, and epistemic/scientific tone were restored without new overclaims.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Local visual evidence reviewed before offload: `/tmp/sounio-brand-desktop-v4.png` and `/tmp/sounio-brand-mobile-v4.png`.
+- Raw review directory: `/tmp/llm-offload-KKugdK/`.

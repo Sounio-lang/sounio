@@ -25,7 +25,7 @@ const traces: ZeroTrace[] = [
     id: 'absent',
     en: 'Absent observation',
     pt: 'Observação ausente',
-    color: '#51c7c8',
+    color: '#D6B35A',
     witness: 'ZE_ABSENT',
     detailEn: 'No observation was made. The zero is not a measurement.',
     detailPt: 'Nenhuma observação foi feita. O zero não é uma medição.',
@@ -34,7 +34,7 @@ const traces: ZeroTrace[] = [
     id: 'cancelled',
     en: 'Cancellation',
     pt: 'Cancelamento',
-    color: '#62a7f2',
+    color: '#EBD6A2',
     witness: 'ZE_CANCELLED',
     detailEn: 'Non-zero terms cancelled while their provenance remained distinct.',
     detailPt: 'Termos não nulos se cancelaram, mantendo proveniências distintas.',
@@ -43,7 +43,7 @@ const traces: ZeroTrace[] = [
     id: 'annihilated',
     en: 'Annihilation',
     pt: 'Aniquilação',
-    color: '#9f86ec',
+    color: '#B99B4A',
     witness: 'ZE_ANNIHILATED',
     detailEn: 'The computation produced zero through an annihilating operation.',
     detailPt: 'A computação produziu zero por uma operação aniquiladora.',
@@ -52,7 +52,7 @@ const traces: ZeroTrace[] = [
     id: 'resolution',
     en: 'Below resolution',
     pt: 'Abaixo da resolução',
-    color: '#e0b65a',
+    color: '#2BA6B3',
     witness: 'ZE_SUBRESOLUTION',
     detailEn: 'The signal exists but falls below the declared measurement resolution.',
     detailPt: 'O sinal existe, mas está abaixo da resolução de medição declarada.',
@@ -61,7 +61,7 @@ const traces: ZeroTrace[] = [
     id: 'rounded',
     en: 'Rounded to zero',
     pt: 'Arredondado a zero',
-    color: '#49b8a8',
+    color: '#7BA7B5',
     witness: 'ZE_ROUNDED',
     detailEn: 'A representable non-zero value became zero under explicit rounding.',
     detailPt: 'Um valor não nulo representável virou zero por arredondamento explícito.',
@@ -70,7 +70,7 @@ const traces: ZeroTrace[] = [
     id: 'gated',
     en: 'Confidence gated',
     pt: 'Bloqueado por confiança',
-    color: '#5d8fd9',
+    color: '#C9B37A',
     witness: 'ZE_GATED',
     detailEn: 'A decision boundary suppressed a value whose confidence was insufficient.',
     detailPt: 'Um limite de decisão suprimiu um valor com confiança insuficiente.',
@@ -79,7 +79,7 @@ const traces: ZeroTrace[] = [
     id: 'unknown',
     en: 'Unknown origin',
     pt: 'Origem desconhecida',
-    color: '#9caec0',
+    color: '#8C9AA8',
     witness: 'ZE_UNKNOWN',
     detailEn: 'The origin cannot be reconstructed, so the uncertainty remains explicit.',
     detailPt: 'A origem não pode ser reconstruída, então a incerteza permanece explícita.',
@@ -119,7 +119,7 @@ export default function ZeroEventObservatory({ locale, traceLabel, traceTitle, c
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, width, height);
 
-      context.strokeStyle = 'rgba(111, 148, 173, 0.12)';
+      context.strokeStyle = 'rgba(214, 179, 90, 0.11)';
       context.lineWidth = 1;
       const gridX = Math.max(44, width / 10);
       const gridY = Math.max(42, height / 8);
@@ -184,12 +184,12 @@ export default function ZeroEventObservatory({ locale, traceLabel, traceTitle, c
       context.shadowBlur = 0;
 
       context.beginPath();
-      context.strokeStyle = 'rgba(115, 218, 218, 0.6)';
+      context.strokeStyle = 'rgba(214, 179, 90, 0.58)';
       context.lineWidth = 1;
       context.arc(endX, centerY, 15, 0, Math.PI * 2);
       context.stroke();
       context.beginPath();
-      context.strokeStyle = 'rgba(115, 218, 218, 0.24)';
+      context.strokeStyle = 'rgba(214, 179, 90, 0.22)';
       context.arc(endX, centerY, 27, 0, Math.PI * 2);
       context.stroke();
 
