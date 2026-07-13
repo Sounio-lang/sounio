@@ -4399,16 +4399,10 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 // whose Box POINTER is copied shallow by struct assignment. Left alone,
 // that pointer would keep referencing dep_box's soon-to-be-reset memory.
 //
-// Fix: before resetting the arena, walk the newly-appended function range
-// [old_fn_count, new_fn_count) and extract every call_args chain (bounded
-// to 8 args/call-site, matching the existing native_v2_collect_call_args /
-// tco_extract_call_args convention) into this BSS scratch buffer -- plain
-// fixed arrays, NOT Box-arena memory, so __arena_reset never touches them.
-// After the reset, rebuild fresh Box<IrRegList> chains from the scratch
-// buffer (landing in the just-freed, now-reused window) and write them
-// back into acc_box's instrs. If a module's call-arg sites exceed the
-// bounded capacity, the reset is skipped for that module only (strictly
-// correctness-preserving fallback -- just reclaims less memory).
+// The intended re-box path snapshots call_args into BSS scratch before reset.
+// The current bootstrap corrupts IrRegList heads during that move, so callers
+// conservatively reset only dependency windows with no live call chains. The
+// scratch machinery remains here for a future bootstrap-safe re-box repair.
 // ============================================================================
 let MF_AREBOX_CAP: i64 = 8192
 var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
@@ -4683,12 +4677,16 @@ fn module_frontend_lower_programs_array_direct_box(
                         // (source still valid), reset, then rebuild fresh in the
                         // freed window.
                         let dep_merge_new_fn_count = (*acc_box).fn_count
-                        let dep_arena_can_reset = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                        let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                        // The current bootstrap corrupts IrRegList heads while moving
+                        // them through the scratch re-box path. Preserve correctness by
+                        // reclaiming only dependency windows with no live call chains.
+                        let dep_arena_can_reset = dep_arena_scan_ok && MF_AREBOX_COUNT == 0
                         if dep_arena_can_reset {
                             __arena_reset(dep_arena_mark)
                             mf_arebox_apply(&! (*acc_box))
                         } else {
-                            print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                            print("lower_array: arena_reset_skipped (live call_args) module ")
                             print_int(i)
                             print("\n")
                         }
