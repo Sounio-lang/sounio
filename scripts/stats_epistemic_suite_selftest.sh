@@ -24,6 +24,8 @@ MODULES=(
   stdlib/stats/chi2_independence.sio
   stdlib/stats/effect_size.sio
   stdlib/stats/proportion.sio
+  stdlib/stats/densities.sio
+  stdlib/stats/bayes_conjugate.sio
 )
 
 fail=0
@@ -38,12 +40,14 @@ for m in "${MODULES[@]}"; do
 done
 
 # Smoke-run the integration demo (exit 0 = every tool composed cleanly).
-if "$SOUC" run examples/stats/epistemic_suite_demo.sio >/dev/null 2>&1; then
-  printf '  [PASS] examples/stats/epistemic_suite_demo.sio\n'
-else
-  printf '  [FAIL] examples/stats/epistemic_suite_demo.sio\n'
-  fail=1
-fi
+for demo in examples/stats/epistemic_suite_demo.sio examples/stats/full_analysis_report.sio; do
+  if "$SOUC" run "$demo" >/dev/null 2>&1; then
+    printf '  [PASS] %s\n' "$demo"
+  else
+    printf '  [FAIL] %s\n' "$demo"
+    fail=1
+  fi
+done
 
 if [ "$fail" -eq 0 ]; then
   echo "epistemic-statistics suite: ALL GREEN"

@@ -331,6 +331,37 @@ forward `ibeta`, avoiding an `ibeta_inv` upper-tail weakness), plus the pooled
 two-proportion z-test. Validated: Wilson 8/10 → [0.490, 0.943]; CP 8/10 →
 [0.444, 0.975]; 30/100 vs 20/100 → z=1.633, p=0.1025.
 
+### `stats::densities` — direct pdf / cdf / pmf
+
+Value (not log-density) API for the common distributions: `normal`, `exponential`,
+`gamma`, `beta`, `lognormal`, `uniform` (pdf/cdf) and `poisson`, `binomial`,
+`geometric` (pmf/cdf). CDFs use the special-function core (igamma/ibeta). Adds the
+binomial/lognormal/geometric missing from `prob::distributions` (which exposes
+log-densities). 25 cases validated (incl. pmf-sums-to-1).
+
+### `stats::bayes_conjugate` — conjugate Bayesian updates
+
+| Function | Signature |
+|---|---|
+| `beta_binomial` | `pub fn beta_binomial(a0: f64, b0: f64, k: i64, n: i64, conf: f64) -> BetaPosterior with Mut, Div, Panic` |
+| `normal_normal` | `pub fn normal_normal(m0: f64, v0: f64, xbar: f64, lik_var: f64, n_obs: i64, conf: f64) -> NormalPosterior with Mut, Div, Panic` |
+
+Exact posteriors with **credible intervals** (a probability statement about the
+parameter). Beta-Binomial → `BetaPosterior` (α, β, mean, mode, variance, credible
+interval via Beta quantiles); Normal-Normal (known likelihood variance) →
+`NormalPosterior`. Validated: Beta(1,1)+8/10 → Beta(9,3), mean 0.75, mode 0.8;
+N(0,1) prior + x̄=2 (n=4) → posterior 1.6 ± credible [0.723, 2.477].
+
+> **Not included: survival analysis.** A clean `stats::survival` (Kaplan-Meier +
+> Greenwood + log-rank) was attempted but is blocked by a `lean_single` engine
+> limitation — a module with several `[128]`/`[256]` arrays live across a nested
+> call produces a crashing binary. A full private implementation (with Cox PH /
+> Nelson-Aalen) exists in `medical::survival`; exposing it hits the same wall.
+> Tracked for the compiler lane.
+
+A capstone example, `examples/stats/full_analysis_report.sio`, drives seven of
+these modules over one dataset and prints a formatted report.
+
 ## Importing
 
 Import each tool directly from its module:
@@ -351,6 +382,8 @@ use stats::tukey::{tukey_q_crit, tukey_hsd, tukey_pair_p, tukey_q_cdf, q_range_c
 use stats::chi2_independence::{ChiIndep, chi2_independence}
 use stats::effect_size::{EffectSize, cohens_d, eta_squared_from_f}
 use stats::proportion::{TwoPropResult, wilson_ci, clopper_pearson_ci, two_prop_z}
+use stats::densities::{normal_pdf, gamma_pdf, beta_pdf, lognormal_pdf, poisson_pmf, binomial_pmf, geometric_pmf}
+use stats::bayes_conjugate::{BetaPosterior, NormalPosterior, beta_binomial, normal_normal}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

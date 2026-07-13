@@ -2634,3 +2634,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - **chi2_independence = PASS**: χ²=Σ(O-E)²/E with E=row·col/N, df=(r-1)(c-1), Cramér V, edge guards. "No content beyond verified identities."
 - **proportion = PASS**: Wilson centre/half, Clopper-Pearson via Beta quantiles, pooled two-prop z, edge handling, test constants. "No errors." (Impl note: CP uses bisection on forward ibeta because ibeta_inv(9,2,0.975) wrongly returns 1.0 — an upper-tail Newton overshoot, separate from #841.)
 - **effect_size = PASS on formulas** (Cohen d, Hedges J=1-3/(4N-9), SE, eta²=df1·F/(df1·F+df2), magnitude). One **[TIGHTENABLE] was a reviewer arithmetic error**: it claimed exact J·d≈-1.142631, but J·d=0.9032258·(-1.2649111)=-1.1425003 = the committed constant (test passes at 1e-5). Not a defect. (Second reviewer false-flag this session after co_ln.)
+
+## 2026-07-13 — math-review: stats::densities (direct pdf/cdf/pmf)
+- File: `stdlib/stats/densities.sio` (new). Direct-value pdf/cdf/pmf for normal, exponential, gamma, beta, lognormal, uniform, poisson, binomial, geometric. Provider: xAI/Grok 4.3 = **PASS** — all densities, all CDFs (gamma via igamma_lower, poisson via igamma_upper, binomial via ibeta), the robust de_exp/de_ln/de_sqrt, and edge handling verified. Complements prob::distributions (log-densities) and adds the missing binomial/lognormal/geometric.
+
+## 2026-07-13 — math-review: stats::bayes_conjugate
+- File: `stdlib/stats/bayes_conjugate.sio` (new). Beta-Binomial + Normal-Normal conjugate updates with credible intervals. Provider: xAI/Grok 4.3 = **PASS** — conjugate update formulas, posterior moments, Normal-Normal precision/mean derivation, and credible-interval construction (Beta quantiles by bisection, normal z) all verified.
+- Survival module (stats::survival) attempted but REMOVED: blocked by a lean_single engine limitation — a module with several [128]/[256] arrays live across a nested function call (sv_sqrt / chi2_sf) produces a crashing binary. Documented in EPISTEMIC_SUITE.md and memory. medical::survival has a full private impl that hits the same wall.
