@@ -2545,3 +2545,34 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Final Z.AI/GLM-5.2 review = **PASS** after the repair. It independently recomputed the threshold, checked the four-term assumption against the enforced sparse domain, and confirmed the XOR/sign exact product and finite measurement boundary.
 - Execution receipt: Madaros checks pass; default Madaros execution is **BLOCKED** with wrapper rc `1` after native driver write rc `12`; the passing execution witness is explicitly `lean_single`.
 - Raw reviews: `/tmp/llm-offload-Fdh6AM/` (first repaired module), `/tmp/llm-offload-WdnICv/` (adversarial test review), and `/tmp/llm-offload-2cc7Cc/` (final post-fix xAI+ZAI module review).
+## 2026-07-12 — math-review: stats::student_t distribution module
+- File: `stdlib/stats/student_t.sio` (new). Student's t pdf/cdf/sf/two-tail, quantile (inverse CDF), CI multiplier, and sample-mean CI.
+- Trigger: mandatory math-review (new numerical/statistical distribution — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: pdf = A&S 26.7.1; the identity I_x(df/2,1/2)=P(|T|>|t|) with x=df/(df+t²) and the symmetry-derived CDF/Sf; quantile inversion via `ibeta_inv`; Cornish–Fisher coefficients vs Fisher & Cornish (1960); the df>500 ibeta_inv guard and large-df normal fallback; all table/round-trip tolerances. Verdict: "NO MATHEMATICAL ERRORS FOUND."
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries; xAI is the §10-designated provider for math-review.
+- Upstream finding (separate issue): `special::beta::ibeta`/`ibeta_inv` return out-of-range values at extreme parameters (ibeta at a~5e4; ibeta_inv at a~1e3 and a=0.5). The module stays inside validated regions and routes around these; the beta breakdown is recorded here for a follow-up stdlib fix.
+- Raw review directory: `/tmp/llm-offload-Qy6zAD/`.
+
+## 2026-07-13 — math-review: stats::wilcoxon signed-rank test
+- File: `stdlib/stats/wilcoxon.sio` (new). Paired + one-sample Wilcoxon signed-rank with average-rank tie handling, tie-corrected variance, continuity correction, and rank-biserial effect size.
+- Trigger: mandatory math-review (new statistical test — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: E[W+]=n(n+1)/4; Var[W+]=n(n+1)(2n+1)/24 − Σ(t³−t)/48; continuity-corrected z; two-tailed p=2(1−Φ(|z|)); rank-biserial r=z/√n_eff; zero-dropping (Pratt zeros omitted) per textbook convention; and all four hand-computed worked examples reproduced exactly. Verdict: "No mathematical or numerical defects."
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review directory: `/tmp/llm-offload-E6JycL/`.
+
+## 2026-07-13 — math-review: stats::bland_altman agreement analysis
+- File: `stdlib/stats/bland_altman.sio` (new). Bias, SD of differences, 95% limits of agreement, Student-t CIs for the bias and each LoA, and points-outside count.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: bias=mean(A-B); sd on n-1 basis; LoA=bias±1.95996·sd; bias CI = bias ± t_{n-1}·sd/√n; Var(LoA)=sd²·(1/n+z²/(2(n-1))) with SE=√Var — all matching Bland & Altman (1986) exactly; both worked-example and outlier tests reproduce hand-computed values. Verdict: "all claims verified."
+- Consumes `stats::student_t::t_quantile` for the t multiplier (the CI piece the existing plot-only `viz::epiviz::epiviz_bland_altman` lacks).
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review directory: `/tmp/llm-offload-UUIRD9/`.
+
+## 2026-07-13 — math-review: stats::chi_square + stats::fisher_f distributions
+- Files: `stdlib/stats/chi_square.sio`, `stdlib/stats/fisher_f.sio` (new). Complete the distribution family (pdf/cdf/quantile + variance / variance-ratio CIs).
+- Trigger: mandatory math-review (new numerical distributions — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS** for both.
+  - chi_square: pdf incl. x=0 edge cases, Wilson-Hilferty+Newton quantile with overshoot damping, variance-CI index direction, and helper soundness all verified; table quantiles match A&S. "No mathematical content beyond the above."
+  - fisher_f: f_cdf/f_pdf vs A&S §26.6.1, quantile inversion x=d2·y/(d1·(1−y)), and the var-ratio duality F_{α/2}(ν1,ν2)=1/F_{1-α/2}(ν2,ν1) all verified; table critical values match. One [OVERREACH] note (not an error): the truncated ff_ln/ff_exp series are empirically adequate within test tolerances rather than proven to machine ε — same helper pattern used across the special modules; values match published F tables.
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review dirs: chi_square /tmp/llm-offload-tQnWk2/, fisher_f /tmp/llm-offload-nuUrHI/.
