@@ -1,0 +1,277 @@
+# Epistemic Statistics Suite
+
+## Overview
+
+The **epistemic statistics suite** is a cohesive, pure-Sounio, dependency-light
+toolkit for classical inferential statistics. It completes the stdlib
+distribution family — Student's t, chi-squared and Fisher-Snedecor F, each with
+a full `pdf` / `cdf` / `sf` / `quantile` surface — and adds two analyses that
+clinical and pharmacometric work routinely need but that the stdlib previously
+lacked: the non-parametric Wilcoxon signed-rank test and Bland-Altman
+method-agreement analysis. Every routine is written in Sounio with no FFI, no
+sampling dependency and no external solver: the analytic core rests only on the
+special-function modules (`special::beta`, `special::gamma`, `special::igamma`,
+`special::erf`). Every non-trivial routine returns an **explicit result struct**
+that carries the point estimate together with a confidence interval (or, for
+Wilcoxon, the test statistics, z, p-value and effect size), so callers receive
+auditable numbers rather than a bare scalar.
+
+## Modules
+
+### `stats::student_t` — Student's t-distribution
+
+Completes the t-distribution as a first-class object: density, cumulative,
+survival, an exact two-tailed tail probability, a general quantile (inverse CDF)
+for any `p`, a two-sided CI multiplier at any confidence level, and a confidence
+interval for a sample mean. The analytic core is the regularized incomplete beta
+and its inverse; the large-`df` path uses the normal quantile plus a
+Cornish-Fisher expansion.
+
+| Function | Signature |
+|---|---|
+| `t_pdf` | `pub fn t_pdf(t: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_cdf` | `pub fn t_cdf(t: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_sf` | `pub fn t_sf(t: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_two_tail` | `pub fn t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_quantile` | `pub fn t_quantile(p: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_ci_multiplier` | `pub fn t_ci_multiplier(conf: f64, df: f64) -> f64 with Mut, Div, Panic` |
+| `t_mean_ci` | `pub fn t_mean_ci(mean: f64, sd: f64, n: i64, conf: f64) -> TCI with Mut, Div, Panic` |
+
+`t_pdf` is the density; `t_cdf` the monotone `P(T <= t)`; `t_sf = 1 - cdf`;
+`t_two_tail` the two-sided `P(|T| > |t|)` a t-test needs; `t_quantile` the
+inverse CDF; `t_ci_multiplier(conf, df)` the `k` with `P(-k < T < k) = conf`
+(generalising the old 95%-only table in `optimize::uncertainty`).
+
+**Returns — `struct TCI`** (from `t_mean_ci`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mean` | `f64` | sample mean (interval centre) |
+| `lo` | `f64` | lower confidence bound |
+| `hi` | `f64` | upper confidence bound |
+| `mult` | `f64` | t-multiplier used |
+| `se` | `f64` | standard error of the mean |
+| `df` | `f64` | degrees of freedom (`n - 1`) |
+
+### `stats::chi_square` — chi-squared distribution
+
+Adds the density, survival and a general quantile (for any `p`, any `k`) on top
+of the existing exact CDF (`special::igamma::chi2_cdf`), plus the classic
+variance confidence interval. The quantile has no closed form: it uses the
+Wilson-Hilferty cube-root normal approximation as an initial guess, then
+Newton-Raphson on the exact CDF/pdf.
+
+| Function | Signature |
+|---|---|
+| `chi2_pdf` | `pub fn chi2_pdf(x: f64, k: f64) -> f64 with Mut, Div, Panic` |
+| `chi2_cdf` | re-exported exact form (`special::igamma::chi2_cdf`) |
+| `chi2_sf` | `pub fn chi2_sf(x: f64, k: f64) -> f64 with Mut, Div, Panic` |
+| `chi2_quantile` | `pub fn chi2_quantile(p: f64, k: f64) -> f64 with Mut, Div, Panic` |
+| `chi2_variance_ci` | `pub fn chi2_variance_ci(s2: f64, n: i64, conf: f64) -> VarCI with Mut, Div, Panic` |
+
+**Returns — `struct VarCI`** (from `chi2_variance_ci`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `s2` | `f64` | sample variance (point estimate) |
+| `lo` | `f64` | lower confidence bound on the population variance |
+| `hi` | `f64` | upper confidence bound |
+| `df` | `f64` | degrees of freedom (`n - 1`) |
+
+### `stats::fisher_f` — Fisher-Snedecor F-distribution
+
+Exposes the density, CDF, survival and a general quantile, plus the
+variance-ratio confidence interval used to compare two sample variances. Built
+on the regularized incomplete beta and its inverse:
+`F_cdf(x) = I_{d1·x/(d1·x+d2)}(d1/2, d2/2)`.
+
+| Function | Signature |
+|---|---|
+| `f_pdf` | `pub fn f_pdf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic` |
+| `f_cdf` | `pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic` |
+| `f_sf` | `pub fn f_sf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic` |
+| `f_quantile` | `pub fn f_quantile(p: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic` |
+| `f_var_ratio_ci` | `pub fn f_var_ratio_ci(s1_2: f64, n1: i64, s2_2: f64, n2: i64, conf: f64) -> VarRatioCI with Mut, Div, Panic` |
+
+Here `d1`/`d2` are the numerator/denominator degrees of freedom.
+
+**Returns — `struct VarRatioCI`** (from `f_var_ratio_ci`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ratio` | `f64` | `s1²/s2²` (point estimate) |
+| `lo` | `f64` | lower confidence bound on `σ1²/σ2²` |
+| `hi` | `f64` | upper confidence bound |
+| `d1` | `f64` | numerator dof (`n1 - 1`) |
+| `d2` | `f64` | denominator dof (`n2 - 1`) |
+
+### `stats::wilcoxon` — Wilcoxon signed-rank test
+
+The non-parametric counterpart to the paired t-test (and the paired analogue of
+the Mann-Whitney U in `stats::hypothesis`). It tests whether the median of the
+paired differences — or of a single sample about a hypothesised median — is
+zero, using only the ranks of the absolute differences, so it is robust to
+non-normal, heavy-tailed data. Exact-zero differences are discarded
+(the standard textbook convention; Pratt-style zeros are not implemented); tied
+magnitudes receive average ranks with the usual tie correction to the variance.
+
+| Function | Signature |
+|---|---|
+| `wilcoxon_signed_rank` | `pub fn wilcoxon_signed_rank(x: &[f64; 256], y: &[f64; 256], n: i32) -> WilcoxonResult with Mut, Div, Panic` |
+| `wilcoxon_one_sample` | `pub fn wilcoxon_one_sample(x: &[f64; 256], n: i32, median0: f64) -> WilcoxonResult with Mut, Div, Panic` |
+
+`wilcoxon_signed_rank` operates on paired differences `d_i = x_i - y_i`;
+`wilcoxon_one_sample` on `d_i = x_i - median0`. Inputs are fixed-size buffers of
+capacity 256 (`n <= 256`).
+
+**Returns — `struct WilcoxonResult`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `w_plus` | `f64` | sum of ranks with positive difference (W+) |
+| `w_minus` | `f64` | sum of ranks with negative difference (W-) |
+| `w_stat` | `f64` | classic statistic `W = min(W+, W-)` |
+| `n_eff` | `i64` | number of non-zero differences |
+| `z` | `f64` | normal-approximation z (continuity-corrected, signed) |
+| `p_value` | `f64` | two-tailed p-value |
+| `effect_r` | `f64` | rank-biserial effect size `r = z / sqrt(n_eff)` |
+
+The normal approximation is accurate for `n_eff` of roughly 15 or more; for very
+small samples an exact permutation p-value would be tighter (not implemented
+here).
+
+### `stats::bland_altman` — Bland-Altman agreement analysis
+
+The reusable statistics behind a Bland-Altman comparison of two measurement
+methods A and B on the same subjects: bias, SD of the differences, 95% limits of
+agreement, and — the part clinical papers require — the confidence intervals of
+the bias and of each limit, plus a count of points outside the limits. The CIs
+use the Student-t multiplier at `n - 1` degrees of freedom
+(`stats::student_t::t_quantile`).
+
+| Function | Signature |
+|---|---|
+| `bland_altman` | `pub fn bland_altman(a: &[f64; 256], b: &[f64; 256], n: i32, conf: f64) -> BAResult with Mut, Div, Panic` |
+
+`a`/`b` are the paired measurements (`3 <= n <= 256`); `conf` is the confidence
+level for the intervals (e.g. `0.95`). The limits of agreement themselves use
+the fixed normal factor 1.96, per Bland & Altman.
+
+**Returns — `struct BAResult`:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `n` | `i64` | number of paired observations |
+| `bias` | `f64` | mean difference `A - B` |
+| `sd_diff` | `f64` | sample SD of the differences |
+| `loa_lo` | `f64` | lower 95% limit of agreement |
+| `loa_hi` | `f64` | upper 95% limit of agreement |
+| `bias_ci_lo` | `f64` | CI of the bias, lower |
+| `bias_ci_hi` | `f64` | CI of the bias, upper |
+| `loa_lo_ci_lo` | `f64` | CI of the lower LoA, lower |
+| `loa_lo_ci_hi` | `f64` | CI of the lower LoA, upper |
+| `loa_hi_ci_lo` | `f64` | CI of the upper LoA, lower |
+| `loa_hi_ci_hi` | `f64` | CI of the upper LoA, upper |
+| `n_outside` | `i64` | points beyond `[loa_lo, loa_hi]` |
+| `pct_outside` | `f64` | `100 · n_outside / n` |
+
+## Importing
+
+Import each tool directly from its module:
+
+```sio
+use stats::student_t::{TCI, t_pdf, t_cdf, t_sf, t_two_tail, t_quantile, t_ci_multiplier, t_mean_ci}
+use stats::chi_square::{VarCI, chi2_pdf, chi2_cdf, chi2_sf, chi2_quantile, chi2_variance_ci}
+use stats::fisher_f::{VarRatioCI, f_pdf, f_cdf, f_sf, f_quantile, f_var_ratio_ci}
+use stats::wilcoxon::{WilcoxonResult, wilcoxon_signed_rank, wilcoxon_one_sample}
+use stats::bland_altman::{BAResult, bland_altman}
+```
+
+A worked end-to-end example that runs all five tools on one dataset lives at
+`examples/stats/epistemic_suite_demo.sio`.
+
+> **Note — no single-import facade yet.** A `mod.sio`-style `pub use` re-export
+> surface (`use stats::epistemic_suite::{…}`) is what `stdlib/CONVENTIONS.md` §2
+> prescribes, but the `lean_single` engine does not currently forward symbols
+> through a `pub use` re-export — imported identifiers resolve only against the
+> defining module. Until that compiler gap is closed, import from the five
+> modules directly as above.
+
+## Validated domain & limitations
+
+This section records the numerical validity ranges honestly. The distribution
+quantiles all ultimately depend on the special-function core, and that core has
+a documented breakdown at extreme parameters — surfaced here, not hidden.
+
+- **Student's t (`t_quantile`).** Validated for `df >= 2` (`df = 1`, the Cauchy
+  limit, is out of scope). The quantile uses the **exact incomplete-beta inverse
+  (`special::beta::ibeta_inv`) for `df <= 500`** and a **Cornish-Fisher expansion
+  off the normal quantile for `df > 500`**; the two paths agree to `< 1e-5`
+  across the crossover, and the split also routes around the extreme-parameter
+  breakdown of `ibeta_inv` observed at `a >= ~1000` (`df >= ~2000`). Inline
+  table cases run from `df = 2` up to `df = 100000`.
+
+- **chi-squared (`chi2_quantile`).** Uses the **Wilson-Hilferty cube-root normal
+  approximation as an initial guess, then Newton-Raphson on the exact CDF**
+  (`special::igamma::chi2_cdf = P(k/2, x/2)`), so accuracy tracks that routine.
+  Validated over the inline table for `k` from 1 to 10 and `p` from 0.05 to 0.95;
+  at very large `k` accuracy inherits the incomplete-gamma limits below.
+
+- **Fisher F (`f_quantile`).** A single `ibeta_inv` inversion, so it inherits
+  `special::beta::ibeta_inv`'s reliable range — roughly `d1/2, d2/2` in `[1, 250]`,
+  i.e. degrees of freedom up to about 500. Beyond that the underlying inverse is
+  known to break.
+
+- **Upstream special-function ceiling (`#841`).** `special::beta::ibeta` and
+  `ibeta_inv` return values outside `[0, 1]` or clamp to their floor for extreme
+  parameters (`ibeta` around `a ~ 5e4`; `ibeta_inv` around `a ~ 1e3` and at
+  `a = 0.5`). This is tracked as **issue `#841`**. Consequently **F, chi-squared
+  and t at very large degrees of freedom degrade** — the t module falls back to
+  the Cornish-Fisher path to stay inside the validated region, while F and the
+  raw `special::beta`-dependent paths degrade where `ibeta_inv` does. This is
+  **documented, not silent**.
+
+- **Wilcoxon.** Normal approximation with continuity correction; accurate for
+  `n_eff` of roughly 15 or more. No exact permutation p-value for small samples.
+  Fixed input capacity `n <= 256`.
+
+- **Bland-Altman.** Requires `3 <= n <= 256`. Limits of agreement use the fixed
+  1.96 normal factor; the CIs use the t-multiplier and therefore share the
+  t-quantile validity above.
+
+## Testing
+
+Each module is self-validating: every source file carries inline tests against
+published tables and hand-computed worked examples, and prints `ALL PASS` on
+success. Run them under the lean_single engine:
+
+```bash
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/student_t.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/chi_square.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/fisher_f.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/wilcoxon.sio
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run stdlib/stats/bland_altman.sio
+```
+
+Each command should print exactly `ALL PASS`. When running from outside the repo
+root, set `SOUNIO_STDLIB_PATH=$(pwd)/stdlib` first.
+
+## References
+
+- Student (1908). "The probable error of a mean." *Biometrika* 6(1).
+- Wilson, E. B. & Hilferty, M. M. (1931). "The distribution of chi-square."
+  *PNAS* 17(12).
+- Wilcoxon, F. (1945). "Individual comparisons by ranking methods."
+  *Biometrics* 1(6).
+- Fisher, R. A. & Cornish, E. A. (1960). "The percentile points of distributions
+  having known cumulants." *Technometrics* 2(2).
+- Abramowitz, M. & Stegun, I. A. (1964). *Handbook of Mathematical Functions*
+  (§26.4 chi-squared, §26.6 F, §26.7 t).
+- Bland, J. M. & Altman, D. G. (1986). "Statistical methods for assessing
+  agreement between two methods of clinical measurement." *Lancet*
+  1(8476):307-310.
+- Snedecor, G. W. & Cochran, W. G. (1989). *Statistical Methods*, 8th ed.
+
+## Licence
+
+MIT / Apache-2.0 (same as Sounio).
