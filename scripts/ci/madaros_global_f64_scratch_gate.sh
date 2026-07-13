@@ -83,4 +83,4 @@ run_witness \
   "$WORK/boundary.log" \
   'global f64 after 256 globals witness'
 
-echo "[madaros-global-f64] PASS: current-source Madaros preserves global f64-array element typing past the previous 256-entry metadata boundary"
+echo "[madaros-global-f64] PASS: Madaros ELF preserves global f64-array element typing past the previous 256-entry metadata boundary"

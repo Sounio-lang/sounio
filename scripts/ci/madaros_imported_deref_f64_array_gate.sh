@@ -19,17 +19,19 @@ else
   WORK="$(mktemp -d /tmp/sounio-madaros-deref-f64.XXXXXX)"
 fi
 
-MADAROS_ELF="$WORK/madaros"
+MADAROS_ELF="${SOUNIO_MADAROS_DEREF_F64_GATE_BIN:-$WORK/madaros}"
 
 if [[ "$KEEP_WORK" != "1" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
 
-if ! bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
-  tail -n 80 "$WORK/build.log" >&2 || true
-  fail "current-source Madaros build failed"
+if [[ -z "${SOUNIO_MADAROS_DEREF_F64_GATE_BIN:-}" ]]; then
+  if ! bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
+    tail -n 80 "$WORK/build.log" >&2 || true
+    fail "current-source Madaros build failed"
+  fi
 fi
-[[ -x "$MADAROS_ELF" ]] || fail "rebuilt Madaros is missing or not executable: $MADAROS_ELF"
+[[ -x "$MADAROS_ELF" ]] || fail "Madaros is missing or not executable: $MADAROS_ELF"
 
 set +e
 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" run "$SOURCE" >"$WORK/run.log" 2>&1
@@ -45,4 +47,4 @@ grep -Fxq 'PASS imported_deref_f64_array' "$WORK/run.log" || {
   fail "exact PASS marker missing"
 }
 
-echo "[madaros-deref-f64] PASS: rebuilt current-source Madaros preserves f64 element typing through imported dereference"
+echo "[madaros-deref-f64] PASS: Madaros ELF preserves f64 element typing through imported dereference"
