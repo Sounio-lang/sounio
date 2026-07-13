@@ -2628,3 +2628,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - **kruskal_wallis = PASS**: H formula, tie correction, χ²(k-1) p-value, all inline cases. "No errors found."
 - **tukey = PASS**: q_range_cdf and studentized-range double-integral formulas, Simpson impls, s-density log formula, bisection, and the Harter q-table values. "No mathematical errors or overreaches."
 - **correlation = PASS on formulas** (Pearson r, t, Fisher-z CI, Spearman on ranks; all numeric assertions pass). One **[WRONG] flag on co_ln was a FALSE POSITIVE** — reviewer claimed O(1e-3) error from "missing t scaling"; verified behaviorally that co_ln is accurate to ~1e-6 (co_ln(7.873)=2.063439 vs 2.063437; co_ln(0.2254)=-1.489864 vs -1.489870). It is the identical helper already reviewed PASS as bt_ln in the beta review; term starts at t and accumulates t^(2k+1)/(2k+1) correctly. Not a defect.
+
+## 2026-07-13 — math-review: chi2_independence + effect_size + proportion
+- Files: `stdlib/stats/{chi2_independence,effect_size,proportion}.sio` (new). Provider: xAI/Grok 4.3.
+- **chi2_independence = PASS**: χ²=Σ(O-E)²/E with E=row·col/N, df=(r-1)(c-1), Cramér V, edge guards. "No content beyond verified identities."
+- **proportion = PASS**: Wilson centre/half, Clopper-Pearson via Beta quantiles, pooled two-prop z, edge handling, test constants. "No errors." (Impl note: CP uses bisection on forward ibeta because ibeta_inv(9,2,0.975) wrongly returns 1.0 — an upper-tail Newton overshoot, separate from #841.)
+- **effect_size = PASS on formulas** (Cohen d, Hedges J=1-3/(4N-9), SE, eta²=df1·F/(df1·F+df2), magnitude). One **[TIGHTENABLE] was a reviewer arithmetic error**: it claimed exact J·d≈-1.142631, but J·d=0.9032258·(-1.2649111)=-1.1425003 = the committed constant (test passes at 1e-5). Not a defect. (Second reviewer false-flag this session after co_ln.)
