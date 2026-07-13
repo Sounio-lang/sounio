@@ -52,6 +52,18 @@ The same logic **inlined into `main`** (no helper fn) compiles and runs. Verifie
 **Workaround (in use):** in importing programs, inline all logic into `main` — no user helper functions.
 This forces verbose drivers but works.
 
+## Defect 4 (adjacent, pre-existing) — `gum.sio`'s embedded self-test segfaults at runtime
+
+`stdlib/epistemic/gum.sio` is annotated `//@ run-pass` / `//@ expect-stdout: ALL PASS`, but compiled and
+run standalone it **segfaults (exit 139)** after printing `─── stdlib/epistemic/gum tests ───\n  PASS [`.
+This is **pre-existing** and independent of the GUM hardening: the pre-session file and the hardened file
+produce **byte-identical output** (same md5) and both exit 139. So `expect-stdout: ALL PASS` is stale —
+the file has not run clean on Madaros v0.80.0. The GUM *functions* are fine (an importing driver exercises
+them and asserts correct ISO-GUM values — `tests/stdlib/epistemic/test_gum_stdlib.sio`); the crash is in
+the file's own test `main`/print path. Not chased here (scope + likely codegen-side). The
+`epistemic_gum_gate.sh` gate therefore verifies the module via the **importing driver**, not by running
+`gum.sio`'s embedded self-test.
+
 ## Impact
 Neither blocks the epistemic/GUM hardening (both have clean caller-side workarounds), but both are
 papercuts that make stdlib modules feel unusable to newcomers (the natural `use mod::name` + `print_f64`

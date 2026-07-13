@@ -7,6 +7,9 @@ OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 fail=0
 
+# NOTE: gum.sio's own embedded self-test segfaults at runtime on Madaros v0.80.0
+# (pre-existing; see docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md, Defect 4).
+# We therefore verify the module via the importing run-proof driver below, not by running gum.sio.
 echo "== check gum.sio =="
 $SOUC check stdlib/epistemic/gum.sio || fail=1
 
