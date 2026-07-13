@@ -57,7 +57,7 @@ use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
-use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
+use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::normalize::*
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
@@ -354,6 +354,77 @@ fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
         println("probe_load_ir: parser_errors=" + int_to_string(parse_errors))
     }
     panic("probe_load_ir failed")
+}
+
+// Internal regression witness for the public single-module lowering entrypoint.
+fn run_probe_monolithic_public_lower_call(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_monolithic_public_lower_call: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let program = load_module_file(source_path)
+    if parser_last_error_count() > 0 {
+        panic("probe_monolithic_public_lower_call: parse failed")
+    }
+
+    var epistemic = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(program, &! epistemic) {
+        panic("probe_monolithic_public_lower_call: check failed")
+    }
+
+    lower_monolithic_public_probe_trace_set(true)
+    println("probe_monolithic_public_lower_call: lower_begin")
+    let lowered = lower_program_to_ir(program)
+    println("probe_monolithic_public_lower_call: lower_done")
+    lower_monolithic_public_probe_trace_set(false)
+    let module = lowered.module
+
+    var bss_globals: i64 = 0
+    var main_fn: i64 = -1
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let func = module.functions[fi as usize]
+        if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            bss_globals = bss_globals + 1
+        }
+        if ir_name_eq(func.name, make_name("main")) {
+            main_fn = fi
+        }
+        fi = fi + 1
+    }
+
+    var f64_adds: i64 = 0
+    var i64_adds: i64 = 0
+    if main_fn >= 0 {
+        let func = module.functions[main_fn as usize]
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let instr = func.instrs[ii as usize]
+            if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpAdd {
+                if instr.imm_flags == 6 {
+                    f64_adds = f64_adds + 1
+                } else if instr.imm_flags == 0 {
+                    i64_adds = i64_adds + 1
+                }
+            }
+            ii = ii + 1
+        }
+    }
+
+    print("monolithic_public_lower_call: bss_globals=")
+    print_int(bss_globals)
+    print(" bss_bytes=")
+    print_int(module.bss_total_size)
+    print(" f64_adds=")
+    print_int(f64_adds)
+    print(" i64_adds=")
+    print_int(i64_adds)
+    print("\n")
+
+    if lowered.had_error {
+        panic("probe_monolithic_public_lower_call: lower reported errors")
+    }
+    println("MONOLITHIC_PUBLIC_LOWER_CALL PASS")
 }
 
 fn probe_frontend_strategy_print_name_local(name: Name) with IO, Mut, Panic, Div {
@@ -28036,6 +28107,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-load-ir-trace" || starts_with(mode, "--probe-load-ir-t") {
             run_probe_load_ir_trace(args, arg_idx)
+            return
+        } else if mode == "--probe-monolithic-public-lower-call" || mode == "--probe-monolithic-global-f64" {
+            run_probe_monolithic_public_lower_call(args, arg_idx)
             return
         } else if mode == "--probe-native-streaming" || starts_with(mode, "--probe-native-stream") {
             run_probe_native_streaming(args, arg_idx)
