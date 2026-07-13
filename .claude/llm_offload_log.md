@@ -2613,3 +2613,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Files: `stdlib/prob/distributions.sio` (dist_exp), `stdlib/pbpk/rapamycin_2cmt.sio`, `rapamycin_budget.sio`, `stent_release.sio` (exp_neg ×3). Same #841-class bug: naive Taylor exp with late/no negative reflection → catastrophic cancellation.
 - Provider: xAI/Grok 4.3 = **PASS**. Confirmed the reflect-first / halving fixes preserve exp(x)=1/exp(-x) and exp(-x)=(exp(-x/2))², restrict the series to [0,2] (full double precision, no cancellation), and match true values (dist_exp(-13.855)=9.6e-7 was -784; exp_neg(8)=3.35e-4).
 - Context: part of a stdlib-wide audit finding ~40 hand-rolled exp helpers with this bug (systemic issue filed). Science-core special::gamma/erf/igamma use the correct ln2-reduction and are unaffected. Fixed here: the severe non-clinical case (dist_exp returned negative densities) + the dissertation PK-model exp_neg copies. Clinical darwin_pbpk/validation/* left for §10 deepseek review.
+
+## 2026-07-13 — math-review: stats::correlation + kruskal_wallis + tukey
+- Files: `stdlib/stats/{correlation,kruskal_wallis,tukey}.sio` (new).
+- Trigger: mandatory math-review (three new statistical methods — CLAUDE.md §10). Provider: xAI/Grok 4.3.
+- **kruskal_wallis = PASS**: H formula, tie correction, χ²(k-1) p-value, all inline cases. "No errors found."
+- **tukey = PASS**: q_range_cdf and studentized-range double-integral formulas, Simpson impls, s-density log formula, bisection, and the Harter q-table values. "No mathematical errors or overreaches."
+- **correlation = PASS on formulas** (Pearson r, t, Fisher-z CI, Spearman on ranks; all numeric assertions pass). One **[WRONG] flag on co_ln was a FALSE POSITIVE** — reviewer claimed O(1e-3) error from "missing t scaling"; verified behaviorally that co_ln is accurate to ~1e-6 (co_ln(7.873)=2.063439 vs 2.063437; co_ln(0.2254)=-1.489864 vs -1.489870). It is the identical helper already reviewed PASS as bt_ln in the beta review; term starts at t and accumulates t^(2k+1)/(2k+1) correctly. Not a defect.

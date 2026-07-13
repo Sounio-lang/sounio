@@ -18,6 +18,9 @@ MODULES=(
   stdlib/stats/qq_normal.sio
   stdlib/stats/anova.sio
   stdlib/stats/reg_bands.sio
+  stdlib/stats/correlation.sio
+  stdlib/stats/kruskal_wallis.sio
+  stdlib/stats/tukey.sio
 )
 
 fail=0

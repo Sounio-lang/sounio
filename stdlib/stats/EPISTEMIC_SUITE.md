@@ -263,6 +263,43 @@ observation) at each x — what a calibration / dose-response figure needs.
 against a hand-computed example (slope 0.6, sigma √0.8, slope CI [-0.30, 1.50],
 conf/pred half at x̄ = 1.273 / 3.118).
 
+### `stats::correlation` — Pearson & Spearman with inference
+
+| Function | Signature |
+|---|---|
+| `pearson` | `pub fn pearson(x: &[f64; 256], y: &[f64; 256], n: i32, conf: f64) -> CorrResult with Mut, Div, Panic` |
+| `spearman` | `pub fn spearman(x: &[f64; 256], y: &[f64; 256], n: i32) -> SpearmanCorr with Mut, Div, Panic` |
+
+Pearson r with a **Fisher-z confidence interval** (`atanh(r) ± z/√(n-3)`, back-
+transformed) and a t-test; Spearman rho is Pearson on the average ranks. `CorrResult`:
+`n, r, t_stat, df, p_value, ci_lo, ci_hi`. `SpearmanCorr`: `n, rho, t_stat, df, p_value`.
+Validated: `r=0.7746`, `t=2.121`, 95% CI `[-0.340, 0.984]`; Spearman `rho=0.738`.
+
+### `stats::kruskal_wallis` — non-parametric one-way ANOVA
+
+| Function | Signature |
+|---|---|
+| `kruskal_wallis` | `pub fn kruskal_wallis(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> KWResult with Mut, Div, Panic` |
+
+Rank-based H test (tie-corrected), `p = chi2_sf(H, k-1)`. `KWResult`: `k, n_total, h,
+h_uncorrected, df, p_value, tie_factor`. Validated: no-ties `H=7.2, p=0.0273`;
+tie-corrected `H=3.333` (factor 0.9143).
+
+### `stats::tukey` — Tukey HSD post-hoc (studentized range)
+
+| Function | Signature |
+|---|---|
+| `tukey_q_crit` | `pub fn tukey_q_crit(alpha: f64, k: i32, nu: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_hsd` | `pub fn tukey_hsd(ms_within: f64, n: i64, k: i32, dfw: f64, alpha: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_pair_p` | `pub fn tukey_pair_p(diff: f64, ms_within: f64, n: i64, k: i32, dfw: f64) -> f64 with Mut, Div, Panic` |
+| `tukey_q_cdf` / `q_range_cdf` | studentized-range / range CDFs (numerical integration) |
+
+Post-hoc pairwise comparisons after a significant ANOVA, controlling family-wise
+error via the studentized range distribution q — computed here by Simpson
+integration of the defining double integral (no closed form). Validated against
+Harter's q tables: `q(0.05,3,10)=3.877`, `q(0.05,4,20)=3.958`, `q(0.05,3,∞)=3.314`
+to ~1e-2. (The double integral makes this the one slow module — ~10s.)
+
 ## Importing
 
 Import each tool directly from its module:
@@ -277,6 +314,9 @@ use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_one
 use stats::qq_normal::{QQResult, qq_normal}
 use stats::anova::{AnovaResult, anova_oneway}
 use stats::reg_bands::{RegFit, reg_fit, reg_predict, reg_conf_band, reg_pred_band, reg_slope_ci}
+use stats::correlation::{CorrResult, SpearmanCorr, pearson, spearman}
+use stats::kruskal_wallis::{KWResult, kruskal_wallis}
+use stats::tukey::{tukey_q_crit, tukey_hsd, tukey_pair_p, tukey_q_cdf, q_range_cdf}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
