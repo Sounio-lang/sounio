@@ -1,0 +1,1072 @@
+// stdlib/image/plot.sio — headless scientific line plots with uncertainty bands.
+//
+// A minimal publication-figure layer over image::pure::types::Image and the pure
+// PNG encoder: axis frame + ticks + numeric labels, a filled uncertainty band,
+// and a data polyline — written to a PNG with no window, no FFI, no Python.
+// Uses an embedded stroke (vector) font, drawn with the AA line rasteriser.
+//
+//   var img = image_new(640, 420)
+//   plot_background(&!img, 640, 420, 0x0E1420)
+//   let a = area_new(64, 20, 620, 360, 0.0, 24.0, 0.0, 20.0)
+//   plot_band(&!img, &a, &t, &lo, &hi, n, 0x2A3E66)
+//   plot_line(&!img, &a, &t, &c,  n, 0xFFB020)
+//   plot_axes(&!img, &a, 6, 6, 0x8090A8)
+//   plot_save(&img, "curve.png")
+
+// NOTE: the PNG encoder caps image WIDTH at 512 (filter row buffers); keep
+// plots <= 512 px wide (height up to 262144/width).
+//
+module image::plot
+
+use image::pure::types::{Image, image_set_pixel}
+use image::pure::png::{png_write}
+
+// Pixel plot rectangle [x0,x1]×[y0,y1] mapped to data range [xmin,xmax]×[ymin,ymax].
+pub struct Area { x0: i64, y0: i64, x1: i64, y1: i64, xmin: f64, xmax: f64, ymin: f64, ymax: f64 }
+
+pub fn area_new(x0: i64, y0: i64, x1: i64, y1: i64, xmin: f64, xmax: f64, ymin: f64, ymax: f64) -> Area {
+    Area { x0: x0, y0: y0, x1: x1, y1: y1, xmin: xmin, xmax: xmax, ymin: ymin, ymax: ymax }
+}
+
+fn mapx(a: &Area, dx: f64) -> i64 with Div {
+    let sp = if (*a).xmax - (*a).xmin == 0.0 { 1.0 } else { (*a).xmax - (*a).xmin }
+    (*a).x0 + ((dx - (*a).xmin) / sp * (((*a).x1 - (*a).x0) as f64)) as i64
+}
+fn mapy(a: &Area, dy: f64) -> i64 with Div {
+    let sp = if (*a).ymax - (*a).ymin == 0.0 { 1.0 } else { (*a).ymax - (*a).ymin }
+    (*a).y1 - ((dy - (*a).ymin) / sp * (((*a).y1 - (*a).y0) as f64)) as i64  // y inverted (down = smaller)
+}
+
+fn setpx(img: &!Image, x: i64, y: i64, c: i64) with Mut {
+    if x >= 0 && y >= 0 && x < (img.width as i64) && y < (img.height as i64) {
+        image_set_pixel(img, x as i32, y as i32, c as u32)
+    }
+}
+
+// Alpha-blend colour c (0xRRGGBB) over the current pixel at coverage `a` (0..255).
+fn blend(img: &!Image, x: i64, y: i64, c: i64, a: i64) with Mut, Div, Panic {
+    if x < 0 || y < 0 || x >= (img.width as i64) || y >= (img.height as i64) { return }
+    if a <= 0 { return }
+    var av = a; if av > 255 { av = 255 }
+    let idx = (y * (img.width as i64) + x) as usize
+    let bg = (img.pixels[idx] as i64) & 16777215
+    let fr = (c >> 16) & 255; let fg = (c >> 8) & 255; let fb = c & 255
+    let br = (bg >> 16) & 255; let bgc = (bg >> 8) & 255; let bb = bg & 255
+    let ia = 255 - av
+    let nr = (fr * av + br * ia) / 255
+    let ng = (fg * av + bgc * ia) / 255
+    let nb = (fb * av + bb * ia) / 255
+    image_set_pixel(img, x as i32, y as i32, ((nr << 16) | (ng << 8) | nb) as u32)
+}
+
+// Fill the whole canvas with a background colour.
+pub fn plot_background(img: &!Image, w: i64, h: i64, c: i64) with Mut {
+    var y = 0
+    while y < h { var x = 0; while x < w { setpx(img, x, y, c); x = x + 1 } y = y + 1 }
+}
+
+fn vspan(img: &!Image, x: i64, ya: i64, yb: i64, c: i64) with Mut {
+    var lo = ya; var hi = yb
+    if lo > hi { let t = lo; lo = hi; hi = t }
+    var y = lo
+    while y <= hi { setpx(img, x, y, c); y = y + 1 }
+}
+
+// Filled uncertainty band between lo[i] and hi[i], as trapezoids per segment.
+pub fn plot_band(img: &!Image, a: &Area, xs: &[f64; 512], lo: &[f64; 512], hi: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < n {
+        let xa = mapx(a, xs[i as usize]); let xb = mapx(a, xs[(i + 1) as usize])
+        let la = mapy(a, lo[i as usize]); let lb = mapy(a, lo[(i + 1) as usize])
+        let ha = mapy(a, hi[i as usize]); let hb = mapy(a, hi[(i + 1) as usize])
+        var x = xa
+        let span = if xb - xa == 0 { 1 } else { xb - xa }
+        while x <= xb {
+            let f = ((x - xa) as f64) / (span as f64)
+            let yl = (la as f64) + ((lb - la) as f64) * f
+            let yh = (ha as f64) + ((hb - ha) as f64) * f
+            vspan(img, x, yl as i64, yh as i64, c)
+            x = x + 1
+        }
+        i = i + 1
+    }
+}
+
+// Shaded horizontal region between data y = ylo and y = yhi, across the plot width.
+pub fn plot_hband(img: &!Image, a: &Area, ylo: f64, yhi: f64, c: i64) with Mut, Div, Panic {
+    let pa = mapy(a, ylo); let pb = mapy(a, yhi)
+    var x = (*a).x0
+    while x <= (*a).x1 { vspan(img, x, pa, pb, c); x = x + 1 }
+}
+
+// Horizontal reference line at data y.
+pub fn plot_hline(img: &!Image, a: &Area, y: f64, c: i64) with Mut, Div, Panic {
+    let py = mapy(a, y)
+    var x = (*a).x0
+    while x <= (*a).x1 { setpx(img, x, py, c); x = x + 1 }
+}
+
+// Vertical reference line at data x.
+pub fn plot_vline(img: &!Image, a: &Area, x: f64, c: i64) with Mut, Div, Panic {
+    let px = mapx(a, x)
+    var y = (*a).y0
+    while y <= (*a).y1 { setpx(img, px, y, c); y = y + 1 }
+}
+
+// Anti-aliased filled disc marker of radius `r` at data (dx,dy).
+pub fn plot_point(img: &!Image, a: &Area, dx: f64, dy: f64, c: i64, r: i64) with Mut, Div, Panic {
+    let cx = mapx(a, dx); let cy = mapy(a, dy)
+    let rf = r as f64
+    var yy = 0 - r - 1
+    while yy <= r + 1 {
+        var xx = 0 - r - 1
+        while xx <= r + 1 {
+            let d = sqrt(((xx * xx) + (yy * yy)) as f64)
+            var av = 0
+            if d <= rf { av = 255 } else { if d <= rf + 1.0 { av = ((rf + 1.0 - d) * 255.0) as i64 } }
+            if av > 0 { blend(img, cx + xx, cy + yy, c, av) }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+// Vertical error bar from dylo to dyhi at data x, with end caps.
+pub fn plot_errbar(img: &!Image, a: &Area, dx: f64, dylo: f64, dyhi: f64, c: i64) with Mut, Div, Panic {
+    let px = mapx(a, dx)
+    vspan(img, px, mapy(a, dylo), mapy(a, dyhi), c)
+    var t = 0 - 3
+    while t <= 3 { setpx(img, px + t, mapy(a, dylo), c); setpx(img, px + t, mapy(a, dyhi), c); t = t + 1 }
+}
+
+// Anti-aliased thick segment: per-pixel coverage from distance to the segment.
+fn seg_aa(img: &!Image, xa: i64, ya: i64, xb: i64, yb: i64, hw: f64, c: i64) with Mut, Div, Panic {
+    var minx = if xa < xb { xa } else { xb }; minx = minx - 2
+    var maxx = if xa > xb { xa } else { xb }; maxx = maxx + 2
+    var miny = if ya < yb { ya } else { yb }; miny = miny - 2
+    var maxy = if ya > yb { ya } else { yb }; maxy = maxy + 2
+    let dx = (xb - xa) as f64; let dy = (yb - ya) as f64
+    let len2 = dx * dx + dy * dy
+    var py = miny
+    while py <= maxy {
+        var px = minx
+        while px <= maxx {
+            var t = if len2 > 0.0 { (((px - xa) as f64) * dx + ((py - ya) as f64) * dy) / len2 } else { 0.0 }
+            if t < 0.0 { t = 0.0 }
+            if t > 1.0 { t = 1.0 }
+            let ex = (px as f64) - ((xa as f64) + t * dx)
+            let ey = (py as f64) - ((ya as f64) + t * dy)
+            let d = sqrt(ex * ex + ey * ey)
+            var av = 0
+            if d <= hw { av = 255 } else { if d <= hw + 1.0 { av = ((hw + 1.0 - d) * 255.0) as i64 } }
+            if av > 0 { blend(img, px, py, c, av) }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// Data polyline, anti-aliased with thickness `hw` (half-width in px, e.g. 1.3).
+pub fn plot_line_w(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64, hw: f64) with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < n {
+        seg_aa(img, mapx(a, xs[i as usize]), mapy(a, ys[i as usize]),
+                    mapx(a, xs[(i + 1) as usize]), mapy(a, ys[(i + 1) as usize]), hw, c)
+        i = i + 1
+    }
+}
+pub fn plot_line(img: &!Image, a: &Area, xs: &[f64; 512], ys: &[f64; 512], n: i64, c: i64) with Mut, Div, Panic {
+    plot_line_w(img, a, xs, ys, n, c, 1.3)
+}
+
+// ---- stroke (vector) font: grid x 0..6, y 0..14; baseline 10, descender 14 ----
+fn sf_seg(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64, gx0: f64, gy0: f64, gx1: f64, gy1: f64) with Mut, Div, Panic {
+    seg_aa(img, ox + (gx0 * sc) as i64, oy + (gy0 * sc) as i64, ox + (gx1 * sc) as i64, oy + (gy1 * sc) as i64, hw, c)
+}
+fn sf_32(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+}
+fn sf_37(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 2.00, 2.45, 2.99)
+    sf_seg(img, ox, oy, sc, hw, c, 2.45, 2.99, 1.60, 3.40)
+    sf_seg(img, ox, oy, sc, hw, c, 1.60, 3.40, 0.75, 2.99)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 2.99, 0.40, 2.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.40, 2.00, 0.75, 1.01)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 1.01, 1.60, 0.60)
+    sf_seg(img, ox, oy, sc, hw, c, 1.60, 0.60, 2.45, 1.01)
+    sf_seg(img, ox, oy, sc, hw, c, 2.45, 1.01, 2.80, 2.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.60, 8.00, 5.25, 8.99)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 8.99, 4.40, 9.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.40, 9.40, 3.55, 8.99)
+    sf_seg(img, ox, oy, sc, hw, c, 3.55, 8.99, 3.20, 8.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 8.00, 3.55, 7.01)
+    sf_seg(img, ox, oy, sc, hw, c, 3.55, 7.01, 4.40, 6.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.40, 6.60, 5.25, 7.01)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 7.01, 5.60, 8.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 1.00, 1.00, 9.00)
+}
+fn sf_40(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.90, 10.26, 2.24, 9.39)
+    sf_seg(img, ox, oy, sc, hw, c, 2.24, 9.39, 1.73, 8.25)
+    sf_seg(img, ox, oy, sc, hw, c, 1.73, 8.25, 1.41, 6.92)
+    sf_seg(img, ox, oy, sc, hw, c, 1.41, 6.92, 1.30, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.30, 5.50, 1.41, 4.08)
+    sf_seg(img, ox, oy, sc, hw, c, 1.41, 4.08, 1.73, 2.75)
+    sf_seg(img, ox, oy, sc, hw, c, 1.73, 2.75, 2.24, 1.61)
+    sf_seg(img, ox, oy, sc, hw, c, 2.24, 1.61, 2.90, 0.74)
+}
+fn sf_41(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 3.10, 0.74, 3.76, 1.61)
+    sf_seg(img, ox, oy, sc, hw, c, 3.76, 1.61, 4.27, 2.75)
+    sf_seg(img, ox, oy, sc, hw, c, 4.27, 2.75, 4.59, 4.08)
+    sf_seg(img, ox, oy, sc, hw, c, 4.59, 4.08, 4.70, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.70, 5.50, 4.59, 6.92)
+    sf_seg(img, ox, oy, sc, hw, c, 4.59, 6.92, 4.27, 8.25)
+    sf_seg(img, ox, oy, sc, hw, c, 4.27, 8.25, 3.76, 9.39)
+    sf_seg(img, ox, oy, sc, hw, c, 3.76, 9.39, 3.10, 10.26)
+}
+fn sf_43(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 3.00, 3.00, 8.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 5.50, 5.40, 5.50)
+}
+fn sf_44(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 9.30, 2.60, 11.50)
+}
+fn sf_45(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 5.50, 4.80, 5.50)
+}
+fn sf_46(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 9.30, 3.20, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 9.30, 3.20, 9.70)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 9.70, 2.80, 9.70)
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 9.70, 2.80, 9.30)
+}
+fn sf_47(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 1.00, 11.00)
+}
+fn sf_48(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.40, 5.00, 5.16, 7.17)
+    sf_seg(img, ox, oy, sc, hw, c, 5.16, 7.17, 4.50, 8.91)
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 8.91, 3.53, 9.87)
+    sf_seg(img, ox, oy, sc, hw, c, 3.53, 9.87, 2.47, 9.87)
+    sf_seg(img, ox, oy, sc, hw, c, 2.47, 9.87, 1.50, 8.91)
+    sf_seg(img, ox, oy, sc, hw, c, 1.50, 8.91, 0.84, 7.17)
+    sf_seg(img, ox, oy, sc, hw, c, 0.84, 7.17, 0.60, 5.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 5.00, 0.84, 2.83)
+    sf_seg(img, ox, oy, sc, hw, c, 0.84, 2.83, 1.50, 1.09)
+    sf_seg(img, ox, oy, sc, hw, c, 1.50, 1.09, 2.47, 0.13)
+    sf_seg(img, ox, oy, sc, hw, c, 2.47, 0.13, 3.53, 0.13)
+    sf_seg(img, ox, oy, sc, hw, c, 3.53, 0.13, 4.50, 1.09)
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 1.09, 5.16, 2.83)
+    sf_seg(img, ox, oy, sc, hw, c, 5.16, 2.83, 5.40, 5.00)
+}
+fn sf_49(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.50, 2.00, 3.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.50, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 10.00, 4.80, 10.00)
+}
+fn sf_50(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.80, 2.60, 1.70, 1.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.70, 1.00, 3.20, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 0.50, 4.60, 1.10)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 1.10, 5.20, 2.90)
+    sf_seg(img, ox, oy, sc, hw, c, 5.20, 2.90, 4.30, 4.80)
+    sf_seg(img, ox, oy, sc, hw, c, 4.30, 4.80, 0.80, 9.90)
+    sf_seg(img, ox, oy, sc, hw, c, 0.80, 9.90, 5.30, 9.90)
+}
+fn sf_51(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.90, 1.60, 2.60, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 0.50, 4.40, 1.30)
+    sf_seg(img, ox, oy, sc, hw, c, 4.40, 1.30, 4.60, 3.20)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 3.20, 3.00, 4.80)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.80, 2.00, 4.90)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.90, 4.60, 6.20)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 6.20, 4.50, 8.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 8.40, 2.80, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 9.60, 0.90, 8.70)
+}
+fn sf_52(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 10.00, 4.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 0.50, 0.60, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 7.00, 5.40, 7.00)
+}
+fn sf_53(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.80, 0.50, 1.40, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.40, 0.50, 1.10, 5.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.10, 5.00, 3.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 3.69, 9.43, 4.55, 8.85)
+    sf_seg(img, ox, oy, sc, hw, c, 4.55, 8.85, 5.15, 7.95)
+    sf_seg(img, ox, oy, sc, hw, c, 5.15, 7.95, 5.40, 6.87)
+    sf_seg(img, ox, oy, sc, hw, c, 5.40, 6.87, 5.26, 5.76)
+    sf_seg(img, ox, oy, sc, hw, c, 5.26, 5.76, 4.76, 4.79)
+    sf_seg(img, ox, oy, sc, hw, c, 4.76, 4.79, 3.97, 4.11)
+    sf_seg(img, ox, oy, sc, hw, c, 3.97, 4.11, 3.00, 3.81)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 3.81, 2.01, 3.94)
+    sf_seg(img, ox, oy, sc, hw, c, 2.01, 3.94, 1.13, 4.48)
+}
+fn sf_54(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.50, 7.00, 5.25, 8.21)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 8.21, 4.56, 9.19)
+    sf_seg(img, ox, oy, sc, hw, c, 4.56, 9.19, 3.56, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 3.56, 9.73, 2.44, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 2.44, 9.73, 1.44, 9.19)
+    sf_seg(img, ox, oy, sc, hw, c, 1.44, 9.19, 0.75, 8.21)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 8.21, 0.50, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.50, 7.00, 0.75, 5.79)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 5.79, 1.44, 4.81)
+    sf_seg(img, ox, oy, sc, hw, c, 1.44, 4.81, 2.44, 4.27)
+    sf_seg(img, ox, oy, sc, hw, c, 2.44, 4.27, 3.56, 4.27)
+    sf_seg(img, ox, oy, sc, hw, c, 3.56, 4.27, 4.56, 4.81)
+    sf_seg(img, ox, oy, sc, hw, c, 4.56, 4.81, 5.25, 5.79)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 5.79, 5.50, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 1.50, 1.60, 4.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.60, 4.50, 0.70, 7.30)
+}
+fn sf_55(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.70, 0.50, 5.30, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 5.30, 0.50, 2.40, 10.00)
+}
+fn sf_56(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 2.70, 4.73, 3.80)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 3.80, 4.00, 4.61)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 4.61, 3.00, 4.90)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.90, 2.00, 4.61)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 4.61, 1.27, 3.80)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 3.80, 1.00, 2.70)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 2.70, 1.27, 1.60)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 1.60, 2.00, 0.79)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 0.79, 3.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.50, 4.00, 0.79)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 0.79, 4.73, 1.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 1.60, 5.00, 2.70)
+    sf_seg(img, ox, oy, sc, hw, c, 5.40, 7.20, 5.08, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 5.08, 8.50, 4.20, 9.45)
+    sf_seg(img, ox, oy, sc, hw, c, 4.20, 9.45, 3.00, 9.80)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 9.80, 1.80, 9.45)
+    sf_seg(img, ox, oy, sc, hw, c, 1.80, 9.45, 0.92, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 0.92, 8.50, 0.60, 7.20)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 7.20, 0.92, 5.90)
+    sf_seg(img, ox, oy, sc, hw, c, 0.92, 5.90, 1.80, 4.95)
+    sf_seg(img, ox, oy, sc, hw, c, 1.80, 4.95, 3.00, 4.60)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.60, 4.20, 4.95)
+    sf_seg(img, ox, oy, sc, hw, c, 4.20, 4.95, 5.08, 5.90)
+    sf_seg(img, ox, oy, sc, hw, c, 5.08, 5.90, 5.40, 7.20)
+}
+fn sf_57(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.50, 3.00, 5.25, 4.21)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 4.21, 4.56, 5.19)
+    sf_seg(img, ox, oy, sc, hw, c, 4.56, 5.19, 3.56, 5.73)
+    sf_seg(img, ox, oy, sc, hw, c, 3.56, 5.73, 2.44, 5.73)
+    sf_seg(img, ox, oy, sc, hw, c, 2.44, 5.73, 1.44, 5.19)
+    sf_seg(img, ox, oy, sc, hw, c, 1.44, 5.19, 0.75, 4.21)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 4.21, 0.50, 3.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.50, 3.00, 0.75, 1.79)
+    sf_seg(img, ox, oy, sc, hw, c, 0.75, 1.79, 1.44, 0.81)
+    sf_seg(img, ox, oy, sc, hw, c, 1.44, 0.81, 2.44, 0.27)
+    sf_seg(img, ox, oy, sc, hw, c, 2.44, 0.27, 3.56, 0.27)
+    sf_seg(img, ox, oy, sc, hw, c, 3.56, 0.27, 4.56, 0.81)
+    sf_seg(img, ox, oy, sc, hw, c, 4.56, 0.81, 5.25, 1.79)
+    sf_seg(img, ox, oy, sc, hw, c, 5.25, 1.79, 5.50, 3.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.40, 8.50, 4.40, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.40, 5.50, 5.30, 2.70)
+}
+fn sf_58(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 4.80, 3.20, 4.80)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 4.80, 3.20, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 5.20, 2.80, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 5.20, 2.80, 4.80)
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 8.80, 3.20, 8.80)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 8.80, 3.20, 9.20)
+    sf_seg(img, ox, oy, sc, hw, c, 3.20, 9.20, 2.80, 9.20)
+    sf_seg(img, ox, oy, sc, hw, c, 2.80, 9.20, 2.80, 8.80)
+}
+fn sf_65(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.30, 10.00, 3.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.50, 5.70, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.30, 6.60, 4.70, 6.60)
+}
+fn sf_66(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 4.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.90, 0.50, 4.59, 0.72)
+    sf_seg(img, ox, oy, sc, hw, c, 4.59, 0.72, 5.15, 1.33)
+    sf_seg(img, ox, oy, sc, hw, c, 5.15, 1.33, 5.46, 2.21)
+    sf_seg(img, ox, oy, sc, hw, c, 5.46, 2.21, 5.46, 3.19)
+    sf_seg(img, ox, oy, sc, hw, c, 5.46, 3.19, 5.15, 4.07)
+    sf_seg(img, ox, oy, sc, hw, c, 5.15, 4.07, 4.59, 4.68)
+    sf_seg(img, ox, oy, sc, hw, c, 4.59, 4.68, 3.90, 4.90)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.00, 4.10, 5.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.10, 4.80, 4.92, 5.06)
+    sf_seg(img, ox, oy, sc, hw, c, 4.92, 5.06, 5.59, 5.78)
+    sf_seg(img, ox, oy, sc, hw, c, 5.59, 5.78, 5.95, 6.82)
+    sf_seg(img, ox, oy, sc, hw, c, 5.95, 6.82, 5.95, 7.98)
+    sf_seg(img, ox, oy, sc, hw, c, 5.95, 7.98, 5.59, 9.02)
+    sf_seg(img, ox, oy, sc, hw, c, 5.59, 9.02, 4.92, 9.74)
+    sf_seg(img, ox, oy, sc, hw, c, 4.92, 9.74, 4.10, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 4.20, 10.00)
+}
+fn sf_67(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 9.21, 3.84, 9.95)
+    sf_seg(img, ox, oy, sc, hw, c, 3.84, 9.95, 2.90, 10.07)
+    sf_seg(img, ox, oy, sc, hw, c, 2.90, 10.07, 2.00, 9.55)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 9.55, 1.26, 8.46)
+    sf_seg(img, ox, oy, sc, hw, c, 1.26, 8.46, 0.77, 6.94)
+    sf_seg(img, ox, oy, sc, hw, c, 0.77, 6.94, 0.60, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 5.20, 0.77, 3.46)
+    sf_seg(img, ox, oy, sc, hw, c, 0.77, 3.46, 1.26, 1.94)
+    sf_seg(img, ox, oy, sc, hw, c, 1.26, 1.94, 2.00, 0.85)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 0.85, 2.90, 0.33)
+    sf_seg(img, ox, oy, sc, hw, c, 2.90, 0.33, 3.84, 0.45)
+    sf_seg(img, ox, oy, sc, hw, c, 3.84, 0.45, 4.69, 1.19)
+}
+fn sf_68(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 3.20, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.10, 10.10, 4.03, 9.86)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 9.86, 4.86, 9.16)
+    sf_seg(img, ox, oy, sc, hw, c, 4.86, 9.16, 5.53, 8.08)
+    sf_seg(img, ox, oy, sc, hw, c, 5.53, 8.08, 5.95, 6.71)
+    sf_seg(img, ox, oy, sc, hw, c, 5.95, 6.71, 6.10, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 6.10, 5.20, 5.95, 3.69)
+    sf_seg(img, ox, oy, sc, hw, c, 5.95, 3.69, 5.53, 2.32)
+    sf_seg(img, ox, oy, sc, hw, c, 5.53, 2.32, 4.86, 1.24)
+    sf_seg(img, ox, oy, sc, hw, c, 4.86, 1.24, 4.03, 0.54)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 0.54, 3.10, 0.30)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 3.20, 0.50)
+}
+fn sf_69(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 1.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 5.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.20, 4.20, 5.20)
+}
+fn sf_70(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 1.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.20, 4.00, 5.20)
+}
+fn sf_71(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 9.21, 3.78, 9.98)
+    sf_seg(img, ox, oy, sc, hw, c, 3.78, 9.98, 2.79, 10.04)
+    sf_seg(img, ox, oy, sc, hw, c, 2.79, 10.04, 1.85, 9.39)
+    sf_seg(img, ox, oy, sc, hw, c, 1.85, 9.39, 1.11, 8.13)
+    sf_seg(img, ox, oy, sc, hw, c, 1.11, 8.13, 0.68, 6.43)
+    sf_seg(img, ox, oy, sc, hw, c, 0.68, 6.43, 0.62, 4.56)
+    sf_seg(img, ox, oy, sc, hw, c, 0.62, 4.56, 0.94, 2.78)
+    sf_seg(img, ox, oy, sc, hw, c, 0.94, 2.78, 1.59, 1.36)
+    sf_seg(img, ox, oy, sc, hw, c, 1.59, 1.36, 2.47, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 2.47, 0.50, 3.46, 0.33)
+    sf_seg(img, ox, oy, sc, hw, c, 3.46, 0.33, 4.42, 0.87)
+    sf_seg(img, ox, oy, sc, hw, c, 4.42, 0.87, 5.19, 2.05)
+    sf_seg(img, ox, oy, sc, hw, c, 3.40, 5.40, 5.60, 5.40)
+    sf_seg(img, ox, oy, sc, hw, c, 5.60, 5.40, 5.60, 7.60)
+}
+fn sf_72(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 5.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.20, 5.00, 5.20)
+}
+fn sf_73(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.50, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.50, 0.50, 4.50, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.50, 10.00, 4.50, 10.00)
+}
+fn sf_74(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 0.50, 4.60, 7.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 7.40, 4.41, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.41, 8.50, 3.89, 9.39)
+    sf_seg(img, ox, oy, sc, hw, c, 3.89, 9.39, 3.12, 9.91)
+    sf_seg(img, ox, oy, sc, hw, c, 3.12, 9.91, 2.25, 9.96)
+    sf_seg(img, ox, oy, sc, hw, c, 2.25, 9.96, 1.45, 9.53)
+    sf_seg(img, ox, oy, sc, hw, c, 1.45, 9.53, 0.87, 8.70)
+}
+fn sf_75(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 1.30, 5.60)
+    sf_seg(img, ox, oy, sc, hw, c, 2.20, 4.60, 5.20, 10.00)
+}
+fn sf_76(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 5.00, 10.00)
+}
+fn sf_77(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.70, 10.00, 0.70, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 0.70, 0.50, 3.00, 6.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 6.00, 5.30, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 5.30, 0.50, 5.30, 10.00)
+}
+fn sf_78(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 5.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 10.00, 5.00, 0.50)
+}
+fn sf_79(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.70, 5.20, 5.49, 7.08)
+    sf_seg(img, ox, oy, sc, hw, c, 5.49, 7.08, 4.91, 8.66)
+    sf_seg(img, ox, oy, sc, hw, c, 4.91, 8.66, 4.03, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 9.73, 3.00, 10.10)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.10, 1.97, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 1.97, 9.73, 1.09, 8.66)
+    sf_seg(img, ox, oy, sc, hw, c, 1.09, 8.66, 0.51, 7.08)
+    sf_seg(img, ox, oy, sc, hw, c, 0.51, 7.08, 0.30, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 0.30, 5.20, 0.51, 3.32)
+    sf_seg(img, ox, oy, sc, hw, c, 0.51, 3.32, 1.09, 1.74)
+    sf_seg(img, ox, oy, sc, hw, c, 1.09, 1.74, 1.97, 0.67)
+    sf_seg(img, ox, oy, sc, hw, c, 1.97, 0.67, 3.00, 0.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.30, 4.03, 0.67)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 0.67, 4.91, 1.74)
+    sf_seg(img, ox, oy, sc, hw, c, 4.91, 1.74, 5.49, 3.32)
+    sf_seg(img, ox, oy, sc, hw, c, 5.49, 3.32, 5.70, 5.20)
+}
+fn sf_80(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 4.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 0.50, 4.69, 0.69)
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 0.69, 5.27, 1.23)
+    sf_seg(img, ox, oy, sc, hw, c, 5.27, 1.23, 5.66, 2.04)
+    sf_seg(img, ox, oy, sc, hw, c, 5.66, 2.04, 5.80, 3.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.80, 3.00, 5.66, 3.96)
+    sf_seg(img, ox, oy, sc, hw, c, 5.66, 3.96, 5.27, 4.77)
+    sf_seg(img, ox, oy, sc, hw, c, 5.27, 4.77, 4.69, 5.31)
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 5.31, 4.00, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.50, 4.00, 5.50)
+}
+fn sf_81(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.70, 5.20, 5.49, 7.08)
+    sf_seg(img, ox, oy, sc, hw, c, 5.49, 7.08, 4.91, 8.66)
+    sf_seg(img, ox, oy, sc, hw, c, 4.91, 8.66, 4.03, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 9.73, 3.00, 10.10)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.10, 1.97, 9.73)
+    sf_seg(img, ox, oy, sc, hw, c, 1.97, 9.73, 1.09, 8.66)
+    sf_seg(img, ox, oy, sc, hw, c, 1.09, 8.66, 0.51, 7.08)
+    sf_seg(img, ox, oy, sc, hw, c, 0.51, 7.08, 0.30, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 0.30, 5.20, 0.51, 3.32)
+    sf_seg(img, ox, oy, sc, hw, c, 0.51, 3.32, 1.09, 1.74)
+    sf_seg(img, ox, oy, sc, hw, c, 1.09, 1.74, 1.97, 0.67)
+    sf_seg(img, ox, oy, sc, hw, c, 1.97, 0.67, 3.00, 0.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.30, 4.03, 0.67)
+    sf_seg(img, ox, oy, sc, hw, c, 4.03, 0.67, 4.91, 1.74)
+    sf_seg(img, ox, oy, sc, hw, c, 4.91, 1.74, 5.49, 3.32)
+    sf_seg(img, ox, oy, sc, hw, c, 5.49, 3.32, 5.70, 5.20)
+    sf_seg(img, ox, oy, sc, hw, c, 3.60, 7.00, 5.60, 10.20)
+}
+fn sf_82(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 4.00, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 0.50, 4.69, 0.69)
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 0.69, 5.27, 1.23)
+    sf_seg(img, ox, oy, sc, hw, c, 5.27, 1.23, 5.66, 2.04)
+    sf_seg(img, ox, oy, sc, hw, c, 5.66, 2.04, 5.80, 3.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.80, 3.00, 5.66, 3.96)
+    sf_seg(img, ox, oy, sc, hw, c, 5.66, 3.96, 5.27, 4.77)
+    sf_seg(img, ox, oy, sc, hw, c, 5.27, 4.77, 4.69, 5.31)
+    sf_seg(img, ox, oy, sc, hw, c, 4.69, 5.31, 4.00, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.50, 4.00, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 5.50, 5.40, 10.00)
+}
+fn sf_83(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 2.40, 3.60, 1.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.60, 1.00, 1.80, 1.40)
+    sf_seg(img, ox, oy, sc, hw, c, 1.80, 1.40, 1.20, 3.20)
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 3.20, 2.60, 4.70)
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 4.70, 4.20, 5.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.20, 5.60, 5.00, 7.20)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.20, 4.20, 9.20)
+    sf_seg(img, ox, oy, sc, hw, c, 4.20, 9.20, 2.40, 9.80)
+    sf_seg(img, ox, oy, sc, hw, c, 2.40, 9.80, 0.90, 8.40)
+}
+fn sf_84(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.50, 0.50, 5.50, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 0.50, 3.00, 10.00)
+}
+fn sf_85(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 7.00, 1.15, 5.85)
+    sf_seg(img, ox, oy, sc, hw, c, 1.15, 5.85, 1.59, 4.88)
+    sf_seg(img, ox, oy, sc, hw, c, 1.59, 4.88, 2.23, 4.23)
+    sf_seg(img, ox, oy, sc, hw, c, 2.23, 4.23, 3.00, 4.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.00, 3.77, 4.23)
+    sf_seg(img, ox, oy, sc, hw, c, 3.77, 4.23, 4.41, 4.88)
+    sf_seg(img, ox, oy, sc, hw, c, 4.41, 4.88, 4.85, 5.85)
+    sf_seg(img, ox, oy, sc, hw, c, 4.85, 5.85, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 5.00, 0.50)
+}
+fn sf_86(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.40, 0.50, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 5.60, 0.50)
+}
+fn sf_87(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.30, 0.50, 1.70, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.70, 10.00, 3.00, 3.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 3.50, 4.30, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.30, 10.00, 5.70, 0.50)
+}
+fn sf_88(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 0.50, 5.40, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.40, 0.50, 0.60, 10.00)
+}
+fn sf_89(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 0.50, 3.00, 5.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 5.30, 5.40, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 5.30, 3.00, 10.00)
+}
+fn sf_90(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 0.50, 5.40, 0.50)
+    sf_seg(img, ox, oy, sc, hw, c, 5.40, 0.50, 0.60, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 10.00, 5.40, 10.00)
+}
+fn sf_95(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.50, 10.00, 5.50, 10.00)
+}
+fn sf_97(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 4.73, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 8.50, 4.00, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 9.60, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 2.00, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 9.60, 1.27, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 7.00, 1.27, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 5.50, 2.00, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 4.40, 3.00, 4.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.00, 4.00, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 4.40, 4.73, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 5.50, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 5.00, 10.00)
+}
+fn sf_98(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.85, 9.46)
+    sf_seg(img, ox, oy, sc, hw, c, 1.85, 9.46, 2.65, 9.95)
+    sf_seg(img, ox, oy, sc, hw, c, 2.65, 9.95, 3.52, 9.90)
+    sf_seg(img, ox, oy, sc, hw, c, 3.52, 9.90, 4.29, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 9.30, 4.81, 8.27)
+    sf_seg(img, ox, oy, sc, hw, c, 4.81, 8.27, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 4.81, 5.73)
+    sf_seg(img, ox, oy, sc, hw, c, 4.81, 5.73, 4.29, 4.70)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 4.70, 3.52, 4.10)
+    sf_seg(img, ox, oy, sc, hw, c, 3.52, 4.10, 2.65, 4.05)
+    sf_seg(img, ox, oy, sc, hw, c, 2.65, 4.05, 1.85, 4.54)
+    sf_seg(img, ox, oy, sc, hw, c, 1.85, 4.54, 1.27, 5.50)
+}
+fn sf_99(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.49, 9.30, 3.59, 9.94)
+    sf_seg(img, ox, oy, sc, hw, c, 3.59, 9.94, 2.59, 9.86)
+    sf_seg(img, ox, oy, sc, hw, c, 2.59, 9.86, 1.75, 9.06)
+    sf_seg(img, ox, oy, sc, hw, c, 1.75, 9.06, 1.26, 7.75)
+    sf_seg(img, ox, oy, sc, hw, c, 1.26, 7.75, 1.26, 6.25)
+    sf_seg(img, ox, oy, sc, hw, c, 1.26, 6.25, 1.75, 4.94)
+    sf_seg(img, ox, oy, sc, hw, c, 1.75, 4.94, 2.59, 4.14)
+    sf_seg(img, ox, oy, sc, hw, c, 2.59, 4.14, 3.59, 4.06)
+    sf_seg(img, ox, oy, sc, hw, c, 3.59, 4.06, 4.49, 4.70)
+}
+fn sf_100(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 0.50, 5.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 5.50, 4.97, 6.48)
+    sf_seg(img, ox, oy, sc, hw, c, 4.97, 6.48, 4.97, 7.52)
+    sf_seg(img, ox, oy, sc, hw, c, 4.97, 7.52, 4.73, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 8.50, 4.29, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 9.30, 3.68, 9.82)
+    sf_seg(img, ox, oy, sc, hw, c, 3.68, 9.82, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 2.32, 9.82)
+    sf_seg(img, ox, oy, sc, hw, c, 2.32, 9.82, 1.71, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 1.71, 9.30, 1.27, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.03, 7.52)
+    sf_seg(img, ox, oy, sc, hw, c, 1.03, 7.52, 1.03, 6.48)
+    sf_seg(img, ox, oy, sc, hw, c, 1.03, 6.48, 1.27, 5.50)
+}
+fn sf_101(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 7.00, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 4.78, 8.37)
+    sf_seg(img, ox, oy, sc, hw, c, 4.78, 8.37, 4.16, 9.44)
+    sf_seg(img, ox, oy, sc, hw, c, 4.16, 9.44, 3.28, 9.97)
+    sf_seg(img, ox, oy, sc, hw, c, 3.28, 9.97, 2.35, 9.84)
+    sf_seg(img, ox, oy, sc, hw, c, 2.35, 9.84, 1.55, 9.07)
+    sf_seg(img, ox, oy, sc, hw, c, 1.55, 9.07, 1.08, 7.85)
+    sf_seg(img, ox, oy, sc, hw, c, 1.08, 7.85, 1.04, 6.43)
+    sf_seg(img, ox, oy, sc, hw, c, 1.04, 6.43, 1.43, 5.15)
+    sf_seg(img, ox, oy, sc, hw, c, 1.43, 5.15, 2.17, 4.27)
+    sf_seg(img, ox, oy, sc, hw, c, 2.17, 4.27, 3.10, 4.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.10, 4.00, 4.00, 4.40)
+}
+fn sf_102(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.39, 1.40, 4.92, 0.83)
+    sf_seg(img, ox, oy, sc, hw, c, 4.92, 0.83, 4.28, 0.53)
+    sf_seg(img, ox, oy, sc, hw, c, 4.28, 0.53, 3.59, 0.56)
+    sf_seg(img, ox, oy, sc, hw, c, 3.59, 0.56, 2.97, 0.92)
+    sf_seg(img, ox, oy, sc, hw, c, 2.97, 0.92, 2.55, 1.54)
+    sf_seg(img, ox, oy, sc, hw, c, 2.55, 1.54, 2.40, 2.30)
+    sf_seg(img, ox, oy, sc, hw, c, 2.40, 2.30, 2.40, 2.30)
+    sf_seg(img, ox, oy, sc, hw, c, 2.40, 2.30, 2.40, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 4.50, 4.00, 4.50)
+}
+fn sf_103(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 4.73, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 8.50, 4.00, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 9.60, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 2.00, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 9.60, 1.27, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 7.00, 1.27, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 5.50, 2.00, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 4.40, 3.00, 4.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.00, 4.00, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 4.40, 4.73, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 5.50, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 5.00, 12.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 12.00, 4.73, 13.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 13.00, 4.00, 13.73)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 13.73, 3.00, 14.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 14.00, 2.00, 13.73)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 13.73, 1.27, 13.00)
+}
+fn sf_104(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.50, 2.20, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 1.97, 5.39, 2.71, 4.70)
+    sf_seg(img, ox, oy, sc, hw, c, 2.71, 4.70, 3.62, 4.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.62, 4.50, 4.50, 4.83)
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 4.83, 5.17, 5.63)
+    sf_seg(img, ox, oy, sc, hw, c, 5.17, 5.63, 5.49, 6.71)
+    sf_seg(img, ox, oy, sc, hw, c, 5.49, 6.71, 5.38, 7.86)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 6.00, 5.00, 10.00)
+}
+fn sf_105(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.20, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 2.00, 3.00, 2.60)
+}
+fn sf_106(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 4.20, 4.00, 12.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 12.00, 3.73, 13.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.73, 13.00, 3.00, 13.73)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 13.73, 2.00, 14.00)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 14.00, 1.00, 13.73)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 13.73, 0.27, 13.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.00, 2.00, 4.00, 2.60)
+}
+fn sf_107(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 0.50, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.60, 4.20, 1.30, 7.40)
+    sf_seg(img, ox, oy, sc, hw, c, 2.30, 6.50, 4.80, 10.00)
+}
+fn sf_108(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 0.50, 2.60, 9.20)
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 9.20, 3.60, 10.00)
+}
+fn sf_109(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.00, 2.00, 4.30)
+    sf_seg(img, ox, oy, sc, hw, c, 1.10, 5.38, 1.66, 4.54)
+    sf_seg(img, ox, oy, sc, hw, c, 1.66, 4.54, 2.54, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 2.54, 4.20, 3.45, 4.47)
+    sf_seg(img, ox, oy, sc, hw, c, 3.45, 4.47, 4.06, 5.27)
+    sf_seg(img, ox, oy, sc, hw, c, 4.06, 5.27, 4.18, 6.31)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 5.50, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 5.00, 4.00, 4.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.10, 5.38, 3.66, 4.54)
+    sf_seg(img, ox, oy, sc, hw, c, 3.66, 4.54, 4.54, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 4.54, 4.20, 5.45, 4.47)
+    sf_seg(img, ox, oy, sc, hw, c, 5.45, 4.47, 6.06, 5.27)
+    sf_seg(img, ox, oy, sc, hw, c, 6.06, 5.27, 6.18, 6.31)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 5.50, 5.00, 10.00)
+}
+fn sf_110(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.30, 2.30, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 1.77, 5.70, 2.45, 4.79)
+    sf_seg(img, ox, oy, sc, hw, c, 2.45, 4.79, 3.38, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 3.38, 4.40, 4.35, 4.64)
+    sf_seg(img, ox, oy, sc, hw, c, 4.35, 4.64, 5.10, 5.45)
+    sf_seg(img, ox, oy, sc, hw, c, 5.10, 5.45, 5.48, 6.62)
+    sf_seg(img, ox, oy, sc, hw, c, 5.48, 6.62, 5.38, 7.89)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 6.00, 5.00, 10.00)
+}
+fn sf_111(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.10, 7.00, 4.82, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.82, 8.50, 4.05, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 4.05, 9.60, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 1.95, 9.60)
+    sf_seg(img, ox, oy, sc, hw, c, 1.95, 9.60, 1.18, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.18, 8.50, 0.90, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 0.90, 7.00, 1.18, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.18, 5.50, 1.95, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 1.95, 4.40, 3.00, 4.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 4.00, 4.05, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.05, 4.40, 4.82, 5.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.82, 5.50, 5.10, 7.00)
+}
+fn sf_112(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 1.00, 14.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.85, 9.46)
+    sf_seg(img, ox, oy, sc, hw, c, 1.85, 9.46, 2.65, 9.95)
+    sf_seg(img, ox, oy, sc, hw, c, 2.65, 9.95, 3.52, 9.90)
+    sf_seg(img, ox, oy, sc, hw, c, 3.52, 9.90, 4.29, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 9.30, 4.81, 8.27)
+    sf_seg(img, ox, oy, sc, hw, c, 4.81, 8.27, 5.00, 7.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 4.81, 5.73)
+    sf_seg(img, ox, oy, sc, hw, c, 4.81, 5.73, 4.29, 4.70)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 4.70, 3.52, 4.10)
+    sf_seg(img, ox, oy, sc, hw, c, 3.52, 4.10, 2.65, 4.05)
+    sf_seg(img, ox, oy, sc, hw, c, 2.65, 4.05, 1.85, 4.54)
+    sf_seg(img, ox, oy, sc, hw, c, 1.85, 4.54, 1.27, 5.50)
+}
+fn sf_113(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 5.00, 14.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 5.50, 4.97, 6.48)
+    sf_seg(img, ox, oy, sc, hw, c, 4.97, 6.48, 4.97, 7.52)
+    sf_seg(img, ox, oy, sc, hw, c, 4.97, 7.52, 4.73, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 4.73, 8.50, 4.29, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 4.29, 9.30, 3.68, 9.82)
+    sf_seg(img, ox, oy, sc, hw, c, 3.68, 9.82, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 2.32, 9.82)
+    sf_seg(img, ox, oy, sc, hw, c, 2.32, 9.82, 1.71, 9.30)
+    sf_seg(img, ox, oy, sc, hw, c, 1.71, 9.30, 1.27, 8.50)
+    sf_seg(img, ox, oy, sc, hw, c, 1.27, 8.50, 1.03, 7.52)
+    sf_seg(img, ox, oy, sc, hw, c, 1.03, 7.52, 1.03, 6.48)
+    sf_seg(img, ox, oy, sc, hw, c, 1.03, 6.48, 1.27, 5.50)
+}
+fn sf_114(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 1.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 5.50, 2.40, 4.40)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 5.00, 2.14, 5.65)
+    sf_seg(img, ox, oy, sc, hw, c, 2.14, 5.65, 2.53, 6.19)
+    sf_seg(img, ox, oy, sc, hw, c, 2.53, 6.19, 3.11, 6.52)
+    sf_seg(img, ox, oy, sc, hw, c, 3.11, 6.52, 3.77, 6.59)
+    sf_seg(img, ox, oy, sc, hw, c, 3.77, 6.59, 4.40, 6.39)
+}
+fn sf_115(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 5.20, 3.30, 4.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.30, 4.50, 2.00, 4.90)
+    sf_seg(img, ox, oy, sc, hw, c, 2.00, 4.90, 1.60, 6.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.60, 6.00, 2.60, 6.90)
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 6.90, 3.90, 7.30)
+    sf_seg(img, ox, oy, sc, hw, c, 3.90, 7.30, 4.50, 8.40)
+    sf_seg(img, ox, oy, sc, hw, c, 4.50, 8.40, 3.80, 9.50)
+    sf_seg(img, ox, oy, sc, hw, c, 3.80, 9.50, 2.40, 9.80)
+    sf_seg(img, ox, oy, sc, hw, c, 2.40, 9.80, 1.40, 9.10)
+}
+fn sf_116(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 1.50, 2.60, 8.60)
+    sf_seg(img, ox, oy, sc, hw, c, 2.60, 8.60, 3.80, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 4.30, 4.20, 4.30)
+}
+fn sf_117(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 1.00, 8.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 8.00, 1.20, 6.96)
+    sf_seg(img, ox, oy, sc, hw, c, 1.20, 6.96, 1.75, 6.12)
+    sf_seg(img, ox, oy, sc, hw, c, 1.75, 6.12, 2.55, 5.66)
+    sf_seg(img, ox, oy, sc, hw, c, 2.55, 5.66, 3.45, 5.66)
+    sf_seg(img, ox, oy, sc, hw, c, 3.45, 5.66, 4.25, 6.12)
+    sf_seg(img, ox, oy, sc, hw, c, 4.25, 6.12, 4.80, 6.96)
+    sf_seg(img, ox, oy, sc, hw, c, 4.80, 6.96, 5.00, 8.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 8.00, 5.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 7.00, 5.00, 10.00)
+}
+fn sf_118(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 3.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 10.00, 5.00, 4.20)
+}
+fn sf_119(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 0.60, 4.20, 1.80, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.80, 10.00, 3.00, 6.00)
+    sf_seg(img, ox, oy, sc, hw, c, 3.00, 6.00, 4.20, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 4.20, 10.00, 5.40, 4.20)
+}
+fn sf_120(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 5.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 1.00, 10.00)
+}
+fn sf_121(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 3.00, 9.80)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 2.20, 12.00)
+    sf_seg(img, ox, oy, sc, hw, c, 2.20, 12.00, 1.00, 13.50)
+}
+fn sf_122(img: &!Image, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 4.20, 5.00, 4.20)
+    sf_seg(img, ox, oy, sc, hw, c, 5.00, 4.20, 1.00, 10.00)
+    sf_seg(img, ox, oy, sc, hw, c, 1.00, 10.00, 5.00, 10.00)
+}
+fn sf_draw(img: &!Image, ch: i64, ox: i64, oy: i64, sc: f64, hw: f64, c: i64) with Mut, Div, Panic {
+    if ch == 32 { sf_32(img, ox, oy, sc, hw, c); return }
+    if ch == 37 { sf_37(img, ox, oy, sc, hw, c); return }
+    if ch == 40 { sf_40(img, ox, oy, sc, hw, c); return }
+    if ch == 41 { sf_41(img, ox, oy, sc, hw, c); return }
+    if ch == 43 { sf_43(img, ox, oy, sc, hw, c); return }
+    if ch == 44 { sf_44(img, ox, oy, sc, hw, c); return }
+    if ch == 45 { sf_45(img, ox, oy, sc, hw, c); return }
+    if ch == 46 { sf_46(img, ox, oy, sc, hw, c); return }
+    if ch == 47 { sf_47(img, ox, oy, sc, hw, c); return }
+    if ch == 48 { sf_48(img, ox, oy, sc, hw, c); return }
+    if ch == 49 { sf_49(img, ox, oy, sc, hw, c); return }
+    if ch == 50 { sf_50(img, ox, oy, sc, hw, c); return }
+    if ch == 51 { sf_51(img, ox, oy, sc, hw, c); return }
+    if ch == 52 { sf_52(img, ox, oy, sc, hw, c); return }
+    if ch == 53 { sf_53(img, ox, oy, sc, hw, c); return }
+    if ch == 54 { sf_54(img, ox, oy, sc, hw, c); return }
+    if ch == 55 { sf_55(img, ox, oy, sc, hw, c); return }
+    if ch == 56 { sf_56(img, ox, oy, sc, hw, c); return }
+    if ch == 57 { sf_57(img, ox, oy, sc, hw, c); return }
+    if ch == 58 { sf_58(img, ox, oy, sc, hw, c); return }
+    if ch == 65 { sf_65(img, ox, oy, sc, hw, c); return }
+    if ch == 66 { sf_66(img, ox, oy, sc, hw, c); return }
+    if ch == 67 { sf_67(img, ox, oy, sc, hw, c); return }
+    if ch == 68 { sf_68(img, ox, oy, sc, hw, c); return }
+    if ch == 69 { sf_69(img, ox, oy, sc, hw, c); return }
+    if ch == 70 { sf_70(img, ox, oy, sc, hw, c); return }
+    if ch == 71 { sf_71(img, ox, oy, sc, hw, c); return }
+    if ch == 72 { sf_72(img, ox, oy, sc, hw, c); return }
+    if ch == 73 { sf_73(img, ox, oy, sc, hw, c); return }
+    if ch == 74 { sf_74(img, ox, oy, sc, hw, c); return }
+    if ch == 75 { sf_75(img, ox, oy, sc, hw, c); return }
+    if ch == 76 { sf_76(img, ox, oy, sc, hw, c); return }
+    if ch == 77 { sf_77(img, ox, oy, sc, hw, c); return }
+    if ch == 78 { sf_78(img, ox, oy, sc, hw, c); return }
+    if ch == 79 { sf_79(img, ox, oy, sc, hw, c); return }
+    if ch == 80 { sf_80(img, ox, oy, sc, hw, c); return }
+    if ch == 81 { sf_81(img, ox, oy, sc, hw, c); return }
+    if ch == 82 { sf_82(img, ox, oy, sc, hw, c); return }
+    if ch == 83 { sf_83(img, ox, oy, sc, hw, c); return }
+    if ch == 84 { sf_84(img, ox, oy, sc, hw, c); return }
+    if ch == 85 { sf_85(img, ox, oy, sc, hw, c); return }
+    if ch == 86 { sf_86(img, ox, oy, sc, hw, c); return }
+    if ch == 87 { sf_87(img, ox, oy, sc, hw, c); return }
+    if ch == 88 { sf_88(img, ox, oy, sc, hw, c); return }
+    if ch == 89 { sf_89(img, ox, oy, sc, hw, c); return }
+    if ch == 90 { sf_90(img, ox, oy, sc, hw, c); return }
+    if ch == 95 { sf_95(img, ox, oy, sc, hw, c); return }
+    if ch == 97 { sf_97(img, ox, oy, sc, hw, c); return }
+    if ch == 98 { sf_98(img, ox, oy, sc, hw, c); return }
+    if ch == 99 { sf_99(img, ox, oy, sc, hw, c); return }
+    if ch == 100 { sf_100(img, ox, oy, sc, hw, c); return }
+    if ch == 101 { sf_101(img, ox, oy, sc, hw, c); return }
+    if ch == 102 { sf_102(img, ox, oy, sc, hw, c); return }
+    if ch == 103 { sf_103(img, ox, oy, sc, hw, c); return }
+    if ch == 104 { sf_104(img, ox, oy, sc, hw, c); return }
+    if ch == 105 { sf_105(img, ox, oy, sc, hw, c); return }
+    if ch == 106 { sf_106(img, ox, oy, sc, hw, c); return }
+    if ch == 107 { sf_107(img, ox, oy, sc, hw, c); return }
+    if ch == 108 { sf_108(img, ox, oy, sc, hw, c); return }
+    if ch == 109 { sf_109(img, ox, oy, sc, hw, c); return }
+    if ch == 110 { sf_110(img, ox, oy, sc, hw, c); return }
+    if ch == 111 { sf_111(img, ox, oy, sc, hw, c); return }
+    if ch == 112 { sf_112(img, ox, oy, sc, hw, c); return }
+    if ch == 113 { sf_113(img, ox, oy, sc, hw, c); return }
+    if ch == 114 { sf_114(img, ox, oy, sc, hw, c); return }
+    if ch == 115 { sf_115(img, ox, oy, sc, hw, c); return }
+    if ch == 116 { sf_116(img, ox, oy, sc, hw, c); return }
+    if ch == 117 { sf_117(img, ox, oy, sc, hw, c); return }
+    if ch == 118 { sf_118(img, ox, oy, sc, hw, c); return }
+    if ch == 119 { sf_119(img, ox, oy, sc, hw, c); return }
+    if ch == 120 { sf_120(img, ox, oy, sc, hw, c); return }
+    if ch == 121 { sf_121(img, ox, oy, sc, hw, c); return }
+    if ch == 122 { sf_122(img, ox, oy, sc, hw, c); return }
+}
+
+// Draw an ASCII string at scale `sc` (advance 8*sc px per glyph). Returns end x.
+pub fn plot_text_sc(img: &!Image, s: string, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Panic, Div {
+    let gs = (sc as f64) * 0.62
+    let hw = gs * 0.55
+    let adv = (7.0 * gs) as i64
+    var x = px; var i = 0; let n = str_len(s)
+    while i < n { sf_draw(img, str_char_at(s, i), x, py, gs, hw, c); x = x + adv; i = i + 1 }
+    x
+}
+// Default 2× text (legible for figure titles / axis labels).
+pub fn plot_text(img: &!Image, s: string, px: i64, py: i64, c: i64) -> i64 with Mut, Panic, Div {
+    plot_text_sc(img, s, px, py, c, 2)
+}
+
+// Draw a number with `dec` decimal places at (px,py), scale `sc`. Returns end x.
+pub fn draw_number(img: &!Image, val: f64, dec: i64, px: i64, py: i64, c: i64, sc: i64) -> i64 with Mut, Div, Panic {
+    let gs = (sc as f64) * 0.62
+    let hw = gs * 0.55
+    let adv = (7.0 * gs) as i64
+    var x = px
+    var v = val
+    if v < 0.0 { sf_draw(img, 45, x, py, gs, hw, c); x = x + adv; v = 0.0 - v }
+    let ip = v as i64
+    var digs: [i64; 16] = [0; 16]
+    var nd = 0
+    var q = ip
+    if q == 0 { digs[0 as usize] = 0; nd = 1 }
+    else { while q > 0 { digs[nd as usize] = q % 10; nd = nd + 1; q = q / 10 } }
+    var k = nd - 1
+    while k >= 0 { sf_draw(img, 48 + digs[k as usize], x, py, gs, hw, c); x = x + adv; k = k - 1 }
+    if dec > 0 {
+        sf_draw(img, 46, x, py, gs, hw, c); x = x + adv
+        var frac = v - (ip as f64)
+        var d = 0
+        while d < dec { frac = frac * 10.0; let dg = (frac as i64) % 10; sf_draw(img, 48 + dg, x, py, gs, hw, c); x = x + adv; d = d + 1 }
+    }
+    x
+}
+
+// Light gridlines at the `nx`/`ny` interior tick positions.
+pub fn plot_grid(img: &!Image, a: &Area, nx: i64, ny: i64, c: i64) with Mut, Div, Panic {
+    let dx = if (*a).xmax - (*a).xmin == 0.0 { 1.0 } else { (*a).xmax - (*a).xmin }
+    var i = 1
+    while i < nx {
+        let px = mapx(a, (*a).xmin + dx * ((i as f64) / (nx as f64)))
+        var y = (*a).y0
+        while y <= (*a).y1 { setpx(img, px, y, c); y = y + 1 }
+        i = i + 1
+    }
+    let dy = if (*a).ymax - (*a).ymin == 0.0 { 1.0 } else { (*a).ymax - (*a).ymin }
+    var j = 1
+    while j < ny {
+        let py = mapy(a, (*a).ymin + dy * ((j as f64) / (ny as f64)))
+        var x = (*a).x0
+        while x <= (*a).x1 { setpx(img, x, py, c); x = x + 1 }
+        j = j + 1
+    }
+}
+
+// Axis frame + `nx`/`ny` ticks with numeric labels.
+pub fn plot_axes(img: &!Image, a: &Area, nx: i64, ny: i64, c: i64, sc: i64) with Mut, Div, Panic {
+    // frame
+    var x = (*a).x0
+    while x <= (*a).x1 { setpx(img, x, (*a).y0, c); setpx(img, x, (*a).y1, c); x = x + 1 }
+    var y = (*a).y0
+    while y <= (*a).y1 { setpx(img, (*a).x0, y, c); setpx(img, (*a).x1, y, c); y = y + 1 }
+    // x ticks + labels
+    let dx = if (*a).xmax - (*a).xmin == 0.0 { 1.0 } else { (*a).xmax - (*a).xmin }
+    var i = 0
+    while i <= nx {
+        let vx = (*a).xmin + dx * ((i as f64) / (nx as f64))
+        let sx = mapx(a, vx)
+        var t = 0; while t < 3*sc { setpx(img, sx, (*a).y1 + t, c); t = t + 1 }
+        draw_number(img, vx, if dx < 10.0 { 1 } else { 0 }, sx - 6*sc, (*a).y1 + 6*sc, c, sc)
+        i = i + 1
+    }
+    // y ticks + labels
+    let dy = if (*a).ymax - (*a).ymin == 0.0 { 1.0 } else { (*a).ymax - (*a).ymin }
+    var j = 0
+    while j <= ny {
+        let vy = (*a).ymin + dy * ((j as f64) / (ny as f64))
+        let sy = mapy(a, vy)
+        var t2 = 0; while t2 < 3*sc { setpx(img, (*a).x0 - t2, sy, c); t2 = t2 + 1 }
+        draw_number(img, vy, if dy < 10.0 { 1 } else { 0 }, (*a).x0 - 34*sc, sy - 4*sc, c, sc)
+        j = j + 1
+    }
+}
+
+// One legend row at pixel (px,py): a colour swatch line + disc, then the label.
+pub fn plot_legend_item(img: &!Image, px: i64, py: i64, c: i64, label: string) with Mut, Panic, Div {
+    seg_aa(img, px, py + 6, px + 22, py + 6, 1.4, c)
+    let rf = 2.5
+    var yy = 0 - 3
+    while yy <= 3 {
+        var xx = 0 - 3
+        while xx <= 3 {
+            let d = sqrt(((xx * xx) + (yy * yy)) as f64)
+            var av = 0
+            if d <= rf { av = 255 } else { if d <= rf + 1.0 { av = ((rf + 1.0 - d) * 255.0) as i64 } }
+            if av > 0 { blend(img, px + 11 + xx, py + 6 + yy, c, av) }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    let _e = plot_text_sc(img, label, px + 30, py, c, 2)
+}
+
+pub fn plot_save(img: &Image, filename: string) -> bool with IO, Mut, Div, Panic {
+    png_write(filename, img)
+}

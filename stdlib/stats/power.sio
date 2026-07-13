@@ -1,0 +1,235 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/power.sio — statistical power and sample size for t-tests
+//
+// A public, general power/sample-size toolkit built on the exact t-distribution
+// (stats::student_t). The existing stats::clinical::power_analysis is entirely
+// private (no `pub fn`), clinical-scoped, and uses the plain normal
+// approximation; this module exposes a clean numeric API and uses the more
+// accurate *shifted-t* approximation to the non-central t power function:
+//
+//   power_ttest_onesample(d, n, alpha, two_sided)      -> power in [0,1]
+//   power_ttest_twosample(d, n_per_group, alpha, two)  -> power in [0,1]
+//   n_for_power_onesample(d, target_power, alpha, two) -> n (>= 2)
+//   n_for_power_twosample(d, target_power, alpha, two) -> n per group
+//
+// `d` is Cohen's standardised effect size (mean difference / SD). The power
+// approximation treats the non-central t as a central t shifted by the
+// noncentrality δ:
+//   one-sample/paired: δ = d·√n,      df = n-1
+//   two-sample equal n: δ = d·√(n/2), df = 2n-2
+//   power ≈ 1 - T_df(t_crit - δ) [+ T_df(-t_crit - δ) for a two-sided test]
+// with t_crit = t_{1-α(/2)}(df). This matches G*Power to a few 1e-3 for n ≳ 20;
+// it slightly over-states power at very small n (documented). Sample sizes are
+// found by searching up from the normal-approximation closed-form guess to the
+// smallest n meeting the target.
+//
+// Pure Sounio; dependencies: stats::student_t (t_cdf, t_quantile) and
+// special::erf (normal_quantile, for the sample-size initial guess).
+//
+// References:
+//   Cohen (1988) "Statistical Power Analysis for the Behavioral Sciences" 2nd ed.
+//   Chow, Shao, Wang & Lokhnygina (2018) "Sample Size Calculations in Clinical
+//     Research" 3rd ed.
+//   Faul et al. (2007) "G*Power 3", Behavior Research Methods 39(2)
+
+module stats::power
+
+use stats::student_t::{t_cdf, t_quantile}
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn pw_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pw_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+// Shifted-t power from a noncentrality, df, alpha and sidedness. Uses the exact
+// t CDF directly — the far-tail workaround this once needed is gone now that the
+// underlying incomplete beta is fixed at the root (issue #841).
+fn pw_power_from(ncp: f64, df: f64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic {
+    var a = alpha
+    if two_sided { a = alpha / 2.0 }
+    let t_crit = t_quantile(1.0 - a, df)
+
+    var pw = 1.0 - t_cdf(t_crit - ncp, df)          // upper rejection region
+    if two_sided {
+        pw = pw + t_cdf(0.0 - t_crit - ncp, df)     // lower rejection region
+    }
+    if pw < 0.0 { return 0.0 }
+    if pw > 1.0 { return 1.0 }
+    return pw
+}
+
+// ============================================================================
+// POWER
+// ============================================================================
+
+/// Power of a one-sample (or paired) t-test.
+///
+/// Parâmetros: d — Cohen's d (mean difference / SD); n — sample size (>= 2);
+///             alpha — significance level; two_sided — true for a two-sided test.
+/// Retorno: power = P(reject H0 | H1 true), in [0, 1].
+/// Referências: Cohen (1988); shifted-t approximation to the non-central t.
+pub fn power_ttest_onesample(d: f64, n: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    let nf = n as f64
+    let ncp = pw_abs(d) * pw_sqrt(nf)
+    return pw_power_from(ncp, nf - 1.0, alpha, two_sided)
+}
+
+/// Power of a two-sample t-test with equal group sizes.
+///
+/// Parâmetros: d — Cohen's d; n_per_group — size of each group (>= 2);
+///             alpha — significance level; two_sided — true for a two-sided test.
+/// Retorno: power in [0, 1].  δ = d·√(n/2), df = 2n-2.
+/// Referências: Cohen (1988); Chow et al. (2018).
+pub fn power_ttest_twosample(d: f64, n_per_group: i64, alpha: f64, two_sided: bool) -> f64 with Mut, Div, Panic {
+    if n_per_group < 2 { return 0.0 }
+    let nf = n_per_group as f64
+    let ncp = pw_abs(d) * pw_sqrt(nf / 2.0)
+    return pw_power_from(ncp, 2.0 * nf - 2.0, alpha, two_sided)
+}
+
+// ============================================================================
+// SAMPLE SIZE
+// ============================================================================
+
+// Normal-approximation closed-form n as a search starting point.
+fn pw_n_guess(d: f64, target_power: f64, alpha: f64, two_sided: bool, per_group: bool) -> i64 with Mut, Div, Panic {
+    var a = alpha
+    if two_sided { a = alpha / 2.0 }
+    let za = normal_quantile(1.0 - a)
+    let zb = normal_quantile(target_power)
+    let dd = pw_abs(d)
+    if dd < 1.0e-9 { return 1000000 }
+    var base = (za + zb) / dd
+    var nf = base * base
+    if per_group { nf = 2.0 * nf }   // two-sample needs ~2x per group
+    var n = nf as i64
+    if (n as f64) < nf { n = n + 1 }
+    n = n + 2   // small-sample / df cushion
+    if n < 2 { n = 2 }
+    return n
+}
+
+/// Smallest one-sample t-test size n reaching `target_power`.
+///
+/// Parâmetros: d — Cohen's d; target_power — desired power in (0,1);
+///             alpha — significance level; two_sided — sidedness.
+/// Retorno: minimal n (>= 2); capped at 1_000_000.
+pub fn n_for_power_onesample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic {
+    if pw_abs(d) < 1.0e-9 { return 1000000 }
+    var n = pw_n_guess(d, target_power, alpha, two_sided, false)
+    // climb until the target is met
+    while n < 1000000 && power_ttest_onesample(d, n, alpha, two_sided) < target_power {
+        n = n + 1
+    }
+    // descend to the minimal n still meeting the target
+    while n > 2 && power_ttest_onesample(d, n - 1, alpha, two_sided) >= target_power {
+        n = n - 1
+    }
+    return n
+}
+
+/// Smallest per-group two-sample t-test size reaching `target_power`.
+///
+/// Parâmetros / Retorno as above; n is the size of EACH group.
+pub fn n_for_power_twosample(d: f64, target_power: f64, alpha: f64, two_sided: bool) -> i64 with Mut, Div, Panic {
+    if pw_abs(d) < 1.0e-9 { return 1000000 }
+    var n = pw_n_guess(d, target_power, alpha, two_sided, true)
+    while n < 1000000 && power_ttest_twosample(d, n, alpha, two_sided) < target_power {
+        n = n + 1
+    }
+    while n > 2 && power_ttest_twosample(d, n - 1, alpha, two_sided) >= target_power {
+        n = n - 1
+    }
+    return n
+}
+
+// ============================================================================
+// INLINE TESTS — validated against G*Power / published power tables
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+fn test_power_values() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // one-sample d=0.5, n=34, alpha=0.05 two-sided -> G*Power ~0.807
+    ok = check(1, approx(power_ttest_onesample(0.5, 34, 0.05, true), 0.807, 0.015)) && ok
+    // two-sample d=0.5, n=64/group, alpha=0.05 two-sided -> ~0.801
+    ok = check(2, approx(power_ttest_twosample(0.5, 64, 0.05, true), 0.801, 0.015)) && ok
+    // under H0 (d=0) power collapses to alpha
+    ok = check(3, approx(power_ttest_onesample(0.0, 50, 0.05, true), 0.05, 1.0e-3)) && ok
+    // large effect / large n -> power ~1
+    ok = check(4, power_ttest_twosample(1.0, 60, 0.05, true) > 0.999) && ok
+    return ok
+}
+
+fn test_monotone() -> bool with IO, Mut, Div, Panic {
+    // power strictly increases with n
+    var ok = true
+    let p20 = power_ttest_onesample(0.5, 20, 0.05, true)
+    let p40 = power_ttest_onesample(0.5, 40, 0.05, true)
+    let p80 = power_ttest_onesample(0.5, 80, 0.05, true)
+    ok = check(10, p20 < p40 && p40 < p80) && ok
+    return ok
+}
+
+fn test_sample_size() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // classic: d=0.5, power=0.80, alpha=0.05 two-sided
+    //   one-sample ~34 ; two-sample ~64 per group
+    let n1 = n_for_power_onesample(0.5, 0.80, 0.05, true)
+    ok = check(20, n1 >= 33 && n1 <= 35) && ok
+    let n2 = n_for_power_twosample(0.5, 0.80, 0.05, true)
+    ok = check(21, n2 >= 62 && n2 <= 65) && ok
+    // the returned n actually meets the target, and n-1 does not
+    ok = check(22, power_ttest_onesample(0.5, n1, 0.05, true) >= 0.80) && ok
+    ok = check(23, power_ttest_onesample(0.5, n1 - 1, 0.05, true) < 0.80) && ok
+    // larger effect needs fewer subjects
+    let n_big = n_for_power_twosample(0.8, 0.80, 0.05, true)
+    ok = check(24, n_big < n2) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_power_values() && ok
+    ok = test_monotone() && ok
+    ok = test_sample_size() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

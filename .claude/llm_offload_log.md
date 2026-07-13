@@ -2518,3 +2518,126 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS**; it confirmed the gate, documentation, resolved execution blocker, and `parity_claim=false` boundary are internally consistent.
 - Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
 - Raw review directory: `/tmp/llm-offload-sZlKAw/`.
+
+## 2026-07-12 — C2-v0 second-order compilation semantic review
+- File: `docs/architecture/second-order-compilation.md`.
+- Provider: xAI/Grok 4.3 via `bin/llm-offload -t review -p xai`.
+- Outcome: **FINDINGS ADDRESSED**. The review challenged witness status, the use of "formal", paired-run terminology, requested-versus-realised enforcement, clinical-safety scope, intervention versioning, and receipt classification integrity. The specification now states that no witness exists, remains `hypothesis`, labels its notation as an operational model rather than proof, makes repetition necessary but insufficient, classifies unauthorised semantic fallback as `BLOCKED`, denies clinical-use authorisation, routes new intervention classes through the Semantic Lane Contract and schema versioning, and adds evidence identity, classification basis, and integrity status. A demand for a Lean proof at architecture-v0 stage was not adopted; the text explicitly disclaims machine-checked semantics.
+- Claude Opus review was attempted first but unavailable because Claude Code was not logged in and the worktree was not trusted. No Claude verdict was claimed.
+- A DeepSeek second-provider review was also attempted and returned `Insufficient Balance`; the xAI review is therefore the only completed external review for this lane.
+- Raw review directory: `/tmp/llm-offload-OTGkvg/`.
+- DeepSeek failure directory: `/tmp/llm-offload-Rzt9rw/`.
+
+## 2026-07-12 — M1 math-review: bounded EISA-H zero-divisor reference
+- Files: `stdlib/eisa/hypercomplex_zd.sio`, `tests/stdlib/eisa/test_eisa_h_zd.sio`, and `docs/internal/concepts/hypercomplex-zero-divisor-evidence.md`.
+- xAI/Grok 4.3 = **PASS** on the executable reference. It confirmed the Cayley-Dickson XOR/sign multiplication, exhaustive sparse accumulation, nonzero-factor requirement, bounded `+/-1` no-overflow envelope, and exact-versus-measured separation.
+- Z.AI/GLM-5.2 = **PASS** on the executable reference. It independently confirmed XOR basis indexing, rank-two zero-divisor coverage, the maximum four-term exact accumulator bound, and the refusal to promote a floating norm observation into an exact proof.
+- A first Z.AI review of the concept prose was inconclusive: it attempted a long informal reconstruction of the existing `84/336/168` census and ended without a verdict or counterexample. No implementation change was made from that response; the counts remain bounded to the existing executable, Python, and Lean census surfaces rather than being re-proved by this lane.
+- Evidence boundary: this review supports only the bounded stdlib software reference. It does not review or authorize checker emission, `IrSedZDCheck`, EISA opcodes, ABI, native lowering, RTL, hardware, or physical/clinical interpretation.
+- Raw reviews: `/tmp/llm-offload-FW6J2k/` (xAI implementation), `/tmp/llm-offload-9ysuAE/` (Z.AI implementation), and `/tmp/llm-offload-zuKRa7/` (concept prose fan-out).
+
+## 2026-07-12 — M1 adversarial follow-up: EISA-H forged evidence and measurement boundaries
+- Files: `stdlib/eisa/hypercomplex_zd.sio`, `tests/stdlib/eisa/test_eisa_h_zd.sio`, and `docs/internal/concepts/hypercomplex-zero-divisor-evidence.md`.
+- Repair: caller-controlled `element_status`, token tags, and checksums are no longer authority. Exact consumers revalidate identities, tags, actual arrays, at-most-two support, `+/-1` coefficients, nonzero operands, and the ordered exact product before accepting a checksum.
+- Adversarial witnesses: an externally forged operand with two `2^32` coefficients and `element_status=OK` is rejected before multiplication; a forged token for nonzero `e1*e2` with a cloned checksum is rejected by exact-product recomputation. NaN, positive and negative infinity, negative norms, invalid resolution, and equality-at-threshold measurement cases are classified explicitly.
+- Z.AI test review found a real classification wording issue: coefficient `2` is outside the V0 domain but is not itself an overflow risk. The implementation now classifies such inputs as `UNSUPPORTED` and reserves `OVERFLOW_RISK` for magnitude above `1518500249`, the exact largest `c` satisfying `4*c*c <= i64::MAX` for the four-term sparse accumulator.
+- Final xAI/Grok 4.3 review = **PASS** after the repair. It confirmed the exact overflow threshold, coefficient/support filter, exhaustive multiplication, product recomputation, and proof/measurement separation.
+- Final Z.AI/GLM-5.2 review = **PASS** after the repair. It independently recomputed the threshold, checked the four-term assumption against the enforced sparse domain, and confirmed the XOR/sign exact product and finite measurement boundary.
+- Execution receipt: Madaros checks pass; default Madaros execution is **BLOCKED** with wrapper rc `1` after native driver write rc `12`; the passing execution witness is explicitly `lean_single`.
+- Raw reviews: `/tmp/llm-offload-Fdh6AM/` (first repaired module), `/tmp/llm-offload-WdnICv/` (adversarial test review), and `/tmp/llm-offload-2cc7Cc/` (final post-fix xAI+ZAI module review).
+## 2026-07-13 — Native CDCL DIMACS receipt vertical slice
+- Files: `stdlib/theorem/cdcl.sio`, `bin/sounio-sat`, `scripts/research/embed_dimacs_cdcl.py`, `scripts/stdlib/cdcl_check_gate.sh`, and bounded solver fixtures/tests.
+- M1 math-review: xAI/Grok 4.3 = **NO MATHEMATICAL CONTENT TO REVIEW**. This slice ports an existing CDCL implementation and adds operational proof/model receipt plumbing; it introduces no new mathematical derivation or theorem claim.
+- Required second-provider attempt: Z.AI/GLM-5.2 returned an empty response on three attempts despite a loaded key. This is recorded as **UNAVAILABLE**, not as a pass. DeepSeek code review was also attempted and returned `Insufficient Balance`.
+- Independent code review initially returned **NOT_READY**, finding source injection through raw CNF paths, same-executable-only UNSAT checking, silent capacity truncation, permissive protocol parsing, and incomplete resource bounds. All findings were repaired. The final independent review verdict is **READY** for the bounded local claim.
+- Verified boundary: input is snapshotted and limited to 8 MiB, 1,023 variables, 8,192 clauses, 32,768 literals total, and 1,024 literals per clause. SAT requires complete host clause replay. UNSAT requires native RUP plus independent Python RUP-addition replay ending in the empty clause. LRAT is generated but not Lean-verified; `drat-trim` remains optional additional validation. Resource limits are operational defenses, not a syscall/filesystem sandbox.
+- Raw offloads: `/tmp/llm-offload-vLoga1/` (final xAI plus empty Z.AI), `/tmp/llm-offload-pK0Gcy/` and `/tmp/llm-offload-NJUItf/` (earlier empty Z.AI attempts), `/tmp/llm-offload-Os37ET/` (DeepSeek balance failure).
+
+## 2026-07-12 — math-review: stats::student_t distribution module
+- File: `stdlib/stats/student_t.sio` (new). Student's t pdf/cdf/sf/two-tail, quantile (inverse CDF), CI multiplier, and sample-mean CI.
+- Trigger: mandatory math-review (new numerical/statistical distribution — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: pdf = A&S 26.7.1; the identity I_x(df/2,1/2)=P(|T|>|t|) with x=df/(df+t²) and the symmetry-derived CDF/Sf; quantile inversion via `ibeta_inv`; Cornish–Fisher coefficients vs Fisher & Cornish (1960); the df>500 ibeta_inv guard and large-df normal fallback; all table/round-trip tolerances. Verdict: "NO MATHEMATICAL ERRORS FOUND."
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries; xAI is the §10-designated provider for math-review.
+- Upstream finding (separate issue): `special::beta::ibeta`/`ibeta_inv` return out-of-range values at extreme parameters (ibeta at a~5e4; ibeta_inv at a~1e3 and a=0.5). The module stays inside validated regions and routes around these; the beta breakdown is recorded here for a follow-up stdlib fix.
+- Raw review directory: `/tmp/llm-offload-Qy6zAD/`.
+
+## 2026-07-13 — math-review: stats::wilcoxon signed-rank test
+- File: `stdlib/stats/wilcoxon.sio` (new). Paired + one-sample Wilcoxon signed-rank with average-rank tie handling, tie-corrected variance, continuity correction, and rank-biserial effect size.
+- Trigger: mandatory math-review (new statistical test — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: E[W+]=n(n+1)/4; Var[W+]=n(n+1)(2n+1)/24 − Σ(t³−t)/48; continuity-corrected z; two-tailed p=2(1−Φ(|z|)); rank-biserial r=z/√n_eff; zero-dropping (Pratt zeros omitted) per textbook convention; and all four hand-computed worked examples reproduced exactly. Verdict: "No mathematical or numerical defects."
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review directory: `/tmp/llm-offload-E6JycL/`.
+
+## 2026-07-13 — math-review: stats::bland_altman agreement analysis
+- File: `stdlib/stats/bland_altman.sio` (new). Bias, SD of differences, 95% limits of agreement, Student-t CIs for the bias and each LoA, and points-outside count.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: bias=mean(A-B); sd on n-1 basis; LoA=bias±1.95996·sd; bias CI = bias ± t_{n-1}·sd/√n; Var(LoA)=sd²·(1/n+z²/(2(n-1))) with SE=√Var — all matching Bland & Altman (1986) exactly; both worked-example and outlier tests reproduce hand-computed values. Verdict: "all claims verified."
+- Consumes `stats::student_t::t_quantile` for the t multiplier (the CI piece the existing plot-only `viz::epiviz::epiviz_bland_altman` lacks).
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review directory: `/tmp/llm-offload-UUIRD9/`.
+
+## 2026-07-13 — math-review: stats::chi_square + stats::fisher_f distributions
+- Files: `stdlib/stats/chi_square.sio`, `stdlib/stats/fisher_f.sio` (new). Complete the distribution family (pdf/cdf/quantile + variance / variance-ratio CIs).
+- Trigger: mandatory math-review (new numerical distributions — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS** for both.
+  - chi_square: pdf incl. x=0 edge cases, Wilson-Hilferty+Newton quantile with overshoot damping, variance-CI index direction, and helper soundness all verified; table quantiles match A&S. "No mathematical content beyond the above."
+  - fisher_f: f_cdf/f_pdf vs A&S §26.6.1, quantile inversion x=d2·y/(d1·(1−y)), and the var-ratio duality F_{α/2}(ν1,ν2)=1/F_{1-α/2}(ν2,ν1) all verified; table critical values match. One [OVERREACH] note (not an error): the truncated ff_ln/ff_exp series are empirically adequate within test tolerances rather than proven to machine ε — same helper pattern used across the special modules; values match published F tables.
+- Fan-out: single provider (xAI) — DeepSeek/Gemini credit-exhausted per prior entries.
+- Raw review dirs: chi_square /tmp/llm-offload-tQnWk2/, fisher_f /tmp/llm-offload-nuUrHI/.
+
+## 2026-07-13 — math-review: stats::power (power & sample size)
+- File: `stdlib/stats/power.sio` (new). Power and required sample size for one-sample/paired and two-sample t-tests via the shifted-t approximation.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: ncp definitions (δ=|d|√n one-sample, |d|√(n/2) two-sample); shifted-t power formula; the pw_tcdf tail fallback (|x|>3 → normal_cdf, immaterial where power≈0/1); normal-closed-form sample-size guess + exact search; monotonicity; and the G*Power-validated test values (n≈34/64, power≈0.807/0.801).
+- Discovery during build: the direct-CF branch of special::beta::ibeta diverges at moderate a (df≈39), corrupting stats::student_t::t_two_tail / t_cdf for |t|≳4 — documented on issue #841 (new comment). power sidesteps it with the pw_tcdf normal-tail fallback; that trick is valid for power (tail ≈ 0/1) but NOT for p-values, so the root fix stays in special::beta.
+- Raw review directory: /tmp/llm-offload-DCHvg8/.
+
+## 2026-07-13 — math-review: stats::qq_normal (normal Q-Q / PPCC)
+- File: `stdlib/stats/qq_normal.sio` (new). Normal quantile-quantile plot coordinates + probability-plot correlation coefficient (PPCC).
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified: Blom plotting position p_i=(i-0.375)/(n+0.25); z_i=Φ⁻¹(p_i); LS slope/intercept and PPCC = s_zx/√(s_zz·s_xx); unbiased sd; perfect/affine → PPCC=1; sorted-output + odd-n symmetry. "No mathematical content beyond the above."
+- Raw review directory: /tmp/llm-offload-vd9qdn/.
+
+## 2026-07-13 — math-review: stats::anova (one-way ANOVA)
+- File: `stdlib/stats/anova.sio` (new). One-way ANOVA (any k), returning the full table + F/p/eta².
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified SS_total=SS_between+SS_within; df=k-1, N-k; MS=SS/df; F=MS_b/MS_w; eta²=SS_between/SS_total; worked example (SS 10/30, F=2, eta²=0.25); f_sf p-value usage. All ANOVA identities correct.
+- Also this commit: root-cause fix for #841 in the suite's *_exp helpers. `ff_exp`/`st_exp`/`cs_exp` reflected negatives only at |x|>20, so exp(x) for x in ~[-20,-10] cancelled catastrophically (exp(-13.855)→98.7 instead of 9.6e-7) — the mechanism corrupting ibeta's prefix and the t/F tails. Fixed by reflecting negatives first + reducing positives to [0,2]; added a small-x series `ff_ibeta_smallx` so `f_sf` far-tail is accurate (f_sf(300,2,6)=9.7e-7). Root cause + one-line fix for special::beta::bt_exp commented on #841.
+- Raw review directory: /tmp/llm-offload-KBWjo9/.
+
+## 2026-07-13 — math-review: stats::reg_bands (regression confidence/prediction bands)
+- File: `stdlib/stats/reg_bands.sio` (new). OLS fit + confidence band (mean response), prediction band (new obs), and slope CI, using the Student-t multiplier at n-2 df.
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified the classical Draper & Smith §1.4/§3.1 band formulas (df=n-2, correct t multiplier), the worked example (slope 0.6, sigma √0.8, r²=0.6, slope CI [-0.30,1.50], conf/pred half at x̄ = 1.273/3.118), edge guards, and rb_sqrt. "No mathematical errors or leaps."
+- Raw review directory: /tmp/llm-offload-XakelW/.
+
+## 2026-07-13 — math-review: special::beta bt_exp root-cause fix (#841)
+- File: `stdlib/special/beta.sio`. Fixed `bt_exp` to reflect negatives first + reduce positives to [0,2] (was: 28-term Taylor on [-20,20], catastrophic cancellation for x∈~[-20,-10]). This was the root of #841 — the incomplete-beta prefix `exp(log_prefix)` landed in the bad range for small x / large a, so `ibeta`/`ibeta_inv` and the t/F/chi2 tails returned garbage.
+- Provider: xAI/Grok 4.3 = **PASS**. Confirmed bt_exp reflection + Taylor + halving correct, bt_ln/bt_lgamma/Lentz CF/ibeta prefix+symmetry/ibeta_inv Newton all sound; one [TIGHTENABLE] comment mislabel ("Wilson-Hilferty" → plain normal approx) — corrected in this commit.
+- Verification: adversarial grid (analytic identities I_x(1,b)/I_x(a,1)/I_x(0.5,0.5), reflection, extremes a=19.5/50000/0.5) ALL PASS; t_two_tail(4,39)=2.7e-4 and (6,39)≈1e-6 (were 20.9 / 2760); ibeta_inv round-trips at a=0.5 and a=1000 now correct; extended tests/stdlib/special/test_beta.sio (14 cases) exit 0; full stats suite ALL GREEN; pre-existing prob::beta e2e failure unrelated (fails before and after).
+- Raw review directory: /tmp/llm-offload-ijJpQN/.
+
+## 2026-07-13 — math-review: exp cancellation fixes (prob + pbpk), #841-class
+- Files: `stdlib/prob/distributions.sio` (dist_exp), `stdlib/pbpk/rapamycin_2cmt.sio`, `rapamycin_budget.sio`, `stent_release.sio` (exp_neg ×3). Same #841-class bug: naive Taylor exp with late/no negative reflection → catastrophic cancellation.
+- Provider: xAI/Grok 4.3 = **PASS**. Confirmed the reflect-first / halving fixes preserve exp(x)=1/exp(-x) and exp(-x)=(exp(-x/2))², restrict the series to [0,2] (full double precision, no cancellation), and match true values (dist_exp(-13.855)=9.6e-7 was -784; exp_neg(8)=3.35e-4).
+- Context: part of a stdlib-wide audit finding ~40 hand-rolled exp helpers with this bug (systemic issue filed). Science-core special::gamma/erf/igamma use the correct ln2-reduction and are unaffected. Fixed here: the severe non-clinical case (dist_exp returned negative densities) + the dissertation PK-model exp_neg copies. Clinical darwin_pbpk/validation/* left for §10 deepseek review.
+
+## 2026-07-13 — math-review: stats::correlation + kruskal_wallis + tukey
+- Files: `stdlib/stats/{correlation,kruskal_wallis,tukey}.sio` (new).
+- Trigger: mandatory math-review (three new statistical methods — CLAUDE.md §10). Provider: xAI/Grok 4.3.
+- **kruskal_wallis = PASS**: H formula, tie correction, χ²(k-1) p-value, all inline cases. "No errors found."
+- **tukey = PASS**: q_range_cdf and studentized-range double-integral formulas, Simpson impls, s-density log formula, bisection, and the Harter q-table values. "No mathematical errors or overreaches."
+- **correlation = PASS on formulas** (Pearson r, t, Fisher-z CI, Spearman on ranks; all numeric assertions pass). One **[WRONG] flag on co_ln was a FALSE POSITIVE** — reviewer claimed O(1e-3) error from "missing t scaling"; verified behaviorally that co_ln is accurate to ~1e-6 (co_ln(7.873)=2.063439 vs 2.063437; co_ln(0.2254)=-1.489864 vs -1.489870). It is the identical helper already reviewed PASS as bt_ln in the beta review; term starts at t and accumulates t^(2k+1)/(2k+1) correctly. Not a defect.
+
+## 2026-07-13 — math-review: chi2_independence + effect_size + proportion
+- Files: `stdlib/stats/{chi2_independence,effect_size,proportion}.sio` (new). Provider: xAI/Grok 4.3.
+- **chi2_independence = PASS**: χ²=Σ(O-E)²/E with E=row·col/N, df=(r-1)(c-1), Cramér V, edge guards. "No content beyond verified identities."
+- **proportion = PASS**: Wilson centre/half, Clopper-Pearson via Beta quantiles, pooled two-prop z, edge handling, test constants. "No errors." (Impl note: CP uses bisection on forward ibeta because ibeta_inv(9,2,0.975) wrongly returns 1.0 — an upper-tail Newton overshoot, separate from #841.)
+- **effect_size = PASS on formulas** (Cohen d, Hedges J=1-3/(4N-9), SE, eta²=df1·F/(df1·F+df2), magnitude). One **[TIGHTENABLE] was a reviewer arithmetic error**: it claimed exact J·d≈-1.142631, but J·d=0.9032258·(-1.2649111)=-1.1425003 = the committed constant (test passes at 1e-5). Not a defect. (Second reviewer false-flag this session after co_ln.)
+
+## 2026-07-13 — math-review: stats::densities (direct pdf/cdf/pmf)
+- File: `stdlib/stats/densities.sio` (new). Direct-value pdf/cdf/pmf for normal, exponential, gamma, beta, lognormal, uniform, poisson, binomial, geometric. Provider: xAI/Grok 4.3 = **PASS** — all densities, all CDFs (gamma via igamma_lower, poisson via igamma_upper, binomial via ibeta), the robust de_exp/de_ln/de_sqrt, and edge handling verified. Complements prob::distributions (log-densities) and adds the missing binomial/lognormal/geometric.
+
+## 2026-07-13 — math-review: stats::bayes_conjugate
+- File: `stdlib/stats/bayes_conjugate.sio` (new). Beta-Binomial + Normal-Normal conjugate updates with credible intervals. Provider: xAI/Grok 4.3 = **PASS** — conjugate update formulas, posterior moments, Normal-Normal precision/mean derivation, and credible-interval construction (Beta quantiles by bisection, normal z) all verified.
+- Survival module (stats::survival) attempted but REMOVED: blocked by a lean_single engine limitation — a module with several [128]/[256] arrays live across a nested function call (sv_sqrt / chi2_sf) produces a crashing binary. Documented in EPISTEMIC_SUITE.md and memory. medical::survival has a full private impl that hits the same wall.

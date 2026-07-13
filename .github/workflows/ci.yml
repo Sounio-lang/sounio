@@ -78,6 +78,14 @@ jobs:
         run: bash scripts/dev/worktree_branch_audit.sh --check
       - name: Compiler lane status contract
         run: bash scripts/ci/compiler_lane_status_gate.sh
+      - name: Portable compiler build lock self-test
+        run: python3 scripts/ci/souc_build_lock_selftest.py
+      - name: CI watch receipt self-test
+        run: python3 scripts/ci/ci_watch_receipt_selftest.py
+      - name: Madaros changed-test selector self-test
+        run: bash scripts/ci/madaros_changed_tests_selftest.sh
+      - name: Executable payload comparator self-test
+        run: bash scripts/ci/executable_payload_compare_selftest.sh
       - name: Output-path invariants
         run: bash scripts/dev/check_outpath_invariant.sh
       - name: Output-path leading-dash guard
@@ -216,6 +224,19 @@ jobs:
           "$SOUC_STAGE2" self-hosted/compiler/lean_single.sio "$MACOS_OUT" --target aarch64-macos
           chmod +x "$MACOS_OUT"
           file "$MACOS_OUT" | grep -E "Mach-O 64-bit.*arm64.*executable|Mach-O 64-bit.*executable.*arm64"
+      - name: Cross-compile ARM64 nested-store witness
+        env:
+          SOUNIO_ARM64_WITNESS_COMPILER: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+          SOUNIO_ARM64_WITNESS_DIR: /tmp/sounio-arm64-nested-store-witness
+          SOUNIO_ARM64_WITNESS_MODE: attest
+        run: bash scripts/ci/arm64_nested_store_witness_gate.sh
+      - name: Cross-compile ARM64 array-element field-store witness
+        env:
+          SOUNIO_ARM64_WITNESS_COMPILER: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+          SOUNIO_ARM64_WITNESS_DIR: /tmp/sounio-arm64-array-element-field-witness
+          SOUNIO_ARM64_WITNESS_MODE: attest
+          SOUNIO_ARM64_WITNESS_SOURCE: tests/run-pass/arm64_deref_array_element_field_store.sio
+        run: bash scripts/ci/arm64_nested_store_witness_gate.sh
       - name: Source-bootstrap modular typecheck proof
         run: |
           SOUC_STAGE2=/tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
@@ -223,6 +244,7 @@ jobs:
           "$SOUC_STAGE2" self-hosted/compiler/lean.sio "$CHECK_OUT"
           chmod +x "$CHECK_OUT"
           "$CHECK_OUT" --help | grep -F -- "--check <source.sio>"
+          "$CHECK_OUT" --check tests/run-pass/match_arm_unbraced_assignment.sio
           SOUC_NATIVE="$CHECK_OUT" \
             WORK_DIR=/tmp/sounio-source-bootstrap-native-typecheck-proof \
             bash scripts/selfhost/selfhost_native_typecheck_proof.sh
@@ -240,6 +262,39 @@ jobs:
           path: |
             /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
             /tmp/sounio-source-bootstrap-native-typecheck-proof
+            /tmp/sounio-arm64-nested-store-witness
+            /tmp/sounio-arm64-array-element-field-witness
+          retention-days: 1
+
+  madaros-current-source-deref-f64:
+    name: Madaros Current-Source f64 Lowering
+    needs: impact
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
+      SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build Madaros once and run current-source f64 lowering gates
+        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      - name: Run changed Madaros tests with the current-source compiler
+        env:
+          SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOUNIO_TEST_JOBS: 4
+        run: bash scripts/ci/madaros_changed_tests_gate.sh
+      - name: Upload current-source f64 lowering logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-current-source-f64-lowering
+          path: /tmp/sounio-madaros-current-source-f64-lowering
           retention-days: 1
 
   native-selfhost-macos-arm64:
@@ -401,6 +456,7 @@ jobs:
       - contracts
       - native-selfhost-linux-x86_64
       - source-bootstrap-selfhost-linux-x86_64
+      - madaros-current-source-deref-f64
       - native-selfhost-macos-arm64
       - full-test-suite
       - sounio-lint

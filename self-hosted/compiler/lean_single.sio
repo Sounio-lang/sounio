@@ -21094,6 +21094,132 @@ fn compile_indexed_field_field_array_store_a64() with IO, Mut, Panic, Div {
     else { em32(0x3821680A) }
 }
 
+// root.array_field[idx].leaf = expr — AArch64 mirror of
+// compile_indexed_field_field_store_x86. Array-of-struct elements are stored as
+// pointers, so load the element pointer before applying the leaf-field offset.
+fn compile_indexed_field_field_store_a64() with IO, Mut, Panic, Div {
+    let root_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    let array_field_tok = EP + 2
+    let afns = TS[array_field_tok as usize]
+    let afne = TE[array_field_tok as usize]
+    let array_fh = gl_name_hash(afns, afne)
+
+    EP = EP + 4
+    let slot_idx = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or_a64()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    emit_store_var_a64(slot_idx)
+    if TK[EP as usize] == 50 { EP = EP + 1 }
+
+    let leaf_field_tok = EP
+    let lfns = TS[EP as usize]
+    let lfne = TE[EP as usize]
+    let leaf_fh = gl_name_hash(lfns, lfne)
+    EP = EP + 1
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+
+    let slot_val = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    compile_or_a64()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    emit_store_var_a64(slot_val)
+
+    ST_QUERY_NS = afns
+    ST_QUERY_NE = afne
+    let root_si = resolve_field_struct_index(ns, ne, array_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if root_si < 0 {
+        tc_error(array_field_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(root_si, array_field_tok) {
+        tc_error_hard(array_field_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = afns
+    ST_QUERY_NE = afne
+    let array_off = st_field_offset(root_si, array_fh)
+    let array_ty = st_field_ty(root_si, array_fh)
+    let array_hash = st_field_hash(root_si, array_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if array_ty != 8 || arr_hash_elem_ty(array_hash) != 6 {
+        tc_error(array_field_tok, "indexed field store requires struct array element")
+        return
+    }
+
+    var elem_si: i64 = -1
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    ST_QUERY_NS = lfns
+    ST_QUERY_NE = lfne
+    if elem_si < 0 { elem_si = resolve_struct_index_by_field(leaf_fh) }
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if elem_si < 0 {
+        tc_error(leaf_field_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(elem_si, leaf_field_tok) {
+        tc_error_hard(leaf_field_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = lfns
+    ST_QUERY_NE = lfne
+    let leaf_off = st_field_offset(elem_si, leaf_fh)
+    let leaf_ty = st_field_ty(elem_si, leaf_fh)
+    let leaf_hash = st_field_hash(elem_si, leaf_fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if leaf_off < 0 {
+        tc_error(leaf_field_tok, "unknown field access")
+        return
+    }
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error_hard(EP - 1, "assignment type mismatch")
+    }
+
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var_a64(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        else { tc_undefined_var(root_tok); em32(0xD2800000) }
+    }
+    if array_off != 0 {
+        emit_imm64_reg_a64(11, array_off)
+        em32(0x8B0B0000)
+    }
+    let slot_array_base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(slot_array_base)
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)  // mov x1, x0 (index)
+    emit_load_var_a64(slot_array_base)
+    em32(0xF8617800)  // ldr x0, [x0, x1, lsl #3] (element pointer)
+    if leaf_off != 0 {
+        emit_imm64_reg_a64(11, leaf_off)
+        em32(0x8B0B0000)
+    }
+    let slot_leaf_ptr = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(slot_leaf_ptr)
+    emit_load_var_a64(slot_val)
+    em32(0xAA0003EA)  // mov x10, x0 (value/source pointer)
+    emit_load_var_a64(slot_leaf_ptr)
+    if type_is_aggregate(leaf_ty, leaf_hash) {
+        emit_copy_agg_to_ptr_a64(leaf_ty, leaf_hash)
+    } else {
+        em32(0xF900000A)  // str x10, [x0]
+    }
+}
+
 fn resolve_struct_index_by_field(fh: i64) -> i64 with Panic, Div, Mut {
     var si: i64 = 0
     while si < ST_COUNT {
@@ -35309,6 +35435,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         compile_indexed_field_field_array_store_a64()
         return
     }
+    // x.array_field[idx].leaf = expr
+    if stmt_is_indexed_field_field_store(EP) {
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        compile_indexed_field_field_store_a64()
+        return
+    }
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
         if current_fn_allows_mutation() == false {
@@ -35604,6 +35738,194 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
         }
+        return
+    }
+    // (*name).field1.field2 = expr — two-level nested field store through a *mut/ref.
+    // a64 mirror of compile_deref_field_field_store_x86. WITHOUT this, `(*c).env.count = X`
+    // (env is an inline sub-struct) fell to the generic assignment path, which materialised
+    // the intermediate INLINE field as a value-copy, wrote into the copy, and discarded it —
+    // so the checker env.count never incremented (read back 0) and the runtime-builtin
+    // bindings (Some/None/…) were lost → standalone files (no imports) E137'd.
+    if stmt_is_deref_field_field_store(EP) {
+        let ff_name_tok = EP + 2
+        let ff_field1_tok = EP + 5
+        let ff_field2_tok = EP + 7
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(ff_field2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        let ff_ns = TS[ff_name_tok as usize]
+        let ff_ne = TE[ff_name_tok as usize]
+        let ff_h1 = gl_name_hash(TS[ff_field1_tok as usize], TE[ff_field1_tok as usize])
+        let ff_h2 = gl_name_hash(TS[ff_field2_tok as usize], TE[ff_field2_tok as usize])
+        EP = EP + 9
+        compile_or_a64()
+        let ff_rhs_ty = EXPR_TY
+        let ff_rhs_hash = EXPR_TY_HASH
+        let ff_lslot = var_find(ff_ns, ff_ne)
+        if ff_lslot < 0 {
+            tc_undefined_var(ff_name_tok)
+            return
+        }
+        let ff_lvi = var_find_idx(ff_ns, ff_ne)
+        if ff_lvi < 0 || type_is_pointer_like(VAR_TY[ff_lvi as usize], VAR_TY_HASH[ff_lvi as usize]) == false {
+            tc_error(ff_field1_tok, "field access through deref requires ref or pointer binding")
+            return
+        }
+        let ff_inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[ff_lvi as usize])
+        let ff_inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[ff_lvi as usize])
+        if ff_inner_ty != 6 {
+            tc_error(ff_field1_tok, "field access through pointer/ref requires struct pointee")
+            return
+        }
+        let ff_si1 = st_find(ff_inner_hash)
+        if ff_si1 < 0 {
+            tc_error(ff_field1_tok, "unknown field access")
+            return
+        }
+        if st_private_access_denied(ff_si1, ff_field1_tok) {
+            tc_error_hard(ff_field1_tok, "private struct field access")
+            return
+        }
+        ST_QUERY_NS = TS[ff_field1_tok as usize]
+        ST_QUERY_NE = TE[ff_field1_tok as usize]
+        let ff_foff1 = st_field_offset(ff_si1, ff_h1)
+        let ff_fty1 = st_field_ty(ff_si1, ff_h1)
+        let ff_fhash1 = st_field_hash(ff_si1, ff_h1)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
+        if ff_foff1 < 0 {
+            tc_error(ff_field1_tok, "unknown field access")
+            return
+        }
+        if ff_fty1 != 6 {
+            tc_error(ff_field2_tok, "field access through pointer/ref requires struct pointee")
+            return
+        }
+        let ff_si2 = st_find(ff_fhash1)
+        if ff_si2 < 0 {
+            tc_error(ff_field2_tok, "unknown field access")
+            return
+        }
+        if st_private_access_denied(ff_si2, ff_field2_tok) {
+            tc_error_hard(ff_field2_tok, "private struct field access")
+            return
+        }
+        ST_QUERY_NS = TS[ff_field2_tok as usize]
+        ST_QUERY_NE = TE[ff_field2_tok as usize]
+        let ff_foff2 = st_field_offset(ff_si2, ff_h2)
+        let ff_fty2 = st_field_ty(ff_si2, ff_h2)
+        let ff_fhash2 = st_field_hash(ff_si2, ff_h2)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
+        if ff_foff2 < 0 {
+            tc_error(ff_field2_tok, "unknown field access")
+            return
+        }
+        if ty_eq(ff_fty2, ff_fhash2, ff_rhs_ty, ff_rhs_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        } else {
+            emit_store_to_pointer_offset_a64(ff_lslot, ff_foff1 + ff_foff2, ff_fty2, ff_fhash2)
+        }
+        return
+    }
+    // (*name).field1.field2[idx] = expr — two-level nested ARRAY-field store through a
+    // *mut/ref. a64 mirror of compile_deref_field_field_array_store_x86. WITHOUT this,
+    // `(*c).env.bindings[idx] = TypeBinding{…}` fell to the generic path and wrote nowhere,
+    // so bound builtins were lost. Base = ptr + off(field1) + off(field2); element by idx.
+    if stmt_is_deref_field_field_array_store(EP) {
+        let fa_name_tok = EP + 2
+        let fa_ns = TS[fa_name_tok as usize]
+        let fa_ne = TE[fa_name_tok as usize]
+        let fa_field1_tok = EP + 5
+        let fa_field2_tok = EP + 7
+        let fa_h1 = gl_name_hash(TS[fa_field1_tok as usize], TE[fa_field1_tok as usize])
+        let fa_h2 = gl_name_hash(TS[fa_field2_tok as usize], TE[fa_field2_tok as usize])
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(fa_field2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        EP = EP + 9
+        compile_or_a64()
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+        if TK[EP as usize] == 42 { EP = EP + 1 }
+        if TK[EP as usize] == 16 { EP = EP + 1 }
+        emit_push_a64()
+        compile_or_a64()
+        let fa_rhs_ty = EXPR_TY
+        let fa_rhs_hash = EXPR_TY_HASH
+        let fa_lslot = var_find(fa_ns, fa_ne)
+        let fa_lvi = var_find_idx(fa_ns, fa_ne)
+        if fa_lslot < 0 || fa_lvi < 0 || type_is_pointer_like(VAR_TY[fa_lvi as usize], VAR_TY_HASH[fa_lvi as usize]) == false {
+            tc_error(fa_field1_tok, "field access through deref requires ref or pointer binding")
+            emit_pop_x1_a64()
+            return
+        }
+        let fa_inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[fa_lvi as usize])
+        let fa_inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[fa_lvi as usize])
+        if fa_inner_ty != 6 {
+            tc_error(fa_field1_tok, "field access through pointer/ref requires struct pointee")
+            emit_pop_x1_a64()
+            return
+        }
+        let fa_si1 = st_find(fa_inner_hash)
+        if fa_si1 < 0 {
+            tc_error(fa_field1_tok, "unknown field access")
+            emit_pop_x1_a64()
+            return
+        }
+        if st_private_access_denied(fa_si1, fa_field1_tok) {
+            tc_error_hard(fa_field1_tok, "private struct field access")
+            emit_pop_x1_a64()
+            return
+        }
+        ST_QUERY_NS = TS[fa_field1_tok as usize]
+        ST_QUERY_NE = TE[fa_field1_tok as usize]
+        let fa_foff1 = st_field_offset(fa_si1, fa_h1)
+        let fa_fty1 = st_field_ty(fa_si1, fa_h1)
+        let fa_fhash1 = st_field_hash(fa_si1, fa_h1)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
+        if fa_foff1 < 0 || fa_fty1 != 6 {
+            tc_error(fa_field2_tok, "field access through pointer/ref requires struct pointee")
+            emit_pop_x1_a64()
+            return
+        }
+        let fa_si2 = st_find(fa_fhash1)
+        if fa_si2 < 0 {
+            tc_error(fa_field2_tok, "unknown field access")
+            emit_pop_x1_a64()
+            return
+        }
+        if st_private_access_denied(fa_si2, fa_field2_tok) {
+            tc_error_hard(fa_field2_tok, "private struct field access")
+            emit_pop_x1_a64()
+            return
+        }
+        ST_QUERY_NS = TS[fa_field2_tok as usize]
+        ST_QUERY_NE = TE[fa_field2_tok as usize]
+        let fa_foff2 = st_field_offset(fa_si2, fa_h2)
+        let fa_fty2 = st_field_ty(fa_si2, fa_h2)
+        let fa_fhash2 = st_field_hash(fa_si2, fa_h2)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
+        if fa_fty2 != 8 {
+            tc_error(fa_field2_tok, "indexed field store requires array field")
+            emit_pop_x1_a64()
+            return
+        }
+        if ty_eq(arr_hash_elem_ty(fa_fhash2), arr_hash_elem_hash(fa_fhash2), fa_rhs_ty, fa_rhs_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        }
+        materialize_aggregate_array_element_a64(fa_fhash2)
+        em32(0xAA0003EA)  // mov x10, x0 (value)
+        emit_pop_x1_a64()  // x1 = index
+        emit_load_var_a64(fa_lslot)  // x0 = base pointer
+        let fa_total_off = fa_foff1 + fa_foff2
+        if fa_total_off != 0 {
+            emit_imm64_reg_a64(11, fa_total_off)
+            em32(0x8B0B0000)  // add x0, x0, x11
+        }
+        if arr_hash_esiz(fa_fhash2) == 8 { em32(0xF821780A) }
+        else { em32(0x3821680A) }
         return
     }
     // (*PTR).field = expr

@@ -1,0 +1,212 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/proportion.sio — confidence intervals and tests for proportions
+//
+// Inference on a binomial proportion (event rate) and the comparison of two —
+// the clinical bread-and-butter (response rates, incidence). Provides the two
+// standard interval methods and the two-proportion z-test:
+//
+//   wilson_ci(k, n, conf)             -> (lo, hi)   score interval (recommended)
+//   clopper_pearson_ci(k, n, conf)    -> (lo, hi)   exact (Beta quantiles)
+//   two_prop_z(k1, n1, k2, n2)        -> TwoPropResult
+//
+// Wilson:  centre = (p̂ + z²/2n)/(1+z²/n),  half = z·sqrt(p̂q̂/n + z²/4n²)/(1+z²/n).
+// Clopper-Pearson:  lo = I⁻¹(k, n−k+1, α/2),  hi = I⁻¹(k+1, n−k, 1−α/2).
+// Two-proportion z (pooled): z = (p̂₁−p̂₂)/sqrt(p̄q̄(1/n₁+1/n₂)),  p̄=(k₁+k₂)/(n₁+n₂).
+//
+// Pure Sounio; dependencies: normal quantile/CDF (special::erf) and the inverse
+// incomplete beta (special::beta).
+//
+// References:
+//   Wilson (1927) "Probable inference, the law of succession, and statistical
+//     inference", JASA 22(158)
+//   Clopper & Pearson (1934) "The use of confidence or fiducial limits...",
+//     Biometrika 26(4)
+//   Newcombe (1998) "Two-sided confidence intervals for the single proportion"
+
+module stats::proportion
+
+use special::erf::{normal_quantile, normal_cdf}
+use special::beta::{ibeta}
+
+// ============================================================================
+// INTERNAL
+// ============================================================================
+
+fn pr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+fn pr_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Inverse regularized incomplete beta by bisection on the (monotone, now-reliable)
+// forward ibeta — robust where special::beta::ibeta_inv's Newton overshoots in the
+// upper tail (e.g. ibeta_inv(9,2,0.975) wrongly returns 1.0).
+fn pr_ibeta_inv(a: f64, b: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0 }
+    var lo = 0.0
+    var hi = 1.0
+    var i = 0
+    while i < 60 {
+        let mid = 0.5 * (lo + hi)
+        if ibeta(a, b, mid) < p { lo = mid } else { hi = mid }
+        i = i + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+// ============================================================================
+// ONE PROPORTION
+// ============================================================================
+
+/// Wilson score confidence interval for a binomial proportion.
+///
+/// Parâmetros: k — successes; n — trials (>0); conf — level (e.g. 0.95).
+/// Retorno: (lo, hi) clamped to [0,1].
+/// Referências: Wilson (1927); recommended by Newcombe (1998).
+pub fn wilson_ci(k: i64, n: i64, conf: f64) -> (f64, f64) with Mut, Div, Panic {
+    if n <= 0 { return (0.0, 1.0) }
+    let nf = n as f64
+    let phat = (k as f64) / nf
+    let z = normal_quantile(0.5 + conf / 2.0)
+    let z2 = z * z
+    let denom = 1.0 + z2 / nf
+    let centre = (phat + z2 / (2.0 * nf)) / denom
+    let half = z * pr_sqrt(phat * (1.0 - phat) / nf + z2 / (4.0 * nf * nf)) / denom
+    var lo = centre - half
+    var hi = centre + half
+    if lo < 0.0 { lo = 0.0 }
+    if hi > 1.0 { hi = 1.0 }
+    return (lo, hi)
+}
+
+/// Clopper-Pearson (exact) confidence interval via Beta quantiles.
+///
+/// Parâmetros / Retorno as for `wilson_ci`. Conservative (guaranteed coverage).
+/// Referências: Clopper & Pearson (1934).
+pub fn clopper_pearson_ci(k: i64, n: i64, conf: f64) -> (f64, f64) with Mut, Div, Panic {
+    if n <= 0 { return (0.0, 1.0) }
+    let alpha = 1.0 - conf
+    var lo = 0.0
+    var hi = 1.0
+    let kf = k as f64
+    let nf = n as f64
+    if k > 0 {
+        lo = pr_ibeta_inv(kf, nf - kf + 1.0, alpha / 2.0)
+    }
+    if k < n {
+        hi = pr_ibeta_inv(kf + 1.0, nf - kf, 1.0 - alpha / 2.0)
+    }
+    return (lo, hi)
+}
+
+// ============================================================================
+// TWO PROPORTIONS
+// ============================================================================
+
+pub struct TwoPropResult {
+    pub p1: f64,         // k1/n1
+    pub p2: f64,         // k2/n2
+    pub diff: f64,       // p1 - p2
+    pub z: f64,          // pooled z statistic
+    pub p_value: f64,    // two-tailed
+}
+
+/// Two-proportion z-test (pooled variance, for H0: p1 = p2).
+///
+/// Parâmetros: k1,n1 — group 1; k2,n2 — group 2.
+/// Retorno: TwoPropResult (p1, p2, diff, z, two-tailed p).
+pub fn two_prop_z(k1: i64, n1: i64, k2: i64, n2: i64) -> TwoPropResult with Mut, Div, Panic {
+    if n1 <= 0 || n2 <= 0 {
+        return TwoPropResult { p1: 0.0, p2: 0.0, diff: 0.0, z: 0.0, p_value: 1.0 }
+    }
+    let n1f = n1 as f64
+    let n2f = n2 as f64
+    let p1 = (k1 as f64) / n1f
+    let p2 = (k2 as f64) / n2f
+    let pooled = ((k1 + k2) as f64) / (n1f + n2f)
+    let se = pr_sqrt(pooled * (1.0 - pooled) * (1.0 / n1f + 1.0 / n2f))
+    var z = 0.0
+    if se > 1.0e-300 { z = (p1 - p2) / se }
+    let p_value = 2.0 * (1.0 - normal_cdf(pr_abs(z)))
+    return TwoPropResult { p1: p1, p2: p2, diff: p1 - p2, z: z, p_value: p_value }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Wilson 95% for 8/10: [0.490172, 0.943348] (Newcombe / R prop.test).
+fn test_wilson() -> bool with IO, Mut, Div, Panic {
+    let (lo, hi) = wilson_ci(8, 10, 0.95)
+    var ok = true
+    ok = check(1, approx(lo, 0.490172, 1.0e-4)) && ok
+    ok = check(2, approx(hi, 0.943348, 1.0e-4)) && ok
+    // full-success edge: hi should be 1
+    let (_l2, hi2) = wilson_ci(10, 10, 0.95)
+    ok = check(3, approx(hi2, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// Clopper-Pearson 95% for 8/10: [0.443904, 0.974707] (R binom.test).
+fn test_clopper() -> bool with IO, Mut, Div, Panic {
+    let (lo, hi) = clopper_pearson_ci(8, 10, 0.95)
+    var ok = true
+    ok = check(10, approx(lo, 0.443904, 1.0e-4)) && ok
+    ok = check(11, approx(hi, 0.974707, 1.0e-4)) && ok
+    // k=0 -> lo=0 ; k=n -> hi=1
+    let (lo0, _h) = clopper_pearson_ci(0, 10, 0.95)
+    ok = check(12, approx(lo0, 0.0, 1.0e-12)) && ok
+    return ok
+}
+
+// Two-proportion: 30/100 vs 20/100. pooled=0.25, se=sqrt(0.1875·0.02)=0.0612372.
+// z=(0.3-0.2)/0.0612372=1.632993. p=2(1-Φ(1.632993))=0.102470.
+fn test_two_prop() -> bool with IO, Mut, Div, Panic {
+    let r = two_prop_z(30, 100, 20, 100)
+    var ok = true
+    ok = check(20, approx(r.diff, 0.1, 1.0e-9)) && ok
+    ok = check(21, approx(r.z, 1.632993, 1.0e-4)) && ok
+    ok = check(22, approx(r.p_value, 0.102470, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_wilson() && ok
+    ok = test_clopper() && ok
+    ok = test_two_prop() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

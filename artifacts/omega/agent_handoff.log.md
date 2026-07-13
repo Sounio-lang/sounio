@@ -3194,3 +3194,21 @@ status: lock-released
 notes: |
   Removes the #684 cd_sigma_x stdlib workaround. KNOWN_LIMITATIONS + SCOREBOARD flipped OPEN->FIXED.
   EISA thin-link + the cd_exact 18GB body-lowering memory wall remain separate open gaps.
+
+---
+
+agent: claude
+time_utc: 2026-07-12T15:30:42Z
+files:
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY Codex-2 (lane-4 nv2-compiler-hardening) — issue #834 opened. Native ELF (souc run / lean_single) has NO working heap allocator: stdlib/mem/box heap_alloc (extern "C" calloc) makes the ELF exit 1 at startup (not linked against libc); no syscall/mmap intrinsic. This blocks unbounded-size image encoding in image::pure::png. Filed as BLK-20260712-image-heap (compiler-semantics, B1, E2). Repro + ranked ask (recommend: link libc) + size-agnostic png_write design in docs/proposals/NATIVE_HEAP_ALLOCATION_2026-07-12.md (on main).
+checks:
+  - "SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run p.sio  # heap_alloc program -> exit 1, no output (repro in issue #834)"
+commit: pending
+status: blocked
+notes: |
+  Does NOT block anything currently on main. PR #828 (pure PNG encoder: dynamic DEFLATE
+  + adaptive filters + colormaps + canvas + 512x512 cap) already MERGED (cd1da7f79).
+  This is only the unbounded-size follow-up, which needs the compiler-side heap primitive.
+  Acceptance gate: the issue-#834 repro program prints 123 under souc run.
+  Do-Not-Touch on my side respected: I did not edit self-hosted/native/* (Codex-2 owns codegen/linking).

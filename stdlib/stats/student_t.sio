@@ -1,0 +1,380 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/student_t.sio — Student's t-distribution as a first-class object
+//
+// The stdlib distribution family (normal, beta, gamma, exponential) each expose
+// pdf / cdf / quantile. The t-distribution did not: only an *internal* exact
+// two-tailed tail probability lived in stats::hypothesis (a function named
+// `t_cdf` there that in fact returns P(|T| > t), not the CDF), plus a hardcoded
+// 95%-only multiplier table in optimize::uncertainty. This module completes the
+// family:
+//
+//   t_pdf(t, df)            — probability density
+//   t_cdf(t, df)            — cumulative distribution (monotone 0->1)
+//   t_sf(t, df)             — survival function 1 - cdf
+//   t_two_tail(t, df)       — two-tailed tail probability P(|T| > |t|)
+//   t_quantile(p, df)       — inverse CDF (NEW: general, any p in (0,1))
+//   t_ci_multiplier(c, df)  — two-sided CI t-multiplier at confidence c (NEW)
+//   t_mean_ci(...)          — confidence interval for a sample mean
+//
+// Analytic core is built on the regularized incomplete beta and its inverse
+// (special::beta) and log-gamma (special::gamma); the large-df path uses the
+// normal quantile/CDF (special::erf). No FFI, no sampling dependency.
+//
+// Validated domain: df >= 2 (df = 1, the Cauchy limit, is a degenerate
+// two-observation case and out of scope). The quantile uses the exact
+// incomplete-beta inverse for df <= 500 and a Cornish-Fisher expansion off the
+// normal quantile for df > 500 — the two agree to < 1e-5 across the crossover,
+// and the split also routes around the extreme-parameter breakdown of
+// special::beta::ibeta_inv observed at a >= ~1000 (df >= ~2000). See NOTE below.
+//
+// NOTE (upstream limitation): special::beta::ibeta / ibeta_inv return values
+// outside [0,1] / clamp to their floor for extreme parameters (ibeta at
+// a ~ 5e4; ibeta_inv at a ~ 1e3 and at a = 0.5). This module stays inside the
+// validated regions and falls back to the normal-based path elsewhere; the beta
+// breakdown itself is a separate stdlib issue.
+//
+// Relations used (Abramowitz & Stegun §26.7; DLMF §8.17):
+//   with x = df / (df + t^2),  I_x(df/2, 1/2) = P(|T| > |t|)
+//   so  F(|t|) = 1 - 0.5 * I_x,  and by symmetry  F(t<0) = 0.5 * I_x.
+//   quantile inverts this: x = I^{-1}(df/2, 1/2, 2*min(p,1-p)),
+//   |t| = sqrt(df * (1 - x) / x), signed by whether p >< 0.5.
+//   Cornish-Fisher (Fisher & Cornish 1960): t_p = z + (z^3+z)/(4v)
+//     + (5z^5+16z^3+3z)/(96v^2) + (3z^7+19z^5+17z^3-15z)/(384v^3), z = Phi^{-1}(p).
+//
+// References:
+//   Student (1908) "The probable error of a mean", Biometrika 6(1)
+//   Fisher & Cornish (1960) "The percentile points of distributions having
+//     known cumulants", Technometrics 2(2)
+//   Abramowitz & Stegun (1964) §26.7 — t-distribution
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., §6.14, §14.3
+//   DLMF §8.17 (https://dlmf.nist.gov/8.17)
+
+module stats::student_t
+
+use special::beta::{ibeta, ibeta_inv}
+use special::gamma::{lgamma}
+use special::erf::{normal_cdf, normal_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS — must precede all callers (self-contained, bootstrap-safe)
+// ============================================================================
+
+fn st_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Newton square root, range-reduced into [1, 4)
+fn st_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+// Natural logarithm via range reduction to [0.5, 2) then Maclaurin series
+fn st_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Exponential via Taylor series. Reflect negatives FIRST (a 28-term Taylor of
+// exp(x) for x in ~[-20,-10] suffers catastrophic cancellation and returns
+// garbage), then range-reduce positive x to [0,2] where the series is exact.
+fn st_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / st_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return st_exp(x / 2.0) * st_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// Cornish-Fisher t-quantile from a signed standard-normal quantile z.
+// Odd polynomial in z, so the sign of z carries to t.
+fn st_cornish_fisher(z: f64, df: f64) -> f64 {
+    let v = df
+    let z2 = z * z
+    let z3 = z2 * z
+    let z5 = z3 * z2
+    let z7 = z5 * z2
+    let c1 = (z3 + z) / (4.0 * v)
+    let c2 = (5.0 * z5 + 16.0 * z3 + 3.0 * z) / (96.0 * v * v)
+    let c3 = (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / (384.0 * v * v * v)
+    return z + c1 + c2 + c3
+}
+
+// ============================================================================
+// PUBLIC API — density, distribution, survival
+// ============================================================================
+
+let ST_PI: f64 = 3.14159265358979323846
+
+/// Probability density of Student's t at `t` with `df` degrees of freedom.
+///
+/// Parâmetros: t — abscissa; df — degrees of freedom (> 0).
+/// Retorno: f(t) = Γ((df+1)/2) / (sqrt(df·π)·Γ(df/2)) · (1 + t²/df)^(-(df+1)/2)
+/// Complexidade: O(1) (two lgamma evaluations).
+/// Referências: A&S §26.7.1.
+pub fn t_pdf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 0.0 }
+    let half = df / 2.0
+    let log_norm = lgamma(half + 0.5) - lgamma(half) - 0.5 * st_ln(df * ST_PI)
+    let log_kern = (0.0 - (half + 0.5)) * st_ln(1.0 + t * t / df)
+    return st_exp(log_norm + log_kern)
+}
+
+/// Two-tailed tail probability P(|T| > |t|) for `df` degrees of freedom.
+///
+/// This is the quantity a two-sided t-test needs. Built directly on the
+/// regularized incomplete beta: with x = df/(df+t²), it equals I_x(df/2, 1/2).
+/// For df > 10000 (beyond ibeta's reliable range) it uses the normal tail.
+pub fn t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 1.0 }
+    if df > 10000.0 {
+        // T ~ N(0,1) to < 3e-4 here; two-tailed = 2*(1 - Phi(|t|))
+        return 2.0 * (1.0 - normal_cdf(st_abs(t)))
+    }
+    let t2 = t * t
+    let x = df / (df + t2)
+    return ibeta(df / 2.0, 0.5, x)
+}
+
+/// Cumulative distribution F(t) = P(T <= t), monotone from 0 to 1.
+///
+/// Parâmetros: t — abscissa; df — degrees of freedom (>= 2 for full accuracy).
+/// Retorno: F(t) in [0, 1].
+/// Referências: A&S §26.7; derived from `t_two_tail` by symmetry.
+pub fn t_cdf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 0.5 }
+    let tail = t_two_tail(t, df)   // = P(|T| > |t|)
+    if t >= 0.0 {
+        return 1.0 - 0.5 * tail
+    }
+    return 0.5 * tail
+}
+
+/// Survival function S(t) = 1 - F(t) = P(T > t).
+pub fn t_sf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    return 1.0 - t_cdf(t, df)
+}
+
+// ============================================================================
+// QUANTILE (inverse CDF) — the genuinely new piece
+// ============================================================================
+
+/// Inverse CDF: the value t with F(t) = p, for p in (0, 1).
+///
+/// Parâmetros: p — probability in (0,1); df — degrees of freedom (>= 2).
+/// Retorno: the p-quantile of Student's t.
+/// Complexidade: one `ibeta_inv` (Newton) call for df <= 500, else O(1)
+///               Cornish-Fisher evaluation.
+/// Referências: inverts the I_x relation of A&S §26.7 via special::beta::ibeta_inv;
+///              Cornish-Fisher (1960) for the large-df tail.
+pub fn t_quantile(p: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 - 1.0e300 }
+    if p >= 1.0 { return 1.0e300 }
+    if p == 0.5 { return 0.0 }
+    if df <= 0.0 { return 0.0 }
+
+    let z = normal_quantile(p)   // signed standard-normal quantile
+
+    // Exact incomplete-beta inverse where it is reliable.
+    if df <= 500.0 {
+        var pp = p
+        if p > 0.5 { pp = 1.0 - p }
+        let x = ibeta_inv(df / 2.0, 0.5, 2.0 * pp)
+        if x > 1.0e-12 && x < 1.0 - 1.0e-12 {
+            let t_abs = st_sqrt(df * (1.0 - x) / x)
+            if p < 0.5 { return 0.0 - t_abs }
+            return t_abs
+        }
+        // ibeta_inv clamped/failed — fall through to Cornish-Fisher.
+    }
+
+    // Large df (or ibeta_inv failure): Cornish-Fisher off the normal quantile.
+    return st_cornish_fisher(z, df)
+}
+
+/// Two-sided CI multiplier at confidence level `conf` (e.g. 0.95) with `df`
+/// degrees of freedom: the k such that P(-k < T < k) = conf.
+///
+/// Generalises the hardcoded 95%-only table in optimize::uncertainty to any
+/// confidence level and df. For df -> ∞ it converges to the normal z-multiplier
+/// (1.95996 at 95%).
+pub fn t_ci_multiplier(conf: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if conf <= 0.0 { return 0.0 }
+    if conf >= 1.0 { return 1.0e300 }
+    let upper = 0.5 + conf / 2.0     // (1 + conf)/2
+    return t_quantile(upper, df)
+}
+
+// ============================================================================
+// CONFIDENCE INTERVAL for a sample mean
+// ============================================================================
+
+pub struct TCI {
+    pub mean: f64,   // sample mean (interval centre)
+    pub lo: f64,     // lower confidence bound
+    pub hi: f64,     // upper confidence bound
+    pub mult: f64,   // t-multiplier used
+    pub se: f64,     // standard error of the mean
+    pub df: f64,     // degrees of freedom (n - 1)
+}
+
+/// Confidence interval for a mean given its point estimate, sample standard
+/// deviation, sample size and confidence level.
+///
+/// Parâmetros: mean — sample mean; sd — sample standard deviation (n-1 basis);
+///             n — sample size (>= 2); conf — confidence level in (0,1).
+/// Retorno: TCI with lo/hi = mean ± t_(conf, n-1) · sd/sqrt(n).
+pub fn t_mean_ci(mean: f64, sd: f64, n: i64, conf: f64) -> TCI with Mut, Div, Panic {
+    if n < 2 {
+        return TCI { mean: mean, lo: mean, hi: mean, mult: 0.0, se: 0.0, df: 0.0 }
+    }
+    let df = (n - 1) as f64
+    let se = sd / st_sqrt(n as f64)
+    let mult = t_ci_multiplier(conf, df)
+    let half = mult * se
+    return TCI { mean: mean, lo: mean - half, hi: mean + half, mult: mult, se: se, df: df }
+}
+
+// ============================================================================
+// INLINE TESTS — validated against published t-tables and round-trips
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok {
+        return true
+    }
+    print("FAIL at case ")
+    print(name)
+    print("\n")
+    return false
+}
+
+fn test_cdf_symmetry() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // F(0) = 0.5 for any df
+    ok = check(1, approx(t_cdf(0.0, 5.0), 0.5, 1.0e-9)) && ok
+    ok = check(2, approx(t_cdf(0.0, 2.0), 0.5, 1.0e-9)) && ok
+    // symmetry: F(-t) = 1 - F(t)
+    let a = t_cdf(1.7, 8.0)
+    let b = t_cdf(0.0 - 1.7, 8.0)
+    ok = check(3, approx(a + b, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+fn test_pdf_peak() -> bool with IO, Mut, Div, Panic {
+    // t_pdf(0, 5) = Γ(3) / (sqrt(5π)·Γ(2.5)) = 0.379607...
+    var ok = true
+    ok = check(10, approx(t_pdf(0.0, 5.0), 0.3796066898224944, 1.0e-6)) && ok
+    // t_pdf(0, 2) = 1/(2·sqrt(2)) = 0.35355339
+    ok = check(11, approx(t_pdf(0.0, 2.0), 0.3535533905932738, 1.0e-6)) && ok
+    // pdf is symmetric
+    ok = check(12, approx(t_pdf(1.3, 7.0), t_pdf(0.0 - 1.3, 7.0), 1.0e-9)) && ok
+    return ok
+}
+
+fn test_quantile_table() -> bool with IO, Mut, Div, Panic {
+    // Classic two-sided 95% t-multipliers (upper 0.975 quantile)
+    var ok = true
+    ok = check(20, approx(t_quantile(0.975, 2.0),   4.3026527, 1.0e-4)) && ok
+    ok = check(21, approx(t_quantile(0.975, 5.0),   2.5705818, 1.0e-4)) && ok
+    ok = check(22, approx(t_quantile(0.975, 10.0),  2.2281389, 1.0e-4)) && ok
+    ok = check(23, approx(t_quantile(0.975, 30.0),  2.0422725, 1.0e-4)) && ok
+    ok = check(24, approx(t_quantile(0.975, 100.0), 1.9839715, 1.0e-4)) && ok
+    // upper 0.995 quantile (99% two-sided)
+    ok = check(25, approx(t_quantile(0.995, 10.0),  3.1692727, 1.0e-4)) && ok
+    // large df via Cornish-Fisher -> approaches normal z
+    ok = check(26, approx(t_quantile(0.975, 1000.0),   1.9623391, 1.0e-3)) && ok
+    ok = check(27, approx(t_quantile(0.975, 100000.0), 1.9599640, 1.0e-3)) && ok
+    return ok
+}
+
+fn test_quantile_cdf_roundtrip() -> bool with IO, Mut, Div, Panic {
+    // F(F^{-1}(p)) = p
+    var ok = true
+    let q1 = t_quantile(0.975, 7.0)
+    ok = check(30, approx(t_cdf(q1, 7.0), 0.975, 1.0e-6)) && ok
+    let q2 = t_quantile(0.20, 13.0)
+    ok = check(31, approx(t_cdf(q2, 13.0), 0.20, 1.0e-6)) && ok
+    let q3 = t_quantile(0.60, 3.0)
+    ok = check(32, approx(t_cdf(q3, 3.0), 0.60, 1.0e-6)) && ok
+    return ok
+}
+
+fn test_two_tail() -> bool with IO, Mut, Div, Panic {
+    // t = 2.5705818 at df=5 is the 0.975 quantile => two-tail p = 0.05
+    var ok = true
+    ok = check(40, approx(t_two_tail(2.5705818, 5.0), 0.05, 1.0e-5)) && ok
+    // t=0 => two-tail probability = 1
+    ok = check(41, approx(t_two_tail(0.0, 9.0), 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+fn test_ci() -> bool with IO, Mut, Div, Panic {
+    // mean=10, sd=2, n=25, 95% => df=24, mult≈2.0639, se=0.4, half≈0.82556
+    var ok = true
+    let ci = t_mean_ci(10.0, 2.0, 25, 0.95)
+    ok = check(50, approx(ci.mult, 2.0638986, 1.0e-4)) && ok
+    ok = check(51, approx(ci.se, 0.4, 1.0e-9)) && ok
+    ok = check(52, approx(ci.lo, 10.0 - 0.8255594, 1.0e-4)) && ok
+    ok = check(53, approx(ci.hi, 10.0 + 0.8255594, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_cdf_symmetry() && ok
+    ok = test_pdf_peak() && ok
+    ok = test_quantile_table() && ok
+    ok = test_quantile_cdf_roundtrip() && ok
+    ok = test_two_tail() && ok
+    ok = test_ci() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

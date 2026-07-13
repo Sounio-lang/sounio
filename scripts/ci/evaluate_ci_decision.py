@@ -23,6 +23,9 @@ def main() -> int:
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
         "source-bootstrap-selfhost-linux-x86_64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "madaros-current-source-deref-f64": any(
+            truthy(impact.get(key)) for key in ("compiler", "tests", "full")
+        ),
         "native-selfhost-macos-arm64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
         "full-test-suite": any(truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")),
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
