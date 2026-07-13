@@ -4,9 +4,13 @@
 
 **Goal:** Make `stdlib/epistemic/gum.sio` a genuinely-usable, importable GUM module — a program can `use` it, propagate ISO-GUM uncertainty, and print a correct report — proven by compile-and-run against a published GUM value. No compiler changes.
 
-**Architecture:** Fix the stdlib import blocker so `epistemic::gum` resolves; add a print-based `gum_report`; prove the full API runs as native ELF with assertions against a published GUM result; ship a consumer example + a runnable gate.
+**Architecture:** The module already imports (via wildcard); document the working idiom, add a print-based `gum_report`, prove the full API runs as native ELF with assertions against a published GUM result, and ship a consumer example + a runnable gate.
 
-**Tech stack:** Sounio (`./bin/souc` → Madaros v0.80.0). Verified working surface only: `print`/`print_f64` stdout, `string`+`str_*`, structs+`impl`, fixed slabs. **`check:OK` ≠ works — every runtime claim must be `souc compile … -o out && ./out`.**
+**Tech stack:** Sounio (`./bin/souc` → Madaros v0.80.0). Verified working surface only: `print`/`println` (incl. `print(f64)`/`println(f64)`) to stdout, `string`+`str_*`, structs+`impl`, fixed slabs. **`check:OK` ≠ works — every runtime claim must be `souc compile … -o out && ./out`.**
+
+**Compiler workarounds (dispatched: `docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md`):**
+- Import stdlib modules with **`use module::*`** (single-symbol `use module::name` fails `E137`).
+- In importing programs print floats with **`print(f64)`/`println(f64)`**, never `print_f64` (spurious `E137`).
 
 **Preamble — run once per shell:**
 ```bash
@@ -27,20 +31,20 @@ mkdir -p "$SCRATCH"
 
 | File | Responsibility | Task |
 |---|---|---|
-| `stdlib/epistemic/gum.sio` (modify) | Publish helpers so the module imports; add `gum_report` | 1, 2 |
+| `stdlib/epistemic/gum.sio` (modify) | Header usage-note; add `gum_report` | 1, 2 |
 | `tests/stdlib/epistemic/test_gum_stdlib.sio` (create) | Run-proof: import stdlib gum, assert published values | 3 |
 | `examples/epistemic/gum_measurement_chain.sio` (create) | Consumer example using stdlib gum + `gum_report` | 4 |
 | `scripts/epistemic_gum_gate.sh` (create) | Compile+run gate | 5 |
 
 ---
 
-## Task 1: Make `epistemic::gum` importable
+## Task 1: Verify `epistemic::gum` imports + runs; document the idiom
 
-**Files:** Modify `stdlib/epistemic/gum.sio`. Scratch repro in `$SCRATCH`.
+**Files:** Modify `stdlib/epistemic/gum.sio` (header comment only). Scratch driver in `$SCRATCH`.
 
-**Context:** `use epistemic::gum::gum_type_b_uniform` currently fails `E137 use of undeclared variable`; `use epistemic::gum::*` fails "visibility preflight". Sibling `knightian.sio` (same dir, no `module` decl, has a `main`) imports fine via `use epistemic::knightian::*`. Lead hypothesis: `gum.sio`'s `pub fn`s call **non-`pub` helpers** (`gum_sqrt`, `gum_abs`, `gum_min`, `gum_max`, `t95`, `t99`, `dof_to_i64`, `gum_result_from_parts`, `ws2`) that don't resolve across the import boundary → `E137`. Fix = publish the helpers the public surface needs.
+**Context (corrected — spec §2):** `epistemic::gum` is **already importable** via the wildcard form. The earlier "not importable" reading was a misdiagnosis of two compiler bugs (single-symbol import; `print_f64` in importing programs) — both dispatched, both with caller-side workarounds. No visibility edit to `gum.sio` is needed. This task proves import+run and records the idiom in the module header.
 
-- [ ] **Step 1: Minimal failing repro (in-repo).**
+- [ ] **Step 1: Prove import + run (in-repo, native ELF).**
 
 Create `examples/_scratch_gum_import.sio`:
 ```sounio
@@ -49,88 +53,71 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let ub = gum_type_b_uniform(0.5)
     let ua = gum_type_a(0.070710, 5)
     let r = gum_combine2(98.3, ua, ub)
-    print("U95="); print_f64(gum_u95(r)); print("\n")
+    print("u_c=")
+    println(gum_std_u(r))     // println(f64) — NOT print_f64
     return 0
 }
 ```
-Run: `$SOUC check examples/_scratch_gum_import.sio`
-Expected: FAIL (`E137` and/or "visibility preflight failed"). Record the exact error + byte offset.
+Run: `$SOUC compile examples/_scratch_gum_import.sio -o "$SCRATCH/gi.elf" && "$SCRATCH/gi.elf"; echo "exit=$?"`
+Expected: prints `u_c=0.29…`, `exit=0`. If it fails, capture the error and report DONE_WITH_CONCERNS — do not edit `self-hosted/`.
 
-- [ ] **Step 2: Confirm the cause is helper visibility.**
+- [ ] **Step 2: Add a usage note to the module header.**
 
-Inspect the non-`pub` helpers in `stdlib/epistemic/gum.sio`:
-```bash
-grep -nE "^\s*fn (gum_sqrt|gum_abs|gum_min|gum_max|t95|t99|dof_to_i64|gum_result_from_parts|ws2)\b" stdlib/epistemic/gum.sio
+At the top of `stdlib/epistemic/gum.sio`, inside the existing comment block, add:
+```sounio
+// USAGE: import with `use epistemic::gum::*` (single-symbol `use epistemic::gum::name`
+// currently fails to resolve — Madaros bug, docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md).
+// Print floats with print(x)/println(x); do NOT use print_f64 in an importing program.
 ```
-Confirm each is `fn` (not `pub fn`) and is referenced inside a `pub fn` body. If the failing symbol in Step 1 is one of these, Hypothesis A holds → Step 3. If instead the error points at an embedded `main` or a top-level statement, STOP and report DONE_WITH_CONCERNS describing what you found (may be Hypothesis B/C — controller will decide fallback).
+Change no code and no signature.
 
-- [ ] **Step 3: Check for name collisions before publishing.**
-
-For each helper without a `gum_` prefix (`t95`, `t99`, `dof_to_i64`, `ws2`, `gum_result_from_parts`), verify making it `pub` won't collide across the epistemic package:
-```bash
-for s in t95 t99 dof_to_i64 ws2 gum_result_from_parts; do echo "== $s =="; git grep -nE "pub fn $s\b" -- 'stdlib/epistemic/*.sio'; done
-```
-Expected: no existing `pub fn` with these names elsewhere. If a collision exists, rename the `gum.sio` helper with a `gum_` prefix (e.g. `t95`→`gum_t95`) and update its call sites within `gum.sio` only.
-
-- [ ] **Step 4: Publish the helpers.**
-
-In `stdlib/epistemic/gum.sio`, change each required helper from `fn NAME` to `pub fn NAME` (apply any rename decided in Step 3, updating in-file call sites). Do not alter bodies or the already-`pub` API.
-
-- [ ] **Step 5: Module still self-checks.**
+- [ ] **Step 3: Self-check stays green.**
 
 Run: `$SOUC check stdlib/epistemic/gum.sio`
 Expected: `check: OK`.
 
-- [ ] **Step 6: Import now resolves — compile AND run.**
-
-Run:
-```bash
-$SOUC compile examples/_scratch_gum_import.sio -o "$SCRATCH/gi.elf" && "$SCRATCH/gi.elf"
-```
-Expected: prints `U95=<number>` and exits 0. If still failing, the blocker is not helper-visibility → report DONE_WITH_CONCERNS with findings (fallback path).
-
-- [ ] **Step 7: Clean up scratch + commit.**
+- [ ] **Step 4: Clean up scratch + commit.**
 ```bash
 rm -f examples/_scratch_gum_import.sio
 git add stdlib/epistemic/gum.sio
-git commit -m "fix(epistemic): make gum helpers pub so epistemic::gum is importable"
+git commit -m "docs(epistemic): document gum import + float-print idiom (Madaros workarounds)"
 ```
 
 ## Task 2: Add `gum_report` formatted stdout
 
-**Files:** Modify `stdlib/epistemic/gum.sio`. Depends on Task 1 (module importable).
+**Files:** Modify `stdlib/epistemic/gum.sio`. Depends on Task 1.
 
 - [ ] **Step 1: Write the report function.**
 
-Append to `stdlib/epistemic/gum.sio` (after the accessors, before any `main`):
+Append to `stdlib/epistemic/gum.sio` (after the accessors, before any `main`). Floats print via `print(f64)` — never `print_f64`:
 ```sounio
 pub fn gum_report(label: string, unit: string, r: GUMResult) with IO, Mut, Div, Panic {
     print(label)
     print(" = ")
-    print_f64(gum_value(r))
+    print(gum_value(r))
     print(" ± ")
-    print_f64(gum_u95(r))
+    print(gum_u95(r))
     print(" ")
     print(unit)
     print("   (k = ")
-    print_f64(gum_k95(r))
+    print(gum_k95(r))
     print(", 95%)\n    u_c = ")
-    print_f64(gum_std_u(r))
+    print(gum_std_u(r))
     print(" ")
     print(unit)
     print(",  nu_eff = ")
-    print_f64(gum_dof(r))
+    print(gum_dof(r))
     print("\n")
 }
 ```
-> If `print`/`print_f64` are not both in scope inside `gum.sio`, mirror how existing functions in the file print (grep `print` in `gum.sio`; the file already prints in its `main`).
+> If `print(f64)` inline does not compile inside `gum.sio` itself (single-module context may differ), fall back to `print_f64` **inside gum.sio only** — the multi-module bug affects importing callers, and `gum.sio` compiled standalone may accept `print_f64`. Verify by the Step 3 run (which imports it).
 
 - [ ] **Step 2: Self-check stays green.**
 
 Run: `$SOUC check stdlib/epistemic/gum.sio`
 Expected: `check: OK`.
 
-- [ ] **Step 3: Smoke it via an in-repo driver, compile+run.**
+- [ ] **Step 3: Smoke via an importing driver, compile+run.**
 
 Create `examples/_scratch_report.sio`:
 ```sounio
@@ -143,8 +130,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     return 0
 }
 ```
-Run: `$SOUC compile examples/_scratch_report.sio -o "$SCRATCH/rep.elf" && "$SCRATCH/rep.elf"`
-Expected: a formatted line `recovery = 98.3… ± … %   (k = …, 95%)` then the `u_c … nu_eff …` line, exit 0.
+Run: `$SOUC compile examples/_scratch_report.sio -o "$SCRATCH/rep.elf" && "$SCRATCH/rep.elf"; echo "exit=$?"`
+Expected: `recovery = 98.3… ± … %   (k = …, 95%)` then `u_c … nu_eff …`, `exit=0`.
 
 - [ ] **Step 4: Clean up + commit.**
 ```bash
@@ -157,9 +144,9 @@ git commit -m "feat(epistemic): gum_report — formatted ISO-GUM stdout report"
 
 **Files:** Create `tests/stdlib/epistemic/test_gum_stdlib.sio`.
 
-**Context:** Published anchor (already reproduced at runtime from `examples/real_world/04_gum_measurement_simple.sio`): Type-A s/√n with s≈0.070710 over n=5; Type-B rectangular half-width 0.5 → variance a²/3 = 0.083333, std 0.288675; combined at value 98.30 → u_c ≈ 0.293914, U(k=2) ≈ 0.587828. Assert on the raw f64 accessors (not printed text) within tolerance.
+**Context:** Published anchor (reproduced at runtime from `examples/real_world/04_gum_measurement_simple.sio`): Type-B rectangular half-width 0.5 → variance a²/3 = 0.083333, std 0.288675; Type-A s≈0.070710 over n=5; combined at 98.30 → u_c ≈ 0.293914, U(k=2) ≈ 0.587828. Assert on the raw f64 accessors (not printed text) within tolerance.
 
-- [ ] **Step 1: Write the driver (this is the test — compile-and-run is the gate).**
+- [ ] **Step 1: Write the driver (compile-and-run IS the gate).**
 
 Create `tests/stdlib/epistemic/test_gum_stdlib.sio`:
 ```sounio
@@ -171,17 +158,12 @@ fn near(a: f64, b: f64, tol: f64) -> bool {
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
-    // Type-B rectangular, half-width 0.5  -> variance a^2/3
     let ub = gum_type_b_uniform(0.5)
-    // Type-A, s = 0.070710 over n = 5
     let ua = gum_type_a(0.070710, 5)
-    // Combine at measured value 98.3
     let r = gum_combine2(98.3, ua, ub)
 
-    // Published expectations (ISO GUM combination)
     if !near(gum_value(r), 98.3, 1.0e-6) { print("FAIL value\n"); return 1 }
     if !near(gum_std_u(r), 0.293914, 1.0e-3) { print("FAIL u_c\n"); return 2 }
-    // U95 = k95 * u_c ; for large dof k95 -> ~2.0 so U95 ~ 0.5878
     if !near(gum_u95(r), 0.587828, 5.0e-2) { print("FAIL U95\n"); return 3 }
     if gum_k95(r) < 1.9 { print("FAIL k95 range\n"); return 4 }
 
@@ -190,17 +172,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     return 0
 }
 ```
-> Tolerances: `u_c` tight (1e-3); `U95` looser (5e-2) because `k95` depends on effective dof via
-> Welch–Satterthwaite and the reference used k=2 exactly. If the driver's `u_c` matches but `U95` is off
-> because `k95` ≠ 2 at this dof, that is CORRECT GUM behaviour — keep the loose bound; do not retrofit.
+> Tolerances: `u_c` tight (1e-3); `U95` looser (5e-2) because `k95` depends on effective dof via Welch–Satterthwaite and the reference used k=2 exactly. If `u_c` matches but `U95` differs because `k95` ≠ 2 at this dof, that is CORRECT GUM behaviour — keep the loose bound; do NOT retrofit tolerances to force a pass.
 
 - [ ] **Step 2: Compile and run (the gate).**
 
 Run: `$SOUC compile tests/stdlib/epistemic/test_gum_stdlib.sio -o "$SCRATCH/tg.elf" && "$SCRATCH/tg.elf"; echo "exit=$?"`
 Expected: report line(s) + `GUM_STDLIB_OK`, `exit=0`.
-If an assertion fails: do NOT loosen tolerances to pass. Investigate — either the stdlib value is wrong
-(report it) or the expectation/tolerance derivation is wrong (fix the derivation, cite it). Report
-DONE_WITH_CONCERNS if the discrepancy is real.
+If an assertion fails: do NOT loosen tolerances. Investigate — either the stdlib value is wrong (report it) or the expectation is wrong (fix the derivation, cite it). Report DONE_WITH_CONCERNS if the discrepancy is real.
 
 - [ ] **Step 3: Commit.**
 ```bash
@@ -223,14 +201,10 @@ use epistemic::gum::*
 fn main() -> i32 with IO, Mut, Div, Panic {
     print("=== GUM measurement chain (stdlib epistemic::gum) ===\n")
 
-    // Reference standard: certificate ±0.5% expanded, k=2 -> Type-B expanded
-    let u_ref = gum_type_b_expanded(0.5, 2.0)
-    // Rounding / resolution: rectangular half-width 0.05
-    let u_res = gum_type_b_uniform(0.05)
-    // Repeatability: s = 0.12 over n = 8 -> Type-A
-    let u_rep = gum_type_a(0.12, 8)
+    let u_ref = gum_type_b_expanded(0.5, 2.0)   // certificate ±0.5% expanded, k=2
+    let u_res = gum_type_b_uniform(0.05)         // resolution, rectangular half-width 0.05
+    let u_rep = gum_type_a(0.12, 8)              // repeatability, s=0.12 over n=8
 
-    // Combine three components at measured value 99.4
     let r = gum_combine3(99.4, u_ref, u_res, u_rep)
     gum_report("assay", "%", r)
     return 0
@@ -240,7 +214,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 - [ ] **Step 2: Compile and run.**
 
 Run: `$SOUC compile examples/epistemic/gum_measurement_chain.sio -o "$SCRATCH/chain.elf" && "$SCRATCH/chain.elf"; echo "exit=$?"`
-Expected: header + a formatted `assay = 99.4… ± … %` report, exit 0.
+Expected: header + `assay = 99.4… ± … %` report, `exit=0`.
 
 - [ ] **Step 3: Commit.**
 ```bash
@@ -299,13 +273,8 @@ git commit -m "test(epistemic): compile-and-run gate for the GUM vertical"
 ---
 
 ## Self-review
-- **Spec coverage:** importability fix (Task 1), `gum_report` (Task 2), run-proof vs published value
-  (Task 3), consumer example (Task 4), runnable gate + vancomycin regression (Task 5). All spec items
-  mapped.
-- **`check`≠run enforced:** Tasks 2–5 each require `souc compile … && ./elf`, not just `check`.
-- **Fallback wired:** Task 1 Steps 2/6 route to DONE_WITH_CONCERNS if the blocker isn't helper-visibility,
-  so the controller can trigger the self-contained fallback from the spec without a dead end.
-- **No tolerance-retrofit:** Task 3 explicitly forbids loosening bounds to pass and explains the correct
-  `k95`/dof behaviour.
-- **Consistency:** symbol names (`gum_type_a/_b_uniform/_b_expanded`, `gum_combine2/3`, `gum_value/std_u/
-  u95/k95/dof`, `gum_report`) match `gum.sio`'s verified surface.
+- **Spec coverage:** import verify+document (Task 1), `gum_report` (Task 2), run-proof vs published value (Task 3), consumer example (Task 4), runnable gate + vancomycin regression (Task 5). All spec items mapped.
+- **`check`≠run enforced:** Tasks 1–5 each require `souc compile … && ./elf`, not just `check`.
+- **Compiler workarounds baked in:** wildcard imports; `print(f64)`/`println(f64)` not `print_f64`.
+- **No tolerance-retrofit:** Task 3 forbids loosening bounds and explains the correct `k95`/dof behaviour.
+- **Consistency:** symbol names (`gum_type_a/_b_uniform/_b_expanded`, `gum_combine2/3`, `gum_value/std_u/u95/k95/dof`, `gum_report`) match `gum.sio`'s verified surface.
