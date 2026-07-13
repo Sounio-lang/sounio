@@ -123,6 +123,20 @@ fn empty_lower_loop_labels() -> LowerLoopLabels {
     }
 }
 
+let LOWER_GLOBAL_ELEM_F64: i64 = 2
+
+pub struct LowerGlobalTypeTable {
+    // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
+    // source array lengths are literal-only in the bootstrap grammar.
+    elem_kinds: [i64; 2048],
+}
+
+fn empty_lower_global_type_table() -> LowerGlobalTypeTable {
+    LowerGlobalTypeTable {
+        elem_kinds: [0; 2048],
+    }
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     current_fn: i64,
@@ -139,6 +153,9 @@ struct Lowerer {
     enum_variants: Box<EnumVariantTable>,
     // Phase 3.2: Struct field layouts
     struct_layouts: Box<StructLayoutTable>,
+    // Frontend-owned global element types. BSS byte size cannot distinguish
+    // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
+    global_types: Box<LowerGlobalTypeTable>,
     array_elem_float_regs: [i64; 512],
     array_elem_float_reg_count: i64,
     variance_base_regs: [i64; 1024],
@@ -167,6 +184,7 @@ pub struct IrProgramSummary {
     module: Box<IrModule>,
     enum_variants: Box<EnumVariantTable>,
     struct_layouts: Box<StructLayoutTable>,
+    global_types: Box<LowerGlobalTypeTable>,
     probe_mode: bool,
 }
 
@@ -186,6 +204,7 @@ pub struct IrProgramSummaryFlat {
     module: IrModule,
     enum_variants: EnumVariantTable,
     struct_layouts: StructLayoutTable,
+    global_types: LowerGlobalTypeTable,
     probe_mode: bool,
 }
 
@@ -205,6 +224,7 @@ struct IrFastSummaryOwnedSeed {
     module: IrModule,
     enum_variants: EnumVariantTable,
     struct_layouts: StructLayoutTable,
+    global_types: LowerGlobalTypeTable,
 }
 
 pub struct IrFunctionBodyResult {
@@ -256,6 +276,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         had_error: false,
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
+        global_types: Box::new(empty_lower_global_type_table()),
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
         variance_base_regs: [IR_INVALID_REG; 1024],
@@ -397,6 +418,7 @@ pub fn ir_empty_program_summary() -> IrProgramSummary {
         module: Box::new(ir_empty_module()),
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
+        global_types: Box::new(empty_lower_global_type_table()),
         probe_mode: false,
     }
 }
@@ -406,6 +428,7 @@ fn ir_empty_program_summary_flat() -> IrProgramSummaryFlat {
         module: ir_empty_module(),
         enum_variants: empty_enum_variant_table(),
         struct_layouts: empty_struct_layout_table(),
+        global_types: empty_lower_global_type_table(),
         probe_mode: false,
     }
 }
@@ -415,6 +438,7 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary {
         module: lo.module,
         enum_variants: lo.enum_variants,
         struct_layouts: lo.struct_layouts,
+        global_types: lo.global_types,
         probe_mode: lo.probe_mode,
     }
 }
@@ -482,6 +506,14 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     }
     struct_layouts.count = si
     lo.struct_layouts = Box::new(struct_layouts)
+
+    var global_types = empty_lower_global_type_table()
+    var gi: i64 = 0
+    while gi < IR_MAX_FUNCS {
+        global_types.elem_kinds[gi as usize] = (*summary.global_types).elem_kinds[gi as usize]
+        gi = gi + 1
+    }
+    lo.global_types = Box::new(global_types)
     lo
 }
 
@@ -526,6 +558,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     lo.module = module_box
     lo.enum_variants = Box::new(summary.enum_variants)
     lo.struct_layouts = Box::new(summary.struct_layouts)
+    lo.global_types = Box::new(summary.global_types)
     lo.probe_mode = summary.probe_mode
     lo
 }
@@ -1069,6 +1102,7 @@ fn lowerer_preseed_program_items_mut(
                             _ => {
                                 let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
                                 if bss_fn_id >= 0 {
+                                    lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
                                     var mbox2 = (*lo).module
                                     var bss_slot = (*mbox2).functions[bss_fn_id as usize]
                                     let bss_off = (*mbox2).bss_total_size
@@ -1372,6 +1406,7 @@ fn ir_fast_summary_seed_empty(epistemic: IrEpistemicSection) -> IrFastSummaryOwn
         module: module,
         enum_variants: empty_enum_variant_table(),
         struct_layouts: empty_struct_layout_table(),
+        global_types: empty_lower_global_type_table(),
     }
 }
 
@@ -1501,6 +1536,11 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                     var bss_mod = seed_value.module
                                     let bss_fid = bss_mod.fn_count
                                     if bss_fid < IR_MAX_FUNCS {
+                                        seed_value.global_types = lower_global_type_table_record(
+                                            seed_value.global_types,
+                                            bss_fid,
+                                            lower_global_elem_kind(&item.type_alias_ty)
+                                        )
                                         let bss_size = lower_typeexpr_byte_size(&item.type_alias_ty)
                                         let aligned_size = ((bss_size + 7) / 8) * 8
                                         var bss_slot = ir_empty_function()
@@ -1558,6 +1598,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     module.epistemic = epistemic
     var enum_variants = empty_enum_variant_table()
     var struct_layouts = empty_struct_layout_table()
+    var global_types = empty_lower_global_type_table()
     var current = (*prog).items
     while true {
         match current {
@@ -1609,6 +1650,11 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                         _ => {
                             let bss_fid = module.fn_count
                             if bss_fid < IR_MAX_FUNCS {
+                                global_types = lower_global_type_table_record(
+                                    global_types,
+                                    bss_fid,
+                                    lower_global_elem_kind(&item.type_alias_ty)
+                                )
                                 let bss_size = lower_typeexpr_byte_size(&item.type_alias_ty)
                                 let aligned_size = ((bss_size + 7) / 8) * 8
                                 var bss_slot = ir_empty_function()
@@ -1714,6 +1760,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
             module: module,
             enum_variants: enum_variants,
             struct_layouts: struct_layouts,
+            global_types: global_types,
             probe_mode: false,
         },
         error_count: 0,
@@ -2250,6 +2297,46 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
         Some(inner_ty) => lower_type_expr_is_f64(&(*inner_ty)),
         None => false,
     }
+}
+
+fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ty_opt {
+        Some(ty) => {
+            if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
+            0
+        }
+        _ => 0,
+    }
+}
+
+fn lower_global_type_table_record(
+    table: LowerGlobalTypeTable,
+    fn_id: i64,
+    elem_kind: i64
+) -> LowerGlobalTypeTable with Mut, Panic {
+    var out = table
+    if fn_id >= 0 && fn_id < IR_MAX_FUNCS {
+        out.elem_kinds[fn_id as usize] = elem_kind
+    }
+    out
+}
+
+fn lower_global_type_table_lookup(table: &LowerGlobalTypeTable, fn_id: i64) -> i64 with Panic {
+    if fn_id >= 0 && fn_id < IR_MAX_FUNCS {
+        return (*table).elem_kinds[fn_id as usize]
+    }
+    0
+}
+
+fn lowerer_record_global_type_mut(
+    lo: &! Lowerer,
+    fn_id: i64,
+    ty_opt: &Option<Box<TypeExpr>>
+) with Mut, Panic, Div, Alloc {
+    let elem_kind = lower_global_elem_kind(ty_opt)
+    var table = *(*lo).global_types
+    table = lower_global_type_table_record(table, fn_id, elem_kind)
+    (*lo).global_types = Box::new(table)
 }
 
 fn lower_opt_type_is_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
@@ -4354,6 +4441,17 @@ impl Lowerer {
                 }
                 lowerer_bind_local_mut(&! lo, g.name, reg, false)
                 lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
+                let global_elem_kind = lower_global_type_table_lookup(&(*lo.global_types), i)
+                if lower_aggregate_diag_enabled() {
+                    print("lower_agg: global name=")
+                    print(str_from_bytes(g.name.buf, g.name.len))
+                    print(" elem_kind=")
+                    print_int(global_elem_kind)
+                    print("\n")
+                }
+                if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
+                    lowerer_mark_local_array_elem_float_mut(&! lo, g.name)
+                }
             }
             i = i + 1
         }
@@ -10082,6 +10180,7 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
     (*summary_box).module = inner.module
     (*summary_box).enum_variants = inner.enum_variants
     (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).global_types = inner.global_types
     (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
         summary: summary_box,
@@ -10117,6 +10216,7 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     (*summary_box).module = inner.module
     (*summary_box).enum_variants = inner.enum_variants
     (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).global_types = inner.global_types
     (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
         summary: summary_box,
@@ -10160,6 +10260,7 @@ fn lower_program_to_ir_summary_box_into_ref(
     (*out_summary).module = summary.module
     (*out_summary).enum_variants = summary.enum_variants
     (*out_summary).struct_layouts = summary.struct_layouts
+    (*out_summary).global_types = summary.global_types
     (*out_summary).probe_mode = summary.probe_mode
 }
 
@@ -10193,6 +10294,7 @@ fn lower_program_to_ir_summary_flat_with_epistemic_ref(prog: &Program, epistemic
             module: *lo2.module,
             enum_variants: *lo2.enum_variants,
             struct_layouts: *lo2.struct_layouts,
+            global_types: *lo2.global_types,
             probe_mode: lo2.probe_mode,
         },
         error_count: lo2.error_count,
