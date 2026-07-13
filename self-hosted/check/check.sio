@@ -615,20 +615,16 @@ fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i
     }
 }
 
-// Bind a struct's type parameters by structurally matching a template field
-// type against the initializer's inferred type, recording each binding into buf.
-// Mirrors substitute_type_param's compound set (inner for TyArray/TyRef/TySlice,
-// tuple_elems for tuples) but in the INFERENCE direction: e.g. a field declared
-// `[F; 4]` against an initializer of type `[i64; 4]` binds F = i64. Without this
-// recursion, a type parameter nested inside an array/ref/tuple field stays
-// unbound and the struct literal mangles to the `__T` fallback (E009). The
-// scalar-field case (`v: F`) is the direct TyNamed match below.
-fn infer_bind_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: StructInfo, buf: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc {
+// Bind direct (`v: F`) and one-level array (`values: [F; N]`) generic struct
+// fields. The template is borrowed because the in-place checker path must not
+// recursively copy StructInfo. Other compound shapes need their own witnesses
+// before they become part of this inference contract.
+fn infer_bind_array_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: &StructInfo, buf: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc {
     var out = buf
     if tmpl_ty.kind == TypeKind::TyNamed {
         var pi: i64 = 0
-        while pi < tmpl.type_param_count {
-            if name_eq(tmpl_ty.name, tmpl.type_param_names[pi]) {
+        while pi < (*tmpl).type_param_count {
+            if name_eq(tmpl_ty.name, (*tmpl).type_param_names[pi]) {
                 out.args[pi] = init_ty
                 return out
             }
@@ -636,36 +632,24 @@ fn infer_bind_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: StructInf
         }
         return out
     }
-    // Compound field: recurse into the element type (TyArray/TyRef/TyRefMut/
-    // TySlice all carry it in .inner) when the initializer has a parallel inner.
+    if tmpl_ty.kind != TypeKind::TyArray || init_ty.kind != TypeKind::TyArray {
+        return out
+    }
     match tmpl_ty.inner {
         Some(t_inner) => {
             match init_ty.inner {
-                Some(i_inner) => { out = infer_bind_type_param(*t_inner, *i_inner, tmpl, out) }
-                None => {}
-            }
-        }
-        None => {}
-    }
-    // Tuple field: recurse element-wise.
-    match tmpl_ty.tuple_elems {
-        Some(t_elems) => {
-            match init_ty.tuple_elems {
-                Some(i_elems) => { out = infer_bind_type_param_list(*t_elems, *i_elems, tmpl, out) }
-                None => {}
-            }
-        }
-        None => {}
-    }
-    out
-}
-
-fn infer_bind_type_param_list(tmpl_l: TypeEntryList, init_l: TypeEntryList, tmpl: StructInfo, buf: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc {
-    var out = infer_bind_type_param(tmpl_l.head, init_l.head, tmpl, buf)
-    match tmpl_l.tail {
-        Some(t_rest) => {
-            match init_l.tail {
-                Some(i_rest) => { out = infer_bind_type_param_list(*t_rest, *i_rest, tmpl, out) }
+                Some(i_inner) => {
+                    if (*t_inner).kind == TypeKind::TyNamed {
+                        var pi: i64 = 0
+                        while pi < (*tmpl).type_param_count {
+                            if name_eq((*t_inner).name, (*tmpl).type_param_names[pi]) {
+                                out.args[pi] = *i_inner
+                                return out
+                            }
+                            pi = pi + 1
+                        }
+                    }
+                }
                 None => {}
             }
         }
@@ -5354,9 +5338,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         let field_name = (*fl).head.name
                         let tmpl_field_ty = field_info_list_find(si.fields, field_name)
                         let init_ty = checker_check_expr_inplace(c, (*fl).head.value)
-                        // Bind any type parameters this field's declared type references —
-                        // directly (`v: F`) or nested inside an array/ref/tuple (`c: [F;N]`).
-                        inferred = infer_bind_type_param(tmpl_field_ty, init_ty, si, inferred)
+                        // Bind direct (`v: F`) and one-level array (`c: [F; N]`)
+                        // type parameters without copying StructInfo recursively.
+                        inferred = infer_bind_array_type_param(tmpl_field_ty, init_ty, &si, inferred)
                         cur_inf = (*fl).tail
                     }
                     None => {
@@ -22275,9 +22259,9 @@ impl Checker {
                 var c = pair.0
                 let init_ty = pair.1
 
-                // Bind any type parameters this field's declared type references —
-                // directly (`v: F`) or nested inside an array/ref/tuple (`c: [F;N]`).
-                var buf = infer_bind_type_param(tmpl_field_ty, init_ty, tmpl, acc)
+                // Bind direct (`v: F`) and one-level array (`c: [F; N]`)
+                // type parameters. Other compound forms remain unclaimed.
+                var buf = infer_bind_array_type_param(tmpl_field_ty, init_ty, &tmpl, acc)
                 c.infer_type_params_from_fields((*fl).tail, tmpl, buf)
             }
         }
