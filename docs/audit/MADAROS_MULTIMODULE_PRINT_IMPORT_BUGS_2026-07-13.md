@@ -40,6 +40,18 @@ Evidence it is `print_f64`-specific, not the import:
 **Workaround (in use):** in importing programs print floats with `print(f64)`/`println(f64)`, never
 `print_f64`.
 
+## Defect 3 — a user-defined helper fn in an importing program trips visibility-preflight
+
+A `main` file with `use ...` **and** any second user-defined function fails:
+```
+run_check_mode: verdict=1   (note: "function arguments are checked against the declared parameter types")
+```
+The same logic **inlined into `main`** (no helper fn) compiles and runs. Verified: `use epistemic::gum::*`
++ `fn near(...)` + `main` → fail; identical program with the comparison inlined → runs.
+
+**Workaround (in use):** in importing programs, inline all logic into `main` — no user helper functions.
+This forces verbose drivers but works.
+
 ## Impact
 Neither blocks the epistemic/GUM hardening (both have clean caller-side workarounds), but both are
 papercuts that make stdlib modules feel unusable to newcomers (the natural `use mod::name` + `print_f64`
