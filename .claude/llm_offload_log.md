@@ -2561,3 +2561,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Local visual evidence reviewed before offload: `/tmp/sounio-fixedpoint-desktop.png`, `/tmp/sounio-fixedpoint-mobile.png`, and `/tmp/sounio-fixedpoint-flow.png`.
 - Raw review directory: `/tmp/llm-offload-5MnRSG/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio homepage claim-boundary tightening
+- Files: `website/src/components/home/CompilerDepth.astro`, `DomainGlimpses.astro`, and `FlagshipApplications.astro`.
+- Task: adversarial review of homepage copy changes that align downstream sections with the scoped gen2/gen3 digest-match receipt and remove broad uniqueness/fixed-point proof wording.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed the revision improves credibility, avoids material overclaim, and remains brand-correct.
+- Follow-up applied before commit: removed the meta "homepage now shows" phrasing from compiler copy and replaced it with an atemporal evidence-surface statement.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Validation: `npm run check:quality`.
+- Raw review directory: `/tmp/llm-offload-77AHOt/`.
