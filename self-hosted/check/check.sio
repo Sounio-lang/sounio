@@ -615,6 +615,49 @@ fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i
     }
 }
 
+// Bind direct (`v: F`) and one-level array (`values: [F; N]`) generic struct
+// fields. The template is borrowed because the in-place checker path must not
+// recursively copy StructInfo. Other compound shapes need their own witnesses
+// before they become part of this inference contract.
+fn infer_bind_array_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: &StructInfo, buf: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    if tmpl_ty.kind == TypeKind::TyNamed {
+        var pi: i64 = 0
+        while pi < (*tmpl).type_param_count {
+            if name_eq(tmpl_ty.name, (*tmpl).type_param_names[pi]) {
+                out.args[pi] = init_ty
+                return out
+            }
+            pi = pi + 1
+        }
+        return out
+    }
+    if tmpl_ty.kind != TypeKind::TyArray || init_ty.kind != TypeKind::TyArray {
+        return out
+    }
+    match tmpl_ty.inner {
+        Some(t_inner) => {
+            match init_ty.inner {
+                Some(i_inner) => {
+                    if (*t_inner).kind == TypeKind::TyNamed {
+                        var pi: i64 = 0
+                        while pi < (*tmpl).type_param_count {
+                            if name_eq((*t_inner).name, (*tmpl).type_param_names[pi]) {
+                                out.args[pi] = *i_inner
+                                return out
+                            }
+                            pi = pi + 1
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+    out
+}
+
 // Substitute type parameters in a field list to produce a monomorphized field list.
 // For each field, if its type is TyNamed and matches a type parameter name,
 // replace it with the corresponding concrete type argument.
@@ -5295,19 +5338,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         let field_name = (*fl).head.name
                         let tmpl_field_ty = field_info_list_find(si.fields, field_name)
                         let init_ty = checker_check_expr_inplace(c, (*fl).head.value)
-                        // If this template field type references a type parameter, record the
-                        // inferred type into that parameter's slot (faithful to 16652-16664).
-                        if tmpl_field_ty.kind == TypeKind::TyNamed {
-                            var pi: i64 = 0
-                            while pi < si.type_param_count {
-                        if name_eq(tmpl_field_ty.name, si.type_param_names[pi]) {
-                                    inferred.args[pi] = init_ty
-                                    pi = si.type_param_count  // break
-                                } else {
-                                    pi = pi + 1
-                                }
-                            }
-                        }
+                        // Bind direct (`v: F`) and one-level array (`c: [F; N]`)
+                        // type parameters without copying StructInfo recursively.
+                        inferred = infer_bind_array_type_param(tmpl_field_ty, init_ty, &si, inferred)
                         cur_inf = (*fl).tail
                     }
                     None => {
@@ -22226,19 +22259,9 @@ impl Checker {
                 var c = pair.0
                 let init_ty = pair.1
 
-                // If this template field type references a type parameter, record the inferred type
-                var buf = acc
-                if tmpl_field_ty.kind == TypeKind::TyNamed {
-                    var pi: i64 = 0
-                    while pi < tmpl.type_param_count {
-                        if name_eq(tmpl_field_ty.name, tmpl.type_param_names[pi]) {
-                            buf.args[pi] = init_ty
-                            pi = tmpl.type_param_count  // break
-                        } else {
-                            pi = pi + 1
-                        }
-                    }
-                }
+                // Bind direct (`v: F`) and one-level array (`c: [F; N]`)
+                // type parameters. Other compound forms remain unclaimed.
+                var buf = infer_bind_array_type_param(tmpl_field_ty, init_ty, &tmpl, acc)
                 c.infer_type_params_from_fields((*fl).tail, tmpl, buf)
             }
         }
