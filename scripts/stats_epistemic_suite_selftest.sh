@@ -29,6 +29,8 @@ MODULES=(
   stdlib/stats/diagnostic.sio
   stdlib/stats/cohen_kappa.sio
   stdlib/stats/roc.sio
+  stdlib/stats/summary_inference.sio
+  stdlib/stats/meta_analysis.sio
 )
 
 fail=0
@@ -44,7 +46,8 @@ done
 
 # Smoke-run the integration demo (exit 0 = every tool composed cleanly).
 for demo in examples/stats/epistemic_suite_demo.sio examples/stats/full_analysis_report.sio \
-            examples/stats/multiple_comparisons_test.sio examples/stats/permutation_test.sio; do
+            examples/stats/multiple_comparisons_test.sio examples/stats/permutation_test.sio \
+            examples/stats/forest_plot.sio; do
   if "$SOUC" run "$demo" >/dev/null 2>&1; then
     printf '  [PASS] %s\n' "$demo"
   else

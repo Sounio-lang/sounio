@@ -420,6 +420,25 @@ groups → p<0.05; identical → p>0.2.
 > arrays are live, triggers a silent native-codegen crash. The public functions
 > are structured around it (no big callee arrays; inlined loops).
 
+### `stats::summary_inference` — inference from summary statistics
+
+Tests/effect sizes from published (mean, SD, n) rather than raw data — scalar, so
+`#852`-safe. `t_test_summary` (Welch + Satterthwaite df), `one_sample_t_summary`,
+`ci_mean_summary`, `cohens_d_summary`. Validated: Welch t≈3.30, df≈52.9, d≈0.874.
+
+### `stats::meta_analysis` — fixed / random-effects meta-analysis
+
+| Function | Signature |
+|---|---|
+| `meta_fixed` | `pub fn meta_fixed(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic` |
+| `meta_random` | `pub fn meta_random(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic` |
+
+Inverse-variance pooling with Cochran's Q, I², and DerSimonian-Laird τ² for the
+random-effects model. `MetaResult`: `pooled, se, ci_lo/hi, z, p_value, q, df, i2,
+tau2`. Validated: 3 studies → pooled 0.477, Q 2.69, I² 25.6%, τ² 0.0072. A
+**forest plot** figure (`examples/stats/forest_plot.sio`) renders it — per-study
+CI bars + the pooled diamond, pure-Sounio.
+
 ## Importing
 
 Import each tool directly from its module:
