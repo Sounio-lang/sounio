@@ -52,17 +52,6 @@ if [[ "$SELECT_ONLY" == "1" ]]; then
   exit 0
 fi
 
-if ((${#selected[@]} == 0)); then
-  echo 'MADAROS_CHANGED_TESTS_SKIP reason=no_changed_requires_madaros_tests'
-  exit 0
-fi
-
-[[ -n "$MADAROS_BIN" ]] || fail "missing_explicit_madaros_bin"
-[[ "$MADAROS_BIN" == /* ]] || fail "madaros_bin_must_be_absolute"
-[[ -f "$MADAROS_BIN" && -r "$MADAROS_BIN" && -x "$MADAROS_BIN" ]] \
-  || fail "madaros_bin_not_executable"
-[[ "$(head -c 2 "$MADAROS_BIN" 2>/dev/null)" != '#!' ]] || fail "madaros_bin_is_wrapper"
-
 # This gate is wired to the Linux current-source CI job. Darwin's common
 # 65532 KiB ceiling is intentionally not normalized into this Linux contract.
 stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-65536}"
@@ -108,6 +97,17 @@ if [[ "$stack_soft_after" != "unlimited" ]] && ((stack_soft_after < stack_kb)); 
   fail "stack_raise_not_effective"
 fi
 echo "MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=$stack_kb soft_before_kb=$stack_soft_before hard_before_kb=$stack_hard_before soft_after_kb=$stack_soft_after hard_after_kb=$stack_hard_after"
+
+if ((${#selected[@]} == 0)); then
+  echo 'MADAROS_CHANGED_TESTS_SKIP reason=no_changed_requires_madaros_tests'
+  exit 0
+fi
+
+[[ -n "$MADAROS_BIN" ]] || fail "missing_explicit_madaros_bin"
+[[ "$MADAROS_BIN" == /* ]] || fail "madaros_bin_must_be_absolute"
+[[ -f "$MADAROS_BIN" && -r "$MADAROS_BIN" && -x "$MADAROS_BIN" ]] \
+  || fail "madaros_bin_not_executable"
+[[ "$(head -c 2 "$MADAROS_BIN" 2>/dev/null)" != '#!' ]] || fail "madaros_bin_is_wrapper"
 
 set +e
 identity="$("$MADAROS_BIN" --version 2>&1)"
