@@ -20,9 +20,12 @@ const sourceChecks = [
   {
     file: 'src/components/home/Hero.astro',
     mustContain: [
-      "import ZeroEventObservatory from './ZeroEventObservatory'",
-      'id="observatory-title"',
-      'Madaros v0.80.0',
+      "import { Picture } from 'astro:assets'",
+      "pappouHero from '../../../public/assets/original-artworks/pappou_hero.png'",
+      "yiayiaHero from '../../../public/assets/original-artworks/yiayia_hero.png'",
+      'data-for-audience="scientist"',
+      'data-for-audience="technical"',
+      'emblem_badge_monochrome_on_navy.png',
     ],
   },
   {

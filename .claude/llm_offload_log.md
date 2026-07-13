@@ -2526,3 +2526,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Local visual evidence reviewed before offload: `/tmp/sounio-brand-desktop-v4.png` and `/tmp/sounio-brand-mobile-v4.png`.
 - Raw review directory: `/tmp/llm-offload-KKugdK/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio homepage brand-first hard reset
+- Files: `website/src/components/home/Hero.astro`, `website/src/components/common/AudienceSelector.tsx`, `website/src/pages/index.astro`, and `website/scripts/check-brand-assets.mjs`.
+- Task: adversarial review of the public homepage hard reset after the founder rejected the previous correction as still visually off-brand.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed that restoring the original Pappou/Yiayia artwork, navy/gold palette, emblem stamp, and clinician/technical audience split brought the first viewport back toward Sounio identity.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Local visual evidence reviewed before offload: `/tmp/sounio-hardreset-desktop-final-clean.png` and `/tmp/sounio-hardreset-mobile-final-clean.png`.
+- Raw review directory: `/tmp/llm-offload-0ebFGx/`.

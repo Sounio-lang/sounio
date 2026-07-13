@@ -19,8 +19,7 @@ interface Props {
 }
 
 export default function AudienceSelector({ strings = defaultStrings }: Props) {
-  const { audience, choose, hasExplicitChoice } = useAudience();
-  const [showTooltip, setShowTooltip] = useState(false);
+  const { audience, choose } = useAudience();
   const [mounted, setMounted] = useState(false);
 
   const labels: Record<Audience, string> = {
@@ -30,17 +29,11 @@ export default function AudienceSelector({ strings = defaultStrings }: Props) {
 
   useEffect(() => {
     setMounted(true);
-    if (!hasExplicitChoice) {
-      const timer = setTimeout(() => setShowTooltip(true), 2000);
-      const hide = setTimeout(() => setShowTooltip(false), 8000);
-      return () => { clearTimeout(timer); clearTimeout(hide); };
-    }
-  }, [hasExplicitChoice]);
+  }, []);
 
   const toggle = () => {
     const next: Audience = audience === 'scientist' ? 'technical' : 'scientist';
     choose(next);
-    setShowTooltip(false);
   };
 
   if (!mounted) {
@@ -69,13 +62,6 @@ export default function AudienceSelector({ strings = defaultStrings }: Props) {
         </svg>
         <span className="audience-label">{labels[audience]}</span>
       </button>
-
-      {showTooltip && !hasExplicitChoice && (
-        <div className="absolute top-full right-0 mt-2 px-3 py-1.5 rounded-lg bg-[var(--color-accent-gold)] text-[#10233e] text-xs font-semibold whitespace-nowrap shadow-lg z-50 animate-[fadeIn_0.3s_ease]">
-          {strings.choose}
-          <div className="absolute -top-1 right-4 w-2 h-2 bg-[var(--color-accent-gold)] rotate-45" />
-        </div>
-      )}
     </div>
   );
 }
