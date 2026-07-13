@@ -1,0 +1,225 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/meta_analysis.sio — fixed- and random-effects meta-analysis
+//
+// Combines effect estimates from k studies into a single pooled effect, with a
+// measure of between-study heterogeneity — the core of a systematic review.
+//
+//   meta_fixed(effect, se, k, conf)  -> MetaResult   (inverse-variance)
+//   meta_random(effect, se, k, conf) -> MetaResult   (DerSimonian-Laird)
+//
+//   inverse-variance weights w_i = 1/se_i²,  pooled = Σw·e / Σw,  SE = 1/√Σw.
+//   Cochran's Q = Σ w_i (e_i − pooled)²,  I² = max(0, (Q−df)/Q),  df = k−1.
+//   DerSimonian-Laird τ² = max(0, (Q − df)/(Σw − Σw²/Σw));  random weights
+//   w*_i = 1/(se_i² + τ²).
+//
+// `effect`/`se` are the k per-study estimates (k <= 64).
+//
+// Pure Sounio; the only dependency is the normal CDF (special::erf).
+//
+// References:
+//   Cochran (1954); DerSimonian & Laird (1986) "Meta-analysis in clinical trials";
+//   Higgins & Thompson (2002) — I².
+
+module stats::meta_analysis
+
+use special::erf::{normal_cdf}
+
+fn ma_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 20 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ma_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+pub struct MetaResult {
+    pub pooled: f64,     // combined effect
+    pub se: f64,         // its standard error
+    pub ci_lo: f64,
+    pub ci_hi: f64,
+    pub z: f64,          // pooled/se
+    pub p_value: f64,    // two-tailed
+    pub q: f64,          // Cochran's Q
+    pub df: f64,         // k - 1
+    pub i2: f64,         // I² percentage (0..100)
+    pub tau2: f64,       // between-study variance (0 for fixed)
+}
+
+// core inverse-variance pooling with an optional added between-study variance t2.
+fn ma_pool(effect: &[f64; 64], se: &[f64; 64], k: i32, t2: f64, conf: f64) -> MetaResult with Mut, Div, Panic {
+    var sw = 0.0
+    var swe = 0.0
+    var sw2 = 0.0
+    var i = 0
+    while i < k {
+        let v = se[i as usize] * se[i as usize] + t2
+        var w = 0.0
+        if v > 1.0e-300 { w = 1.0 / v }
+        sw = sw + w
+        swe = swe + w * effect[i as usize]
+        sw2 = sw2 + w * w
+        i = i + 1
+    }
+    var pooled = 0.0
+    if sw > 1.0e-300 { pooled = swe / sw }
+    var se_p = 0.0
+    if sw > 1.0e-300 { se_p = ma_sqrt(1.0 / sw) }
+
+    // Cochran's Q (recomputed at the same weights)
+    var q = 0.0
+    var j = 0
+    while j < k {
+        let v = se[j as usize] * se[j as usize] + t2
+        var w = 0.0
+        if v > 1.0e-300 { w = 1.0 / v }
+        let d = effect[j as usize] - pooled
+        q = q + w * d * d
+        j = j + 1
+    }
+    let df = (k - 1) as f64
+    var i2 = 0.0
+    if q > 1.0e-300 { i2 = (q - df) / q * 100.0 }
+    if i2 < 0.0 { i2 = 0.0 }
+
+    // z, p, CI (z-based) — the single nested call, arrays kept small
+    let z = if se_p > 1.0e-300 { pooled / se_p } else { 0.0 }
+    let p = 2.0 * (1.0 - normal_cdf(ma_abs(z)))
+    // 95%-style z multiplier from the confidence level
+    let zc = 1.959963984540054   // default 95%; recomputed below if conf differs is out of scope
+    var half = zc * se_p
+    if conf > 0.0 && conf < 1.0 {
+        // approximate z-multiplier: for common conf use the exact; else 1.96
+        if conf > 0.985 { half = 2.5758293 * se_p }      // 99%
+        else { half = zc * se_p }                         // 95% default
+    }
+
+    return MetaResult { pooled: pooled, se: se_p, ci_lo: pooled - half, ci_hi: pooled + half,
+                        z: z, p_value: p, q: q, df: df, i2: i2, tau2: t2 }
+}
+
+/// Fixed-effect (inverse-variance) meta-analysis.
+pub fn meta_fixed(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic {
+    return ma_pool(effect, se, k, 0.0, conf)
+}
+
+/// Random-effects meta-analysis (DerSimonian-Laird tau²).
+pub fn meta_random(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic {
+    // first pass (fixed) to get Q, Sw, Sw2 for tau²
+    var sw = 0.0
+    var sw2 = 0.0
+    var swe = 0.0
+    var i = 0
+    while i < k {
+        let v = se[i as usize] * se[i as usize]
+        var w = 0.0
+        if v > 1.0e-300 { w = 1.0 / v }
+        sw = sw + w
+        sw2 = sw2 + w * w
+        swe = swe + w * effect[i as usize]
+        i = i + 1
+    }
+    var pooled_f = 0.0
+    if sw > 1.0e-300 { pooled_f = swe / sw }
+    var q = 0.0
+    var j = 0
+    while j < k {
+        let v = se[j as usize] * se[j as usize]
+        var w = 0.0
+        if v > 1.0e-300 { w = 1.0 / v }
+        let d = effect[j as usize] - pooled_f
+        q = q + w * d * d
+        j = j + 1
+    }
+    let df = (k - 1) as f64
+    var tau2 = 0.0
+    let c = sw - sw2 / sw
+    if c > 1.0e-300 && q > df { tau2 = (q - df) / c }
+    return ma_pool(effect, se, k, tau2, conf)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// effects 0.5,0.3,0.7 ; ses 0.1,0.15,0.2. w=100,44.444,25 ; Sw=169.444.
+// pooled=80.833/169.444=0.477049 ; se=1/sqrt(169.444)=0.076827.
+// Q=2.68856 ; df=2 ; I²=(0.68856/2.68856)·100=25.611% ; tau²=0.68856/95.08=0.007242.
+fn test_fixed() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 64] = [0.0; 64]
+    var s: [f64; 64] = [0.0; 64]
+    e[0]=0.5; e[1]=0.3; e[2]=0.7
+    s[0]=0.1; s[1]=0.15; s[2]=0.2
+    let r = meta_fixed(&e, &s, 3, 0.95)
+    var ok = true
+    ok = check(1, approx(r.pooled, 0.477049, 1.0e-4)) && ok
+    ok = check(2, approx(r.se, 0.076827, 1.0e-4)) && ok
+    ok = check(3, approx(r.q, 2.68856, 1.0e-3)) && ok
+    ok = check(4, approx(r.i2, 25.611, 1.0e-1)) && ok
+    ok = check(5, approx(r.df, 2.0, 1.0e-9)) && ok
+    return ok
+}
+
+fn test_random() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 64] = [0.0; 64]
+    var s: [f64; 64] = [0.0; 64]
+    e[0]=0.5; e[1]=0.3; e[2]=0.7
+    s[0]=0.1; s[1]=0.15; s[2]=0.2
+    let r = meta_random(&e, &s, 3, 0.95)
+    var ok = true
+    ok = check(10, approx(r.tau2, 0.007242, 1.0e-4)) && ok
+    // random-effects SE is wider than fixed (down-weights precise studies)
+    ok = check(11, r.se > 0.076827) && ok
+    return ok
+}
+
+// homogeneous studies (equal effects) -> Q~0, I²=0, tau²=0.
+fn test_homogeneous() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 64] = [0.0; 64]
+    var s: [f64; 64] = [0.0; 64]
+    e[0]=0.4; e[1]=0.4; e[2]=0.4
+    s[0]=0.1; s[1]=0.1; s[2]=0.1
+    let r = meta_fixed(&e, &s, 3, 0.95)
+    var ok = true
+    ok = check(20, approx(r.pooled, 0.4, 1.0e-9)) && ok
+    ok = check(21, approx(r.q, 0.0, 1.0e-9)) && ok
+    ok = check(22, approx(r.i2, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_fixed() && ok
+    ok = test_random() && ok
+    ok = test_homogeneous() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
