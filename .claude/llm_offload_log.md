@@ -2552,3 +2552,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Local visual evidence reviewed before offload: `/tmp/sounio-refusal-desktop.png`, `/tmp/sounio-refusal-mobile.png`, and `/tmp/sounio-refusal-flow.png`.
 - Raw review directory: `/tmp/llm-offload-M6sL4X/`.
+
+## 2026-07-13 — M3 prose/design review: Sounio compiler convergence receipt
+- File: `website/src/components/home/NumberAnchor.astro`.
+- Task: adversarial review of the homepage fixed-point section upgrade from an isolated percentage into a compiler convergence receipt following the clinical compile-refusal scene.
+- Provider: xAI/Grok 4.3 = **MINOR**, no blockers or major issues. It confirmed that the post-refusal convergence receipt strengthens narrative continuity, uses concrete metrics, and does not overclaim.
+- Follow-up applied before commit: tightened the mobile chain and ledger spacing while keeping the vertical proof-flow arrows legible.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
+- Local visual evidence reviewed before offload: `/tmp/sounio-fixedpoint-desktop.png`, `/tmp/sounio-fixedpoint-mobile.png`, and `/tmp/sounio-fixedpoint-flow.png`.
+- Raw review directory: `/tmp/llm-offload-5MnRSG/`.
