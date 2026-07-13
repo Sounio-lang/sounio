@@ -16,6 +16,7 @@ MODULES=(
   stdlib/stats/bland_altman.sio
   stdlib/stats/power.sio
   stdlib/stats/qq_normal.sio
+  stdlib/stats/anova.sio
 )
 
 fail=0

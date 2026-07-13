@@ -223,6 +223,26 @@ receives the sorted sample (plot y).
 | `mean` | `f64` | sample mean |
 | `sd` | `f64` | sample standard deviation (n-1 basis) |
 
+### `stats::anova` — one-way analysis of variance
+
+The headline group-comparison test and the first real consumer of `stats::fisher_f`.
+Partitions the response variation into between- and within-groups components and
+tests H0 "all group means equal" with F = MS_between / MS_within.
+
+| Function | Signature |
+|---|---|
+| `anova_oneway` | `pub fn anova_oneway(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> AnovaResult with Mut, Div, Panic` |
+
+`data` holds the groups concatenated end to end; `sizes[j]` is group j's size;
+`k` is the number of groups (2 ≤ k ≤ 16, total N ≤ 256).
+
+**Returns — `struct AnovaResult`:** `k`, `n_total`, `ss_between`, `ss_within`,
+`ss_total`, `df_between`, `df_within`, `ms_between`, `ms_within`, `f_stat`,
+`p_value` (F survival), `eta_squared` (SS_between/SS_total). Validated against a
+hand-computed table (SS 10/30, F=2.0, p=0.178, η²=0.25) and a well-separated case
+(F≫1, p<0.001). The p-value uses the tail-hardened `f_sf` (accurate far tail — see
+below).
+
 ## Importing
 
 Import each tool directly from its module:
@@ -235,6 +255,7 @@ use stats::wilcoxon::{WilcoxonResult, wilcoxon_signed_rank, wilcoxon_one_sample}
 use stats::bland_altman::{BAResult, bland_altman}
 use stats::power::{power_ttest_onesample, power_ttest_twosample, n_for_power_onesample, n_for_power_twosample}
 use stats::qq_normal::{QQResult, qq_normal}
+use stats::anova::{AnovaResult, anova_oneway}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

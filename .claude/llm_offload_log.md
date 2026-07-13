@@ -2589,3 +2589,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
 - Provider: xAI/Grok 4.3 = **PASS**. Verified: Blom plotting position p_i=(i-0.375)/(n+0.25); z_i=Φ⁻¹(p_i); LS slope/intercept and PPCC = s_zx/√(s_zz·s_xx); unbiased sd; perfect/affine → PPCC=1; sorted-output + odd-n symmetry. "No mathematical content beyond the above."
 - Raw review directory: /tmp/llm-offload-vd9qdn/.
+
+## 2026-07-13 — math-review: stats::anova (one-way ANOVA)
+- File: `stdlib/stats/anova.sio` (new). One-way ANOVA (any k), returning the full table + F/p/eta².
+- Trigger: mandatory math-review (new statistical method — CLAUDE.md §10).
+- Provider: xAI/Grok 4.3 = **PASS**. Verified SS_total=SS_between+SS_within; df=k-1, N-k; MS=SS/df; F=MS_b/MS_w; eta²=SS_between/SS_total; worked example (SS 10/30, F=2, eta²=0.25); f_sf p-value usage. All ANOVA identities correct.
+- Also this commit: root-cause fix for #841 in the suite's *_exp helpers. `ff_exp`/`st_exp`/`cs_exp` reflected negatives only at |x|>20, so exp(x) for x in ~[-20,-10] cancelled catastrophically (exp(-13.855)→98.7 instead of 9.6e-7) — the mechanism corrupting ibeta's prefix and the t/F tails. Fixed by reflecting negatives first + reducing positives to [0,2]; added a small-x series `ff_ibeta_smallx` so `f_sf` far-tail is accurate (f_sf(300,2,6)=9.7e-7). Root cause + one-line fix for special::beta::bt_exp commented on #841.
+- Raw review directory: /tmp/llm-offload-KBWjo9/.
