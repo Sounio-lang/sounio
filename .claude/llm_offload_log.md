@@ -2519,6 +2519,32 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek failed with `Insufficient Balance`; Gemini failed with OpenRouter HTTP 402 insufficient credits. The missing second M3 opinion is recorded for later re-review.
 - Raw review directory: `/tmp/llm-offload-sZlKAw/`.
 
+## 2026-07-12 — C2-v0 second-order compilation semantic review
+- File: `docs/architecture/second-order-compilation.md`.
+- Provider: xAI/Grok 4.3 via `bin/llm-offload -t review -p xai`.
+- Outcome: **FINDINGS ADDRESSED**. The review challenged witness status, the use of "formal", paired-run terminology, requested-versus-realised enforcement, clinical-safety scope, intervention versioning, and receipt classification integrity. The specification now states that no witness exists, remains `hypothesis`, labels its notation as an operational model rather than proof, makes repetition necessary but insufficient, classifies unauthorised semantic fallback as `BLOCKED`, denies clinical-use authorisation, routes new intervention classes through the Semantic Lane Contract and schema versioning, and adds evidence identity, classification basis, and integrity status. A demand for a Lean proof at architecture-v0 stage was not adopted; the text explicitly disclaims machine-checked semantics.
+- Claude Opus review was attempted first but unavailable because Claude Code was not logged in and the worktree was not trusted. No Claude verdict was claimed.
+- A DeepSeek second-provider review was also attempted and returned `Insufficient Balance`; the xAI review is therefore the only completed external review for this lane.
+- Raw review directory: `/tmp/llm-offload-OTGkvg/`.
+- DeepSeek failure directory: `/tmp/llm-offload-Rzt9rw/`.
+
+## 2026-07-12 — M1 math-review: bounded EISA-H zero-divisor reference
+- Files: `stdlib/eisa/hypercomplex_zd.sio`, `tests/stdlib/eisa/test_eisa_h_zd.sio`, and `docs/internal/concepts/hypercomplex-zero-divisor-evidence.md`.
+- xAI/Grok 4.3 = **PASS** on the executable reference. It confirmed the Cayley-Dickson XOR/sign multiplication, exhaustive sparse accumulation, nonzero-factor requirement, bounded `+/-1` no-overflow envelope, and exact-versus-measured separation.
+- Z.AI/GLM-5.2 = **PASS** on the executable reference. It independently confirmed XOR basis indexing, rank-two zero-divisor coverage, the maximum four-term exact accumulator bound, and the refusal to promote a floating norm observation into an exact proof.
+- A first Z.AI review of the concept prose was inconclusive: it attempted a long informal reconstruction of the existing `84/336/168` census and ended without a verdict or counterexample. No implementation change was made from that response; the counts remain bounded to the existing executable, Python, and Lean census surfaces rather than being re-proved by this lane.
+- Evidence boundary: this review supports only the bounded stdlib software reference. It does not review or authorize checker emission, `IrSedZDCheck`, EISA opcodes, ABI, native lowering, RTL, hardware, or physical/clinical interpretation.
+- Raw reviews: `/tmp/llm-offload-FW6J2k/` (xAI implementation), `/tmp/llm-offload-9ysuAE/` (Z.AI implementation), and `/tmp/llm-offload-zuKRa7/` (concept prose fan-out).
+
+## 2026-07-12 — M1 adversarial follow-up: EISA-H forged evidence and measurement boundaries
+- Files: `stdlib/eisa/hypercomplex_zd.sio`, `tests/stdlib/eisa/test_eisa_h_zd.sio`, and `docs/internal/concepts/hypercomplex-zero-divisor-evidence.md`.
+- Repair: caller-controlled `element_status`, token tags, and checksums are no longer authority. Exact consumers revalidate identities, tags, actual arrays, at-most-two support, `+/-1` coefficients, nonzero operands, and the ordered exact product before accepting a checksum.
+- Adversarial witnesses: an externally forged operand with two `2^32` coefficients and `element_status=OK` is rejected before multiplication; a forged token for nonzero `e1*e2` with a cloned checksum is rejected by exact-product recomputation. NaN, positive and negative infinity, negative norms, invalid resolution, and equality-at-threshold measurement cases are classified explicitly.
+- Z.AI test review found a real classification wording issue: coefficient `2` is outside the V0 domain but is not itself an overflow risk. The implementation now classifies such inputs as `UNSUPPORTED` and reserves `OVERFLOW_RISK` for magnitude above `1518500249`, the exact largest `c` satisfying `4*c*c <= i64::MAX` for the four-term sparse accumulator.
+- Final xAI/Grok 4.3 review = **PASS** after the repair. It confirmed the exact overflow threshold, coefficient/support filter, exhaustive multiplication, product recomputation, and proof/measurement separation.
+- Final Z.AI/GLM-5.2 review = **PASS** after the repair. It independently recomputed the threshold, checked the four-term assumption against the enforced sparse domain, and confirmed the XOR/sign exact product and finite measurement boundary.
+- Execution receipt: Madaros checks pass; default Madaros execution is **BLOCKED** with wrapper rc `1` after native driver write rc `12`; the passing execution witness is explicitly `lean_single`.
+- Raw reviews: `/tmp/llm-offload-Fdh6AM/` (first repaired module), `/tmp/llm-offload-WdnICv/` (adversarial test review), and `/tmp/llm-offload-2cc7Cc/` (final post-fix xAI+ZAI module review).
 ## 2026-07-12 — math-review: stats::student_t distribution module
 - File: `stdlib/stats/student_t.sio` (new). Student's t pdf/cdf/sf/two-tail, quantile (inverse CDF), CI multiplier, and sample-mean CI.
 - Trigger: mandatory math-review (new numerical/statistical distribution — CLAUDE.md §10).
