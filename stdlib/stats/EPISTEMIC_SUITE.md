@@ -857,6 +857,36 @@ Asymmetric ordinal association: D(Y|X)=(C−D)/(C+D+Tx) penalises ties on the
 predictor, so for a binary Y it equals 2·AUC−1. Validated: no ties → D=0.667;
 ties → D(Y|X)=D(X|Y)=0.8; binary Y with perfect separation → D(Y|X)=1 (AUC=1).
 
+### `stats::bartlett` — Bartlett's test for equal variance
+
+| Function | Signature |
+|---|---|
+| `bartlett` | `pub fn bartlett(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> BartlettResult with Mut, Div, Panic` |
+
+Homogeneity-of-variance test across k consecutive-block groups (powerful under
+normality): `χ²=[(N−k)ln(s_p²)−Σ(n_i−1)ln(s_i²)]/C ~ χ²(k−1)`. Validated:
+{1..5} vs {2,4..10} → pooled 6.25, χ²=1.5868, df=1; equal-spread → χ²=0.
+
+### `stats::levene` — Levene / Brown-Forsythe test
+
+| Function | Signature |
+|---|---|
+| `levene` | `pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic` |
+
+The distribution-robust variance test: one-way ANOVA on absolute deviations from
+each group's centre (`center` = 0 mean → Levene, 1 median → Brown-Forsythe).
+`W ~ F(k−1, N−k)`. Validated: worked example → W=2.0571 (both centerings on
+symmetric data); equal-spread → W=0.
+
+### `stats::var_ftest` — two-sample variance F-test
+
+| Function | Signature |
+|---|---|
+| `var_ftest` | `pub fn var_ftest(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> VarFResult with Mut, Div, Panic` |
+
+The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
+p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -919,6 +949,9 @@ use stats::life_table::{life_table_survival, life_table_hazard}
 use stats::kendall_tau::{KendallResult, kendall_tau}
 use stats::goodman_kruskal::{GammaResult, goodman_kruskal}
 use stats::somers_d::{SomersResult, somers_d}
+use stats::bartlett::{BartlettResult, bartlett}
+use stats::levene::{LeveneResult, levene}
+use stats::var_ftest::{VarFResult, var_ftest}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
