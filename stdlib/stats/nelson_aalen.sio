@@ -1,0 +1,167 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/nelson_aalen.sio — Nelson-Aalen cumulative-hazard estimator
+//
+// The non-parametric cumulative hazard, a companion to Kaplan-Meier that is
+// often better behaved in the tail:
+//
+//   nelson_aalen(time, event, n, t_query) -> NAResult
+//
+//   Ĥ(t) = Σ_{t_(j) ≤ t} d_j / n_j,      Var(Ĥ(t)) = Σ_{t_(j) ≤ t} d_j / n_j²,
+// with d_j deaths and n_j at risk at each distinct death time; the implied
+// survival is Ŝ(t) = e^{−Ĥ(t)}.
+//
+// Pure Sounio: a sort-free ordered walk over the distinct death times (no nested
+// data-array calls); exp via an inline reduced series.
+//
+// References:
+//   Nelson (1972); Aalen (1978) Ann. Stat. 6:701.
+
+module stats::nelson_aalen
+
+fn na_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / na_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+pub struct NAResult {
+    pub h: f64,     // cumulative hazard Ĥ(t_query)
+    pub var_h: f64, // variance of Ĥ(t_query)
+    pub surv: f64,  // implied survival e^{-Ĥ}
+    pub n_events: i64,
+}
+
+/// Nelson-Aalen cumulative hazard at a queried time.
+///
+/// Parâmetros: time — follow-up times; event — 1 death / 0 censored; n — size;
+///             t_query — evaluation time.
+/// Retorno: NAResult (h, var_h, surv, n_events).
+/// Referências: Nelson (1972); Aalen (1978).
+pub fn nelson_aalen(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> NAResult with Mut, Div, Panic {
+    if n < 1 { return NAResult { h: 0.0, var_h: 0.0, surv: 1.0, n_events: 0 } }
+    var h = 0.0
+    var vh = 0.0
+    var nev = 0
+    var prev = 0.0 - 1.0e300
+    var have_prev = false
+    var guard = 0
+    while guard <= n {
+        var found = false
+        var tau = 0.0
+        var i = 0
+        while i < n {
+            if event[i as usize] == 1 {
+                let ti = time[i as usize]
+                let after = if have_prev { ti > prev } else { true }
+                if after {
+                    if found == false || ti < tau { tau = ti; found = true }
+                }
+            }
+            i = i + 1
+        }
+        if found == false { guard = n + 1 }
+        else {
+            var d = 0
+            var at_risk = 0
+            var j = 0
+            while j < n {
+                let tj = time[j as usize]
+                if tj >= tau { at_risk = at_risk + 1 }
+                if tj == tau && event[j as usize] == 1 { d = d + 1 }
+                j = j + 1
+            }
+            if tau <= t_query && at_risk > 0 {
+                let df = d as f64
+                let nr = at_risk as f64
+                h = h + df / nr
+                vh = vh + df / (nr * nr)
+                nev = nev + d
+            }
+            prev = tau
+            have_prev = true
+            guard = guard + 1
+        }
+    }
+    return NAResult { h: h, var_h: vh, surv: na_exp(0.0 - h), n_events: nev as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// times 1..5 all deaths. Ĥ(3)=1/5+1/4+1/3=0.783333.
+// Var(3)=1/25+1/16+1/9=0.213611. S(3)=exp(-0.783333)=0.456876.
+fn test_na() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    let r = nelson_aalen(&t, &e, 5, 3.0)
+    var ok = true
+    ok = check(1, approx(r.h, 0.783333, 1.0e-5)) && ok
+    ok = check(2, approx(r.var_h, 0.213611, 1.0e-5)) && ok
+    ok = check(3, approx(r.surv, 0.456876, 1.0e-5)) && ok
+    ok = check(4, r.n_events == 3) && ok
+    return ok
+}
+
+// full hazard Ĥ(5)=1/5+1/4+1/3+1/2+1=2.283333.
+fn test_full() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    let r = nelson_aalen(&t, &e, 5, 5.0)
+    return check(10, approx(r.h, 2.283333, 1.0e-5))
+}
+
+// censoring: times 1..5, events {1,0,1,0,1}. deaths at 1(n=5),3(n=3),5(n=1).
+// Ĥ(4)=1/5+1/3=0.533333.
+fn test_censor() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=0; e[2]=1; e[3]=0; e[4]=1
+    let r = nelson_aalen(&t, &e, 5, 4.0)
+    var ok = true
+    ok = check(20, approx(r.h, 0.533333, 1.0e-5)) && ok
+    ok = check(21, r.n_events == 2) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_na() && ok
+    ok = test_full() && ok
+    ok = test_censor() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

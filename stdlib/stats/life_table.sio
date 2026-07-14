@@ -1,0 +1,114 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/life_table.sio — actuarial (cohort) life table
+//
+// The interval-grouped survival estimator for data reported as counts per time
+// interval rather than exact event times:
+//
+//   life_table_survival(entering, deaths, withdrawn, k, q_interval) -> f64
+//   life_table_hazard(entering, deaths, withdrawn, k, q_interval)   -> f64
+//
+// In each interval the effective number at risk adjusts for withdrawals
+// (censoring) assumed uniform across the interval:
+//   n'ᵢ = nᵢ − wᵢ/2,  qᵢ = dᵢ/n'ᵢ,  pᵢ = 1 − qᵢ,
+//   Ŝ(end of interval m) = Π_{i≤m} pᵢ.
+//
+// Pure Sounio: a single cumulative product across intervals; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Cutler & Ederer (1958); Collett, "Modelling Survival Data" 3e, §2.
+
+module stats::life_table
+
+/// Cumulative survival at the end of interval `q_interval` (0-indexed).
+///
+/// Parâmetros: entering — n at start of each interval; deaths — d per interval;
+///             withdrawn — censored per interval; k — number of intervals;
+///             q_interval — interval index to report (0..k-1).
+/// Retorno: Ŝ at the end of that interval.
+/// Referências: Cutler & Ederer (1958).
+pub fn life_table_survival(entering: &[f64; 64], deaths: &[f64; 64], withdrawn: &[f64; 64],
+                           k: i32, q_interval: i32) -> f64 with Mut, Div, Panic {
+    if k < 1 || q_interval < 0 { return 1.0 }
+    var surv = 1.0
+    var i = 0
+    while i <= q_interval && i < k {
+        let neff = entering[i as usize] - 0.5 * withdrawn[i as usize]
+        if neff > 0.0 {
+            let q = deaths[i as usize] / neff
+            surv = surv * (1.0 - q)
+        }
+        i = i + 1
+    }
+    return surv
+}
+
+/// Interval conditional hazard qᵢ = dᵢ/n'ᵢ for interval `q_interval`.
+pub fn life_table_hazard(entering: &[f64; 64], deaths: &[f64; 64], withdrawn: &[f64; 64],
+                         k: i32, q_interval: i32) -> f64 with Mut, Div, Panic {
+    if k < 1 || q_interval < 0 || q_interval >= k { return 0.0 }
+    let neff = entering[q_interval as usize] - 0.5 * withdrawn[q_interval as usize]
+    if neff <= 0.0 { return 0.0 }
+    return deaths[q_interval as usize] / neff
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 3 intervals:
+//  i0: n=100 d=10 w=0  -> n'=100, q=0.1,   S=0.9
+//  i1: n=90  d=9  w=10 -> n'=85,  q=0.105882, S=0.9·0.894118=0.804706
+//  i2: n=71  d=7  w=4  -> n'=69,  q=0.101449, S=0.804706·0.898551=0.723073
+fn test_life_table() -> bool with IO, Mut, Div, Panic {
+    var en: [f64; 64] = [0.0; 64]
+    var de: [f64; 64] = [0.0; 64]
+    var wd: [f64; 64] = [0.0; 64]
+    en[0]=100.0; de[0]=10.0; wd[0]=0.0
+    en[1]=90.0;  de[1]=9.0;  wd[1]=10.0
+    en[2]=71.0;  de[2]=7.0;  wd[2]=4.0
+    var ok = true
+    ok = check(1, approx(life_table_survival(&en, &de, &wd, 3, 0), 0.9, 1.0e-9)) && ok
+    ok = check(2, approx(life_table_survival(&en, &de, &wd, 3, 1), 0.804706, 1.0e-5)) && ok
+    ok = check(3, approx(life_table_survival(&en, &de, &wd, 3, 2), 0.723073, 1.0e-5)) && ok
+    ok = check(4, approx(life_table_hazard(&en, &de, &wd, 3, 1), 0.105882, 1.0e-5)) && ok
+    return ok
+}
+
+// no withdrawals, no deaths -> survival stays 1.
+fn test_no_events() -> bool with IO, Mut, Div, Panic {
+    var en: [f64; 64] = [0.0; 64]
+    var de: [f64; 64] = [0.0; 64]
+    var wd: [f64; 64] = [0.0; 64]
+    en[0]=50.0; en[1]=50.0
+    let r = life_table_survival(&en, &de, &wd, 2, 1)
+    return check(10, approx(r, 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_life_table() && ok
+    ok = test_no_events() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
