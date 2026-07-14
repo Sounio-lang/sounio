@@ -49,6 +49,9 @@ MODULES=(
   stdlib/stats/robust.sio
   stdlib/stats/hodges_lehmann.sio
   stdlib/stats/outlier.sio
+  stdlib/stats/deming.sio
+  stdlib/stats/theil_sen.sio
+  stdlib/stats/passing_bablok.sio
 )
 
 fail=0

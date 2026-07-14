@@ -657,6 +657,39 @@ single-outlier test `G=max|xᵢ−x̄|/s` with the exact two-sided Bonferroni t
 p-value, and the MAD-based Iglewicz-Hoaglin modified z-score. Validated:
 {…,100}→1 Tukey outlier; {1,2,3,4,5,50}→G=2.036, p<0.01, modified-z=20.9.
 
+### `stats::deming` — Deming regression (errors-in-variables)
+
+| Function | Signature |
+|---|---|
+| `deming` | `pub fn deming(x: &[f64; 256], y: &[f64; 256], n: i32, lambda: f64) -> DemingFit with Mut, Div, Panic` |
+
+The method-comparison regression that allows measurement error in *both*
+variables (λ = error-variance ratio; λ=1 → orthogonal). Closed-form slope
+`b = [(Syy−λSxx)+√((Syy−λSxx)²+4λSxy²)]/(2Sxy)`, intercept ȳ−b·x̄. Validated:
+perfect line → slope 2, intercept 1; staircase → slope 0.8828 (vs OLS 0.8).
+
+### `stats::theil_sen` — Theil-Sen robust regression
+
+| Function | Signature |
+|---|---|
+| `theil_sen` | `pub fn theil_sen(x: &[f64; 256], y: &[f64; 256], n: i32) -> TSFit with Mut, Div, Panic` |
+
+Distribution-free line fit: slope = median of pairwise slopes, intercept =
+median residual — resistant to ~29% arbitrary outliers. Validated: perfect line
+→ (2,1); with a wild outlier at (5,100) still → (2,1); negative slope → −3.
+
+### `stats::passing_bablok` — Passing-Bablok regression
+
+| Function | Signature |
+|---|---|
+| `passing_bablok` | `pub fn passing_bablok(x: &[f64; 256], y: &[f64; 256], n: i32) -> PBFit with Mut, Div, Panic` |
+
+The clinical-chemistry standard for method comparison: the shifted-median slope
+(pairwise slopes with the −1 exclusion and the `K` = #{slope<−1} rank offset,
+per Passing & Bablok 1983 / the R `mcr` package) and the median-residual
+intercept. Validated: perfect line → (2,1); −1-slope pair correctly excluded;
+K-offset case → slope 2.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -701,6 +734,9 @@ use stats::exp_survival::{ExpSurvResult, exp_survival}
 use stats::robust::{median, quantile, iqr, mad, trimmed_mean, winsorized_mean}
 use stats::hodges_lehmann::{hl_one, hl_two}
 use stats::outlier::{OutlierFences, GrubbsResult, ModZResult, tukey_outliers, grubbs, modified_z}
+use stats::deming::{DemingFit, deming}
+use stats::theil_sen::{TSFit, theil_sen}
+use stats::passing_bablok::{PBFit, passing_bablok}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

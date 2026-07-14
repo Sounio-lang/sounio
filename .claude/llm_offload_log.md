@@ -2738,3 +2738,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - outlier = **PASS**: Tukey interpolation, Grubbs G + r=G²n/(n-1)², t²=r(n-2)/(1-r), p=n·2P(T>|t|) via I_x(ν/2,1/2), modified-z constant 0.67449, and the Lanczos+Lentz incomplete-beta all correct.
 - Theme: robust / outlier-resistant statistics — the descriptive layer under the inferential suite. #852-safe: HL uses a bounded pairwise buffer with an *inline* median sort (no nested call while the big buffer is live). Suite selftest: 42 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-V9LS18/`, `/tmp/llm-offload-vOSDSg/`, `/tmp/llm-offload-w3oWGw/`.
+
+## 2026-07-14 — math-review: stats::deming, stats::theil_sen, stats::passing_bablok
+- Files (all new): `stdlib/stats/deming.sio` (errors-in-variables regression, closed-form quadratic-root slope), `stdlib/stats/theil_sen.sio` (median-of-pairwise-slopes robust regression), `stdlib/stats/passing_bablok.sio` (clinical-chemistry method-comparison regression: -1 exclusion + K-offset shifted median). Provider: xAI/Grok 4.3.
+- deming = **PASS**: slope = positive quadratic root of the Deming normal equations, intercept ȳ−b·x̄; perfect (2,1) and staircase (0.8828 vs OLS 0.8) verified.
+- theil_sen = **PASS**: median pairwise slope + median residual; 29% breakdown demonstrated (outlier at (5,100) leaves slope 2); buffer 2080≥C(64,2) sizing correct.
+- passing_bablok = **PASS**: shifted-median with K-offset matches Passing & Bablok 1983 exactly (1-indexed rank (N+1)/2+K → 0-based with clamping); -1 slope exclusion verified (N=5,K=0 case); K-offset case (N=6,K=1 → slope 2) confirmed.
+- Theme: method-comparison / robust regression — complements the agreement modules (bland_altman, concordance/CCC, reliability) for assay/instrument comparison. #852-safe: theil_sen & passing_bablok use bounded pairwise buffers with inline median sorts (no nested call while big buffer live). Suite selftest: 45 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-8JVsS1/`, `/tmp/llm-offload-NuJ1qi/`, `/tmp/llm-offload-LafnKF/`.
