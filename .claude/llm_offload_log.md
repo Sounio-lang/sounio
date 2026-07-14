@@ -2762,3 +2762,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - wls = **PASS**: normal-equation WLS solution, σ̂²(XᵀWX)⁻¹ variance entries under Var(εᵢ)=σ²/wᵢ, weighted R²; perfect and outlier-downweight cases verified.
 - Theme: generalized linear models (one predictor) — pharmacometric dose-response / count / heteroscedastic fits. #852-safe: flat per-iteration passes, scalar accumulation, no nested data-array calls. Suite runner now tracks **49 modules** + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-V3U3Al/`, `/tmp/llm-offload-zlNiM7/`, `/tmp/llm-offload-p2IVgX/`.
+
+## 2026-07-14 — math-review: stats::runs_test, stats::durbin_watson, stats::autocorr
+- Files (all new): `stdlib/stats/runs_test.sio` (Wald-Wolfowitz runs test, normal approximation), `stdlib/stats/durbin_watson.sio` (DW autocorrelation statistic + ρ̂), `stdlib/stats/autocorr.sio` (sample ACF at lag k + Ljung-Box portmanteau test, χ² tail via igamma). Provider: xAI/Grok 4.3.
+- runs_test = **PASS**: μ_R=2n₁n₂/n+1, σ²_R=2n₁n₂(2n₁n₂−n)/(n²(n−1)), z, two-sided p all match; random/clustered/alternating cases verified.
+- durbin_watson = **PASS**: d=Σ(eᵢ−e_{i−1})²/Σeᵢ², ρ̂≈1−d/2 canonical; three cases (d=3.333/0.667/2.0) verified.
+- autocorr = **PASS**: biased r_k, Ljung-Box Q=n(n+2)Σr_k²/(n−k) ~ χ²(m); acf(1)=0.4/acf(2)=−0.1 and Q≈1.5167 hand-checked.
+- Theme: serial-dependence / independence-assumption diagnostics — complements the goodness-of-fit / normality family for ordered & time-course data (PK sampling, longitudinal). All scalar/read-only-array, #852-safe. Suite runner: 52 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-0yOUhT/`, `/tmp/llm-offload-5OiuG1/`, `/tmp/llm-offload-FpKA3Q/`.

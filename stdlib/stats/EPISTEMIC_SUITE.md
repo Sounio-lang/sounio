@@ -759,6 +759,40 @@ heteroscedastic assay data. Closed-form coefficients, standard errors from
 `σ̂²(XᵀWX)⁻¹`, and a weighted R². Validated: perfect line → (1,2), R²=1;
 downweighting an outlier pulls the slope from OLS 5 to 1.229.
 
+### `stats::runs_test` — Wald-Wolfowitz runs test
+
+| Function | Signature |
+|---|---|
+| `runs_test` | `pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic` |
+
+Tests a 0/1 sequence for randomness against serial dependence: with n₁ ones, n₂
+zeros and R runs, `z=(R−μ_R)/σ_R` where `μ_R=2n₁n₂/n+1`. Too few runs →
+clustering, too many → over-alternation. Validated: balanced random-like →
+R=6, z=0; clustered → R=2, z=−2.683, p<0.01; alternating → R=10, z=2.683.
+
+### `stats::durbin_watson` — Durbin-Watson statistic
+
+| Function | Signature |
+|---|---|
+| `durbin_watson` | `pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic` |
+
+First-order serial-correlation diagnostic for residuals:
+`d=Σ(eᵢ−e_{i−1})²/Σeᵢ² ∈ [0,4]`, with ρ̂≈1−d/2 (d≈2 → none, d<2 → positive,
+d>2 → negative). Validated: alternating residuals → d=3.333, ρ̂=−0.667;
+block residuals → d=0.667, ρ̂=0.667.
+
+### `stats::autocorr` — autocorrelation & Ljung-Box
+
+| Function | Signature |
+|---|---|
+| `acf` | `pub fn acf(x: &[f64; 256], n: i32, k: i32) -> f64 with Mut, Div, Panic` |
+| `ljung_box` | `pub fn ljung_box(x: &[f64; 256], n: i32, m: i32) -> LBResult with Mut, Div, Panic` |
+
+Sample autocorrelation at lag k and the Ljung-Box portmanteau test
+`Q=n(n+2)Σr_k²/(n−k) ~ χ²(m)` for white noise up to lag m. Validated:
+{1,2,3,4,5}→acf(1)=0.4, acf(2)=−0.1; Ljung-Box(m=2)→Q=1.517; a monotone ramp →
+acf(1)>0.6, Q significant.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -812,6 +846,9 @@ use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
 use stats::logistic::{LogisticFit, logistic_fit, logistic_predict}
 use stats::poisson_reg::{PoissonFit, poisson_fit, poisson_predict}
 use stats::wls::{WLSFit, wls_fit}
+use stats::runs_test::{RunsResult, runs_test}
+use stats::durbin_watson::{DWResult, durbin_watson}
+use stats::autocorr::{LBResult, acf, ljung_box}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
