@@ -2725,3 +2725,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - **Milestone**: survival analysis was the historical #852 codegen blocker (km_fit silent crash). The #852-safe re-architecture (flat loops, scalar returns, no nested calls with big arrays live) delivers a full survival family running cleanly under lean_single.
 - Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.
+
+## 2026-07-14 — math-review: data::csv fixed-point + GUM row (Trilha A, Data I/O)
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Grok 4.3: fixed-point digit extraction, f64 round-half-up scaling, GUM u_c/U95 reproduction = OK; one exact-*.5 f64 tie TIGHTENABLE addressed with a caveat + tie-free decimals. (Z.AI empty; xai + independent awk recompute used.)
+
+## 2026-07-14 — math-review: GUM coverage factor (finite dof) for the f64-cast dispatch
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Both OK: coverage factor = Student-t quantile (not fixed 1.96); t-table values; Welch-Satterthwaite worked example (nu_eff≈4.17). Z.AI TIGHTENABLE: U95 ≈ 0.571 (t(4.173)=2.743 × 0.20817). Confirms MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST science.
