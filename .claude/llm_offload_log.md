@@ -2589,3 +2589,13 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-cvr-desktop.png`, `/tmp/sounio-cvr-mobile.png`, and `/tmp/sounio-cvr-design-qa-board.png`; all three images loaded at manifest dimensions, no positive horizontal overflow was measured, and the browser console contained no runtime errors.
 - Validation: `npm run check:quality` passed; render regeneration explicitly skipped because the active compiler path returned the known `expected P3 header`, so checked-in pre-rendered assets were used.
 - Raw review directories: `/tmp/llm-offload-shNnPG/`, `/tmp/llm-offload-pAwT4t/`, and `/tmp/llm-offload-s8I0Me/`.
+
+## 2026-07-14 — M3 prose/design review: system cartography
+- Files: `website/src/components/home/SystemAtlas.astro` and `website/src/pages/index.astro`.
+- Task: adversarial review of the homepage cartography connecting language, effects, epistemics, proof, applications, and self-hosting to checked-in receipts and explicit claim boundaries.
+- Provider: xAI/Grok 4.3 completed with two major, two minor, and one nit findings. The clinical wording concern was accepted: the vancomycin node now states that it is an illustrative authored fixture exercising compile-fail rejection before a simulated call. The missing-data concern was rejected because `publicContract` is a statically imported generated TypeScript contract and a missing gate should fail the static build. Direct inspection also disproved the duplicate locale finding and verified every displayed source path exists in the checkout. Status labels are deliberately heterogeneous evidence classes, not a mirror of feature maturity.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Claim-boundary evidence: `tests/conformance/manifest.v1.tsv`, effect pass/refuse fixtures, GUM pass/refuse fixtures, `formal/lean4/SounioEpistemic.lean`, the illustrative vancomycin compile-fail fixture, and the canonical preserved-seed compiler gate.
+- Visual evidence: `/tmp/sounio-system-map-desktop.png`, `/tmp/sounio-system-map-mobile-v2.png`, and `/tmp/sounio-system-map-design-qa-board.png`; six links rendered, no positive horizontal overflow was measured, and the browser console contained no runtime errors.
+- Validation: `npm run check:quality` passed; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directories: `/tmp/llm-offload-tr1b3B/`, `/tmp/llm-offload-7Hz99D/`, and `/tmp/llm-offload-ldfHd8/`.
