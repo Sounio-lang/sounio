@@ -867,11 +867,44 @@ fn ir_test_16_method_call_lowered() -> bool with Mut, Panic, Div, Alloc, IO {
 }
 
 // Phase 0 tests: IR serialization and normalization
-fn ir_test_17_serialize_roundtrip() -> bool with Mut, Panic, Div, IO {
+fn irt_soir_v5_matches(buf: [i8; 131072], len: i64, expected_string: Name) -> bool with Mut, Panic, Div, Alloc {
+    var restored = ir_empty_module()
+    if !deserialize_ir_module_into(buf, len, &! restored) { return false }
+    restored.fn_count == 1 &&
+    restored.functions[0].instr_count == 2 &&
+    restored.functions[0].instrs[0].imm_i64 == 42 &&
+    restored.functions[0].defining_module_id == 37 &&
+    restored.string_count == 1 &&
+    ir_name_eq(restored.string_table[0], expected_string) &&
+    restored.epistemic.hyper_expr_count == 1 &&
+    restored.algebras.count == 1
+}
+
+fn irt_soir_v4_matches(buf: [i8; 131072], len: i64, expected_string: Name) -> bool with Mut, Panic, Div, Alloc {
+    var restored = ir_empty_module()
+    if !deserialize_ir_module_into(buf, len, &! restored) { return false }
+    restored.fn_count == 1 &&
+    restored.functions[0].defining_module_id == IR_DEFINING_MODULE_UNKNOWN &&
+    restored.functions[0].instr_count == 2 &&
+    restored.functions[0].instrs[0].imm_i64 == 42 &&
+    restored.string_count == 1 &&
+    ir_name_eq(restored.string_table[0], expected_string) &&
+    restored.epistemic.hyper_expr_count == 1 &&
+    restored.algebras.count == 1
+}
+
+fn irt_soir_rejects_truncated(buf: [i8; 131072], len: i64) -> bool with Mut, Panic, Div, Alloc {
+    var restored = ir_empty_module()
+    !deserialize_ir_module_into(buf, len, &! restored) && restored.fn_count == 0 && restored.string_count == 0
+}
+
+fn ir_test_17_serialize_roundtrip() -> bool with Mut, Panic, Div, IO, Alloc {
     var module = ir_empty_module()
     module.fn_count = 1
     module.string_count = 1
     module.string_table[0] = ir_name_from_bytes(118 as i8, 52 as i8, 0 as i8, 0 as i8, 2)
+    module.epistemic.hyper_expr_count = 1
+    module.algebras.count = 1
 
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
@@ -880,27 +913,47 @@ fn ir_test_17_serialize_roundtrip() -> bool with Mut, Panic, Div, IO {
     func.reg_count = 1
     func.instrs[0] = ir_load_imm(0, 42)
     func.instrs[1] = ir_return(0)
+    // These are in-memory backing-store witnesses, not claims that the 128 KiB
+    // SOIR envelope can serialize every allocated slot.
+    func.instrs[1023] = ir_load_imm(0, 1024)
+    func.instrs[(IR_MAX_INSTRS - 1) as usize] = ir_load_imm(0, 2048)
+    if func.instrs[1023].imm_i64 != 1024 ||
+       func.instrs[(IR_MAX_INSTRS - 1) as usize].imm_i64 != 2048 {
+        return false
+    }
 
     module.functions[0] = func
+    module.functions[1023].defining_module_id = 1023
+    module.functions[(IR_MAX_FUNCS - 1) as usize].defining_module_id = 2047
+    if module.functions[1023].defining_module_id != 1023 ||
+       module.functions[(IR_MAX_FUNCS - 1) as usize].defining_module_id != 2047 {
+        return false
+    }
+
+    // One maximum-sized function cannot fit in SOIR v5. Rejection must happen
+    // before any fixed-buffer write, while the in-memory 2048-slot store remains valid.
+    module.functions[0].instr_count = IR_MAX_INSTRS
+    if serialize_ir_module(module).1 != 0 { return false }
+    module.functions[0].instr_count = 2
+
+    // SOIR v5 does not encode BSS sizes. Refuse the artifact instead of silently
+    // restoring a different module.
+    module.bss_total_size = 8
+    if serialize_ir_module(module).1 != 0 { return false }
+    module.bss_total_size = 0
+    module.functions[0].bss_size = 8
+    if serialize_ir_module(module).1 != 0 { return false }
+    module.functions[0].bss_size = 0
 
     let pair = serialize_ir_module(module)
     let buf = pair.0
     let len = pair.1
 
-    let restored = deserialize_ir_module(buf, len)
-
-    if restored.fn_count != 1 {
-        return false
-    }
-    if restored.functions[0].instr_count != 2 {
-        return false
-    }
-    if restored.functions[0].instrs[0].imm_i64 != 42 {
-        return false
-    }
-    if restored.functions[0].defining_module_id != 37 {
-        return false
-    }
+    if len <= 0 || !irt_soir_v5_matches(buf, len, module.string_table[0]) { return false }
+    // The core function/string payload ends at byte 1336 for this fixture.
+    // v5 must still require its declared epistemic and algebra sections.
+    if !irt_soir_rejects_truncated(buf, 1336) { return false }
+    if !irt_soir_rejects_truncated(buf, len - 1) { return false }
 
     // Build a genuine v4 module buffer from the v5 fixture: remove the v5-only
     // provenance word and shift both instructions and following module sections.
@@ -913,15 +966,7 @@ fn ir_test_17_serialize_roundtrip() -> bool with Mut, Panic, Div, IO {
         shift_pos = shift_pos + 1
     }
     legacy_buf[4] = 4 as i8
-    let legacy_restored = deserialize_ir_module(legacy_buf, len - 8)
-    if legacy_restored.fn_count != 1 ||
-       legacy_restored.functions[0].defining_module_id != IR_DEFINING_MODULE_UNKNOWN ||
-       legacy_restored.functions[0].instr_count != 2 ||
-       legacy_restored.functions[0].instrs[0].imm_i64 != 42 ||
-       legacy_restored.string_count != 1 ||
-       !ir_name_eq(legacy_restored.string_table[0], module.string_table[0]) {
-        return false
-    }
+    if !irt_soir_v4_matches(legacy_buf, len - 8, module.string_table[0]) { return false }
 
     true
 }
