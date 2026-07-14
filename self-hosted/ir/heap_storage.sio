@@ -10,7 +10,10 @@
 module ir::heap_storage
 
 use ir::ir::*
-use ir::serialize::{serialize_ir_module_into, deserialize_ir_module_into}
+use ir::soir_core::{
+    soir_core_serialize_ir_module_empty_extensions_into,
+    soir_core_deserialize_ir_module_empty_extensions_into,
+}
 
 pub let IR_MODULE_HEAP_STATE_NULL: i64 = 0
 pub let IR_MODULE_HEAP_STATE_ALLOCATED: i64 = 1
@@ -185,7 +188,7 @@ pub fn ir_module_heap_serialize_into(
 ) -> bool with Mut, Panic, Div, Alloc {
     (*out_len) = 0
     if !ir_module_heap_is_allocated(owner) { return false }
-    serialize_ir_module_into(&(*(*owner).ptr), out_buf, out_len)
+    soir_core_serialize_ir_module_empty_extensions_into(&(*(*owner).ptr), out_buf, out_len)
     (*out_len) > 0
 }
 
@@ -202,7 +205,7 @@ pub fn ir_module_heap_deserialize_into(
     // unchanged on every decode failure without copying an IrModule value.
     var staged = ir_module_heap_new()
     if !ir_module_heap_is_allocated(&staged) { return false }
-    if !deserialize_ir_module_into(buf, len, &!(*staged.ptr)) {
+    if !soir_core_deserialize_ir_module_empty_extensions_into(buf, len, &!(*staged.ptr)) {
         let _failed_release = ir_module_heap_release(&! staged)
         return false
     }
@@ -255,10 +258,23 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     var buf: [i8; 131072] = [0; 131072]
     var len: i64 = 0
     ok = ir_module_heap_serialize_into(&owner, &! buf, &! len) && ok
+    let provenance_pos: i64 = 8 + 8 + 136 + 32 + 512 + 24
+    let extensions_pos: i64 = len - 296
+    ok = len == 1632 && ok
+    ok = buf[4] == 5 as i8 && ok
+    ok = provenance_pos == 720 && buf[provenance_pos as usize] == 37 as i8 && ok
+    ok = extensions_pos == 1336 && buf[extensions_pos as usize] == 0 as i8 && ok
     ok = ir_module_heap_deserialize_into(&! owner, buf, len) && ok
     ok = ir_module_heap_fn_count(&owner) == 1 && ok
     ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
     ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
+    ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+
+    // The bounded core must reject, not skip, any non-empty extension section.
+    var nonempty_extension_buf = buf
+    nonempty_extension_buf[extensions_pos as usize] = 1 as i8
+    ok = !ir_module_heap_deserialize_into(&! owner, nonempty_extension_buf, len) && ok
+    ok = ir_module_heap_fn_count(&owner) == 1 && ok
     ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
 
     // A truncated v5 decode must not publish any staged writes.
@@ -270,13 +286,13 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
 
     // Build a genuine v4 buffer by removing the v5-only provenance word.
     var legacy_buf = buf
-    let provenance_pos: i64 = 8 + 8 + 136 + 32 + 512 + 24
     var shift_pos = provenance_pos
     while shift_pos + 8 < len {
         legacy_buf[shift_pos as usize] = legacy_buf[(shift_pos + 8) as usize]
         shift_pos = shift_pos + 1
     }
     legacy_buf[4] = 4 as i8
+    ok = len - 8 == 1624 && ok
     ok = ir_module_heap_deserialize_into(&! owner, legacy_buf, len - 8) && ok
     ok = ir_module_heap_fn_count(&owner) == 1 && ok
     ok = ir_module_heap_function_defining_module_id(&owner, 0) == IR_DEFINING_MODULE_UNKNOWN && ok
@@ -306,5 +322,20 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = !ir_module_heap_serialize_into(&unsupported_owner, &! unsupported_buf, &! unsupported_len) && ok
     ok = unsupported_len == 0 && ok
     ok = ir_module_heap_release(&! unsupported_owner) == IR_MODULE_HEAP_STATE_FREED && ok
+
+    // Non-empty in-memory epistemic/algebra sections are outside this bounded
+    // codec and must fail preflight with no published bytes.
+    var extension_owner = ir_module_heap_new()
+    (*extension_owner.ptr).epistemic.model_family_count = 1
+    var extension_buf: [i8; 131072] = [0; 131072]
+    var extension_len: i64 = 91
+    ok = !ir_module_heap_serialize_into(&extension_owner, &! extension_buf, &! extension_len) && ok
+    ok = extension_len == 0 && ok
+    (*extension_owner.ptr).epistemic.model_family_count = 0
+    (*extension_owner.ptr).algebras.count = 1
+    extension_len = 92
+    ok = !ir_module_heap_serialize_into(&extension_owner, &! extension_buf, &! extension_len) && ok
+    ok = extension_len == 0 && ok
+    ok = ir_module_heap_release(&! extension_owner) == IR_MODULE_HEAP_STATE_FREED && ok
     ok
 }
