@@ -2701,3 +2701,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed mean=6, sample var=10, std=√10≈3.162278, SE=√2≈1.414214, range=8; Pearson r=6/√60≈0.774597, r²=0.6; OLS slope=0.6, intercept=2.2.
 - Build: lean_single (validation.sio uses `.len()`/constructs the default Madaros engine rejects; importing programs hit Madaros visibility-preflight). STATS_VALIDATION_GATE_OK.
 - Raw review directory: see /tmp llm-offload dir for this run.
+## 2026-07-14 — math-review: stats::mcnemar, stats::friedman, stats::trend
+- Files (all new): `stdlib/stats/mcnemar.sio` (McNemar paired-binary test: continuity-corrected χ², exact sign-test p, paired OR), `stdlib/stats/friedman.sio` (Friedman repeated-measures test + Kendall's W, mid-rank ties, χ² tail via Lanczos log-gamma + regularised incomplete gamma), `stdlib/stats/trend.sio` (Cochran-Armitage trend test for ordered proportions: z, χ², slope). Provider: xAI/Grok 4.3.
+- mcnemar = **PASS**: Yates-corrected χ²=(|b−c|−1)²/(b+c), exact 2·P(X≥max(b,c)) via running binomial coefficients, paired OR=c/b, A-S erf tail — all verified; three test cases hold.
+- friedman = **PASS**: χ²_F and Kendall's W identities verified by direct substitution on perfect/null/ties cases; mid-rank formula correct. One cosmetic comment-arithmetic note (computed χ² correct).
+- trend = **PASS**: CA score statistic T, centered Sxx, null variance V, χ²=T²/V, slope=T/Sxx all match; worked example (T=50, χ²=26.667, z=5.164, slope=0.10) reproduced exactly.
+- Theme: paired / repeated-measures / ordered-design tests — fills the gap left by the suite's independent-groups tests. Suite selftest: 33 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-c3hsRt/`, `/tmp/llm-offload-n1l38u/`, `/tmp/llm-offload-QM8I6l/`.

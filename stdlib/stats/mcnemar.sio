@@ -1,0 +1,187 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/mcnemar.sio — McNemar's test for paired binary data
+//
+// The paired-sample analogue of the 2×2 chi-squared test: given a matched
+// table of before/after (or test-A/test-B) binary outcomes, McNemar's test
+// asks whether the two discordant cells differ.
+//
+//   paired 2×2:            After +   After −
+//     Before +               a          b
+//     Before −               c          d
+//
+//   mcnemar(a, b, c, d) -> McNemarResult
+//
+// Only the discordant pairs b and c carry information. With continuity
+// correction  χ² = (|b−c|−1)² / (b+c),  df = 1; the exact test is the
+// two-sided sign (binomial) test  p = 2·P(X ≥ max(b,c)),  X ~ Bin(b+c, ½).
+// The paired odds ratio is c/b.
+//
+// Pure Sounio: inline erf (normal tail) and an exact binomial sum; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   McNemar (1947); Agresti, "Categorical Data Analysis" 3e, §11.1.
+
+module stats::mcnemar
+
+fn mn_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn mn_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / mn_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+// erf via Abramowitz-Stegun 7.1.26 (max err ~1.5e-7).
+fn mn_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * mn_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+// upper-tail normal probability P(Z > z).
+fn mn_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - mn_erf(z * INV_SQRT2))
+}
+
+pub struct McNemarResult {
+    pub chi2: f64,      // continuity-corrected statistic, df = 1
+    pub p_approx: f64,  // asymptotic two-sided p from chi2
+    pub p_exact: f64,   // exact two-sided sign-test p
+    pub or_paired: f64, // paired odds ratio c/b
+    pub n_discord: i64, // b + c
+}
+
+/// McNemar's test for a paired 2×2 table (a,b,c,d as laid out above).
+///
+/// Parâmetros: a,b,c,d — the four cell counts (b,c are the discordant pairs).
+/// Retorno: McNemarResult (chi2, p_approx, p_exact, or_paired, n_discord).
+/// Referências: McNemar (1947); Agresti §11.1.
+pub fn mcnemar(a: i64, b: i64, c: i64, d: i64) -> McNemarResult with Mut, Div, Panic {
+    let n = b + c
+    if n <= 0 {
+        return McNemarResult { chi2: 0.0, p_approx: 1.0, p_exact: 1.0, or_paired: 1.0, n_discord: 0 }
+    }
+    let bf = b as f64
+    let cf = c as f64
+    // continuity-corrected chi-squared
+    var diff = bf - cf
+    if diff < 0.0 { diff = 0.0 - diff }
+    let cont = if diff - 1.0 > 0.0 { diff - 1.0 } else { 0.0 }
+    let chi2 = cont * cont / (bf + cf)
+    let p_approx = 2.0 * mn_normal_sf(mn_sqrt(chi2))
+    // exact two-sided sign test: 2 * P(X >= max(b,c)), X ~ Bin(n, 0.5)
+    var hi = b
+    if c > b { hi = c }
+    // sum_{k=hi}^{n} C(n,k) 0.5^n  via iterative binomial coefficient
+    let half_pow = mn_exp((0.0 - (n as f64)) * 0.6931471805599453)  // 0.5^n
+    var coef = 1.0
+    var k = 0
+    // advance coef to C(n, hi)
+    while k < hi { coef = coef * ((n - k) as f64) / ((k + 1) as f64); k = k + 1 }
+    var tail = 0.0
+    var kk = hi
+    var cf2 = coef
+    while kk <= n {
+        tail = tail + cf2 * half_pow
+        // C(n,kk+1) = C(n,kk) * (n-kk)/(kk+1)
+        cf2 = cf2 * ((n - kk) as f64) / ((kk + 1) as f64)
+        kk = kk + 1
+    }
+    var p_exact = 2.0 * tail
+    if p_exact > 1.0 { p_exact = 1.0 }
+    var or_paired = 0.0
+    if bf > 0.0 { or_paired = cf / bf }
+    return McNemarResult {
+        chi2: chi2, p_approx: p_approx, p_exact: p_exact,
+        or_paired: or_paired, n_discord: n
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Classic worked example (Agresti): b=6, c=16 discordant (a,d irrelevant).
+// chi2 = (|6-16|-1)²/(6+16) = 81/22 = 3.681818.
+// p_approx = 2·Φ̄(√3.681818)=2·Φ̄(1.918806)=0.055011 (approx).
+// or_paired = 16/6 = 2.666667. n_discord = 22.
+fn test_mcnemar() -> bool with IO, Mut, Div, Panic {
+    let r = mcnemar(30, 6, 16, 48)
+    var ok = true
+    ok = check(1, approx(r.chi2, 3.681818, 1.0e-4)) && ok
+    ok = check(2, approx(r.or_paired, 2.666667, 1.0e-4)) && ok
+    ok = check(3, r.n_discord == 22) && ok
+    ok = check(4, approx(r.p_approx, 0.055011, 5.0e-3)) && ok
+    return ok
+}
+
+// Exact sign test: b=1, c=9 -> n=10, hi=9.
+// tail = [C(10,9)+C(10,10)]·0.5^10 = (10+1)/1024 = 0.010742; p_exact = 0.021484.
+fn test_exact() -> bool with IO, Mut, Div, Panic {
+    let r = mcnemar(20, 1, 9, 30)
+    var ok = true
+    ok = check(10, approx(r.p_exact, 0.021484, 1.0e-4)) && ok
+    ok = check(11, r.n_discord == 10) && ok
+    return ok
+}
+
+// Symmetric discordance b=c -> corrected chi2 = max(|0|-1,0)²/16 = 0, OR 1.
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    let r = mcnemar(10, 8, 8, 10)
+    var ok = true
+    ok = check(20, approx(r.chi2, 0.0, 1.0e-12)) && ok
+    ok = check(21, approx(r.or_paired, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_mcnemar() && ok
+    ok = test_exact() && ok
+    ok = test_symmetric() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

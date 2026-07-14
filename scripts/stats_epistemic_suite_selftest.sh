@@ -37,6 +37,9 @@ MODULES=(
   stdlib/stats/concordance.sio
   stdlib/stats/rate_epi.sio
   stdlib/stats/weibull_negbin.sio
+  stdlib/stats/mcnemar.sio
+  stdlib/stats/friedman.sio
+  stdlib/stats/trend.sio
 )
 
 fail=0

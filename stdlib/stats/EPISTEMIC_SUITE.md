@@ -513,6 +513,42 @@ hazard/mean, and the negative binomial (successes `r`, prob `p`, support = failu
 count) with pmf/cdf/mean via log-gamma. Validated: Weibull(2,1) → F(1)=0.6321,
 median 0.8326, mean Γ(1.5)=0.8862; NegBin(3,0.5) → pmf(0)=0.125, mean 3.
 
+### `stats::mcnemar` — McNemar's test for paired binary data
+
+| Function | Signature |
+|---|---|
+| `mcnemar` | `pub fn mcnemar(a: i64, b: i64, c: i64, d: i64) -> McNemarResult with Mut, Div, Panic` |
+
+The paired-sample analogue of the 2×2 χ² test (before/after, matched
+case-control): continuity-corrected `χ² = (|b−c|−1)²/(b+c)` with its asymptotic
+p, the exact two-sided sign-test p (`X ~ Bin(b+c, ½)`), and the paired odds
+ratio c/b. Validated: Agresti b=6/c=16 → χ²=3.6818, OR=2.667; exact b=1/c=9 →
+p=0.02148.
+
+### `stats::friedman` — Friedman test & Kendall's W
+
+| Function | Signature |
+|---|---|
+| `friedman` | `pub fn friedman(data: &[f64; 256], n: i32, k: i32) -> FriedmanResult with Mut, Div, Panic` |
+
+Repeated-measures (matched-block) non-parametric ANOVA — the paired counterpart
+to Kruskal-Wallis — on a row-major n×k subject×treatment matrix, with mid-rank
+tie handling. Returns `χ²_F = 12/(n·k·(k+1))·ΣRⱼ² − 3n(k+1)` (df k−1), its
+asymptotic p, and Kendall's W = χ²_F/(n(k−1)) ∈ [0,1]. Validated: perfectly
+concordant 3×3 → χ²=6, W=1.0; opposing ranks → χ²=0, W=0.
+
+### `stats::trend` — Cochran-Armitage test for trend in proportions
+
+| Function | Signature |
+|---|---|
+| `cochran_armitage` | `pub fn cochran_armitage(events: &[f64; 32], totals: &[f64; 32], scores: &[f64; 32], k: i32) -> TrendResult with Mut, Div, Panic` |
+
+The categorical dose-response analogue of a slope test: is the event proportion
+linearly trending across k *ordered* groups? Returns the signed trend z, `χ² =
+T²/V` (df 1), two-sided p, and the fitted slope (proportion per unit score).
+Validated: doses 0–3 with proportions 0.1–0.4 → χ²=26.667, z=5.164, slope=0.10;
+flat proportions → χ²=0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -545,6 +581,9 @@ use stats::roc::{AUCResult, roc_auc, roc_point}
 use stats::concordance::{CCCResult, DeltaResult, lin_ccc, cliff_delta}
 use stats::rate_epi::{RateCI, RatioCI, DiffCI, incidence_rate, rate_ratio, rate_difference}
 use stats::weibull_negbin::{weibull_pdf, weibull_cdf, weibull_quantile, weibull_median, weibull_hazard, weibull_mean, negbin_pmf, negbin_cdf, negbin_mean}
+use stats::mcnemar::{McNemarResult, mcnemar}
+use stats::friedman::{FriedmanResult, friedman}
+use stats::trend::{TrendResult, cochran_armitage}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
