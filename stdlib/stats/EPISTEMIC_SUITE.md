@@ -723,6 +723,42 @@ agreement `κ=(P̄−P̄ₑ)/(1−P̄ₑ)` from a row-major N×k rater-count mat
 worked 2-subject case → P̄=0.6667, P̄ₑ=0.7222, κ=−0.2; perfect within-subject
 agreement → κ=1.
 
+### `stats::logistic` — one-predictor logistic regression
+
+| Function | Signature |
+|---|---|
+| `logistic_fit` | `pub fn logistic_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> LogisticFit with Mut, Div, Panic` |
+| `logistic_predict` | `pub fn logistic_predict(fit: &LogisticFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood logistic regression `logit(pᵢ)=b₀+b₁xᵢ`, fit by
+Newton-Raphson (IRLS) — the workhorse for binary dose-response. Returns the
+coefficients, standard errors, slope Wald z/p and convergence diagnostics.
+Validated: two-point saturated design → b₀=−0.6931, b₁=1.3863, p̂(0)=⅓, p̂(1)=⅔;
+balanced null → b₁=0.
+
+### `stats::poisson_reg` — one-predictor Poisson regression
+
+| Function | Signature |
+|---|---|
+| `poisson_fit` | `pub fn poisson_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> PoissonFit with Mut, Div, Panic` |
+| `poisson_predict` | `pub fn poisson_predict(fit: &PoissonFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood Poisson (log-link) count/rate regression `log(μᵢ)=b₀+b₁xᵢ`
+by Newton-Raphson; `exp(b₁)` is the rate ratio per unit x. Validated: two-point
+saturated design → b₀=ln3, b₁=ln4, rate ratio 4, μ̂(0)=3, μ̂(1)=12; flat counts
+→ b₁=0.
+
+### `stats::wls` — weighted least-squares regression
+
+| Function | Signature |
+|---|---|
+| `wls_fit` | `pub fn wls_fit(x: &[f64; 256], y: &[f64; 256], w: &[f64; 256], n: i32) -> WLSFit with Mut, Div, Panic` |
+
+Straight-line regression with per-observation weights (wᵢ∝1/σᵢ²) — the fit for
+heteroscedastic assay data. Closed-form coefficients, standard errors from
+`σ̂²(XᵀWX)⁻¹`, and a weighted R². Validated: perfect line → (1,2), R²=1;
+downweighting an outlier pulls the slope from OLS 5 to 1.229.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -773,6 +809,9 @@ use stats::passing_bablok::{PBFit, passing_bablok}
 use stats::fisher_exact::{FisherResult, fisher_exact}
 use stats::cochran_q::{CochranQResult, cochran_q}
 use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
+use stats::logistic::{LogisticFit, logistic_fit, logistic_predict}
+use stats::poisson_reg::{PoissonFit, poisson_fit, poisson_predict}
+use stats::wls::{WLSFit, wls_fit}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

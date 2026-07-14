@@ -55,6 +55,9 @@ MODULES=(
   stdlib/stats/fisher_exact.sio
   stdlib/stats/cochran_q.sio
   stdlib/stats/fleiss_kappa.sio
+  stdlib/stats/logistic.sio
+  stdlib/stats/poisson_reg.sio
+  stdlib/stats/wls.sio
 )
 
 fail=0
