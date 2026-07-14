@@ -15,8 +15,14 @@ module ir::heap_storage
 
 use ir::ir::*
 use ir::soir_core::{
-    soir_core_serialize_ir_module_empty_extensions_into,
+    soir_core_serialize_ir_module_empty_extensions_result_into,
     soir_core_deserialize_ir_module_empty_extensions_materialized_into,
+    SOIR_CORE_SERIALIZE_OK,
+    SOIR_CORE_SERIALIZE_COUNTS_BOUNDS,
+    SOIR_CORE_SERIALIZE_MODULE_CONTRACT,
+    SOIR_CORE_SERIALIZE_ENVELOPE_CAPACITY,
+    SOIR_CORE_SERIALIZE_FUNCTION_INSTR,
+    SOIR_CORE_SERIALIZE_STRING,
 }
 
 pub let IR_MODULE_HEAP_STATE_NULL: i64 = 0
@@ -110,13 +116,13 @@ pub fn ir_module_heap_add_function(owner: &! IrModuleHeapBridge, name: Name, def
     let index = (*module_ptr).fn_count
     if index < 0 || index >= IR_MAX_FUNCS { return -1 }
 
-    // Native-v2 lowers [IrFunction; N] as aggregate handles. A zeroed raw
-    // reservation therefore contains null slots, not inline empty functions.
-    // Install the canonical empty value before any field dereference so the
-    // backend owns the physical representation and all sentinel defaults.
-    (*module_ptr).functions[index as usize] = ir_empty_function()
-    (*module_ptr).functions[index as usize].name = name
-    (*module_ptr).functions[index as usize].defining_module_id = defining_module_id
+    // Build through a local canonical lvalue, then publish its managed handle
+    // once. Native-v2 raw->array->field mutation can target a lowered temporary
+    // instead of the handle stored in the raw reservation.
+    var function = ir_empty_function()
+    function.name = name
+    function.defining_module_id = defining_module_id
+    (*module_ptr).functions[index as usize] = function
     (*module_ptr).fn_count = index + 1
     index
 }
@@ -126,21 +132,54 @@ pub fn ir_module_heap_set_function_reg_count(owner: &! IrModuleHeapBridge, fn_in
     let module_ptr = (*owner).ptr
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return false }
     if reg_count < 0 { return false }
-    (*module_ptr).functions[fn_index as usize].reg_count = reg_count
+    var function = (*module_ptr).functions[fn_index as usize]
+    function.reg_count = reg_count
+    (*module_ptr).functions[fn_index as usize] = function
     true
 }
 
-pub fn ir_module_heap_append_instr(owner: &! IrModuleHeapBridge, fn_index: i64, instr: IrInstr) -> bool with Mut {
-    if !ir_module_heap_is_allocated(owner) { return false }
+let IR_MODULE_HEAP_APPEND_OK: i64 = 0
+let IR_MODULE_HEAP_APPEND_INVALID_OWNER: i64 = 1
+let IR_MODULE_HEAP_APPEND_FUNCTION_BOUNDS: i64 = 2
+let IR_MODULE_HEAP_APPEND_INSTR_BOUNDS: i64 = 3
+let IR_MODULE_HEAP_APPEND_LOCAL_OPCODE: i64 = 4
+let IR_MODULE_HEAP_APPEND_LOCAL_IMM: i64 = 5
+let IR_MODULE_HEAP_APPEND_PUBLISHED_COUNT: i64 = 6
+let IR_MODULE_HEAP_APPEND_PUBLISHED_OPCODE: i64 = 7
+let IR_MODULE_HEAP_APPEND_PUBLISHED_IMM: i64 = 8
+
+fn ir_module_heap_append_instr_status(owner: &! IrModuleHeapBridge, fn_index: i64, instr: &IrInstr) -> i64 with Mut {
+    if !ir_module_heap_is_allocated(owner) { return IR_MODULE_HEAP_APPEND_INVALID_OWNER }
     let module_ptr = (*owner).ptr
-    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return false }
-    let instr_index = (*module_ptr).functions[fn_index as usize].instr_count
-    if instr_index < 0 || instr_index >= IR_MAX_INSTRS { return false }
-    // The function slot above is already materialized. Assigning the canonical
-    // IrInstr value installs its managed handle in the instruction array.
-    (*module_ptr).functions[fn_index as usize].instrs[instr_index as usize] = instr
-    (*module_ptr).functions[fn_index as usize].instr_count = instr_index + 1
-    true
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return IR_MODULE_HEAP_APPEND_FUNCTION_BOUNDS }
+    var function = (*module_ptr).functions[fn_index as usize]
+    let instr_index = function.instr_count
+    if instr_index < 0 || instr_index >= IR_MAX_INSTRS { return IR_MODULE_HEAP_APPEND_INSTR_BOUNDS }
+    let source_opcode = (*instr).op
+    let source_imm_i64 = (*instr).imm_i64
+    function.instrs[instr_index as usize] = *instr
+    if function.instrs[instr_index as usize].op != source_opcode {
+        return IR_MODULE_HEAP_APPEND_LOCAL_OPCODE
+    }
+    if function.instrs[instr_index as usize].imm_i64 != source_imm_i64 {
+        return IR_MODULE_HEAP_APPEND_LOCAL_IMM
+    }
+    function.instr_count = instr_index + 1
+    (*module_ptr).functions[fn_index as usize] = function
+    if (*module_ptr).functions[fn_index as usize].instr_count != instr_index + 1 {
+        return IR_MODULE_HEAP_APPEND_PUBLISHED_COUNT
+    }
+    if (*module_ptr).functions[fn_index as usize].instrs[instr_index as usize].op != source_opcode {
+        return IR_MODULE_HEAP_APPEND_PUBLISHED_OPCODE
+    }
+    if (*module_ptr).functions[fn_index as usize].instrs[instr_index as usize].imm_i64 != source_imm_i64 {
+        return IR_MODULE_HEAP_APPEND_PUBLISHED_IMM
+    }
+    IR_MODULE_HEAP_APPEND_OK
+}
+
+pub fn ir_module_heap_append_instr(owner: &! IrModuleHeapBridge, fn_index: i64, instr: &IrInstr) -> bool with Mut {
+    ir_module_heap_append_instr_status(owner, fn_index, instr) == IR_MODULE_HEAP_APPEND_OK
 }
 
 pub fn ir_module_heap_add_string(owner: &! IrModuleHeapBridge, name: Name) -> i64 with Mut {
@@ -157,14 +196,16 @@ pub fn ir_module_heap_function_defining_module_id(owner: &IrModuleHeapBridge, fn
     if !ir_module_heap_is_allocated(owner) { return IR_DEFINING_MODULE_UNKNOWN }
     let module_ptr = (*owner).ptr
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return IR_DEFINING_MODULE_UNKNOWN }
-    (*module_ptr).functions[fn_index as usize].defining_module_id
+    let function = (*module_ptr).functions[fn_index as usize]
+    function.defining_module_id
 }
 
 pub fn ir_module_heap_function_instr_count(owner: &IrModuleHeapBridge, fn_index: i64) -> i64 {
     if !ir_module_heap_is_allocated(owner) { return -1 }
     let module_ptr = (*owner).ptr
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return -1 }
-    (*module_ptr).functions[fn_index as usize].instr_count
+    let function = (*module_ptr).functions[fn_index as usize]
+    function.instr_count
 }
 
 pub fn ir_module_heap_function_param_reg(owner: &IrModuleHeapBridge, fn_index: i64, param_index: i64) -> i64 {
@@ -172,34 +213,56 @@ pub fn ir_module_heap_function_param_reg(owner: &IrModuleHeapBridge, fn_index: i
     let module_ptr = (*owner).ptr
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return IR_INVALID_REG }
     if param_index < 0 || param_index >= 64 { return IR_INVALID_REG }
-    (*module_ptr).functions[fn_index as usize].param_regs[param_index as usize]
+    let function = (*module_ptr).functions[fn_index as usize]
+    function.param_regs[param_index as usize]
 }
 
 pub fn ir_module_heap_instr_imm_i64(owner: &IrModuleHeapBridge, fn_index: i64, instr_index: i64) -> i64 {
     if !ir_module_heap_is_allocated(owner) { return 0 }
     let module_ptr = (*owner).ptr
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return 0 }
-    let func = &(*module_ptr).functions[fn_index as usize]
-    if instr_index < 0 || instr_index >= (*func).instr_count { return 0 }
-    (*func).instrs[instr_index as usize].imm_i64
+    let function = (*module_ptr).functions[fn_index as usize]
+    if instr_index < 0 || instr_index >= function.instr_count { return 0 }
+    let instr = function.instrs[instr_index as usize]
+    instr.imm_i64
 }
 
 pub fn ir_module_heap_string_at(owner: &IrModuleHeapBridge, index: i64) -> Name {
     if !ir_module_heap_is_allocated(owner) { return ir_empty_name() }
     let module_ptr = (*owner).ptr
     if index < 0 || index >= (*module_ptr).string_count { return ir_empty_name() }
-    (*module_ptr).string_table[index as usize]
+    let name = (*module_ptr).string_table[index as usize]
+    name
 }
 
-pub fn ir_module_heap_serialize_into(
+pub let IR_MODULE_HEAP_SERIALIZE_OK: i64 = 0
+pub let IR_MODULE_HEAP_SERIALIZE_INVALID_OWNER: i64 = -1
+pub let IR_MODULE_HEAP_SERIALIZE_COUNTS_BOUNDS: i64 = -2
+pub let IR_MODULE_HEAP_SERIALIZE_MODULE_CONTRACT: i64 = -3
+pub let IR_MODULE_HEAP_SERIALIZE_ENVELOPE_CAPACITY: i64 = -4
+pub let IR_MODULE_HEAP_SERIALIZE_FUNCTION_INSTR: i64 = -5
+pub let IR_MODULE_HEAP_SERIALIZE_STRING: i64 = -6
+pub let IR_MODULE_HEAP_SERIALIZE_FINAL_PUBLISH: i64 = -7
+
+// Canonical heap serialization boundary: positive length is success, while
+// negative values are stable failure categories. The buffer is the sole
+// out-parameter, avoiding the falsified buffer-plus-length publication path.
+pub fn ir_module_heap_serialize_result_into(
     owner: &IrModuleHeapBridge,
     out_buf: &![i8; 131072],
-    out_len: &! i64,
-) -> bool with Mut, Panic, Div, Alloc {
-    (*out_len) = 0
-    if !ir_module_heap_is_allocated(owner) { return false }
-    soir_core_serialize_ir_module_empty_extensions_into(&(*(*owner).ptr), out_buf, out_len)
-    (*out_len) > 0
+) -> i64 with Mut, Panic, Div, Alloc {
+    if !ir_module_heap_is_allocated(owner) { return IR_MODULE_HEAP_SERIALIZE_INVALID_OWNER }
+    let core_result = soir_core_serialize_ir_module_empty_extensions_result_into(
+        &(*(*owner).ptr),
+        out_buf,
+    )
+    if core_result > SOIR_CORE_SERIALIZE_OK { return core_result }
+    if core_result == SOIR_CORE_SERIALIZE_COUNTS_BOUNDS { return IR_MODULE_HEAP_SERIALIZE_COUNTS_BOUNDS }
+    if core_result == SOIR_CORE_SERIALIZE_MODULE_CONTRACT { return IR_MODULE_HEAP_SERIALIZE_MODULE_CONTRACT }
+    if core_result == SOIR_CORE_SERIALIZE_ENVELOPE_CAPACITY { return IR_MODULE_HEAP_SERIALIZE_ENVELOPE_CAPACITY }
+    if core_result == SOIR_CORE_SERIALIZE_FUNCTION_INSTR { return IR_MODULE_HEAP_SERIALIZE_FUNCTION_INSTR }
+    if core_result == SOIR_CORE_SERIALIZE_STRING { return IR_MODULE_HEAP_SERIALIZE_STRING }
+    IR_MODULE_HEAP_SERIALIZE_FINAL_PUBLISH
 }
 
 pub fn ir_module_heap_deserialize_into(
@@ -242,7 +305,9 @@ fn ir_module_heap_free_raw_graph(raw: *mut IrModule) with Alloc, Mut {
     if live_functions > IR_MAX_FUNCS { live_functions = IR_MAX_FUNCS }
     while live_functions > 0 {
         live_functions = live_functions - 1
-        (*raw).functions[live_functions as usize].instr_count = 0
+        var function = (*raw).functions[live_functions as usize]
+        function.instr_count = 0
+        (*raw).functions[live_functions as usize] = function
     }
     (*raw).fn_count = 0
     (*raw).string_count = 0
@@ -268,19 +333,123 @@ pub fn ir_module_heap_release(owner: &! IrModuleHeapBridge) -> i64 with Alloc, M
     IR_MODULE_HEAP_STATE_FREED
 }
 
+fn ir_module_heap_self_test_fail(owner: &! IrModuleHeapBridge, code: i64) -> i64 with Alloc, Mut {
+    // Preserve the first diagnostic while preventing T17's bool wrapper from
+    // carrying a live raw reservation into later tests after a failed stage.
+    let _release_state = ir_module_heap_release(owner)
+    code
+}
+
+// Stage codes are stable diagnostic receipts, not semantic result categories.
+// Zero is success; the first failing checkpoint is returned unchanged.
+pub let IR_MODULE_HEAP_SELF_TEST_PASS: i64 = 0
+pub let IR_MODULE_HEAP_SELF_TEST_ALLOC: i64 = 101
+pub let IR_MODULE_HEAP_SELF_TEST_ADD_FUNCTION: i64 = 102
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5: i64 = 103
+pub let IR_MODULE_HEAP_SELF_TEST_DESERIALIZE_V5: i64 = 104
+pub let IR_MODULE_HEAP_SELF_TEST_DEFID_V5: i64 = 105
+pub let IR_MODULE_HEAP_SELF_TEST_NONEMPTY_EXTENSION: i64 = 106
+pub let IR_MODULE_HEAP_SELF_TEST_TRUNCATION: i64 = 107
+pub let IR_MODULE_HEAP_SELF_TEST_DESERIALIZE_V4: i64 = 108
+pub let IR_MODULE_HEAP_SELF_TEST_RELEASE: i64 = 109
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_OPCODE: i64 = 110
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_PREFLIGHT: i64 = 111
+pub let IR_MODULE_HEAP_SELF_TEST_ADD_INDEX: i64 = 120
+pub let IR_MODULE_HEAP_SELF_TEST_LIVE_SLOT: i64 = 121
+pub let IR_MODULE_HEAP_SELF_TEST_SENTINELS: i64 = 122
+pub let IR_MODULE_HEAP_SELF_TEST_REG_COUNT: i64 = 123
+pub let IR_MODULE_HEAP_SELF_TEST_INSTR_0: i64 = 124
+pub let IR_MODULE_HEAP_SELF_TEST_INSTR_1: i64 = 125
+pub let IR_MODULE_HEAP_SELF_TEST_STRING_0: i64 = 126
+pub let IR_MODULE_HEAP_SELF_TEST_FN_COUNT: i64 = 127
+pub let IR_MODULE_HEAP_SELF_TEST_EMPTY_INSTR_COUNT: i64 = 128
+pub let IR_MODULE_HEAP_SELF_TEST_INITIAL_DEFID: i64 = 129
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_0: i64 = 130
+pub let IR_MODULE_HEAP_SELF_TEST_INSTR_COUNT_1: i64 = 131
+pub let IR_MODULE_HEAP_SELF_TEST_OPCODE_0: i64 = 132
+pub let IR_MODULE_HEAP_SELF_TEST_IMM_0: i64 = 133
+pub let IR_MODULE_HEAP_SELF_TEST_INPUT_OPCODE_0: i64 = 134
+pub let IR_MODULE_HEAP_SELF_TEST_INPUT_IMM_0: i64 = 135
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_OWNER: i64 = 136
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_FN_BOUNDS: i64 = 137
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_INSTR_BOUNDS: i64 = 138
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_LOCAL_OPCODE: i64 = 139
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_LOCAL_IMM: i64 = 140
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_COUNT: i64 = 141
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_OPCODE: i64 = 142
+pub let IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_IMM: i64 = 143
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_CALL: i64 = 144
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_LEN: i64 = 145
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_VERSION: i64 = 146
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_DEFID: i64 = 147
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_EXTENSIONS: i64 = 148
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_INVALID_OWNER: i64 = 149
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_COUNTS_BOUNDS: i64 = 150
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_MODULE_CONTRACT: i64 = 151
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_ENVELOPE_CAPACITY: i64 = 152
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_FUNCTION_INSTR: i64 = 153
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_STRING: i64 = 154
+pub let IR_MODULE_HEAP_SELF_TEST_SERIALIZE_FINAL_PUBLISH: i64 = 155
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_FN_INDEX: i64 = 156
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_CONSTRUCTOR_OPCODE: i64 = 157
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_APPEND: i64 = 158
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_PUBLISHED_COUNT: i64 = 159
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_PUBLISHED_OPCODE: i64 = 160
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_CANONICAL_RESULT: i64 = 161
+// 162-163 are reserved receipts from the removed bool/out_len compatibility
+// wrapper. Code 163 proved that its mutable length promise was not reliable.
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_COMPAT_BOOL: i64 = 162
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_COMPAT_LEN: i64 = 163
+pub let IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_RELEASE: i64 = 164
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_PUBLISHED_COUNT: i64 = 165
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESULT: i64 = 166
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESET_COUNT: i64 = 167
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_PUBLISHED_COUNT: i64 = 168
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_RESULT: i64 = 169
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_RELEASE: i64 = 170
+
+var IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN: i64 = -1
+var IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT: i64 = 0
+
+pub fn ir_module_heap_self_test_observed_len() -> i64 {
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN
+}
+
+pub fn ir_module_heap_self_test_observed_result() -> i64 {
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT
+}
+
 // Shared semantic witness used by T17 and by the source-fresh Madaros internal
 // self-test. One implementation keeps CI on the actual SOIR v5/v4 bridge.
-pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc {
+pub fn ir_module_heap_roundtrip_self_test_code() -> i64 with Mut, Panic, Div, Alloc {
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN = -1
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT = 0
     var owner = ir_module_heap_new()
+    if !ir_module_heap_is_allocated(&owner) {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_ALLOC)
+    }
+
     let expected_name = ir_name_from_bytes(118 as i8, 52 as i8, 0 as i8, 0 as i8, 2)
     let fn_index = ir_module_heap_add_function(
         &! owner,
         ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4),
         37,
     )
-    var ok = ir_module_heap_is_allocated(&owner) && fn_index == 0
-    ok = ir_module_heap_function_instr_count(&owner, fn_index) == 0 && ok
-    ok = ir_module_heap_function_defining_module_id(&owner, fn_index) == 37 && ok
+    if fn_index != 0 { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_ADD_INDEX) }
+
+    if ir_module_heap_fn_count(&owner) != 1 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_FN_COUNT)
+    }
+    if ir_module_heap_function_instr_count(&owner, fn_index) != 0 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_EMPTY_INSTR_COUNT)
+    }
+    if ir_module_heap_function_defining_module_id(&owner, fn_index) != 37 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_INITIAL_DEFID)
+    }
+
+    // Codes 102 and 121 remain reserved for the original aggregate checkpoints.
+    // The leaf receipts now identify their first false assertion.
+    var ok = true
     var sentinel_index: i64 = 0
     while sentinel_index < 64 {
         ok = ir_module_heap_function_param_reg(&owner, fn_index, sentinel_index) == IR_INVALID_REG && ok
@@ -293,25 +462,108 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = (*owner.ptr).functions[fn_index as usize].is_sret == 0 && ok
     ok = (*owner.ptr).functions[fn_index as usize].sret_dest_reg == -1 && ok
     ok = (*owner.ptr).functions[fn_index as usize].bss_size == 0 && ok
-    ok = ir_module_heap_set_function_reg_count(&! owner, fn_index, 1) && ok
-    ok = ir_module_heap_append_instr(&! owner, fn_index, ir_load_imm(0, 42)) && ok
-    ok = ir_module_heap_append_instr(&! owner, fn_index, ir_return(0)) && ok
-    ok = ir_module_heap_add_string(&! owner, expected_name) == 0 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_SENTINELS) }
+
+    ok = ir_module_heap_set_function_reg_count(&! owner, fn_index, 1)
+    ok = (*owner.ptr).functions[fn_index as usize].reg_count == 1 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_REG_COUNT) }
+
+    // Code 124 remains reserved for the original first-instruction checkpoint.
+    var input_instr_0 = ir_load_imm(0, 42)
+    if input_instr_0.op != IrOpcode::IrLoadImm {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_INPUT_OPCODE_0)
+    }
+    if input_instr_0.imm_i64 != 42 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_INPUT_IMM_0)
+    }
+    let append_0_status = ir_module_heap_append_instr_status(&! owner, fn_index, &input_instr_0)
+    if append_0_status != IR_MODULE_HEAP_APPEND_OK {
+        let append_0_code = if append_0_status == IR_MODULE_HEAP_APPEND_INVALID_OWNER {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_OWNER
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_FUNCTION_BOUNDS {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_FN_BOUNDS
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_INSTR_BOUNDS {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_INSTR_BOUNDS
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_LOCAL_OPCODE {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_LOCAL_OPCODE
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_LOCAL_IMM {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_LOCAL_IMM
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_PUBLISHED_COUNT {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_COUNT
+        } else if append_0_status == IR_MODULE_HEAP_APPEND_PUBLISHED_OPCODE {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_OPCODE
+        } else {
+            IR_MODULE_HEAP_SELF_TEST_APPEND_PUBLISHED_IMM
+        }
+        return ir_module_heap_self_test_fail(&! owner, append_0_code)
+    }
+    if ir_module_heap_function_instr_count(&owner, fn_index) != 1 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_INSTR_COUNT_1)
+    }
+    if (*owner.ptr).functions[fn_index as usize].instrs[0].op != IrOpcode::IrLoadImm {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_OPCODE_0)
+    }
+    if ir_module_heap_instr_imm_i64(&owner, fn_index, 0) != 42 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_IMM_0)
+    }
+
+    var input_instr_1 = ir_return(0)
+    ok = ir_module_heap_append_instr(&! owner, fn_index, &input_instr_1)
+    ok = ir_module_heap_function_instr_count(&owner, fn_index) == 2 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].instrs[1].op == IrOpcode::IrReturn && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_INSTR_1) }
+
+    ok = ir_module_heap_add_string(&! owner, expected_name) == 0
+    ok = ir_module_heap_string_count(&owner) == 1 && ok
+    ok = ir_name_eq(ir_module_heap_string_at(&owner, 0), expected_name) && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_STRING_0) }
 
     var buf: [i8; 131072] = [0; 131072]
     var len: i64 = 0
-    ok = ir_module_heap_serialize_into(&owner, &! buf, &! len) && ok
+    let serialize_result = ir_module_heap_serialize_result_into(&owner, &! buf)
+    if serialize_result <= IR_MODULE_HEAP_SERIALIZE_OK {
+        let serialize_code = if serialize_result == IR_MODULE_HEAP_SERIALIZE_INVALID_OWNER {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_INVALID_OWNER
+        } else if serialize_result == IR_MODULE_HEAP_SERIALIZE_COUNTS_BOUNDS {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_COUNTS_BOUNDS
+        } else if serialize_result == IR_MODULE_HEAP_SERIALIZE_MODULE_CONTRACT {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_MODULE_CONTRACT
+        } else if serialize_result == IR_MODULE_HEAP_SERIALIZE_ENVELOPE_CAPACITY {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_ENVELOPE_CAPACITY
+        } else if serialize_result == IR_MODULE_HEAP_SERIALIZE_FUNCTION_INSTR {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_FUNCTION_INSTR
+        } else if serialize_result == IR_MODULE_HEAP_SERIALIZE_STRING {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_STRING
+        } else {
+            IR_MODULE_HEAP_SELF_TEST_SERIALIZE_FINAL_PUBLISH
+        }
+        return ir_module_heap_self_test_fail(&! owner, serialize_code)
+    }
+    len = serialize_result
+    if len != 1632 {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN = len
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_LEN)
+    }
     let provenance_pos: i64 = 8 + 8 + 136 + 32 + 512 + 24
     let extensions_pos: i64 = len - 296
-    ok = len == 1632 && ok
-    ok = buf[4] == 5 as i8 && ok
-    ok = provenance_pos == 720 && buf[provenance_pos as usize] == 37 as i8 && ok
-    ok = extensions_pos == 1336 && buf[extensions_pos as usize] == 0 as i8 && ok
+    if buf[4] != 5 as i8 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_VERSION)
+    }
+    if provenance_pos != 720 || buf[provenance_pos as usize] != 37 as i8 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_DEFID)
+    }
+    if extensions_pos != 1336 || buf[extensions_pos as usize] != 0 as i8 {
+        return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_SERIALIZE_V5_EXTENSIONS)
+    }
+
     ok = ir_module_heap_deserialize_into(&! owner, buf, len) && ok
     ok = ir_module_heap_fn_count(&owner) == 1 && ok
     ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
     ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_DESERIALIZE_V5) }
+
     ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_DEFID_V5) }
 
     // The bounded core must reject, not skip, any non-empty extension section.
     var nonempty_extension_buf = buf
@@ -319,6 +571,7 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = !ir_module_heap_deserialize_into(&! owner, nonempty_extension_buf, len) && ok
     ok = ir_module_heap_fn_count(&owner) == 1 && ok
     ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_NONEMPTY_EXTENSION) }
 
     // A truncated v5 decode must not publish any staged writes.
     ok = !ir_module_heap_deserialize_into(&! owner, buf, len - 1) && ok
@@ -326,6 +579,7 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
     ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
     ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_TRUNCATION) }
 
     // Build a genuine v4 buffer by removing the v5-only provenance word.
     var legacy_buf = buf
@@ -343,6 +597,7 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
     ok = ir_module_heap_string_count(&owner) == 1 && ok
     ok = ir_name_eq(ir_module_heap_string_at(&owner, 0), expected_name) && ok
+    if !ok { return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_DESERIALIZE_V4) }
 
     let first_release = ir_module_heap_release(&! owner)
     let second_release = ir_module_heap_release(&! owner)
@@ -351,36 +606,88 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = ir_module_heap_state(&owner) == IR_MODULE_HEAP_STATE_FREED && ok
     ok = ir_module_heap_fn_count(&owner) == -1 && ok
     ok = ir_module_heap_string_count(&owner) == -1 && ok
+    if !ok { return IR_MODULE_HEAP_SELF_TEST_RELEASE }
 
     // Newer opcodes without assigned SOIR tags must make serialization fail
     // with len=0; they can never be emitted as the placeholder NOP tag.
     var unsupported_owner = ir_module_heap_new()
     let unsupported_fn = ir_module_heap_add_function(&! unsupported_owner, ir_empty_name(), 91)
-    ok = unsupported_fn == 0 && ok
-    ok = ir_module_heap_append_instr(
+    if unsupported_fn != 0 {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_FN_INDEX)
+    }
+    var unsupported_instr = ir_instr_new(IrOpcode::IrArrayLen)
+    if unsupported_instr.op != IrOpcode::IrArrayLen {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_CONSTRUCTOR_OPCODE)
+    }
+    let unsupported_append_status = ir_module_heap_append_instr_status(
         &! unsupported_owner,
         unsupported_fn,
-        ir_instr_new(IrOpcode::IrArrayLen),
-    ) && ok
+        &unsupported_instr,
+    )
+    if unsupported_append_status != IR_MODULE_HEAP_APPEND_OK {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_APPEND)
+    }
+    let unsupported_function = (*unsupported_owner.ptr).functions[unsupported_fn as usize]
+    if unsupported_function.instr_count != 1 {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_PUBLISHED_COUNT)
+    }
+    let unsupported_published_instr = unsupported_function.instrs[0]
+    if unsupported_published_instr.op != IrOpcode::IrArrayLen {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_PUBLISHED_OPCODE)
+    }
     var unsupported_buf: [i8; 131072] = [0; 131072]
-    var unsupported_len: i64 = 77
-    ok = !ir_module_heap_serialize_into(&unsupported_owner, &! unsupported_buf, &! unsupported_len) && ok
-    ok = unsupported_len == 0 && ok
-    ok = ir_module_heap_release(&! unsupported_owner) == IR_MODULE_HEAP_STATE_FREED && ok
+    let unsupported_result = ir_module_heap_serialize_result_into(&unsupported_owner, &! unsupported_buf)
+    if unsupported_result != IR_MODULE_HEAP_SERIALIZE_FUNCTION_INSTR {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_CANONICAL_RESULT)
+    }
+    if ir_module_heap_release(&! unsupported_owner) != IR_MODULE_HEAP_STATE_FREED {
+        return ir_module_heap_self_test_fail(&! unsupported_owner, IR_MODULE_HEAP_SELF_TEST_UNSUPPORTED_RELEASE)
+    }
 
     // Non-empty in-memory epistemic/algebra sections are outside this bounded
     // codec and must fail preflight with no published bytes.
     var extension_owner = ir_module_heap_new()
-    (*extension_owner.ptr).epistemic.model_family_count = 1
+    if !ir_module_heap_is_allocated(&extension_owner) {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_ALLOC)
+    }
+    var extension_epistemic = (*extension_owner.ptr).epistemic
+    extension_epistemic.model_family_count = 1
+    (*extension_owner.ptr).epistemic = extension_epistemic
+    let published_extension_epistemic = (*extension_owner.ptr).epistemic
+    if published_extension_epistemic.model_family_count != 1 {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_PUBLISHED_COUNT)
+    }
     var extension_buf: [i8; 131072] = [0; 131072]
-    var extension_len: i64 = 91
-    ok = !ir_module_heap_serialize_into(&extension_owner, &! extension_buf, &! extension_len) && ok
-    ok = extension_len == 0 && ok
-    (*extension_owner.ptr).epistemic.model_family_count = 0
-    (*extension_owner.ptr).algebras.count = 1
-    extension_len = 92
-    ok = !ir_module_heap_serialize_into(&extension_owner, &! extension_buf, &! extension_len) && ok
-    ok = extension_len == 0 && ok
-    ok = ir_module_heap_release(&! extension_owner) == IR_MODULE_HEAP_STATE_FREED && ok
-    ok
+    let epistemic_extension_result = ir_module_heap_serialize_result_into(&extension_owner, &! extension_buf)
+    if epistemic_extension_result != IR_MODULE_HEAP_SERIALIZE_MODULE_CONTRACT {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT = epistemic_extension_result
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESULT)
+    }
+    extension_epistemic = (*extension_owner.ptr).epistemic
+    extension_epistemic.model_family_count = 0
+    (*extension_owner.ptr).epistemic = extension_epistemic
+    let reset_extension_epistemic = (*extension_owner.ptr).epistemic
+    if reset_extension_epistemic.model_family_count != 0 {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESET_COUNT)
+    }
+    var extension_algebras = (*extension_owner.ptr).algebras
+    extension_algebras.count = 1
+    (*extension_owner.ptr).algebras = extension_algebras
+    let published_extension_algebras = (*extension_owner.ptr).algebras
+    if published_extension_algebras.count != 1 {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_PUBLISHED_COUNT)
+    }
+    let algebra_extension_result = ir_module_heap_serialize_result_into(&extension_owner, &! extension_buf)
+    if algebra_extension_result != IR_MODULE_HEAP_SERIALIZE_MODULE_CONTRACT {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT = algebra_extension_result
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_RESULT)
+    }
+    if ir_module_heap_release(&! extension_owner) != IR_MODULE_HEAP_STATE_FREED {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_RELEASE)
+    }
+    IR_MODULE_HEAP_SELF_TEST_PASS
+}
+
+pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc {
+    ir_module_heap_roundtrip_self_test_code() == IR_MODULE_HEAP_SELF_TEST_PASS
 }
