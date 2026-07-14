@@ -982,6 +982,35 @@ fn name_is_assert(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_heap_alloc(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }
+    if n.buf[0] != 104 as i8 { return false }     // 'h'
+    if n.buf[1] != 101 as i8 { return false }     // 'e'
+    if n.buf[2] != 97 as i8 { return false }      // 'a'
+    if n.buf[3] != 112 as i8 { return false }     // 'p'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 97 as i8 { return false }      // 'a'
+    if n.buf[6] != 108 as i8 { return false }     // 'l'
+    if n.buf[7] != 108 as i8 { return false }     // 'l'
+    if n.buf[8] != 111 as i8 { return false }     // 'o'
+    if n.buf[9] != 99 as i8 { return false }      // 'c'
+    true
+}
+
+fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 104 as i8 { return false }     // 'h'
+    if n.buf[1] != 101 as i8 { return false }     // 'e'
+    if n.buf[2] != 97 as i8 { return false }      // 'a'
+    if n.buf[3] != 112 as i8 { return false }     // 'p'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 102 as i8 { return false }     // 'f'
+    if n.buf[6] != 114 as i8 { return false }     // 'r'
+    if n.buf[7] != 101 as i8 { return false }     // 'e'
+    if n.buf[8] != 101 as i8 { return false }     // 'e'
+    true
+}
+
 fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 9 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1026,6 +1055,8 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_char(name) { return 2 }
     if name_ref_is_print(name) { return 3 }
     if name_is_assert(*name) { return 21 }
+    if name_is_heap_alloc(*name) { return 23 }
+    if name_is_heap_free(*name) { return 24 }
     0
 }
 
@@ -1091,6 +1122,8 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_cos((*func).name) { return 19 }
     if name_is_assert((*func).name) { return 21 }
     if name_is_str_from_bytes((*func).name) { return 22 }
+    if name_is_heap_alloc((*func).name) { return 23 }
+    if name_is_heap_free((*func).name) { return 24 }
     0
 }
 
@@ -3226,6 +3259,95 @@ fn emit_builtin_assert_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_exit_code(nc, 1)
     nc_emit_mov_rax_imm(nc, 0)
     nc_emit_ret(nc)
+}
+
+// heap_alloc(n) -> zeroed payload. The historical heap ABI stores the
+// page-rounded mapping length at ptr-8 so heap_free/heap_realloc can recover it.
+fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // Reject n <= 0.
+    nc_emit_test_rdi_rdi(nc)
+    let nonpositive_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0) // jle fail
+
+    // rsi = page_round_up(n + 8). Adding 8 + 4095 in one step lets the
+    // signed test reject every overflow from a positive source value.
+    nc_emit_mov_reg_reg(nc, 6, 7)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc6)
+    nc_emit_u32_le(nc, 4103)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xf6) // test rsi,rsi
+    let overflow_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0) // jle fail
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xe6)
+    nc_emit_u32_le(nc, -4096)
+
+    // mmap(NULL, rsi, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xff) // xor rdi,rdi
+    nc_emit_mov_reg_imm(nc, 2, 3)
+    nc_emit_mov_r10_imm32(nc, 34)
+    nc_emit_mov_reg_imm(nc, 8, -1)
+    nc_emit_byte(nc, 0x4d)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xc9) // xor r9,r9
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_syscall(nc)
+
+    // Linux syscall errors are negative. User mappings never occupy the
+    // negative canonical half, so a sign test is sufficient here.
+    nc_emit_test_rax_rax(nc)
+    let mmap_error_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    nc_emit_u32_le(nc, 0) // js fail
+
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x30) // mov [rax],rsi
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 8)
+    nc_emit_ret(nc)
+
+    let fail_offset = (*nc).code.len
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_ret(nc)
+    nc_patch_u32_le(nc, nonpositive_patch, fail_offset - (nonpositive_patch + 4))
+    nc_patch_u32_le(nc, overflow_patch, fail_offset - (overflow_patch + 4))
+    nc_patch_u32_le(nc, mmap_error_patch, fail_offset - (mmap_error_patch + 4))
+}
+
+// heap_free(NULL) is a no-op. Non-null pointers must come from heap_alloc.
+fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_test_rdi_rdi(nc)
+    let null_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x84)
+    nc_emit_u32_le(nc, 0) // jz done
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xef)
+    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x37) // mov rsi,[rdi]
+    nc_emit_mov_rax_imm(nc, 11)
+    nc_emit_syscall(nc)
+    let done_offset = (*nc).code.len
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_ret(nc)
+    nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
 }
 
 // ============================================================================
@@ -5670,6 +5792,8 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_cos(name) { return 19 }
     if name_is_assert(name) { return 21 }
     if name_is_str_from_bytes(name) { return 22 }
+    if name_is_heap_alloc(name) { return 23 }
+    if name_is_heap_free(name) { return 24 }
     0
 }
 
@@ -5705,6 +5829,8 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
     if builtin_id == 21 { emit_builtin_assert_into(nc); return }
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
+    if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
+    if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5758,6 +5884,8 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if name_is_sin(func.name) { return emit_builtin_sin(c) }
     if name_is_cos(func.name) { return emit_builtin_cos(c) }
     if name_is_assert(func.name) { return emit_builtin_assert(c) }
+    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
+    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
 
     c.current_strategy = func.compile_strategy
 
@@ -5879,6 +6007,14 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         }
         if builtin_id == 3 {
             emit_builtin_print_str_into(nc)
+            return
+        }
+        if builtin_id == 23 {
+            emit_builtin_heap_alloc_into(nc)
+            return
+        }
+        if builtin_id == 24 {
+            emit_builtin_heap_free_into(nc)
             return
         }
         return
@@ -7752,6 +7888,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
     if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
     if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
+    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
+    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
