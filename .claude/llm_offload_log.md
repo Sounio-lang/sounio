@@ -2747,6 +2747,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Theme: method-comparison / robust regression — complements the agreement modules (bland_altman, concordance/CCC, reliability) for assay/instrument comparison. #852-safe: theil_sen & passing_bablok use bounded pairwise buffers with inline median sorts (no nested call while big buffer live). Suite selftest: 45 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-8JVsS1/`, `/tmp/llm-offload-NuJ1qi/`, `/tmp/llm-offload-LafnKF/`.
 
+## 2026-07-14 — math-review: integrate::epistemic_ode run-proof
+- Files: `tests/stdlib/integrate/test_integrate_stdlib.sio`, `examples/integrate/decay_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = **PASS** (all). Confirmed y(t)=y0 e^{-kt}; Euler (1-1/n)^n→e^-1 O(1/n) (err@2000<err@200); half-life y(ln2)=y0/2; y(2)=2e^-1=0.735759; step-wise additive uncertainty recurrence u_{n+1}=u_n√(1+(k dt)²) is algebraically correct (u stays ~u0). Default Madaros. INTEGRATE_GATE_OK.
+- Raw review directory: see /tmp llm-offload dir.
 ## 2026-07-14 — math-review: stats::fisher_exact, stats::cochran_q, stats::fleiss_kappa
 - Files (all new): `stdlib/stats/fisher_exact.sio` (Fisher's exact 2×2: hypergeometric two-sided/one-sided p + odds ratio, log-factorials via Lanczos), `stdlib/stats/cochran_q.sio` (Cochran's Q for k paired binary conditions, χ² tail via igamma), `stdlib/stats/fleiss_kappa.sio` (Fleiss' multi-rater kappa). Provider: xAI/Grok 4.3.
 - fisher_exact = **PASS**: hypergeometric P via log-factorials, two-sided sum over P≤P_obs with float-tolerant threshold, support bounds max(0,c1-r2)..min(r1,c1), OR=ad/bc all correct; tea-test 0.4857/OR 9 verified.
