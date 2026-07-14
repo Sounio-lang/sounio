@@ -120,6 +120,7 @@ FILES=(
   self-hosted/ir/lower.sio
   self-hosted/ir/normalize.sio
   self-hosted/ir/serialize.sio
+  self-hosted/ir/heap_storage.sio
   self-hosted/ir/disasm.sio
   self-hosted/ir/verify.sio
   self-hosted/ir/optimize.sio
@@ -453,6 +454,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/lower.sio
     self-hosted/ir/normalize.sio
     self-hosted/ir/serialize.sio
+    self-hosted/ir/heap_storage.sio
     self-hosted/ir/disasm.sio
     self-hosted/ir/verify.sio
     self-hosted/ir/optimize.sio

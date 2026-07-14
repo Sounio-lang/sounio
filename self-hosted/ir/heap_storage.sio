@@ -1,0 +1,310 @@
+// Heap-backed owner for the current fixed-layout IrModule.
+//
+// This is a bridge, not the canonical IR representation. It removes the
+// very large IrModule value from selected stack/BSS paths while preserving the
+// existing IrModule ABI and all SOIR semantics. The layout is hundreds of MiB
+// in this stack and has exceeded 1 GiB in adjacent compiler snapshots. The 2
+// GiB mapping is a virtual upper envelope; heap_alloc returns zeroed pages, and
+// these APIs touch only top-level metadata plus live functions.
+
+module ir::heap_storage
+
+use ir::ir::*
+use ir::serialize::{serialize_ir_module_into, deserialize_ir_module_into}
+
+pub let IR_MODULE_HEAP_STATE_NULL: i64 = 0
+pub let IR_MODULE_HEAP_STATE_ALLOCATED: i64 = 1
+pub let IR_MODULE_HEAP_STATE_FREED: i64 = 2
+pub let IR_MODULE_HEAP_STATE_FAILED: i64 = 3
+
+// Keep this above the measured current IrModule layout. This is deliberately
+// not described as capacity for 2048 materialized functions: untouched mmap
+// pages remain virtual, and every live function must be inserted explicitly.
+pub let IR_MODULE_HEAP_RESERVATION_BYTES: i64 = 2147483648
+
+// Fields stay private so allocation state changes remain owned by this module.
+// The current checker rejects repeated borrows and state-threaded returns of a
+// linear owner (reduced in issue #877). This bootstrap bridge therefore uses
+// an explicit runtime state machine. Callers must not copy or alias the owner;
+// canonical linearization is a later lane.
+pub struct IrModuleHeapBridge {
+    ptr: *mut IrModule,
+    state: i64,
+    allocation_bytes: i64,
+}
+
+pub fn ir_module_heap_null() -> IrModuleHeapBridge {
+    IrModuleHeapBridge {
+        ptr: 0 as *mut IrModule,
+        state: IR_MODULE_HEAP_STATE_NULL,
+        allocation_bytes: 0,
+    }
+}
+
+pub fn ir_module_heap_new() -> IrModuleHeapBridge with Alloc, Mut {
+    let raw = heap_alloc(IR_MODULE_HEAP_RESERVATION_BYTES) as *mut IrModule
+    if raw as i64 == 0 {
+        return IrModuleHeapBridge {
+            ptr: 0 as *mut IrModule,
+            state: IR_MODULE_HEAP_STATE_FAILED,
+            allocation_bytes: 0,
+        }
+    }
+
+    // heap_alloc is zero-initializing on both the libc and native-v2 paths.
+    // Counts are written explicitly so the sparse-empty contract is visible;
+    // no [IrFunction; 2048] initializer is constructed or copied here.
+    (*raw).fn_count = 0
+    (*raw).string_count = 0
+    (*raw).prof_counter_count = 0
+    (*raw).export_count = 0
+    (*raw).bss_total_size = 0
+
+    IrModuleHeapBridge {
+        ptr: raw,
+        state: IR_MODULE_HEAP_STATE_ALLOCATED,
+        allocation_bytes: IR_MODULE_HEAP_RESERVATION_BYTES,
+    }
+}
+
+pub fn ir_module_heap_state(owner: &IrModuleHeapBridge) -> i64 {
+    (*owner).state
+}
+
+pub fn ir_module_heap_is_allocated(owner: &IrModuleHeapBridge) -> bool {
+    (*owner).state == IR_MODULE_HEAP_STATE_ALLOCATED &&
+        (*owner).ptr as i64 != 0 &&
+        (*owner).allocation_bytes == IR_MODULE_HEAP_RESERVATION_BYTES
+}
+
+pub fn ir_module_heap_fn_count(owner: &IrModuleHeapBridge) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return -1 }
+    (*(*owner).ptr).fn_count
+}
+
+pub fn ir_module_heap_string_count(owner: &IrModuleHeapBridge) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return -1 }
+    (*(*owner).ptr).string_count
+}
+
+pub fn ir_module_heap_add_function(owner: &! IrModuleHeapBridge, name: Name, defining_module_id: i64) -> i64 with Mut {
+    if !ir_module_heap_is_allocated(owner) { return -1 }
+    let module_ptr = (*owner).ptr
+    let index = (*module_ptr).fn_count
+    if index < 0 || index >= IR_MAX_FUNCS { return -1 }
+
+    // The allocation is already zeroed. Initialize only the live slot's
+    // non-zero/default-sensitive fields instead of constructing and copying a
+    // full IrFunction with its 2048-instruction inline array.
+    (*module_ptr).functions[index as usize].name = name
+    (*module_ptr).functions[index as usize].defining_module_id = defining_module_id
+    (*module_ptr).functions[index as usize].prof_counter_id = -1
+    (*module_ptr).functions[index as usize].hyper_algebra_kind = -1
+    (*module_ptr).functions[index as usize].sret_dest_reg = -1
+    var param_index: i64 = 0
+    while param_index < 64 {
+        (*module_ptr).functions[index as usize].param_regs[param_index as usize] = IR_INVALID_REG
+        param_index = param_index + 1
+    }
+    (*module_ptr).fn_count = index + 1
+    index
+}
+
+pub fn ir_module_heap_set_function_reg_count(owner: &! IrModuleHeapBridge, fn_index: i64, reg_count: i64) -> bool with Mut {
+    if !ir_module_heap_is_allocated(owner) { return false }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return false }
+    if reg_count < 0 { return false }
+    (*module_ptr).functions[fn_index as usize].reg_count = reg_count
+    true
+}
+
+pub fn ir_module_heap_append_instr(owner: &! IrModuleHeapBridge, fn_index: i64, instr: IrInstr) -> bool with Mut {
+    if !ir_module_heap_is_allocated(owner) { return false }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return false }
+    let instr_index = (*module_ptr).functions[fn_index as usize].instr_count
+    if instr_index < 0 || instr_index >= IR_MAX_INSTRS { return false }
+    (*module_ptr).functions[fn_index as usize].instrs[instr_index as usize] = instr
+    (*module_ptr).functions[fn_index as usize].instr_count = instr_index + 1
+    true
+}
+
+pub fn ir_module_heap_add_string(owner: &! IrModuleHeapBridge, name: Name) -> i64 with Mut {
+    if !ir_module_heap_is_allocated(owner) { return -1 }
+    let module_ptr = (*owner).ptr
+    let index = (*module_ptr).string_count
+    if index < 0 || index >= IR_MAX_STRINGS { return -1 }
+    (*module_ptr).string_table[index as usize] = name
+    (*module_ptr).string_count = index + 1
+    index
+}
+
+pub fn ir_module_heap_function_defining_module_id(owner: &IrModuleHeapBridge, fn_index: i64) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return IR_DEFINING_MODULE_UNKNOWN }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return IR_DEFINING_MODULE_UNKNOWN }
+    (*module_ptr).functions[fn_index as usize].defining_module_id
+}
+
+pub fn ir_module_heap_function_instr_count(owner: &IrModuleHeapBridge, fn_index: i64) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return -1 }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return -1 }
+    (*module_ptr).functions[fn_index as usize].instr_count
+}
+
+pub fn ir_module_heap_function_param_reg(owner: &IrModuleHeapBridge, fn_index: i64, param_index: i64) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return IR_INVALID_REG }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return IR_INVALID_REG }
+    if param_index < 0 || param_index >= 64 { return IR_INVALID_REG }
+    (*module_ptr).functions[fn_index as usize].param_regs[param_index as usize]
+}
+
+pub fn ir_module_heap_instr_imm_i64(owner: &IrModuleHeapBridge, fn_index: i64, instr_index: i64) -> i64 {
+    if !ir_module_heap_is_allocated(owner) { return 0 }
+    let module_ptr = (*owner).ptr
+    if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return 0 }
+    let func = &(*module_ptr).functions[fn_index as usize]
+    if instr_index < 0 || instr_index >= (*func).instr_count { return 0 }
+    (*func).instrs[instr_index as usize].imm_i64
+}
+
+pub fn ir_module_heap_string_at(owner: &IrModuleHeapBridge, index: i64) -> Name {
+    if !ir_module_heap_is_allocated(owner) { return ir_empty_name() }
+    let module_ptr = (*owner).ptr
+    if index < 0 || index >= (*module_ptr).string_count { return ir_empty_name() }
+    (*module_ptr).string_table[index as usize]
+}
+
+pub fn ir_module_heap_serialize_into(
+    owner: &IrModuleHeapBridge,
+    out_buf: &![i8; 131072],
+    out_len: &! i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    (*out_len) = 0
+    if !ir_module_heap_is_allocated(owner) { return false }
+    serialize_ir_module_into(&(*(*owner).ptr), out_buf, out_len)
+    (*out_len) > 0
+}
+
+pub fn ir_module_heap_deserialize_into(
+    owner: &! IrModuleHeapBridge,
+    buf: [i8; 131072],
+    len: i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    if !ir_module_heap_is_allocated(owner) { return false }
+
+    // Decode transactionally into a second virtual reservation. The base
+    // decoder intentionally publishes counts last, but can still modify other
+    // fields before returning false. Staging keeps the live owner bit-for-bit
+    // unchanged on every decode failure without copying an IrModule value.
+    var staged = ir_module_heap_new()
+    if !ir_module_heap_is_allocated(&staged) { return false }
+    if !deserialize_ir_module_into(buf, len, &!(*staged.ptr)) {
+        let _failed_release = ir_module_heap_release(&! staged)
+        return false
+    }
+
+    let old_ptr = (*owner).ptr
+    (*owner).ptr = staged.ptr
+    (*owner).state = IR_MODULE_HEAP_STATE_ALLOCATED
+    (*owner).allocation_bytes = IR_MODULE_HEAP_RESERVATION_BYTES
+    staged.ptr = 0 as *mut IrModule
+    staged.state = IR_MODULE_HEAP_STATE_FREED
+    staged.allocation_bytes = 0
+    heap_free(old_ptr as *mut u8)
+    true
+}
+
+// Transition before deallocation, then pass the exact user pointer returned
+// by heap_alloc. Native-v2 recovers its page-rounded mmap from the header at
+// ptr-8; the libc path receives the same pointer through ordinary free. A
+// second release observes FREED + null and therefore cannot call heap_free.
+pub fn ir_module_heap_release(owner: &! IrModuleHeapBridge) -> i64 with Alloc, Mut {
+    if !ir_module_heap_is_allocated(owner) {
+        return (*owner).state
+    }
+    let raw = (*owner).ptr
+    (*owner).ptr = 0 as *mut IrModule
+    (*owner).state = IR_MODULE_HEAP_STATE_FREED
+    (*owner).allocation_bytes = 0
+    heap_free(raw as *mut u8)
+    IR_MODULE_HEAP_STATE_FREED
+}
+
+// Shared semantic witness used by T17 and by the source-fresh Madaros internal
+// self-test. One implementation keeps CI on the actual SOIR v5/v4 bridge.
+pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc {
+    var owner = ir_module_heap_new()
+    let expected_name = ir_name_from_bytes(118 as i8, 52 as i8, 0 as i8, 0 as i8, 2)
+    let fn_index = ir_module_heap_add_function(
+        &! owner,
+        ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4),
+        37,
+    )
+    var ok = ir_module_heap_is_allocated(&owner) && fn_index == 0
+    ok = ir_module_heap_set_function_reg_count(&! owner, fn_index, 1) && ok
+    ok = ir_module_heap_append_instr(&! owner, fn_index, ir_load_imm(0, 42)) && ok
+    ok = ir_module_heap_append_instr(&! owner, fn_index, ir_return(0)) && ok
+    ok = ir_module_heap_add_string(&! owner, expected_name) == 0 && ok
+    ok = ir_module_heap_function_param_reg(&owner, fn_index, 0) == IR_INVALID_REG && ok
+    ok = ir_module_heap_function_param_reg(&owner, fn_index, 63) == IR_INVALID_REG && ok
+
+    var buf: [i8; 131072] = [0; 131072]
+    var len: i64 = 0
+    ok = ir_module_heap_serialize_into(&owner, &! buf, &! len) && ok
+    ok = ir_module_heap_deserialize_into(&! owner, buf, len) && ok
+    ok = ir_module_heap_fn_count(&owner) == 1 && ok
+    ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
+    ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
+    ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+
+    // A truncated v5 decode must not publish any staged writes.
+    ok = !ir_module_heap_deserialize_into(&! owner, buf, len - 1) && ok
+    ok = ir_module_heap_fn_count(&owner) == 1 && ok
+    ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
+    ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
+    ok = ir_module_heap_function_defining_module_id(&owner, 0) == 37 && ok
+
+    // Build a genuine v4 buffer by removing the v5-only provenance word.
+    var legacy_buf = buf
+    let provenance_pos: i64 = 8 + 8 + 136 + 32 + 512 + 24
+    var shift_pos = provenance_pos
+    while shift_pos + 8 < len {
+        legacy_buf[shift_pos as usize] = legacy_buf[(shift_pos + 8) as usize]
+        shift_pos = shift_pos + 1
+    }
+    legacy_buf[4] = 4 as i8
+    ok = ir_module_heap_deserialize_into(&! owner, legacy_buf, len - 8) && ok
+    ok = ir_module_heap_fn_count(&owner) == 1 && ok
+    ok = ir_module_heap_function_defining_module_id(&owner, 0) == IR_DEFINING_MODULE_UNKNOWN && ok
+    ok = ir_module_heap_function_instr_count(&owner, 0) == 2 && ok
+    ok = ir_module_heap_instr_imm_i64(&owner, 0, 0) == 42 && ok
+    ok = ir_module_heap_string_count(&owner) == 1 && ok
+    ok = ir_name_eq(ir_module_heap_string_at(&owner, 0), expected_name) && ok
+
+    let first_release = ir_module_heap_release(&! owner)
+    let second_release = ir_module_heap_release(&! owner)
+    ok = first_release == IR_MODULE_HEAP_STATE_FREED && ok
+    ok = second_release == IR_MODULE_HEAP_STATE_FREED && ok
+    ok = ir_module_heap_state(&owner) == IR_MODULE_HEAP_STATE_FREED && ok
+
+    // Newer opcodes without assigned SOIR tags must make serialization fail
+    // with len=0; they can never be emitted as the placeholder NOP tag.
+    var unsupported_owner = ir_module_heap_new()
+    let unsupported_fn = ir_module_heap_add_function(&! unsupported_owner, ir_empty_name(), 91)
+    ok = unsupported_fn == 0 && ok
+    ok = ir_module_heap_append_instr(
+        &! unsupported_owner,
+        unsupported_fn,
+        ir_instr_new(IrOpcode::IrArrayLen),
+    ) && ok
+    var unsupported_buf: [i8; 131072] = [0; 131072]
+    var unsupported_len: i64 = 77
+    ok = !ir_module_heap_serialize_into(&unsupported_owner, &! unsupported_buf, &! unsupported_len) && ok
+    ok = unsupported_len == 0 && ok
+    ok = ir_module_heap_release(&! unsupported_owner) == IR_MODULE_HEAP_STATE_FREED && ok
+    ok
+}
