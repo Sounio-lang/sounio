@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-07-14-stats-validation-runproof-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-07-14-stats-validation-runproof-design
+-->
+
 # Design — Independent run-proof for stats::validation (coordinated, disjoint lane)
 
 **Status:** approved design, pre-implementation

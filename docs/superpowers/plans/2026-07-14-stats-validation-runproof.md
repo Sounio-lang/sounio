@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof
+-->
+
 # Stats::validation Run-Proof — Implementation Plan (coordinated, disjoint)
 
 > Compile-and-run is the gate. Build with `SOUNIO_SOUC_ENGINE=lean_single` + `chmod +x`. **No edit to any stats source or existing test/harness** (the stats module is under active development by another lane — PR #905 / stats-suite-*).

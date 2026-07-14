@@ -2695,3 +2695,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - weibull_negbin = **PASS**: all Weibull & NegBin closed forms match references; hazard=f/S reduction and mean=λΓ(1+1/k) correct; log-gamma binomial coefficient + geometric special case algebraically correct. No errors.
 - Suite selftest: 30 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-mS7gGT/`, `/tmp/llm-offload-Y62RoO/`, `/tmp/llm-offload-sF2UHr/`.
+
+## 2026-07-14 — math-review: stats::validation run-proof (coordinated disjoint lane)
+- Files: `tests/stdlib/stats/test_validation_runproof.sio`, `scripts/stats_validation_gate.sh` (no stats source edited — module under active dev by another lane, PR #905).
+- Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed mean=6, sample var=10, std=√10≈3.162278, SE=√2≈1.414214, range=8; Pearson r=6/√60≈0.774597, r²=0.6; OLS slope=0.6, intercept=2.2.
+- Build: lean_single (validation.sio uses `.len()`/constructs the default Madaros engine rejects; importing programs hit Madaros visibility-preflight). STATS_VALIDATION_GATE_OK.
+- Raw review directory: see /tmp llm-offload dir for this run.
