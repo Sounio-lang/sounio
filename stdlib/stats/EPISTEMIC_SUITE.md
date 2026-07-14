@@ -439,6 +439,27 @@ tau2`. Validated: 3 studies → pooled 0.477, Q 2.69, I² 25.6%, τ² 0.0072. A
 **forest plot** figure (`examples/stats/forest_plot.sio`) renders it — per-study
 CI bars + the pooled diamond, pure-Sounio.
 
+### `stats::epidemiology` — risk / odds measures (2×2)
+
+`pub fn epi_2x2(a: i64, b: i64, c: i64, d: i64, conf: f64) -> EpiResult with Mut, Div, Panic`
+— risk ratio, odds ratio and risk difference (each with a CI), plus ARR, RRR and
+NNT. RR/OR CIs on the log scale, RD via the binomial SEs. Validated:
+15/85/5/95 → RR 3.0, OR 3.35, RD 0.10, NNT 10.
+
+### `stats::sample_size` — sample size for proportions & correlation
+
+| Function | Signature |
+|---|---|
+| `n_two_props` | `pub fn n_two_props(p1: f64, p2: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic` |
+| `n_one_prop` | `pub fn n_one_prop(p0: f64, p1: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic` |
+| `n_correlation` | `pub fn n_correlation(r: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic` |
+
+Extends `stats::power` (t-tests) to the other common designs. Validated:
+`p=0.5→0.3` → ~93/group; `p=0.5→0.7` one-sample → ~47; `r=0.3` → ~85.
+
+A **box plot** figure (`examples/stats/box_plot.sio`) renders three groups with
+quartile boxes, median lines, 1.5·IQR whiskers and outlier points.
+
 ## Importing
 
 Import each tool directly from its module:

@@ -2659,3 +2659,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - summary_inference: Welch se/df (Satterthwaite), pooled-SD Cohen's d, one-sample t, t-CI — all verified. (Note: the code's Welch t deviates ~3e-4 from the true 3.29574 — an execution/float artifact under load, not a formula error; test tolerance loosened accordingly.)
 - meta_analysis: inverse-variance pooling, Cochran Q, I², DerSimonian-Laird τ², random-effects weights, homogeneous edge — all verified.
 - Both scalar/small-array -> #852-safe. Forest plot figure (examples/stats/forest_plot.sio) renders the meta-analysis.
+
+## 2026-07-14 — math-review: epidemiology + sample_size
+- Files: `stdlib/stats/{epidemiology,sample_size}.sio` (new). Provider: xAI/Grok 4.3 = **PASS** both.
+- epidemiology: risk_e/risk_u, RR/OR/RD, log-scale SEs (RR/OR), binomial RD SE, ARR/RRR/NNT — all verified.
+- sample_size: two-proportion, one-proportion, and Fisher-z correlation N formulas, normal_quantile, ss_ln/ss_sqrt/ss_ceil_pos, guards — all verified.
+- Both scalar -> #852-safe. Box-plot figure (examples/stats/box_plot.sio) added.
