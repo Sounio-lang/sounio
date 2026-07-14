@@ -111,4 +111,4 @@ if [[ "$witness_rc" != "0" ]] || ! cmp -s "$WITNESS_EXPECTED" "$WITNESS_ACTUAL";
   fail "focused value-semantics witness failed"
 fi
 
-echo "[madaros-array-call-boundary] PASS: witnessed direct word-scalar fixed arrays are caller-isolated and mutable references remain caller-visible"
+echo "[madaros-array-call-boundary] PASS: witnessed direct word-scalar fixed arrays with 1<=N<=16 are caller-isolated and mutable references remain caller-visible"

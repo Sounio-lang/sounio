@@ -26,12 +26,12 @@ Files-Read-Only: self-hosted/ir/ir.sio, scripts/ci/build_modular_madaros.sh
 Do-Not-Touch: scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh semantics; aggregate and nested-array legacy paths
 Repro: SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_BIN=/tmp/sounio-pr915-madaros-current-source-artifact/madaros SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_DIR=/tmp/sounio-pr915-array-call-boundary-v2 SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_KEEP=1 bash scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh
 Observed: PR #915 current-source Madaros a1b63e5d651bbe21c6eb0f19b4f24aa967977f4734d687793322b09e6b573095 executes the probe with rc=61 and exact diagnostic BLOCKED fixed_array_call_boundary_alias caller_changed_after_by_value_param_mutation
-Expected: rc=0, exact probe stdout PASS fixed_array_call_boundary_value_semantics caller=unchanged, and exact focused-witness stdout covering i64/i8/bool/f64 ownership, mutable-reference visibility, and prefix/array/suffix parameter stability
+Expected: rc=0, exact probe stdout PASS fixed_array_call_boundary_value_semantics caller=unchanged, and exact focused-witness stdout covering i64/i8/bool/f64 ownership for 1<=N<=16, mutable-reference visibility, and prefix/array/suffix parameter stability
 Acceptance-Gate: bash scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh
 Evidence-Level: E4
 Evidence: docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records the original f841 gate and Stage2 acceptance; PR #915 Actions run 29360223188 produced the a1b63e5d source-fresh control artifact; the candidate Stage2 focused witness passes locally
 Fallback-Path: none
-Legacy-Kept: yes; local identifier-copy behavior and aggregate or nested-array paths are unchanged by the future call-boundary lane
+Legacy-Kept: yes; N>16, aggregate, nested-array, and unknown-extent paths retain the unproven loop/legacy behavior
 LLM-Offload: not-required
 Next-Action: commit the reviewed candidate, request a source-fresh Madaros CI build from that exact commit, download its compiler artifact, and require the acceptance gate to return rc=0
 ```
@@ -42,13 +42,13 @@ Next-Action: commit the reviewed candidate, request a source-fresh Madaros CI bu
 Semantic-Lane-ID: fixed-array-call-abi-20260714
 Owner: Codex agent /root/fixed_array_call_abi
 Concept-IDs: none
-Intent-Preserved: by-value direct known-extent word-scalar fixed-array parameters own backing storage distinct from the caller
+Intent-Preserved: by-value direct word-scalar fixed-array parameters with 1<=N<=16 own backing storage distinct from the caller
 Transformation: bind an eligible callee parameter name to a fresh element-wise copy while keeping the received ABI parameter register unchanged
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: instruction sequence only; no opcode or field meaning changed
-Claims-Introduced: the named gate may prove caller isolation for its witnessed direct word-scalar arrays
-Claims-Forbidden: f128/f256 support; structs; nested arrays; unknown extents; arbitrary whitelist-wide runtime parity; reference isolation
+Claims-Introduced: the named gates may prove caller isolation and local-copy independence for their witnessed direct word-scalar arrays with 1<=N<=16
+Claims-Forbidden: general known-extent semantics; N>16; f128/f256 arithmetic support; structs; nested arrays; unknown extents; arbitrary whitelist-wide runtime parity; reference isolation
 Assumptions: direct fixed arrays are represented by aggregate handles and each whitelisted element occupies one native-v2 word slot
 Write-Set: self-hosted/ir/lower.sio; focused call-boundary probe, witness, gate, handoff, and receipt
 Read-Set: self-hosted/ir/ir.sio; scripts/ci/build_modular_madaros.sh; self-hosted/native/codegen_x86_linux.sio
@@ -89,7 +89,7 @@ Acceptance-Gate: bash scripts/ci/madaros_local_known_extent_word_array_copy_gate
 Evidence-Level: E4
 Evidence: docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records CI run 29360223188, artifact 8321978196, merge-candidate and head SHAs, compiler SHA, command, exit codes, stdout, and gate-log SHA
 Fallback-Path: none
-Legacy-Kept: yes; unsupported aggregate, nested-array, and unknown-extent paths remain unchanged
+Legacy-Kept: yes; N>16, aggregate, nested-array, and unknown-extent paths remain unchanged and unproven
 LLM-Offload: not-required
 Next-Action: determine whether a self-host replay internalizes the lowering change or whether the compiler requires an additional bootstrap-safe repair; then rerun both local-copy and call-boundary gates
 ```
