@@ -2805,3 +2805,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - var_ftest = **PASS**: F=s1²/s2², two-sided p=2·min(cdf,1−cdf), F-CDF via I_x(d1/2,d2/2); F(4,4) at 0.25 → p=0.208 exact. Reviewer flagged the inline exp/ln/betacf helpers as bounded-precision without proven error bounds at extreme args — a general property of every inline special function in the suite; reviewer confirms "all downstream statistical claims remain valid." Not a defect; sufficient for the tested tolerances.
 - Theme: homogeneity-of-variance / homoscedasticity tests — completes the parametric-assumption-checking trio (normality, independence, now equal variance). All scalar/small-array, #852-safe. Suite runner: 61 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-orKL2v/`, `/tmp/llm-offload-2oDw1A/`, `/tmp/llm-offload-5aKJEh/`.
+
+## 2026-07-14 — math-review: stats::mann_whitney, stats::sign_test, stats::mood_median
+- Files (all new): `stdlib/stats/mann_whitney.sio` (two-sample rank-sum U test with tie-corrected normal approx), `stdlib/stats/sign_test.sio` (paired & one-sample sign test, exact binomial), `stdlib/stats/mood_median.sio` (k-sample median test, χ² on 2×k table). Provider: xAI/Grok 4.3.
+- mann_whitney = **PASS**: μ_U=n₁n₂/2, tie-corrected σ²_U=(n₁n₂/12)[(N+1)−Σ(t³−t)/(N(N−1))], z, two-sided p all match; mid-rank less/eq counting correct; separated case z=−1.964, p=0.0495 verified.
+- sign_test = **PASS**: Bin(m,½) exact two-sided p via forward binomial recurrence, zeros dropped; 46/512=0.1797 and 5/16=0.625 verified.
+- mood_median = **PASS**: 2×k Pearson χ², df=k−1, degenerate-split guard; median 5.5/χ²=10 verified.
+- Theme: non-parametric location tests — fills the standalone rank-sum / sign / median-test gap beside wilcoxon (paired) and kruskal_wallis (k-sample). All deterministic/derivable, #852-safe. Suite runner: 64 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-ChPzJD/`, `/tmp/llm-offload-sVEzvh/`, `/tmp/llm-offload-nZbhUO/`.

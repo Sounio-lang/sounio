@@ -887,6 +887,37 @@ symmetric data); equal-spread → W=0.
 The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
 p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
 
+### `stats::mann_whitney` — Mann-Whitney U / rank-sum test
+
+| Function | Signature |
+|---|---|
+| `mann_whitney` | `pub fn mann_whitney(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> MannWhitneyResult with Mut, Div, Panic` |
+
+The two-sample rank-sum test (unpaired counterpart to Wilcoxon signed-rank):
+`U₁=R₁−n₁(n₁+1)/2`, tie-corrected normal-approximation z. Validated: fully
+separated → U=0, z=−1.964, p=0.0495; overlapping → U₁=3, p>0.5; cross-group ties
+→ R₁=8.
+
+### `stats::sign_test` — sign test
+
+| Function | Signature |
+|---|---|
+| `sign_test` | `pub fn sign_test(x: &[f64; 256], y: &[f64; 256], n: i32) -> SignResult with Mut, Div, Panic` |
+| `sign_test_median` | `pub fn sign_test_median(x: &[f64; 256], n: i32, m0: f64) -> SignResult with Mut, Div, Panic` |
+
+The simplest distribution-free test — signs only, exact binomial p (zeros
+dropped). Validated: 7+/2− → p=0.1797; one-sample median → p=0.625.
+
+### `stats::mood_median` — Mood's median test
+
+| Function | Signature |
+|---|---|
+| `mood_median` | `pub fn mood_median(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> MoodResult with Mut, Div, Panic` |
+
+A robust k-sample equal-medians test: χ² on the 2×k above/below-pooled-median
+table. Less powerful than Kruskal-Wallis but far more outlier-resistant.
+Validated: {1..5} vs {6..10} → median 5.5, χ²=10, df=1; identical groups → χ²=0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -952,6 +983,9 @@ use stats::somers_d::{SomersResult, somers_d}
 use stats::bartlett::{BartlettResult, bartlett}
 use stats::levene::{LeveneResult, levene}
 use stats::var_ftest::{VarFResult, var_ftest}
+use stats::mann_whitney::{MannWhitneyResult, mann_whitney}
+use stats::sign_test::{SignResult, sign_test, sign_test_median}
+use stats::mood_median::{MoodResult, mood_median}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

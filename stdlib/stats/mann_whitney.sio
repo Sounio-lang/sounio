@@ -1,0 +1,204 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/mann_whitney.sio — Mann-Whitney U / Wilcoxon rank-sum test
+//
+// The two-sample non-parametric test of whether one distribution is
+// stochastically shifted from the other — the unpaired counterpart to Wilcoxon
+// signed-rank:
+//
+//   mann_whitney(x, nx, y, ny) -> MannWhitneyResult
+//
+// Rank the pooled sample (mid-ranks for ties). With R₁ the rank sum of x,
+//   U₁ = R₁ − n₁(n₁+1)/2,   U₂ = n₁n₂ − U₁,   U = min(U₁, U₂),
+//   μ_U = n₁n₂/2,
+//   σ²_U = (n₁n₂/12)·[ (N+1) − Σ(tᵢ³−tᵢ)/(N(N−1)) ],   z = (U₁ − μ_U)/σ_U,
+// with a tie correction over each tied group of size tᵢ; two-sided normal p.
+//
+// Pure Sounio: mid-ranks via O(N²) less/equal counting; inline sqrt/erf; no
+// nested data-array calls.
+//
+// References:
+//   Mann & Whitney (1947) Ann. Math. Stat. 18:50; Wilcoxon (1945).
+
+module stats::mann_whitney
+
+fn mw_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn mw_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / mw_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn mw_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * mw_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn mw_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - mw_erf(z * INV_SQRT2))
+}
+
+pub struct MannWhitneyResult {
+    pub u: f64,       // min(U1, U2)
+    pub u1: f64,      // U for sample x
+    pub r1: f64,      // rank sum of x
+    pub z: f64,
+    pub p: f64,       // two-sided p
+}
+
+/// Mann-Whitney U test between samples x and y.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes (<=128 each; nx+ny<=256).
+/// Retorno: MannWhitneyResult (u, u1, r1, z, p).
+/// Referências: Mann & Whitney (1947).
+pub fn mann_whitney(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> MannWhitneyResult with Mut, Div, Panic {
+    if nx < 1 || ny < 1 {
+        return MannWhitneyResult { u: 0.0, u1: 0.0, r1: 0.0, z: 0.0, p: 1.0 }
+    }
+    let ntot = nx + ny
+    // pooled values: first nx are x, next ny are y
+    var all: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < nx { all[i as usize] = x[i as usize]; i = i + 1 }
+    var j = 0
+    while j < ny { all[(nx + j) as usize] = y[j as usize]; j = j + 1 }
+    // mid-rank of each element and rank sum of the x group
+    var r1 = 0.0
+    var tie_sum = 0.0
+    var a = 0
+    while a < ntot {
+        var less = 0
+        var eq = 0
+        var first = true
+        var b = 0
+        while b < ntot {
+            let vb = all[b as usize]
+            let va = all[a as usize]
+            if vb < va { less = less + 1 }
+            else { if vb == va { eq = eq + 1; if b < a { first = false } } }
+            b = b + 1
+        }
+        let rank = (less as f64) + ((eq + 1) as f64) * 0.5
+        if a < nx { r1 = r1 + rank }
+        // accumulate tie correction once per tied group
+        if first && eq > 1 {
+            let t = eq as f64
+            tie_sum = tie_sum + (t * t * t - t)
+        }
+        a = a + 1
+    }
+    let nxf = nx as f64
+    let nyf = ny as f64
+    let nf = ntot as f64
+    let u1 = r1 - nxf * (nxf + 1.0) / 2.0
+    let u2 = nxf * nyf - u1
+    var u = u1
+    if u2 < u1 { u = u2 }
+    let mu = nxf * nyf / 2.0
+    var varu = (nxf * nyf / 12.0) * ((nf + 1.0) - tie_sum / (nf * (nf - 1.0)))
+    var z = 0.0
+    if varu > 0.0 { z = (u1 - mu) / mw_sqrt(varu) }
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    let p = 2.0 * mw_normal_sf(az)
+    return MannWhitneyResult { u: u, u1: u1, r1: r1, z: z, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// fully separated x={1,2,3}, y={4,5,6}: R1=6, U1=0, U=0. mu=4.5, var=5.25,
+// z=(0-4.5)/2.291288=-1.963961; p=2·Φ̄(1.963961)=0.049536.
+fn test_separated() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=4.0; y[1]=5.0; y[2]=6.0
+    let r = mann_whitney(&x, 3, &y, 3)
+    var ok = true
+    ok = check(1, approx(r.r1, 6.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.u1, 0.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.u, 0.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.z, 0.0 - 1.963961, 1.0e-4)) && ok
+    ok = check(5, approx(r.p, 0.049536, 1.0e-3)) && ok
+    return ok
+}
+
+// identical distributions x={1,3,5}, y={2,4,6}: R1=1+3+5 ranks(1,3,5)=9. U1=9-6=3.
+// mu=4.5. symmetric -> z small, p large.
+fn test_overlap() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=3.0; x[2]=5.0
+    y[0]=2.0; y[1]=4.0; y[2]=6.0
+    let r = mann_whitney(&x, 3, &y, 3)
+    var ok = true
+    ok = check(10, approx(r.u1, 3.0, 1.0e-9)) && ok
+    ok = check(11, r.p > 0.5) && ok
+    return ok
+}
+
+// ties across groups x={1,2,3}, y={2,3,4}: ranks 1,2.5,4.5 for x -> R1=8, U1=2.
+fn test_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=2.0; y[1]=3.0; y[2]=4.0
+    let r = mann_whitney(&x, 3, &y, 3)
+    var ok = true
+    ok = check(20, approx(r.r1, 8.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.u1, 2.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_separated() && ok
+    ok = test_overlap() && ok
+    ok = test_ties() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

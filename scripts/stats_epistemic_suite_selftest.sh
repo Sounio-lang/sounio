@@ -70,6 +70,9 @@ MODULES=(
   stdlib/stats/bartlett.sio
   stdlib/stats/levene.sio
   stdlib/stats/var_ftest.sio
+  stdlib/stats/mann_whitney.sio
+  stdlib/stats/sign_test.sio
+  stdlib/stats/mood_median.sio
 )
 
 fail=0
