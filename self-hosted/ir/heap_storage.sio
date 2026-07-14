@@ -4,15 +4,19 @@
 // very large IrModule value from selected stack/BSS paths while preserving the
 // existing IrModule ABI and all SOIR semantics. The layout is hundreds of MiB
 // in this stack and has exceeded 1 GiB in adjacent compiler snapshots. The 2
-// GiB mapping is a virtual upper envelope; heap_alloc returns zeroed pages, and
-// these APIs touch only top-level metadata plus live functions.
+// GiB mapping is a virtual upper envelope; heap_alloc returns zeroed pages.
+// Live aggregate slots are materialized through canonical Sounio constructors.
+// Their storage remains compiler-runtime-owned: the bootstrap aggregate pool
+// retains it to process exit, while native-v2 may reclaim its managed handles
+// only at a whole-context empty-frame reset or process exit. This bridge frees
+// only its raw module reservation.
 
 module ir::heap_storage
 
 use ir::ir::*
 use ir::soir_core::{
     soir_core_serialize_ir_module_empty_extensions_into,
-    soir_core_deserialize_ir_module_empty_extensions_into,
+    soir_core_deserialize_ir_module_empty_extensions_materialized_into,
 }
 
 pub let IR_MODULE_HEAP_STATE_NULL: i64 = 0
@@ -44,7 +48,7 @@ pub fn ir_module_heap_null() -> IrModuleHeapBridge {
     }
 }
 
-pub fn ir_module_heap_new() -> IrModuleHeapBridge with Alloc, Mut {
+pub fn ir_module_heap_new() -> IrModuleHeapBridge with Alloc, Mut, Panic, Div {
     let raw = heap_alloc(IR_MODULE_HEAP_RESERVATION_BYTES) as *mut IrModule
     if raw as i64 == 0 {
         return IrModuleHeapBridge {
@@ -54,7 +58,17 @@ pub fn ir_module_heap_new() -> IrModuleHeapBridge with Alloc, Mut {
         }
     }
 
-    // heap_alloc is zero-initializing on both the libc and native-v2 paths.
+    // heap_alloc is zero-initializing on both the libc and native-v2 paths,
+    // but aggregate fields are lowered as handles there. Materialize the two
+    // top-level extension aggregates touched by the bounded SOIR codec before
+    // its preflight/publish paths dereference them. Keep the MB-scale
+    // epistemic value off this caller's stack through its canonical boxed
+    // constructor. Function and instruction slots remain sparse and are
+    // materialized only when they become live.
+    let empty_epistemic = ir_empty_epistemic_section_boxed()
+    (*raw).epistemic = *empty_epistemic
+    (*raw).algebras = ir_empty_algebra_table()
+
     // Counts are written explicitly so the sparse-empty contract is visible;
     // no [IrFunction; 2048] initializer is constructed or copied here.
     (*raw).fn_count = 0
@@ -96,19 +110,13 @@ pub fn ir_module_heap_add_function(owner: &! IrModuleHeapBridge, name: Name, def
     let index = (*module_ptr).fn_count
     if index < 0 || index >= IR_MAX_FUNCS { return -1 }
 
-    // The allocation is already zeroed. Initialize only the live slot's
-    // non-zero/default-sensitive fields instead of constructing and copying a
-    // full IrFunction with its 2048-instruction inline array.
+    // Native-v2 lowers [IrFunction; N] as aggregate handles. A zeroed raw
+    // reservation therefore contains null slots, not inline empty functions.
+    // Install the canonical empty value before any field dereference so the
+    // backend owns the physical representation and all sentinel defaults.
+    (*module_ptr).functions[index as usize] = ir_empty_function()
     (*module_ptr).functions[index as usize].name = name
     (*module_ptr).functions[index as usize].defining_module_id = defining_module_id
-    (*module_ptr).functions[index as usize].prof_counter_id = -1
-    (*module_ptr).functions[index as usize].hyper_algebra_kind = -1
-    (*module_ptr).functions[index as usize].sret_dest_reg = -1
-    var param_index: i64 = 0
-    while param_index < 64 {
-        (*module_ptr).functions[index as usize].param_regs[param_index as usize] = IR_INVALID_REG
-        param_index = param_index + 1
-    }
     (*module_ptr).fn_count = index + 1
     index
 }
@@ -128,6 +136,8 @@ pub fn ir_module_heap_append_instr(owner: &! IrModuleHeapBridge, fn_index: i64, 
     if fn_index < 0 || fn_index >= (*module_ptr).fn_count { return false }
     let instr_index = (*module_ptr).functions[fn_index as usize].instr_count
     if instr_index < 0 || instr_index >= IR_MAX_INSTRS { return false }
+    // The function slot above is already materialized. Assigning the canonical
+    // IrInstr value installs its managed handle in the instruction array.
     (*module_ptr).functions[fn_index as usize].instrs[instr_index as usize] = instr
     (*module_ptr).functions[fn_index as usize].instr_count = instr_index + 1
     true
@@ -205,7 +215,7 @@ pub fn ir_module_heap_deserialize_into(
     // unchanged on every decode failure without copying an IrModule value.
     var staged = ir_module_heap_new()
     if !ir_module_heap_is_allocated(&staged) { return false }
-    if !soir_core_deserialize_ir_module_empty_extensions_into(buf, len, &!(*staged.ptr)) {
+    if !soir_core_deserialize_ir_module_empty_extensions_materialized_into(buf, len, &!(*staged.ptr)) {
         let _failed_release = ir_module_heap_release(&! staged)
         return false
     }
@@ -217,14 +227,35 @@ pub fn ir_module_heap_deserialize_into(
     staged.ptr = 0 as *mut IrModule
     staged.state = IR_MODULE_HEAP_STATE_FREED
     staged.allocation_bytes = 0
-    heap_free(old_ptr as *mut u8)
+    ir_module_heap_free_raw_graph(old_ptr)
     true
+}
+
+// Invalidate the published graph from leaves to root, then free only the raw
+// reservation. Aggregate values cannot be passed to heap_free: bootstrap owns
+// them in its aggregate pool and native-v2 owns their handles in RuntimeContext.
+// This bounded bridge deliberately has no repeated-use production claim.
+fn ir_module_heap_free_raw_graph(raw: *mut IrModule) with Alloc, Mut {
+    if raw as i64 == 0 { return }
+    var live_functions = (*raw).fn_count
+    if live_functions < 0 { live_functions = 0 }
+    if live_functions > IR_MAX_FUNCS { live_functions = IR_MAX_FUNCS }
+    while live_functions > 0 {
+        live_functions = live_functions - 1
+        (*raw).functions[live_functions as usize].instr_count = 0
+    }
+    (*raw).fn_count = 0
+    (*raw).string_count = 0
+    (*raw).prof_counter_count = 0
+    (*raw).export_count = 0
+    (*raw).bss_total_size = 0
+    heap_free(raw as *mut u8)
 }
 
 // Transition before deallocation, then pass the exact user pointer returned
 // by heap_alloc. Native-v2 recovers its page-rounded mmap from the header at
 // ptr-8; the libc path receives the same pointer through ordinary free. A
-// second release observes FREED + null and therefore cannot call heap_free.
+// second release observes FREED + null and therefore cannot free again.
 pub fn ir_module_heap_release(owner: &! IrModuleHeapBridge) -> i64 with Alloc, Mut {
     if !ir_module_heap_is_allocated(owner) {
         return (*owner).state
@@ -233,7 +264,7 @@ pub fn ir_module_heap_release(owner: &! IrModuleHeapBridge) -> i64 with Alloc, M
     (*owner).ptr = 0 as *mut IrModule
     (*owner).state = IR_MODULE_HEAP_STATE_FREED
     (*owner).allocation_bytes = 0
-    heap_free(raw as *mut u8)
+    ir_module_heap_free_raw_graph(raw)
     IR_MODULE_HEAP_STATE_FREED
 }
 
@@ -248,12 +279,24 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
         37,
     )
     var ok = ir_module_heap_is_allocated(&owner) && fn_index == 0
+    ok = ir_module_heap_function_instr_count(&owner, fn_index) == 0 && ok
+    ok = ir_module_heap_function_defining_module_id(&owner, fn_index) == 37 && ok
+    var sentinel_index: i64 = 0
+    while sentinel_index < 64 {
+        ok = ir_module_heap_function_param_reg(&owner, fn_index, sentinel_index) == IR_INVALID_REG && ok
+        sentinel_index = sentinel_index + 1
+    }
+    ok = (*owner.ptr).functions[fn_index as usize].compile_strategy == IR_STRATEGY_STANDARD && ok
+    ok = (*owner.ptr).functions[fn_index as usize].returns_float == 0 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].prof_counter_id == -1 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].hyper_algebra_kind == -1 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].is_sret == 0 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].sret_dest_reg == -1 && ok
+    ok = (*owner.ptr).functions[fn_index as usize].bss_size == 0 && ok
     ok = ir_module_heap_set_function_reg_count(&! owner, fn_index, 1) && ok
     ok = ir_module_heap_append_instr(&! owner, fn_index, ir_load_imm(0, 42)) && ok
     ok = ir_module_heap_append_instr(&! owner, fn_index, ir_return(0)) && ok
     ok = ir_module_heap_add_string(&! owner, expected_name) == 0 && ok
-    ok = ir_module_heap_function_param_reg(&owner, fn_index, 0) == IR_INVALID_REG && ok
-    ok = ir_module_heap_function_param_reg(&owner, fn_index, 63) == IR_INVALID_REG && ok
 
     var buf: [i8; 131072] = [0; 131072]
     var len: i64 = 0
@@ -306,6 +349,8 @@ pub fn ir_module_heap_roundtrip_self_test() -> bool with Mut, Panic, Div, Alloc 
     ok = first_release == IR_MODULE_HEAP_STATE_FREED && ok
     ok = second_release == IR_MODULE_HEAP_STATE_FREED && ok
     ok = ir_module_heap_state(&owner) == IR_MODULE_HEAP_STATE_FREED && ok
+    ok = ir_module_heap_fn_count(&owner) == -1 && ok
+    ok = ir_module_heap_string_count(&owner) == -1 && ok
 
     // Newer opcodes without assigned SOIR tags must make serialization fail
     // with len=0; they can never be emitted as the placeholder NOP tag.
