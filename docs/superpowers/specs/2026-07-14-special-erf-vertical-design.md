@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-07-14-special-erf-vertical-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-07-14-special-erf-vertical-design
+-->
+
 # Design — Harden the special::erf vertical (coordinated, disjoint)
 **Date:** 2026-07-14 · no compiler changes · `special/` disjoint from active lanes (no open PR touching it);
 scalar API is cross-module-safe (no arrays/HOF). This lane reads the module + adds run-proof/gate/docs; no source edits. EN-UK.
