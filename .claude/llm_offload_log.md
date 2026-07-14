@@ -2731,3 +2731,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS** (all 4). Confirmed DC→|X|[0]=4/rest 0; impulse→flat 1; IDFT(DFT(x))=x (1/N inverse); real cosine cos(2πn/8)→|X[1]|=|X[7]|=4, other bins exactly 0 (residual at 3,5 is fft_cos input precision, not FFT error).
 - Build: default Madaros (signal::fft is self-contained — no lean_single needed). SIGNAL_FFT_GATE_OK.
 - Raw review directory: see /tmp llm-offload dir for this run.
+## 2026-07-14 — math-review: stats::robust, stats::hodges_lehmann, stats::outlier
+- Files (all new): `stdlib/stats/robust.sio` (median/quantile type-7, IQR, σ-consistent MAD, trimmed & Winsorized means), `stdlib/stats/hodges_lehmann.sio` (HL one-sample = median of Walsh averages, two-sample = median of pairwise differences, bounded [2080] buffer + inline sort), `stdlib/stats/outlier.sio` (Tukey fences, Grubbs single-outlier test with exact Bonferroni t-tail via inline incomplete beta, Iglewicz-Hoaglin modified z). Provider: xAI/Grok 4.3.
+- robust = **PASS**: type-7 quantile (Hyndman-Fan), MAD constant 1.482602=1/Φ⁻¹(0.75), trimmed/Winsorized floor(frac·n) logic all verified; test values hold.
+- hodges_lehmann = **PASS**: Walsh-average and pairwise-difference medians, translation invariance, even/odd inline-sort median selection all correct.
+- outlier = **PASS**: Tukey interpolation, Grubbs G + r=G²n/(n-1)², t²=r(n-2)/(1-r), p=n·2P(T>|t|) via I_x(ν/2,1/2), modified-z constant 0.67449, and the Lanczos+Lentz incomplete-beta all correct.
+- Theme: robust / outlier-resistant statistics — the descriptive layer under the inferential suite. #852-safe: HL uses a bounded pairwise buffer with an *inline* median sort (no nested call while the big buffer is live). Suite selftest: 42 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-V9LS18/`, `/tmp/llm-offload-vOSDSg/`, `/tmp/llm-offload-w3oWGw/`.
