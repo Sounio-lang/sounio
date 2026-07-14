@@ -1977,6 +1977,44 @@ fn lowerer_mark_local_array_elem_float_mut(
     }
 }
 
+// *mut analogue of bind_local_fixed_array_len: the active summary-owned
+// parameter path must update the LocalStack through its Box. Reassigning a
+// by-value Lowerer silently loses this metadata in current-source Madaros.
+fn lowerer_bind_local_fixed_array_len_mut(
+    lo: &! Lowerer,
+    name: Name,
+    array_len: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).array_lens[i as usize] = array_len
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// *mut analogue of bind_local_array_copy_word_scalar. This bit is the second
+// half of the inferred fixed-array copy predicate in lower_let_stmt_ref.
+fn lowerer_mark_local_array_copy_word_scalar_mut(
+    lo: &! Lowerer,
+    name: Name
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).array_copy_word_scalar[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 // *mut analogue of bind_local_struct_type: record a local/param's struct type so
 // `recv.method()` and `recv.field` resolve the receiver type. Single-level store through
 // the Box (safe under the by-value-aggregate miscompile). No-op for non-struct types.
@@ -2096,10 +2134,10 @@ fn lowerer_lower_fn_params_mut(
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
                 if param_array_len >= 0 {
-                    (*lo) = (*lo).bind_local_fixed_array_len((*list).head.name, param_array_len)
+                    lowerer_bind_local_fixed_array_len_mut(lo, (*list).head.name, param_array_len)
                 }
                 if param_word_scalar {
-                    (*lo) = (*lo).bind_local_array_copy_word_scalar((*list).head.name)
+                    lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 if lower_type_expr_is_f64(&(*list).head.ty) {
@@ -3516,31 +3554,6 @@ impl Lowerer {
             lo = lo.bind_reg_array_elem_float(dst_reg)
         }
         if elem_count <= 0 {
-            return (lo, dst_reg)
-        }
-
-        // Keep small, compiler-known fixed arrays straight-line. The current
-        // source-fresh Madaros fails the identity witness when a second copy from
-        // a parameter-derived local uses the backedge form below. Explicit
-        // indices remove that backedge from the narrow witnessed path while the
-        // existing loop remains available for larger, as-yet-unproven extents.
-        if elem_count <= 16 {
-            var copy_index: i64 = 0
-            while copy_index < elem_count {
-                let pair_index = lo.emit_i64_const(copy_index)
-                lo = pair_index.0
-                let index_reg = pair_index.1
-                let pair_elem = lo.fresh_reg()
-                lo = pair_elem.0
-                let elem_reg = pair_elem.1
-                var load_instr = ir_index_get(elem_reg, src_reg, index_reg)
-                if elem_is_float {
-                    load_instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
-                }
-                lo = lo.emit(load_instr)
-                lo = lo.emit(ir_index_set(dst_reg, index_reg, elem_reg))
-                copy_index = copy_index + 1
-            }
             return (lo, dst_reg)
         }
 

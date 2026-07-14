@@ -26,12 +26,12 @@ Files-Read-Only: self-hosted/ir/ir.sio, scripts/ci/build_modular_madaros.sh
 Do-Not-Touch: scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh semantics; aggregate and nested-array legacy paths
 Repro: SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_BIN=/tmp/sounio-pr915-madaros-current-source-artifact/madaros SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_DIR=/tmp/sounio-pr915-array-call-boundary-v2 SOUNIO_MADAROS_ARRAY_CALL_BOUNDARY_GATE_KEEP=1 bash scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh
 Observed: PR #915 current-source Madaros a1b63e5d651bbe21c6eb0f19b4f24aa967977f4734d687793322b09e6b573095 executes the probe with rc=61 and exact diagnostic BLOCKED fixed_array_call_boundary_alias caller_changed_after_by_value_param_mutation
-Expected: rc=0, exact probe stdout PASS fixed_array_call_boundary_value_semantics caller=unchanged, and exact focused-witness stdout covering i64/i8/bool/f64 ownership for 1<=N<=16, mutable-reference visibility, and prefix/array/suffix parameter stability
+Expected: rc=0, exact probe stdout PASS fixed_array_call_boundary_value_semantics caller=unchanged, and exact focused-witness stdout covering witnessed N=2 i64/i8/bool/f64 ownership, mutable-reference visibility, and prefix/array/suffix parameter stability
 Acceptance-Gate: bash scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh
 Evidence-Level: E4
 Evidence: docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records the original f841 gate and Stage2 acceptance; PR #915 Actions run 29360223188 produced the a1b63e5d source-fresh control artifact; the candidate Stage2 focused witness passes locally
 Fallback-Path: none
-Legacy-Kept: yes; N>16, aggregate, nested-array, and unknown-extent paths retain the unproven loop/legacy behavior
+Legacy-Kept: yes; the existing copy loop and aggregate, nested-array, and unknown-extent paths remain unchanged
 LLM-Offload: not-required
 Next-Action: commit the reviewed candidate, request a source-fresh Madaros CI build from that exact commit, download its compiler artifact, and require the acceptance gate to return rc=0
 ```
@@ -42,13 +42,13 @@ Next-Action: commit the reviewed candidate, request a source-fresh Madaros CI bu
 Semantic-Lane-ID: fixed-array-call-abi-20260714
 Owner: Codex agent /root/fixed_array_call_abi
 Concept-IDs: none
-Intent-Preserved: by-value direct word-scalar fixed-array parameters with 1<=N<=16 own backing storage distinct from the caller
-Transformation: bind an eligible callee parameter name to a fresh element-wise copy while keeping the received ABI parameter register unchanged
+Intent-Preserved: witnessed by-value direct word-scalar fixed-array parameters own backing storage distinct from the caller, and inferred local copies retain their fixed-array shape metadata
+Transformation: bind an eligible callee parameter name to a fresh element-wise copy while keeping the received ABI parameter register unchanged; record fixed-array length and word-scalar metadata through the summary-owned mutable LocalStack path
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: instruction sequence only; no opcode or field meaning changed
-Claims-Introduced: the named gates may prove caller isolation and local-copy independence for their witnessed direct word-scalar arrays with 1<=N<=16
-Claims-Forbidden: general known-extent semantics; N>16; f128/f256 arithmetic support; structs; nested arrays; unknown extents; arbitrary whitelist-wide runtime parity; reference isolation
+Claims-Introduced: the named gates may prove caller isolation and local-copy independence for their witnessed direct word-scalar arrays at N=2 and N=4
+Claims-Forbidden: general known-extent semantics; f128/f256 arithmetic support; structs; nested arrays; unknown extents; arbitrary whitelist-wide runtime parity; reference isolation
 Assumptions: direct fixed arrays are represented by aggregate handles and each whitelisted element occupies one native-v2 word slot
 Write-Set: self-hosted/ir/lower.sio; focused call-boundary probe, witness, gate, handoff, and receipt
 Read-Set: self-hosted/ir/ir.sio; scripts/ci/build_modular_madaros.sh; self-hosted/native/codegen_x86_linux.sio
@@ -67,14 +67,17 @@ reference behavior has an executable negative witness in this lane.
 
 ## Source-Fresh Local-Copy Blocker
 
-The PR #915 CI artifact builds successfully, but the dedicated local-copy gate
-fails when that compiler executes the `u64` parameter-source case.
+The PR #915 artifact first exposed the `u64` parameter-source failure. PR #916
+head `d9234e228` proved call-boundary isolation, but the same local-copy case
+still failed because the active summary-owned parameter path discarded the
+fixed-array length and word-scalar LocalStack metadata after creating the
+callee-owned parameter copy.
 
 ```text
 Blocker-ID: BLK-20260714-madaros-local-array-copy-bootstrap-replay
-Status: classified
+Status: fix-pending-source-fresh-validation
 Severity: B2
-Class: bootstrap-runtime
+Class: compiler-lowering-metadata
 Owner: Codex agent /root/fixed_array_call_abi
 Lane: PR #915 local known-extent word-array copy promotion
 Worktree: /tmp/sounio-madaros-fixed-array-copy-main-20260714
@@ -83,13 +86,13 @@ Files-Owned: self-hosted/ir/lower.sio, scripts/ci/madaros_local_known_extent_wor
 Files-Read-Only: scripts/ci/build_modular_madaros.sh, .github/workflows/ci.yml
 Do-Not-Touch: canonical compiler wrappers and CI workflow; aggregate, nested-array, and unknown-extent legacy paths
 Repro: SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_BIN=/tmp/sounio-pr915-madaros-artifact-8321978196/madaros SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_DIR=/tmp/sounio-pr915-word-array-source-fresh SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_KEEP=1 bash scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh
-Observed: PR #915 merge-candidate artifact a1b63e5d651bbe21c6eb0f19b4f24aa967977f4734d687793322b09e6b573095 exits the witness at rc=51 with FAIL local_known_extent_word_array_copy u64 parameter source copy
+Observed: PR #916 head d9234e228 artifact e2c70d6663e8047a1503c3394433a12cf973051d2bb8dfebfd808144978f6750 passes the call-boundary gate but exits the local-copy witness at rc=51 with FAIL local_known_extent_word_array_copy u64 parameter source copy
 Expected: gate rc=0 and exact PASS receipt for every narrow local-copy case
 Acceptance-Gate: bash scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh against a compiler rebuilt from the candidate head
 Evidence-Level: E4
-Evidence: docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records CI run 29360223188, artifact 8321978196, merge-candidate and head SHAs, compiler SHA, command, exit codes, stdout, and gate-log SHA
+Evidence: d9234e reducers distinguish inferred rc=81/one callee allocation from annotated rc=0/two allocations and manual rc=0/two allocations; Stage2 runs all three at rc=0; the d9234e old/new IR trace proves its unroll was internalized; Slurm replay job 5888 stopped independently at the existing compiler visibility preflight
 Fallback-Path: none
-Legacy-Kept: yes; N>16, aggregate, nested-array, and unknown-extent paths remain unchanged and unproven
+Legacy-Kept: yes; the original copy loop and aggregate, nested-array, and unknown-extent paths remain unchanged
 LLM-Offload: not-required
-Next-Action: determine whether a self-host replay internalizes the lowering change or whether the compiler requires an additional bootstrap-safe repair; then rerun both local-copy and call-boundary gates
+Next-Action: source-fresh build the mutable LocalStack metadata repair from the exact candidate head and require both local-copy and call-boundary gates to pass on the same compiler artifact
 ```
