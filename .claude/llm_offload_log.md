@@ -2610,3 +2610,15 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-receipt-room-desktop.png`, `/tmp/sounio-receipt-room-mobile.png`, and `/tmp/sounio-receipt-room-design-qa-board.png`; no positive horizontal overflow was measured, the proof anchor resolved, and the browser console contained no runtime errors.
 - Validation: `npm run check:quality` passed; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directories: `/tmp/llm-offload-e6wKpA/`, `/tmp/llm-offload-3IyOvU/`, and `/tmp/llm-offload-VkwEvp/`.
+
+## 2026-07-14 — M3 math/prose/design review: forward autodiff instrument
+- Files: `website/src/components/home/AutodiffInstrument.tsx`, `AutodiffInstrument.css`, `website/src/pages/index.astro`, and the accompanying brand-cohesion copy/style changes.
+- Task: review the public homepage instrument exposing the six current run-pass forward dual-number derivatives, including the plotted tangent, `val`/`dot` lanes, tolerance receipt, responsive behavior, and explicit claim boundary.
+- Executable evidence: `./bin/souc run tests/run-pass/autodiff_forward_basic.sio` returned exit 0 on the default Madaros v0.80.0 path with `T1 PASS` through `T6 PASS` and `autodiff_forward_basic: ALL PASS`.
+- Math review: xAI/Grok 4.3 found no mathematical, derivation, numerical-formatting, or scope errors. It independently confirmed all six derivatives and the tangent-line construction.
+- External-facing review: xAI/Grok 4.3 approved with no blockers or major issues. Its accessibility minor was applied by expanding the canvas label to include the checked x, value, and derivative. The 320 px legend-wrap concern was tested directly: zero page overflow and a contained 256 px legend.
+- Claim boundary: the scene proves forward dual-number differentiation only in the self-contained run-pass fixture. It does not claim compiler-native autodiff or stability of the currently failing imported `stdlib/autodiff` path.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI reviews and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-autodiff-desktop.png`, `/tmp/sounio-autodiff-mobile.png`, and `/tmp/sounio-autodiff-design-qa.png`; the six-button interaction updated all live values, desktop/mobile/320 px measured zero overflow, and the browser console contained no runtime errors.
+- Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directories: `/tmp/llm-offload-yhJrrX/` and `/tmp/llm-offload-Jd637K/`.
