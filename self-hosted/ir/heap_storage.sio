@@ -407,9 +407,17 @@ pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESET_COUNT: i64 = 167
 pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_PUBLISHED_COUNT: i64 = 168
 pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_RESULT: i64 = 169
 pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_RELEASE: i64 = 170
+// 165 is the legacy composite extension receipt. The failure-only receipts
+// below isolate its epistemic handle/ref boundaries without widening the
+// terminal adapter or instrumenting the later algebra path.
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_HANDLE_WORD_ZERO: i64 = 171
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_SETTER_FALSE: i64 = 172
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_SAME_LOCAL_COUNT: i64 = 173
+pub let IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_FRESH_RAW_RELOAD_COUNT: i64 = 174
 
 var IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN: i64 = -1
 var IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT: i64 = 0
+var IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR: i64 = -1
 
 pub fn ir_module_heap_self_test_observed_len() -> i64 {
     IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN
@@ -419,11 +427,23 @@ pub fn ir_module_heap_self_test_observed_result() -> i64 {
     IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT
 }
 
+pub fn ir_module_heap_self_test_observed_scalar() -> i64 {
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR
+}
+
+// Evidence-only native-v2 slot observation. The shared reference ends at this
+// leaf boundary, so the caller can acquire the later exclusive leaf borrow.
+fn ir_module_heap_self_test_epistemic_handle_word(handle_slot: &IrEpistemicSection) -> i64 {
+    let raw_slot = handle_slot as *const i64
+    (*raw_slot)
+}
+
 // Shared semantic witness used by T17 and by the source-fresh Madaros internal
 // self-test. One implementation keeps CI on the actual SOIR v5/v4 bridge.
 pub fn ir_module_heap_roundtrip_self_test_code() -> i64 with Mut, Panic, Div, Alloc {
     IR_MODULE_HEAP_SELF_TEST_OBSERVED_LEN = -1
     IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT = 0
+    IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR = -1
     var owner = ir_module_heap_new()
     if !ir_module_heap_is_allocated(&owner) {
         return ir_module_heap_self_test_fail(&! owner, IR_MODULE_HEAP_SELF_TEST_ALLOC)
@@ -650,12 +670,32 @@ pub fn ir_module_heap_roundtrip_self_test_code() -> i64 with Mut, Panic, Div, Al
     if !ir_module_heap_is_allocated(&extension_owner) {
         return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_ALLOC)
     }
-    var extension_epistemic = (*extension_owner.ptr).epistemic
-    extension_epistemic.model_family_count = 1
-    (*extension_owner.ptr).epistemic = extension_epistemic
-    let published_extension_epistemic = (*extension_owner.ptr).epistemic
-    if published_extension_epistemic.model_family_count != 1 {
-        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_PUBLISHED_COUNT)
+    // This is the last adapter for the legacy raw-module representation. The
+    // raw field holds a compiler-runtime aggregate handle: stage that handle,
+    // borrow it only for the leaf call, and never republish or swap the slot.
+    var extension_epistemic_handle = (*extension_owner.ptr).epistemic
+    // Evidence-only observation of the native aggregate handle word stored in
+    // this local slot. This distinguishes zero/nonzero; it does not claim that
+    // a nonzero word is valid in the runtime handle table.
+    let extension_epistemic_handle_word = ir_module_heap_self_test_epistemic_handle_word(&extension_epistemic_handle)
+    if extension_epistemic_handle_word == 0 {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR = extension_epistemic_handle_word
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_HANDLE_WORD_ZERO)
+    }
+    if !ir_epistemic_set_model_family_count_for_heap_bridge(&! extension_epistemic_handle, 1) {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR = 0
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_SETTER_FALSE)
+    }
+    let same_local_epistemic_count = ir_epistemic_model_family_count(&extension_epistemic_handle)
+    if same_local_epistemic_count != 1 {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR = same_local_epistemic_count
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_SAME_LOCAL_COUNT)
+    }
+    let published_extension_epistemic_handle = (*extension_owner.ptr).epistemic
+    let fresh_raw_reload_epistemic_count = ir_epistemic_model_family_count(&published_extension_epistemic_handle)
+    if fresh_raw_reload_epistemic_count != 1 {
+        IR_MODULE_HEAP_SELF_TEST_OBSERVED_SCALAR = fresh_raw_reload_epistemic_count
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_FRESH_RAW_RELOAD_COUNT)
     }
     var extension_buf: [i8; 131072] = [0; 131072]
     let epistemic_extension_result = ir_module_heap_serialize_result_into(&extension_owner, &! extension_buf)
@@ -663,18 +703,20 @@ pub fn ir_module_heap_roundtrip_self_test_code() -> i64 with Mut, Panic, Div, Al
         IR_MODULE_HEAP_SELF_TEST_OBSERVED_RESULT = epistemic_extension_result
         return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESULT)
     }
-    extension_epistemic = (*extension_owner.ptr).epistemic
-    extension_epistemic.model_family_count = 0
-    (*extension_owner.ptr).epistemic = extension_epistemic
-    let reset_extension_epistemic = (*extension_owner.ptr).epistemic
-    if reset_extension_epistemic.model_family_count != 0 {
+    var reset_extension_epistemic_handle = (*extension_owner.ptr).epistemic
+    if !ir_epistemic_set_model_family_count_for_heap_bridge(&! reset_extension_epistemic_handle, 0) {
         return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESET_COUNT)
     }
-    var extension_algebras = (*extension_owner.ptr).algebras
-    extension_algebras.count = 1
-    (*extension_owner.ptr).algebras = extension_algebras
-    let published_extension_algebras = (*extension_owner.ptr).algebras
-    if published_extension_algebras.count != 1 {
+    let reset_extension_epistemic_handle_readback = (*extension_owner.ptr).epistemic
+    if ir_epistemic_model_family_count(&reset_extension_epistemic_handle_readback) != 0 {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_EPISTEMIC_RESET_COUNT)
+    }
+    var extension_algebras_handle = (*extension_owner.ptr).algebras
+    if !ir_algebra_table_set_count_for_heap_bridge(&! extension_algebras_handle, 1) {
+        return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_PUBLISHED_COUNT)
+    }
+    let published_extension_algebras_handle = (*extension_owner.ptr).algebras
+    if ir_algebra_table_count(&published_extension_algebras_handle) != 1 {
         return ir_module_heap_self_test_fail(&! extension_owner, IR_MODULE_HEAP_SELF_TEST_EXTENSION_ALGEBRA_PUBLISHED_COUNT)
     }
     let algebra_extension_result = ir_module_heap_serialize_result_into(&extension_owner, &! extension_buf)
