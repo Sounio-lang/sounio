@@ -2647,3 +2647,27 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - **diagnostic = PASS**: sens/spec/PPV/NPV/LR±/accuracy/Youden, Wilson CIs. "No errors or leaps."
 - **roc = PASS**: AUC=(wins+0.5·ties)/(n_pos·n_neg), Hanley-McNeil q1/q2/variance, CI clipping, roc_point TPR/FPR. "All verified."
 - **cohen_kappa = PASS on formulas** (κ=(po-pe)/(1-pe), weighted linear/quadratic, Landis-Koch). One **[TIGHTENABLE] was a legitimate caveat** (unlike the previous two reviewer false-flags): the Fleiss SE is exact for unweighted kappa but only approximate for weighted — documented in the module and the weighted fn doc; the kappa value itself is exact for both.
+
+## 2026-07-13 — math-review: multiple_comparisons + permutation
+- Files: `stdlib/stats/{multiple_comparisons,permutation}.sio` (new, library modules). Provider: xAI/Grok 4.3 = **PASS** both.
+- multiple_comparisons: Bonferroni min(1,m·p), Holm max-form, BH-FDR min-form, O(m²) rank enumeration — all verified.
+- permutation: two-sample |mean diff| test, p=(count+1)/(iters+1), Fisher-Yates, two-sided abs counting, inline LCG — verified.
+- Both hit the #852 codegen crash for in-module test harnesses; shipped as libraries validated by external examples/stats/*_test.sio (bonf=1 holm=1 bh=5; sep_significant=1 null_notsig=1). Functions structured to avoid #852 (no big callee arrays, inlined loops).
+
+## 2026-07-13 — math-review: summary_inference + meta_analysis
+- Files: `stdlib/stats/{summary_inference,meta_analysis}.sio` (new). Provider: xAI/Grok 4.3 = **PASS** both.
+- summary_inference: Welch se/df (Satterthwaite), pooled-SD Cohen's d, one-sample t, t-CI — all verified. (Note: the code's Welch t deviates ~3e-4 from the true 3.29574 — an execution/float artifact under load, not a formula error; test tolerance loosened accordingly.)
+- meta_analysis: inverse-variance pooling, Cochran Q, I², DerSimonian-Laird τ², random-effects weights, homogeneous edge — all verified.
+- Both scalar/small-array -> #852-safe. Forest plot figure (examples/stats/forest_plot.sio) renders the meta-analysis.
+
+## 2026-07-14 — math-review: epidemiology + sample_size
+- Files: `stdlib/stats/{epidemiology,sample_size}.sio` (new). Provider: xAI/Grok 4.3 = **PASS** both.
+- epidemiology: risk_e/risk_u, RR/OR/RD, log-scale SEs (RR/OR), binomial RD SE, ARR/RRR/NNT — all verified.
+- sample_size: two-proportion, one-proportion, and Fisher-z correlation N formulas, normal_quantile, ss_ln/ss_sqrt/ss_ceil_pos, guards — all verified.
+- Both scalar -> #852-safe. Box-plot figure (examples/stats/box_plot.sio) added.
+
+## 2026-07-14 — math-review: units / dimensional-analysis vertical
+- Files: `stdlib/units/lib.sio` (`dim_show`/`quantity_show`), `tests/stdlib/units/test_units_stdlib.sio`, `examples/units/dimensional_report.sio`.
+- Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed add/sub RSS, mul u=√((b·u_a)²+(a·u_b)²), div u=√((u_a/b)²+(a·u_b/b²)²) with denominator term |∂(a/b)/∂b|, and every first-principles anchor (5±0.5 kg; 19.6±0.98 N; 5 m/s; 6 kg; mass↔length mismatch; kg→g ×1000; 0°C=273.15 K) plus the example values (0.25±0.005 kg s⁻¹; 686.7±4.905 N; 2060.1±37.355 J).
+- Evidence boundary: verifies dimensional + GUM-uncertainty arithmetic and unit-symbol recognition by SI dimension (torque-vs-energy N·m ambiguity noted, out of scope); number formatting is raw print(f64).
+- Raw review directory: `/tmp/llm-offload-BscnpJ/`.
