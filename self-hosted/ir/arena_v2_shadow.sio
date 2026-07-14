@@ -1,0 +1,421 @@
+// Shadow-only ownership kernel for a future canonical IrModule representation.
+//
+// This module is intentionally not imported by ir/mod.sio, compiler/main.sio,
+// or bootstrap_concat.sh. It owns bounded scalar slot tables directly and has
+// no dependency on IrModuleHeapBridge, RuntimeContext handles, or AGG_POOL.
+
+module ir::arena_v2_shadow
+
+pub let IR_MODULE_ARENA_V2_FUNCTION_CAPACITY: i64 = 4
+pub let IR_MODULE_ARENA_V2_INSTR_CAPACITY: i64 = 8
+pub let IR_MODULE_ARENA_V2_MAX_REG_COUNT: i64 = 65536
+
+pub let IR_MODULE_ARENA_V2_ARENA_INVALID: i64 = 0
+pub let IR_MODULE_ARENA_V2_ARENA_LIVE: i64 = 1
+pub let IR_MODULE_ARENA_V2_ARENA_RELEASED: i64 = 2
+
+pub let IR_MODULE_ARENA_V2_SLOT_FREE: i64 = 0
+pub let IR_MODULE_ARENA_V2_SLOT_LIVE: i64 = 1
+pub let IR_MODULE_ARENA_V2_SLOT_RELEASED: i64 = 2
+
+pub let IR_MODULE_ARENA_V2_OK: i64 = 0
+pub let IR_MODULE_ARENA_V2_ALREADY_RELEASED: i64 = 1
+pub let IR_MODULE_ARENA_V2_ERR_INVALID_ARENA: i64 = -1
+pub let IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE: i64 = -2
+pub let IR_MODULE_ARENA_V2_ERR_CAPACITY: i64 = -3
+pub let IR_MODULE_ARENA_V2_ERR_HAS_CHILDREN: i64 = -4
+pub let IR_MODULE_ARENA_V2_ERR_RANGE: i64 = -5
+pub let IR_MODULE_ARENA_V2_ERR_RELEASED: i64 = -6
+
+// Function and instruction handles cannot be confused structurally. Every
+// handle carries both stable identities plus a slot generation for ABA checks.
+pub struct IrModuleArenaV2FunctionHandle {
+    arena_identity: i64,
+    module_identity: i64,
+    slot: i64,
+    generation: i64,
+}
+
+pub struct IrModuleArenaV2InstrHandle {
+    arena_identity: i64,
+    module_identity: i64,
+    slot: i64,
+    generation: i64,
+}
+
+// The arena is the sole owner of all node slots. This shadow prototype keeps
+// fields private and exposes mutations only through validated &! commands.
+// Compile-time non-copyability of this authority remains blocked by issue #877.
+pub struct IrModuleArenaV2 {
+    arena_identity: i64,
+    module_identity: i64,
+    state: i64,
+    release_count: i64,
+
+    function_state: [i64; 4],
+    function_generation: [i64; 4],
+    function_defining_module_id: [i64; 4],
+    function_reg_count: [i64; 4],
+    function_live_count: i64,
+
+    instr_state: [i64; 8],
+    instr_generation: [i64; 8],
+    instr_parent_function_slot: [i64; 8],
+    instr_opcode: [i64; 8],
+    instr_imm_i64: [i64; 8],
+    instr_live_count: i64,
+}
+
+fn ir_module_arena_v2_invalid_function_handle() -> IrModuleArenaV2FunctionHandle {
+    IrModuleArenaV2FunctionHandle {
+        arena_identity: 0,
+        module_identity: 0,
+        slot: -1,
+        generation: 0,
+    }
+}
+
+fn ir_module_arena_v2_invalid_instr_handle() -> IrModuleArenaV2InstrHandle {
+    IrModuleArenaV2InstrHandle {
+        arena_identity: 0,
+        module_identity: 0,
+        slot: -1,
+        generation: 0,
+    }
+}
+
+pub fn ir_module_arena_v2_new(arena_identity: i64, module_identity: i64) -> IrModuleArenaV2 {
+    let initial_state = if arena_identity > 0 && module_identity > 0 {
+        IR_MODULE_ARENA_V2_ARENA_LIVE
+    } else {
+        IR_MODULE_ARENA_V2_ARENA_INVALID
+    }
+
+    IrModuleArenaV2 {
+        arena_identity: arena_identity,
+        module_identity: module_identity,
+        state: initial_state,
+        release_count: 0,
+        function_state: [IR_MODULE_ARENA_V2_SLOT_FREE; 4],
+        function_generation: [1; 4],
+        function_defining_module_id: [0; 4],
+        function_reg_count: [0; 4],
+        function_live_count: 0,
+        instr_state: [IR_MODULE_ARENA_V2_SLOT_FREE; 8],
+        instr_generation: [1; 8],
+        instr_parent_function_slot: [-1; 8],
+        instr_opcode: [0; 8],
+        instr_imm_i64: [0; 8],
+        instr_live_count: 0,
+    }
+}
+
+pub fn ir_module_arena_v2_state(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).state
+}
+
+pub fn ir_module_arena_v2_arena_identity(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).arena_identity
+}
+
+pub fn ir_module_arena_v2_module_identity(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).module_identity
+}
+
+pub fn ir_module_arena_v2_release_count(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).release_count
+}
+
+pub fn ir_module_arena_v2_function_live_count(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).function_live_count
+}
+
+pub fn ir_module_arena_v2_instr_live_count(arena: &IrModuleArenaV2) -> i64 {
+    (*arena).instr_live_count
+}
+
+pub fn ir_module_arena_v2_function_handle_slot(handle: &IrModuleArenaV2FunctionHandle) -> i64 {
+    (*handle).slot
+}
+
+pub fn ir_module_arena_v2_function_handle_generation(handle: &IrModuleArenaV2FunctionHandle) -> i64 {
+    (*handle).generation
+}
+
+pub fn ir_module_arena_v2_instr_handle_slot(handle: &IrModuleArenaV2InstrHandle) -> i64 {
+    (*handle).slot
+}
+
+pub fn ir_module_arena_v2_instr_handle_generation(handle: &IrModuleArenaV2InstrHandle) -> i64 {
+    (*handle).generation
+}
+
+pub fn ir_module_arena_v2_function_is_live(
+    arena: &IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+) -> bool with Panic, Div {
+    if (*arena).state != IR_MODULE_ARENA_V2_ARENA_LIVE {
+        return false
+    }
+    if (*handle).arena_identity != (*arena).arena_identity ||
+       (*handle).module_identity != (*arena).module_identity {
+        return false
+    }
+    let slot = (*handle).slot
+    if slot < 0 || slot >= IR_MODULE_ARENA_V2_FUNCTION_CAPACITY {
+        return false
+    }
+    (*arena).function_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_LIVE &&
+        (*arena).function_generation[slot as usize] == (*handle).generation
+}
+
+pub fn ir_module_arena_v2_instr_is_live(
+    arena: &IrModuleArenaV2,
+    handle: &IrModuleArenaV2InstrHandle,
+) -> bool with Panic, Div {
+    if (*arena).state != IR_MODULE_ARENA_V2_ARENA_LIVE {
+        return false
+    }
+    if (*handle).arena_identity != (*arena).arena_identity ||
+       (*handle).module_identity != (*arena).module_identity {
+        return false
+    }
+    let slot = (*handle).slot
+    if slot < 0 || slot >= IR_MODULE_ARENA_V2_INSTR_CAPACITY {
+        return false
+    }
+    (*arena).instr_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_LIVE &&
+        (*arena).instr_generation[slot as usize] == (*handle).generation
+}
+
+pub fn ir_module_arena_v2_add_function(
+    arena: &! IrModuleArenaV2,
+    defining_module_id: i64,
+) -> (i64, IrModuleArenaV2FunctionHandle) with Mut, Panic, Div {
+    if (*arena).state == IR_MODULE_ARENA_V2_ARENA_RELEASED {
+        return (IR_MODULE_ARENA_V2_ERR_RELEASED, ir_module_arena_v2_invalid_function_handle())
+    }
+    if (*arena).state != IR_MODULE_ARENA_V2_ARENA_LIVE || defining_module_id < 0 {
+        return (IR_MODULE_ARENA_V2_ERR_INVALID_ARENA, ir_module_arena_v2_invalid_function_handle())
+    }
+
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_FUNCTION_CAPACITY {
+        if (*arena).function_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_FREE ||
+           (*arena).function_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_RELEASED {
+            (*arena).function_state[slot as usize] = IR_MODULE_ARENA_V2_SLOT_LIVE
+            (*arena).function_defining_module_id[slot as usize] = defining_module_id
+            (*arena).function_reg_count[slot as usize] = 0
+            (*arena).function_live_count = (*arena).function_live_count + 1
+            let handle = IrModuleArenaV2FunctionHandle {
+                arena_identity: (*arena).arena_identity,
+                module_identity: (*arena).module_identity,
+                slot: slot,
+                generation: (*arena).function_generation[slot as usize],
+            }
+            return (IR_MODULE_ARENA_V2_OK, handle)
+        }
+        slot = slot + 1
+    }
+
+    (IR_MODULE_ARENA_V2_ERR_CAPACITY, ir_module_arena_v2_invalid_function_handle())
+}
+
+fn ir_module_arena_v2_set_function_reg_count_validated(
+    arena: &! IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+    reg_count: i64,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_function_is_live(arena, handle) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    if reg_count < 0 || reg_count > IR_MODULE_ARENA_V2_MAX_REG_COUNT {
+        return IR_MODULE_ARENA_V2_ERR_RANGE
+    }
+    (*arena).function_reg_count[(*handle).slot as usize] = reg_count
+    IR_MODULE_ARENA_V2_OK
+}
+
+// Public commands expose intent; raw field setters remain module-private.
+pub fn ir_module_arena_v2_configure_function_reg_count(
+    arena: &! IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+    reg_count: i64,
+) -> i64 with Mut, Panic, Div {
+    ir_module_arena_v2_set_function_reg_count_validated(arena, handle, reg_count)
+}
+
+pub fn ir_module_arena_v2_function_reg_count(
+    arena: &IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+) -> (i64, i64) with Panic, Div {
+    if !ir_module_arena_v2_function_is_live(arena, handle) {
+        return (IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE, 0)
+    }
+    (IR_MODULE_ARENA_V2_OK, (*arena).function_reg_count[(*handle).slot as usize])
+}
+
+pub fn ir_module_arena_v2_function_defining_module_id(
+    arena: &IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+) -> (i64, i64) with Panic, Div {
+    if !ir_module_arena_v2_function_is_live(arena, handle) {
+        return (IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE, 0)
+    }
+    (IR_MODULE_ARENA_V2_OK, (*arena).function_defining_module_id[(*handle).slot as usize])
+}
+
+fn ir_module_arena_v2_set_instr_payload_validated(
+    arena: &! IrModuleArenaV2,
+    handle: &IrModuleArenaV2InstrHandle,
+    opcode: i64,
+    imm_i64: i64,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_instr_is_live(arena, handle) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    if opcode < 0 || opcode > 65535 {
+        return IR_MODULE_ARENA_V2_ERR_RANGE
+    }
+    let slot = (*handle).slot
+    (*arena).instr_opcode[slot as usize] = opcode
+    (*arena).instr_imm_i64[slot as usize] = imm_i64
+    IR_MODULE_ARENA_V2_OK
+}
+
+pub fn ir_module_arena_v2_add_instr(
+    arena: &! IrModuleArenaV2,
+    parent: &IrModuleArenaV2FunctionHandle,
+    opcode: i64,
+    imm_i64: i64,
+) -> (i64, IrModuleArenaV2InstrHandle) with Mut, Panic, Div {
+    if (*arena).state == IR_MODULE_ARENA_V2_ARENA_RELEASED {
+        return (IR_MODULE_ARENA_V2_ERR_RELEASED, ir_module_arena_v2_invalid_instr_handle())
+    }
+    if !ir_module_arena_v2_function_is_live(arena, parent) {
+        return (IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE, ir_module_arena_v2_invalid_instr_handle())
+    }
+    if opcode < 0 || opcode > 65535 {
+        return (IR_MODULE_ARENA_V2_ERR_RANGE, ir_module_arena_v2_invalid_instr_handle())
+    }
+
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_INSTR_CAPACITY {
+        if (*arena).instr_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_FREE ||
+           (*arena).instr_state[slot as usize] == IR_MODULE_ARENA_V2_SLOT_RELEASED {
+            (*arena).instr_state[slot as usize] = IR_MODULE_ARENA_V2_SLOT_LIVE
+            (*arena).instr_parent_function_slot[slot as usize] = (*parent).slot
+            (*arena).instr_live_count = (*arena).instr_live_count + 1
+            let handle = IrModuleArenaV2InstrHandle {
+                arena_identity: (*arena).arena_identity,
+                module_identity: (*arena).module_identity,
+                slot: slot,
+                generation: (*arena).instr_generation[slot as usize],
+            }
+            let status = ir_module_arena_v2_set_instr_payload_validated(arena, &handle, opcode, imm_i64)
+            if status != IR_MODULE_ARENA_V2_OK {
+                (*arena).instr_state[slot as usize] = IR_MODULE_ARENA_V2_SLOT_FREE
+                (*arena).instr_parent_function_slot[slot as usize] = -1
+                (*arena).instr_live_count = (*arena).instr_live_count - 1
+                return (status, ir_module_arena_v2_invalid_instr_handle())
+            }
+            return (IR_MODULE_ARENA_V2_OK, handle)
+        }
+        slot = slot + 1
+    }
+
+    (IR_MODULE_ARENA_V2_ERR_CAPACITY, ir_module_arena_v2_invalid_instr_handle())
+}
+
+pub fn ir_module_arena_v2_instr_payload(
+    arena: &IrModuleArenaV2,
+    handle: &IrModuleArenaV2InstrHandle,
+) -> (i64, i64, i64) with Panic, Div {
+    if !ir_module_arena_v2_instr_is_live(arena, handle) {
+        return (IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE, 0, 0)
+    }
+    let slot = (*handle).slot
+    (IR_MODULE_ARENA_V2_OK, (*arena).instr_opcode[slot as usize], (*arena).instr_imm_i64[slot as usize])
+}
+
+pub fn ir_module_arena_v2_remove_instr(
+    arena: &! IrModuleArenaV2,
+    handle: &IrModuleArenaV2InstrHandle,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_instr_is_live(arena, handle) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    let slot = (*handle).slot
+    (*arena).instr_state[slot as usize] = IR_MODULE_ARENA_V2_SLOT_RELEASED
+    (*arena).instr_generation[slot as usize] = (*arena).instr_generation[slot as usize] + 1
+    (*arena).instr_parent_function_slot[slot as usize] = -1
+    (*arena).instr_opcode[slot as usize] = 0
+    (*arena).instr_imm_i64[slot as usize] = 0
+    (*arena).instr_live_count = (*arena).instr_live_count - 1
+    IR_MODULE_ARENA_V2_OK
+}
+
+pub fn ir_module_arena_v2_remove_function(
+    arena: &! IrModuleArenaV2,
+    handle: &IrModuleArenaV2FunctionHandle,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_function_is_live(arena, handle) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    var i: i64 = 0
+    while i < IR_MODULE_ARENA_V2_INSTR_CAPACITY {
+        if (*arena).instr_state[i as usize] == IR_MODULE_ARENA_V2_SLOT_LIVE &&
+           (*arena).instr_parent_function_slot[i as usize] == (*handle).slot {
+            return IR_MODULE_ARENA_V2_ERR_HAS_CHILDREN
+        }
+        i = i + 1
+    }
+
+    let slot = (*handle).slot
+    (*arena).function_state[slot as usize] = IR_MODULE_ARENA_V2_SLOT_RELEASED
+    (*arena).function_generation[slot as usize] = (*arena).function_generation[slot as usize] + 1
+    (*arena).function_defining_module_id[slot as usize] = 0
+    (*arena).function_reg_count[slot as usize] = 0
+    (*arena).function_live_count = (*arena).function_live_count - 1
+    IR_MODULE_ARENA_V2_OK
+}
+
+// First release invalidates every live handle and records one logical reclaim.
+// Later releases are explicit no-ops and cannot increment release_count.
+pub fn ir_module_arena_v2_release(arena: &! IrModuleArenaV2) -> i64 with Mut, Panic, Div {
+    if (*arena).state == IR_MODULE_ARENA_V2_ARENA_RELEASED {
+        return IR_MODULE_ARENA_V2_ALREADY_RELEASED
+    }
+    if (*arena).state != IR_MODULE_ARENA_V2_ARENA_LIVE {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_ARENA
+    }
+
+    var fi: i64 = 0
+    while fi < IR_MODULE_ARENA_V2_FUNCTION_CAPACITY {
+        if (*arena).function_state[fi as usize] == IR_MODULE_ARENA_V2_SLOT_LIVE {
+            (*arena).function_generation[fi as usize] = (*arena).function_generation[fi as usize] + 1
+        }
+        (*arena).function_state[fi as usize] = IR_MODULE_ARENA_V2_SLOT_RELEASED
+        (*arena).function_defining_module_id[fi as usize] = 0
+        (*arena).function_reg_count[fi as usize] = 0
+        fi = fi + 1
+    }
+
+    var ii: i64 = 0
+    while ii < IR_MODULE_ARENA_V2_INSTR_CAPACITY {
+        if (*arena).instr_state[ii as usize] == IR_MODULE_ARENA_V2_SLOT_LIVE {
+            (*arena).instr_generation[ii as usize] = (*arena).instr_generation[ii as usize] + 1
+        }
+        (*arena).instr_state[ii as usize] = IR_MODULE_ARENA_V2_SLOT_RELEASED
+        (*arena).instr_parent_function_slot[ii as usize] = -1
+        (*arena).instr_opcode[ii as usize] = 0
+        (*arena).instr_imm_i64[ii as usize] = 0
+        ii = ii + 1
+    }
+
+    (*arena).function_live_count = 0
+    (*arena).instr_live_count = 0
+    (*arena).release_count = 1
+    (*arena).state = IR_MODULE_ARENA_V2_ARENA_RELEASED
+    IR_MODULE_ARENA_V2_OK
+}
