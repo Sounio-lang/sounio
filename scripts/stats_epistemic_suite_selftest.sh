@@ -33,6 +33,7 @@ MODULES=(
   stdlib/stats/meta_analysis.sio
   stdlib/stats/epidemiology.sio
   stdlib/stats/sample_size.sio
+  stdlib/stats/reliability.sio
 )
 
 fail=0
@@ -49,7 +50,8 @@ done
 # Smoke-run the integration demo (exit 0 = every tool composed cleanly).
 for demo in examples/stats/epistemic_suite_demo.sio examples/stats/full_analysis_report.sio \
             examples/stats/multiple_comparisons_test.sio examples/stats/permutation_test.sio \
-            examples/stats/forest_plot.sio examples/stats/box_plot.sio; do
+            examples/stats/forest_plot.sio examples/stats/box_plot.sio \
+            examples/stats/funnel_plot.sio; do
   if "$SOUC" run "$demo" >/dev/null 2>&1; then
     printf '  [PASS] %s\n' "$demo"
   else
