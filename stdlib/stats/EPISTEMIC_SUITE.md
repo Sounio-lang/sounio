@@ -460,6 +460,21 @@ Extends `stats::power` (t-tests) to the other common designs. Validated:
 A **box plot** figure (`examples/stats/box_plot.sio`) renders three groups with
 quartile boxes, median lines, 1.5·IQR whiskers and outlier points.
 
+### `stats::reliability` — inter-rater & internal-consistency reliability
+
+| Function | Signature |
+|---|---|
+| `icc` | `pub fn icc(data: &[f64; 256], n_subj: i32, n_rater: i32) -> ICCResult with Mut, Div, Panic` |
+| `cronbach_alpha` | `pub fn cronbach_alpha(data: &[f64; 256], n_subj: i32, n_item: i32) -> f64 with Mut, Div, Panic` |
+
+ICC(2,1) (two-way random, single rater) via the ANOVA mean squares, and Cronbach's
+alpha for scale internal consistency, from a subjects×raters/items matrix.
+Validated: perfect agreement → ICC 1.0; a 4×3 example → α 0.930.
+
+A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
+meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
+assessment).
+
 ## Importing
 
 Import each tool directly from its module:

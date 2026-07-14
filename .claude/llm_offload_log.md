@@ -2677,3 +2677,7 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed det=5, trace=5, ‖A‖_F=√15≈3.872983, A⁻¹=[[0.6,-0.2],[-0.2,0.4]] (A·A⁻¹=I), solve x=[1.4,1.2], and [[1,2],[3,4]]·[[5,6],[7,8]]=[[19,22],[43,50]].
 - Finding (display-only compiler bug): `print(f64)` drops the magnitude of negative floats → `matnm_show` prints sign + positive magnitude; filed issue #890 + `docs/audit/MADAROS_PRINT_NEGATIVE_F64_2026-07-14.md`. matnm arithmetic itself is correct (verified via A·A⁻¹=I and run-proof assertions on f64 data).
 - Raw review directory: see /tmp llm-offload dir for this run.
+
+## 2026-07-14 — math-review: stats::reliability
+- File: `stdlib/stats/reliability.sio` (new). ICC(2,1) via ANOVA mean squares + Cronbach's alpha. Provider: xAI/Grok 4.3 = **PASS** — ICC formula, SS/MS decomposition, Cronbach formula, item/total variance estimators, test data all verified.
+- Funnel-plot figure (examples/stats/funnel_plot.sio) added. Correlation-heatmap figure attempted but DROPPED: needs a data matrix live during many render calls (custom pixel loops / plot_band with data[256]+corr[64] live) -> #852 crash. The funnel worked (no separate data matrix; proven plot path only).
