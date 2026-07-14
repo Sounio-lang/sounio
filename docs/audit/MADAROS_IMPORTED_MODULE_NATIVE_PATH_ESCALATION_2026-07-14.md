@@ -19,8 +19,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 Every real Sounio program imports the stdlib. On the default **native** engine, the
 imported-module path has a small number of distinct, reproducible defects that
 together make composing real modules **fail or silently miscompile**. Building one
-modest I/O vertical hit five of them. They are not five verticals' worth of work —
-they are one subsystem (imported-module IR lowering → merge → native emit), and
+modest I/O vertical surfaced **four** distinct defects on this path (D1–D4 below;
+a fifth, `str_slice` ignoring its length argument, is a general builtin bug that
+also reproduces single-file, so it is out of scope here). They are not four
+verticals' worth of work — they are one subsystem (imported-module IR lowering →
+merge → native emit), and
 that subsystem is exactly what the active `codex/*-ir-*` rebuild (SOIR core, Place
 IR, `IrModuleArena` v2, ref-field projections) is reconstructing. **This is the
 one fix that unblocks I/O readers, cross-module reuse, correct GUM coverage
