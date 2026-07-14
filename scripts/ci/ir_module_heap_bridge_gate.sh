@@ -50,4 +50,5 @@ if grep -Fq 'fallback' <<<"$output"; then
   printf '%s\n' "$output" >&2
   fail fallback_observed
 fi
+echo 'IR_MODULE_HEAP_BRIDGE_SCOPE raw_module=freed_exactly_once managed_graph=compiler_runtime_owned reclaim=runtime_reset_or_process_exit witness_functions=6 repeated_use=not_production'
 echo "IR_MODULE_HEAP_BRIDGE_PASS compiler=$RAW_MADAROS sha256=$compiler_sha256"
