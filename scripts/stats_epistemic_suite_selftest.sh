@@ -34,6 +34,9 @@ MODULES=(
   stdlib/stats/epidemiology.sio
   stdlib/stats/sample_size.sio
   stdlib/stats/reliability.sio
+  stdlib/stats/concordance.sio
+  stdlib/stats/rate_epi.sio
+  stdlib/stats/weibull_negbin.sio
 )
 
 fail=0

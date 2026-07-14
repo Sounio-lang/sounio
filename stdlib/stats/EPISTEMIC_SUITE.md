@@ -471,6 +471,48 @@ ICC(2,1) (two-way random, single rater) via the ANOVA mean squares, and Cronbach
 alpha for scale internal consistency, from a subjects×raters/items matrix.
 Validated: perfect agreement → ICC 1.0; a 4×3 example → α 0.930.
 
+### `stats::concordance` — Lin's CCC & Cliff's delta
+
+| Function | Signature |
+|---|---|
+| `lin_ccc` | `pub fn lin_ccc(x: &[f64; 256], y: &[f64; 256], n: i32) -> CCCResult with Mut, Div, Panic` |
+| `cliff_delta` | `pub fn cliff_delta(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> DeltaResult with Mut, Div, Panic` |
+
+Lin's concordance correlation coefficient for paired-measurement agreement about
+the identity line — `CCC = 2·σxy/(σxx+σyy+(μx−μy)²)`, decomposed into precision
+(Pearson ρ) and accuracy (Cb) — and Cliff's delta, a robust distribution-free
+dominance effect size. Validated: precision ≈ 0.9955, CCC ≈ 0.9942 on a worked
+pair; perfect identity → CCC 1.0; fully-separated samples → δ = −1 (large).
+
+### `stats::rate_epi` — incidence-rate epidemiology (person-time)
+
+| Function | Signature |
+|---|---|
+| `incidence_rate` | `pub fn incidence_rate(a: f64, pt: f64) -> RateCI with Mut, Div, Panic` |
+| `rate_ratio` | `pub fn rate_ratio(a1: f64, pt1: f64, a2: f64, pt2: f64) -> RatioCI with Mut, Div, Panic` |
+| `rate_difference` | `pub fn rate_difference(a1: f64, pt1: f64, a2: f64, pt2: f64) -> DiffCI with Mut, Div, Panic` |
+
+Person-time incidence rates with the ratio (IRR) and difference measures and
+their large-sample intervals: a Poisson log CI for a single rate
+(`SE(ln rate)=1/√a`), a log CI for the IRR (`SE(ln IRR)=√(1/a1+1/a2)`), and a
+Wald CI for the rate difference (`SE=√(a1/pt1²+a2/pt2²)`). Validated: 10 events /
+500 py → rate 0.02, 95% CI [0.0108, 0.0372]; IRR 2.0, 95% CI [0.936, 4.273].
+
+### `stats::weibull_negbin` — Weibull & negative-binomial laws
+
+| Function | Signature |
+|---|---|
+| `weibull_pdf` / `weibull_cdf` / `weibull_hazard` | `pub fn weibull_*(x: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic` |
+| `weibull_quantile` | `pub fn weibull_quantile(p: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic` |
+| `weibull_median` / `weibull_mean` | `pub fn weibull_*(k: f64, l: f64) -> f64 with Mut, Div, Panic` |
+| `negbin_pmf` / `negbin_cdf` | `pub fn negbin_*(j: i32, r: f64, p: f64) -> f64 with Mut, Div, Panic` |
+| `negbin_mean` | `pub fn negbin_mean(r: f64, p: f64) -> f64 with Mut, Div, Panic` |
+
+The Weibull survival law (shape `k`, scale `λ`) with pdf/cdf/quantile/median/
+hazard/mean, and the negative binomial (successes `r`, prob `p`, support = failure
+count) with pmf/cdf/mean via log-gamma. Validated: Weibull(2,1) → F(1)=0.6321,
+median 0.8326, mean Γ(1.5)=0.8862; NegBin(3,0.5) → pmf(0)=0.125, mean 3.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -500,6 +542,9 @@ use stats::bayes_conjugate::{BetaPosterior, NormalPosterior, beta_binomial, norm
 use stats::diagnostic::{DiagResult, diag_metrics}
 use stats::cohen_kappa::{KappaResult, cohen_kappa, cohen_kappa_weighted}
 use stats::roc::{AUCResult, roc_auc, roc_point}
+use stats::concordance::{CCCResult, DeltaResult, lin_ccc, cliff_delta}
+use stats::rate_epi::{RateCI, RatioCI, DiffCI, incidence_rate, rate_ratio, rate_difference}
+use stats::weibull_negbin::{weibull_pdf, weibull_cdf, weibull_quantile, weibull_median, weibull_hazard, weibull_mean, negbin_pmf, negbin_cdf, negbin_mean}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
