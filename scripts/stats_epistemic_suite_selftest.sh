@@ -40,6 +40,9 @@ MODULES=(
   stdlib/stats/mcnemar.sio
   stdlib/stats/friedman.sio
   stdlib/stats/trend.sio
+  stdlib/stats/ks_test.sio
+  stdlib/stats/gof.sio
+  stdlib/stats/normality.sio
 )
 
 fail=0

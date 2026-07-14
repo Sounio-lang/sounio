@@ -2703,3 +2703,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - trend = **PASS**: CA score statistic T, centered Sxx, null variance V, χ²=T²/V, slope=T/Sxx all match; worked example (T=50, χ²=26.667, z=5.164, slope=0.10) reproduced exactly.
 - Theme: paired / repeated-measures / ordered-design tests — fills the gap left by the suite's independent-groups tests. Suite selftest: 33 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-c3hsRt/`, `/tmp/llm-offload-n1l38u/`, `/tmp/llm-offload-QM8I6l/`.
+
+## 2026-07-14 — math-review: stats::ks_test, stats::gof, stats::normality
+- Files (all new): `stdlib/stats/ks_test.sio` (Kolmogorov-Smirnov one-sample-vs-normal and two-sample, Stephens 1970 asymptotic p, internal insertion sort), `stdlib/stats/gof.sio` (Pearson χ² + likelihood-ratio G goodness-of-fit with ddof, χ² tail via Lanczos log-gamma + regularised incomplete gamma), `stdlib/stats/normality.sio` (Jarque-Bera omnibus normality: skewness, kurtosis, JB, closed-form p=exp(-JB/2)). Provider: xAI/Grok 4.3.
+- ks_test = **PASS**: Kolmogorov asymptotic p (finite-sample λ), one-sample d±/order-statistic sup, two-sample merge-walk sup, erf/exp/sqrt helpers, all four test D/ne values verified.
+- gof = **PASS**: Pearson χ², G=2ΣO ln(O/E), df=k−1−ddof, incomplete-gamma χ² tail all correct; worked values (χ²=20, G=21.288, p=1.7e−4) exact.
+- normality = **PASS**: JB formulas + χ²(2) survival exp(−x/2); hand-verified moments (mean 5, m2=4, m3=5.25, m4=44.5); edge cases (n<2, m2=0) defined.
+- Theme: goodness-of-fit / distributional diagnostics — the analytic complement to the visual qq_normal. Suite selftest: 36 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-TFBYYh/`, `/tmp/llm-offload-tezDcO/`, `/tmp/llm-offload-tjxfPd/`.
