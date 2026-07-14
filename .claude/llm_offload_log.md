@@ -2770,3 +2770,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - autocorr = **PASS**: biased r_k, Ljung-Box Q=n(n+2)Σr_k²/(n−k) ~ χ²(m); acf(1)=0.4/acf(2)=−0.1 and Q≈1.5167 hand-checked.
 - Theme: serial-dependence / independence-assumption diagnostics — complements the goodness-of-fit / normality family for ordered & time-course data (PK sampling, longitudinal). All scalar/read-only-array, #852-safe. Suite runner: 52 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-0yOUhT/`, `/tmp/llm-offload-5OiuG1/`, `/tmp/llm-offload-FpKA3Q/`.
+
+## 2026-07-14 — math-review: stats::nelson_aalen, stats::rmst, stats::life_table
+- Files (all new): `stdlib/stats/nelson_aalen.sio` (Nelson-Aalen cumulative hazard Ĥ + variance + implied survival), `stdlib/stats/rmst.sio` (restricted mean survival time = area under KM up to τ), `stdlib/stats/life_table.sio` (actuarial Cutler-Ederer grouped survival + interval hazard). Provider: xAI/Grok 4.3.
+- nelson_aalen = **PASS**: Ĥ=Σd_j/n_j, Var=Σd_j/n_j², Ŝ=e^{-Ĥ} canonical; sort-free distinct-death-time walk correct; Ĥ(3)=0.7833, Var=0.2136 verified.
+- rmst = **PASS**: exact right-continuous KM step-function area truncated at τ; all five cases (3.0, 2.4, 3.0, 2.1, 3.667) reproduced; edge cases correct.
+- life_table = **PASS**: n'ᵢ=nᵢ−wᵢ/2, qᵢ=dᵢ/n'ᵢ, Ŝ=Πpᵢ (Cutler-Ederer) exact; 3-interval example (0.9, 0.8047, 0.7231) verified.
+- Theme: survival-analysis extensions — completes the survival family (km, logrank, exp_survival + Nelson-Aalen, RMST, life-table). All deterministic, fully hand-derivable. #852-safe: sort-free walks / cumulative products, no nested data-array calls. Suite runner: 55 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-dUWR1L/`, `/tmp/llm-offload-K5q4eh/`, `/tmp/llm-offload-vpkpHX/`.
