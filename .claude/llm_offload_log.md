@@ -2599,3 +2599,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-system-map-desktop.png`, `/tmp/sounio-system-map-mobile-v2.png`, and `/tmp/sounio-system-map-design-qa-board.png`; six links rendered, no positive horizontal overflow was measured, and the browser console contained no runtime errors.
 - Validation: `npm run check:quality` passed; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directories: `/tmp/llm-offload-tr1b3B/`, `/tmp/llm-offload-7Hz99D/`, and `/tmp/llm-offload-ldfHd8/`.
+
+## 2026-07-14 — M3 prose/design review: verified epistemic receipt room
+- Files: `website/src/components/home/ProofMoment.astro`, `SystemAtlas.astro`, `Hero.astro`, `HonestStatusSection.astro`, `website/src/pages/proof.astro`, and related internal links.
+- Task: replace the stale homepage and proof-page vancomycin compile-refusal claim with a receipt verified against the current default Madaros entrypoint.
+- Triggering evidence: direct execution of `./bin/souc check tests/compile-fail/vancomycin_low_conf.sio` returned exit 0 and `check: OK`, disproving the existing website's captured exit-1 claim. Direct execution of `./bin/souc check tests/compile-fail/knowledge_no_silent_unwrap.sio` returned exit 1 with `error[E001]`, `expected f64`, and `found Knowledge<f64>`.
+- Provider: xAI/Grok 4.3 completed with no blocker, major, or minor findings. It confirmed the revision narrows the public claim from a clinical epsilon-threshold story to the foundational language boundary actually exercised by the current compiler.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Claim boundary: this receipt proves only that the checked implicit assignment from `Knowledge<f64>` to `f64` is refused. It does not prove all GUM propagation, all provenance behavior, clinical validity, or maturity of the full epistemic stdlib.
+- Visual evidence: `/tmp/sounio-receipt-room-desktop.png`, `/tmp/sounio-receipt-room-mobile.png`, and `/tmp/sounio-receipt-room-design-qa-board.png`; no positive horizontal overflow was measured, the proof anchor resolved, and the browser console contained no runtime errors.
+- Validation: `npm run check:quality` passed; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directories: `/tmp/llm-offload-e6wKpA/`, `/tmp/llm-offload-3IyOvU/`, and `/tmp/llm-offload-VkwEvp/`.

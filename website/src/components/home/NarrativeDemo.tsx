@@ -370,7 +370,7 @@ export default function NarrativeDemo() {
             </button>
           ) : (
             <a
-              href="/proof#compile-fail-vancomycin"
+              href="/proof#epistemic-boundary"
               className="rounded-full px-5 py-2.5 text-[0.85rem] font-[600] text-[#0d1117] hover:-translate-y-px transition-all"
               style={{ background: '#22c55e' }}
             >
