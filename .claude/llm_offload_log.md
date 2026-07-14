@@ -2789,3 +2789,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 ## 2026-07-14 — math-review: signal::filter run-proof
 - Files: `tests/stdlib/signal/test_filter_stdlib.sio`, `examples/signal/filter_report.sio` (no source edited).
 - Provider: xAI/Grok 4.3 = PASS. FIR MA(4) DC gain=Σh=1 + impulse response = h (0.25×4 then 0); IIR1 bilinear lowpass DC gain(z=1)=1 (const 2→2); IIR1 highpass DC gain(z=1)=0 (DC blocked). Default Madaros. SIGNAL_FILTER_GATE_OK.
+## 2026-07-14 — math-review: stats::kendall_tau, stats::goodman_kruskal, stats::somers_d
+- Files (all new): `stdlib/stats/kendall_tau.sio` (Kendall τ_a/τ_b + no-tie z-test), `stdlib/stats/goodman_kruskal.sio` (γ=(C−D)/(C+D) + Wald z), `stdlib/stats/somers_d.sio` (asymmetric Somers' D both directions). Provider: xAI/Grok 4.3.
+- kendall_tau = **PASS**: τ_a, tie-corrected τ_b, Var₀(S)=n(n−1)(2n+5)/18 z-test all correct; {1,3,2,4}→τ_a=0.667, z=1.359 (note: initial test constant z=1.358601 was a hand-arithmetic error — correct value 4/√8.666667=1.358732; caught by the failing assertion, fixed).
+- goodman_kruskal = **PASS**: γ + SE(γ)=√(4CD/(C+D)³) Wald z verified.
+- somers_d = **PASS**: D(Y|X)=(C−D)/(C+D+Tx), D(X|Y)=(C−D)/(C+D+Ty), and the 2·AUC−1 identity for binary Y confirmed.
+- **Bug found & fixed**: the tie-counting branches originally assigned tied-on-X pairs to Ty and vice-versa. Masked in kendall (τ_b denominator √((C+D+Tx)(C+D+Ty)) is symmetric in Tx/Ty) but surfaced in somers_d where the directions are distinct (D(Y|X) test gave 0.667 instead of 1.0). Fixed the labeling in both modules.
+- Theme: rank / ordinal association — complements the Pearson/Spearman correlation module. All O(n²) pair scans, scalar returns, #852-safe. Suite runner: 58 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-2RCSmH/`, `/tmp/llm-offload-sD8vnn/`, `/tmp/llm-offload-BerYTX/`.

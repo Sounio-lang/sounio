@@ -64,6 +64,9 @@ MODULES=(
   stdlib/stats/nelson_aalen.sio
   stdlib/stats/rmst.sio
   stdlib/stats/life_table.sio
+  stdlib/stats/kendall_tau.sio
+  stdlib/stats/goodman_kruskal.sio
+  stdlib/stats/somers_d.sio
 )
 
 fail=0
