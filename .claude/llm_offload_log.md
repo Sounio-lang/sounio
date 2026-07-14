@@ -2751,3 +2751,18 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Files: `tests/stdlib/integrate/test_integrate_stdlib.sio`, `examples/integrate/decay_report.sio` (no source edited).
 - Provider: xAI/Grok 4.3 = **PASS** (all). Confirmed y(t)=y0 e^{-kt}; Euler (1-1/n)^n→e^-1 O(1/n) (err@2000<err@200); half-life y(ln2)=y0/2; y(2)=2e^-1=0.735759; step-wise additive uncertainty recurrence u_{n+1}=u_n√(1+(k dt)²) is algebraically correct (u stays ~u0). Default Madaros. INTEGRATE_GATE_OK.
 - Raw review directory: see /tmp llm-offload dir.
+## 2026-07-14 — math-review: stats::fisher_exact, stats::cochran_q, stats::fleiss_kappa
+- Files (all new): `stdlib/stats/fisher_exact.sio` (Fisher's exact 2×2: hypergeometric two-sided/one-sided p + odds ratio, log-factorials via Lanczos), `stdlib/stats/cochran_q.sio` (Cochran's Q for k paired binary conditions, χ² tail via igamma), `stdlib/stats/fleiss_kappa.sio` (Fleiss' multi-rater kappa). Provider: xAI/Grok 4.3.
+- fisher_exact = **PASS**: hypergeometric P via log-factorials, two-sided sum over P≤P_obs with float-tolerant threshold, support bounds max(0,c1-r2)..min(r1,c1), OR=ad/bc all correct; tea-test 0.4857/OR 9 verified.
+- cochran_q = **PASS**: Q=(k-1)(kΣC²-N²)/(kN-ΣR²) transcription exact, denom=0 guard, χ² tail standard; Q=2.667 and Q=6 examples verified.
+- fleiss_kappa = **PASS**: Pᵢ, P̄, pⱼ, P̄ₑ, κ all match Fleiss (1971); three test cases (κ=-0.2, κ=1, three-category) correct. Note: significance-test SE deliberately omitted (fiddly Fleiss variance) — point estimate + components only.
+- Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
+
+## 2026-07-14 — math-review: stats::logistic, stats::poisson_reg, stats::wls
+- Files (all new): `stdlib/stats/logistic.sio` (1-predictor logistic regression via Newton-Raphson/IRLS, Wald SE/z/p, predict), `stdlib/stats/poisson_reg.sio` (1-predictor Poisson log-link regression via Newton, rate ratio, predict), `stdlib/stats/wls.sio` (weighted least squares, closed-form coefficients + SEs + weighted R²). Provider: xAI/Grok 4.3.
+- logistic = **PASS**: score g=Xᵀ(y−p), Fisher info H=XᵀWX (W=diag p(1−p)), NR update, SE=√diag(H⁻¹), Wald z; two-point saturated MLE (b0=logit⅓, b1=logit⅔−logit⅓) exact.
+- poisson_reg = **PASS**: Poisson log-link score/Hessian, NR update, saturated two-point MLE (b0=ln ȳ|x=0, b1=ln ratio) exact; Wald inference correct.
+- wls = **PASS**: normal-equation WLS solution, σ̂²(XᵀWX)⁻¹ variance entries under Var(εᵢ)=σ²/wᵢ, weighted R²; perfect and outlier-downweight cases verified.
+- Theme: generalized linear models (one predictor) — pharmacometric dose-response / count / heteroscedastic fits. #852-safe: flat per-iteration passes, scalar accumulation, no nested data-array calls. Suite runner now tracks **49 modules** + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-V3U3Al/`, `/tmp/llm-offload-zlNiM7/`, `/tmp/llm-offload-p2IVgX/`.

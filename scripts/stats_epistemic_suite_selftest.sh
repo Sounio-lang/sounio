@@ -52,6 +52,12 @@ MODULES=(
   stdlib/stats/deming.sio
   stdlib/stats/theil_sen.sio
   stdlib/stats/passing_bablok.sio
+  stdlib/stats/fisher_exact.sio
+  stdlib/stats/cochran_q.sio
+  stdlib/stats/fleiss_kappa.sio
+  stdlib/stats/logistic.sio
+  stdlib/stats/poisson_reg.sio
+  stdlib/stats/wls.sio
 )
 
 fail=0
