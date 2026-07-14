@@ -1,0 +1,359 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/outlier.sio — outlier detection
+//
+// Three complementary rules for flagging outliers in a sample:
+//
+//   tukey_outliers(x, n, k)      -> OutlierFences   (Q1−k·IQR, Q3+k·IQR)
+//   grubbs(x, n)                 -> GrubbsResult    (max studentized deviate)
+//   modified_z(x, n, thresh)     -> ModZResult      (MAD-based robust z)
+//
+// Tukey fences are the boxplot rule (k = 1.5 inner, 3.0 outer). Grubbs' test
+// detects a single outlier via G = maxᵢ|xᵢ − x̄|/s with the exact two-sided
+// Bonferroni p-value from the t-distribution. The modified z-score
+// (Iglewicz-Hoaglin) is 0.6745·(xᵢ − median)/MAD, robust because it uses the
+// median and MAD rather than the mean and sd; |z| > 3.5 flags an outlier.
+//
+// Pure Sounio: inline sqrt/exp/ln, Lanczos log-gamma and a continued-fraction
+// incomplete beta for the t-tail; inline insertion sort for the quantiles.
+//
+// References:
+//   Tukey (1977) EDA; Grubbs (1969) Technometrics 11:1; Iglewicz & Hoaglin (1993).
+
+module stats::outlier
+
+fn ol_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ol_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ol_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ol_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ol_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * ol_ln(tt) - tt + ol_ln(a)
+}
+
+// continued-fraction core for the regularised incomplete beta I_x(a,b).
+fn ol_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+// regularised incomplete beta I_x(a,b).
+fn ol_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = ol_lgamma(a) + ol_lgamma(b) - ol_lgamma(a + b)
+    let front = ol_exp(a * ol_ln(x) + b * ol_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) {
+        return front * ol_betacf(a, b, x) / a
+    }
+    return 1.0 - front * ol_betacf(b, a, 1.0 - x) / b
+}
+
+// two-sided single-test p for Student t: 2·P(T_df > |t|) = I_x(df/2, 1/2).
+fn ol_t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 1.0 }
+    let at = if t < 0.0 { 0.0 - t } else { t }
+    let x = df / (df + at * at)
+    return ol_ibeta(df * 0.5, 0.5, x)
+}
+
+fn ol_sort(a: &![f64; 256], n: i32) with Mut {
+    var i = 1
+    while i < n {
+        let key = a[i as usize]
+        var j = i - 1
+        while j >= 0 && a[j as usize] > key { a[(j + 1) as usize] = a[j as usize]; j = j - 1 }
+        a[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+fn ol_quantile_sorted(s: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic {
+    if n == 1 { return s[0] }
+    let h = ((n - 1) as f64) * p
+    var lo = 0
+    while (lo as f64) + 1.0 <= h { lo = lo + 1 }
+    let frac = h - (lo as f64)
+    if lo >= n - 1 { return s[(n - 1) as usize] }
+    return s[lo as usize] + frac * (s[(lo + 1) as usize] - s[lo as usize])
+}
+
+pub struct OutlierFences {
+    pub lower: f64,   // Q1 - k·IQR
+    pub upper: f64,   // Q3 + k·IQR
+    pub n_out: i64,   // count outside the fences
+}
+
+pub struct GrubbsResult {
+    pub g: f64,       // max studentized deviate
+    pub value: f64,   // the extreme observation
+    pub p: f64,       // two-sided Bonferroni p-value
+}
+
+pub struct ModZResult {
+    pub max_z: f64,   // largest |modified z|
+    pub n_out: i64,   // count with |modified z| > thresh
+}
+
+/// Tukey fence rule: outliers beyond Q1−k·IQR or Q3+k·IQR (k=1.5 inner).
+pub fn tukey_outliers(x: &[f64; 256], n: i32, k: f64) -> OutlierFences with Mut, Div, Panic {
+    if n < 1 { return OutlierFences { lower: 0.0, upper: 0.0, n_out: 0 } }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    ol_sort(&!s, n)
+    let q1 = ol_quantile_sorted(&s, n, 0.25)
+    let q3 = ol_quantile_sorted(&s, n, 0.75)
+    let iqrv = q3 - q1
+    let lower = q1 - k * iqrv
+    let upper = q3 + k * iqrv
+    var cnt = 0
+    var j = 0
+    while j < n {
+        let v = x[j as usize]
+        if v < lower || v > upper { cnt = cnt + 1 }
+        j = j + 1
+    }
+    return OutlierFences { lower: lower, upper: upper, n_out: cnt as i64 }
+}
+
+/// Grubbs' test for a single outlier: G = maxᵢ|xᵢ−x̄|/s (sample sd), with the
+/// two-sided Bonferroni p-value from the t-distribution.
+pub fn grubbs(x: &[f64; 256], n: i32) -> GrubbsResult with Mut, Div, Panic {
+    if n < 3 { return GrubbsResult { g: 0.0, value: 0.0, p: 1.0 } }
+    let nf = n as f64
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + x[i as usize]; i = i + 1 }
+    let mean = sum / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let sd = ol_sqrt(ss / (nf - 1.0))
+    if sd <= 0.0 { return GrubbsResult { g: 0.0, value: mean, p: 1.0 } }
+    var gmax = 0.0
+    var extreme = x[0]
+    var kk = 0
+    while kk < n {
+        let dev = x[kk as usize] - mean
+        let ad = if dev < 0.0 { 0.0 - dev } else { dev }
+        if ad > gmax { gmax = ad; extreme = x[kk as usize] }
+        kk = kk + 1
+    }
+    let g = gmax / sd
+    // invert Grubbs->t:  r = G²·n/(n-1)²,  t² = r(n-2)/(1-r)
+    let r = g * g * nf / ((nf - 1.0) * (nf - 1.0))
+    var p = 0.0
+    if r >= 1.0 { p = 0.0 }
+    else {
+        let t2 = r * (nf - 2.0) / (1.0 - r)
+        let t = ol_sqrt(t2)
+        p = nf * ol_t_two_tail(t, nf - 2.0)
+        if p > 1.0 { p = 1.0 }
+    }
+    return GrubbsResult { g: g, value: extreme, p: p }
+}
+
+/// Modified (MAD-based) z-score rule; |z| > thresh flags an outlier.
+pub fn modified_z(x: &[f64; 256], n: i32, thresh: f64) -> ModZResult with Mut, Div, Panic {
+    if n < 1 { return ModZResult { max_z: 0.0, n_out: 0 } }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    ol_sort(&!s, n)
+    let med = ol_quantile_sorted(&s, n, 0.5)
+    // MAD_raw = median(|x - med|)
+    var dev: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j < n {
+        let d = x[j as usize] - med
+        dev[j as usize] = if d < 0.0 { 0.0 - d } else { d }
+        j = j + 1
+    }
+    ol_sort(&!dev, n)
+    let mad_raw = ol_quantile_sorted(&dev, n, 0.5)
+    if mad_raw <= 0.0 { return ModZResult { max_z: 0.0, n_out: 0 } }
+    var maxz = 0.0
+    var cnt = 0
+    var kk = 0
+    while kk < n {
+        let d = x[kk as usize] - med
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        let z = 0.6744897501960817 * ad / mad_raw
+        if z > maxz { maxz = z }
+        if z > thresh { cnt = cnt + 1 }
+        kk = kk + 1
+    }
+    return ModZResult { max_z: maxz, n_out: cnt as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Tukey: {1,2,3,4,5,6,7,8,9,100}. sorted, Q1=quantile(.25), Q3=quantile(.75).
+// h1=(9)·.25=2.25 -> s[2]=3 +.25(s3-s2=1)=3.25; h3=9·.75=6.75 -> s[6]=7+.75·(8-7)=7.75.
+// IQR=4.5; upper=7.75+1.5·4.5=14.5; 100 is the one outlier.
+fn test_tukey() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 9 { x[i as usize] = (i + 1) as f64; i = i + 1 }
+    x[9] = 100.0
+    let r = tukey_outliers(&x, 10, 1.5)
+    var ok = true
+    ok = check(1, approx(r.lower, 3.25 - 1.5 * 4.5, 1.0e-9)) && ok
+    ok = check(2, approx(r.upper, 14.5, 1.0e-9)) && ok
+    ok = check(3, r.n_out == 1) && ok
+    return ok
+}
+
+// Grubbs: {1,2,3,4,5,50}. mean=10.833333, sd=19.239728, extreme=50.
+// G=(50-10.833333)/19.239728=39.166667/19.239728=2.035717. p small (<0.01).
+fn test_grubbs() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0; x[5]=50.0
+    let r = grubbs(&x, 6)
+    var ok = true
+    ok = check(10, approx(r.g, 2.035717, 1.0e-4)) && ok
+    ok = check(11, approx(r.value, 50.0, 1.0e-9)) && ok
+    ok = check(12, r.p < 0.01) && ok
+    return ok
+}
+
+// No outlier: {1,2,3,4,5} -> G modest, p ~ 1 (well above 0.05).
+fn test_grubbs_clean() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = grubbs(&x, 5)
+    return check(20, r.p > 0.5)
+}
+
+// Modified z: {1,2,3,4,5,50}. median=3.5, MAD_raw=median|x-3.5|.
+// |devs|={2.5,1.5,0.5,0.5,1.5,46.5} sorted {0.5,0.5,1.5,1.5,2.5,46.5} median=(1.5+1.5)/2=1.5.
+// z(50)=0.6744897·46.5/1.5=20.908 -> one outlier over 3.5.
+fn test_modz() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0; x[5]=50.0
+    let r = modified_z(&x, 6, 3.5)
+    var ok = true
+    ok = check(30, approx(r.max_z, 20.909182, 1.0e-3)) && ok
+    ok = check(31, r.n_out == 1) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_tukey() && ok
+    ok = test_grubbs() && ok
+    ok = test_grubbs_clean() && ok
+    ok = test_modz() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

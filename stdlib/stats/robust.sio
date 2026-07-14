@@ -1,0 +1,215 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/robust.sio — robust location & scale estimators
+//
+// Outlier-resistant descriptive statistics for real clinical data:
+//
+//   median(x, n)                  quantile(x, n, p)     iqr(x, n)
+//   mad(x, n)                     trimmed_mean(x, n, frac)
+//   winsorized_mean(x, n, frac)
+//
+// Quantiles use the type-7 (R default / NumPy linear) rule
+//   h = (n−1)p,  Q = x_(⌊h⌋) + (h−⌊h⌋)·(x_(⌊h⌋+1) − x_(⌊h⌋)).
+// MAD is scaled by 1.482602 so that it is consistent with σ under normality;
+// the trimmed and Winsorized means drop / clamp ⌊frac·n⌋ points at each tail.
+//
+// Pure Sounio: inline insertion sort over a fixed [256] scratch; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Hyndman & Fan (1996) type-7; Huber & Ronchetti, "Robust Statistics" 2e;
+//   Tukey (1977) EDA.
+
+module stats::robust
+
+// insertion sort of the first n entries of a [256] buffer, ascending.
+fn rb_sort(a: &![f64; 256], n: i32) with Mut {
+    var i = 1
+    while i < n {
+        let key = a[i as usize]
+        var j = i - 1
+        while j >= 0 && a[j as usize] > key {
+            a[(j + 1) as usize] = a[j as usize]
+            j = j - 1
+        }
+        a[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// type-7 quantile of an already-sorted buffer.
+fn rb_quantile_sorted(s: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    if n == 1 { return s[0] }
+    var pp = p
+    if pp < 0.0 { pp = 0.0 }
+    if pp > 1.0 { pp = 1.0 }
+    let h = ((n - 1) as f64) * pp
+    var lo = 0
+    // floor(h)
+    while (lo as f64) + 1.0 <= h { lo = lo + 1 }
+    let frac = h - (lo as f64)
+    if lo >= n - 1 { return s[(n - 1) as usize] }
+    return s[lo as usize] + frac * (s[(lo + 1) as usize] - s[lo as usize])
+}
+
+/// Sample quantile (type-7) at probability p in [0,1].
+pub fn quantile(x: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    rb_sort(&!s, n)
+    return rb_quantile_sorted(&s, n, p)
+}
+
+/// Median (type-7 quantile at 0.5).
+pub fn median(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    return quantile(x, n, 0.5)
+}
+
+/// Inter-quartile range Q3 − Q1 (type-7).
+pub fn iqr(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    rb_sort(&!s, n)
+    let q1 = rb_quantile_sorted(&s, n, 0.25)
+    let q3 = rb_quantile_sorted(&s, n, 0.75)
+    return q3 - q1
+}
+
+/// Median absolute deviation, scaled to be σ-consistent under normality.
+pub fn mad(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    let m = median(x, n)
+    var dev: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        let d = x[i as usize] - m
+        dev[i as usize] = if d < 0.0 { 0.0 - d } else { d }
+        i = i + 1
+    }
+    let raw = median(&dev, n)
+    return 1.482602218505602 * raw
+}
+
+/// Symmetric trimmed mean: drop ⌊frac·n⌋ points from each tail.
+pub fn trimmed_mean(x: &[f64; 256], n: i32, frac: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    rb_sort(&!s, n)
+    var g = 0
+    let fn_ = frac * (n as f64)
+    while ((g + 1) as f64) <= fn_ { g = g + 1 }   // g = floor(frac*n)
+    if 2 * g >= n { return rb_quantile_sorted(&s, n, 0.5) }
+    var sum = 0.0
+    var k = g
+    while k < n - g { sum = sum + s[k as usize]; k = k + 1 }
+    return sum / ((n - 2 * g) as f64)
+}
+
+/// Symmetric Winsorized mean: clamp ⌊frac·n⌋ tail points to the fence values.
+pub fn winsorized_mean(x: &[f64; 256], n: i32, frac: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    rb_sort(&!s, n)
+    var g = 0
+    let fn_ = frac * (n as f64)
+    while ((g + 1) as f64) <= fn_ { g = g + 1 }
+    if 2 * g >= n { return rb_quantile_sorted(&s, n, 0.5) }
+    let lo = s[g as usize]
+    let hi = s[(n - 1 - g) as usize]
+    var sum = 0.0
+    var k = 0
+    while k < n {
+        var v = s[k as usize]
+        if v < lo { v = lo }
+        if v > hi { v = hi }
+        sum = sum + v
+        k = k + 1
+    }
+    return sum / (n as f64)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4,5}: median 3, IQR 2 (Q1=2,Q3=4), MAD=1.482602·1=1.482602.
+fn test_basic() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=3.0; x[1]=1.0; x[2]=5.0; x[3]=2.0; x[4]=4.0     // unsorted on purpose
+    var ok = true
+    ok = check(1, approx(median(&x, 5), 3.0, 1.0e-9)) && ok
+    ok = check(2, approx(iqr(&x, 5), 2.0, 1.0e-9)) && ok
+    ok = check(3, approx(mad(&x, 5), 1.482602, 1.0e-5)) && ok
+    ok = check(4, approx(quantile(&x, 5, 0.5), 3.0, 1.0e-9)) && ok
+    return ok
+}
+
+// even n {1,2,3,4}: median (type-7 at .5) = x1 + .5(x2-x1) = 2 + .5 = 2.5.
+fn test_even() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    return check(10, approx(median(&x, 4), 2.5, 1.0e-9))
+}
+
+// {1..10}: median 5.5, Q1=3.25, Q3=7.75, IQR 4.5.
+// trimmed(.1): drop 1 each end -> mean{2..9}=5.5. winsor(.1): {2,2,..,9,9} mean 5.5.
+fn test_ten() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 10 { x[i as usize] = (i + 1) as f64; i = i + 1 }
+    var ok = true
+    ok = check(20, approx(median(&x, 10), 5.5, 1.0e-9)) && ok
+    ok = check(21, approx(iqr(&x, 10), 4.5, 1.0e-9)) && ok
+    ok = check(22, approx(trimmed_mean(&x, 10, 0.1), 5.5, 1.0e-9)) && ok
+    ok = check(23, approx(winsorized_mean(&x, 10, 0.1), 5.5, 1.0e-9)) && ok
+    return ok
+}
+
+// outlier robustness: {1,2,3,4,1000}. median 3 (unmoved); trimmed(.2) drops
+// the 1000 and the 1 -> mean{2,3,4}=3; plain mean would be 202.
+fn test_outlier() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=1000.0
+    var ok = true
+    ok = check(30, approx(median(&x, 5), 3.0, 1.0e-9)) && ok
+    ok = check(31, approx(trimmed_mean(&x, 5, 0.2), 3.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_basic() && ok
+    ok = test_even() && ok
+    ok = test_ten() && ok
+    ok = test_outlier() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

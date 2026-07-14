@@ -619,6 +619,44 @@ companion to Kaplan-Meier: `λ̂ = D/T` with a log-scale 95% CI `λ̂·exp(±1.9
 plus median `ln2/λ̂`, mean `1/λ̂`, and Ŝ(t)=e^{−λ̂t}. Validated: {2,3,5⁺,6,7}
 with one censored → λ̂=0.1739, median 3.986, mean 5.75, S(4)=0.4988.
 
+### `stats::robust` — robust location & scale
+
+| Function | Signature |
+|---|---|
+| `median` / `quantile` | `pub fn median(x: &[f64; 256], n: i32) -> f64 …` · `quantile(x, n, p)` (type-7) |
+| `iqr` / `mad` | `pub fn iqr(x, n) -> f64` · `mad(x, n) -> f64` (σ-consistent, ×1.4826) |
+| `trimmed_mean` / `winsorized_mean` | `pub fn trimmed_mean(x, n, frac) -> f64` · `winsorized_mean(x, n, frac) -> f64` |
+
+Outlier-resistant descriptives: type-7 (R/NumPy-linear) quantiles, the median,
+IQR, the σ-consistent MAD, and symmetric trimmed / Winsorized means. Validated:
+{1,2,3,4,5}→median 3, IQR 2, MAD 1.4826; {1,2,3,4,1000}→median & 20%-trimmed
+mean both 3 (vs raw mean 202).
+
+### `stats::hodges_lehmann` — Hodges-Lehmann estimators
+
+| Function | Signature |
+|---|---|
+| `hl_one` | `pub fn hl_one(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic` |
+| `hl_two` | `pub fn hl_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic` |
+
+The robust location estimators that invert the Wilcoxon tests: `hl_one` is the
+median of the Walsh averages `(xᵢ+xⱼ)/2` (i≤j), `hl_two` the median of the
+pairwise differences `xᵢ−yⱼ`. Validated: {1,2,3,4}→2.5; {1,2,3,4,100}→3.0
+(robust); two-sample shift y=x+5 → −5.
+
+### `stats::outlier` — outlier detection
+
+| Function | Signature |
+|---|---|
+| `tukey_outliers` | `pub fn tukey_outliers(x: &[f64; 256], n: i32, k: f64) -> OutlierFences with Mut, Div, Panic` |
+| `grubbs` | `pub fn grubbs(x: &[f64; 256], n: i32) -> GrubbsResult with Mut, Div, Panic` |
+| `modified_z` | `pub fn modified_z(x: &[f64; 256], n: i32, thresh: f64) -> ModZResult with Mut, Div, Panic` |
+
+Three complementary rules: Tukey boxplot fences (Q1−k·IQR, Q3+k·IQR), Grubbs'
+single-outlier test `G=max|xᵢ−x̄|/s` with the exact two-sided Bonferroni t
+p-value, and the MAD-based Iglewicz-Hoaglin modified z-score. Validated:
+{…,100}→1 Tukey outlier; {1,2,3,4,5,50}→G=2.036, p<0.01, modified-z=20.9.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -660,6 +698,9 @@ use stats::normality::{NormalityResult, normality}
 use stats::km::{KMResult, km}
 use stats::logrank::{LogRankResult, logrank}
 use stats::exp_survival::{ExpSurvResult, exp_survival}
+use stats::robust::{median, quantile, iqr, mad, trimmed_mean, winsorized_mean}
+use stats::hodges_lehmann::{hl_one, hl_two}
+use stats::outlier::{OutlierFences, GrubbsResult, ModZResult, tukey_outliers, grubbs, modified_z}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

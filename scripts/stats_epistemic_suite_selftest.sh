@@ -46,6 +46,9 @@ MODULES=(
   stdlib/stats/km.sio
   stdlib/stats/logrank.sio
   stdlib/stats/exp_survival.sio
+  stdlib/stats/robust.sio
+  stdlib/stats/hodges_lehmann.sio
+  stdlib/stats/outlier.sio
 )
 
 fail=0
