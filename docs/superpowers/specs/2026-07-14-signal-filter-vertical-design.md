@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-07-14-signal-filter-vertical-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-07-14-signal-filter-vertical-design
+-->
+
 # Design — Harden the signal::filter vertical (coordinated, disjoint)
 **Date:** 2026-07-14 · no compiler changes · `signal/` cold (no open PR touching signal/special/math). By-reference
 API (`&!filter`, `&[f64;512]`) is cross-module-safe. Adds run-proof/example/gate; only `filter.sio` header optional (none needed). EN-UK.

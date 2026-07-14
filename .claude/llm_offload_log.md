@@ -2785,3 +2785,7 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - life_table = **PASS**: n'ᵢ=nᵢ−wᵢ/2, qᵢ=dᵢ/n'ᵢ, Ŝ=Πpᵢ (Cutler-Ederer) exact; 3-interval example (0.9, 0.8047, 0.7231) verified.
 - Theme: survival-analysis extensions — completes the survival family (km, logrank, exp_survival + Nelson-Aalen, RMST, life-table). All deterministic, fully hand-derivable. #852-safe: sort-free walks / cumulative products, no nested data-array calls. Suite runner: 55 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-dUWR1L/`, `/tmp/llm-offload-K5q4eh/`, `/tmp/llm-offload-vpkpHX/`.
+
+## 2026-07-14 — math-review: signal::filter run-proof
+- Files: `tests/stdlib/signal/test_filter_stdlib.sio`, `examples/signal/filter_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. FIR MA(4) DC gain=Σh=1 + impulse response = h (0.25×4 then 0); IIR1 bilinear lowpass DC gain(z=1)=1 (const 2→2); IIR1 highpass DC gain(z=1)=0 (DC blocked). Default Madaros. SIGNAL_FILTER_GATE_OK.
