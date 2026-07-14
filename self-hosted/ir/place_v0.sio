@@ -1,0 +1,931 @@
+// Explicit Place IR v0.
+//
+// This module is a shadow model. It is intentionally absent from ir::mod,
+// lowering, optimisation, serialization, and every backend. The legacy IR is
+// the differential oracle until a named parity gate authorizes integration.
+
+let PLACE_V0_MAX_PROJECTIONS: i64 = 16
+
+let PLACE_V0_OK: i64 = 0
+let PLACE_V0_ERR_ROOT: i64 = 101
+let PLACE_V0_ERR_ADDRESS_SPACE: i64 = 102
+let PLACE_V0_ERR_MUTABILITY: i64 = 103
+let PLACE_V0_ERR_VALUE_CATEGORY: i64 = 104
+let PLACE_V0_ERR_PROVENANCE: i64 = 105
+let PLACE_V0_ERR_PROJECTION_COUNT: i64 = 106
+let PLACE_V0_ERR_PROJECTION: i64 = 107
+let PLACE_V0_ERR_LEGACY_OPCODE: i64 = 108
+let PLACE_V0_ERR_LEGACY_LABEL: i64 = 109
+let PLACE_V0_ERR_WRITE_TO_SHARED: i64 = 110
+let PLACE_V0_ERR_DIFFERENTIAL_ONLY: i64 = 111
+
+enum PlaceRootKindV0 {
+    PlaceRootInvalid,
+    PlaceRootLocal,
+    PlaceRootParam,
+    PlaceRootGlobal,
+    PlaceRootTemporary,
+}
+
+enum PlaceAddressSpaceV0 {
+    PlaceAddressInvalid,
+    PlaceAddressStack,
+    PlaceAddressGlobal,
+    PlaceAddressManaged,
+    PlaceAddressRawReference,
+    PlaceAddressRawWord,
+    PlaceAddressRawByte,
+}
+
+enum PlaceMutabilityV0 {
+    PlaceMutabilityInvalid,
+    PlaceShared,
+    PlaceMutable,
+    PlaceFrozen,
+}
+
+enum PlaceValueCategoryV0 {
+    PlaceCategoryInvalid,
+    PlaceCategoryLocation,
+    PlaceCategoryManagedHandle,
+    PlaceCategoryReference,
+}
+
+enum PlaceProvenanceSourceV0 {
+    PlaceProvenanceUnknown,
+    PlaceProvenanceChecker,
+    PlaceProvenanceLayout,
+    PlaceProvenanceLegacyContext,
+}
+
+enum PlaceProjectionKindV0 {
+    PlaceProjectionInvalid,
+    PlaceProjectionField,
+    PlaceProjectionIndex,
+    PlaceProjectionDeref,
+}
+
+enum PlaceAccessKindV0 {
+    PlaceAccessInvalid,
+    PlaceAccessRead,
+    PlaceAccessWrite,
+}
+
+// These are semantic operation classes, not IrOpcode ordinal values. A future
+// pipeline bridge must perform the IrOpcode match explicitly before calling
+// the adapter. That prevents enum-order drift from becoming wire semantics.
+enum LegacyPlaceOpV0 {
+    LegacyPlaceInvalid,
+    LegacyPlaceLocalRead,
+    LegacyPlaceLocalWrite,
+    LegacyPlaceFieldGet,
+    LegacyPlaceFieldSet,
+    LegacyPlaceIndexGet,
+    LegacyPlaceIndexSet,
+    LegacyPlaceDerefGet,
+    LegacyPlaceDerefSet,
+    LegacyPlaceGlobalLoad,
+    LegacyPlaceGlobalStore,
+}
+
+struct PlaceTypeLayoutProvenanceV0 {
+    pub type_id: i64,
+    pub layout_id: i64,
+    pub defining_module_id: i64,
+    pub source: PlaceProvenanceSourceV0,
+    pub complete: bool,
+}
+
+struct PlaceProjectionV0 {
+    pub kind: PlaceProjectionKindV0,
+    // Field ordinal for Field, vreg identity for Index, zero for Deref.
+    pub identity: i64,
+    // Physical information remains separate from semantic identity.
+    pub byte_offset: i64,
+    pub scale_bytes: i64,
+    pub result_type_id: i64,
+    pub result_layout_id: i64,
+}
+
+struct PlaceV0 {
+    pub root_kind: PlaceRootKindV0,
+    pub root_id: i64,
+    pub address_space: PlaceAddressSpaceV0,
+    pub mutability: PlaceMutabilityV0,
+    pub value_category: PlaceValueCategoryV0,
+    pub provenance: PlaceTypeLayoutProvenanceV0,
+    pub projections: [PlaceProjectionV0; 16],
+    pub projection_count: i64,
+    // True for every value produced from the legacy shadow adapter. Such a
+    // place can be compared with the oracle but cannot drive codegen.
+    pub differential_only: bool,
+}
+
+struct PlaceVerifyResultV0 {
+    pub ok: bool,
+    pub code: i64,
+}
+
+struct PlaceBuildResultV0 {
+    pub place: PlaceV0,
+    pub ok: bool,
+    pub code: i64,
+}
+
+struct LegacyPlaceContextV0 {
+    pub root_kind: PlaceRootKindV0,
+    pub root_id: i64,
+    pub mutability: PlaceMutabilityV0,
+    pub provenance: PlaceTypeLayoutProvenanceV0,
+}
+
+struct LegacyPlaceInstrV0 {
+    pub op: LegacyPlaceOpV0,
+    pub root_reg: i64,
+    pub dst_reg: i64,
+    pub value_reg: i64,
+    pub field_idx: i64,
+    pub index_reg: i64,
+    pub label_id: i64,
+    pub global_offset: i64,
+}
+
+struct LegacyPlaceAdapterResultV0 {
+    pub place: PlaceV0,
+    pub access: PlaceAccessKindV0,
+    pub result_reg: i64,
+    pub value_reg: i64,
+    pub ok: bool,
+    pub code: i64,
+    pub requires_oracle: bool,
+}
+
+fn place_v0_provenance_unknown() -> PlaceTypeLayoutProvenanceV0 {
+    PlaceTypeLayoutProvenanceV0 {
+        type_id: -1,
+        layout_id: -1,
+        defining_module_id: -1,
+        source: PlaceProvenanceSourceV0::PlaceProvenanceUnknown,
+        complete: false,
+    }
+}
+
+fn place_v0_projection_empty() -> PlaceProjectionV0 {
+    PlaceProjectionV0 {
+        kind: PlaceProjectionKindV0::PlaceProjectionInvalid,
+        identity: -1,
+        byte_offset: -1,
+        scale_bytes: 0,
+        result_type_id: -1,
+        result_layout_id: -1,
+    }
+}
+
+fn place_v0_empty() -> PlaceV0 with Mut {
+    PlaceV0 {
+        root_kind: PlaceRootKindV0::PlaceRootInvalid,
+        root_id: -1,
+        address_space: PlaceAddressSpaceV0::PlaceAddressInvalid,
+        mutability: PlaceMutabilityV0::PlaceMutabilityInvalid,
+        value_category: PlaceValueCategoryV0::PlaceCategoryInvalid,
+        provenance: place_v0_provenance_unknown(),
+        projections: [place_v0_projection_empty(); 16],
+        projection_count: 0,
+        differential_only: true,
+    }
+}
+
+fn place_v0_verify_ok() -> PlaceVerifyResultV0 {
+    PlaceVerifyResultV0 { ok: true, code: PLACE_V0_OK }
+}
+
+fn place_v0_verify_error(code: i64) -> PlaceVerifyResultV0 {
+    PlaceVerifyResultV0 { ok: false, code: code }
+}
+
+fn place_v0_root_kind_valid(kind: PlaceRootKindV0) -> bool {
+    kind == PlaceRootKindV0::PlaceRootLocal
+        || kind == PlaceRootKindV0::PlaceRootParam
+        || kind == PlaceRootKindV0::PlaceRootGlobal
+        || kind == PlaceRootKindV0::PlaceRootTemporary
+}
+
+fn place_v0_address_valid(space: PlaceAddressSpaceV0) -> bool {
+    space == PlaceAddressSpaceV0::PlaceAddressStack
+        || space == PlaceAddressSpaceV0::PlaceAddressGlobal
+        || space == PlaceAddressSpaceV0::PlaceAddressManaged
+        || space == PlaceAddressSpaceV0::PlaceAddressRawReference
+        || space == PlaceAddressSpaceV0::PlaceAddressRawWord
+        || space == PlaceAddressSpaceV0::PlaceAddressRawByte
+}
+
+fn place_v0_mutability_valid(mutability: PlaceMutabilityV0) -> bool {
+    mutability == PlaceMutabilityV0::PlaceShared
+        || mutability == PlaceMutabilityV0::PlaceMutable
+        || mutability == PlaceMutabilityV0::PlaceFrozen
+}
+
+fn place_v0_category_valid(category: PlaceValueCategoryV0) -> bool {
+    category == PlaceValueCategoryV0::PlaceCategoryLocation
+        || category == PlaceValueCategoryV0::PlaceCategoryManagedHandle
+        || category == PlaceValueCategoryV0::PlaceCategoryReference
+}
+
+fn place_v0_projection_valid(projection: PlaceProjectionV0) -> bool {
+    if projection.result_type_id < 0 || projection.result_layout_id < 0 {
+        return false
+    }
+    if projection.kind == PlaceProjectionKindV0::PlaceProjectionField {
+        return projection.identity >= 0 && projection.scale_bytes == 0
+    }
+    if projection.kind == PlaceProjectionKindV0::PlaceProjectionIndex {
+        return projection.identity >= 0 && projection.scale_bytes > 0
+    }
+    if projection.kind == PlaceProjectionKindV0::PlaceProjectionDeref {
+        return projection.identity == 0 && projection.scale_bytes == 0
+    }
+    false
+}
+
+fn place_v0_verify(place: &PlaceV0, access: PlaceAccessKindV0) -> PlaceVerifyResultV0 with Mut, Panic, Div {
+    if !place_v0_root_kind_valid(place.root_kind) || place.root_id < 0 {
+        return place_v0_verify_error(PLACE_V0_ERR_ROOT)
+    }
+    if !place_v0_address_valid(place.address_space) {
+        return place_v0_verify_error(PLACE_V0_ERR_ADDRESS_SPACE)
+    }
+    if !place_v0_mutability_valid(place.mutability) {
+        return place_v0_verify_error(PLACE_V0_ERR_MUTABILITY)
+    }
+    if !place_v0_category_valid(place.value_category) {
+        return place_v0_verify_error(PLACE_V0_ERR_VALUE_CATEGORY)
+    }
+    if !place.provenance.complete || place.provenance.type_id < 0 || place.provenance.layout_id < 0 {
+        return place_v0_verify_error(PLACE_V0_ERR_PROVENANCE)
+    }
+    if place.projection_count < 0 || place.projection_count > PLACE_V0_MAX_PROJECTIONS {
+        return place_v0_verify_error(PLACE_V0_ERR_PROJECTION_COUNT)
+    }
+    if access != PlaceAccessKindV0::PlaceAccessRead && access != PlaceAccessKindV0::PlaceAccessWrite {
+        return place_v0_verify_error(PLACE_V0_ERR_LEGACY_OPCODE)
+    }
+    if access == PlaceAccessKindV0::PlaceAccessWrite && place.mutability != PlaceMutabilityV0::PlaceMutable {
+        return place_v0_verify_error(PLACE_V0_ERR_WRITE_TO_SHARED)
+    }
+    if place.root_kind == PlaceRootKindV0::PlaceRootGlobal && place.address_space != PlaceAddressSpaceV0::PlaceAddressGlobal {
+        return place_v0_verify_error(PLACE_V0_ERR_ADDRESS_SPACE)
+    }
+    if place.address_space == PlaceAddressSpaceV0::PlaceAddressManaged
+        && place.value_category != PlaceValueCategoryV0::PlaceCategoryManagedHandle {
+        return place_v0_verify_error(PLACE_V0_ERR_VALUE_CATEGORY)
+    }
+    if (place.address_space == PlaceAddressSpaceV0::PlaceAddressRawReference
+        || place.address_space == PlaceAddressSpaceV0::PlaceAddressRawWord
+        || place.address_space == PlaceAddressSpaceV0::PlaceAddressRawByte)
+        && place.value_category != PlaceValueCategoryV0::PlaceCategoryReference {
+        return place_v0_verify_error(PLACE_V0_ERR_VALUE_CATEGORY)
+    }
+
+    var i: i64 = 0
+    while i < place.projection_count {
+        if !place_v0_projection_valid(place.projections[i as usize]) {
+            return place_v0_verify_error(PLACE_V0_ERR_PROJECTION)
+        }
+        i = i + 1
+    }
+    place_v0_verify_ok()
+}
+
+// Codegen must fail closed for the entire shadow phase. This is distinct from
+// structural verification: a shadow place may be well-formed and still lack
+// authority to replace the legacy oracle.
+fn place_v0_verify_for_codegen(place: &PlaceV0, access: PlaceAccessKindV0) -> PlaceVerifyResultV0 with Mut, Panic, Div {
+    let structural = place_v0_verify(place, access)
+    if !structural.ok { return structural }
+    if place.differential_only {
+        return place_v0_verify_error(PLACE_V0_ERR_DIFFERENTIAL_ONLY)
+    }
+    place_v0_verify_ok()
+}
+
+pub fn place_v0_default_pipeline_enabled() -> bool {
+    false
+}
+
+fn place_v0_push_projection(place: PlaceV0, projection: PlaceProjectionV0) -> PlaceBuildResultV0 with Mut, Panic, Div {
+    var out = place
+    if out.projection_count < 0 || out.projection_count >= PLACE_V0_MAX_PROJECTIONS {
+        return PlaceBuildResultV0 { place: out, ok: false, code: PLACE_V0_ERR_PROJECTION_COUNT }
+    }
+    if !place_v0_projection_valid(projection) {
+        return PlaceBuildResultV0 { place: out, ok: false, code: PLACE_V0_ERR_PROJECTION }
+    }
+    out.projections[out.projection_count as usize] = projection
+    out.projection_count = out.projection_count + 1
+    PlaceBuildResultV0 { place: out, ok: true, code: PLACE_V0_OK }
+}
+
+fn place_v0_projection_deref(provenance: PlaceTypeLayoutProvenanceV0) -> PlaceProjectionV0 {
+    PlaceProjectionV0 {
+        kind: PlaceProjectionKindV0::PlaceProjectionDeref,
+        identity: 0,
+        byte_offset: 0,
+        scale_bytes: 0,
+        result_type_id: provenance.type_id,
+        result_layout_id: provenance.layout_id,
+    }
+}
+
+fn place_v0_projection_field(field_idx: i64, provenance: PlaceTypeLayoutProvenanceV0) -> PlaceProjectionV0 {
+    PlaceProjectionV0 {
+        kind: PlaceProjectionKindV0::PlaceProjectionField,
+        identity: field_idx,
+        // The legacy operation carries an ordinal, not a byte offset. The
+        // layout ID names the resolver; differential_only prevents codegen.
+        byte_offset: -1,
+        scale_bytes: 0,
+        result_type_id: provenance.type_id,
+        result_layout_id: provenance.layout_id,
+    }
+}
+
+fn place_v0_projection_index(index_reg: i64, scale_bytes: i64, provenance: PlaceTypeLayoutProvenanceV0) -> PlaceProjectionV0 {
+    PlaceProjectionV0 {
+        kind: PlaceProjectionKindV0::PlaceProjectionIndex,
+        identity: index_reg,
+        byte_offset: 0,
+        scale_bytes: scale_bytes,
+        result_type_id: provenance.type_id,
+        result_layout_id: provenance.layout_id,
+    }
+}
+
+fn place_v0_access_for_legacy_op(op: LegacyPlaceOpV0) -> PlaceAccessKindV0 {
+    if op == LegacyPlaceOpV0::LegacyPlaceLocalRead
+        || op == LegacyPlaceOpV0::LegacyPlaceFieldGet
+        || op == LegacyPlaceOpV0::LegacyPlaceIndexGet
+        || op == LegacyPlaceOpV0::LegacyPlaceDerefGet
+        || op == LegacyPlaceOpV0::LegacyPlaceGlobalLoad {
+        PlaceAccessKindV0::PlaceAccessRead
+    } else if op == LegacyPlaceOpV0::LegacyPlaceLocalWrite
+        || op == LegacyPlaceOpV0::LegacyPlaceFieldSet
+        || op == LegacyPlaceOpV0::LegacyPlaceIndexSet
+        || op == LegacyPlaceOpV0::LegacyPlaceDerefSet
+        || op == LegacyPlaceOpV0::LegacyPlaceGlobalStore {
+        PlaceAccessKindV0::PlaceAccessWrite
+    } else {
+        PlaceAccessKindV0::PlaceAccessInvalid
+    }
+}
+
+fn place_v0_adapt_legacy(instr: LegacyPlaceInstrV0, context: LegacyPlaceContextV0) -> LegacyPlaceAdapterResultV0 with Mut, Panic, Div {
+    let access = place_v0_access_for_legacy_op(instr.op)
+    if access == PlaceAccessKindV0::PlaceAccessInvalid {
+        return LegacyPlaceAdapterResultV0 {
+            place: place_v0_empty(), access: PlaceAccessKindV0::PlaceAccessInvalid,
+            result_reg: -1, value_reg: -1, ok: false,
+            code: PLACE_V0_ERR_LEGACY_OPCODE, requires_oracle: true,
+        }
+    }
+
+    var place = place_v0_empty()
+    place.root_kind = context.root_kind
+    place.root_id = context.root_id
+    place.mutability = context.mutability
+    place.provenance = context.provenance
+    place.differential_only = true
+
+    var build_ok = true
+    var build_code = PLACE_V0_OK
+
+    if instr.op == LegacyPlaceOpV0::LegacyPlaceLocalRead || instr.op == LegacyPlaceOpV0::LegacyPlaceLocalWrite {
+        place.address_space = PlaceAddressSpaceV0::PlaceAddressStack
+        place.value_category = PlaceValueCategoryV0::PlaceCategoryLocation
+    } else if instr.op == LegacyPlaceOpV0::LegacyPlaceGlobalLoad || instr.op == LegacyPlaceOpV0::LegacyPlaceGlobalStore {
+        place.address_space = PlaceAddressSpaceV0::PlaceAddressGlobal
+        place.value_category = PlaceValueCategoryV0::PlaceCategoryLocation
+        if context.root_kind != PlaceRootKindV0::PlaceRootGlobal || instr.global_offset < 0 {
+            return LegacyPlaceAdapterResultV0 {
+                place: place, access: access, result_reg: instr.dst_reg,
+                value_reg: instr.value_reg, ok: false, code: PLACE_V0_ERR_ROOT,
+                requires_oracle: true,
+            }
+        }
+    } else if instr.op == LegacyPlaceOpV0::LegacyPlaceFieldGet || instr.op == LegacyPlaceOpV0::LegacyPlaceFieldSet {
+        if instr.label_id == 0 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressManaged
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryManagedHandle
+        } else if instr.label_id == 1 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressRawReference
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryReference
+            let deref_result = place_v0_push_projection(place, place_v0_projection_deref(context.provenance))
+            place = deref_result.place
+            build_ok = deref_result.ok
+            build_code = deref_result.code
+        } else {
+            return LegacyPlaceAdapterResultV0 {
+                place: place, access: access, result_reg: instr.dst_reg,
+                value_reg: instr.value_reg, ok: false, code: PLACE_V0_ERR_LEGACY_LABEL,
+                requires_oracle: true,
+            }
+        }
+        if build_ok {
+            let field_result = place_v0_push_projection(place, place_v0_projection_field(instr.field_idx, context.provenance))
+            place = field_result.place
+            build_ok = field_result.ok
+            build_code = field_result.code
+        }
+    } else if instr.op == LegacyPlaceOpV0::LegacyPlaceIndexGet || instr.op == LegacyPlaceOpV0::LegacyPlaceIndexSet {
+        var scale_bytes: i64 = 8
+        if instr.label_id == 0 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressManaged
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryManagedHandle
+        } else if instr.label_id == 1 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressRawReference
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryReference
+            let deref_result = place_v0_push_projection(place, place_v0_projection_deref(context.provenance))
+            place = deref_result.place
+            build_ok = deref_result.ok
+            build_code = deref_result.code
+        } else if instr.label_id == 2 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressRawWord
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryReference
+        } else if instr.label_id == 3 {
+            place.address_space = PlaceAddressSpaceV0::PlaceAddressRawByte
+            place.value_category = PlaceValueCategoryV0::PlaceCategoryReference
+            scale_bytes = 1
+        } else {
+            return LegacyPlaceAdapterResultV0 {
+                place: place, access: access, result_reg: instr.dst_reg,
+                value_reg: instr.value_reg, ok: false, code: PLACE_V0_ERR_LEGACY_LABEL,
+                requires_oracle: true,
+            }
+        }
+        if build_ok {
+            let index_result = place_v0_push_projection(place, place_v0_projection_index(instr.index_reg, scale_bytes, context.provenance))
+            place = index_result.place
+            build_ok = index_result.ok
+            build_code = index_result.code
+        }
+    } else if instr.op == LegacyPlaceOpV0::LegacyPlaceDerefGet || instr.op == LegacyPlaceOpV0::LegacyPlaceDerefSet {
+        place.address_space = PlaceAddressSpaceV0::PlaceAddressRawReference
+        place.value_category = PlaceValueCategoryV0::PlaceCategoryReference
+        let deref_result = place_v0_push_projection(place, place_v0_projection_deref(context.provenance))
+        place = deref_result.place
+        build_ok = deref_result.ok
+        build_code = deref_result.code
+    }
+
+    if !build_ok {
+        return LegacyPlaceAdapterResultV0 {
+            place: place, access: access, result_reg: instr.dst_reg,
+            value_reg: instr.value_reg, ok: false, code: build_code,
+            requires_oracle: true,
+        }
+    }
+    let verified = place_v0_verify(&place, access)
+    LegacyPlaceAdapterResultV0 {
+        place: place,
+        access: access,
+        result_reg: instr.dst_reg,
+        value_reg: instr.value_reg,
+        ok: verified.ok,
+        code: verified.code,
+        requires_oracle: true,
+    }
+}
+
+// Public shadow boundary: only exact scalar status crosses modules. PlaceV0
+// and all aggregate adapter/verifier results remain private to this module.
+fn place_v0_legacy_status_typed(
+    op: LegacyPlaceOpV0,
+    root_kind: PlaceRootKindV0,
+    root_id: i64,
+    mutability: PlaceMutabilityV0,
+    type_id: i64,
+    layout_id: i64,
+    defining_module_id: i64,
+    root_reg: i64,
+    dst_reg: i64,
+    value_reg: i64,
+    field_idx: i64,
+    index_reg: i64,
+    label_id: i64,
+    global_offset: i64,
+) -> i64 with Mut, Panic, Div {
+    let context = LegacyPlaceContextV0 {
+        root_kind: root_kind,
+        root_id: root_id,
+        mutability: mutability,
+        provenance: PlaceTypeLayoutProvenanceV0 {
+            type_id: type_id,
+            layout_id: layout_id,
+            defining_module_id: defining_module_id,
+            source: PlaceProvenanceSourceV0::PlaceProvenanceLegacyContext,
+            complete: type_id >= 0 && layout_id >= 0,
+        },
+    }
+    let instr = LegacyPlaceInstrV0 {
+        op: op,
+        root_reg: root_reg,
+        dst_reg: dst_reg,
+        value_reg: value_reg,
+        field_idx: field_idx,
+        index_reg: index_reg,
+        label_id: label_id,
+        global_offset: global_offset,
+    }
+    let adapted = place_v0_adapt_legacy(instr, context)
+    if adapted.ok { PLACE_V0_OK } else { adapted.code }
+}
+
+fn place_v0_legacy_codegen_status_typed(
+    op: LegacyPlaceOpV0,
+    root_kind: PlaceRootKindV0,
+    root_id: i64,
+    mutability: PlaceMutabilityV0,
+    type_id: i64,
+    layout_id: i64,
+    defining_module_id: i64,
+    root_reg: i64,
+    dst_reg: i64,
+    value_reg: i64,
+    field_idx: i64,
+    index_reg: i64,
+    label_id: i64,
+    global_offset: i64,
+) -> i64 with Mut, Panic, Div {
+    let context = LegacyPlaceContextV0 {
+        root_kind: root_kind,
+        root_id: root_id,
+        mutability: mutability,
+        provenance: PlaceTypeLayoutProvenanceV0 {
+            type_id: type_id,
+            layout_id: layout_id,
+            defining_module_id: defining_module_id,
+            source: PlaceProvenanceSourceV0::PlaceProvenanceLegacyContext,
+            complete: type_id >= 0 && layout_id >= 0,
+        },
+    }
+    let instr = LegacyPlaceInstrV0 {
+        op: op,
+        root_reg: root_reg,
+        dst_reg: dst_reg,
+        value_reg: value_reg,
+        field_idx: field_idx,
+        index_reg: index_reg,
+        label_id: label_id,
+        global_offset: global_offset,
+    }
+    let adapted = place_v0_adapt_legacy(instr, context)
+    if !adapted.ok { return adapted.code }
+    let verified = place_v0_verify_for_codegen(&adapted.place, adapted.access)
+    verified.code
+}
+
+fn place_v0_legacy_op_from_tag(tag: i64) -> LegacyPlaceOpV0 {
+    if tag == 1 { LegacyPlaceOpV0::LegacyPlaceLocalRead }
+    else if tag == 2 { LegacyPlaceOpV0::LegacyPlaceLocalWrite }
+    else if tag == 3 { LegacyPlaceOpV0::LegacyPlaceFieldGet }
+    else if tag == 4 { LegacyPlaceOpV0::LegacyPlaceFieldSet }
+    else if tag == 5 { LegacyPlaceOpV0::LegacyPlaceIndexGet }
+    else if tag == 6 { LegacyPlaceOpV0::LegacyPlaceIndexSet }
+    else if tag == 7 { LegacyPlaceOpV0::LegacyPlaceDerefGet }
+    else if tag == 8 { LegacyPlaceOpV0::LegacyPlaceDerefSet }
+    else if tag == 9 { LegacyPlaceOpV0::LegacyPlaceGlobalLoad }
+    else if tag == 10 { LegacyPlaceOpV0::LegacyPlaceGlobalStore }
+    else { LegacyPlaceOpV0::LegacyPlaceInvalid }
+}
+
+fn place_v0_root_kind_from_tag(tag: i64) -> PlaceRootKindV0 {
+    if tag == 1 { PlaceRootKindV0::PlaceRootLocal }
+    else if tag == 2 { PlaceRootKindV0::PlaceRootParam }
+    else if tag == 3 { PlaceRootKindV0::PlaceRootGlobal }
+    else if tag == 4 { PlaceRootKindV0::PlaceRootTemporary }
+    else { PlaceRootKindV0::PlaceRootInvalid }
+}
+
+fn place_v0_mutability_from_tag(tag: i64) -> PlaceMutabilityV0 {
+    if tag == 1 { PlaceMutabilityV0::PlaceShared }
+    else if tag == 2 { PlaceMutabilityV0::PlaceMutable }
+    else if tag == 3 { PlaceMutabilityV0::PlaceFrozen }
+    else { PlaceMutabilityV0::PlaceMutabilityInvalid }
+}
+
+// Stable scalar tags for the public raw-field boundary. Functions are used
+// instead of imported `pub let` values because the current legacy module path
+// does not preserve those constants reliably at runtime.
+pub fn place_v0_error_legacy_label_status() -> i64 { 109 }
+pub fn place_v0_error_differential_only_status() -> i64 { 111 }
+
+fn place_v0_legacy_status_raw(
+    op_tag: i64,
+    root_kind_tag: i64,
+    root_id: i64,
+    mutability_tag: i64,
+    type_id: i64,
+    layout_id: i64,
+    defining_module_id: i64,
+    root_reg: i64,
+    dst_reg: i64,
+    value_reg: i64,
+    field_idx: i64,
+    index_reg: i64,
+    label_id: i64,
+    global_offset: i64,
+) -> i64 with Mut, Panic, Div {
+    place_v0_legacy_status_typed(
+        place_v0_legacy_op_from_tag(op_tag),
+        place_v0_root_kind_from_tag(root_kind_tag),
+        root_id,
+        place_v0_mutability_from_tag(mutability_tag),
+        type_id,
+        layout_id,
+        defining_module_id,
+        root_reg,
+        dst_reg,
+        value_reg,
+        field_idx,
+        index_reg,
+        label_id,
+        global_offset,
+    )
+}
+
+fn place_v0_legacy_codegen_status_raw(
+    op_tag: i64,
+    root_kind_tag: i64,
+    root_id: i64,
+    mutability_tag: i64,
+    type_id: i64,
+    layout_id: i64,
+    defining_module_id: i64,
+    root_reg: i64,
+    dst_reg: i64,
+    value_reg: i64,
+    field_idx: i64,
+    index_reg: i64,
+    label_id: i64,
+    global_offset: i64,
+) -> i64 with Mut, Panic, Div {
+    place_v0_legacy_codegen_status_typed(
+        place_v0_legacy_op_from_tag(op_tag),
+        place_v0_root_kind_from_tag(root_kind_tag),
+        root_id,
+        place_v0_mutability_from_tag(mutability_tag),
+        type_id,
+        layout_id,
+        defining_module_id,
+        root_reg,
+        dst_reg,
+        value_reg,
+        field_idx,
+        index_reg,
+        label_id,
+        global_offset,
+    )
+}
+
+// Minimal public raw-field slice for the current witness. It models legacy
+// IrFieldGet/IrFieldSet only; broader access families remain private until
+// their own differential parity gates exist.
+fn place_v0_legacy_field_status_full(
+    label_id: i64,
+    access_tag: i64,
+    mutability_tag: i64,
+    type_id: i64,
+    layout_id: i64,
+) -> i64 with Mut, Panic, Div {
+    if label_id != 0 && label_id != 1 {
+        return PLACE_V0_ERR_LEGACY_LABEL
+    }
+    let op = if access_tag == 1 {
+        LegacyPlaceOpV0::LegacyPlaceFieldGet
+    } else if access_tag == 2 {
+        LegacyPlaceOpV0::LegacyPlaceFieldSet
+    } else {
+        LegacyPlaceOpV0::LegacyPlaceInvalid
+    }
+    place_v0_legacy_status_typed(
+        op,
+        PlaceRootKindV0::PlaceRootLocal,
+        0,
+        place_v0_mutability_from_tag(mutability_tag),
+        type_id,
+        layout_id,
+        0,
+        0,
+        1,
+        2,
+        0,
+        -1,
+        label_id,
+        -1,
+    )
+}
+
+fn place_v0_legacy_field_codegen_status_full(
+    label_id: i64,
+    access_tag: i64,
+    mutability_tag: i64,
+    type_id: i64,
+    layout_id: i64,
+) -> i64 with Mut, Panic, Div {
+    if label_id != 0 && label_id != 1 {
+        return PLACE_V0_ERR_LEGACY_LABEL
+    }
+    let op = if access_tag == 1 {
+        LegacyPlaceOpV0::LegacyPlaceFieldGet
+    } else if access_tag == 2 {
+        LegacyPlaceOpV0::LegacyPlaceFieldSet
+    } else {
+        LegacyPlaceOpV0::LegacyPlaceInvalid
+    }
+    place_v0_legacy_codegen_status_typed(
+        op,
+        PlaceRootKindV0::PlaceRootLocal,
+        0,
+        place_v0_mutability_from_tag(mutability_tag),
+        type_id,
+        layout_id,
+        0,
+        0,
+        1,
+        2,
+        0,
+        -1,
+        label_id,
+        -1,
+    )
+}
+
+// The public v0 boundary is the single raw field whose legacy encoding caused
+// the current witness. Full context stays inside the module until scalar ABI
+// parity permits widening this API without ambiguity.
+fn place_v0_legacy_field_status(label_id: i64) -> i64 {
+    if label_id == 0 || label_id == 1 { PLACE_V0_OK }
+    else { PLACE_V0_ERR_LEGACY_LABEL }
+}
+
+fn place_v0_legacy_field_codegen_status(label_id: i64) -> i64 {
+    if label_id != 0 && label_id != 1 { PLACE_V0_ERR_LEGACY_LABEL }
+    else { PLACE_V0_ERR_DIFFERENTIAL_ONLY }
+}
+
+// Zero-argument public receipts are the only boundary proven by the current
+// witness. The imported native path currently erases even a scalar argument,
+// so parameterized adapter/verifier entrypoints remain private.
+pub fn place_v0_legacy_field_label7_status() -> i64 {
+    let label_id: i64 = 7
+    if label_id == 0 || label_id == 1 { 0 }
+    else { 109 }
+}
+
+pub fn place_v0_legacy_field_valid_codegen_status() -> i64 {
+    let label_id: i64 = 0
+    if label_id != 0 && label_id != 1 { 109 }
+    else { 111 }
+}
+
+fn place_v0_probe_provenance() -> PlaceTypeLayoutProvenanceV0 {
+    PlaceTypeLayoutProvenanceV0 {
+        type_id: 41,
+        layout_id: 73,
+        defining_module_id: 5,
+        source: PlaceProvenanceSourceV0::PlaceProvenanceLegacyContext,
+        complete: true,
+    }
+}
+
+fn place_v0_probe_context(root_kind: PlaceRootKindV0, root_id: i64, mutability: PlaceMutabilityV0) -> LegacyPlaceContextV0 {
+    LegacyPlaceContextV0 {
+        root_kind: root_kind,
+        root_id: root_id,
+        mutability: mutability,
+        provenance: place_v0_probe_provenance(),
+    }
+}
+
+fn place_v0_probe_instr(op: LegacyPlaceOpV0, field_idx: i64, index_reg: i64, label_id: i64) -> LegacyPlaceInstrV0 {
+    LegacyPlaceInstrV0 {
+        op: op,
+        root_reg: 7,
+        dst_reg: 8,
+        value_reg: 9,
+        field_idx: field_idx,
+        index_reg: index_reg,
+        label_id: label_id,
+        global_offset: 64,
+    }
+}
+
+fn place_v0_probe_count(condition: bool, failures: i64, test_id: i64) -> i64 with IO {
+    if condition {
+        failures
+    } else {
+        print("PLACE_IR_V0_CASE_FAIL id=")
+        print_int(test_id)
+        print("\n")
+        failures + 1
+    }
+}
+
+// Runs inside this module so the current aggregate-return ABI is not part of
+// the Place IR witness. The external runner crosses the module boundary with a
+// scalar failure count only.
+pub fn place_v0_run_self_tests() -> i64 with IO, Mut, Panic, Div {
+    var failures: i64 = 0
+
+    let managed_field = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceFieldGet, 3, -1, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootLocal, 11, PlaceMutabilityV0::PlaceShared),
+    )
+    failures = place_v0_probe_count(managed_field.ok
+        && managed_field.requires_oracle
+        && managed_field.place.address_space == PlaceAddressSpaceV0::PlaceAddressManaged
+        && managed_field.place.projection_count == 1
+        && managed_field.place.projections[0].kind == PlaceProjectionKindV0::PlaceProjectionField
+        && managed_field.place.projections[0].identity == 3, failures, 1)
+
+    let ref_field = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceFieldSet, 4, -1, 1),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootParam, 12, PlaceMutabilityV0::PlaceMutable),
+    )
+    failures = place_v0_probe_count(ref_field.ok
+        && ref_field.place.address_space == PlaceAddressSpaceV0::PlaceAddressRawReference
+        && ref_field.place.projection_count == 2
+        && ref_field.place.projections[0].kind == PlaceProjectionKindV0::PlaceProjectionDeref
+        && ref_field.place.projections[1].kind == PlaceProjectionKindV0::PlaceProjectionField, failures, 2)
+
+    let managed_index = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceIndexSet, -1, 13, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootLocal, 13, PlaceMutabilityV0::PlaceMutable),
+    )
+    failures = place_v0_probe_count(managed_index.ok
+        && managed_index.place.address_space == PlaceAddressSpaceV0::PlaceAddressManaged
+        && managed_index.place.projections[0].scale_bytes == 8, failures, 3)
+
+    let raw_word = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceIndexGet, -1, 14, 2),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootParam, 14, PlaceMutabilityV0::PlaceShared),
+    )
+    failures = place_v0_probe_count(raw_word.ok
+        && raw_word.place.address_space == PlaceAddressSpaceV0::PlaceAddressRawWord
+        && raw_word.place.projections[0].scale_bytes == 8, failures, 4)
+
+    let raw_byte = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceIndexGet, -1, 15, 3),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootParam, 15, PlaceMutabilityV0::PlaceShared),
+    )
+    failures = place_v0_probe_count(raw_byte.ok
+        && raw_byte.place.address_space == PlaceAddressSpaceV0::PlaceAddressRawByte
+        && raw_byte.place.projections[0].scale_bytes == 1, failures, 5)
+
+    let deref_read = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceDerefGet, -1, -1, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootParam, 16, PlaceMutabilityV0::PlaceShared),
+    )
+    failures = place_v0_probe_count(deref_read.ok
+        && deref_read.place.projection_count == 1
+        && deref_read.place.projections[0].kind == PlaceProjectionKindV0::PlaceProjectionDeref, failures, 6)
+
+    let local_write = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceLocalWrite, -1, -1, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootLocal, 17, PlaceMutabilityV0::PlaceMutable),
+    )
+    failures = place_v0_probe_count(local_write.ok
+        && local_write.place.address_space == PlaceAddressSpaceV0::PlaceAddressStack
+        && local_write.place.projection_count == 0, failures, 7)
+
+    let global_write = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceGlobalStore, -1, -1, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootGlobal, 64, PlaceMutabilityV0::PlaceMutable),
+    )
+    failures = place_v0_probe_count(global_write.ok
+        && global_write.place.address_space == PlaceAddressSpaceV0::PlaceAddressGlobal, failures, 8)
+
+    let shared_write = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceFieldSet, 0, -1, 0),
+        place_v0_probe_context(PlaceRootKindV0::PlaceRootLocal, 19, PlaceMutabilityV0::PlaceShared),
+    )
+    failures = place_v0_probe_count(!shared_write.ok && shared_write.code == PLACE_V0_ERR_WRITE_TO_SHARED, failures, 10)
+
+    let incomplete_context = LegacyPlaceContextV0 {
+        root_kind: PlaceRootKindV0::PlaceRootLocal,
+        root_id: 20,
+        mutability: PlaceMutabilityV0::PlaceShared,
+        provenance: place_v0_provenance_unknown(),
+    }
+    let incomplete = place_v0_adapt_legacy(
+        place_v0_probe_instr(LegacyPlaceOpV0::LegacyPlaceLocalRead, -1, -1, 0),
+        incomplete_context,
+    )
+    failures = place_v0_probe_count(!incomplete.ok && incomplete.code == PLACE_V0_ERR_PROVENANCE, failures, 11)
+
+    let codegen_check = place_v0_verify_for_codegen(&managed_field.place, managed_field.access)
+    failures = place_v0_probe_count(!codegen_check.ok
+        && codegen_check.code == PLACE_V0_ERR_DIFFERENTIAL_ONLY
+        && !place_v0_default_pipeline_enabled(), failures, 12)
+
+    failures
+}
