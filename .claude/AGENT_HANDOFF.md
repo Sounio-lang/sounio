@@ -251,3 +251,38 @@ RESOLUTION:
   (checked out by a live agent; git would refuse, and removal would disrupt
   that agent). It will retire naturally when that agent advances; until then it
   carries no unique commits.
+
+## Blocker handoff → codex-2 (compiler) — 2026-07-14 (Madaros v0.80.0 codegen)
+
+GitHub issue: https://github.com/Sounio-lang/sounio/issues/891
+
+```text
+Blocker-ID: BLK-20260714-madaros-print_int-f64
+Status: classified
+Severity: B2
+Class: compiler-semantics
+Owner: codex-2 (compiler/coordination)
+Lane: research/octonion-probes (reporter: Claude, this session — NOT blocked; workaround applied)
+Worktree: /workspace/sounio
+Branch: feat/epistemic-gum-hardening
+Files-Owned: Madaros codegen (print_int lowering / f64↔i64 register allocation) — compiler owner's write set
+Files-Read-Only: examples/associativity_probe_benchmark.sio (reporter's workaround, be5c0ab0f)
+Do-Not-Touch: n/a
+Repro: printf 'var CT: [i64; 2] = [42; 2]\nfn main() -> i64 with IO {\n  let p = 5.7\n  print(p); print(" ("); print_int(CT[0]); print(")\\n")\n  0\n}\n' > /tmp/repro.sio && ./bin/souc run /tmp/repro.sio
+Observed: prints "5.700000 (0)" (and INT_MIN / f64-bitpattern when print_int'ing an array element used in an `as f64` expr earlier on the line)
+Expected: "5.700000 (42)"
+Acceptance-Gate: the repro prints "5.700000 (42)"
+Evidence-Level: E2
+Evidence: issue #891; commit be5c0ab0f (real manifestation garbled the assoc-probe accuracy display); minimal repro above
+Fallback-Path: workaround — never print(f64); compute to i64 (permil) and print via print_int only (applied in be5c0ab0f)
+Legacy-Kept: n/a
+LLM-Offload: not-required
+Next-Action: fix print_int / f64→i64 reg-alloc so print_int reads the intended gpr after an f64 op
+```
+
+Sibling Madaros v0.80.0 codegen bugs found in the same investigation (also worked
+around in be5c0ab0f; detail in issue #891 and memory project_madaros_scalar_global_writeback):
+(1) scalar global written in a unit-returning fn doesn't persist to caller;
+(2) `[i64; 1]` array globals SIGSEGV (use length ≥ 2);
+(3) many-f64-locals-across-many-calls fns clobber the return addr → runaway SIGSEGV
+(fix: load-compute-store). These are distinct defects; codex-2 may split them out.
