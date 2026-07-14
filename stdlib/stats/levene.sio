@@ -1,0 +1,294 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/levene.sio — Levene / Brown-Forsythe test for equal variance
+//
+// A distribution-robust test of homogeneity of variance: run a one-way ANOVA on
+// the absolute deviations of each observation from its group centre. With the
+// group mean as centre it is Levene's original test; with the group median it is
+// the Brown-Forsythe variant, robust to non-normality.
+//
+//   levene(values, sizes, k, center) -> LeveneResult   (center: 0=mean, 1=median)
+//
+//   Zᵢⱼ = |xᵢⱼ − cᵢ|,
+//   W = [(N−k)/(k−1)] · Σ nᵢ(Z̄ᵢ − Z̄)² / ΣΣ(Zᵢⱼ − Z̄ᵢ)²   ~   F(k−1, N−k).
+//
+// Pure Sounio: an inline insertion sort per group for the median; incomplete
+// beta for the F tail. No nested data-array calls.
+//
+// References:
+//   Levene (1960); Brown & Forsythe (1974) JASA 69:364.
+
+module stats::levene
+
+fn lv_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / lv_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn lv_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn lv_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * lv_ln(tt) - tt + lv_ln(a)
+}
+
+fn lv_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn lv_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = lv_lgamma(a) + lv_lgamma(b) - lv_lgamma(a + b)
+    let front = lv_exp(a * lv_ln(x) + b * lv_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * lv_betacf(a, b, x) / a }
+    return 1.0 - front * lv_betacf(b, a, 1.0 - x) / b
+}
+
+// upper-tail F: P(F_{d1,d2} > f)
+fn lv_f_sf(f: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if f <= 0.0 { return 1.0 }
+    let x = d2 / (d2 + d1 * f)
+    return lv_ibeta(d2 * 0.5, d1 * 0.5, x)
+}
+
+pub struct LeveneResult {
+    pub w: f64,    // Levene statistic
+    pub df1: i64,  // k - 1
+    pub df2: i64,  // N - k
+    pub p: f64,
+}
+
+/// Levene / Brown-Forsythe test for equal variance across k consecutive groups.
+///
+/// Parâmetros: values — concatenated group data; sizes — per-group n (>=2);
+///             k — groups (2..16); center — 0 group mean (Levene), 1 median (Brown-Forsythe).
+/// Retorno: LeveneResult (w, df1, df2, p).
+/// Referências: Levene (1960); Brown & Forsythe (1974).
+pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return LeveneResult { w: 0.0, df1: 0, df2: 0, p: 1.0 } }
+    var z: [f64; 256] = [0.0; 256]
+    var zmean: [f64; 16] = [0.0; 16]
+    var bign = 0
+    // build the Zij = |x - center_i| and per-group means
+    var off = 0
+    var g = 0
+    while g < k {
+        let ni = sizes[g as usize]
+        if ni < 2 { return LeveneResult { w: 0.0, df1: 0, df2: 0, p: 1.0 } }
+        let nif = ni as f64
+        var ctr = 0.0
+        if center == 1 {
+            // median via inline insertion sort of a local copy
+            var buf: [f64; 256] = [0.0; 256]
+            var a = 0
+            while a < ni { buf[a as usize] = values[(off + a) as usize]; a = a + 1 }
+            var ii = 1
+            while ii < ni {
+                let key = buf[ii as usize]
+                var jj = ii - 1
+                while jj >= 0 && buf[jj as usize] > key { buf[(jj + 1) as usize] = buf[jj as usize]; jj = jj - 1 }
+                buf[(jj + 1) as usize] = key
+                ii = ii + 1
+            }
+            if ni % 2 == 1 { ctr = buf[((ni - 1) / 2) as usize] }
+            else { ctr = 0.5 * (buf[(ni / 2 - 1) as usize] + buf[(ni / 2) as usize]) }
+        } else {
+            var s = 0.0
+            var a = 0
+            while a < ni { s = s + values[(off + a) as usize]; a = a + 1 }
+            ctr = s / nif
+        }
+        var zs = 0.0
+        var b = 0
+        while b < ni {
+            let dv = values[(off + b) as usize] - ctr
+            let az = if dv < 0.0 { 0.0 - dv } else { dv }
+            z[(off + b) as usize] = az
+            zs = zs + az
+            b = b + 1
+        }
+        zmean[g as usize] = zs / nif
+        bign = bign + ni
+        off = off + ni
+        g = g + 1
+    }
+    // grand mean of Z
+    var zsum = 0.0
+    var t = 0
+    while t < bign { zsum = zsum + z[t as usize]; t = t + 1 }
+    let zbar = zsum / (bign as f64)
+    // between and within sums of squares
+    var between = 0.0
+    var within = 0.0
+    var off2 = 0
+    var g2 = 0
+    while g2 < k {
+        let ni = sizes[g2 as usize]
+        let dmean = zmean[g2 as usize] - zbar
+        between = between + (ni as f64) * dmean * dmean
+        var b = 0
+        while b < ni {
+            let dv = z[(off2 + b) as usize] - zmean[g2 as usize]
+            within = within + dv * dv
+            b = b + 1
+        }
+        off2 = off2 + ni
+        g2 = g2 + 1
+    }
+    let kf = k as f64
+    let nf = bign as f64
+    let df1 = kf - 1.0
+    let df2 = nf - kf
+    var w = 0.0
+    if within > 1.0e-300 && df1 > 0.0 { w = (df2 / df1) * (between / within) }
+    let p = lv_f_sf(w, df1, df2)
+    return LeveneResult { w: w, df1: (k - 1) as i64, df2: (bign - k) as i64, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// g1={1,2,3,4,5} mean3 devs{2,1,0,1,2} Z̄=1.2; g2={2,4,6,8,10} mean6 devs{4,2,0,2,4} Z̄=2.4.
+// Z̄=1.8. between=5·0.36+5·0.36=3.6. within=2.8+11.2=14.0. W=(8/1)(3.6/14)=2.057143.
+fn test_levene_mean() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0; v[4]=5.0
+    v[5]=2.0; v[6]=4.0; v[7]=6.0; v[8]=8.0; v[9]=10.0
+    sz[0]=5; sz[1]=5
+    let r = levene(&v, &sz, 2, 0)
+    var ok = true
+    ok = check(1, approx(r.w, 2.057143, 1.0e-4)) && ok
+    ok = check(2, r.df1 == 1) && ok
+    ok = check(3, r.df2 == 8) && ok
+    return ok
+}
+
+// median centering: same groups, medians are 3 and 6 (same as means here) -> same W.
+fn test_bf_median() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0; v[4]=5.0
+    v[5]=2.0; v[6]=4.0; v[7]=6.0; v[8]=8.0; v[9]=10.0
+    sz[0]=5; sz[1]=5
+    let r = levene(&v, &sz, 2, 1)
+    return check(10, approx(r.w, 2.057143, 1.0e-4))
+}
+
+// equal spread (shifted copies) -> W ~ 0, p ~ 1.
+fn test_equal() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0
+    v[4]=11.0; v[5]=12.0; v[6]=13.0; v[7]=14.0
+    sz[0]=4; sz[1]=4
+    let r = levene(&v, &sz, 2, 0)
+    var ok = true
+    ok = check(20, approx(r.w, 0.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_levene_mean() && ok
+    ok = test_bf_median() && ok
+    ok = test_equal() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
