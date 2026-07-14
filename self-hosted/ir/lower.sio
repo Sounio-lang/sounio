@@ -13,6 +13,12 @@ struct LowerLocalStack {
     depths: [i64; 4096],
     struct_types: [Name; 4096],
     array_elem_float: [i64; 4096],
+    // Logical element count for a directly-stored fixed array local. -1 means
+    // the local is not a fixed array (or its extent is not statically known).
+    array_lens: [i64; 4096],
+    // 1 only when each array element is known to occupy one non-aggregate word.
+    // Nested arrays and struct elements must not take the shallow slot-copy path.
+    array_copy_word_scalar: [i64; 4096],
     wide_bits: [i64; 4096],
     wide_signed: [i64; 4096],
     global_bss_offsets: [i64; 4096],
@@ -38,6 +44,8 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         depths: [0; 4096],
         struct_types: [ir_empty_name(); 4096],
         array_elem_float: [0; 4096],
+        array_lens: [-1; 4096],
+        array_copy_word_scalar: [0; 4096],
         wide_bits: [0; 4096],
         wide_signed: [0; 4096],
         global_bss_offsets: [0; 4096],
@@ -1027,6 +1035,121 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
     }
 }
 
+fn lower_type_expr_fixed_array_len_ref(ty: &TypeExpr) -> i64 {
+    if (*ty).kind != TypeExprKind::TypeArray { return -1 }
+    match (*ty).array_size {
+        Some(sz) => {
+            if (*sz).kind == ExprKind::ExprIntLit && (*sz).int_val >= 0 {
+                return (*sz).int_val
+            }
+            -1
+        }
+        None => -1,
+    }
+}
+
+fn lower_opt_type_fixed_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 {
+    match *ty_opt {
+        Some(ty) => lower_type_expr_fixed_array_len_ref(&(*ty)),
+        None => -1,
+    }
+}
+
+fn lower_name_is_direct_word_scalar_type(n: Name) -> bool with Panic, Div {
+    // Native-v2 local arrays use one boxed 8-byte slot per primitive element,
+    // including narrow integers. Keep this list explicit so structs, nested
+    // arrays, strings, and future multiword primitives cannot enter a shallow copy.
+    if n.len == 2 {
+        return (n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8)
+            && n.buf[1] == 56 as i8 // i8/u8
+    }
+    if n.len == 3 {
+        let numeric_width = (n.buf[1] == 49 as i8 && n.buf[2] == 54 as i8)
+            || (n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8)
+            || (n.buf[1] == 54 as i8 && n.buf[2] == 52 as i8)
+        if (n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8) && numeric_width {
+            return true // i16/u16/i32/u32/i64/u64
+        }
+        return n.buf[0] == 102 as i8
+            && ((n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8)
+                || (n.buf[1] == 54 as i8 && n.buf[2] == 52 as i8)) // f32/f64
+    }
+    if n.len == 4 {
+        let is_bool = n.buf[0] == 98 as i8 && n.buf[1] == 111 as i8
+            && n.buf[2] == 111 as i8 && n.buf[3] == 108 as i8
+        let is_char = n.buf[0] == 99 as i8 && n.buf[1] == 104 as i8
+            && n.buf[2] == 97 as i8 && n.buf[3] == 114 as i8
+        return is_bool || is_char
+    }
+    if n.len == 5 {
+        let suffix = n.buf[1] == 115 as i8 && n.buf[2] == 105 as i8
+            && n.buf[3] == 122 as i8 && n.buf[4] == 101 as i8
+        return suffix && (n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8) // isize/usize
+    }
+    false
+}
+
+fn lower_type_expr_fixed_array_word_scalar_ref(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeArray { return false }
+    match (*ty).inner {
+        Some(elem_ty) => {
+            if (*elem_ty).kind != TypeExprKind::TypeNamed { return false }
+            lower_name_is_direct_word_scalar_type(ir_path_first_name((*elem_ty).path))
+        }
+        None => false,
+    }
+}
+
+fn lower_opt_type_fixed_array_word_scalar(ty_opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty_opt {
+        Some(ty) => lower_type_expr_fixed_array_word_scalar_ref(&(*ty)),
+        None => false,
+    }
+}
+
+fn lower_array_literal_fixed_len_ref(e: &Expr) -> i64 with Alloc, Mut, Div {
+    if (*e).kind != ExprKind::ExprArrayLit { return -1 }
+    match (*e).left {
+        Some(_) => {
+            match (*e).right {
+                Some(count_expr) => {
+                    if (*count_expr).kind == ExprKind::ExprIntLit && (*count_expr).int_val >= 0 {
+                        return (*count_expr).int_val
+                    }
+                    -1
+                }
+                None => -1,
+            }
+        }
+        None => count_expr_list_ref(&(*e).args),
+    }
+}
+
+fn lower_array_literal_word_scalar_ref(e: &Expr, repeat_ident_scalar_kind: i64) -> bool {
+    if (*e).kind != ExprKind::ExprArrayLit { return false }
+    match (*e).left {
+        Some(repeat_value) => {
+            (*repeat_value).kind == ExprKind::ExprIntLit
+                || (*repeat_value).kind == ExprKind::ExprFloatLit
+                || (*repeat_value).kind == ExprKind::ExprBoolTrue
+                || (*repeat_value).kind == ExprKind::ExprBoolFalse
+                || ((*repeat_value).kind == ExprKind::ExprIdent
+                    && (repeat_ident_scalar_kind == 1 || repeat_ident_scalar_kind == 2))
+        }
+        None => {
+            match (*e).args {
+                Some(args) => {
+                    (*args).head.kind == ExprKind::ExprIntLit
+                        || (*args).head.kind == ExprKind::ExprFloatLit
+                        || (*args).head.kind == ExprKind::ExprBoolTrue
+                        || (*args).head.kind == ExprKind::ExprBoolFalse
+                }
+                None => false,
+            }
+        }
+    }
+}
+
 fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
     match *ty_opt {
         Some(ty) => {
@@ -1797,6 +1920,8 @@ fn lowerer_bind_local_mut(
         (*locals_box).depths[idx as usize] = (*lo).scope_depth
         (*locals_box).struct_types[idx as usize] = ir_empty_name()
         (*locals_box).array_elem_float[idx as usize] = 0
+        (*locals_box).array_lens[idx as usize] = -1
+        (*locals_box).array_copy_word_scalar[idx as usize] = 0
         (*locals_box).wide_bits[idx as usize] = 0
         (*locals_box).wide_signed[idx as usize] = 0
         (*locals_box).global_bss_offsets[idx as usize] = 0
@@ -1957,6 +2082,13 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
+                let param_array_len = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
+                if param_array_len >= 0 {
+                    (*lo) = (*lo).bind_local_fixed_array_len((*list).head.name, param_array_len)
+                }
+                if lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty) {
+                    (*lo) = (*lo).bind_local_array_copy_word_scalar((*list).head.name)
+                }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 if lower_type_expr_is_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_scalar_kind((*list).head.name, 2)
@@ -3362,6 +3494,62 @@ impl Lowerer {
         if elem_count <= 0 { 8 } else { elem_count * 8 }
     }
 
+    fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count))
+        if elem_is_float {
+            lo = lo.emit(ir_mark_float_reg(dst_reg))
+            lo = lo.bind_reg_array_elem_float(dst_reg)
+        }
+        if elem_count <= 0 {
+            return (lo, dst_reg)
+        }
+
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        let cond_reg = pair_cond.1
+        lo = lo.emit(ir_binop(cond_reg, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(cond_reg, end_label))
+
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        let elem_reg = pair_elem.1
+        var load_instr = ir_index_get(elem_reg, src_reg, idx_reg)
+        if elem_is_float {
+            load_instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        }
+        lo = lo.emit(load_instr)
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, elem_reg))
+
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        let next_reg = pair_next.1
+        lo = lo.emit(ir_binop(next_reg, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, next_reg))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        (lo, dst_reg)
+    }
+
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
         let _lo = self
         if e.kind == ExprKind::ExprIntLit { return e.int_val == 0 }
@@ -3893,6 +4081,8 @@ impl Lowerer {
                 stk.depths[idx as usize] = lo.scope_depth
                 stk.struct_types[idx as usize] = ir_empty_name()
                 stk.array_elem_float[idx as usize] = 0
+                stk.array_lens[idx as usize] = -1
+                stk.array_copy_word_scalar[idx as usize] = 0
                 stk.wide_bits[idx as usize] = 0
                 stk.wide_signed[idx as usize] = 0
                 stk.is_ref[idx as usize] = 0
@@ -3912,6 +4102,36 @@ impl Lowerer {
         while i >= 0 {
             if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
                 stk.array_elem_float[i as usize] = 1
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn bind_local_fixed_array_len(self, name: Name, array_len: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.array_lens[i as usize] = array_len
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn bind_local_array_copy_word_scalar(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.array_copy_word_scalar[i as usize] = 1
                 lo.locals = Box::new(stk)
                 return lo
             }
@@ -4050,6 +4270,28 @@ impl Lowerer {
         while i >= 0 {
             if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
                 return (*self.locals).array_elem_float[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn lookup_local_fixed_array_len(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).array_lens[i as usize]
+            }
+            i = i - 1
+        }
+        -1
+    }
+
+    fn lookup_local_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).array_copy_word_scalar[i as usize] == 1
             }
             i = i - 1
         }
@@ -5061,7 +5303,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIntLit {
             return false
         }
-        if (*e).kind == ExprKind::ExprBoolLit {
+        if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
             return false
         }
         if (*e).kind == ExprKind::ExprStringLit {
@@ -6099,6 +6341,8 @@ impl Lowerer {
                         locals.depths[idx as usize] = lo.scope_depth
                         locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
+                        locals.array_lens[idx as usize] = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
+                        locals.array_copy_word_scalar[idx as usize] = if lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
                         locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
@@ -6807,19 +7051,50 @@ impl Lowerer {
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
         let reg = pair.1
-        // A `var` initialized from a bare identifier must own its storage. An ident
-        // lowers to the SOURCE local's register (lookup_local returns it directly), so
-        // binding the var to `reg` aliases them onto the same vreg/stack slot — a later
-        // `y = ...` then clobbers the source `x`, and reads of `x` return y's value.
-        // This corrupted `var y = x; ... y = f(y, x)` patterns (e.g. Newton's method
-        // `y = 0.5*(y + x/y)`, which drifted to sqrt(garbage) once x was overwritten).
-        // Computed initializers already yield a fresh dst reg, so only the bare-ident
-        // case needs an explicit copy into a fresh register.
+        var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
+        var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
+        var rhs_array_elem_is_float = false
+        match s.expr {
+            Some(rhs_shape) => {
+                if fixed_array_len < 0 {
+                    if (*rhs_shape).kind == ExprKind::ExprIdent {
+                        fixed_array_len = lo.lookup_local_fixed_array_len((*rhs_shape).name)
+                        fixed_array_word_scalar = lo.lookup_local_array_copy_word_scalar((*rhs_shape).name)
+                    } else {
+                        fixed_array_len = lower_array_literal_fixed_len_ref(&(*rhs_shape))
+                        var repeat_ident_scalar_kind = 0
+                        match (*rhs_shape).left {
+                            Some(repeat_value) => {
+                                if (*repeat_value).kind == ExprKind::ExprIdent {
+                                    repeat_ident_scalar_kind = lo.lookup_local_scalar_kind((*repeat_value).name)
+                                    rhs_array_elem_is_float = repeat_ident_scalar_kind == 2
+                                }
+                            }
+                            _ => {}
+                        }
+                        fixed_array_word_scalar = lower_array_literal_word_scalar_ref(&(*rhs_shape), repeat_ident_scalar_kind)
+                    }
+                }
+                if (*rhs_shape).kind == ExprKind::ExprIdent {
+                    rhs_array_elem_is_float = lo.lookup_local_array_elem_float((*rhs_shape).name)
+                }
+            }
+            _ => {}
+        }
+
+        // A bare identifier lowers to the source local's register. Scalars need a
+        // fresh register only for mutable bindings; fixed arrays need fresh backing
+        // storage for both `let` and `var`, otherwise an indexed mutation through
+        // either binding changes the other value.
         var bind_reg = reg
-        if is_mut {
-            match s.expr {
-                Some(rhs_ident) => {
-                    if (*rhs_ident).kind == ExprKind::ExprIdent {
+        match s.expr {
+            Some(rhs_ident) => {
+                if (*rhs_ident).kind == ExprKind::ExprIdent {
+                    if fixed_array_len >= 0 && fixed_array_word_scalar {
+                        let array_copy_pair = lo.emit_fixed_array_value_copy(reg, fixed_array_len, rhs_array_elem_is_float)
+                        lo = array_copy_pair.0
+                        bind_reg = array_copy_pair.1
+                    } else if is_mut {
                         let copy_pair = lo.fresh_reg()
                         lo = copy_pair.0
                         let copy_reg = copy_pair.1
@@ -6827,10 +7102,16 @@ impl Lowerer {
                         bind_reg = copy_reg
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        if fixed_array_len >= 0 {
+            lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
+        }
+        if fixed_array_word_scalar {
+            lo = lo.bind_local_array_copy_word_scalar(s.name)
+        }
         // Closures step 2: if the RHS was a capturing closure, mark this local so a later
         // `name(args)` call injects the captured regs (direct call to the synthetic fn).
         if lo.pending_closure_fn_id >= 0 {
@@ -6850,6 +7131,8 @@ impl Lowerer {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    } else if rhs_array_elem_is_float {
+                        lo = lo.bind_local_array_elem_float(s.name)
                     }
                 }
                 _ => {}
@@ -6862,7 +7145,7 @@ impl Lowerer {
                 Some(expr_box_sk) => {
                     if (*expr_box_sk).kind == ExprKind::ExprIntLit {
                         lo = lo.bind_local_scalar_kind(s.name, 1)
-                    } else if (*expr_box_sk).kind == ExprKind::ExprBoolLit {
+                    } else if (*expr_box_sk).kind == ExprKind::ExprBoolTrue || (*expr_box_sk).kind == ExprKind::ExprBoolFalse {
                         lo = lo.bind_local_scalar_kind(s.name, 1)
                     } else if lo.expr_result_is_float_ref(&(*expr_box_sk)) {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
