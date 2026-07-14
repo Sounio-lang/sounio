@@ -690,6 +690,39 @@ per Passing & Bablok 1983 / the R `mcr` package) and the median-residual
 intercept. Validated: perfect line → (2,1); −1-slope pair correctly excluded;
 K-offset case → slope 2.
 
+### `stats::fisher_exact` — Fisher's exact test (2×2)
+
+| Function | Signature |
+|---|---|
+| `fisher_exact` | `pub fn fisher_exact(a: i64, b: i64, c: i64, d: i64) -> FisherResult with Mut, Div, Panic` |
+
+The exact small-sample test of 2×2 association (valid where χ² is not): the
+two-sided p sums hypergeometric probabilities of all tables with P≤P(observed);
+one-sided tails and the sample odds ratio too. Validated: tea-test [[3,1],[1,3]]
+→ p_two=0.4857, p_greater=0.2429, OR=9; [[9,1],[1,9]] → p<0.01, OR=81;
+[[5,5],[5,5]] → p=1, OR=1.
+
+### `stats::cochran_q` — Cochran's Q test
+
+| Function | Signature |
+|---|---|
+| `cochran_q` | `pub fn cochran_q(data: &[f64; 256], n: i32, k: i32) -> CochranQResult with Mut, Div, Panic` |
+
+McNemar extended to k≥2 matched binary conditions: `Q=(k−1)(k·ΣCⱼ²−N²)/(k·N−ΣRᵢ²)
+~ χ²(k−1)` on a row-major n×k 0/1 matrix. Validated: 4×3 example → Q=2.667, df=2;
+one-condition-always-positive → Q=6, p<0.05; all-agree → Q=0.
+
+### `stats::fleiss_kappa` — Fleiss' kappa (multi-rater)
+
+| Function | Signature |
+|---|---|
+| `fleiss_kappa` | `pub fn fleiss_kappa(counts: &[f64; 256], subjects: i32, k: i32, raters: i32) -> FleissResult with Mut, Div, Panic` |
+
+Cohen's κ extended to a fixed number of raters per subject: chance-corrected
+agreement `κ=(P̄−P̄ₑ)/(1−P̄ₑ)` from a row-major N×k rater-count matrix. Validated:
+worked 2-subject case → P̄=0.6667, P̄ₑ=0.7222, κ=−0.2; perfect within-subject
+agreement → κ=1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -737,6 +770,9 @@ use stats::outlier::{OutlierFences, GrubbsResult, ModZResult, tukey_outliers, gr
 use stats::deming::{DemingFit, deming}
 use stats::theil_sen::{TSFit, theil_sen}
 use stats::passing_bablok::{PBFit, passing_bablok}
+use stats::fisher_exact::{FisherResult, fisher_exact}
+use stats::cochran_q::{CochranQResult, cochran_q}
+use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
