@@ -2785,3 +2785,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - life_table = **PASS**: n'ᵢ=nᵢ−wᵢ/2, qᵢ=dᵢ/n'ᵢ, Ŝ=Πpᵢ (Cutler-Ederer) exact; 3-interval example (0.9, 0.8047, 0.7231) verified.
 - Theme: survival-analysis extensions — completes the survival family (km, logrank, exp_survival + Nelson-Aalen, RMST, life-table). All deterministic, fully hand-derivable. #852-safe: sort-free walks / cumulative products, no nested data-array calls. Suite runner: 55 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-dUWR1L/`, `/tmp/llm-offload-K5q4eh/`, `/tmp/llm-offload-vpkpHX/`.
+
+## 2026-07-14 — math-review: stats::kendall_tau, stats::goodman_kruskal, stats::somers_d
+- Files (all new): `stdlib/stats/kendall_tau.sio` (Kendall τ_a/τ_b + no-tie z-test), `stdlib/stats/goodman_kruskal.sio` (γ=(C−D)/(C+D) + Wald z), `stdlib/stats/somers_d.sio` (asymmetric Somers' D both directions). Provider: xAI/Grok 4.3.
+- kendall_tau = **PASS**: τ_a, tie-corrected τ_b, Var₀(S)=n(n−1)(2n+5)/18 z-test all correct; {1,3,2,4}→τ_a=0.667, z=1.359 (note: initial test constant z=1.358601 was a hand-arithmetic error — correct value 4/√8.666667=1.358732; caught by the failing assertion, fixed).
+- goodman_kruskal = **PASS**: γ + SE(γ)=√(4CD/(C+D)³) Wald z verified.
+- somers_d = **PASS**: D(Y|X)=(C−D)/(C+D+Tx), D(X|Y)=(C−D)/(C+D+Ty), and the 2·AUC−1 identity for binary Y confirmed.
+- **Bug found & fixed**: the tie-counting branches originally assigned tied-on-X pairs to Ty and vice-versa. Masked in kendall (τ_b denominator √((C+D+Tx)(C+D+Ty)) is symmetric in Tx/Ty) but surfaced in somers_d where the directions are distinct (D(Y|X) test gave 0.667 instead of 1.0). Fixed the labeling in both modules.
+- Theme: rank / ordinal association — complements the Pearson/Spearman correlation module. All O(n²) pair scans, scalar returns, #852-safe. Suite runner: 58 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-2RCSmH/`, `/tmp/llm-offload-sD8vnn/`, `/tmp/llm-offload-BerYTX/`.

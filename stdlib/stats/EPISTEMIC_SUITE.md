@@ -826,6 +826,37 @@ Interval-grouped survival for count-per-interval data: with the withdrawal-
 adjusted risk set `n'ᵢ=nᵢ−wᵢ/2`, `qᵢ=dᵢ/n'ᵢ` and `Ŝ=Πpᵢ` (Cutler-Ederer).
 Validated: 3-interval example → S=0.9, 0.8047, 0.7231; hazard(i1)=0.1059.
 
+### `stats::kendall_tau` — Kendall's rank correlation
+
+| Function | Signature |
+|---|---|
+| `kendall_tau` | `pub fn kendall_tau(x: &[f64; 256], y: &[f64; 256], n: i32) -> KendallResult with Mut, Div, Panic` |
+
+Concordance-based rank correlation robust to outliers and monotone non-linear
+relationships: τ_a=(C−D)/(n(n−1)/2), the tie-corrected τ_b, and the no-tie null
+z-test. Validated: perfect concordance → τ=1; {1,3,2,4} → τ_a=0.667, z=1.359;
+ties → τ_a=0.667 but τ_b=0.8; perfect discordance → τ=−1.
+
+### `stats::goodman_kruskal` — Goodman-Kruskal gamma
+
+| Function | Signature |
+|---|---|
+| `goodman_kruskal` | `pub fn goodman_kruskal(x: &[f64; 256], y: &[f64; 256], n: i32) -> GammaResult with Mut, Div, Panic` |
+
+Ordinal association ignoring tied pairs entirely: γ=(C−D)/(C+D) with the
+pair-count Wald z. Validated: {1,3,2,4} → γ=0.667; ties (using only untied
+pairs) → γ=1; perfect discordance → γ=−1.
+
+### `stats::somers_d` — Somers' D (asymmetric)
+
+| Function | Signature |
+|---|---|
+| `somers_d` | `pub fn somers_d(x: &[f64; 256], y: &[f64; 256], n: i32) -> SomersResult with Mut, Div, Panic` |
+
+Asymmetric ordinal association: D(Y|X)=(C−D)/(C+D+Tx) penalises ties on the
+predictor, so for a binary Y it equals 2·AUC−1. Validated: no ties → D=0.667;
+ties → D(Y|X)=D(X|Y)=0.8; binary Y with perfect separation → D(Y|X)=1 (AUC=1).
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -885,6 +916,9 @@ use stats::autocorr::{LBResult, acf, ljung_box}
 use stats::nelson_aalen::{NAResult, nelson_aalen}
 use stats::rmst::{rmst}
 use stats::life_table::{life_table_survival, life_table_hazard}
+use stats::kendall_tau::{KendallResult, kendall_tau}
+use stats::goodman_kruskal::{GammaResult, goodman_kruskal}
+use stats::somers_d::{SomersResult, somers_d}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
