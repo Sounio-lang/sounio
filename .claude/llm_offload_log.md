@@ -2665,3 +2665,7 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - epidemiology: risk_e/risk_u, RR/OR/RD, log-scale SEs (RR/OR), binomial RD SE, ARR/RRR/NNT — all verified.
 - sample_size: two-proportion, one-proportion, and Fisher-z correlation N formulas, normal_quantile, ss_ln/ss_sqrt/ss_ceil_pos, guards — all verified.
 - Both scalar -> #852-safe. Box-plot figure (examples/stats/box_plot.sio) added.
+
+## 2026-07-14 — math-review: stats::reliability
+- File: `stdlib/stats/reliability.sio` (new). ICC(2,1) via ANOVA mean squares + Cronbach's alpha. Provider: xAI/Grok 4.3 = **PASS** — ICC formula, SS/MS decomposition, Cronbach formula, item/total variance estimators, test data all verified.
+- Funnel-plot figure (examples/stats/funnel_plot.sio) added. Correlation-heatmap figure attempted but DROPPED: needs a data matrix live during many render calls (custom pixel loops / plot_band with data[256]+corr[64] live) -> #852 crash. The funnel worked (no separate data matrix; proven plot path only).
