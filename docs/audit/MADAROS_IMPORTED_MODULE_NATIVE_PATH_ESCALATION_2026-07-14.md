@@ -38,6 +38,9 @@ factors, and the entire `Knowledge<T>` / uncertainty-propagation core at once.**
 | D3 | **Multi-module native lowering fails** — segfault in `lower_array` dep-lowering, or thin-link `rc=12` | native compile fails whenever the program's dep closure has ≥2 modules or a module `use`s another | this doc's witnesses (`knowledge`, `propagate`, `order_spread_exact`, `uncertain_eq`); extends `MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30`, `MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14`, `MADAROS_MULTIMODULE_NATIVE_SEED_SEGFAULT_2026-06-22` | cross-module reuse (`data::csv` + `epistemic::gum`); `Knowledge<T>`, `propagate`, and any module with `use` deps |
 | D4 | **named `use m::sym` E137 + `print_f64` E137** in importing programs | type-check rejects valid code | `MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13` | selective imports; float printing in importing programs |
 
+**Tracking issues:** D1 → #932, D2 → #933, D3 → #901 (+ thin-link variant #921),
+D4 → #862.
+
 D1–D2 are silent/local mis-lowerings; D3 is the structural multi-module path; D4 is
 type-check-level. All four are the *imported-module* path — none reproduce in a
 single-file `main()` (verified: the same `f64 as i64`, `&buf`→builtin, and long
