@@ -1,0 +1,118 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/durbin_watson.sio — Durbin-Watson autocorrelation statistic
+//
+// Tests regression residuals for first-order serial correlation:
+//
+//   durbin_watson(e, n) -> DWResult
+//
+//   d = Σ_{i=2}^n (eᵢ − e_{i−1})² / Σ_{i=1}^n eᵢ²   ∈ [0, 4],
+//   ρ̂ ≈ 1 − d/2.
+// d ≈ 2 → no autocorrelation; d < 2 → positive (successive residuals alike);
+// d > 2 → negative (successive residuals opposite). The exact critical bounds
+// depend on the design matrix and are not computed here — d and ρ̂ are reported.
+//
+// Pure Sounio: one pass for the two sums; no external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Durbin & Watson (1950, 1951) Biometrika 37:409, 38:159.
+
+module stats::durbin_watson
+
+pub struct DWResult {
+    pub d: f64,    // Durbin-Watson statistic in [0,4]
+    pub rho: f64,  // approximate first-order autocorrelation 1 - d/2
+}
+
+/// Durbin-Watson statistic for a residual (or ordered) series.
+///
+/// Parâmetros: e — residual series (in order); n — length (>=2, <=256).
+/// Retorno: DWResult (d, rho ≈ 1 − d/2).
+/// Referências: Durbin & Watson (1950, 1951).
+pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic {
+    if n < 2 { return DWResult { d: 0.0, rho: 0.0 } }
+    var num = 0.0
+    var den = 0.0
+    var i = 0
+    while i < n {
+        let ei = e[i as usize]
+        den = den + ei * ei
+        if i > 0 {
+            let diff = ei - e[(i - 1) as usize]
+            num = num + diff * diff
+        }
+        i = i + 1
+    }
+    if den <= 1.0e-300 { return DWResult { d: 0.0, rho: 0.0 } }
+    let d = num / den
+    return DWResult { d: d, rho: 1.0 - d / 2.0 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// strong negative autocorr: e={1,-1,1,-1,1,-1}. Σe²=6; Σdiff²=5·4=20.
+// d=20/6=3.333333; rho=1-1.666667=-0.666667.
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 256] = [0.0; 256]
+    e[0]=1.0; e[1]=0.0-1.0; e[2]=1.0; e[3]=0.0-1.0; e[4]=1.0; e[5]=0.0-1.0
+    let r = durbin_watson(&e, 6)
+    var ok = true
+    ok = check(1, approx(r.d, 3.333333, 1.0e-5)) && ok
+    ok = check(2, approx(r.rho, 0.0 - 0.666667, 1.0e-5)) && ok
+    return ok
+}
+
+// strong positive autocorr: e={1,1,1,-1,-1,-1}. Σe²=6; Σdiff²=4 (one jump of -2).
+// d=4/6=0.666667; rho=1-0.333333=0.666667.
+fn test_positive() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 256] = [0.0; 256]
+    e[0]=1.0; e[1]=1.0; e[2]=1.0; e[3]=0.0-1.0; e[4]=0.0-1.0; e[5]=0.0-1.0
+    let r = durbin_watson(&e, 6)
+    var ok = true
+    ok = check(10, approx(r.d, 0.666667, 1.0e-5)) && ok
+    ok = check(11, approx(r.rho, 0.666667, 1.0e-5)) && ok
+    return ok
+}
+
+// no autocorr sanity: alternating small pattern giving d near 2.
+// e={1,-1,-1,1,1,-1} -> Σe²=6; diffs: -2,0,2,0,-2 -> squares 4,0,4,0,4=12. d=2, rho=0.
+fn test_none() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 256] = [0.0; 256]
+    e[0]=1.0; e[1]=0.0-1.0; e[2]=0.0-1.0; e[3]=1.0; e[4]=1.0; e[5]=0.0-1.0
+    let r = durbin_watson(&e, 6)
+    var ok = true
+    ok = check(20, approx(r.d, 2.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.rho, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_negative() && ok
+    ok = test_positive() && ok
+    ok = test_none() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

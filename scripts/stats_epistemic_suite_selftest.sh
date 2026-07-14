@@ -58,6 +58,9 @@ MODULES=(
   stdlib/stats/logistic.sio
   stdlib/stats/poisson_reg.sio
   stdlib/stats/wls.sio
+  stdlib/stats/runs_test.sio
+  stdlib/stats/durbin_watson.sio
+  stdlib/stats/autocorr.sio
 )
 
 fail=0
