@@ -2786,6 +2786,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Theme: survival-analysis extensions — completes the survival family (km, logrank, exp_survival + Nelson-Aalen, RMST, life-table). All deterministic, fully hand-derivable. #852-safe: sort-free walks / cumulative products, no nested data-array calls. Suite runner: 55 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-dUWR1L/`, `/tmp/llm-offload-K5q4eh/`, `/tmp/llm-offload-vpkpHX/`.
 
+## 2026-07-14 — math-review: signal::filter run-proof
+- Files: `tests/stdlib/signal/test_filter_stdlib.sio`, `examples/signal/filter_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. FIR MA(4) DC gain=Σh=1 + impulse response = h (0.25×4 then 0); IIR1 bilinear lowpass DC gain(z=1)=1 (const 2→2); IIR1 highpass DC gain(z=1)=0 (DC blocked). Default Madaros. SIGNAL_FILTER_GATE_OK.
 ## 2026-07-14 — math-review: stats::kendall_tau, stats::goodman_kruskal, stats::somers_d
 - Files (all new): `stdlib/stats/kendall_tau.sio` (Kendall τ_a/τ_b + no-tie z-test), `stdlib/stats/goodman_kruskal.sio` (γ=(C−D)/(C+D) + Wald z), `stdlib/stats/somers_d.sio` (asymmetric Somers' D both directions). Provider: xAI/Grok 4.3.
 - kendall_tau = **PASS**: τ_a, tie-corrected τ_b, Var₀(S)=n(n−1)(2n+5)/18 z-test all correct; {1,3,2,4}→τ_a=0.667, z=1.359 (note: initial test constant z=1.358601 was a hand-arithmetic error — correct value 4/√8.666667=1.358732; caught by the failing assertion, fixed).
