@@ -29,6 +29,8 @@ require_fixed "$WRITER" 'pub fn soir_writer_preflight_empty_extensions_v5('
 require_fixed "$WRITER" 'pub fn soir_writer_emit_empty_extensions_v5('
 require_fixed "$WRITER" 'out_buf: &![i8; 131072]'
 require_fixed "$WRITER" 'let verified = soir_writer_preflight_empty_extensions_v5('
+require_fixed "$WRITER" '(*function).param_count > IR_MAX_PARAMS'
+require_fixed "$WRITER" 'while i < IR_MAX_PARAMS {'
 
 if grep -Eq '(buf|out_buf): \[i8; 131072\]' "$WRITER"; then
   fail 'writer passes the 128 KiB buffer by value'
@@ -105,7 +107,7 @@ if [[ "$witness_rc" -ne 0 ]]; then
     if [[ "${SOIR_WRITER_REQUIRE_DYNAMIC:-0}" == "1" ]]; then
       fail 'dynamic differential required but modular import routing is blocked'
     fi
-    exit 0
+    fail 'dynamic differential not run; use SOIR_WRITER_STATIC_ONLY=1 only for explicit static qualification'
   fi
   cat "$check_dir/witness.log" >&2
   fail 'witness checker introduced diagnostics beyond the legacy baseline'

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.implementation.soir-writer-v0
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.soir-writer-v0
+-->
+
 # SOIR Writer v0
 
 Status: off-default prototype
@@ -22,8 +31,8 @@ Claims-Forbidden: runtime byte parity, default integration, v4 emission, perform
 Assumptions: current SOIR v5 empty-extension layout is the differential baseline
 Write-Set: four all-new files listed by this checkpoint
 Read-Set: serialize.sio, soir_core.sio, heap_storage.sio, ir.sio
-Positive-Witness: legacy-vs-writer length and byte comparison for two v5 fixtures
-Negative-Witness: full-buffer canaries for every declared input rejection
+Positive-Witness: legacy-vs-writer length and byte comparison for exactly two v5 fixtures
+Negative-Witness: full-buffer canaries for every declared input-rejection status exercised by v0
 Acceptance-Gate: SOIR_WRITER_REQUIRE_DYNAMIC=1 bash scripts/ci/soir_writer_v0_gate.sh
 Integration-Target: none; stacked draft over PR #889
 Authoritative-Only-If: runtime differential gate passes locally and remotely
@@ -56,7 +65,9 @@ only `pos`, `limit`, and `status`; it never owns the byte buffer.
 
 Preflight validates before the first byte is written:
 
-- module, function, instruction, string, and parameter count bounds;
+- module function/string counts and per-function instruction/parameter counts
+  against `IR_MAX_FUNCS`, `IR_MAX_STRINGS`, `IR_MAX_INSTRS`, and
+  `IR_MAX_PARAMS`;
 - zero BSS, because SOIR v5 does not encode BSS sizes;
 - empty epistemic and algebra extensions for the v0 subset;
 - every function, instruction, and string `Name` length;
@@ -84,9 +95,9 @@ and verifies legacy decode behavior (`defining_module_id = UNKNOWN`).
 The writer pins its own version constant to `5`; a future default SOIR version
 cannot silently change the bytes emitted by this v0 contract.
 
-## Failure Atomicity
+## Input-Rejection Atomicity
 
-Failure atomicity is an observable contract, not an implementation comment.
+Input-rejection atomicity is an observable contract, not an implementation comment.
 The witness fills the caller buffer with a canary and checks all 131072 bytes
 after rejected capacity, count bounds, module contract, stale plan,
 unsupported-opcode, and invalid-name inputs.
@@ -94,7 +105,9 @@ unsupported-opcode, and invalid-name inputs.
 The writer does not allocate a private 128 KiB scratch buffer. Its atomicity
 comes from complete preflight, an opaque plan, and an exact-size cursor. Any
 post-write cursor failure is an internal invariant breach and keeps this lane
-from promotion; it is not a fallback to partial output.
+from promotion; it is not a fallback to partial output. `SOIR_WRITER_INTERNAL_BOUNDS`
+may be reported after bytes were written, so it does not carry the unchanged-buffer
+guarantee and consumers must discard the entire candidate output.
 
 ## Differential Oracle
 
@@ -107,8 +120,8 @@ against `serialize_ir_module_into` for:
 It also pins v5 anchors for magic/version, function provenance at offset 720,
 and empty extensions at offset 1336, and repeats each accepted emission into a
 distinct canary-filled buffer. Once the runtime witness passes, these checks
-will establish deterministic parity only for the declared empty-extension
-subset.
+will establish deterministic parity only for these two fixtures. A broader
+empty-extension subset matrix remains future qualification work.
 
 ## Non-Claims
 
@@ -117,7 +130,9 @@ subset.
 - no new SOIR version or opcode tag;
 - no support for non-empty epistemic, algebra, claim, or BSS payloads;
 - no performance claim until a source-fresh/Foundry benchmark exists;
-- no proof of general failure atomicity beyond the declared v0 input contract.
+- no proof of general failure atomicity; only the declared v0 input rejections
+  promise an unchanged buffer;
+- no parity claim beyond the two declared fixtures until a subset matrix runs.
 
 ## Promotion Rule
 

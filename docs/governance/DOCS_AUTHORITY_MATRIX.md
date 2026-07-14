@@ -452,6 +452,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.implementation.self-hosting-phases | repo_only | docs/internal/implementation/SELF_HOSTING_PHASES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.selfhost-checklist | repo_only | docs/internal/implementation/SELFHOST_CHECKLIST.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.selfhost-reproducibility-report | repo_only | docs/internal/implementation/SELFHOST_REPRODUCIBILITY_REPORT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.implementation.soir-writer-v0 | repo_only | docs/internal/implementation/SOIR_WRITER_V0.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.string-interning-summary | repo_only | docs/internal/implementation/STRING_INTERNING_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.summary-v0.2.0 | repo_only | docs/internal/implementation/SUMMARY_v0.2.0.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.test-triage-report | repo_only | docs/internal/implementation/test_triage_report.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
