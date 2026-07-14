@@ -39,7 +39,7 @@ fi
 selected=()
 for path in "${paths[@]}"; do
   case "$path" in
-    tests/run-pass/*.sio) ;;
+    tests/run-pass/*.sio|tests/compile-fail/*.sio) ;;
     *) continue ;;
   esac
   [[ -f "$ROOT_DIR/$path" ]] || continue
