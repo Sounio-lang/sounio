@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.plans.2026-07-14-linalg-vertical
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.plans.2026-07-14-linalg-vertical
+-->
+
 # Linalg (matnm) Hardening — Implementation Plan
 
 > Execute task-by-task; compile-and-run is the gate (`check:OK` ≠ runs).
