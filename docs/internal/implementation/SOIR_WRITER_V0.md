@@ -11,6 +11,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.imple
 
 Status: off-default prototype
 
+reviewed_on: 2026-07-14
+
+`last_validated` in the generated metadata block is currently owned by the
+repository-wide governance generator and remains pinned to its legacy
+`2026-03-07` value. `reviewed_on` records the factual date of this contract
+review without widening this compiler lane into a global metadata migration.
+
 Base: draft PR #889, `17b0858f6e7d75c9cfc9e545b1b9f0805fa9d5d6`
 
 Concept-ID: proposed `compiler.soir.writer.v0`
@@ -29,7 +36,7 @@ IR-Changed: none
 Claims-Introduced: checker-valid writer implementation; static wire-tag parity
 Claims-Forbidden: runtime byte parity, default integration, v4 emission, performance
 Assumptions: current SOIR v5 empty-extension layout is the differential baseline
-Write-Set: four all-new files listed by this checkpoint
+Write-Set: writer, witness, gate, spec, plus three mechanically generated governance files
 Read-Set: serialize.sio, soir_core.sio, heap_storage.sio, ir.sio
 Positive-Witness: legacy-vs-writer length and byte comparison for exactly two v5 fixtures
 Negative-Witness: full-buffer canaries for every declared input-rejection status exercised by v0
@@ -65,9 +72,10 @@ only `pos`, `limit`, and `status`; it never owns the byte buffer.
 
 Preflight validates before the first byte is written:
 
-- module function/string counts and per-function instruction/parameter counts
-  against `IR_MAX_FUNCS`, `IR_MAX_STRINGS`, `IR_MAX_INSTRS`, and
-  `IR_MAX_PARAMS`;
+- module function/string counts and per-function instruction counts against
+  `IR_MAX_FUNCS`, `IR_MAX_STRINGS`, and `IR_MAX_INSTRS`;
+- parameter counts against both canonical `IR_MAX_PARAMS` capacity and the
+  fixed `SOIR_V5_WIRE_PARAM_SLOTS` v5 wire capacity;
 - zero BSS, because SOIR v5 does not encode BSS sizes;
 - empty epistemic and algebra extensions for the v0 subset;
 - every function, instruction, and string `Name` length;
@@ -94,6 +102,9 @@ differential witness derives a v4 artifact by removing the v5 provenance word
 and verifies legacy decode behavior (`defining_module_id = UNKNOWN`).
 The writer pins its own version constant to `5`; a future default SOIR version
 cannot silently change the bytes emitted by this v0 contract.
+SOIR v5 always emits `SOIR_V5_WIRE_PARAM_SLOTS = 64` parameter-register slots.
+That wire-layout constant is deliberately independent from `IR_MAX_PARAMS`, so
+expanding the canonical IR cannot silently resize an established v5 artifact.
 
 ## Input-Rejection Atomicity
 

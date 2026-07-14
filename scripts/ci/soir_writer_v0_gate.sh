@@ -25,12 +25,14 @@ done
 require_fixed "$WRITER" 'pub struct SoirWritePlan {'
 require_fixed "$WRITER" 'struct SoirWriterCursor {'
 require_fixed "$WRITER" 'pub let SOIR_WRITER_VERSION_V5: i8 = 5'
+require_fixed "$WRITER" 'pub let SOIR_V5_WIRE_PARAM_SLOTS: i64 = 64'
 require_fixed "$WRITER" 'pub fn soir_writer_preflight_empty_extensions_v5('
 require_fixed "$WRITER" 'pub fn soir_writer_emit_empty_extensions_v5('
 require_fixed "$WRITER" 'out_buf: &![i8; 131072]'
 require_fixed "$WRITER" 'let verified = soir_writer_preflight_empty_extensions_v5('
 require_fixed "$WRITER" '(*function).param_count > IR_MAX_PARAMS'
-require_fixed "$WRITER" 'while i < IR_MAX_PARAMS {'
+require_fixed "$WRITER" '(*function).param_count > SOIR_V5_WIRE_PARAM_SLOTS'
+require_fixed "$WRITER" 'while i < SOIR_V5_WIRE_PARAM_SLOTS {'
 
 if grep -Eq '(buf|out_buf): \[i8; 131072\]' "$WRITER"; then
   fail 'writer passes the 128 KiB buffer by value'
