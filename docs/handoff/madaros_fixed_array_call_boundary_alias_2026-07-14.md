@@ -14,7 +14,7 @@ that boundary executable and separate from local known-extent word-array copy.
 
 ```text
 Blocker-ID: BLK-20260714-madaros-fixed-array-call-boundary-alias
-Status: review-ready
+Status: source-fresh-semantic-pass
 Severity: B1
 Class: compiler-semantics
 Owner: Codex agent /root/fixed_array_call_abi
@@ -29,11 +29,11 @@ Observed: PR #915 current-source Madaros a1b63e5d651bbe21c6eb0f19b4f24aa967977f4
 Expected: rc=0, exact probe stdout PASS fixed_array_call_boundary_value_semantics caller=unchanged, and exact focused-witness stdout covering witnessed N=2 i64/i8/bool/f64 ownership, mutable-reference visibility, and prefix/array/suffix parameter stability
 Acceptance-Gate: bash scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh
 Evidence-Level: E4
-Evidence: docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records the original f841 gate and Stage2 acceptance; PR #915 Actions run 29360223188 produced the a1b63e5d source-fresh control artifact; the candidate Stage2 focused witness passes locally
+Evidence: PR #916 run 29365161389 artifact 8323918253 compiler 842fad7d passes the exact call-boundary gate and the repaired local-copy gate; docs/audit/receipts/madaros_fixed_array_call_boundary_alias_2026-07-14.json records hashes and outcomes
 Fallback-Path: none
 Legacy-Kept: yes; the existing copy loop and aggregate, nested-array, and unknown-extent paths remain unchanged
 LLM-Offload: not-required
-Next-Action: commit the reviewed candidate, request a source-fresh Madaros CI build from that exact commit, download its compiler artifact, and require the acceptance gate to return rc=0
+Next-Action: commit the harness-only two-line PASS receipt, then require final-head CI and both gates on its exact source-fresh compiler artifact before marking the stacked PR merge-ready
 ```
 
 ## Semantic Lane Declaration
@@ -75,7 +75,7 @@ callee-owned parameter copy.
 
 ```text
 Blocker-ID: BLK-20260714-madaros-local-array-copy-bootstrap-replay
-Status: fix-pending-source-fresh-validation
+Status: resolved-on-semantic-head
 Severity: B2
 Class: compiler-lowering-metadata
 Owner: Codex agent /root/fixed_array_call_abi
@@ -86,13 +86,13 @@ Files-Owned: self-hosted/ir/lower.sio, scripts/ci/madaros_local_known_extent_wor
 Files-Read-Only: scripts/ci/build_modular_madaros.sh, .github/workflows/ci.yml
 Do-Not-Touch: canonical compiler wrappers and CI workflow; aggregate, nested-array, and unknown-extent legacy paths
 Repro: SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_BIN=/tmp/sounio-pr915-madaros-artifact-8321978196/madaros SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_DIR=/tmp/sounio-pr915-word-array-source-fresh SOUNIO_MADAROS_WORD_ARRAY_COPY_GATE_KEEP=1 bash scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh
-Observed: PR #916 head d9234e228 artifact e2c70d6663e8047a1503c3394433a12cf973051d2bb8dfebfd808144978f6750 passes the call-boundary gate but exits the local-copy witness at rc=51 with FAIL local_known_extent_word_array_copy u64 parameter source copy
+Observed: PR #916 head 3a6c5ebc artifact 842fad7d13e281cb38aa9c516f3721d0b6b21f93464103e8a7f4f48b3d14251b runs every local-copy assertion to rc=0 and passes the call-boundary gate; the first local-gate replay exposed only the pre-existing 128-byte string-literal limit, repaired by splitting the final receipt into two exact lines
 Expected: gate rc=0 and exact PASS receipt for every narrow local-copy case
 Acceptance-Gate: bash scripts/ci/madaros_local_known_extent_word_array_copy_gate.sh against a compiler rebuilt from the candidate head
 Evidence-Level: E4
-Evidence: d9234e reducers distinguish inferred rc=81/one callee allocation from annotated rc=0/two allocations and manual rc=0/two allocations; Stage2 runs all three at rc=0; the d9234e old/new IR trace proves its unroll was internalized; Slurm replay job 5888 stopped independently at the existing compiler visibility preflight
+Evidence: d9234e reducers distinguish inferred rc=81/one callee allocation from annotated rc=0/two allocations and manual rc=0/two allocations; Stage2 runs all three at rc=0; source-fresh 3a6c5ebc runs the original parameter-source witness to rc=0 and both named gates pass on compiler 842fad7d
 Fallback-Path: none
 Legacy-Kept: yes; the original copy loop and aggregate, nested-array, and unknown-extent paths remain unchanged
 LLM-Offload: not-required
-Next-Action: source-fresh build the mutable LocalStack metadata repair from the exact candidate head and require both local-copy and call-boundary gates to pass on the same compiler artifact
+Next-Action: confirm final harness-only head CI and replay both gates against its exact source-fresh compiler artifact
 ```

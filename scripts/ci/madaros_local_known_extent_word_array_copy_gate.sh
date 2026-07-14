@@ -49,11 +49,14 @@ echo "[madaros-word-array-copy] compiler_source=$COMPILER_SOURCE"
 echo "[madaros-word-array-copy] compiler_sha256=$compiler_sha"
 echo "[madaros-word-array-copy] witness_sha256=$source_sha"
 
-printf '%s\n' 'PASS local_known_extent_word_array_copy i64=independent i8=independent bool=independent repeat_i64_ident=independent repeat_bool_ident=independent repeat_f64_ident=independent u64_param_source_copy=independent scalar=stable' >"$EXPECTED"
+printf '%s\n' \
+  'PASS local_copy i64=independent i8=independent bool=independent repeat_i64=independent' \
+  'PASS local_copy repeat_bool=independent repeat_f64=independent param_u64=independent scalar=stable' \
+  >"$EXPECTED"
 echo "[madaros-word-array-copy] blocker_id=BLK-20260714-madaros-fixed-array-call-boundary-alias"
 echo "[madaros-word-array-copy] blocker_gate=scripts/ci/madaros_fixed_array_call_boundary_alias_gate.sh"
 echo "[madaros-word-array-copy] blocker_doc=docs/handoff/madaros_fixed_array_call_boundary_alias_2026-07-14.md"
-echo "[madaros-word-array-copy] residual_call_boundary_fixed_array_value_semantics=blocked"
+echo "[madaros-word-array-copy] residual_call_boundary_fixed_array_value_semantics=passed"
 
 if ! MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" check "$SOURCE" >"$WORK/check.log" 2>&1; then
   cat "$WORK/check.log" >&2
