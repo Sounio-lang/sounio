@@ -2758,3 +2758,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 ## 2026-07-14 — math-review: special::erf run-proof
 - Files: `tests/stdlib/special/test_erf_stdlib.sio`, `examples/special/erf_report.sio` (no source edited).
 - Provider: xAI/Grok 4.3 = PASS. erf(1)=0.8427008, odd symmetry, erfc=1-erf, Phi(0)=0.5/Phi(1)=0.8413447/Phi(1.96)=0.9750, z(0.975)=1.95996, round-trip Phi(z(0.9))=0.9. normal_quantile deep-tail approximation not over-claimed. Default Madaros. SPECIAL_ERF_GATE_OK.
+## 2026-07-14 — math-review: stats::logistic, stats::poisson_reg, stats::wls
+- Files (all new): `stdlib/stats/logistic.sio` (1-predictor logistic regression via Newton-Raphson/IRLS, Wald SE/z/p, predict), `stdlib/stats/poisson_reg.sio` (1-predictor Poisson log-link regression via Newton, rate ratio, predict), `stdlib/stats/wls.sio` (weighted least squares, closed-form coefficients + SEs + weighted R²). Provider: xAI/Grok 4.3.
+- logistic = **PASS**: score g=Xᵀ(y−p), Fisher info H=XᵀWX (W=diag p(1−p)), NR update, SE=√diag(H⁻¹), Wald z; two-point saturated MLE (b0=logit⅓, b1=logit⅔−logit⅓) exact.
+- poisson_reg = **PASS**: Poisson log-link score/Hessian, NR update, saturated two-point MLE (b0=ln ȳ|x=0, b1=ln ratio) exact; Wald inference correct.
+- wls = **PASS**: normal-equation WLS solution, σ̂²(XᵀWX)⁻¹ variance entries under Var(εᵢ)=σ²/wᵢ, weighted R²; perfect and outlier-downweight cases verified.
+- Theme: generalized linear models (one predictor) — pharmacometric dose-response / count / heteroscedastic fits. #852-safe: flat per-iteration passes, scalar accumulation, no nested data-array calls. Suite runner now tracks **49 modules** + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-V3U3Al/`, `/tmp/llm-offload-zlNiM7/`, `/tmp/llm-offload-p2IVgX/`.
