@@ -2716,3 +2716,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - normality = **PASS**: JB formulas + χ²(2) survival exp(−x/2); hand-verified moments (mean 5, m2=4, m3=5.25, m4=44.5); edge cases (n<2, m2=0) defined.
 - Theme: goodness-of-fit / distributional diagnostics — the analytic complement to the visual qq_normal. Suite selftest: 36 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-TFBYYh/`, `/tmp/llm-offload-tezDcO/`, `/tmp/llm-offload-tjxfPd/`.
+
+## 2026-07-14 — math-review: stats::km, stats::logrank, stats::exp_survival
+- Files (all new): `stdlib/stats/km.sio` (Kaplan-Meier product-limit survival, scalar summaries: S(t), median, S_final, events — sort-free ordered walk over distinct death times), `stdlib/stats/logrank.sio` (two-group Mantel-Haenszel log-rank test: hypergeometric O/E/V per death time, χ², O/E hazard ratio), `stdlib/stats/exp_survival.sio` (MLE exponential survival: λ̂=D/T, log-scale CI, median/mean/S(t)). Provider: xAI/Grok 4.3.
+- km = **PASS**: product-limit definition, median rule, risk-set/deaths counting, censoring + ties all verified; four test cases algebraically correct.
+- logrank = **PASS**: hypergeometric expectation e₁=d·n₁/n and finite-population variance, χ²=(O₁−E₁)²/V, M-H hazard ratio all match; worked example (E₁=3.7667, V=1.2122, χ²=0.4849, HR=0.5929) exact; null symmetry → 0.
+- exp_survival = **PASS**: λ̂=D/T MLE, Var=λ̂²/D, log-scale CI exp(±z/√D), S/median/mean all standard; all test constants match.
+- **Milestone**: survival analysis was the historical #852 codegen blocker (km_fit silent crash). The #852-safe re-architecture (flat loops, scalar returns, no nested calls with big arrays live) delivers a full survival family running cleanly under lean_single.
+- Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.

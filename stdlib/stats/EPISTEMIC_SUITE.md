@@ -584,6 +584,41 @@ check: reports sample skewness, kurtosis (normal=3) and excess, the Jarque-Bera
 statistic `JB = n/6·(S²+(K−3)²/4) ~ χ²(2)`, and its closed-form p = e^{−JB/2}.
 Validated: {2,4,4,4,5,5,7,9} → S=0.6563, K=2.7813, JB=0.5902, p=0.7445.
 
+### `stats::km` — Kaplan-Meier survival summaries
+
+| Function | Signature |
+|---|---|
+| `km` | `pub fn km(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> KMResult with Mut, Div, Panic` |
+
+The non-parametric product-limit estimator `Ŝ(t) = Π(1−dⱼ/nⱼ)`, reported as
+scalar summaries — Ŝ at a queried time, median survival (first death time with
+Ŝ≤½), final Ŝ, and event count. Right-censoring (event=0) reduces the risk set
+without a step. Validated: times 1–5 all deaths → S(2)=0.6, median 3; with
+censoring {1,0,1,0,1} → S(4)=0.5333; tied deaths handled.
+
+### `stats::logrank` — two-group log-rank test
+
+| Function | Signature |
+|---|---|
+| `logrank` | `pub fn logrank(time: &[f64; 256], event: &[i64; 256], group: &[i64; 256], n: i32) -> LogRankResult with Mut, Div, Panic` |
+
+The Mantel-Haenszel test for a difference between two survival curves:
+observed vs expected deaths with the hypergeometric variance at each distinct
+death time, giving `χ²=(O₁−E₁)²/V` (df 1) and the O/E hazard ratio. Validated:
+interleaved-deaths example → χ²=0.4849, E₁=3.7667, HR=0.5929; identical groups
+→ χ²=0, HR=1.
+
+### `stats::exp_survival` — parametric exponential survival fit
+
+| Function | Signature |
+|---|---|
+| `exp_survival` | `pub fn exp_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> ExpSurvResult with Mut, Div, Panic` |
+
+The MLE constant-hazard model from right-censored data — the parametric
+companion to Kaplan-Meier: `λ̂ = D/T` with a log-scale 95% CI `λ̂·exp(±1.96/√D)`,
+plus median `ln2/λ̂`, mean `1/λ̂`, and Ŝ(t)=e^{−λ̂t}. Validated: {2,3,5⁺,6,7}
+with one censored → λ̂=0.1739, median 3.986, mean 5.75, S(4)=0.4988.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -622,6 +657,9 @@ use stats::trend::{TrendResult, cochran_armitage}
 use stats::ks_test::{KSResult, ks_one_normal, ks_two}
 use stats::gof::{GofResult, gof}
 use stats::normality::{NormalityResult, normality}
+use stats::km::{KMResult, km}
+use stats::logrank::{LogRankResult, logrank}
+use stats::exp_survival::{ExpSurvResult, exp_survival}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

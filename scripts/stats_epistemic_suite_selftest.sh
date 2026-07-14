@@ -43,6 +43,9 @@ MODULES=(
   stdlib/stats/ks_test.sio
   stdlib/stats/gof.sio
   stdlib/stats/normality.sio
+  stdlib/stats/km.sio
+  stdlib/stats/logrank.sio
+  stdlib/stats/exp_survival.sio
 )
 
 fail=0
