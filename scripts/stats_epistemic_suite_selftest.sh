@@ -61,6 +61,9 @@ MODULES=(
   stdlib/stats/runs_test.sio
   stdlib/stats/durbin_watson.sio
   stdlib/stats/autocorr.sio
+  stdlib/stats/nelson_aalen.sio
+  stdlib/stats/rmst.sio
+  stdlib/stats/life_table.sio
 )
 
 fail=0
