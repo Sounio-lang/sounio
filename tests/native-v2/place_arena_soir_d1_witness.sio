@@ -2,12 +2,13 @@
 //
 // D1LogicalWireV1 is a test-local logical wire. It is not SOIR v5/v6 and it
 // has no authority over serialization, lowering, codegen, or the default
-// pipeline. The ordered Place path is re-keyed into a fresh Arena solely to
-// test the proposed storage-ownership boundary.
+// pipeline. The structured subreceipt tests exact Place reconstruction and a
+// logical-ID re-key into a fresh Arena. The value-only comparison is synthetic
+// and cannot stand in for an executed legacy oracle.
 
 let D1_WIRE_MAGIC: i64 = 680113
 let D1_WIRE_VERSION: i64 = 1
-let D1_WIRE_WORDS: i64 = 32
+let D1_WIRE_WORDS: i64 = 48
 let D1_ACCESS_READ: i64 = 1
 let D1_ACCESS_WRITE: i64 = 2
 
@@ -16,10 +17,19 @@ let D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH: i64 = 201
 let D1_ERR_WRITE_TO_SHARED: i64 = 202
 let D1_ERR_CROSS_MODULE_IDENTITY: i64 = 203
 let D1_ERR_STALE_RUNTIME_HANDLE: i64 = 204
-let D1_RAW_INFORMATION_LOSS: i64 = 301
+let D1_ERR_INVALID_ROOT_ID: i64 = 205
+let D1_ERR_UNKNOWN_WIRE_TAG: i64 = 206
 
 struct D1DecodeResult {
     place: PlaceV0,
+    access: PlaceAccessKindV0,
+    opcode: i64,
+    value: i64,
+    runtime_handle_serialized: bool,
+    candidate_arena_identity: i64,
+    candidate_module_identity: i64,
+    candidate_slot: i64,
+    candidate_generation: i64,
     ok: bool,
     code: i64,
 }
@@ -28,6 +38,13 @@ struct D1ArenaPayload {
     ok: bool,
     opcode: i64,
     value: i64,
+}
+
+struct D1RekeyMap {
+    logical_id: i64,
+    function_handle: IrModuleArenaV2FunctionHandle,
+    instr_handle: IrModuleArenaV2InstrHandle,
+    fingerprint: i64,
 }
 
 fn d1_provenance(type_id: i64, layout_id: i64, module_id: i64) -> PlaceTypeLayoutProvenanceV0 {
@@ -40,7 +57,7 @@ fn d1_provenance(type_id: i64, layout_id: i64, module_id: i64) -> PlaceTypeLayou
     }
 }
 
-fn d1_build_place(module_id: i64) -> PlaceBuildResultV0 with Mut, Panic, Div {
+fn d1_build_source_place(module_id: i64) -> PlaceBuildResultV0 with Mut, Panic, Div {
     var place = place_v0_empty()
     place.root_kind = PlaceRootKindV0::PlaceRootTemporary
     place.root_id = 7001
@@ -66,83 +83,317 @@ fn d1_build_place(module_id: i64) -> PlaceBuildResultV0 with Mut, Panic, Div {
     )
 }
 
-fn d1_encode_wire(wire: &! [i64; 32], place: &PlaceV0, opcode: i64, value: i64) with Mut, Panic, Div {
+fn d1_root_kind_tag(kind: PlaceRootKindV0) -> i64 {
+    if kind == PlaceRootKindV0::PlaceRootLocal { return 1 }
+    if kind == PlaceRootKindV0::PlaceRootParam { return 2 }
+    if kind == PlaceRootKindV0::PlaceRootGlobal { return 3 }
+    if kind == PlaceRootKindV0::PlaceRootTemporary { return 4 }
+    0
+}
+
+fn d1_address_tag(space: PlaceAddressSpaceV0) -> i64 {
+    if space == PlaceAddressSpaceV0::PlaceAddressStack { return 1 }
+    if space == PlaceAddressSpaceV0::PlaceAddressGlobal { return 2 }
+    if space == PlaceAddressSpaceV0::PlaceAddressManaged { return 3 }
+    if space == PlaceAddressSpaceV0::PlaceAddressRawReference { return 4 }
+    if space == PlaceAddressSpaceV0::PlaceAddressRawWord { return 5 }
+    if space == PlaceAddressSpaceV0::PlaceAddressRawByte { return 6 }
+    0
+}
+
+fn d1_mutability_tag(mutability: PlaceMutabilityV0) -> i64 {
+    if mutability == PlaceMutabilityV0::PlaceShared { return 1 }
+    if mutability == PlaceMutabilityV0::PlaceMutable { return 2 }
+    if mutability == PlaceMutabilityV0::PlaceFrozen { return 3 }
+    0
+}
+
+fn d1_category_tag(category: PlaceValueCategoryV0) -> i64 {
+    if category == PlaceValueCategoryV0::PlaceCategoryLocation { return 1 }
+    if category == PlaceValueCategoryV0::PlaceCategoryManagedHandle { return 2 }
+    if category == PlaceValueCategoryV0::PlaceCategoryReference { return 3 }
+    0
+}
+
+fn d1_provenance_source_tag(source: PlaceProvenanceSourceV0) -> i64 {
+    if source == PlaceProvenanceSourceV0::PlaceProvenanceChecker { return 1 }
+    if source == PlaceProvenanceSourceV0::PlaceProvenanceLayout { return 2 }
+    if source == PlaceProvenanceSourceV0::PlaceProvenanceLegacyContext { return 3 }
+    0
+}
+
+fn d1_projection_kind_tag(kind: PlaceProjectionKindV0) -> i64 {
+    if kind == PlaceProjectionKindV0::PlaceProjectionField { return 1 }
+    if kind == PlaceProjectionKindV0::PlaceProjectionIndex { return 2 }
+    if kind == PlaceProjectionKindV0::PlaceProjectionDeref { return 3 }
+    0
+}
+
+fn d1_projection_kind_tag_ref(projection: &PlaceProjectionV0) -> i64 {
+    if (*projection).kind == PlaceProjectionKindV0::PlaceProjectionField { return 1 }
+    if (*projection).kind == PlaceProjectionKindV0::PlaceProjectionIndex { return 2 }
+    if (*projection).kind == PlaceProjectionKindV0::PlaceProjectionDeref { return 3 }
+    0
+}
+
+fn d1_path_fingerprint(place: &PlaceV0) -> i64 with Mut, Panic, Div {
+    var fingerprint: i64 = 0
+    var i: i64 = 0
+    while i < (*place).projection_count {
+        let projection = (*place).projections[i as usize]
+        let factor = (i + 1) * 1009
+        fingerprint = fingerprint + factor * (
+            d1_projection_kind_tag(projection.kind) * 101 +
+            projection.identity * 103 +
+            (projection.byte_offset + 2) * 107 +
+            projection.scale_bytes * 109 +
+            projection.result_type_id * 113 +
+            projection.result_layout_id * 127
+        )
+        i = i + 1
+    }
+    fingerprint
+}
+
+fn d1_encode_projection(wire: &! [i64; 48], base: i64, projection: PlaceProjectionV0) with Mut, Panic, Div {
+    (*wire)[base as usize] = d1_projection_kind_tag(projection.kind)
+    (*wire)[(base + 1) as usize] = projection.identity
+    (*wire)[(base + 2) as usize] = projection.byte_offset
+    (*wire)[(base + 3) as usize] = projection.scale_bytes
+    (*wire)[(base + 4) as usize] = projection.result_type_id
+    (*wire)[(base + 5) as usize] = projection.result_layout_id
+}
+
+fn d1_encode_wire(wire: &! [i64; 48], place: &PlaceV0, opcode: i64, value: i64) with Mut, Panic, Div {
     (*wire)[0] = D1_WIRE_MAGIC
     (*wire)[1] = D1_WIRE_VERSION
     (*wire)[2] = (*place).root_id
     (*wire)[3] = (*place).provenance.defining_module_id
     (*wire)[4] = D1_ACCESS_READ
-    (*wire)[5] = 4
-    (*wire)[6] = 1
-    (*wire)[7] = 4
-    (*wire)[8] = 3
+    (*wire)[5] = d1_root_kind_tag((*place).root_kind)
+    (*wire)[6] = d1_address_tag((*place).address_space)
+    (*wire)[7] = d1_mutability_tag((*place).mutability)
+    (*wire)[8] = d1_category_tag((*place).value_category)
     (*wire)[9] = (*place).provenance.type_id
     (*wire)[10] = (*place).provenance.layout_id
     (*wire)[11] = (*place).provenance.defining_module_id
-    (*wire)[12] = (*place).projection_count
-
-    // Projection tags: Field=1, Index=2, Deref=3. Order is semantic.
-    (*wire)[13] = 3
-    (*wire)[14] = (*place).projections[0].identity
-    (*wire)[15] = (*place).projections[0].scale_bytes
-    (*wire)[16] = (*place).projections[0].result_type_id
-    (*wire)[17] = (*place).projections[0].result_layout_id
-    (*wire)[18] = 1
-    (*wire)[19] = (*place).projections[1].identity
-    (*wire)[20] = (*place).projections[1].scale_bytes
-    (*wire)[21] = (*place).projections[1].result_type_id
-    (*wire)[22] = (*place).projections[1].result_layout_id
-    (*wire)[23] = 2
-    (*wire)[24] = (*place).projections[2].identity
-    (*wire)[25] = (*place).projections[2].scale_bytes
-    (*wire)[26] = (*place).projections[2].result_type_id
-    (*wire)[27] = (*place).projections[2].result_layout_id
-    (*wire)[28] = opcode
-    (*wire)[29] = value
-    (*wire)[30] = 311323
-    (*wire)[31] = D1_WIRE_WORDS
+    (*wire)[12] = d1_provenance_source_tag((*place).provenance.source)
+    (*wire)[13] = if (*place).provenance.complete { 1 } else { 0 }
+    (*wire)[14] = (*place).projection_count
+    (*wire)[15] = if (*place).differential_only { 1 } else { 0 }
+    d1_encode_projection(wire, 16, (*place).projections[0])
+    d1_encode_projection(wire, 22, (*place).projections[1])
+    d1_encode_projection(wire, 28, (*place).projections[2])
+    (*wire)[34] = opcode
+    (*wire)[35] = value
+    (*wire)[36] = d1_path_fingerprint(place)
+    (*wire)[37] = D1_WIRE_WORDS
+    // Runtime identities are deliberately absent from the canonical wire.
+    (*wire)[38] = 0
+    (*wire)[39] = 0
+    (*wire)[40] = 0
+    (*wire)[41] = -1
+    (*wire)[42] = 0
 }
 
 fn d1_decode_error(code: i64) -> D1DecodeResult with Mut {
-    D1DecodeResult { place: place_v0_empty(), ok: false, code: code }
+    D1DecodeResult {
+        place: place_v0_empty(),
+        access: PlaceAccessKindV0::PlaceAccessInvalid,
+        opcode: 0,
+        value: 0,
+        runtime_handle_serialized: false,
+        candidate_arena_identity: 0,
+        candidate_module_identity: 0,
+        candidate_slot: -1,
+        candidate_generation: 0,
+        ok: false,
+        code: code,
+    }
 }
 
-fn d1_decode_place(wire: &[i64; 32], expected_module_id: i64) -> D1DecodeResult with Mut, Panic, Div {
-    if (*wire)[0] != D1_WIRE_MAGIC || (*wire)[1] != D1_WIRE_VERSION ||
-       (*wire)[31] != D1_WIRE_WORDS {
-        return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
+fn d1_projection_from_wire(wire: &[i64; 48], base: i64) -> PlaceProjectionV0 with Panic, Div {
+    let kind_tag = (*wire)[base as usize]
+    let kind = if kind_tag == 1 {
+        PlaceProjectionKindV0::PlaceProjectionField
+    } else if kind_tag == 2 {
+        PlaceProjectionKindV0::PlaceProjectionIndex
+    } else {
+        PlaceProjectionKindV0::PlaceProjectionDeref
     }
+    PlaceProjectionV0 {
+        kind: kind,
+        identity: (*wire)[(base + 1) as usize],
+        byte_offset: (*wire)[(base + 2) as usize],
+        scale_bytes: (*wire)[(base + 3) as usize],
+        result_type_id: (*wire)[(base + 4) as usize],
+        result_layout_id: (*wire)[(base + 5) as usize],
+    }
+}
+
+fn d1_decode_place(wire: &[i64; 48], expected_module_id: i64) -> D1DecodeResult with Mut, Panic, Div {
+    if (*wire)[0] != D1_WIRE_MAGIC || (*wire)[1] != D1_WIRE_VERSION || (*wire)[37] != D1_WIRE_WORDS {
+        return d1_decode_error(D1_ERR_UNKNOWN_WIRE_TAG)
+    }
+    if (*wire)[2] != 7001 { return d1_decode_error(D1_ERR_INVALID_ROOT_ID) }
     if (*wire)[3] != expected_module_id || (*wire)[11] != expected_module_id {
         return d1_decode_error(D1_ERR_CROSS_MODULE_IDENTITY)
     }
-    if (*wire)[12] != 3 ||
-       (*wire)[13] != 3 || (*wire)[14] != 0 || (*wire)[15] != 0 || (*wire)[16] != 101 || (*wire)[17] != 101 ||
-       (*wire)[18] != 1 || (*wire)[19] != 0 || (*wire)[20] != 0 || (*wire)[21] != 102 || (*wire)[22] != 102 ||
-       (*wire)[23] != 2 || (*wire)[24] != 3 || (*wire)[25] != 8 || (*wire)[26] != 103 || (*wire)[27] != 103 ||
-       (*wire)[30] != 311323 {
+    if ((*wire)[4] != D1_ACCESS_READ && (*wire)[4] != D1_ACCESS_WRITE) ||
+       (*wire)[5] < 1 || (*wire)[5] > 4 ||
+       (*wire)[6] < 1 || (*wire)[6] > 6 ||
+       (*wire)[7] < 1 || (*wire)[7] > 3 ||
+       (*wire)[8] < 1 || (*wire)[8] > 3 ||
+       (*wire)[12] < 1 || (*wire)[12] > 3 ||
+       ((*wire)[13] != 0 && (*wire)[13] != 1) ||
+       ((*wire)[15] != 0 && (*wire)[15] != 1) {
+        return d1_decode_error(D1_ERR_UNKNOWN_WIRE_TAG)
+    }
+    if (*wire)[14] != 3 ||
+       ((*wire)[16] < 1 || (*wire)[16] > 3) ||
+       ((*wire)[22] < 1 || (*wire)[22] > 3) ||
+       ((*wire)[28] < 1 || (*wire)[28] > 3) {
         return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
     }
 
-    let built = d1_build_place(expected_module_id)
-    if !built.ok { return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH) }
-    let access = if (*wire)[4] == D1_ACCESS_WRITE {
-        PlaceAccessKindV0::PlaceAccessWrite
+    var place = place_v0_empty()
+    place.root_kind = if (*wire)[5] == 1 {
+        PlaceRootKindV0::PlaceRootLocal
+    } else if (*wire)[5] == 2 {
+        PlaceRootKindV0::PlaceRootParam
+    } else if (*wire)[5] == 3 {
+        PlaceRootKindV0::PlaceRootGlobal
     } else {
-        PlaceAccessKindV0::PlaceAccessRead
+        PlaceRootKindV0::PlaceRootTemporary
     }
-    let verified = place_v0_verify(&built.place, access)
+    place.root_id = (*wire)[2]
+    place.address_space = if (*wire)[6] == 1 {
+        PlaceAddressSpaceV0::PlaceAddressStack
+    } else if (*wire)[6] == 2 {
+        PlaceAddressSpaceV0::PlaceAddressGlobal
+    } else if (*wire)[6] == 3 {
+        PlaceAddressSpaceV0::PlaceAddressManaged
+    } else if (*wire)[6] == 4 {
+        PlaceAddressSpaceV0::PlaceAddressRawReference
+    } else if (*wire)[6] == 5 {
+        PlaceAddressSpaceV0::PlaceAddressRawWord
+    } else {
+        PlaceAddressSpaceV0::PlaceAddressRawByte
+    }
+    place.mutability = if (*wire)[7] == 1 {
+        PlaceMutabilityV0::PlaceShared
+    } else if (*wire)[7] == 2 {
+        PlaceMutabilityV0::PlaceMutable
+    } else {
+        PlaceMutabilityV0::PlaceFrozen
+    }
+    place.value_category = if (*wire)[8] == 1 {
+        PlaceValueCategoryV0::PlaceCategoryLocation
+    } else if (*wire)[8] == 2 {
+        PlaceValueCategoryV0::PlaceCategoryManagedHandle
+    } else {
+        PlaceValueCategoryV0::PlaceCategoryReference
+    }
+    let provenance_source = if (*wire)[12] == 1 {
+        PlaceProvenanceSourceV0::PlaceProvenanceChecker
+    } else if (*wire)[12] == 2 {
+        PlaceProvenanceSourceV0::PlaceProvenanceLayout
+    } else {
+        PlaceProvenanceSourceV0::PlaceProvenanceLegacyContext
+    }
+    place.provenance = PlaceTypeLayoutProvenanceV0 {
+        type_id: (*wire)[9],
+        layout_id: (*wire)[10],
+        defining_module_id: (*wire)[11],
+        source: provenance_source,
+        complete: (*wire)[13] == 1,
+    }
+    place.projection_count = (*wire)[14]
+    place.differential_only = (*wire)[15] == 1
+    place.projections[0] = d1_projection_from_wire(wire, 16)
+    place.projections[1] = d1_projection_from_wire(wire, 22)
+    place.projections[2] = d1_projection_from_wire(wire, 28)
+
+    let access = if (*wire)[4] == D1_ACCESS_READ {
+        PlaceAccessKindV0::PlaceAccessRead
+    } else {
+        PlaceAccessKindV0::PlaceAccessWrite
+    }
+    let verified = place_v0_verify(&place, access)
     if !verified.ok {
         if verified.code == PLACE_V0_ERR_WRITE_TO_SHARED {
             return d1_decode_error(D1_ERR_WRITE_TO_SHARED)
         }
         return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
     }
-    D1DecodeResult { place: built.place, ok: true, code: D1_OK }
+
+    // D1's exact structured path is ordered Deref/Field/Index with pinned
+    // type/layout transitions. A reordered but individually valid path fails.
+    if place.projections[0].kind != PlaceProjectionKindV0::PlaceProjectionDeref ||
+       place.projections[0].identity != 0 || place.projections[0].byte_offset != 0 ||
+       place.projections[0].scale_bytes != 0 || place.projections[0].result_type_id != 101 || place.projections[0].result_layout_id != 101 {
+        return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
+    }
+    if place.projections[1].kind != PlaceProjectionKindV0::PlaceProjectionField ||
+       place.projections[1].identity != 0 || place.projections[1].byte_offset != -1 ||
+       place.projections[1].scale_bytes != 0 || place.projections[1].result_type_id != 102 || place.projections[1].result_layout_id != 102 {
+        return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
+    }
+    if place.projections[2].kind != PlaceProjectionKindV0::PlaceProjectionIndex ||
+       place.projections[2].identity != 3 || place.projections[2].byte_offset != 0 ||
+       place.projections[2].scale_bytes != 8 || place.projections[2].result_type_id != 103 || place.projections[2].result_layout_id != 103 {
+        return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
+    }
+    if (*wire)[36] != d1_path_fingerprint(&place) {
+        return d1_decode_error(D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH)
+    }
+
+    D1DecodeResult {
+        place: place,
+        access: access,
+        opcode: (*wire)[34],
+        value: (*wire)[35],
+        runtime_handle_serialized: (*wire)[38] == 1,
+        candidate_arena_identity: (*wire)[39],
+        candidate_module_identity: (*wire)[40],
+        candidate_slot: (*wire)[41],
+        candidate_generation: (*wire)[42],
+        ok: true,
+        code: D1_OK,
+    }
+}
+
+fn d1_places_exact_diff(left: &PlaceV0, right: &PlaceV0) -> i64 with Mut, Panic, Div {
+    if (*left).root_kind != (*right).root_kind { return 1 }
+    if (*left).root_id != (*right).root_id { return 2 }
+    if (*left).address_space != (*right).address_space { return 3 }
+    if (*left).mutability != (*right).mutability { return 4 }
+    if (*left).value_category != (*right).value_category { return 5 }
+    if (*left).provenance.type_id != (*right).provenance.type_id { return 6 }
+    if (*left).provenance.layout_id != (*right).provenance.layout_id { return 7 }
+    if (*left).provenance.defining_module_id != (*right).provenance.defining_module_id { return 8 }
+    if (*left).provenance.source != (*right).provenance.source { return 9 }
+    if (*left).provenance.complete != (*right).provenance.complete { return 10 }
+    if (*left).projection_count != (*right).projection_count { return 11 }
+    if (*left).differential_only != (*right).differential_only { return 12 }
+    var i: i64 = 0
+    while i < PLACE_V0_MAX_PROJECTIONS {
+        let a = (*left).projections[i as usize]
+        let b = (*right).projections[i as usize]
+        if a.kind != b.kind || a.identity != b.identity || a.byte_offset != b.byte_offset ||
+           a.scale_bytes != b.scale_bytes || a.result_type_id != b.result_type_id ||
+           a.result_layout_id != b.result_layout_id {
+            return 100 + i
+        }
+        i = i + 1
+    }
+    0
 }
 
 // The pinned Stage2 cannot project element .2 from the Arena's public triple
-// result. Because D1 concatenates the exact Arena snapshot into one test-only
-// unit, this helper reads the same validated slot without changing that source.
+// result. The exact Arena snapshot is concatenated into this test-only unit, so
+// this helper reads the validated slot. This is private composite access, not
+// evidence for a usable public payload accessor.
 fn d1_arena_payload(arena: &IrModuleArenaV2, handle: &IrModuleArenaV2InstrHandle) -> D1ArenaPayload with Panic, Div {
     if !ir_module_arena_v2_instr_is_live(arena, handle) {
         return D1ArenaPayload { ok: false, opcode: 0, value: 0 }
@@ -155,7 +406,37 @@ fn d1_arena_payload(arena: &IrModuleArenaV2, handle: &IrModuleArenaV2InstrHandle
     }
 }
 
-fn d1_raw_observation(final_value: i64) -> i64 {
+fn d1_map_fingerprint(logical_id: i64, function_handle: &IrModuleArenaV2FunctionHandle, instr_handle: &IrModuleArenaV2InstrHandle) -> i64 {
+    logical_id * 100000 +
+        ir_module_arena_v2_function_handle_slot(function_handle) * 10000 +
+        ir_module_arena_v2_function_handle_generation(function_handle) * 1000 +
+        ir_module_arena_v2_instr_handle_slot(instr_handle) * 100 +
+        ir_module_arena_v2_instr_handle_generation(instr_handle) * 10 + 7
+}
+
+fn d1_validate_rekey(decoded: &D1DecodeResult, arena: &IrModuleArenaV2, map: &D1RekeyMap) -> i64 with Panic, Div {
+    if (*decoded).runtime_handle_serialized {
+        let candidate = IrModuleArenaV2InstrHandle {
+            arena_identity: (*decoded).candidate_arena_identity,
+            module_identity: (*decoded).candidate_module_identity,
+            slot: (*decoded).candidate_slot,
+            generation: (*decoded).candidate_generation,
+        }
+        if ir_module_arena_v2_instr_is_live(arena, &candidate) {
+            return D1_ERR_UNKNOWN_WIRE_TAG
+        }
+        return D1_ERR_STALE_RUNTIME_HANDLE
+    }
+    if (*map).logical_id != (*decoded).place.root_id ||
+       !ir_module_arena_v2_function_is_live(arena, &(*map).function_handle) ||
+       !ir_module_arena_v2_instr_is_live(arena, &(*map).instr_handle) ||
+       (*map).fingerprint != d1_map_fingerprint((*map).logical_id, &(*map).function_handle, &(*map).instr_handle) {
+        return D1_ERR_STALE_RUNTIME_HANDLE
+    }
+    D1_OK
+}
+
+fn d1_synthetic_value_only(final_value: i64) -> i64 {
     final_value
 }
 
@@ -176,83 +457,143 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if source_instr_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(102) }
     let source_instr = source_instr_result.1
     let source_payload = d1_arena_payload(&source_arena, &source_instr)
-    if !source_payload.ok || source_payload.opcode != 9 || source_payload.value != 42 {
-        return d1_fail(103)
-    }
+    if !source_payload.ok || source_payload.opcode != 9 || source_payload.value != 42 { return d1_fail(103) }
 
-    let built = d1_build_place(module_id)
+    let built = d1_build_source_place(module_id)
     if !built.ok { return d1_fail(104) }
     let source_verified = place_v0_verify(&built.place, PlaceAccessKindV0::PlaceAccessRead)
     if !source_verified.ok { return d1_fail(105) }
-
-    var wire: [i64; 32] = [0; 32]
-    d1_encode_wire(&! wire, &built.place, source_payload.opcode, source_payload.value)
-
-    // N1 corrupts ordered path semantics but retains the same final scalar.
-    var mismatch_wire = wire
-    mismatch_wire[13] = 1
-    mismatch_wire[18] = 3
-    let raw_original = d1_raw_observation(wire[29])
-    let raw_n1 = d1_raw_observation(mismatch_wire[29])
-    let raw_status = if raw_original == 42 && raw_n1 == raw_original {
-        D1_RAW_INFORMATION_LOSS
+    let direct_projection_tag = if built.place.projections[0].kind == PlaceProjectionKindV0::PlaceProjectionDeref { 3 } else { 0 }
+    let value_projection_tag = d1_projection_kind_tag(built.place.projections[0].kind)
+    let ref_projection_tag = d1_projection_kind_tag_ref(&built.place.projections[0])
+    if direct_projection_tag != 3 || value_projection_tag != 3 { return d1_fail(125) }
+    if ref_projection_tag == 0 {
+        print("D1_KIND_BOUNDARY direct=3 by_value=3 by_ref=0 blocker=abi-transport/stage2_place_projection_ref_enum_field\n")
+    } else if ref_projection_tag == 3 {
+        print("D1_KIND_BOUNDARY direct=3 by_value=3 by_ref=3 blocker=none\n")
     } else {
-        -1
+        return d1_fail(127)
     }
-    if raw_status != D1_RAW_INFORMATION_LOSS { return d1_fail(106) }
-    print("D1_RAW_CONTROL original_value=42 n1_value=42 collision=true value_preserved=true path_order_preserved=false status=information_loss code=301\n")
 
+    var wire: [i64; 48] = [0; 48]
+    d1_encode_wire(&! wire, &built.place, source_payload.opcode, source_payload.value)
     let decoded = d1_decode_place(&wire, module_id)
-    if !decoded.ok || decoded.code != D1_OK { return d1_fail(107) }
+    if !decoded.ok || decoded.code != D1_OK {
+        print("D1_DECODE_FAIL code=")
+        print_int(decoded.code)
+        print("\n")
+        return d1_fail(106)
+    }
+    let exact_diff = d1_places_exact_diff(&built.place, &decoded.place)
+    if exact_diff != 0 {
+        print("D1_EXACT_DIFF code=")
+        print_int(exact_diff)
+        print("\n")
+        return d1_fail(106)
+    }
+    if decoded.opcode != source_payload.opcode || decoded.value != source_payload.value {
+        return d1_fail(132)
+    }
 
+    // A synthetic scalar-only observation collapses original and N1. This is
+    // useful characterization, but it is not an executed legacy/raw oracle.
+    var n1_wire = wire
+    var j: i64 = 0
+    while j < 6 {
+        n1_wire[(22 + j) as usize] = wire[(28 + j) as usize]
+        n1_wire[(28 + j) as usize] = wire[(22 + j) as usize]
+        j = j + 1
+    }
+    let synthetic_original = d1_synthetic_value_only(wire[35])
+    let synthetic_n1 = d1_synthetic_value_only(n1_wire[35])
+    if synthetic_original != 42 || synthetic_n1 != synthetic_original { return d1_fail(107) }
+    print("D1_SYNTHETIC_VALUE_ONLY original_value=42 n1_value=42 collision=true status=partial classification=MORE_EVIDENCE_REQUIRED d1_comparable_legacy_oracle_executed=false\n")
+
+    // Force both target handle slot and generation to differ from the source.
     var fresh_arena = ir_module_arena_v2_new(202, module_id)
+    let dummy_function_result = ir_module_arena_v2_add_function(&! fresh_arena, module_id)
+    if dummy_function_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(108) }
+    let dummy_function = dummy_function_result.1
+    let churn_function_result = ir_module_arena_v2_add_function(&! fresh_arena, module_id)
+    if churn_function_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(109) }
+    let churn_function = churn_function_result.1
+    if ir_module_arena_v2_remove_function(&! fresh_arena, &churn_function) != IR_MODULE_ARENA_V2_OK { return d1_fail(110) }
     let fresh_function_result = ir_module_arena_v2_add_function(&! fresh_arena, wire[3])
-    if fresh_function_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(108) }
+    if fresh_function_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(111) }
     let fresh_function = fresh_function_result.1
-    let fresh_instr_result = ir_module_arena_v2_add_instr(&! fresh_arena, &fresh_function, wire[28], wire[29])
-    if fresh_instr_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(109) }
+
+    let dummy_instr_result = ir_module_arena_v2_add_instr(&! fresh_arena, &dummy_function, 1, 0)
+    if dummy_instr_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(112) }
+    let churn_instr_result = ir_module_arena_v2_add_instr(&! fresh_arena, &fresh_function, 2, 0)
+    if churn_instr_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(113) }
+    let churn_instr = churn_instr_result.1
+    if ir_module_arena_v2_remove_instr(&! fresh_arena, &churn_instr) != IR_MODULE_ARENA_V2_OK { return d1_fail(114) }
+    let fresh_instr_result = ir_module_arena_v2_add_instr(&! fresh_arena, &fresh_function, decoded.opcode, decoded.value)
+    if fresh_instr_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(115) }
     let fresh_instr = fresh_instr_result.1
+
+    let map_fingerprint = d1_map_fingerprint(decoded.place.root_id, &fresh_function, &fresh_instr)
+    let rekey_map = D1RekeyMap {
+        logical_id: decoded.place.root_id,
+        function_handle: fresh_function,
+        instr_handle: fresh_instr,
+        fingerprint: map_fingerprint,
+    }
+    if d1_validate_rekey(&decoded, &fresh_arena, &rekey_map) != D1_OK { return d1_fail(116) }
     let fresh_payload = d1_arena_payload(&fresh_arena, &fresh_instr)
-    if !fresh_payload.ok || fresh_payload.opcode != 9 || fresh_payload.value != 42 {
-        return d1_fail(110)
+    if !fresh_payload.ok || fresh_payload.opcode != 9 || fresh_payload.value != 42 { return d1_fail(117) }
+    if ir_module_arena_v2_function_handle_slot(&source_function) == ir_module_arena_v2_function_handle_slot(&fresh_function) ||
+       ir_module_arena_v2_function_handle_generation(&source_function) == ir_module_arena_v2_function_handle_generation(&fresh_function) ||
+       ir_module_arena_v2_instr_handle_slot(&source_instr) == ir_module_arena_v2_instr_handle_slot(&fresh_instr) ||
+       ir_module_arena_v2_instr_handle_generation(&source_instr) == ir_module_arena_v2_instr_handle_generation(&fresh_instr) ||
+       map_fingerprint != 700112127 {
+        return d1_fail(118)
     }
-    if ir_module_arena_v2_instr_is_live(&fresh_arena, &source_instr) ||
-       !ir_module_arena_v2_instr_is_live(&fresh_arena, &fresh_instr) ||
-       ir_module_arena_v2_arena_identity(&source_arena) == ir_module_arena_v2_arena_identity(&fresh_arena) ||
-       decoded.place.root_id != built.place.root_id {
-        return d1_fail(111)
-    }
-    print("D1_STRUCTURED path=Deref/Field/Index value=42 logical_id=7001 source_arena=101 fresh_arena=202 rekeyed=true status=pass\n")
+    if wire[36] != 154461756 { return d1_fail(126) }
+    print("D1_STRUCTURED status=pass structured_exact_roundtrip=true payload_roundtrip=true path=Deref/Field/Index path_fingerprint=154461756 logical_id=7001 source_arena=101 source_function_slot=0 source_function_generation=1 source_instr_slot=0 source_instr_generation=1 decoded_arena=202 decoded_function_slot=1 decoded_function_generation=2 decoded_instr_slot=1 decoded_instr_generation=2 map_fingerprint=700112127 rekeyed=true linkage=test_local_external_rekey_map place_stored_in_arena=false\n")
 
-    let mismatch = d1_decode_place(&mismatch_wire, module_id)
-    if mismatch.ok || mismatch.code != D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH { return d1_fail(112) }
-    print("D1_NEGATIVE name=projection_type_layout_mismatch status=pass code=201\n")
+    let n1 = d1_decode_place(&n1_wire, module_id)
+    if n1.ok || n1.code != D1_ERR_PROJECTION_TYPE_LAYOUT_MISMATCH { return d1_fail(119) }
+    print("D1_NEGATIVE name=projection_type_layout_mismatch status=pass code=201 count=1 backend_ops=0 mutation=swap_complete_field_index_records\n")
 
-    var write_wire = wire
-    write_wire[4] = D1_ACCESS_WRITE
-    let shared_write = d1_decode_place(&write_wire, module_id)
-    if shared_write.ok || shared_write.code != D1_ERR_WRITE_TO_SHARED { return d1_fail(113) }
-    print("D1_NEGATIVE name=write_to_shared status=pass code=202 place_code=110\n")
+    var n2_wire = wire
+    n2_wire[4] = D1_ACCESS_WRITE
+    let n2 = d1_decode_place(&n2_wire, module_id)
+    if n2.ok || n2.code != D1_ERR_WRITE_TO_SHARED { return d1_fail(120) }
+    print("D1_NEGATIVE name=write_to_shared status=pass code=202 place_code=110 count=1 backend_ops=0 mutation=access_write\n")
 
-    var cross_module_wire = wire
-    cross_module_wire[3] = 502
-    cross_module_wire[11] = 502
-    let cross_module = d1_decode_place(&cross_module_wire, module_id)
-    if cross_module.ok || cross_module.code != D1_ERR_CROSS_MODULE_IDENTITY { return d1_fail(114) }
-    print("D1_NEGATIVE name=cross_module_identity status=pass code=203\n")
+    var n3_wire = wire
+    n3_wire[3] = 502
+    let n3 = d1_decode_place(&n3_wire, module_id)
+    if n3.ok || n3.code != D1_ERR_CROSS_MODULE_IDENTITY { return d1_fail(121) }
+    print("D1_NEGATIVE name=cross_module_identity status=pass code=203 count=1 backend_ops=0 mutation=header_module_only\n")
 
-    if ir_module_arena_v2_remove_instr(&! fresh_arena, &fresh_instr) != IR_MODULE_ARENA_V2_OK { return d1_fail(115) }
-    let replacement_result = ir_module_arena_v2_add_instr(&! fresh_arena, &fresh_function, 10, 84)
-    if replacement_result.0 != IR_MODULE_ARENA_V2_OK { return d1_fail(116) }
-    let replacement = replacement_result.1
-    if ir_module_arena_v2_instr_handle_slot(&fresh_instr) != ir_module_arena_v2_instr_handle_slot(&replacement) ||
-       ir_module_arena_v2_instr_handle_generation(&fresh_instr) == ir_module_arena_v2_instr_handle_generation(&replacement) ||
-       ir_module_arena_v2_instr_is_live(&fresh_arena, &fresh_instr) ||
-       !ir_module_arena_v2_instr_is_live(&fresh_arena, &replacement) {
-        return d1_fail(D1_ERR_STALE_RUNTIME_HANDLE)
-    }
-    print("D1_NEGATIVE name=stale_runtime_handle status=pass code=204\n")
+    var n4_wire = wire
+    n4_wire[38] = 1
+    n4_wire[39] = 202
+    n4_wire[40] = module_id
+    n4_wire[41] = ir_module_arena_v2_instr_handle_slot(&churn_instr)
+    n4_wire[42] = ir_module_arena_v2_instr_handle_generation(&churn_instr)
+    let n4 = d1_decode_place(&n4_wire, module_id)
+    if !n4.ok { return d1_fail(128) }
+    let n4_status = d1_validate_rekey(&n4, &fresh_arena, &rekey_map)
+    if n4_status == D1_OK { return d1_fail(129) }
+    if n4_status == D1_ERR_UNKNOWN_WIRE_TAG { return d1_fail(130) }
+    if n4_status != D1_ERR_STALE_RUNTIME_HANDLE { return d1_fail(131) }
+    print("D1_NEGATIVE name=stale_runtime_handle status=pass code=204 count=1 backend_ops=0 mutation=serialized_stale_candidate candidate_arena=202 candidate_slot=1 candidate_generation=1\n")
 
-    print("PLACE_ARENA_SOIR_D1_PASS same_build=true default_pipeline=false legacy_kept=true promotion_ready=false writer_contract_only=true actual_soir_version=none\n")
+    var n5_wire = wire
+    n5_wire[2] = 9999
+    let n5 = d1_decode_place(&n5_wire, module_id)
+    if n5.ok || n5.code != D1_ERR_INVALID_ROOT_ID { return d1_fail(123) }
+    print("D1_NEGATIVE name=invalid_root_id status=pass code=205 count=1 backend_ops=0 mutation=root_id_9999\n")
+
+    var n6_wire = wire
+    n6_wire[4] = 99
+    let n6 = d1_decode_place(&n6_wire, module_id)
+    if n6.ok || n6.code != D1_ERR_UNKNOWN_WIRE_TAG { return d1_fail(124) }
+    print("D1_NEGATIVE name=unknown_access_tag status=pass code=206 count=1 backend_ops=0 mutation=access_tag_99\n")
+
+    print("PLACE_ARENA_SOIR_D1_PARTIAL structured=pass synthetic_value_only=partial legacy_control=MORE_EVIDENCE_REQUIRED same_build=true default_pipeline=false legacy_kept=true d1_comparable_legacy_oracle_executed=false promotion_ready=false writer_contract_only=true backend_ops=0 actual_soir_version=none arena_public_payload_accessor=false composite_private_access=true blocker=abi-transport/stage2_tuple_index_2\n")
     0
 }
