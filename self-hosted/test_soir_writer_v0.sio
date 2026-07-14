@@ -1,0 +1,211 @@
+// Differential and failure-atomicity witness for the off-default SOIR writer.
+
+module selfhost::test_soir_writer_v0
+
+use ir::ir::*
+use ir::serialize::{serialize_ir_module_into, deserialize_ir_module_into}
+use ir::soir_writer::*
+
+fn soir_writer_buffers_equal(
+    left: &[i8; 131072],
+    right: &[i8; 131072],
+    left_start: i64,
+    right_start: i64,
+    len: i64,
+) -> bool with Panic, Div {
+    var i: i64 = 0
+    while i < len {
+        if left[(left_start + i) as usize] != right[(right_start + i) as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn soir_writer_buffer_is_canary(buf: &[i8; 131072], canary: i8) -> bool with Panic, Div {
+    var i: i64 = 0
+    while i < 131072 {
+        if (*buf)[i as usize] != canary { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn soir_writer_compare_with_legacy(module: &IrModule, expected_len: i64) -> bool with Mut, Panic, Div, Alloc {
+    var legacy: [i8; 131072] = [0; 131072]
+    var legacy_len: i64 = 0
+    serialize_ir_module_into(module, &! legacy, &! legacy_len)
+    if legacy_len != expected_len { return false }
+
+    var candidate: [i8; 131072] = [0; 131072]
+    let plan = soir_writer_preflight_empty_extensions_v5(module, 0, 131072)
+    if soir_write_plan_status(&plan) != SOIR_WRITER_OK ||
+       soir_write_plan_required(&plan) != expected_len ||
+       soir_write_plan_start(&plan) != 0 ||
+       soir_write_plan_end(&plan) != expected_len ||
+       soir_write_plan_version(&plan) != 5 as i8 {
+        return false
+    }
+    let end = soir_writer_emit_empty_extensions_v5(module, &plan, &! candidate)
+    if end != expected_len || !soir_writer_buffers_equal(&legacy, &candidate, 0, 0, expected_len) {
+        return false
+    }
+
+    var repeated: [i8; 131072] = [85; 131072]
+    let repeated_end = soir_writer_emit_empty_extensions_v5(module, &plan, &! repeated)
+    repeated_end == expected_len &&
+        soir_writer_buffers_equal(&candidate, &repeated, 0, 0, expected_len)
+}
+
+fn soir_writer_empty_module_differential() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    if !soir_writer_compare_with_legacy(&module, 320) { return false }
+
+    var candidate: [i8; 131072] = [0; 131072]
+    let plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    let end = soir_writer_emit_empty_extensions_v5(&module, &plan, &! candidate)
+    end == 320 &&
+        candidate[0] == 83 as i8 && candidate[1] == 79 as i8 &&
+        candidate[2] == 73 as i8 && candidate[3] == 82 as i8 &&
+        candidate[4] == 5 as i8 && candidate[319] == 0 as i8
+}
+
+fn soir_writer_populated_module_differential() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    var function = ir_empty_function()
+    function.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
+    function.defining_module_id = 37
+    function.reg_count = 1
+    function.instr_count = 2
+    function.instrs[0] = ir_load_imm(0, 42)
+    function.instrs[1] = ir_return(0)
+    module.functions[0] = function
+    module.fn_count = 1
+    module.string_table[0] = ir_name_from_bytes(118 as i8, 53 as i8, 0 as i8, 0 as i8, 2)
+    module.string_count = 1
+
+    if !soir_writer_compare_with_legacy(&module, 1632) { return false }
+
+    var arena: [i8; 131072] = [85; 131072]
+    let plan = soir_writer_preflight_empty_extensions_v5(&module, 17, 2000)
+    let end = soir_writer_emit_empty_extensions_v5(&module, &plan, &! arena)
+    if end != 1649 || soir_write_plan_required(&plan) != 1632 { return false }
+
+    // Stable v5 anchors: version, defining_module_id and extension start.
+    let provenance_offset: i64 = 720
+    let extensions_offset: i64 = 1336
+    arena[17 + 4] == 5 as i8 &&
+        arena[17 + provenance_offset] == 37 as i8 &&
+        arena[17 + extensions_offset] == 0 as i8 &&
+        arena[16] == 85 as i8 && arena[end] == 85 as i8
+}
+
+fn soir_writer_rejections_preserve_canary() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    var canary: [i8; 131072] = [85; 131072]
+
+    let capacity_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 319)
+    if soir_write_plan_status(&capacity_plan) != SOIR_WRITER_VIEW_BOUNDS { return false }
+    if soir_writer_emit_empty_extensions_v5(&module, &capacity_plan, &! canary) != SOIR_WRITER_VIEW_BOUNDS {
+        return false
+    }
+    if !soir_writer_buffer_is_canary(&canary, 85 as i8) { return false }
+
+    module.fn_count = -1
+    let counts_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    if soir_write_plan_status(&counts_plan) != SOIR_WRITER_COUNTS_BOUNDS { return false }
+    if soir_writer_emit_empty_extensions_v5(&module, &counts_plan, &! canary) != SOIR_WRITER_COUNTS_BOUNDS {
+        return false
+    }
+    if !soir_writer_buffer_is_canary(&canary, 85 as i8) { return false }
+    module.fn_count = 0
+
+    module.bss_total_size = 8
+    let contract_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    if soir_write_plan_status(&contract_plan) != SOIR_WRITER_MODULE_CONTRACT { return false }
+    if soir_writer_emit_empty_extensions_v5(&module, &contract_plan, &! canary) != SOIR_WRITER_MODULE_CONTRACT {
+        return false
+    }
+    if !soir_writer_buffer_is_canary(&canary, 85 as i8) { return false }
+    module.bss_total_size = 0
+
+    let accepted_empty_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    module.string_count = 1
+    let stale_result = soir_writer_emit_empty_extensions_v5(&module, &accepted_empty_plan, &! canary)
+    if stale_result != SOIR_WRITER_STALE_PLAN { return false }
+    if !soir_writer_buffer_is_canary(&canary, 85 as i8) { return false }
+    module.string_count = 0
+
+    var function = ir_empty_function()
+    function.instr_count = 1
+    function.instrs[0] = ir_instr_new(IrOpcode::IrArrayLen)
+    module.functions[0] = function
+    module.fn_count = 1
+    let opcode_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    if soir_write_plan_status(&opcode_plan) != SOIR_WRITER_UNSUPPORTED_OPCODE { return false }
+    if soir_writer_emit_empty_extensions_v5(&module, &opcode_plan, &! canary) != SOIR_WRITER_UNSUPPORTED_OPCODE {
+        return false
+    }
+    if !soir_writer_buffer_is_canary(&canary, 85 as i8) { return false }
+
+    function = ir_empty_function()
+    function.name.len = 129
+    module.functions[0] = function
+    let name_plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    if soir_write_plan_status(&name_plan) != SOIR_WRITER_INVALID_NAME { return false }
+    if soir_writer_emit_empty_extensions_v5(&module, &name_plan, &! canary) != SOIR_WRITER_INVALID_NAME {
+        return false
+    }
+    soir_writer_buffer_is_canary(&canary, 85 as i8)
+}
+
+fn soir_writer_v4_decode_only_anchor() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    var function = ir_empty_function()
+    function.defining_module_id = 37
+    function.instr_count = 1
+    function.instrs[0] = ir_return(0)
+    module.functions[0] = function
+    module.fn_count = 1
+
+    var v5: [i8; 131072] = [0; 131072]
+    let plan = soir_writer_preflight_empty_extensions_v5(&module, 0, 131072)
+    let v5_len = soir_writer_emit_empty_extensions_v5(&module, &plan, &! v5)
+    if v5_len <= 0 { return false }
+
+    let provenance_offset: i64 = 720
+    var v4: [i8; 131072] = [0; 131072]
+    var copy_index: i64 = 0
+    while copy_index < v5_len {
+        v4[copy_index as usize] = v5[copy_index as usize]
+        copy_index = copy_index + 1
+    }
+    var i = provenance_offset
+    while i + 8 < v5_len {
+        v4[i as usize] = v4[(i + 8) as usize]
+        i = i + 1
+    }
+    v4[4] = 4 as i8
+
+    var decoded = ir_empty_module()
+    if !deserialize_ir_module_into(v4, v5_len - 8, &! decoded) { return false }
+    decoded.fn_count == 1 && decoded.functions[0].defining_module_id == IR_DEFINING_MODULE_UNKNOWN
+}
+
+pub fn soir_writer_v0_differential_self_test() -> bool with Mut, Panic, Div, Alloc {
+    soir_writer_empty_module_differential() &&
+        soir_writer_populated_module_differential() &&
+        soir_writer_rejections_preserve_canary() &&
+        soir_writer_v4_decode_only_anchor()
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if soir_writer_v0_differential_self_test() {
+        println("PASS soir_writer_v0_differential")
+        0
+    } else {
+        println("FAIL soir_writer_v0_differential")
+        1
+    }
+}

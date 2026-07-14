@@ -1,0 +1,460 @@
+// Transactional SOIR v5 writer prototype.
+//
+// This module is deliberately outside the default compiler pipeline. It emits
+// the empty-extension SOIR v5 subset into a caller-owned buffer view without
+// passing the 128 KiB array by value or using mutable global writer state.
+
+module ir::soir_writer
+
+use parser::ast::*
+use ir::ir::*
+use ir::soir_core::{
+    SOIR_MAX_SIZE,
+    SOIR_NAME_SIZE,
+    SOIR_INSTR_SIZE,
+    SOIR_FUNCTION_HEADER_V5_SIZE,
+    SOIR_EMPTY_EXTENSION_COUNT_FIELDS,
+}
+
+pub let SOIR_WRITER_VERSION_V5: i8 = 5
+pub let SOIR_WRITER_OK: i64 = 0
+pub let SOIR_WRITER_COUNTS_BOUNDS: i64 = -1
+pub let SOIR_WRITER_MODULE_CONTRACT: i64 = -2
+pub let SOIR_WRITER_VIEW_BOUNDS: i64 = -3
+pub let SOIR_WRITER_UNSUPPORTED_OPCODE: i64 = -4
+pub let SOIR_WRITER_INVALID_NAME: i64 = -5
+pub let SOIR_WRITER_STALE_PLAN: i64 = -6
+pub let SOIR_WRITER_INTERNAL_BOUNDS: i64 = -7
+
+// Public only as an opaque capability passed from preflight to emit. Its
+// fields remain private to this module, so callers cannot forge an accepted
+// plan or alter the arena view after validation.
+pub struct SoirWritePlan {
+    start: i64,
+    capacity: i64,
+    required: i64,
+    end: i64,
+    version: i8,
+    status: i64,
+}
+
+// The cursor owns no bytes. It is a small state object over a caller-owned
+// array/arena view and is never returned across the public boundary.
+struct SoirWriterCursor {
+    pos: i64,
+    limit: i64,
+    status: i64,
+}
+
+fn soir_writer_failed_plan(start: i64, capacity: i64, status: i64) -> SoirWritePlan {
+    SoirWritePlan {
+        start: start,
+        capacity: capacity,
+        required: 0,
+        end: start,
+        version: SOIR_WRITER_VERSION_V5,
+        status: status,
+    }
+}
+
+pub fn soir_write_plan_status(plan: &SoirWritePlan) -> i64 {
+    (*plan).status
+}
+
+pub fn soir_write_plan_required(plan: &SoirWritePlan) -> i64 {
+    (*plan).required
+}
+
+pub fn soir_write_plan_start(plan: &SoirWritePlan) -> i64 {
+    (*plan).start
+}
+
+pub fn soir_write_plan_end(plan: &SoirWritePlan) -> i64 {
+    (*plan).end
+}
+
+pub fn soir_write_plan_version(plan: &SoirWritePlan) -> i8 {
+    (*plan).version
+}
+
+fn soir_writer_name_is_valid(name: &Name) -> bool {
+    (*name).len >= 0 && (*name).len <= 128
+}
+
+fn soir_writer_opcode_tag(op: IrOpcode) -> i64 {
+    match op {
+        IrOpcode::IrLoadImm => 0,
+        IrOpcode::IrLoadFloat => 1,
+        IrOpcode::IrLoadBool => 2,
+        IrOpcode::IrLoadString => 3,
+        IrOpcode::IrCopy => 4,
+        IrOpcode::IrBinOp => 5,
+        IrOpcode::IrUnaryOp => 6,
+        IrOpcode::IrCall => 7,
+        IrOpcode::IrReturn => 8,
+        IrOpcode::IrJump => 9,
+        IrOpcode::IrBranchTrue => 10,
+        IrOpcode::IrBranchFalse => 11,
+        IrOpcode::IrFieldGet => 12,
+        IrOpcode::IrFieldSet => 13,
+        IrOpcode::IrIndexGet => 14,
+        IrOpcode::IrIndexSet => 15,
+        IrOpcode::IrAlloc => 16,
+        IrOpcode::IrLabel => 17,
+        IrOpcode::IrNop => 18,
+        IrOpcode::IrPhi => 19,
+        IrOpcode::IrContest => 20,
+        IrOpcode::IrProveRobust => 21,
+        IrOpcode::IrValidated => 22,
+        IrOpcode::IrLiftKnowledge => 23,
+        IrOpcode::IrMeasure => 24,
+        IrOpcode::IrAdmitAction => 25,
+        IrOpcode::IrDeferAction => 26,
+        IrOpcode::IrPlanAcquisition => 27,
+        IrOpcode::IrPlanRecourse => 28,
+        IrOpcode::IrProposeAlternatives => 29,
+        IrOpcode::IrCommitAlternative => 30,
+        IrOpcode::IrObserveTransition => 31,
+        IrOpcode::IrRollbackTransition => 32,
+        IrOpcode::IrDebugGuard => 33,
+        IrOpcode::IrProfCounter => 34,
+        IrOpcode::IrCallSret => 35,
+        IrOpcode::IrReturnSret => 36,
+        _ => -1,
+    }
+}
+
+fn soir_writer_binary_op_tag(op: BinaryOp) -> i64 {
+    match op {
+        BinaryOp::OpAdd => 0,
+        BinaryOp::OpSub => 1,
+        BinaryOp::OpMul => 2,
+        BinaryOp::OpDiv => 3,
+        BinaryOp::OpRem => 4,
+        BinaryOp::OpEq => 5,
+        BinaryOp::OpNe => 6,
+        BinaryOp::OpLt => 7,
+        BinaryOp::OpLe => 8,
+        BinaryOp::OpGt => 9,
+        BinaryOp::OpGe => 10,
+        BinaryOp::OpAnd => 11,
+        BinaryOp::OpOr => 12,
+        BinaryOp::OpBitAnd => 13,
+        BinaryOp::OpBitOr => 14,
+        BinaryOp::OpBitXor => 15,
+        BinaryOp::OpShl => 16,
+        BinaryOp::OpShr => 17,
+        BinaryOp::OpConcat => 18,
+        BinaryOp::OpRange => 19,
+        BinaryOp::OpRangeInclusive => 20,
+    }
+}
+
+fn soir_writer_unary_op_tag(op: UnaryOp) -> i64 {
+    match op {
+        UnaryOp::OpNeg => 0,
+        UnaryOp::OpNot => 1,
+        UnaryOp::OpRef => 2,
+        UnaryOp::OpRefMut => 3,
+        UnaryOp::OpDeref => 4,
+    }
+}
+
+fn soir_writer_module_has_empty_extensions(module: &IrModule) -> bool {
+    let epistemic = &(*module).epistemic
+    let algebras = &(*module).algebras
+    (*algebras).count == 0 &&
+        (*epistemic).model_family_count == 0 &&
+        (*epistemic).policy_count == 0 &&
+        (*epistemic).decision_policy_count == 0 &&
+        (*epistemic).deferral_policy_count == 0 &&
+        (*epistemic).acquisition_policy_count == 0 &&
+        (*epistemic).recourse_policy_count == 0 &&
+        (*epistemic).validation_count == 0 &&
+        (*epistemic).mechanistic_report_count == 0 &&
+        (*epistemic).posterior_weights_count == 0 &&
+        (*epistemic).counterexample_count == 0 &&
+        (*epistemic).audit_count == 0 &&
+        (*epistemic).contest_count == 0 &&
+        (*epistemic).contest_witness_count == 0 &&
+        (*epistemic).robust_proof_count == 0 &&
+        (*epistemic).validated_manifest_count == 0 &&
+        (*epistemic).decision_certificate_count == 0 &&
+        (*epistemic).deferred_certificate_count == 0 &&
+        (*epistemic).deferred_reason_witness_count == 0 &&
+        (*epistemic).acquisition_plan_count == 0 &&
+        (*epistemic).acquisition_reason_witness_count == 0 &&
+        (*epistemic).recourse_plan_count == 0 &&
+        (*epistemic).recourse_reason_witness_count == 0 &&
+        (*epistemic).alternative_policy_count == 0 &&
+        (*epistemic).alternative_frontier_count == 0 &&
+        (*epistemic).alternative_candidate_count == 0 &&
+        (*epistemic).alternative_set_count == 0 &&
+        (*epistemic).alternative_reason_witness_count == 0 &&
+        (*epistemic).transition_policy_count == 0 &&
+        (*epistemic).transition_protocol_count == 0 &&
+        (*epistemic).transition_step_count == 0 &&
+        (*epistemic).transition_plan_count == 0 &&
+        (*epistemic).transition_reason_witness_count == 0 &&
+        (*epistemic).monitoring_policy_count == 0 &&
+        (*epistemic).observed_transition_count == 0 &&
+        (*epistemic).rollback_certificate_count == 0 &&
+        (*epistemic).hyper_expr_count == 0
+}
+
+// Preflight is the only input-rejection phase. It validates every count, name,
+// opcode and byte bound needed by emit before the caller buffer is touched.
+pub fn soir_writer_preflight_empty_extensions_v5(
+    module: &IrModule,
+    start: i64,
+    capacity: i64,
+) -> SoirWritePlan with Panic, Div {
+    if start < 0 || capacity < 0 || start > SOIR_MAX_SIZE || capacity > SOIR_MAX_SIZE - start {
+        return soir_writer_failed_plan(start, capacity, SOIR_WRITER_VIEW_BOUNDS)
+    }
+    if (*module).fn_count < 0 || (*module).fn_count > IR_MAX_FUNCS ||
+       (*module).string_count < 0 || (*module).string_count > IR_MAX_STRINGS {
+        return soir_writer_failed_plan(start, capacity, SOIR_WRITER_COUNTS_BOUNDS)
+    }
+    if (*module).bss_total_size != 0 || !soir_writer_module_has_empty_extensions(module) {
+        return soir_writer_failed_plan(start, capacity, SOIR_WRITER_MODULE_CONTRACT)
+    }
+
+    var required: i64 = 16
+    var i: i64 = 0
+    while i < (*module).fn_count {
+        let function = &(*module).functions[i as usize]
+        if (*function).instr_count < 0 || (*function).instr_count > IR_MAX_INSTRS {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_COUNTS_BOUNDS)
+        }
+        if (*function).param_count < 0 || (*function).param_count > 64 || (*function).bss_size != 0 {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_MODULE_CONTRACT)
+        }
+        if !soir_writer_name_is_valid(&(*function).name) {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_INVALID_NAME)
+        }
+
+        var j: i64 = 0
+        while j < (*function).instr_count {
+            let instr = &(*function).instrs[j as usize]
+            if soir_writer_opcode_tag((*instr).op) < 0 {
+                return soir_writer_failed_plan(start, capacity, SOIR_WRITER_UNSUPPORTED_OPCODE)
+            }
+            if !soir_writer_name_is_valid(&(*instr).name) {
+                return soir_writer_failed_plan(start, capacity, SOIR_WRITER_INVALID_NAME)
+            }
+            j = j + 1
+        }
+
+        required = required + SOIR_FUNCTION_HEADER_V5_SIZE + (*function).instr_count * SOIR_INSTR_SIZE
+        if required > capacity {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_VIEW_BOUNDS)
+        }
+        i = i + 1
+    }
+
+    required = required + 8
+    var string_index: i64 = 0
+    while string_index < (*module).string_count {
+        let name = &(*module).string_table[string_index as usize]
+        if !soir_writer_name_is_valid(name) {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_INVALID_NAME)
+        }
+        required = required + SOIR_NAME_SIZE
+        if required > capacity {
+            return soir_writer_failed_plan(start, capacity, SOIR_WRITER_VIEW_BOUNDS)
+        }
+        string_index = string_index + 1
+    }
+
+    required = required + SOIR_EMPTY_EXTENSION_COUNT_FIELDS * 8 + 8
+    if required > capacity || required > SOIR_MAX_SIZE - start {
+        return soir_writer_failed_plan(start, capacity, SOIR_WRITER_VIEW_BOUNDS)
+    }
+
+    SoirWritePlan {
+        start: start,
+        capacity: capacity,
+        required: required,
+        end: start + required,
+        version: SOIR_WRITER_VERSION_V5,
+        status: SOIR_WRITER_OK,
+    }
+}
+
+fn soir_writer_cursor_from_plan(plan: &SoirWritePlan) -> SoirWriterCursor {
+    SoirWriterCursor {
+        pos: (*plan).start,
+        limit: (*plan).end,
+        status: SOIR_WRITER_OK,
+    }
+}
+
+fn soir_writer_put_i8(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    value: i8,
+) with Mut, Panic, Div {
+    if (*cursor).status != SOIR_WRITER_OK { return }
+    if (*cursor).pos < 0 || (*cursor).pos >= (*cursor).limit || (*cursor).pos >= SOIR_MAX_SIZE {
+        (*cursor).status = SOIR_WRITER_INTERNAL_BOUNDS
+        return
+    }
+    out_buf[(*cursor).pos as usize] = value
+    (*cursor).pos = (*cursor).pos + 1
+}
+
+fn soir_writer_put_i64(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 0
+    while shift < 64 {
+        soir_writer_put_i8(cursor, out_buf, ((value >> shift) & 255) as i8)
+        shift = shift + 8
+    }
+}
+
+fn soir_writer_put_f64(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    value: f64,
+) with Mut, Panic, Div {
+    soir_writer_put_i64(cursor, out_buf, f64_to_bits(value))
+}
+
+fn soir_writer_put_zeroes(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    count: i64,
+) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        soir_writer_put_i8(cursor, out_buf, 0 as i8)
+        i = i + 1
+    }
+}
+
+fn soir_writer_put_name(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    name: &Name,
+) with Mut, Panic, Div {
+    soir_writer_put_i64(cursor, out_buf, (*name).len)
+    var i: i64 = 0
+    while i < 128 {
+        soir_writer_put_i8(cursor, out_buf, (*name).buf[i as usize])
+        i = i + 1
+    }
+}
+
+fn soir_writer_put_instr(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    instr: &IrInstr,
+) with Mut, Panic, Div {
+    soir_writer_put_i8(cursor, out_buf, soir_writer_opcode_tag((*instr).op) as i8)
+    soir_writer_put_zeroes(cursor, out_buf, 7)
+    soir_writer_put_i64(cursor, out_buf, (*instr).dst)
+    soir_writer_put_i64(cursor, out_buf, (*instr).src1)
+    soir_writer_put_i64(cursor, out_buf, (*instr).src2)
+    soir_writer_put_i64(cursor, out_buf, (*instr).imm_i64)
+    soir_writer_put_f64(cursor, out_buf, (*instr).imm_f64)
+    soir_writer_put_i64(cursor, out_buf, (*instr).label_id)
+    soir_writer_put_i64(cursor, out_buf, (*instr).fn_id)
+    soir_writer_put_i64(cursor, out_buf, (*instr).field_idx)
+    soir_writer_put_i8(cursor, out_buf, soir_writer_binary_op_tag((*instr).bin_op) as i8)
+    soir_writer_put_zeroes(cursor, out_buf, 7)
+    soir_writer_put_i8(cursor, out_buf, soir_writer_unary_op_tag((*instr).un_op) as i8)
+    soir_writer_put_zeroes(cursor, out_buf, 7)
+    soir_writer_put_name(cursor, out_buf, &(*instr).name)
+    soir_writer_put_i64(cursor, out_buf, (*instr).arg_count)
+}
+
+fn soir_writer_put_function(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    function: &IrFunction,
+) with Mut, Panic, Div {
+    soir_writer_put_name(cursor, out_buf, &(*function).name)
+    soir_writer_put_i64(cursor, out_buf, (*function).instr_count)
+    soir_writer_put_i64(cursor, out_buf, (*function).reg_count)
+    soir_writer_put_i64(cursor, out_buf, (*function).label_count)
+    soir_writer_put_i64(cursor, out_buf, (*function).param_count)
+
+    var i: i64 = 0
+    while i < 64 {
+        soir_writer_put_i64(cursor, out_buf, (*function).param_regs[i as usize])
+        i = i + 1
+    }
+    soir_writer_put_i64(cursor, out_buf, (*function).compile_strategy)
+    soir_writer_put_i64(cursor, out_buf, (*function).prof_counter_id)
+    soir_writer_put_i64(cursor, out_buf, (*function).hyper_algebra_kind)
+    soir_writer_put_i64(cursor, out_buf, (*function).defining_module_id)
+
+    var instr_index: i64 = 0
+    while instr_index < (*function).instr_count {
+        let instr = &(*function).instrs[instr_index as usize]
+        soir_writer_put_instr(cursor, out_buf, instr)
+        instr_index = instr_index + 1
+    }
+}
+
+fn soir_writer_plan_matches(left: &SoirWritePlan, right: &SoirWritePlan) -> bool {
+    (*left).status == (*right).status &&
+        (*left).start == (*right).start &&
+        (*left).capacity == (*right).capacity &&
+        (*left).required == (*right).required &&
+        (*left).end == (*right).end &&
+        (*left).version == (*right).version
+}
+
+// Returns the absolute end cursor on success and a SOIR_WRITER_* status on
+// rejection. Every rejection occurs before cursor creation and before the
+// first buffer write. The emitted byte length is end - plan.start.
+pub fn soir_writer_emit_empty_extensions_v5(
+    module: &IrModule,
+    plan: &SoirWritePlan,
+    out_buf: &![i8; 131072],
+) -> i64 with Mut, Panic, Div {
+    if (*plan).status != SOIR_WRITER_OK { return (*plan).status }
+    let verified = soir_writer_preflight_empty_extensions_v5(module, (*plan).start, (*plan).capacity)
+    if !soir_writer_plan_matches(plan, &verified) { return SOIR_WRITER_STALE_PLAN }
+
+    var cursor = soir_writer_cursor_from_plan(plan)
+    soir_writer_put_i8(&! cursor, out_buf, 83 as i8)
+    soir_writer_put_i8(&! cursor, out_buf, 79 as i8)
+    soir_writer_put_i8(&! cursor, out_buf, 73 as i8)
+    soir_writer_put_i8(&! cursor, out_buf, 82 as i8)
+    soir_writer_put_i8(&! cursor, out_buf, SOIR_WRITER_VERSION_V5)
+    soir_writer_put_zeroes(&! cursor, out_buf, 3)
+    soir_writer_put_i64(&! cursor, out_buf, (*module).fn_count)
+
+    var function_index: i64 = 0
+    while function_index < (*module).fn_count {
+        let function = &(*module).functions[function_index as usize]
+        soir_writer_put_function(&! cursor, out_buf, function)
+        function_index = function_index + 1
+    }
+
+    soir_writer_put_i64(&! cursor, out_buf, (*module).string_count)
+    var string_index: i64 = 0
+    while string_index < (*module).string_count {
+        let name = &(*module).string_table[string_index as usize]
+        soir_writer_put_name(&! cursor, out_buf, name)
+        string_index = string_index + 1
+    }
+
+    var extension_index: i64 = 0
+    while extension_index < SOIR_EMPTY_EXTENSION_COUNT_FIELDS {
+        soir_writer_put_i64(&! cursor, out_buf, 0)
+        extension_index = extension_index + 1
+    }
+    soir_writer_put_i64(&! cursor, out_buf, 0)
+
+    if cursor.status != SOIR_WRITER_OK || cursor.pos != (*plan).end {
+        return SOIR_WRITER_INTERNAL_BOUNDS
+    }
+    cursor.pos
+}
