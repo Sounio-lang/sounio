@@ -2579,3 +2579,13 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-pr845-hero-v3-desktop.png`, `/tmp/sounio-pr845-hero-v3-mobile.png`, and `/tmp/sounio-hero-design-qa-board.png`; browser snapshot verified audience switching, zero mobile overflow, and no console errors.
 - Validation: `npm run check:quality` passed after the brand-contract import paths were restored; the generated artifact timestamp was returned to the committed value.
 - Raw review directories: `/tmp/llm-offload-ur4Oep/`, `/tmp/llm-offload-35qfuj/`, and `/tmp/llm-offload-UtfGoo/`.
+
+## 2026-07-14 — M3 prose/design review: compiled visual receipts
+- File: `website/src/components/home/CompiledVisualReceipts.astro`.
+- Task: adversarial review of the homepage section exposing checked-in causal, epistemic, and geometry renders with their manifest metadata and Sounio source links.
+- Provider: xAI/Grok 4.3 completed and raised one blocker, two major findings, one minor, and one nit. Direct inspection classified the first three as context errors: failing the static build when an editorially promised receipt disappears is intentional integrity enforcement; the ledger explicitly reports all five registered renders while the section deliberately curates three; and the const-selected receipt keys are type-checked against both localized copy objects. The hard-coded canonical repository URL was retained because these are durable public source links to `main`.
+- Follow-up applied: made the locale fallback explicitly typed with `Astro.props.locale ?? 'en'`.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-cvr-desktop.png`, `/tmp/sounio-cvr-mobile.png`, and `/tmp/sounio-cvr-design-qa-board.png`; all three images loaded at manifest dimensions, no positive horizontal overflow was measured, and the browser console contained no runtime errors.
+- Validation: `npm run check:quality` passed; render regeneration explicitly skipped because the active compiler path returned the known `expected P3 header`, so checked-in pre-rendered assets were used.
+- Raw review directories: `/tmp/llm-offload-shNnPG/`, `/tmp/llm-offload-pAwT4t/`, and `/tmp/llm-offload-s8I0Me/`.
