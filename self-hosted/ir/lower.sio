@@ -18,8 +18,8 @@ struct LowerLocalStack {
     global_bss_offsets: [i64; 4096],
     global_bss_sizes: [i64; 4096],
     is_global: [i64; 4096],
-    // 1 = local/param holds a reference (&P / &[T;N] / &![T;N]) to a heap aggregate,
-    // i.e. its slot stores a raw address of the caller slot, not the handle directly.
+    // 0 = value, 1 = shared reference, 2 = mutable reference. A reference slot stores
+    // a raw address of the caller slot, not the aggregate handle directly.
     is_ref: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
@@ -1959,15 +1959,16 @@ fn lowerer_bind_local_mut(
 
 // *mut analogue: mark a just-bound param/local as a reference-typed binding so
 // field/index lowering can emit the extra dereference for &P / &[T;N] params.
-fn lowerer_mark_local_ref_mut(
+fn lowerer_mark_local_ref_kind_mut(
     lo: &! Lowerer,
-    name: Name
+    name: Name,
+    ref_kind: i64
 ) with Mut, Alloc, Panic, Div {
     var locals_box = (*lo).locals
     var i = (*locals_box).count - 1
     while i >= 0 {
         if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
-            (*locals_box).is_ref[i as usize] = 1
+            (*locals_box).is_ref[i as usize] = ref_kind
             (*lo).locals = locals_box
             return
         }
@@ -2106,8 +2107,9 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_scalar_kind((*list).head.name, 2)
                 }
-                if lower_type_expr_is_ref_like(&(*list).head.ty) {
-                    lowerer_mark_local_ref_mut(lo, (*list).head.name)
+                let param_ref_kind = lower_type_expr_ref_kind(&(*list).head.ty)
+                if param_ref_kind > 0 {
+                    lowerer_mark_local_ref_kind_mut(lo, (*list).head.name, param_ref_kind)
                 }
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     lowerer_mark_local_array_elem_float_mut(lo, (*list).head.name)
@@ -2574,8 +2576,28 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     ir_empty_name()
 }
 
+fn lower_type_expr_ref_kind(ty: &TypeExpr) -> i64 {
+    if (*ty).kind == TypeExprKind::TypeRefMut { return 2 }
+    if (*ty).kind == TypeExprKind::TypeReference { return 1 }
+    0
+}
+
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
-    (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
+    lower_type_expr_ref_kind(ty) > 0
+}
+
+fn lower_opt_type_ref_kind(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => lower_type_expr_ref_kind(&(*ty)),
+        None => 0,
+    }
+}
+
+fn lower_opt_type_struct_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => lower_param_struct_type_name(&(*ty)),
+        None => ir_empty_name(),
+    }
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -4146,15 +4168,66 @@ impl Lowerer {
         false
     }
 
-    fn lookup_local_is_ref(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    fn lookup_local_ref_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
             if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
-                return (*self.locals).is_ref[i as usize] == 1
+                return (*self.locals).is_ref[i as usize]
             }
             i = i - 1
         }
-        false
+        0
+    }
+
+    fn lookup_local_is_ref(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        self.lookup_local_ref_kind(name) > 0
+    }
+
+    fn bind_local_ref_kind(self, name: Name, ref_kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.is_ref[i as usize] = ref_kind
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn expr_local_ref_kind(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprUnary {
+            if (*e).un_op == UnaryOp::OpRefMut { return 2 }
+            if (*e).un_op == UnaryOp::OpRef { return 1 }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_ref_kind((*e).name)
+        }
+        0
+    }
+
+    fn field_base_explicit_local_ref_kind(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind != ExprKind::ExprUnary || (*base_expr).un_op != UnaryOp::OpDeref {
+                    return 0
+                }
+                match (*base_expr).left {
+                    Some(operand) => {
+                        if (*operand).kind == ExprKind::ExprIdent {
+                            self.lookup_local_ref_kind((*operand).name)
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        }
     }
 
     fn lookup_local_global_bss_offset(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -6246,7 +6319,7 @@ impl Lowerer {
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
-                        locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        locals.is_ref[idx as usize] = lower_type_expr_ref_kind(&(*list).head.ty)
                         locals.scalar_kind[idx as usize] = if lower_type_expr_is_f64(&(*list).head.ty) { 2 } else { 0 }
                         locals.count = idx + 1
                     } else {
@@ -6976,6 +7049,22 @@ impl Lowerer {
             }
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        var local_ref_kind = lower_opt_type_ref_kind(&s.ty)
+        if local_ref_kind == 0 {
+            match s.expr {
+                Some(ref_expr) => {
+                    local_ref_kind = lo.expr_local_ref_kind(&(*ref_expr))
+                }
+                _ => {}
+            }
+        }
+        if local_ref_kind > 0 {
+            lo = lo.bind_local_ref_kind(s.name, local_ref_kind)
+            let annotated_struct_type = lower_opt_type_struct_name(&s.ty)
+            if annotated_struct_type.len > 0 {
+                lo = lo.bind_local_struct_type(s.name, annotated_struct_type)
+            }
+        }
         // Closures step 2: if the RHS was a capturing closure, mark this local so a later
         // `name(args)` call injects the captured regs (direct call to the synthetic fn).
         if lo.pending_closure_fn_id >= 0 {
@@ -7097,6 +7186,22 @@ impl Lowerer {
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprUnary
+                    && ((*expr_box).un_op == UnaryOp::OpRef || (*expr_box).un_op == UnaryOp::OpRefMut) {
+                    // `let r = &x` / `let r = &!x`: keep the referent's layout identity.
+                    // Without it, explicit projection can select a same-named field from
+                    // an unrelated struct through the global field-name fallback.
+                    match (*expr_box).left {
+                        Some(ref_operand) => {
+                            if (*ref_operand).kind == ExprKind::ExprIdent {
+                                let referent_st = lo.lookup_local_struct_type((*ref_operand).name)
+                                if referent_st.len > 0 {
+                                    lo = lo.bind_local_struct_type(s.name, referent_st)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -7187,13 +7292,27 @@ impl Lowerer {
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
                         match base_opt {
                             Some(base_expr) => {
-                                let base_is_ref = if (*base_expr).kind == ExprKind::ExprIdent {
+                                let explicit_ref_kind = lo.field_base_explicit_local_ref_kind(&base_opt)
+                                // Shared-reference stores retain the pre-existing unary/handle
+                                // lowering until the checker rejects them. Only &!T normalizes.
+                                let explicit_ref_deref = explicit_ref_kind == 2
+                                let base_is_ref = if explicit_ref_deref {
+                                    true
+                                } else if (*base_expr).kind == ExprKind::ExprIdent {
                                     lo.lookup_local_is_ref((*base_expr).name)
                                 } else {
                                     false
                                 }
-                                let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
-                                let pair_base = lo.lower_expr_ref(&(*base_expr))
+                                let fidx = if explicit_ref_deref {
+                                    lo.field_idx_for_base_ref(&(*base_expr).left, (*target_expr).name)
+                                } else {
+                                    lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                }
+                                let pair_base = if explicit_ref_deref {
+                                    lo.lower_opt_expr_ref(&(*base_expr).left)
+                                } else {
+                                    lo.lower_expr_ref(&(*base_expr))
+                                }
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
                                 var set_instr = ir_field_set(base_reg, fidx, rhs, (*target_expr).name)
@@ -8889,15 +9008,58 @@ impl Lowerer {
     }
 
     fn lower_field_access_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair_b = self.lower_opt_expr_ref(&e.left)
+        // A typed reference's explicit projection `(*ref).field` is the same place as
+        // `ref.field`. Lower the referenced ident directly so no raw OpDeref temporary
+        // is emitted. Box, raw-pointer, and non-ident dereferences retain their paths.
+        let explicit_ref_kind = self.field_base_explicit_local_ref_kind(&e.left)
+        let explicit_ref_deref = explicit_ref_kind > 0
+        let pair_b = match e.left {
+            Some(base_expr_ref) => {
+                if explicit_ref_deref {
+                    self.lower_opt_expr_ref(&(*base_expr_ref).left)
+                } else {
+                    self.lower_opt_expr_ref(&e.left)
+                }
+            }
+            _ => self.lower_opt_expr_ref(&e.left),
+        }
         let lo1 = pair_b.0
         let base = pair_b.1
-        let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
-        let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let fidx = match e.left {
+            Some(base_expr_ref) => {
+                if explicit_ref_deref {
+                    lo1.field_idx_for_base_ref(&(*base_expr_ref).left, e.name)
+                } else {
+                    lo1.field_idx_for_base_ref(&e.left, e.name)
+                }
+            }
+            _ => lo1.field_idx_for_base_ref(&e.left, e.name),
+        }
+        let field_is_float = match e.left {
+            Some(base_expr_ref) => {
+                if explicit_ref_deref {
+                    lo1.field_is_float_for_base_ref(&(*base_expr_ref).left, e.name)
+                } else {
+                    lo1.field_is_float_for_base_ref(&e.left, e.name)
+                }
+            }
+            _ => lo1.field_is_float_for_base_ref(&e.left, e.name),
+        } || lo1.field_is_float_by_name_simple(e.name)
+        let field_array_elem_is_float = match e.left {
+            Some(base_expr_ref) => {
+                if explicit_ref_deref {
+                    lo1.field_array_elem_is_float_for_base_ref(&(*base_expr_ref).left, e.name)
+                } else {
+                    lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+                }
+            }
+            _ => lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name),
+        }
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
-                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                if explicit_ref_deref {
+                    true
+                } else if (*base_expr_ref).kind == ExprKind::ExprIdent {
                     lo1.lookup_local_is_ref((*base_expr_ref).name)
                 } else {
                     false

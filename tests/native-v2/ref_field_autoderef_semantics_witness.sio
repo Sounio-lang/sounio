@@ -1,0 +1,96 @@
+//@ run-pass
+//@ expect-stdout: PASS ref_field_autoderef_semantics
+// A typed reference projection and an explicit dereference projection must
+// name the same field and preserve writes into the caller-owned object.
+
+struct RefFieldPair {
+    first: i64,
+    second: f64,
+    samples: [f64; 2],
+}
+
+// `second` deliberately has a different index than RefFieldPair.second. Both
+// fields are f64 so this detects layout identity, not an unrelated type error.
+struct RefFieldCollision {
+    second: f64,
+    guard: f64,
+}
+
+fn read_auto(pair: &RefFieldPair) -> f64 {
+    pair.second
+}
+
+fn read_explicit(pair: &RefFieldPair) -> f64 {
+    (*pair).second
+}
+
+fn read_mut_explicit(pair: &!RefFieldPair) -> f64 {
+    (*pair).second
+}
+
+fn read_array_explicit(pair: &RefFieldPair) -> f64 with Panic {
+    (*pair).samples[1]
+}
+
+fn write_auto(pair: &!RefFieldPair, value: f64) with Mut {
+    pair.second = value
+}
+
+fn write_explicit(pair: &!RefFieldPair, value: f64) with Mut {
+    (*pair).second = value
+}
+
+fn write_array_explicit(pair: &!RefFieldPair, value: f64) with Mut, Panic {
+    (*pair).samples[1] = value
+}
+
+fn write_via_local_alias(pair: &!RefFieldPair, value: f64) with Mut {
+    let alias = pair
+    (*alias).second = value
+}
+
+fn write_via_annotated_alias(pair: &!RefFieldCollision, value: f64) with Mut {
+    let alias: &!RefFieldCollision = pair
+    (*alias).second = value
+}
+
+fn local_borrow_keeps_layout() -> i64 with Mut {
+    var local = RefFieldCollision { second: 12.5, guard: 99.5 }
+    let alias = &!local
+    (*alias).second = 77.5
+    if (*alias).second == 77.5 && (*alias).guard == 99.5 { 1 } else { 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic {
+    var pair = RefFieldPair { first: 11, second: 22.5, samples: [3.5, 4.5] }
+
+    assert(read_auto(&pair) == 22.5)
+    assert(read_explicit(&pair) == 22.5)
+    assert(read_mut_explicit(&!pair) == 22.5)
+    assert(read_array_explicit(&pair) == 4.5)
+
+    write_auto(&!pair, 33.5)
+    assert(pair.first == 11)
+    assert(pair.second == 33.5)
+
+    write_explicit(&!pair, 44.5)
+    assert(pair.first == 11)
+    assert(pair.second == 44.5)
+
+    write_array_explicit(&!pair, 6.5)
+    assert(pair.samples[0] == 3.5)
+    assert(pair.samples[1] == 6.5)
+
+    write_via_local_alias(&!pair, 55.5)
+    assert(pair.first == 11)
+    assert(pair.second == 55.5)
+
+    var collision = RefFieldCollision { second: 7.5, guard: 101.5 }
+    write_via_annotated_alias(&!collision, 8.5)
+    assert(collision.second == 8.5)
+    assert(collision.guard == 101.5)
+    assert(local_borrow_keeps_layout() == 1)
+
+    println("PASS ref_field_autoderef_semantics")
+    0
+}
