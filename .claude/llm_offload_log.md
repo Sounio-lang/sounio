@@ -2799,6 +2799,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Theme: rank / ordinal association — complements the Pearson/Spearman correlation module. All O(n²) pair scans, scalar returns, #852-safe. Suite runner: 58 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-2RCSmH/`, `/tmp/llm-offload-sD8vnn/`, `/tmp/llm-offload-BerYTX/`.
 
+## 2026-07-14 — math-review: special::gamma run-proof
+- Files: `tests/stdlib/special/test_gamma_stdlib.sio`, `examples/special/gamma_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. gamma(n)=(n-1)! (24,120) + recurrence; gamma(0.5)=√π, gamma(1.5)=√π/2; lgamma(5)=ln24=3.178054, lgamma(1)=0; digamma(1)=-γ=-0.5772157, digamma(2)=1-γ, recurrence. Default Madaros. SPECIAL_GAMMA_GATE_OK. (digamma negative asserted by value; print(f64) negative bug #890 worked around in the example.)
 ## 2026-07-14 — math-review: stats::bartlett, stats::levene, stats::var_ftest
 - Files (all new): `stdlib/stats/bartlett.sio` (Bartlett homogeneity-of-variance χ²), `stdlib/stats/levene.sio` (Levene/Brown-Forsythe F-test via ANOVA on abs deviations, mean/median centering), `stdlib/stats/var_ftest.sio` (two-sample variance F-test). Provider: xAI/Grok 4.3.
 - bartlett = **PASS**: pooled variance, χ² numerator + correction factor C, χ² tail all match; worked example (6.25, χ²=1.5868) exact.
