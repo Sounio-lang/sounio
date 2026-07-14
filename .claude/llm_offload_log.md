@@ -2570,3 +2570,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review is recorded with the failed legs for later re-review if needed.
 - Validation: `npm run check:quality`.
 - Raw review directory: `/tmp/llm-offload-77AHOt/`.
+
+## 2026-07-14 — M3 prose/design review: Sounio dual-portrait hero
+- File: `website/src/components/home/Hero.astro`.
+- Task: adversarial review of the public homepage hero that replaces the alternating portrait with a simultaneous Pappou/Yiayia composition and makes `Sounio` the literal first-viewport headline.
+- Provider: xAI/Grok 4.3 completed and raised four blocker/major findings; direct repo and browser evidence showed they were context errors rather than defects: the H1 IDs are unique (`sounio-hero-title` and `sounio-hero-title-technical`), the established audience controller hides the inactive variant, the entire art container is `aria-hidden="true"`, and the clinical/proof copy links to the existing dosing and proof surfaces. No claim or implementation change was required from those findings.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-pr845-hero-v3-desktop.png`, `/tmp/sounio-pr845-hero-v3-mobile.png`, and `/tmp/sounio-hero-design-qa-board.png`; browser snapshot verified audience switching, zero mobile overflow, and no console errors.
+- Validation: `npm run check:quality` passed after the brand-contract import paths were restored; the generated artifact timestamp was returned to the committed value.
+- Raw review directories: `/tmp/llm-offload-ur4Oep/`, `/tmp/llm-offload-35qfuj/`, and `/tmp/llm-offload-UtfGoo/`.
