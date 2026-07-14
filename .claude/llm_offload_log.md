@@ -2681,3 +2681,9 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 ## 2026-07-14 — math-review: stats::reliability
 - File: `stdlib/stats/reliability.sio` (new). ICC(2,1) via ANOVA mean squares + Cronbach's alpha. Provider: xAI/Grok 4.3 = **PASS** — ICC formula, SS/MS decomposition, Cronbach formula, item/total variance estimators, test data all verified.
 - Funnel-plot figure (examples/stats/funnel_plot.sio) added. Correlation-heatmap figure attempted but DROPPED: needs a data matrix live during many render calls (custom pixel loops / plot_band with data[256]+corr[64] live) -> #852 crash. The funnel worked (no separate data matrix; proven plot path only).
+
+## 2026-07-14 — math-review: prob (distributions) vertical
+- Files: `stdlib/prob/distributions.sio` (header), `tests/stdlib/prob/test_prob_stdlib.sio`, `examples/prob/distribution_report.sio`.
+- Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed N(0,1) pdf(0)=1/√(2π)≈0.398942, cdf(0)=0.5, cdf(1.96)≈0.975; Exp(λ=2) mean=0.5; Exp(λ=1) cdf(ln2)=0.5; Uniform(0,10) mean=median=5; Poisson(3) var=3.
+- Finding (compiler): default Madaros native cannot link the ~210-fn multi-module graph; lean_single compiles + runs it. Filed issue #901 + docs/audit/MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14.md. Values verified textbook-correct under lean_single.
+- Raw review directory: see /tmp llm-offload dir for this run.

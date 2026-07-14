@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.plans.2026-07-14-prob-vertical
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.plans.2026-07-14-prob-vertical
+-->
+
 # Prob (distributions) Hardening — Implementation Plan
 
 > Execute task-by-task; compile-and-run is the gate. **Build with `SOUNIO_SOUC_ENGINE=lean_single`** (Madaros native can't link the ~210-fn graph — see docs/audit/MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14.md); `chmod +x` the output.
