@@ -2746,3 +2746,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - passing_bablok = **PASS**: shifted-median with K-offset matches Passing & Bablok 1983 exactly (1-indexed rank (N+1)/2+K → 0-based with clamping); -1 slope exclusion verified (N=5,K=0 case); K-offset case (N=6,K=1 → slope 2) confirmed.
 - Theme: method-comparison / robust regression — complements the agreement modules (bland_altman, concordance/CCC, reliability) for assay/instrument comparison. #852-safe: theil_sen & passing_bablok use bounded pairwise buffers with inline median sorts (no nested call while big buffer live). Suite selftest: 45 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-8JVsS1/`, `/tmp/llm-offload-NuJ1qi/`, `/tmp/llm-offload-LafnKF/`.
+
+## 2026-07-14 — math-review: stats::fisher_exact, stats::cochran_q, stats::fleiss_kappa
+- Files (all new): `stdlib/stats/fisher_exact.sio` (Fisher's exact 2×2: hypergeometric two-sided/one-sided p + odds ratio, log-factorials via Lanczos), `stdlib/stats/cochran_q.sio` (Cochran's Q for k paired binary conditions, χ² tail via igamma), `stdlib/stats/fleiss_kappa.sio` (Fleiss' multi-rater kappa). Provider: xAI/Grok 4.3.
+- fisher_exact = **PASS**: hypergeometric P via log-factorials, two-sided sum over P≤P_obs with float-tolerant threshold, support bounds max(0,c1-r2)..min(r1,c1), OR=ad/bc all correct; tea-test 0.4857/OR 9 verified.
+- cochran_q = **PASS**: Q=(k-1)(kΣC²-N²)/(kN-ΣR²) transcription exact, denom=0 guard, χ² tail standard; Q=2.667 and Q=6 examples verified.
+- fleiss_kappa = **PASS**: Pᵢ, P̄, pⱼ, P̄ₑ, κ all match Fleiss (1971); three test cases (κ=-0.2, κ=1, three-category) correct. Note: significance-test SE deliberately omitted (fiddly Fleiss variance) — point estimate + components only.
+- Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
