@@ -2754,3 +2754,7 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - fleiss_kappa = **PASS**: Pᵢ, P̄, pⱼ, P̄ₑ, κ all match Fleiss (1971); three test cases (κ=-0.2, κ=1, three-category) correct. Note: significance-test SE deliberately omitted (fiddly Fleiss variance) — point estimate + components only.
 - Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
+
+## 2026-07-14 — math-review: epistemic trust-map criteria
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2). Both OK on all 4 claims.
+- Cov(indep)=0, p-box gap/midpoint, u_c=0.290402, k95=1.96-wrong-for-finite-nu. Z.AI caveat: exact-0 tolerance valid only for ANALYTIC covariance (correlation::covariance is analytic/shared-source, so appropriate) — noted in EPISTEMIC_TRUST_MAP.

@@ -82,6 +82,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.epistemic-demo-sweep-2026-06-02 | repo_only | docs/audit/EPISTEMIC_DEMO_SWEEP_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-nn-backward-e2e-2026-06-02 | repo_only | docs/audit/EPISTEMIC_NN_BACKWARD_E2E_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-self-application-audit-2026-06-03 | repo_only | docs/audit/EPISTEMIC_SELF_APPLICATION_AUDIT_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.epistemic-trust-map-2026-07-14 | repo_only | docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_BENETTIN_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-gate-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_GATE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-substrate-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_SUBSTRATE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -121,6 +122,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.g1-wip.tuple-match-feature-design-2026-06-03 | repo_only | docs/audit/g1_wip/TUPLE_MATCH_FEATURE_DESIGN_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-wip.verdict-parity-2026-06-02 | repo_only | docs/audit/g1_wip/VERDICT_PARITY_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.hypercomplex-651-rootcause-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.hypercomplex-algebra-audit-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_ALGEBRA_AUDIT_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-knowledge-arithmetic-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_KNOWLEDGE_ARITHMETIC_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-struct-field-aggregate-copy-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_STRUCT_FIELD_AGGREGATE_COPY_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -602,9 +605,14 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cd-tower-seam | historical | docs/research/cd_tower_seam.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cpc2026-cobre-orc-preregistration-2026-07-11 | historical | docs/research/cpc2026_cobre_orc_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cpc2026-cobre-orc-preregistration-amendment1-2026-07-11 | historical | docs/research/cpc2026_cobre_orc_preregistration_amendment1_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cpc2026-fisher-orc-analysis-lock-2026-07-11 | historical | docs/research/cpc2026_fisher_orc_analysis_lock_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-orc-group-preregistration-2026-07-11 | historical | docs/research/cpc2026_orc_group_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.discourse-uwo-orc-access-protocol-2026-07-11 | historical | docs/research/discourse_uwo_orc_access_protocol_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.discourse-uwo-orc-preregistration-2026-07-11 | historical | docs/research/discourse_uwo_orc_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-calculus-value-carrying-redesign | historical | docs/research/epistemic_calculus_value_carrying_redesign.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-self-reference-design | historical | docs/research/epistemic_self_reference_design.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
