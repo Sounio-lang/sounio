@@ -15,6 +15,11 @@ pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
 pub let IR_INVALID_LABEL: i64 = -1
 pub let IR_INVALID_FN: i64 = -1
+// IrFieldGet/IrFieldSet address domains. These values are opcode-local; branch
+// and index instructions retain their existing label_id meanings.
+pub let IR_FIELD_MODE_MANAGED: i64 = 0
+pub let IR_FIELD_MODE_REF: i64 = 1
+pub let IR_FIELD_MODE_RAW: i64 = 2
 pub let IR_MAX_EPI_MODEL_FAMILIES: i64 = 32
 pub let IR_MAX_EPI_POLICIES: i64 = 32
 pub let IR_MAX_EPI_DECISION_POLICIES: i64 = 32
@@ -647,6 +652,18 @@ pub enum IrOpcode {
     IrStoreGlobal,
     // Store through a raw pointer: [src1] = src2  (used for `*p = val` on a true reference).
     IrStorePtr,
+}
+
+// label_id is a shared physical slot with opcode-local meanings. Only these
+// control-flow instructions may have that slot renumbered as a CFG label.
+pub fn ir_opcode_has_cfg_label(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLabel => true,
+        IrOpcode::IrJump => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        _ => false,
+    }
 }
 
 pub struct IrRegList {
@@ -1996,10 +2013,13 @@ pub struct IrLowerResult {
 // Struct layout tracking (Phase 3.2)
 // ============================================================================
 
-// A single struct field: name + sequential index
+// A single struct field: managed ordinal plus compiler-owned raw layout.
 pub struct StructFieldEntry {
     name: Name,
     index: i64,
+    offset_words: i64,
+    storage_words: i64,
+    raw_projectable: i64,
     is_float: i64,
 }
 
@@ -2017,7 +2037,7 @@ pub struct StructLayoutTable {
 }
 
 fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0 }
+    StructFieldEntry { name: ir_empty_name(), index: 0, offset_words: -1, storage_words: -1, raw_projectable: 0, is_float: 0 }
 }
 
 fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -3371,7 +3391,7 @@ fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> Ir
         src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: IR_FIELD_MODE_MANAGED,
         fn_id: base.fn_id,
         field_idx: field_idx,
         imm_flags: base.imm_flags,
@@ -3392,7 +3412,7 @@ fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> Ir
         src2: src,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: IR_FIELD_MODE_MANAGED,
         fn_id: base.fn_id,
         field_idx: field_idx,
         imm_flags: base.imm_flags,

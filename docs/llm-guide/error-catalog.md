@@ -454,3 +454,5 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E226 | import | error | import path table full | [E226.md](explanations/E226.md) |
 | E227 | import | error | import too large for SRC buffer | [E227.md](explanations/E227.md) |
 | E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |
+| E229 | type-checker/raw-field | error | raw inline aggregate field projection requires Place IR | [E229.md](explanations/E229.md) |
+| E230 | type-checker/raw-field | error | raw field projection requires an identifier pointer operand | [E230.md](explanations/E230.md) |

@@ -5,7 +5,7 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG, IR_FIELD_MODE_MANAGED, IR_FIELD_MODE_REF, IR_FIELD_MODE_RAW}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 1024
@@ -196,6 +196,12 @@ pub fn machine_instr_src2_value(instr: MachineInstr) -> i64 {
 
 pub fn machine_instr_aux_value(instr: MachineInstr) -> i64 {
     instr.aux.value
+}
+
+// Field ops use arg_index as their opcode-specific address-mode payload. It is
+// otherwise meaningful only for MIR_OP_ARG_MOVE.
+pub fn machine_instr_field_mode(instr: MachineInstr) -> i64 {
+    instr.arg_index
 }
 
 pub fn machine_instr_src1_kind(instr: MachineInstr) -> i64 {
@@ -501,6 +507,7 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.dst = machine_operand_stack_slot(instr.dst)
         mi.src1 = machine_operand_stack_slot(instr.src1)
         mi.aux = machine_operand_imm64(instr.field_idx)
+        mi.arg_index = instr.label_id
         return mi
     }
     if instr.op == IrOpcode::IrFieldSet {
@@ -508,6 +515,7 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.src1 = machine_operand_stack_slot(instr.src1)
         mi.src2 = machine_operand_stack_slot(instr.src2)
         mi.aux = machine_operand_imm64(instr.field_idx)
+        mi.arg_index = instr.label_id
         return mi
     }
     if instr.op == IrOpcode::IrIndexGet {
@@ -768,21 +776,23 @@ pub fn native_v2_make_alloc(temp: i64, alloc_size: i64, descriptor_id: i64) -> M
     mi
 }
 
-pub fn native_v2_make_field_load(dst: i64, base: i64, field_idx: i64) -> MachineInstr with Mut, Panic, Div {
+pub fn native_v2_make_field_load(dst: i64, base: i64, field_idx: i64, field_mode: i64) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_FIELD_LOAD
     mi.dst = machine_operand_gpr64(dst)
     mi.src1 = machine_operand_gpr64(base)
     mi.aux = machine_operand_imm64(field_idx)
+    mi.arg_index = field_mode
     mi
 }
 
-pub fn native_v2_make_field_store(base: i64, src: i64, field_idx: i64) -> MachineInstr with Mut, Panic, Div {
+pub fn native_v2_make_field_store(base: i64, src: i64, field_idx: i64, field_mode: i64) -> MachineInstr with Mut, Panic, Div {
     var mi = machine_empty_instr()
     mi.opcode = MIR_OP_FIELD_STORE
     mi.src1 = machine_operand_gpr64(base)
     mi.src2 = machine_operand_gpr64(src)
     mi.aux = machine_operand_imm64(field_idx)
+    mi.arg_index = field_mode
     mi
 }
 
@@ -1242,7 +1252,7 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             let dst = (*out).temp_count
             (*out).temp_count = dst + 1
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
-            native_v2_emit_legal_instr_mut(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr)))
+            native_v2_emit_legal_instr_mut(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr), machine_instr_field_mode(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), dst))
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
             let base = (*out).temp_count
@@ -1251,7 +1261,7 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             (*out).temp_count = src + 1
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(src, machine_instr_src2_value(instr)))
-            native_v2_emit_legal_instr_mut(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr)))
+            native_v2_emit_legal_instr_mut(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr), machine_instr_field_mode(instr)))
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
             let base = (*out).temp_count
             (*out).temp_count = base + 1
@@ -1431,7 +1441,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             let dst = out.temp_count
             out.temp_count = dst + 1
             out = _emit_legal_byval(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
-            out = _emit_legal_byval(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr)))
+            out = _emit_legal_byval(out, native_v2_make_field_load(dst, base, machine_instr_aux_value(instr), machine_instr_field_mode(instr)))
             out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), dst))
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
             let base = out.temp_count
@@ -1440,7 +1450,7 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             out.temp_count = src + 1
             out = _emit_legal_byval(out, native_v2_make_load_stack(base, machine_instr_src1_value(instr)))
             out = _emit_legal_byval(out, native_v2_make_load_stack(src, machine_instr_src2_value(instr)))
-            out = _emit_legal_byval(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr)))
+            out = _emit_legal_byval(out, native_v2_make_field_store(base, src, machine_instr_aux_value(instr), machine_instr_field_mode(instr)))
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
             let base = out.temp_count
             out.temp_count = base + 1
@@ -1568,9 +1578,11 @@ pub fn native_v2_machine_instr_is_legal(instr: MachineInstr) -> bool with Mut, P
     }
     if instr.opcode == MIR_OP_FIELD_LOAD {
         return instr.dst.kind == MIR_OPERAND_GPR64 && instr.src1.kind == MIR_OPERAND_GPR64 && instr.aux.kind == MIR_OPERAND_IMM64
+            && (instr.arg_index == IR_FIELD_MODE_MANAGED || instr.arg_index == IR_FIELD_MODE_REF || instr.arg_index == IR_FIELD_MODE_RAW)
     }
     if instr.opcode == MIR_OP_FIELD_STORE {
         return instr.src1.kind == MIR_OPERAND_GPR64 && instr.src2.kind == MIR_OPERAND_GPR64 && instr.aux.kind == MIR_OPERAND_IMM64
+            && (instr.arg_index == IR_FIELD_MODE_MANAGED || instr.arg_index == IR_FIELD_MODE_REF || instr.arg_index == IR_FIELD_MODE_RAW)
     }
     if instr.opcode == MIR_OP_INDEX_LOAD {
         return instr.dst.kind == MIR_OPERAND_GPR64 && instr.src1.kind == MIR_OPERAND_GPR64 && instr.src2.kind == MIR_OPERAND_GPR64

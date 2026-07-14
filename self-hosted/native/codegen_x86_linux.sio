@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_FIELD_MODE_MANAGED, IR_FIELD_MODE_REF, IR_FIELD_MODE_RAW, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -5623,18 +5623,35 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_FIELD_LOAD {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_resolve_handle_to_object_base_rax(c)
-        c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value + (native_v2_object_header_size() / 8))
+        if instr.arg_index == IR_FIELD_MODE_REF {
+            c.code = emit_load_rax_mem_rax(c.code)
+            c = native_v2_resolve_handle_to_object_base_rax(c)
+            c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value + (native_v2_object_header_size() / 8))
+        } else if instr.arg_index == IR_FIELD_MODE_RAW {
+            c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value)
+        } else {
+            c = native_v2_resolve_handle_to_object_base_rax(c)
+            c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value + (native_v2_object_header_size() / 8))
+        }
         c.code = emit_mov_rax_mem_rax_rbx8(c.code)
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
     if instr.opcode == MIR_OP_FIELD_STORE {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_resolve_handle_to_object_base_rax(c)
+        if instr.arg_index == IR_FIELD_MODE_REF {
+            c.code = emit_load_rax_mem_rax(c.code)
+            c = native_v2_resolve_handle_to_object_base_rax(c)
+        } else if instr.arg_index != IR_FIELD_MODE_RAW {
+            c = native_v2_resolve_handle_to_object_base_rax(c)
+        }
         c.code = emit_mov_rdx_rax(c.code)
         c = native_v2_load_temp_to_rax(c, instr.src2.value)
-        c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value + (native_v2_object_header_size() / 8))
+        if instr.arg_index == IR_FIELD_MODE_RAW {
+            c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value)
+        } else {
+            c.code = emit_mov_reg_imm(c.code, 3, instr.aux.value + (native_v2_object_header_size() / 8))
+        }
         c.code = emit_store_rax_mem_rdx_rbx8(c.code)
         return c
     }
@@ -6890,7 +6907,12 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrFieldGet {
-            if (*func).instrs[i as usize].label_id == 1 {
+            if (*func).instrs[i as usize].label_id == IR_FIELD_MODE_RAW {
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx)
+                nc_emit_mov_rax_mem_rax_rbx8(nc)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            } else if (*func).instrs[i as usize].label_id == IR_FIELD_MODE_REF {
                 native_v2_core_emit_load_ref_field_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx)
             } else {
                 nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
@@ -6905,7 +6927,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
             }
         } else if instr_op == IrOpcode::IrFieldSet {
-            if (*func).instrs[i as usize].label_id == 1 {
+            if (*func).instrs[i as usize].label_id == IR_FIELD_MODE_RAW {
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_emit_mov_rdx_rax(nc)
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+                nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx)
+                nc_emit_store_rax_mem_rdx_rbx8(nc)
+            } else if (*func).instrs[i as usize].label_id == IR_FIELD_MODE_REF {
                 native_v2_core_emit_store_ref_field_into(nc, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx, (*func).instrs[i as usize].src2)
             } else {
                 nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
@@ -7590,7 +7618,7 @@ fn native_v2_ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: N
         src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: IR_FIELD_MODE_MANAGED,
         fn_id: base.fn_id,
         field_idx: field_idx,
         imm_flags: base.imm_flags,
@@ -7611,7 +7639,7 @@ fn native_v2_ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: N
         src2: src,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: IR_FIELD_MODE_MANAGED,
         fn_id: base.fn_id,
         field_idx: field_idx,
         imm_flags: base.imm_flags,

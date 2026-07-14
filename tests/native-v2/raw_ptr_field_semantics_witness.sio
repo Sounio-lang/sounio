@@ -1,0 +1,69 @@
+//@ run-pass
+//@ expect-stdout: PASS raw_ptr_field_semantics
+
+struct RawFieldNested {
+    marker: i64,
+}
+
+// Physical word layout: prefix=0..1, nested=2, value=3, tail=4.
+struct RawFieldWide {
+    prefix: [f64; 2],
+    nested: RawFieldNested,
+    value: f64,
+    tail: i64,
+}
+
+// `value` deliberately collides at a different physical offset.
+struct RawFieldCollision {
+    value: f64,
+    guard: i64,
+}
+
+fn read_const_value(p: *const RawFieldWide) -> f64 {
+    (*p).value
+}
+
+fn read_nested_marker(p: *const RawFieldWide) -> i64 {
+    (*p).nested.marker
+}
+
+fn write_from_callee(
+    p: *mut RawFieldWide,
+    nested: RawFieldNested,
+    value: f64,
+    tail: i64,
+) with Mut {
+    (*p).nested = nested
+    (*p).value = value
+    (*p).tail = tail
+}
+
+fn write_collision(p: *mut RawFieldCollision, value: f64, guard: i64) with Mut {
+    (*p).value = value
+    (*p).guard = guard
+}
+
+fn main() -> i64 with IO, Mut, Panic, Alloc {
+    let wide = heap_alloc(40) as *mut RawFieldWide
+    let collision = heap_alloc(16) as *mut RawFieldCollision
+
+    let nested = RawFieldNested { marker: 73 }
+    write_from_callee(wide, nested, 19.25, 91)
+    assert(read_const_value(wide as *const RawFieldWide) == 19.25)
+    assert(read_nested_marker(wide as *const RawFieldWide) == 73)
+    assert((*wide).tail == 91)
+
+    write_collision(collision, 7.5, 101)
+    assert((*collision).value == 7.5)
+    assert((*collision).guard == 101)
+
+    // A second caller-visible mutation proves the callee wrote the raw
+    // reservation, not a lowered temporary or managed object copy.
+    write_from_callee(wide, RawFieldNested { marker: 88 }, 33.5, 111)
+    assert((*wide).value == 33.5)
+    assert((*wide).nested.marker == 88)
+    assert((*wide).tail == 111)
+
+    println("PASS raw_ptr_field_semantics")
+    0
+}

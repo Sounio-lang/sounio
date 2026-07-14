@@ -5063,12 +5063,50 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     if checker_expr_is_gpu_axis_field(e) {
         return ty_i64()
     }
-    let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    var explicit_raw_operand_kind: i64 = 0
+    var prechecked_nonident_deref = false
+    var prechecked_base_ty = empty_type_entry()
+    match e.left {
+        Some(raw_base) => {
+            if (*raw_base).kind == ExprKind::ExprUnary && (*raw_base).un_op == UnaryOp::OpDeref {
+                match (*raw_base).left {
+                    Some(raw_operand) => {
+                        if (*raw_operand).kind == ExprKind::ExprIdent {
+                            explicit_raw_operand_kind = ty_terminal_storage_kind(type_env_binding_type(&(*c).env, (*raw_operand).name))
+                        } else {
+                            let raw_operand_ty = checker_check_expr_inplace(c, *raw_operand)
+                            let raw_operand_storage_kind = ty_terminal_storage_kind(raw_operand_ty)
+                            if raw_operand_storage_kind == 1 || raw_operand_storage_kind == 2 {
+                                checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
+                                return empty_type_entry()
+                            }
+                            prechecked_base_ty = unary_result_type(UnaryOp::OpDeref, raw_operand_ty)
+                            if is_error_or_unknown(prechecked_base_ty) && !is_error_or_unknown(raw_operand_ty) {
+                                checker_report_error_at_inplace(c, e.span, 5, 0, 0, 0)
+                            }
+                            prechecked_nonident_deref = true
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    let base_ty = if prechecked_nonident_deref {
+        prechecked_base_ty
+    } else {
+        checker_check_opt_expr_inplace(c, e.left)
+    }
     if base_ty.kind == TypeKind::TyNamed {
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
             let si = struct_table_get((*c).structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
+            if explicit_raw_operand_kind > 0 && explicit_raw_operand_kind < 3 && ty_terminal_storage_kind(field_ty) == 3 {
+                checker_report_error_at_inplace(c, e.span, 229, 0, 0, 0)
+                return empty_type_entry()
+            }
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
             }
@@ -7368,6 +7406,25 @@ fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr
                 // E003 on `GLOBAL = …` while preserving the true positive on local `let`.
                 if (*c).env.has_binding((*e).name) && !(*c).env.lookup_is_mutable((*e).name) {
                     checker_report_error_at_inplace(c, span, 3, 0, 0, 0)
+                }
+            } else if (*e).kind == ExprKind::ExprFieldAccess {
+                match (*e).left {
+                    Some(base) => {
+                        if (*base).kind == ExprKind::ExprUnary && (*base).un_op == UnaryOp::OpDeref {
+                            match (*base).left {
+                                Some(raw_ident) => {
+                                    if (*raw_ident).kind == ExprKind::ExprIdent {
+                                        let raw_ty = (*c).env.lookup((*raw_ident).name)
+                                        if ty_terminal_storage_kind(raw_ty) == 1 {
+                                            checker_report_error_at_inplace(c, span, 3, 0, 0, 0)
+                                        }
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -11594,6 +11651,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
+    else if code == 229 { print("raw inline aggregate field projection requires Place IR") }
+    else if code == 230 { print("raw field projection requires an identifier pointer operand") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 216 { print("infinite recursive type") }
     else { print("unknown error") }
@@ -18175,6 +18234,26 @@ impl Checker {
                     } else {
                         self
                     }
+                } else if (*e).kind == ExprKind::ExprFieldAccess {
+                    match (*e).left {
+                        Some(base) => {
+                            if (*base).kind == ExprKind::ExprUnary && (*base).un_op == UnaryOp::OpDeref {
+                                match (*base).left {
+                                    Some(raw_ident) => {
+                                        if (*raw_ident).kind == ExprKind::ExprIdent {
+                                            let raw_ty = self.env.lookup((*raw_ident).name)
+                                            if ty_terminal_storage_kind(raw_ty) == 1 {
+                                                return self.report_error_at(span, 3, 0, 0, 0)
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    self
                 } else {
                     // Field access, index — assume mutable for now
                     self
@@ -18782,14 +18861,55 @@ impl Checker {
         if checker_expr_is_gpu_axis_field(e) {
             return (self, ty_i64())
         }
-        let pair = self.check_opt_expr(e.left)
-        var c = pair.0
-        let base_ty = pair.1
+        var c0 = self
+        var explicit_raw_operand_kind: i64 = 0
+        var prechecked_nonident_deref = false
+        var prechecked_base_ty = empty_type_entry()
+        match e.left {
+            Some(raw_base) => {
+                if (*raw_base).kind == ExprKind::ExprUnary && (*raw_base).un_op == UnaryOp::OpDeref {
+                    match (*raw_base).left {
+                        Some(raw_operand) => {
+                            if (*raw_operand).kind == ExprKind::ExprIdent {
+                                explicit_raw_operand_kind = ty_terminal_storage_kind(type_env_binding_type(&c0.env, (*raw_operand).name))
+                            } else {
+                                let raw_operand_pair = c0.check_expr(*raw_operand)
+                                c0 = raw_operand_pair.0
+                                let raw_operand_ty = raw_operand_pair.1
+                                let raw_operand_storage_kind = ty_terminal_storage_kind(raw_operand_ty)
+                                if raw_operand_storage_kind == 1 || raw_operand_storage_kind == 2 {
+                                    c0 = c0.report_error_at(e.span, 230, 0, 0, 0)
+                                    return (c0, empty_type_entry())
+                                }
+                                prechecked_base_ty = unary_result_type(UnaryOp::OpDeref, raw_operand_ty)
+                                if is_error_or_unknown(prechecked_base_ty) && !is_error_or_unknown(raw_operand_ty) {
+                                    c0 = c0.report_error_at(e.span, 5, 0, 0, 0)
+                                }
+                                prechecked_nonident_deref = true
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+        var c = c0
+        var base_ty = prechecked_base_ty
+        if !prechecked_nonident_deref {
+            let pair = c0.check_opt_expr(e.left)
+            c = pair.0
+            base_ty = pair.1
+        }
         if base_ty.kind == TypeKind::TyNamed {
             let struct_idx = struct_table_find(c.structs, base_ty.name)
             if struct_idx >= 0 {
                 let si = struct_table_get(c.structs, struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
+                if explicit_raw_operand_kind > 0 && explicit_raw_operand_kind < 3 && ty_terminal_storage_kind(field_ty) == 3 {
+                    c = c.report_error_at(e.span, 229, 0, 0, 0)
+                    return (c, empty_type_entry())
+                }
                 if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                     c = c.report_error_at(e.span, 12, 0, 0, 0)
                 }
