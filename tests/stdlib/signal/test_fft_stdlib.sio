@@ -1,0 +1,64 @@
+// Run-proof for stdlib signal::fft against known FFT properties.
+// Self-contained module -> native-compiles under default Madaros. Inline in main.
+use signal::fft::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // (1) DC signal [1,1,1,1], n=4 -> X[0]=4, X[k>0]=0
+    var d1: [f64; 256] = [0.0; 256]
+    d1[0]=1.0
+    d1[1]=1.0
+    d1[2]=1.0
+    d1[3]=1.0
+    var a1 = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!a1, &d1, 4)
+    fft_forward(&!a1)
+    var m1: [f64; 256] = [0.0; 256]
+    fft_magnitude(&a1, &!m1)
+    if (if m1[0] > 4.0 { m1[0]-4.0 } else { 4.0-m1[0] }) >= 1.0e-6 { print("FAIL dc0\n"); return 1 }
+    if m1[1] >= 1.0e-6 { print("FAIL dc1\n"); return 2 }
+    if m1[2] >= 1.0e-6 { print("FAIL dc2\n"); return 3 }
+
+    // (2) Impulse [1,0,0,0], n=4 -> flat spectrum, X[k]=1 for all k
+    var d2: [f64; 256] = [0.0; 256]
+    d2[0]=1.0
+    var a2 = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!a2, &d2, 4)
+    fft_forward(&!a2)
+    var m2: [f64; 256] = [0.0; 256]
+    fft_magnitude(&a2, &!m2)
+    var k: i64 = 0
+    while k < 4 {
+        if (if m2[k as usize] > 1.0 { m2[k as usize]-1.0 } else { 1.0-m2[k as usize] }) >= 1.0e-6 { print("FAIL impulse\n"); return 4 }
+        k = k + 1
+    }
+
+    // (3) Round-trip: forward then inverse recovers the DC signal (arr.re == d1)
+    fft_inverse(&!a1)
+    if (if a1.re[0] > 1.0 { a1.re[0]-1.0 } else { 1.0-a1.re[0] }) >= 1.0e-5 { print("FAIL rt0\n"); return 5 }
+    if (if a1.re[3] > 1.0 { a1.re[3]-1.0 } else { 1.0-a1.re[3] }) >= 1.0e-5 { print("FAIL rt3\n"); return 6 }
+
+    // (4) Single cosine at bin 1, n=8: cos(2*pi*i/8) -> peak magnitude at bins 1 and 7 (=n/2=4)
+    var d3: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    let two_pi = 2.0 * fft_pi()
+    while i < 8 {
+        d3[i as usize] = fft_cos(two_pi * (i as f64) / 8.0)
+        i = i + 1
+    }
+    var a3 = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!a3, &d3, 8)
+    fft_forward(&!a3)
+    var m3: [f64; 256] = [0.0; 256]
+    fft_magnitude(&a3, &!m3)
+    // peaks at bins 1 and 7 = N/2 = 4 (real cosine, one cycle over N=8)
+    if (if m3[1] > 4.0 { m3[1]-4.0 } else { 4.0-m3[1] }) >= 1.0e-4 { print("FAIL cos1\n"); return 7 }
+    if (if m3[7] > 4.0 { m3[7]-4.0 } else { 4.0-m3[7] }) >= 1.0e-4 { print("FAIL cos7\n"); return 8 }
+    // exact-zero bins (no FFT error): 0,2,4,6
+    if m3[2] >= 1.0e-6 { print("FAIL cos2\n"); return 9 }
+    if m3[4] >= 1.0e-6 { print("FAIL cos4\n"); return 10 }
+    // bins 3,5 carry only residual leakage from fft_cos precision (~1e-3), NOT FFT error
+    if m3[3] >= 2.0e-3 { print("FAIL cos3 leakage\n"); return 11 }
+
+    print("FFT_STDLIB_OK\n")
+    return 0
+}

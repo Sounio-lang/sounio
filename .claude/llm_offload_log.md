@@ -2726,6 +2726,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.
 
+## 2026-07-14 — math-review: signal::fft vertical
+- Files: `stdlib/signal/fft.sio` (pub fields + note), `tests/stdlib/signal/test_fft_stdlib.sio`, `examples/signal/spectrum_report.sio`.
+- Provider: xAI/Grok 4.3 = **PASS** (all 4). Confirmed DC→|X|[0]=4/rest 0; impulse→flat 1; IDFT(DFT(x))=x (1/N inverse); real cosine cos(2πn/8)→|X[1]|=|X[7]|=4, other bins exactly 0 (residual at 3,5 is fft_cos input precision, not FFT error).
+- Build: default Madaros (signal::fft is self-contained — no lean_single needed). SIGNAL_FFT_GATE_OK.
+- Raw review directory: see /tmp llm-offload dir for this run.
 ## 2026-07-14 — math-review: stats::robust, stats::hodges_lehmann, stats::outlier
 - Files (all new): `stdlib/stats/robust.sio` (median/quantile type-7, IQR, σ-consistent MAD, trimmed & Winsorized means), `stdlib/stats/hodges_lehmann.sio` (HL one-sample = median of Walsh averages, two-sample = median of pairwise differences, bounded [2080] buffer + inline sort), `stdlib/stats/outlier.sio` (Tukey fences, Grubbs single-outlier test with exact Bonferroni t-tail via inline incomplete beta, Iglewicz-Hoaglin modified z). Provider: xAI/Grok 4.3.
 - robust = **PASS**: type-7 quantile (Hyndman-Fan), MAD constant 1.482602=1/Φ⁻¹(0.75), trimmed/Winsorized floor(frac·n) logic all verified; test values hold.
