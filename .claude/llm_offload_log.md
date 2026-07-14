@@ -2622,3 +2622,15 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-autodiff-desktop.png`, `/tmp/sounio-autodiff-mobile.png`, and `/tmp/sounio-autodiff-design-qa.png`; the six-button interaction updated all live values, desktop/mobile/320 px measured zero overflow, and the browser console contained no runtime errors.
 - Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directories: `/tmp/llm-offload-yhJrrX/` and `/tmp/llm-offload-Jd637K/`.
+
+## 2026-07-14 — M3 math/prose/design review: Bayesian observation instrument
+- Files: `website/src/components/home/BayesianObservationInstrument.tsx`, `BayesianObservationInstrument.css`, and `website/src/pages/index.astro`.
+- Task: review the public homepage instrument that reveals a fixed scalar normal-normal update through prior, measurement, and posterior states, with an exact numerical ledger and explicit scientific claim boundary.
+- Executable evidence: `./bin/souc run tests/run-pass/bayesian_observe.sio` returned exit 0 on the default Madaros v0.80.0 path with posterior mean `37.027586`, posterior variance `0.034482`, three invariant passes, and `ALL PASS: observation narrows uncertainty`; the canonical suite harness also reported one pass and zero failures.
+- Math review: xAI/Grok 4.3 independently recomputed the normal-normal posterior mean and variance and approved the displayed values, equation, three fixture inequalities, and scope boundary with no findings.
+- External-facing review: xAI/Grok 4.3 approved with no implementation bugs or claim-boundary violations. Its only note was low risk below 320 px; direct browser checks at 320 px measured zero overflow, stable stage controls, and legible curves after separating the crowded prior/posterior labels.
+- Claim boundary: this is one illustrative scalar calculation authored directly over `f64`. It does not claim automatic compiler inference, a general Bayesian theorem, checked `Observe` semantics, or a clinical result.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI reviews and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-bayesian-desktop.png`, `/tmp/sounio-bayesian-mobile.png`, `/tmp/sounio-bayesian-320-posterior-fixed.png`, and `/tmp/sounio-bayesian-design-qa.png`; all interaction states exposed correct `aria-pressed` values and desktop/mobile/320 px measured zero overflow.
+- Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directories: `/tmp/llm-offload-My4OsK/` and `/tmp/llm-offload-79Us2s/`.
