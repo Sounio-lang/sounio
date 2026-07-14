@@ -2666,6 +2666,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - sample_size: two-proportion, one-proportion, and Fisher-z correlation N formulas, normal_quantile, ss_ln/ss_sqrt/ss_ceil_pos, guards — all verified.
 - Both scalar -> #852-safe. Box-plot figure (examples/stats/box_plot.sio) added.
 
+## 2026-07-14 — math-review: units / dimensional-analysis vertical
+- Files: `stdlib/units/lib.sio` (`dim_show`/`quantity_show`), `tests/stdlib/units/test_units_stdlib.sio`, `examples/units/dimensional_report.sio`.
+- Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed add/sub RSS, mul u=√((b·u_a)²+(a·u_b)²), div u=√((u_a/b)²+(a·u_b/b²)²) with denominator term |∂(a/b)/∂b|, and every first-principles anchor (5±0.5 kg; 19.6±0.98 N; 5 m/s; 6 kg; mass↔length mismatch; kg→g ×1000; 0°C=273.15 K) plus the example values (0.25±0.005 kg s⁻¹; 686.7±4.905 N; 2060.1±37.355 J).
+- Evidence boundary: verifies dimensional + GUM-uncertainty arithmetic and unit-symbol recognition by SI dimension (torque-vs-energy N·m ambiguity noted, out of scope); number formatting is raw print(f64).
+- Raw review directory: `/tmp/llm-offload-BscnpJ/`.
+
 ## 2026-07-14 — math-review: stats::reliability
 - File: `stdlib/stats/reliability.sio` (new). ICC(2,1) via ANOVA mean squares + Cronbach's alpha. Provider: xAI/Grok 4.3 = **PASS** — ICC formula, SS/MS decomposition, Cronbach formula, item/total variance estimators, test data all verified.
 - Funnel-plot figure (examples/stats/funnel_plot.sio) added. Correlation-heatmap figure attempted but DROPPED: needs a data matrix live during many render calls (custom pixel loops / plot_band with data[256]+corr[64] live) -> #852 crash. The funnel worked (no separate data matrix; proven plot path only).
