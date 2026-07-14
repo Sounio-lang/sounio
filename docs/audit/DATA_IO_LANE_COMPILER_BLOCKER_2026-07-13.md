@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13
+-->
+
 # Data & Science I/O lane — blocked by compiler-owned file-I/O builtins
 
 **Date:** 2026-07-13

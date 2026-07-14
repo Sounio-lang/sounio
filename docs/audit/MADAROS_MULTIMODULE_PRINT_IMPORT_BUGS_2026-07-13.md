@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-multimodule-print-import-bugs-2026-07-13
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-multimodule-print-import-bugs-2026-07-13
+-->
+
 # Madaros v0.80.0 — two multi-module defects (named import + print_f64)
 
 **Date:** 2026-07-13
