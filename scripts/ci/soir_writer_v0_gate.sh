@@ -82,6 +82,10 @@ printf 'soir-writer-v0 gate: static contract PASS\n'
 # Import routing for standalone self-hosted modules is not assumed. When the
 # packaged compiler can resolve the lane, run the differential witness; when it
 # cannot, fail explicitly unless the caller selected static-only qualification.
+if [[ "${SOIR_WRITER_STATIC_ONLY:-0}" == "1" && "${SOIR_WRITER_REQUIRE_DYNAMIC:-0}" == "1" ]]; then
+  fail 'SOIR_WRITER_STATIC_ONLY=1 conflicts with SOIR_WRITER_REQUIRE_DYNAMIC=1'
+fi
+
 if [[ "${SOIR_WRITER_STATIC_ONLY:-0}" == "1" ]]; then
   printf 'soir-writer-v0 gate: dynamic witness NOT RUN (SOIR_WRITER_STATIC_ONLY=1)\n'
   exit 0
