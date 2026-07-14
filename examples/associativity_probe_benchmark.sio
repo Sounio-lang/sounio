@@ -5,6 +5,24 @@
 // Associativity Probe: Direct Octonionic Composition — THE Definitive Test
 // ═══════════════════════════════════════════════════════════════════════════
 //
+// FIXED 2026-07-14: this file previously SEGFAULTED during training and printed
+// a bogus "100% non-associative / all class 0" verification. Two Madaros v0.80.0
+// codegen bugs were worked around at the source level:
+//   (a) scalar globals written in a unit-returning fn don't persist to the caller
+//       -> PROBE_LABEL/PROBE_IS_ASSOC/N_STEPS/EVAL_* are now [i64; 2] (length-1
+//          arrays [i64; 1] themselves SIGSEGV, so length 2 is used), index [0].
+//   (b) oct_step/quat_step held ~24 live f64 values across ~40 wg/hg/hs calls,
+//       corrupting the return address -> rewritten in load-compute-store form
+//       (all wg/hg/hs calls in tight loops; the big arithmetic block is call-free).
+// Verification + the 29% non-assoc fraction are now correct and it runs end-to-end.
+//
+// NOT fully repaired: a third bug (print_int is corrupted when it follows an f64
+// cast/print on a line) still garbles the per-category accuracy DISPLAY, and every
+// trained model lands near the random floor, so the TRAINED comparison is
+// inconclusive. The trustworthy, provable separation (O-SSM 1000 vs associative
+// ceiling 500 permil on non-assoc triples) is in scripts/research/ossm_separation.sio.
+// ═══════════════════════════════════════════════════════════════════════════
+//
 // Ground truth is ALGEBRAICALLY non-associative.
 // Input: [a, b, c, mode] where mode=LEFT→(e_a⊗e_b)⊗e_c, mode=RIGHT→e_a⊗(e_b⊗e_c)
 // Output: ±e_k (16 classes: sign × basis index)
@@ -84,8 +102,8 @@ fn oct_signed_mul(s_a: i64, idx_a: i64, idx_b: i64) -> i64 with Mut {
 // ═══════════════════════════════════════════════════════════════════════════
 
 var PROBE_TOKENS: [i64; 4] = [0; 4]
-var PROBE_LABEL: i64 = 0
-var PROBE_IS_ASSOC: i64 = 0  // 1 if LEFT==RIGHT for this triple
+var PROBE_LABEL: [i64; 2] = [0; 2]
+var PROBE_IS_ASSOC: [i64; 2] = [0; 2]  // 1 if LEFT==RIGHT for this triple
 
 fn generate_assoc_probe() with Mut, Div {
     let a = (rng_next() / 100) % 8
@@ -108,11 +126,11 @@ fn generate_assoc_probe() with Mut, Div {
     let bc_idx = oct_basis(b, c)
     let right_label = oct_signed_mul(bc_sign, a, bc_idx)
 
-    if mode == 0 { PROBE_LABEL = left_label }
-    if mode == 1 { PROBE_LABEL = right_label }
+    if mode == 0 { PROBE_LABEL[0] = left_label }
+    if mode == 1 { PROBE_LABEL[0] = right_label }
 
     // Check if this triple is associative (LEFT == RIGHT)
-    if left_label == right_label { PROBE_IS_ASSOC = 1 } else { PROBE_IS_ASSOC = 0 }
+    if left_label == right_label { PROBE_IS_ASSOC[0] = 1 } else { PROBE_IS_ASSOC[0] = 0 }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -132,7 +150,7 @@ var MOM: [i64; 224] = [0; 224]
 // BPTT storage: 4 timesteps × 8 dims = 32
 var H_SAVE: [i64; 64] = [0; 64]
 var X_SAVE: [i64; 64] = [0; 64]
-var N_STEPS: i64 = 0
+var N_STEPS: [i64; 2] = [0; 2]
 var DA: [i64; 64] = [0; 64]
 var DB: [i64; 8] = [0; 8]
 var DH: [i64; 8] = [0; 8]
@@ -209,48 +227,64 @@ fn init_A_s4diag() with Mut, Div, Panic {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn oct_step(token: i64) with Mut, Div {
-    let a0 = wg(80); let a1 = wg(81); let a2 = wg(82); let a3 = wg(83)
-    let a4 = wg(84); let a5 = wg(85); let a6 = wg(86); let a7 = wg(87)
-    let h0 = hg(0); let h1 = hg(1); let h2 = hg(2); let h3 = hg(3)
-    let h4 = hg(4); let h5 = hg(5); let h6 = hg(6); let h7 = hg(7)
-    // Cayley product
-    var n0 = a0*h0 - a1*h1 - a2*h2 - a3*h3 - a4*h4 - a5*h5 - a6*h6 - a7*h7
-    var n1 = a0*h1 + a1*h0 + a2*h3 - a3*h2 + a4*h5 - a5*h4 - a6*h7 + a7*h6
-    var n2 = a0*h2 + a2*h0 - a1*h3 + a3*h1 + a4*h6 - a6*h4 + a5*h7 - a7*h5
-    var n3 = a0*h3 + a3*h0 + a1*h2 - a2*h1 + a4*h7 - a7*h4 - a5*h6 + a6*h5
-    var n4 = a0*h4 + a4*h0 - a1*h5 + a5*h1 - a2*h6 + a6*h2 - a3*h7 + a7*h3
-    var n5 = a0*h5 + a5*h0 + a1*h4 - a4*h1 - a2*h7 + a7*h2 + a3*h6 - a6*h3
-    var n6 = a0*h6 + a6*h0 + a1*h7 - a7*h1 + a2*h4 - a4*h2 - a3*h5 + a5*h3
-    var n7 = a0*h7 + a7*h0 - a1*h6 + a6*h1 - a2*h5 + a5*h2 + a3*h4 - a4*h3
-    n0 = n0 + wg(88+0)*wg(token*8+0); n1 = n1 + wg(88+1)*wg(token*8+1)
-    n2 = n2 + wg(88+2)*wg(token*8+2); n3 = n3 + wg(88+3)*wg(token*8+3)
-    n4 = n4 + wg(88+4)*wg(token*8+4); n5 = n5 + wg(88+5)*wg(token*8+5)
-    n6 = n6 + wg(88+6)*wg(token*8+6); n7 = n7 + wg(88+7)*wg(token*8+7)
-    if n0>5.0{n0=5.0} if n0<0.0-5.0{n0=0.0-5.0} if n1>5.0{n1=5.0} if n1<0.0-5.0{n1=0.0-5.0}
-    if n2>5.0{n2=5.0} if n2<0.0-5.0{n2=0.0-5.0} if n3>5.0{n3=5.0} if n3<0.0-5.0{n3=0.0-5.0}
-    if n4>5.0{n4=5.0} if n4<0.0-5.0{n4=0.0-5.0} if n5>5.0{n5=5.0} if n5<0.0-5.0{n5=0.0-5.0}
-    if n6>5.0{n6=5.0} if n6<0.0-5.0{n6=0.0-5.0} if n7>5.0{n7=5.0} if n7<0.0-5.0{n7=0.0-5.0}
-    hs(0,n0); hs(1,n1); hs(2,n2); hs(3,n3); hs(4,n4); hs(5,n5); hs(6,n6); hs(7,n7)
+    // load-compute-store: no wg/hg/hs calls interleaved with the live f64 block
+    // (avoids the Madaros v0.80.0 f64-spill-across-calls stack corruption)
+    var Aa: [f64; 8] = [0.0; 8]
+    var Hh: [f64; 8] = [0.0; 8]
+    var Bin: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 { Aa[d] = wg(80 + d); Hh[d] = hg(d); Bin[d] = wg(88 + d) * wg(token * 8 + d); d = d + 1 }
+    let a0 = Aa[0]; let a1 = Aa[1]; let a2 = Aa[2]; let a3 = Aa[3]
+    let a4 = Aa[4]; let a5 = Aa[5]; let a6 = Aa[6]; let a7 = Aa[7]
+    let h0 = Hh[0]; let h1 = Hh[1]; let h2 = Hh[2]; let h3 = Hh[3]
+    let h4 = Hh[4]; let h5 = Hh[5]; let h6 = Hh[6]; let h7 = Hh[7]
+    var out: [f64; 8] = [0.0; 8]
+    out[0] = a0*h0 - a1*h1 - a2*h2 - a3*h3 - a4*h4 - a5*h5 - a6*h6 - a7*h7 + Bin[0]
+    out[1] = a0*h1 + a1*h0 + a2*h3 - a3*h2 + a4*h5 - a5*h4 - a6*h7 + a7*h6 + Bin[1]
+    out[2] = a0*h2 + a2*h0 - a1*h3 + a3*h1 + a4*h6 - a6*h4 + a5*h7 - a7*h5 + Bin[2]
+    out[3] = a0*h3 + a3*h0 + a1*h2 - a2*h1 + a4*h7 - a7*h4 - a5*h6 + a6*h5 + Bin[3]
+    out[4] = a0*h4 + a4*h0 - a1*h5 + a5*h1 - a2*h6 + a6*h2 - a3*h7 + a7*h3 + Bin[4]
+    out[5] = a0*h5 + a5*h0 + a1*h4 - a4*h1 - a2*h7 + a7*h2 + a3*h6 - a6*h3 + Bin[5]
+    out[6] = a0*h6 + a6*h0 + a1*h7 - a7*h1 + a2*h4 - a4*h2 - a3*h5 + a5*h3 + Bin[6]
+    out[7] = a0*h7 + a7*h0 - a1*h6 + a6*h1 - a2*h5 + a5*h2 + a3*h4 - a4*h3 + Bin[7]
+    d = 0
+    while d < 8 {
+        var v = out[d]
+        if v > 5.0 { v = 5.0 }
+        if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(d, v)
+        d = d + 1
+    }
 }
 
 fn quat_step(token: i64) with Mut, Div {
-    let qw=wg(80); let qx=wg(81); let qy=wg(82); let qz=wg(83)
-    let hw=hg(0); let hx=hg(1); let hy=hg(2); let hz=hg(3)
-    var n0=qw*hw-qx*hx-qy*hy-qz*hz; var n1=qw*hx+qx*hw+qy*hz-qz*hy
-    var n2=qw*hy-qx*hz+qy*hw+qz*hx; var n3=qw*hz+qx*hy-qy*hx+qz*hw
-    n0=n0+wg(88+0)*wg(token*8+0); n1=n1+wg(88+1)*wg(token*8+1)
-    n2=n2+wg(88+2)*wg(token*8+2); n3=n3+wg(88+3)*wg(token*8+3)
-    if n0>5.0{n0=5.0} if n0<0.0-5.0{n0=0.0-5.0} if n1>5.0{n1=5.0} if n1<0.0-5.0{n1=0.0-5.0}
-    if n2>5.0{n2=5.0} if n2<0.0-5.0{n2=0.0-5.0} if n3>5.0{n3=5.0} if n3<0.0-5.0{n3=0.0-5.0}
-    let qw2=wg(84); let qx2=wg(85); let qy2=wg(86); let qz2=wg(87)
-    let hw2=hg(4); let hx2=hg(5); let hy2=hg(6); let hz2=hg(7)
-    var n4=qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2; var n5=qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2
-    var n6=qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2; var n7=qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2
-    n4=n4+wg(88+4)*wg(token*8+4); n5=n5+wg(88+5)*wg(token*8+5)
-    n6=n6+wg(88+6)*wg(token*8+6); n7=n7+wg(88+7)*wg(token*8+7)
-    if n4>5.0{n4=5.0} if n4<0.0-5.0{n4=0.0-5.0} if n5>5.0{n5=5.0} if n5<0.0-5.0{n5=0.0-5.0}
-    if n6>5.0{n6=5.0} if n6<0.0-5.0{n6=0.0-5.0} if n7>5.0{n7=5.0} if n7<0.0-5.0{n7=0.0-5.0}
-    hs(0,n0); hs(1,n1); hs(2,n2); hs(3,n3); hs(4,n4); hs(5,n5); hs(6,n6); hs(7,n7)
+    // load-compute-store (see oct_step): two quaternion halves on dims 0-3 and 4-7
+    var Aa: [f64; 8] = [0.0; 8]
+    var Hh: [f64; 8] = [0.0; 8]
+    var Bin: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 { Aa[d] = wg(80 + d); Hh[d] = hg(d); Bin[d] = wg(88 + d) * wg(token * 8 + d); d = d + 1 }
+    let qw=Aa[0]; let qx=Aa[1]; let qy=Aa[2]; let qz=Aa[3]
+    let hw=Hh[0]; let hx=Hh[1]; let hy=Hh[2]; let hz=Hh[3]
+    let qw2=Aa[4]; let qx2=Aa[5]; let qy2=Aa[6]; let qz2=Aa[7]
+    let hw2=Hh[4]; let hx2=Hh[5]; let hy2=Hh[6]; let hz2=Hh[7]
+    var out: [f64; 8] = [0.0; 8]
+    out[0] = qw*hw-qx*hx-qy*hy-qz*hz + Bin[0]
+    out[1] = qw*hx+qx*hw+qy*hz-qz*hy + Bin[1]
+    out[2] = qw*hy-qx*hz+qy*hw+qz*hx + Bin[2]
+    out[3] = qw*hz+qx*hy-qy*hx+qz*hw + Bin[3]
+    out[4] = qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2 + Bin[4]
+    out[5] = qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2 + Bin[5]
+    out[6] = qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2 + Bin[6]
+    out[7] = qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2 + Bin[7]
+    d = 0
+    while d < 8 {
+        var v = out[d]
+        if v > 5.0 { v = 5.0 }
+        if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(d, v)
+        d = d + 1
+    }
 }
 
 fn diag_step(token: i64) with Mut, Div {
@@ -450,7 +484,7 @@ fn bptt_accum(t: i64) with Mut, Div {
 }
 
 fn bptt_apply(lr_A: f64) with Mut, Div {
-    let inv_t = 1.0 / (N_STEPS as f64)
+    let inv_t = 1.0 / (N_STEPS[0] as f64)
     var i = 0
     while i < 8 {
         let g = (DA[i] as f64) / 100000000.0 * inv_t
@@ -476,7 +510,7 @@ fn bptt_backward(tgt: i64, model_id: i64, lr_A: f64, lr_out: f64) with Mut, Div,
     while i < 64 { DA[i] = 0; i = i + 1 }
     i = 0
     while i < 8 { DB[i] = 0; i = i + 1 }
-    var t = N_STEPS - 1
+    var t = N_STEPS[0] - 1
     while t >= 0 {
         bptt_accum(t)
         if model_id == 0 { bptt_prop_oct() }
@@ -506,7 +540,7 @@ fn train_and_eval(model_id: i64) with IO, Mut, Div, Panic {
             var t = 0
             while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
             compute_logits()
-            update_out(PROBE_LABEL, 0.01)
+            update_out(PROBE_LABEL[0], 0.01)
             s = s + 1
         }
         ep = ep + 1
@@ -521,11 +555,11 @@ fn train_and_eval(model_id: i64) with IO, Mut, Div, Panic {
             generate_assoc_probe()
             var d = 0
             while d < 8 { H[d] = 0; d = d + 1 }
-            N_STEPS = 0
+            N_STEPS[0] = 0
             var t = 0
-            while t < 4 { model_step_save(PROBE_TOKENS[t], model_id, N_STEPS); N_STEPS = N_STEPS + 1; t = t + 1 }
+            while t < 4 { model_step_save(PROBE_TOKENS[t], model_id, N_STEPS[0]); N_STEPS[0] = N_STEPS[0] + 1; t = t + 1 }
             compute_logits()
-            bptt_backward(PROBE_LABEL, model_id, 0.001, 0.005)
+            bptt_backward(PROBE_LABEL[0], model_id, 0.001, 0.005)
             s = s + 1
         }
         ep = ep + 1
@@ -533,17 +567,17 @@ fn train_and_eval(model_id: i64) with IO, Mut, Div, Panic {
 }
 
 // Structured evaluation: overall, assoc-triples, non-assoc-triples
-var EVAL_OVERALL: i64 = 0
-var EVAL_ASSOC_CORRECT: i64 = 0
-var EVAL_ASSOC_TOTAL: i64 = 0
-var EVAL_NONASSOC_CORRECT: i64 = 0
-var EVAL_NONASSOC_TOTAL: i64 = 0
+var EVAL_OVERALL: [i64; 2] = [0; 2]
+var EVAL_ASSOC_CORRECT: [i64; 2] = [0; 2]
+var EVAL_ASSOC_TOTAL: [i64; 2] = [0; 2]
+var EVAL_NONASSOC_CORRECT: [i64; 2] = [0; 2]
+var EVAL_NONASSOC_TOTAL: [i64; 2] = [0; 2]
 
 fn eval_model(model_id: i64) with IO, Mut, Div, Panic {
     rng_seed(99999, 11111)
-    EVAL_OVERALL = 0
-    EVAL_ASSOC_CORRECT = 0; EVAL_ASSOC_TOTAL = 0
-    EVAL_NONASSOC_CORRECT = 0; EVAL_NONASSOC_TOTAL = 0
+    EVAL_OVERALL[0] = 0
+    EVAL_ASSOC_CORRECT[0] = 0; EVAL_ASSOC_TOTAL[0] = 0
+    EVAL_NONASSOC_CORRECT[0] = 0; EVAL_NONASSOC_TOTAL[0] = 0
     var s = 0
     while s < 1000 {
         generate_assoc_probe()
@@ -553,31 +587,34 @@ fn eval_model(model_id: i64) with IO, Mut, Div, Panic {
         while t < 4 { model_step(PROBE_TOKENS[t], model_id); t = t + 1 }
         compute_logits()
         let pred = get_pred()
-        if pred == PROBE_LABEL { EVAL_OVERALL = EVAL_OVERALL + 1 }
-        if PROBE_IS_ASSOC == 1 {
-            EVAL_ASSOC_TOTAL = EVAL_ASSOC_TOTAL + 1
-            if pred == PROBE_LABEL { EVAL_ASSOC_CORRECT = EVAL_ASSOC_CORRECT + 1 }
+        if pred == PROBE_LABEL[0] { EVAL_OVERALL[0] = EVAL_OVERALL[0] + 1 }
+        if PROBE_IS_ASSOC[0] == 1 {
+            EVAL_ASSOC_TOTAL[0] = EVAL_ASSOC_TOTAL[0] + 1
+            if pred == PROBE_LABEL[0] { EVAL_ASSOC_CORRECT[0] = EVAL_ASSOC_CORRECT[0] + 1 }
         } else {
-            EVAL_NONASSOC_TOTAL = EVAL_NONASSOC_TOTAL + 1
-            if pred == PROBE_LABEL { EVAL_NONASSOC_CORRECT = EVAL_NONASSOC_CORRECT + 1 }
+            EVAL_NONASSOC_TOTAL[0] = EVAL_NONASSOC_TOTAL[0] + 1
+            if pred == PROBE_LABEL[0] { EVAL_NONASSOC_CORRECT[0] = EVAL_NONASSOC_CORRECT[0] + 1 }
         }
         s = s + 1
     }
 }
 
+// permil (0..1000) accuracy, printed with print_int only.
+// NB: Madaros v0.80.0 corrupts print_int when it follows print(f64) on a line,
+// so this avoids f64 printing entirely.
 fn print_eval_line() with IO, Mut, Div {
-    let overall_pct = (EVAL_OVERALL as f64) / 1000.0 * 100.0
-    var assoc_pct = 0.0
-    if EVAL_ASSOC_TOTAL > 0 { assoc_pct = (EVAL_ASSOC_CORRECT as f64) / (EVAL_ASSOC_TOTAL as f64) * 100.0 }
-    var nonassoc_pct = 0.0
-    if EVAL_NONASSOC_TOTAL > 0 { nonassoc_pct = (EVAL_NONASSOC_CORRECT as f64) / (EVAL_NONASSOC_TOTAL as f64) * 100.0 }
-    let delta = nonassoc_pct - assoc_pct
-
-    print(overall_pct); print("%    ")
-    print(assoc_pct); print("% ("); print_int(EVAL_ASSOC_TOTAL); print(")  ")
-    print(nonassoc_pct); print("% ("); print_int(EVAL_NONASSOC_TOTAL); print(")  ")
-    if delta >= 0.0 { print("+") }
-    print(delta); print("%\n")
+    var assoc_p = 0
+    if EVAL_ASSOC_TOTAL[0] > 0 {
+        assoc_p = (1000.0 * (EVAL_ASSOC_CORRECT[0] as f64) / (EVAL_ASSOC_TOTAL[0] as f64)) as i64
+    }
+    var nonassoc_p = 0
+    if EVAL_NONASSOC_TOTAL[0] > 0 {
+        nonassoc_p = (1000.0 * (EVAL_NONASSOC_CORRECT[0] as f64) / (EVAL_NONASSOC_TOTAL[0] as f64)) as i64
+    }
+    print("overall(permil) "); print_int(EVAL_OVERALL[0])
+    print("   assoc "); print_int(assoc_p); print(" (n="); print_int(EVAL_ASSOC_TOTAL[0]); print(")")
+    print("   non-assoc "); print_int(nonassoc_p); print(" (n="); print_int(EVAL_NONASSOC_TOTAL[0]); print(")")
+    print("   delta "); print_int(nonassoc_p - assoc_p); print("\n")
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
@@ -599,8 +636,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         let mode = PROBE_TOKENS[3] - 8
         print("    e"); print_int(a); print("*e"); print_int(b); print("*e"); print_int(c)
         if mode == 0 { print(" LEFT  ") } else { print(" RIGHT ") }
-        print("→ class "); print_int(PROBE_LABEL)
-        if PROBE_IS_ASSOC == 1 { print(" [assoc]") } else { print(" [NON-ASSOC]"); na_count = na_count + 1 }
+        print("→ class "); print_int(PROBE_LABEL[0])
+        if PROBE_IS_ASSOC[0] == 1 { print(" [assoc]") } else { print(" [NON-ASSOC]"); na_count = na_count + 1 }
         print("\n")
         total_verify = total_verify + 1
     }
@@ -610,7 +647,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var na_total = 0; var check = 0
     while check < 1000 {
         generate_assoc_probe()
-        if PROBE_IS_ASSOC == 0 { na_total = na_total + 1 }
+        if PROBE_IS_ASSOC[0] == 0 { na_total = na_total + 1 }
         check = check + 1
     }
     let na_frac = (na_total as f64) / 1000.0 * 100.0
@@ -625,9 +662,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     rng_seed(12345, 67890)
     train_and_eval(0)
     eval_model(0)
-    var ossm_overall = EVAL_OVERALL
-    var ossm_assoc_c = EVAL_ASSOC_CORRECT; var ossm_assoc_t = EVAL_ASSOC_TOTAL
-    var ossm_na_c = EVAL_NONASSOC_CORRECT; var ossm_na_t = EVAL_NONASSOC_TOTAL
+    var ossm_overall = EVAL_OVERALL[0]
+    var ossm_assoc_c = EVAL_ASSOC_CORRECT[0]; var ossm_assoc_t = EVAL_ASSOC_TOTAL[0]
+    var ossm_na_c = EVAL_NONASSOC_CORRECT[0]; var ossm_na_t = EVAL_NONASSOC_TOTAL[0]
 
     // H-SSM
     print("  Training H-SSM (Hamilton)...\n")
@@ -635,9 +672,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     rng_seed(12345, 67890)
     train_and_eval(1)
     eval_model(1)
-    var hssm_overall = EVAL_OVERALL
-    var hssm_assoc_c = EVAL_ASSOC_CORRECT; var hssm_assoc_t = EVAL_ASSOC_TOTAL
-    var hssm_na_c = EVAL_NONASSOC_CORRECT; var hssm_na_t = EVAL_NONASSOC_TOTAL
+    var hssm_overall = EVAL_OVERALL[0]
+    var hssm_assoc_c = EVAL_ASSOC_CORRECT[0]; var hssm_assoc_t = EVAL_ASSOC_TOTAL[0]
+    var hssm_na_c = EVAL_NONASSOC_CORRECT[0]; var hssm_na_t = EVAL_NONASSOC_TOTAL[0]
 
     // Naive
     print("  Training Naive (diagonal)...\n")
@@ -645,9 +682,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     rng_seed(12345, 67890)
     train_and_eval(2)
     eval_model(2)
-    var naive_overall = EVAL_OVERALL
-    var naive_assoc_c = EVAL_ASSOC_CORRECT; var naive_assoc_t = EVAL_ASSOC_TOTAL
-    var naive_na_c = EVAL_NONASSOC_CORRECT; var naive_na_t = EVAL_NONASSOC_TOTAL
+    var naive_overall = EVAL_OVERALL[0]
+    var naive_assoc_c = EVAL_ASSOC_CORRECT[0]; var naive_assoc_t = EVAL_ASSOC_TOTAL[0]
+    var naive_na_c = EVAL_NONASSOC_CORRECT[0]; var naive_na_t = EVAL_NONASSOC_TOTAL[0]
 
     // S4-DIAG
     print("  Training S4-DIAG (HiPPO)...\n")
@@ -664,19 +701,19 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("  ───────   ───────   ─────────────    ─────────────────  ─────\n")
 
     // O-SSM
-    EVAL_OVERALL = ossm_overall
-    EVAL_ASSOC_CORRECT = ossm_assoc_c; EVAL_ASSOC_TOTAL = ossm_assoc_t
-    EVAL_NONASSOC_CORRECT = ossm_na_c; EVAL_NONASSOC_TOTAL = ossm_na_t
+    EVAL_OVERALL[0] = ossm_overall
+    EVAL_ASSOC_CORRECT[0] = ossm_assoc_c; EVAL_ASSOC_TOTAL[0] = ossm_assoc_t
+    EVAL_NONASSOC_CORRECT[0] = ossm_na_c; EVAL_NONASSOC_TOTAL[0] = ossm_na_t
     print("  O-SSM    "); print_eval_line()
 
-    EVAL_OVERALL = hssm_overall
-    EVAL_ASSOC_CORRECT = hssm_assoc_c; EVAL_ASSOC_TOTAL = hssm_assoc_t
-    EVAL_NONASSOC_CORRECT = hssm_na_c; EVAL_NONASSOC_TOTAL = hssm_na_t
+    EVAL_OVERALL[0] = hssm_overall
+    EVAL_ASSOC_CORRECT[0] = hssm_assoc_c; EVAL_ASSOC_TOTAL[0] = hssm_assoc_t
+    EVAL_NONASSOC_CORRECT[0] = hssm_na_c; EVAL_NONASSOC_TOTAL[0] = hssm_na_t
     print("  H-SSM    "); print_eval_line()
 
-    EVAL_OVERALL = naive_overall
-    EVAL_ASSOC_CORRECT = naive_assoc_c; EVAL_ASSOC_TOTAL = naive_assoc_t
-    EVAL_NONASSOC_CORRECT = naive_na_c; EVAL_NONASSOC_TOTAL = naive_na_t
+    EVAL_OVERALL[0] = naive_overall
+    EVAL_ASSOC_CORRECT[0] = naive_assoc_c; EVAL_ASSOC_TOTAL[0] = naive_assoc_t
+    EVAL_NONASSOC_CORRECT[0] = naive_na_c; EVAL_NONASSOC_TOTAL[0] = naive_na_t
     print("  Naive    "); print_eval_line()
 
     // S4-DIAG is still in globals from last eval
@@ -684,31 +721,22 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
     print("\n  Random baseline: 6.25% (1/16 classes)\n")
 
-    // Verdict
-    var ossm_na_pct = 0.0
-    if ossm_na_t > 0 { ossm_na_pct = (ossm_na_c as f64) / (ossm_na_t as f64) * 100.0 }
-    var hssm_na_pct = 0.0
-    if hssm_na_t > 0 { hssm_na_pct = (hssm_na_c as f64) / (hssm_na_t as f64) * 100.0 }
-    let na_gap = ossm_na_pct - hssm_na_pct
+    // Verdict — uses ONLY the reliable overall permil counts (raw #correct out of
+    // 1000; never cast to f64, so they print cleanly). The per-category display
+    // above is affected by a Madaros v0.80.0 print_int-after-f64 codegen bug, and
+    // every trained model sits near the 62-permil random floor, so the trained
+    // classifier comparison here is INCONCLUSIVE. The clean, provable separation
+    // (O-SSM 1000 vs associative-ceiling 500 permil on non-assoc triples) lives in
+    // scripts/research/ossm_separation.sio.
+    print("\n  ═══ VERDICT (trained models; overall permil, random floor = 62) ═══\n")
+    print("  O-SSM overall:  "); print_int(ossm_overall)
+    print("   H-SSM overall: "); print_int(hssm_overall)
+    print("   Naive: "); print_int(naive_overall); print("\n")
+    print("  All near the random floor -> trained-classifier comparison is\n")
+    print("  inconclusive in this toy regime. For the clean representational\n")
+    print("  separation (+500 permil on non-assoc triples), run:\n")
+    print("    souc run scripts/research/ossm_separation.sio\n")
 
-    print("\n  ═══ VERDICT ═══\n")
-    print("  O-SSM non-assoc accuracy: "); print(ossm_na_pct); print("%\n")
-    print("  H-SSM non-assoc accuracy: "); print(hssm_na_pct); print("%\n")
-    print("  Gap (O-SSM - H-SSM): "); if na_gap >= 0.0 { print("+") }; print(na_gap); print("pp\n")
-
-    if na_gap > 3.0 {
-        print("\n  ✓ O-SSM separates on non-associative triples.\n")
-        print("  → Non-associativity IS the mechanism when the task requires it.\n")
-    } else {
-        if na_gap > 0.0 - 3.0 {
-            print("\n  ~ No significant separation on non-associative triples.\n")
-            print("  → Non-associativity doesn't help even when the ground truth is non-associative.\n")
-        } else {
-            print("\n  ✗ H-SSM outperforms on non-associative triples.\n")
-            print("  → Non-associativity hurts even on intrinsically non-associative tasks.\n")
-        }
-    }
-
-    println("ALL PASS")
+    println("ALL PASS (runs end-to-end; see note above)")
     0
 }
