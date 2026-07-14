@@ -1,0 +1,207 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/rate_epi.sio — incidence-rate epidemiology (person-time)
+//
+// Rates built from counts over person-time, with the ratio and difference
+// measures and their large-sample (log / Wald) confidence intervals:
+//
+//   incidence_rate(a, pt)            -> RateCI    (rate + Poisson log CI)
+//   rate_ratio(a1, pt1, a2, pt2)     -> RatioCI   (IRR + log CI)
+//   rate_difference(a1, pt1, a2, pt2)-> DiffCI    (RD + Wald CI)
+//
+// For a events over person-time T the incidence rate is a/T; on the log scale
+// SE(ln rate) = 1/sqrt(a), giving CI = exp( ln(a/T) ± z/sqrt(a) ).
+// For two groups the rate ratio (a1/T1)/(a2/T2) has SE(ln IRR)=sqrt(1/a1+1/a2);
+// the rate difference a1/T1 − a2/T2 has SE = sqrt(a1/T1² + a2/T2²).
+//
+// Pure Sounio: inline sqrt / exp / ln, no external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Rothman, Greenland & Lash, "Modern Epidemiology" 3e, ch. 14 (person-time).
+
+module stats::rate_epi
+
+fn re_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+// exp reduced to [0,2] after reflecting negatives (robust, no cancellation).
+fn re_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / re_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+// ln via artanh series with range reduction to [1,2).
+fn re_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 {
+        sum = sum + term / ((2 * n + 1) as f64)
+        term = term * t2
+        n = n + 1
+    }
+    return e + 2.0 * sum
+}
+
+pub struct RateCI {
+    pub rate: f64,   // point estimate a/pt
+    pub lo: f64,     // 95% lower bound
+    pub hi: f64,     // 95% upper bound
+}
+
+pub struct RatioCI {
+    pub irr: f64,    // incidence-rate ratio
+    pub lo: f64,
+    pub hi: f64,
+}
+
+pub struct DiffCI {
+    pub rd: f64,     // rate difference
+    pub lo: f64,
+    pub hi: f64,
+}
+
+/// Incidence rate a/pt with a 95% Poisson log confidence interval.
+///
+/// Parâmetros: a — event count (>0 for a finite CI); pt — person-time (>0).
+/// Retorno: RateCI (rate, lo, hi).
+pub fn incidence_rate(a: f64, pt: f64) -> RateCI with Mut, Div, Panic {
+    if pt <= 0.0 { return RateCI { rate: 0.0, lo: 0.0, hi: 0.0 } }
+    let rate = a / pt
+    if a <= 0.0 { return RateCI { rate: 0.0, lo: 0.0, hi: 0.0 } }
+    let z = 1.959963984540054
+    let se = 1.0 / re_sqrt(a)            // SE(ln rate)
+    let lr = re_ln(rate)
+    return RateCI { rate: rate, lo: re_exp(lr - z * se), hi: re_exp(lr + z * se) }
+}
+
+/// Incidence-rate ratio (a1/pt1)/(a2/pt2) with a 95% log CI.
+///
+/// Parâmetros: a1,pt1 — exposed events/time; a2,pt2 — reference events/time.
+/// Retorno: RatioCI (irr, lo, hi).
+pub fn rate_ratio(a1: f64, pt1: f64, a2: f64, pt2: f64) -> RatioCI with Mut, Div, Panic {
+    if pt1 <= 0.0 || pt2 <= 0.0 || a1 <= 0.0 || a2 <= 0.0 {
+        return RatioCI { irr: 0.0, lo: 0.0, hi: 0.0 }
+    }
+    let r1 = a1 / pt1
+    let r2 = a2 / pt2
+    let irr = r1 / r2
+    let z = 1.959963984540054
+    let se = re_sqrt(1.0 / a1 + 1.0 / a2)   // SE(ln IRR)
+    let li = re_ln(irr)
+    return RatioCI { irr: irr, lo: re_exp(li - z * se), hi: re_exp(li + z * se) }
+}
+
+/// Rate difference a1/pt1 − a2/pt2 with a 95% Wald CI.
+///
+/// Parâmetros: a1,pt1 — exposed; a2,pt2 — reference.
+/// Retorno: DiffCI (rd, lo, hi).
+pub fn rate_difference(a1: f64, pt1: f64, a2: f64, pt2: f64) -> DiffCI with Mut, Div, Panic {
+    if pt1 <= 0.0 || pt2 <= 0.0 { return DiffCI { rd: 0.0, lo: 0.0, hi: 0.0 } }
+    let r1 = a1 / pt1
+    let r2 = a2 / pt2
+    let rd = r1 - r2
+    let z = 1.959963984540054
+    let se = re_sqrt(a1 / (pt1 * pt1) + a2 / (pt2 * pt2))
+    return DiffCI { rd: rd, lo: rd - z * se, hi: rd + z * se }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 10 events over 500 person-years -> rate 0.02.
+// SE(ln)=1/sqrt(10)=0.316228; ln(0.02)=-3.912023.
+// lo=exp(-3.912023-1.959964·0.316228)=exp(-4.531773)=0.010761
+// hi=exp(-3.912023+1.959964·0.316228)=exp(-3.292274)=0.037172
+fn test_rate() -> bool with IO, Mut, Div, Panic {
+    let r = incidence_rate(10.0, 500.0)
+    var ok = true
+    ok = check(1, approx(r.rate, 0.02, 1.0e-9)) && ok
+    ok = check(2, approx(r.lo, 0.010761, 1.0e-4)) && ok
+    ok = check(3, approx(r.hi, 0.037172, 1.0e-4)) && ok
+    return ok
+}
+
+// group1: 20 events / 1000 py = 0.02; group2: 10 / 1000 = 0.01. IRR=2.
+// SE(ln IRR)=sqrt(1/20+1/10)=sqrt(0.15)=0.387298; ln2=0.693147.
+// lo=exp(0.693147-1.959964·0.387298)=exp(-0.066014)=0.936120
+// hi=exp(0.693147+1.959964·0.387298)=exp(1.452308)=4.272797
+fn test_ratio() -> bool with IO, Mut, Div, Panic {
+    let r = rate_ratio(20.0, 1000.0, 10.0, 1000.0)
+    var ok = true
+    ok = check(10, approx(r.irr, 2.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.lo, 0.936120, 1.0e-3)) && ok
+    ok = check(12, approx(r.hi, 4.272797, 1.0e-3)) && ok
+    return ok
+}
+
+// rd = 0.02 - 0.01 = 0.01. SE=sqrt(20/1000²+10/1000²)=sqrt(30e-6)=0.005477.
+// lo=0.01-1.959964·0.005477=-0.000735; hi=0.01+...=0.020735.
+fn test_diff() -> bool with IO, Mut, Div, Panic {
+    let r = rate_difference(20.0, 1000.0, 10.0, 1000.0)
+    var ok = true
+    ok = check(20, approx(r.rd, 0.01, 1.0e-9)) && ok
+    ok = check(21, approx(r.lo, 0.0 - 0.000735, 1.0e-5)) && ok
+    ok = check(22, approx(r.hi, 0.020735, 1.0e-5)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_rate() && ok
+    ok = test_ratio() && ok
+    ok = test_diff() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

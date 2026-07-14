@@ -2687,3 +2687,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Provider: xAI/Grok 4.3 = **PASS** (all items). Confirmed N(0,1) pdf(0)=1/√(2π)≈0.398942, cdf(0)=0.5, cdf(1.96)≈0.975; Exp(λ=2) mean=0.5; Exp(λ=1) cdf(ln2)=0.5; Uniform(0,10) mean=median=5; Poisson(3) var=3.
 - Finding (compiler): default Madaros native cannot link the ~210-fn multi-module graph; lean_single compiles + runs it. Filed issue #901 + docs/audit/MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14.md. Values verified textbook-correct under lean_single.
 - Raw review directory: see /tmp llm-offload dir for this run.
+
+## 2026-07-14 — math-review: stats::concordance, stats::rate_epi, stats::weibull_negbin
+- Files (all new): `stdlib/stats/concordance.sio` (Lin's CCC + Cliff's delta), `stdlib/stats/rate_epi.sio` (person-time incidence rate / IRR / rate difference with Poisson-log & Wald CIs), `stdlib/stats/weibull_negbin.sio` (Weibull pdf/cdf/quantile/median/hazard/mean + negative-binomial pmf/cdf/mean via log-gamma). Provider: xAI/Grok 4.3.
+- concordance = **PASS**: CCC population-moment formula matches Lin (1989); Cliff δ definition + magnitude bins match Cliff (1993); all test values verified to 1e-3.
+- rate_epi = **PASS**: rate=a/pt, SE(ln rate)=1/√a, SE(ln IRR)=√(1/a1+1/a2), Var(r̂)=a/pt² all confirmed against Rothman §14; range-reduced exp/ln/sqrt accuracy sufficient.
+- weibull_negbin = **PASS**: all Weibull & NegBin closed forms match references; hazard=f/S reduction and mean=λΓ(1+1/k) correct; log-gamma binomial coefficient + geometric special case algebraically correct. No errors.
+- Suite selftest: 30 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-mS7gGT/`, `/tmp/llm-offload-Y62RoO/`, `/tmp/llm-offload-sF2UHr/`.
