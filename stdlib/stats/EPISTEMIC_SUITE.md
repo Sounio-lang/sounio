@@ -549,6 +549,41 @@ T²/V` (df 1), two-sided p, and the fitted slope (proportion per unit score).
 Validated: doses 0–3 with proportions 0.1–0.4 → χ²=26.667, z=5.164, slope=0.10;
 flat proportions → χ²=0.
 
+### `stats::ks_test` — Kolmogorov-Smirnov tests
+
+| Function | Signature |
+|---|---|
+| `ks_one_normal` | `pub fn ks_one_normal(x: &[f64; 256], n: i32, mu: f64, sigma: f64) -> KSResult with Mut, Div, Panic` |
+| `ks_two` | `pub fn ks_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> KSResult with Mut, Div, Panic` |
+
+The distribution-free supremum goodness-of-fit test in both forms: one-sample
+against a Normal(μ,σ) reference (`D = supₓ|Fₙ(x)−Φ(x)|`) and two-sample
+(`D = supₓ|F₁−F₂|`), with the Kolmogorov asymptotic p-value (Stephens 1970
+finite-sample λ). Data is copied and sorted internally. Validated: {−1,0,1} vs
+N(0,1) → D=0.1747; fully-separated samples → D=1; identical → D=0, p=1.
+
+### `stats::gof` — chi-squared & G goodness-of-fit
+
+| Function | Signature |
+|---|---|
+| `gof` | `pub fn gof(observed: &[f64; 64], expected: &[f64; 64], k: i32, ddof: i32) -> GofResult with Mut, Div, Panic` |
+
+Pearson's `χ² = Σ(Oᵢ−Eᵢ)²/Eᵢ` and the likelihood-ratio `G = 2ΣOᵢln(Oᵢ/Eᵢ)`
+for binned counts, both against χ²(k−1−ddof), where `ddof` counts parameters
+estimated from the data. Validated: O={10,20,30,40} vs E=25 → χ²=20, G=21.288,
+df=3, p≈1.7e−4; perfect fit → χ²=G=0, p=1.
+
+### `stats::normality` — Jarque-Bera omnibus normality test
+
+| Function | Signature |
+|---|---|
+| `normality` | `pub fn normality(x: &[f64; 256], n: i32) -> NormalityResult with Mut, Div, Panic` |
+
+The moment-based (skewness + kurtosis) complement to the visual `qq_normal`
+check: reports sample skewness, kurtosis (normal=3) and excess, the Jarque-Bera
+statistic `JB = n/6·(S²+(K−3)²/4) ~ χ²(2)`, and its closed-form p = e^{−JB/2}.
+Validated: {2,4,4,4,5,5,7,9} → S=0.6563, K=2.7813, JB=0.5902, p=0.7445.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -584,6 +619,9 @@ use stats::weibull_negbin::{weibull_pdf, weibull_cdf, weibull_quantile, weibull_
 use stats::mcnemar::{McNemarResult, mcnemar}
 use stats::friedman::{FriedmanResult, friedman}
 use stats::trend::{TrendResult, cochran_armitage}
+use stats::ks_test::{KSResult, ks_one_normal, ks_two}
+use stats::gof::{GofResult, gof}
+use stats::normality::{NormalityResult, normality}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
