@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.plans.2026-07-14-integrate-vertical
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.plans.2026-07-14-integrate-vertical
+-->
+
 # integrate::epistemic_ode Run-Proof — Plan
 > Default Madaros (self-contained). No source edits (disjoint from active lanes). Spec: docs/superpowers/specs/2026-07-14-integrate-vertical-design.md.
 ## Task 1 — run-proof driver

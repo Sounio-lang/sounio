@@ -2746,3 +2746,8 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - passing_bablok = **PASS**: shifted-median with K-offset matches Passing & Bablok 1983 exactly (1-indexed rank (N+1)/2+K → 0-based with clamping); -1 slope exclusion verified (N=5,K=0 case); K-offset case (N=6,K=1 → slope 2) confirmed.
 - Theme: method-comparison / robust regression — complements the agreement modules (bland_altman, concordance/CCC, reliability) for assay/instrument comparison. #852-safe: theil_sen & passing_bablok use bounded pairwise buffers with inline median sorts (no nested call while big buffer live). Suite selftest: 45 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-8JVsS1/`, `/tmp/llm-offload-NuJ1qi/`, `/tmp/llm-offload-LafnKF/`.
+
+## 2026-07-14 — math-review: integrate::epistemic_ode run-proof
+- Files: `tests/stdlib/integrate/test_integrate_stdlib.sio`, `examples/integrate/decay_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = **PASS** (all). Confirmed y(t)=y0 e^{-kt}; Euler (1-1/n)^n→e^-1 O(1/n) (err@2000<err@200); half-life y(ln2)=y0/2; y(2)=2e^-1=0.735759; step-wise additive uncertainty recurrence u_{n+1}=u_n√(1+(k dt)²) is algebraically correct (u stays ~u0). Default Madaros. INTEGRATE_GATE_OK.
+- Raw review directory: see /tmp llm-offload dir.
