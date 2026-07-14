@@ -69,11 +69,13 @@ rg -l 'IrWideNumericPayload|wide_numeric_payload|numeric_payload|IR_WIDE_NUMERIC
   | sort >"$TMP_DIR/payload-references.actual"
 printf '%s\n' \
   'self-hosted/compiler/f128_f256_numeric_payload_probe.sio' \
+  'self-hosted/compiler/f128_f256_numeric_wire_probe.sio' \
   'self-hosted/ir/numeric_payload.sio' \
+  'self-hosted/ir/numeric_payload_wire.sio' \
   >"$TMP_DIR/payload-references.expected"
 if ! diff -u "$TMP_DIR/payload-references.expected" "$TMP_DIR/payload-references.actual" \
     >"$TMP_DIR/integration-leak.log" 2>&1; then
-  echo "FAIL bounded V0-B payload pool leaked into IR instructions, lowering, native, or SOIR" >&2
+  echo "FAIL numeric payload surface leaked beyond the V0-B arena and bounded standalone V0-C wire codec" >&2
   cat "$TMP_DIR/integration-leak.log" >&2
   exit 1
 fi
