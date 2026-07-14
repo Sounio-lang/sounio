@@ -38,6 +38,7 @@ check_case "gum -> csv (end-to-end)" examples/epistemic/gum_to_csv.sio tests/std
 
 # Multi-row PK concentration-time table, per-point GUM combined uncertainty.
 check_case "pk curve (multi-row + u_c)" examples/epistemic/pk_curve_gum_to_csv.sio tests/stdlib/data/fixtures/pk_curve.csv
+check_case "rfc-4180 quoting"           tests/stdlib/data/test_csv_quote.sio   tests/stdlib/data/fixtures/csv_quoting.csv
 
 [ $fail -eq 0 ] && echo "DATA_IO_CSV_GATE_OK"
 exit $fail
