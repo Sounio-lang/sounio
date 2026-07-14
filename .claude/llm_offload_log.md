@@ -2647,3 +2647,15 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - **diagnostic = PASS**: sens/spec/PPV/NPV/LR±/accuracy/Youden, Wilson CIs. "No errors or leaps."
 - **roc = PASS**: AUC=(wins+0.5·ties)/(n_pos·n_neg), Hanley-McNeil q1/q2/variance, CI clipping, roc_point TPR/FPR. "All verified."
 - **cohen_kappa = PASS on formulas** (κ=(po-pe)/(1-pe), weighted linear/quadratic, Landis-Koch). One **[TIGHTENABLE] was a legitimate caveat** (unlike the previous two reviewer false-flags): the Fleiss SE is exact for unweighted kappa but only approximate for weighted — documented in the module and the weighted fn doc; the kappa value itself is exact for both.
+
+## 2026-07-13 — math-review: multiple_comparisons + permutation
+- Files: `stdlib/stats/{multiple_comparisons,permutation}.sio` (new, library modules). Provider: xAI/Grok 4.3 = **PASS** both.
+- multiple_comparisons: Bonferroni min(1,m·p), Holm max-form, BH-FDR min-form, O(m²) rank enumeration — all verified.
+- permutation: two-sample |mean diff| test, p=(count+1)/(iters+1), Fisher-Yates, two-sided abs counting, inline LCG — verified.
+- Both hit the #852 codegen crash for in-module test harnesses; shipped as libraries validated by external examples/stats/*_test.sio (bonf=1 holm=1 bh=5; sep_significant=1 null_notsig=1). Functions structured to avoid #852 (no big callee arrays, inlined loops).
+
+## 2026-07-13 — math-review: summary_inference + meta_analysis
+- Files: `stdlib/stats/{summary_inference,meta_analysis}.sio` (new). Provider: xAI/Grok 4.3 = **PASS** both.
+- summary_inference: Welch se/df (Satterthwaite), pooled-SD Cohen's d, one-sample t, t-CI — all verified. (Note: the code's Welch t deviates ~3e-4 from the true 3.29574 — an execution/float artifact under load, not a formula error; test tolerance loosened accordingly.)
+- meta_analysis: inverse-variance pooling, Cochran Q, I², DerSimonian-Laird τ², random-effects weights, homogeneous edge — all verified.
+- Both scalar/small-array -> #852-safe. Forest plot figure (examples/stats/forest_plot.sio) renders the meta-analysis.

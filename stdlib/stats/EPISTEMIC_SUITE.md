@@ -393,6 +393,52 @@ computed exactly by pairwise concordance; SE by Hanley & McNeil (1982), CI clipp
 to [0,1]. `roc_point` gives one (TPR, FPR) operating point. Validated: AUC 0.75 on
 the classic 4-point example; perfect separation → 1; a tied pair → 0.5.
 
+### `stats::multiple_comparisons` — p-value adjustment
+
+| Function | Signature |
+|---|---|
+| `bonferroni` | `pub fn bonferroni(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic` |
+| `holm` | `pub fn holm(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic` |
+| `bh_fdr` | `pub fn bh_fdr(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic` |
+
+Adjust m raw p-values for multiple testing (writes adjusted p into `out_adj` in the
+same order, returns the count rejected at `alpha`): Bonferroni and Holm control the
+FWER, Benjamini-Hochberg the FDR. Validated: p=0.01..0.05 → Bonferroni/Holm reject
+1, BH rejects all 5. (Library module — validation in `examples/stats/`.)
+
+### `stats::permutation` — two-sample permutation test
+
+`pub fn perm_test_means(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, iters: i32, seed: i64) -> f64 with Mut, Div, Panic`
+— distribution-free test of a location difference: p = (1 + #{|Δ*|≥|Δ_obs|})/(iters+1)
+over `iters` random relabellings (inline LCG, deterministic in `seed`). The mean
+bootstrap CI already lives in `stats::epistemic::bootstrap`. Validated: separated
+groups → p<0.05; identical → p>0.2.
+
+> **Codegen caveat (#852):** these two are library modules with external tests
+> (`examples/stats/*_test.sio`) rather than inline `main` tests — a routine with
+> big local arrays, or an in-module test harness making many nested calls while
+> arrays are live, triggers a silent native-codegen crash. The public functions
+> are structured around it (no big callee arrays; inlined loops).
+
+### `stats::summary_inference` — inference from summary statistics
+
+Tests/effect sizes from published (mean, SD, n) rather than raw data — scalar, so
+`#852`-safe. `t_test_summary` (Welch + Satterthwaite df), `one_sample_t_summary`,
+`ci_mean_summary`, `cohens_d_summary`. Validated: Welch t≈3.30, df≈52.9, d≈0.874.
+
+### `stats::meta_analysis` — fixed / random-effects meta-analysis
+
+| Function | Signature |
+|---|---|
+| `meta_fixed` | `pub fn meta_fixed(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic` |
+| `meta_random` | `pub fn meta_random(effect: &[f64; 64], se: &[f64; 64], k: i32, conf: f64) -> MetaResult with Mut, Div, Panic` |
+
+Inverse-variance pooling with Cochran's Q, I², and DerSimonian-Laird τ² for the
+random-effects model. `MetaResult`: `pooled, se, ci_lo/hi, z, p_value, q, df, i2,
+tau2`. Validated: 3 studies → pooled 0.477, Q 2.69, I² 25.6%, τ² 0.0072. A
+**forest plot** figure (`examples/stats/forest_plot.sio`) renders it — per-study
+CI bars + the pooled diamond, pure-Sounio.
+
 ## Importing
 
 Import each tool directly from its module:
