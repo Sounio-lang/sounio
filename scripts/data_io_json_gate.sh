@@ -37,6 +37,7 @@ check_case () {
 check_case "flat object (int + f64)" tests/stdlib/data/test_json_obj.sio tests/stdlib/data/fixtures/pk_obj.json
 check_case "string escaping (RFC 8259)" tests/stdlib/data/test_json_str.sio tests/stdlib/data/fixtures/pk_str.json
 check_case "array of objects (PK table)" tests/stdlib/data/test_json_table.sio tests/stdlib/data/fixtures/pk_table.json
+check_case "nested dataset + null/bool (BLQ)" tests/stdlib/data/test_json_dataset.sio tests/stdlib/data/fixtures/pk_dataset.json
 
 # End-to-end: real GUM compute (imports epistemic::gum) -> byte-exact JSON object.
 check_case "gum -> json (end-to-end)" examples/epistemic/gum_to_json.sio tests/stdlib/data/fixtures/gum_recovery.json
