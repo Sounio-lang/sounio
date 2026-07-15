@@ -2926,3 +2926,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - cles = **PASS**: Φ(d/√2) from X₁−X₂~N(dσ,2σ²), non-parametric pair count (ties ½) = ROC AUC; d=1→0.7603, interleaved→1/3 verified.
 - Theme: effect-size conversion & derivation — the meta-analysis/reporting glue complementing effect_size (which computes from data). All derivable, #852-safe. Suite runner: 94 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-mWCVbQ/`, `/tmp/llm-offload-pTAF9f/`, `/tmp/llm-offload-rYFbnF/`.
+
+## 2026-07-15 — math-review: stats::gwet_ac1, stats::krippendorff, stats::icc_forms
+- Files (all new): `stdlib/stats/gwet_ac1.sio` (Gwet's AC1 paradox-resistant agreement), `stdlib/stats/krippendorff.sio` (Krippendorff's alpha, nominal, complete data, m raters), `stdlib/stats/icc_forms.sio` (all six Shrout-Fleiss ICC forms via two-way ANOVA). Provider: xAI/Grok 4.3.
+- gwet_ac1 = **PASS**: AC1=(Pₐ−Pₑ)/(1−Pₑ), Pₑ=1/(k−1)Σπc(1−πc); paradox case [[8,1],[1,0]]→AC1=0.756 (κ negative) verified.
+- krippendorff = **PASS**: coincidence-matrix Dₒ/Dₑ, α=1−Dₒ/Dₑ; 4-unit/2-rater→α=0.125, perfect→1 verified.
+- icc_forms = **PASS**: ICC(1,1)/(2,1)/(3,1) + average-measure forms from ANOVA MSB/MSR/MSW/MSE; **validated against the published Shrout-Fleiss (1979) 6×4 example** → 0.166/0.290/0.715 (all three match).
+- Theme: chance-corrected agreement — extends cohen_kappa/fleiss_kappa/reliability with the general Krippendorff α, the paradox-resistant Gwet AC1, and the full ICC family. All derivable, #852-safe. Suite runner: 97 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-QU0X4f/`, `/tmp/llm-offload-DxNLA5/`, `/tmp/llm-offload-xj10Av/`.
