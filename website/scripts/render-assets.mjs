@@ -80,6 +80,25 @@ const renderSpecs = [
       'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/epistemic_field_atelier.sio > epistemic_field_atelier.ppm',
   },
   {
+    example: 'examples/render/causal_intervention_frontier.sio',
+    sourceAsset: 'examples/render/assets/causal-intervention-frontier.png',
+    assetFile: 'causal-intervention-frontier.png',
+    title: 'Causal intervention refusal',
+    description:
+      'A fixed-DAG backdoor witness: native do(X) graph surgery preserves the latent path and refuses an observed-data effect estimate.',
+    width: 480,
+    height: 300,
+    engine: 'lean_single',
+    sha256: 'eae2f0a22b8a8df65fd181849055360fb2ed0115fb85dac539c8284011b1f1d8',
+    renderSha256: '6de2b1f6cba8e7290757e09e6d337f8559dd4a5a0ed777b32900d65b6ab7413a',
+    verification: 'byte-identical output across two independent runs',
+    gate: 'tests/run-pass/viz_causal_intervention_receipt.sio',
+    receipt: 'VIZ_CAUSAL_INTERVENTION_RECEIPT_PASS',
+    sourceRef: 'website/living-observatory-20260713',
+    command:
+      'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/causal_intervention_frontier.sio > causal_intervention_frontier.ppm',
+  },
+  {
     example: 'examples/render/triangle_basic.sio',
     assetFile: 'triangle-basic.svg',
     title: 'Triangle raster render',
@@ -105,15 +124,6 @@ const renderSpecs = [
       'Integer-scaled uncertainty heatmap where value controls color and epsilon controls brightness.',
     command:
       "bin/souc run examples/render/uncertainty_field.sio | sed -n '/^P3$/,$p' > uncertainty_field.ppm",
-  },
-  {
-    example: 'examples/render/causal_dag.sio',
-    assetFile: 'causal-dag.svg',
-    title: 'Causal DAG render',
-    description:
-      'Sounio-authored X-to-M-to-Y raster diagram with a latent U node and intervention-highlighted X.',
-    command:
-      "bin/souc run examples/render/causal_dag.sio | sed -n '/^P3$/,$p' > causal_dag.ppm",
   },
   {
     example: 'examples/render/quaternion_rotation.sio',

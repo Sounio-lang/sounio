@@ -2724,3 +2724,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Raw review directory: `/tmp/llm-offload-r36LVT/`.
 
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | math-review + external artifact review | categorical.sio; causal_canvas.sio; causal_intervention_frontier.sio; viz_causal_intervention_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted the fixed DAG, native do(X) graph surgery, {Z} open-backdoor witness, structural {Z,U} witness, latent-U observed-data refusal, deterministic visual receipt, and explicit no-effect-estimate/no-general-ID boundary. DeepSeek and Gemini provider calls failed; no fallback claim was made. Raw: `/tmp/llm-offload-xnaK1b/`, `/tmp/llm-offload-Er8SK2/`. |
+
+## 2026-07-15 - Causal receipt website integration review
+- Files: `website/src/components/home/CompiledVisualReceipts.astro`, `website/scripts/render-assets.mjs`, the generated render manifest, and the causal PNG receipt.
+- Task: replace the historical hardcoded causal SVG with a deterministic fixed-DAG intervention refusal and expose its Source -> Artifact -> Gate custody chain.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR finding. It accepted the fixed-DAG wording, explicit latent-backdoor refusal, deterministic gate, and no-effect-estimate boundary.
+- Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px screenshots confirmed the selected fourth tab, loaded 480x300 PNG, receipt visibility, responsive inspector, and zero horizontal overflow.
+- Validation: `npm run check:quality` verified four deterministic receipts and gates, built 904 pages, validated 28,454 internal links, and reported zero Astro errors, warnings, or hints. The historical Madaros cube-render `SIGSEGV` remains an explicit fallback after the verified receipts pass.
+- Raw review directory: `/tmp/llm-offload-Fo6YZf/`.
