@@ -39,7 +39,8 @@ fourteen families:
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
-  MINSTD generator (exact f64), and the nonparametric bootstrap for the mean.
+  MINSTD generator (exact f64), the nonparametric bootstrap for the mean, the
+  two-sample difference and correlation bootstraps, and a permutation test.
 - **Bayesian & model selection** — conjugate updates, the Beta-posterior
   credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
   Schwarz Bayes-factor approximation.
@@ -1123,6 +1124,39 @@ distributional assumption. Validated: {1..5} → point estimate 3 exactly, SE
 converging to √(σ̂²/n)=0.6325 (within Monte-Carlo error), CI bracketing the mean,
 identical results from identical seeds.
 
+### `stats::perm_test` — two-sample permutation test
+
+| Function | Signature |
+|---|---|
+| `perm_test` | `pub fn perm_test(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, seed: i64) -> PermResult with Mut, Div, Panic` |
+
+A Monte-Carlo permutation test on the difference in means: pool, randomly
+reassign nx values to group A `b` times (Fisher-Yates via seeded MINSTD), and
+report `p=(#{|Δ*|≥|Δ_obs|}+1)/(b+1)`. Validated: identical means → p=1;
+well-separated 5-vs-5 → p<0.05 (permutation floor 2/252≈0.008); reproducible.
+
+### `stats::bootstrap_diff` — two-sample bootstrap difference
+
+| Function | Signature |
+|---|---|
+| `bootstrap_diff` | `pub fn bootstrap_diff(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, conf: f64, seed: i64) -> BootDiffResult with Mut, Div, Panic` |
+
+The resampling counterpart to Welch's t-test: a percentile CI and SE for the
+difference in means, resampling each group independently (seeded). Validated:
+{5,6,7} vs {1,2,3} → point diff 4 exactly, CI brackets 4; identical groups → CI
+brackets 0; reproducible.
+
+### `stats::bootstrap_corr` — bootstrap correlation CI
+
+| Function | Signature |
+|---|---|
+| `bootstrap_corr` | `pub fn bootstrap_corr(x: &[f64; 256], y: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootCorrResult with Mut, Div, Panic` |
+
+A distribution-free CI for a Pearson correlation by resampling pairs (the
+alternative to the Fisher-z interval when normality is doubtful). Validated:
+perfectly correlated data → r=1, SE=0, CI=[1,1]; noisy positive association → CI
+brackets the point r; reproducible.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1206,6 +1240,9 @@ use stats::pca2::{PCA2Result, pca2}
 use stats::jackknife::{JackResult, jackknife_mean, jackknife_variance}
 use stats::rng::{Rng, rng_seed, rng_uniform, rng_range, rng_int, rng_normal}
 use stats::bootstrap::{BootResult, bootstrap_mean}
+use stats::perm_test::{PermResult, perm_test}
+use stats::bootstrap_diff::{BootDiffResult, bootstrap_diff}
+use stats::bootstrap_corr::{BootCorrResult, bootstrap_corr}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

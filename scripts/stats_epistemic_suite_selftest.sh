@@ -88,6 +88,9 @@ MODULES=(
   stdlib/stats/jackknife.sio
   stdlib/stats/rng.sio
   stdlib/stats/bootstrap.sio
+  stdlib/stats/perm_test.sio
+  stdlib/stats/bootstrap_diff.sio
+  stdlib/stats/bootstrap_corr.sio
 )
 
 fail=0
