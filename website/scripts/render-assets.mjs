@@ -26,45 +26,45 @@ const renderSpecs = [
     assetFile: 'triangle-basic.svg',
     title: 'Triangle raster render',
     description:
-      'Software-rasterized triangle with barycentric color interpolation emitted by the checked JIT artifact.',
+      'Software-rasterized triangle with barycentric color interpolation authored in Sounio.',
     command:
-      'bin/souc run examples/render/triangle_basic.sio > triangle_basic.ppm',
+      "bin/souc run examples/render/triangle_basic.sio | sed -n '/^P3$/,$p' > triangle_basic.ppm",
   },
   {
     example: 'examples/render/cube_wireframe.sio',
     assetFile: 'cube-wireframe.svg',
     title: 'Wireframe cube render',
     description:
-      'Perspective-projected cube with depth-tinted edges emitted by the checked JIT artifact.',
+      'Perspective-projected cube with depth-tinted edges preserved as a checked-in Sounio render asset.',
     command:
-      'bin/souc run examples/render/cube_wireframe.sio > cube_wireframe.ppm',
+      "bin/souc run examples/render/cube_wireframe.sio | sed -n '/^P3$/,$p' > cube_wireframe.ppm",
   },
   {
     example: 'examples/render/uncertainty_field.sio',
     assetFile: 'uncertainty-field.svg',
     title: 'Uncertainty field render',
     description:
-      'Epistemic heatmap over value and epsilon axes emitted as a real 128x128 raster by the checked JIT artifact.',
+      'Integer-scaled uncertainty heatmap where value controls color and epsilon controls brightness.',
     command:
-      'bin/souc run examples/render/uncertainty_field.sio > uncertainty_field.ppm',
+      "bin/souc run examples/render/uncertainty_field.sio | sed -n '/^P3$/,$p' > uncertainty_field.ppm",
   },
   {
     example: 'examples/render/causal_dag.sio',
     assetFile: 'causal-dag.svg',
     title: 'Causal DAG render',
     description:
-      'Front-door causal graph with intervention and latent-node annotations emitted as a real 256x128 raster by the checked JIT artifact.',
+      'Sounio-authored X-to-M-to-Y raster diagram with a latent U node and intervention-highlighted X.',
     command:
-      'bin/souc run examples/render/causal_dag.sio > causal_dag.ppm',
+      "bin/souc run examples/render/causal_dag.sio | sed -n '/^P3$/,$p' > causal_dag.ppm",
   },
   {
     example: 'examples/render/quaternion_rotation.sio',
     assetFile: 'quaternion-rotation.svg',
     title: 'Quaternion rotation render',
     description:
-      'Tetrahedron wireframe showing original and quaternion-rotated geometry emitted as a real 192x192 raster by the checked JIT artifact.',
+      'Tetrahedron wireframe produced by the example custom quaternion struct and its documented approximation.',
     command:
-      'bin/souc run examples/render/quaternion_rotation.sio > quaternion_rotation.ppm',
+      "bin/souc run examples/render/quaternion_rotation.sio | sed -n '/^P3$/,$p' > quaternion_rotation.ppm",
   },
 ];
 
@@ -86,10 +86,12 @@ function rgbHex(r, g, b) {
 }
 
 function parsePpm(ppmText, example) {
-  const tokens = ppmText.trim().split(/\s+/);
-  if (tokens[0] !== 'P3') {
+  const outputTokens = ppmText.trim().split(/\s+/);
+  const headerIndex = outputTokens.indexOf('P3');
+  if (headerIndex < 0) {
     throw new Error(`${example}: expected P3 header`);
   }
+  const tokens = outputTokens.slice(headerIndex);
 
   const width = Number(tokens[1]);
   const height = Number(tokens[2]);
@@ -242,7 +244,7 @@ async function check() {
     assets = await collectAssets();
   } catch (e) {
     console.log(`SKIP: render check failed (${e.message}) — using pre-rendered assets`);
-    console.log('OK: render-assets check skipped (compiler unavailable).');
+    console.log('OK: render-assets check skipped (current render path incomplete).');
     return;
   }
   const stale = [];
