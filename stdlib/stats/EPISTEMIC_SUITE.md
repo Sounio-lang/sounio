@@ -16,8 +16,10 @@ fourteen families:
   χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
-- **Group comparison** — one-way ANOVA, inference from summary statistics,
-  standardised effect sizes, and power / sample-size planning.
+- **Group comparison & planning** — one-way ANOVA, inference from summary
+  statistics, standardised effect sizes, t-test power, and sample-size planning
+  for proportions/correlations, survival trials (Schoenfeld), target precision,
+  and the minimum detectable effect.
 - **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
   Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
 - **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
@@ -1398,6 +1400,36 @@ D₁=0.5625; perfect fit → all 0.
 The multicollinearity diagnostic `VIFⱼ=1/(1−R²ⱼ)` (VIF>5 concern, >10 serious).
 Validated: r=0.8 → VIF=2.778, tolerance=0.36; R²=0.9 → VIF=10; R²=0 → VIF=1.
 
+### `stats::sample_size_survival` — survival-trial sample size
+
+| Function | Signature |
+|---|---|
+| `ss_survival` | `pub fn ss_survival(hr: f64, alpha: f64, power: f64, alloc: f64, event_prob: f64) -> SurvSSResult with Mut, Div, Panic` |
+
+The Schoenfeld required number of events and enrolment for a log-rank / Cox test:
+`events=(z_{1−α/2}+z_{1−β})²/(πA·πB·(ln HR)²)`, `n=events/P(event)`. Validated:
+HR=2, α=0.05, 80% power, 1:1 → 65.3 events; a larger HR needs fewer.
+
+### `stats::sample_size_precision` — precision-based sample size
+
+| Function | Signature |
+|---|---|
+| `ss_mean` / `ss_proportion` | `pub fn ss_mean(sigma, margin, conf) -> i64` · `ss_proportion(p, margin, conf) -> i64` |
+
+The n needed for a confidence interval no wider than a chosen half-width:
+`n=(z·σ/E)²` for a mean, `n=z²p(1−p)/E²` for a proportion. Validated: σ=10, E=2,
+95% → 97; p=0.5, E=0.05, 95% → 385.
+
+### `stats::detectable_effect` — minimum detectable effect
+
+| Function | Signature |
+|---|---|
+| `mde_two_means` / `mde_one_mean` | `pub fn mde_two_means(n_per_group, alpha, power) -> f64` · `mde_one_mean(n, alpha, power) -> f64` |
+
+The smallest Cohen's d a study can detect: `d=(z_{1−α/2}+z_{1−β})·√(2/n)`
+(two-sample) or `/√n` (one-sample) — for judging whether a study was adequately
+powered. Validated: n=64/group, α=0.05, 80% → d=0.495; one-sample → 0.350.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1505,6 +1537,9 @@ use stats::breslow_day::{BDResult, breslow_day}
 use stats::leverage::{LeverageResult, leverage}
 use stats::cooks_distance::{CooksResult, cooks_distance}
 use stats::vif::{vif_from_r2, vif_two, tolerance}
+use stats::sample_size_survival::{SurvSSResult, ss_survival}
+use stats::sample_size_precision::{ss_mean, ss_proportion}
+use stats::detectable_effect::{mde_two_means, mde_one_mean}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
