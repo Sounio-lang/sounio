@@ -2845,3 +2845,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - partial_corr = **PASS**: r_xy·z formula + t(n−3) test; discriminating case r_xy=0 but partial=−1 (r_xz=0.6,r_yz=0.8) verified; uncorrelated-z → partial=r_xy.
 - Theme: correlation-inference toolkit — the Fisher-z CI, point-biserial, and partial correlation beside the existing Pearson/Spearman module. partial_corr makes 3 nested pc_pearson calls (shared-ref reads, scalar return) — #852-safe. Suite runner: 70 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-1ZtLOb/`, `/tmp/llm-offload-rTCcaN/`, `/tmp/llm-offload-CqFiN9/`.
+
+## 2026-07-15 — math-review: stats::bayes_ab, stats::beta_hdi, stats::bic
+- Files (all new): `stdlib/stats/bayes_ab.sio` (Bayesian A/B test P(pB>pA) for two Beta posteriors via Miller's exact finite sum), `stdlib/stats/beta_hdi.sio` (Beta-posterior equal-tailed credible interval via inverse incomplete-beta bisection + tail probability), `stdlib/stats/bic.sio` (AIC/BIC + Schwarz Bayes-factor approximation). Provider: xAI/Grok 4.3.
+- bayes_ab = **PASS**: Miller/Berry-Fristedt identity for integer αB verified; Beta(2,1)vs(1,1)→2/3 (analytic), symmetric→0.5, separated→≈1.
+- beta_hdi = **PASS**: equal-tailed inverse-incomplete-beta interval, bisection convergence, incomplete beta all correct; Beta(1,1)→[0.025,0.975], I_0.8(2,2)=0.896 verified.
+- bic = **PASS**: AIC=2k−2lnL, BIC=k·ln(n)−2lnL, ln BF₁₀≈(BIC₀−BIC₁)/2 all exact; worked values verified.
+- Theme: Bayesian inference & model selection — expands the previously single-module Bayesian family (bayes_conjugate). All derivable, #852-safe. Suite runner: 73 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-n4B5X5/`, `/tmp/llm-offload-jNnXGV/`, `/tmp/llm-offload-ylWpE0/`.

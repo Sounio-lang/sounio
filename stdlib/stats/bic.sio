@@ -1,0 +1,142 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bic.sio — AIC / BIC model selection & the BIC Bayes factor
+//
+// Information criteria for comparing two fitted models by their maximised
+// log-likelihood, penalising parameter count:
+//
+//   aic(loglik, k)                            -> f64
+//   bic(loglik, k, n)                         -> f64
+//   bic_compare(ll0, k0, ll1, k1, n)          -> BICResult
+//
+//   AIC = 2k − 2·lnL,      BIC = k·ln(n) − 2·lnL,
+// and the Schwarz approximation to the Bayes factor for model 1 vs model 0 is
+//   ln BF₁₀ ≈ (BIC₀ − BIC₁)/2.
+//
+// Pure Sounio: inline ln; arithmetic only. No external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Akaike (1974); Schwarz (1978) Ann. Stat. 6:461; Kass & Raftery (1995).
+
+module stats::bic
+
+fn bc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+/// Akaike information criterion.
+pub fn aic(loglik: f64, k: i32) -> f64 {
+    return 2.0 * (k as f64) - 2.0 * loglik
+}
+
+/// Bayesian (Schwarz) information criterion.
+pub fn bic(loglik: f64, k: i32, n: i32) -> f64 with Mut, Div, Panic {
+    return (k as f64) * bc_ln(n as f64) - 2.0 * loglik
+}
+
+pub struct BICResult {
+    pub aic0: f64,
+    pub aic1: f64,
+    pub bic0: f64,
+    pub bic1: f64,
+    pub delta_aic: f64,     // AIC0 - AIC1  (positive favours model 1)
+    pub delta_bic: f64,     // BIC0 - BIC1
+    pub log_bf10: f64,      // ln BF(model1 vs model0) ≈ delta_bic / 2
+}
+
+/// Compare two models by AIC, BIC and the BIC Bayes factor.
+///
+/// Parâmetros: ll0,k0 — model 0 log-likelihood & #params; ll1,k1 — model 1;
+///             n — sample size.
+/// Retorno: BICResult (aic/bic per model, deltas, log BF10).
+/// Referências: Schwarz (1978); Kass & Raftery (1995).
+pub fn bic_compare(ll0: f64, k0: i32, ll1: f64, k1: i32, n: i32) -> BICResult with Mut, Div, Panic {
+    let a0 = aic(ll0, k0)
+    let a1 = aic(ll1, k1)
+    let b0 = bic(ll0, k0, n)
+    let b1 = bic(ll1, k1, n)
+    let db = b0 - b1
+    return BICResult {
+        aic0: a0, aic1: a1, bic0: b0, bic1: b1,
+        delta_aic: a0 - a1, delta_bic: db, log_bf10: db / 2.0
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// model0: lnL=-100, k=2; model1: lnL=-90, k=3; n=50.
+// AIC0=4+200=204; AIC1=6+180=186.
+// BIC0=2·ln50+200=7.824046+200=207.824046; BIC1=3·ln50+180=11.736069+180=191.736069.
+// delta_bic=16.087977; log_bf10=8.043989.
+fn test_compare() -> bool with IO, Mut, Div, Panic {
+    let r = bic_compare(0.0 - 100.0, 2, 0.0 - 90.0, 3, 50)
+    var ok = true
+    ok = check(1, approx(r.aic0, 204.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.aic1, 186.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.bic0, 207.824046, 1.0e-4)) && ok
+    ok = check(4, approx(r.bic1, 191.736069, 1.0e-4)) && ok
+    ok = check(5, approx(r.delta_bic, 16.087977, 1.0e-4)) && ok
+    ok = check(6, approx(r.log_bf10, 8.043989, 1.0e-4)) && ok
+    return ok
+}
+
+// equal fit, model1 has an extra parameter -> BIC penalises it (delta_bic < 0).
+fn test_penalty() -> bool with IO, Mut, Div, Panic {
+    let r = bic_compare(0.0 - 50.0, 2, 0.0 - 50.0, 3, 100)
+    // both lnL equal; BIC1 - BIC0 = ln(100) > 0 -> delta_bic = -ln(100) = -4.60517.
+    var ok = true
+    ok = check(10, approx(r.delta_bic, 0.0 - 4.60517, 1.0e-4)) && ok
+    ok = check(11, r.log_bf10 < 0.0) && ok
+    return ok
+}
+
+// standalone helpers.
+fn test_helpers() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(20, approx(aic(0.0 - 100.0, 2), 204.0, 1.0e-9)) && ok
+    ok = check(21, approx(bic(0.0 - 100.0, 2, 50), 207.824046, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_compare() && ok
+    ok = test_penalty() && ok
+    ok = test_helpers() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

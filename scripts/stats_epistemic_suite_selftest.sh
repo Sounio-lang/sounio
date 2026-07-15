@@ -79,6 +79,9 @@ MODULES=(
   stdlib/stats/corr_ci.sio
   stdlib/stats/point_biserial.sio
   stdlib/stats/partial_corr.sio
+  stdlib/stats/bayes_ab.sio
+  stdlib/stats/beta_hdi.sio
+  stdlib/stats/bic.sio
 )
 
 fail=0
