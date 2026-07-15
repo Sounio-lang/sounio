@@ -30,6 +30,678 @@ struct OcpCseTables {
     len: i64,
 }
 
+// Mirrors the fixed register-indexed tables in cleanup passes A2/B. A future
+// pass-capacity change must update this named boundary and its focused gate.
+let OCP_REBRACKET_TRACKED_REG_LIMIT: i64 = 256
+
+// Compiler-internal authority for one exact bitwise reassociation.
+//
+// The authority is deliberately private, non-serializable, and never returned
+// from this module. A transaction derives it from the current IR window and
+// consumes it immediately before mutation. Audit fingerprints are computed
+// only after application; authority comes from rechecking structural facts.
+struct OcpExactBitwiseRebracketOccurrence {
+    outer_instr_index: i64,
+    inner_instr_index: i64,
+    outer_const_def_index: i64,
+    operator_key: i64,
+    base_reg: i64,
+    outer_const_reg: i64,
+}
+
+struct OcpSealedExactBitwiseRebracketAuthority {
+    occurrence: OcpExactBitwiseRebracketOccurrence,
+}
+
+struct OcpExactBitwiseRebracketAudit {
+    authorization_count: i64,
+    application_count: i64,
+    refusal_count: i64,
+    reason_code: i64,
+    outer_instr_index: i64,
+    operator_key: i64,
+    combined_const_value: i64,
+    diagnostic_fingerprint: i64,
+}
+
+// Public evidence is an audit summary, never an authority value.
+pub struct OcpExactBitwiseRebracketProbeReceipt {
+    pub case_count: i64,
+    // Application bits: 0=AND, 1=OR, 2=XOR.
+    pub application_mask: i64,
+    // Refusal bits: replay, wrong occurrence, swapped, arithmetic, float,
+    // shared constant, stale occurrence, call operands, packed operands,
+    // control flow without a dominance certificate, and explicit float IR.
+    pub refusal_mask: i64,
+    pub unchanged_refusal_mask: i64,
+    // Bit 0: authority is private and consumed in the local transaction.
+    // Bits 1..3 would claim D7, float/GUM, or global authority and stay clear.
+    pub boundary_claim_mask: i64,
+}
+
+fn ocp_rebracket_empty_occurrence() -> OcpExactBitwiseRebracketOccurrence {
+    OcpExactBitwiseRebracketOccurrence {
+        outer_instr_index: -1,
+        inner_instr_index: -1,
+        outer_const_def_index: -1,
+        operator_key: 0,
+        base_reg: -1,
+        outer_const_reg: -1,
+    }
+}
+
+fn ocp_rebracket_empty_audit(reason_code: i64) -> OcpExactBitwiseRebracketAudit {
+    OcpExactBitwiseRebracketAudit {
+        authorization_count: 0,
+        application_count: 0,
+        refusal_count: 1,
+        reason_code: reason_code,
+        outer_instr_index: -1,
+        operator_key: 0,
+        combined_const_value: 0,
+        diagnostic_fingerprint: 0,
+    }
+}
+
+fn ocp_rebracket_is_exact_bitwise_op(op: BinaryOp) -> bool {
+    op == BinaryOp::OpBitAnd || op == BinaryOp::OpBitOr || op == BinaryOp::OpBitXor
+}
+
+fn ocp_rebracket_operator_key(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpBitAnd { return 3 }
+    if op == BinaryOp::OpBitOr { return 4 }
+    if op == BinaryOp::OpBitXor { return 5 }
+    0
+}
+
+fn ocp_rebracket_combine(op: BinaryOp, a: i64, b: i64) -> (bool, i64) {
+    if op == BinaryOp::OpBitAnd { return (true, a & b) }
+    if op == BinaryOp::OpBitOr { return (true, a | b) }
+    if op == BinaryOp::OpBitXor { return (true, a ^ b) }
+    (false, 0)
+}
+
+fn ocp_rebracket_is_plain_binop(instr: IrInstr) -> bool with Mut, Div, Panic {
+    let empty = ir_empty_name()
+    instr.op == IrOpcode::IrBinOp &&
+        instr.imm_i64 == 0 && instr.imm_f64 == 0.0 &&
+        instr.label_id == IR_INVALID_LABEL && instr.fn_id == IR_INVALID_FN &&
+        instr.field_idx == -1 && instr.imm_flags == 0 && instr.arg_count == 0 &&
+        ir_name_eq(instr.name, empty)
+}
+
+fn ocp_rebracket_is_plain_load_imm(instr: IrInstr) -> bool with Mut, Div, Panic {
+    let empty = ir_empty_name()
+    instr.op == IrOpcode::IrLoadImm &&
+        instr.src1 == IR_INVALID_REG && instr.src2 == IR_INVALID_REG &&
+        instr.imm_f64 == 0.0 && instr.label_id == IR_INVALID_LABEL &&
+        instr.fn_id == IR_INVALID_FN && instr.field_idx == -1 &&
+        instr.imm_flags == 0 && instr.arg_count == 0 &&
+        ir_name_eq(instr.name, empty)
+}
+
+fn ocp_rebracket_has_no_call_args(args: Option<Box<IrRegList>>) -> bool {
+    match args {
+        Some(_) => false,
+        _ => true,
+    }
+}
+
+// This first authority slice admits only IR whose register observations are
+// fully represented by src1/src2, plus IrIndexSet's documented third operand.
+// Calls, phi lists, epistemic metadata operands, and packed/wide register
+// layouts are refused rather than guessed at by an incomplete use analysis.
+fn ocp_rebracket_has_canonical_scalar_operands(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => true,
+        IrOpcode::IrLoadBool => true,
+        IrOpcode::IrLoadString => true,
+        IrOpcode::IrCopy => true,
+        IrOpcode::IrBinOp => true,
+        IrOpcode::IrUnaryOp => true,
+        IrOpcode::IrReturn => true,
+        IrOpcode::IrFieldGet => true,
+        IrOpcode::IrFieldSet => true,
+        IrOpcode::IrIndexGet => true,
+        IrOpcode::IrIndexSet => true,
+        IrOpcode::IrArrayLen => true,
+        IrOpcode::IrAlloc => true,
+        IrOpcode::IrNop => true,
+        IrOpcode::IrLoadFnRef => true,
+        IrOpcode::IrLoadGlobal => true,
+        IrOpcode::IrStoreGlobal => true,
+        IrOpcode::IrStorePtr => true,
+        _ => false,
+    }
+}
+
+fn ocp_rebracket_function_has_canonical_scalar_operands(func: &IrFunction) -> bool with Div, Panic {
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if !ocp_rebracket_has_canonical_scalar_operands(instr.op) ||
+            instr.arg_count != 0 || !ocp_rebracket_has_no_call_args(instr.call_args) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ocp_rebracket_instr_equal(a: IrInstr, b: IrInstr) -> bool with Mut, Div, Panic {
+    a.op == b.op && a.dst == b.dst && a.src1 == b.src1 && a.src2 == b.src2 &&
+        a.imm_i64 == b.imm_i64 && a.imm_f64 == b.imm_f64 &&
+        a.label_id == b.label_id && a.fn_id == b.fn_id &&
+        a.field_idx == b.field_idx && a.imm_flags == b.imm_flags &&
+        a.bin_op == b.bin_op && a.un_op == b.un_op && a.arg_count == b.arg_count &&
+        ir_name_eq(a.name, b.name) && ocp_rebracket_has_no_call_args(a.call_args) &&
+        ocp_rebracket_has_no_call_args(b.call_args)
+}
+
+fn ocp_rebracket_last_value_def_before(func: &IrFunction, reg: i64, before: i64) -> i64 with Div, Panic {
+    var found: i64 = -1
+    var i: i64 = 0
+    while i < before && i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if instr.op != IrOpcode::IrNop && instr.dst == reg {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn ocp_rebracket_has_float_marker_before(func: &IrFunction, reg: i64, before: i64) -> bool with Div, Panic {
+    var i: i64 = 0
+    while i < before && i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if instr.op == IrOpcode::IrNop && instr.dst == reg &&
+            (instr.imm_flags & IR_FLOAT_REG_MARKER_FLAG) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ocp_rebracket_window_has_conflicting_write(
+    func: &IrFunction,
+    inner_idx: i64,
+    outer_idx: i64,
+    outer_const_def_idx: i64,
+    base_reg: i64,
+    inner_const_reg: i64,
+    outer_const_reg: i64,
+    inner_result_reg: i64,
+) -> bool with Div, Panic {
+    var i = inner_idx + 1
+    while i < outer_idx {
+        let instr = func.instrs[i as usize]
+        if i != outer_const_def_idx && instr.op != IrOpcode::IrNop {
+            if instr.dst == base_reg || instr.dst == inner_const_reg ||
+                instr.dst == outer_const_reg || instr.dst == inner_result_reg {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// The transform rewrites the existing outer constant definition in place.
+// Refuse unless that register has exactly one observable consumer and every
+// instruction uses the canonical scalar operand encoding admitted above.
+// A negative result means the function contains an uncertified operand shape.
+fn ocp_rebracket_source_use_count(func: &IrFunction, reg: i64) -> i64 with Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if !ocp_rebracket_has_canonical_scalar_operands(instr.op) ||
+            instr.arg_count != 0 || !ocp_rebracket_has_no_call_args(instr.call_args) {
+            return -1
+        }
+        if instr.src1 == reg { count = count + 1 }
+        if instr.src2 == reg { count = count + 1 }
+        if instr.op == IrOpcode::IrIndexSet && instr.imm_i64 == reg {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn ocp_capture_exact_bitwise_rebracket_occurrence(
+    func: &IrFunction,
+    outer_idx: i64,
+    inner_idx: i64,
+) -> (bool, OcpExactBitwiseRebracketOccurrence, i64) with Mut, Div, Panic {
+    let empty = ocp_rebracket_empty_occurrence()
+    if inner_idx < 0 || outer_idx <= inner_idx || outer_idx >= func.instr_count {
+        return (false, empty, 1)
+    }
+
+    let inner = func.instrs[inner_idx as usize]
+    let outer = func.instrs[outer_idx as usize]
+    if !ocp_rebracket_is_plain_binop(inner) || !ocp_rebracket_is_plain_binop(outer) {
+        return (false, empty, 2)
+    }
+    if !ocp_rebracket_is_exact_bitwise_op(inner.bin_op) || inner.bin_op != outer.bin_op {
+        return (false, empty, 3)
+    }
+    if outer.src1 != inner.dst {
+        return (false, empty, 4)
+    }
+
+    let base_reg = inner.src1
+    let inner_const_reg = inner.src2
+    let outer_const_reg = outer.src2
+    if base_reg < 0 || base_reg >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
+        inner_const_reg < 0 || inner_const_reg >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
+        outer_const_reg < 0 || outer_const_reg >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
+        inner.dst < 0 || inner.dst >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
+        outer.dst < 0 || outer.dst >= OCP_REBRACKET_TRACKED_REG_LIMIT {
+        return (false, empty, 5)
+    }
+    if base_reg == inner_const_reg || base_reg == outer_const_reg ||
+        inner_const_reg == outer_const_reg || inner.dst == base_reg ||
+        inner.dst == inner_const_reg || inner.dst == outer_const_reg {
+        return (false, empty, 6)
+    }
+
+    let inner_const_def_idx = ocp_rebracket_last_value_def_before(func, inner_const_reg, inner_idx)
+    let outer_const_def_idx = ocp_rebracket_last_value_def_before(func, outer_const_reg, outer_idx)
+    if inner_const_def_idx < 0 || outer_const_def_idx < 0 ||
+        outer_const_def_idx >= outer_idx {
+        return (false, empty, 7)
+    }
+    let inner_const_def = func.instrs[inner_const_def_idx as usize]
+    let outer_const_def = func.instrs[outer_const_def_idx as usize]
+    if !ocp_rebracket_is_plain_load_imm(inner_const_def) ||
+        !ocp_rebracket_is_plain_load_imm(outer_const_def) ||
+        inner_const_def.dst != inner_const_reg || outer_const_def.dst != outer_const_reg {
+        return (false, empty, 8)
+    }
+
+    if ocp_rebracket_has_float_marker_before(func, base_reg, outer_idx) ||
+        ocp_rebracket_has_float_marker_before(func, inner_const_reg, outer_idx) ||
+        ocp_rebracket_has_float_marker_before(func, outer_const_reg, outer_idx) ||
+        ocp_rebracket_has_float_marker_before(func, inner.dst, outer_idx) ||
+        ocp_rebracket_has_float_marker_before(func, outer.dst, outer_idx) {
+        return (false, empty, 9)
+    }
+    if ocp_rebracket_window_has_conflicting_write(
+        func,
+        inner_idx,
+        outer_idx,
+        outer_const_def_idx,
+        base_reg,
+        inner_const_reg,
+        outer_const_reg,
+        inner.dst,
+    ) {
+        return (false, empty, 10)
+    }
+    let outer_const_use_count = ocp_rebracket_source_use_count(func, outer_const_reg)
+    if outer_const_use_count < 0 {
+        return (false, empty, 14)
+    }
+    if outer_const_use_count != 1 {
+        return (false, empty, 11)
+    }
+
+    let combined = ocp_rebracket_combine(
+        inner.bin_op,
+        inner_const_def.imm_i64,
+        outer_const_def.imm_i64,
+    )
+    if !combined.0 { return (false, empty, 12) }
+    let operator_key = ocp_rebracket_operator_key(inner.bin_op)
+    let occurrence = OcpExactBitwiseRebracketOccurrence {
+        outer_instr_index: outer_idx,
+        inner_instr_index: inner_idx,
+        outer_const_def_index: outer_const_def_idx,
+        operator_key: operator_key,
+        base_reg: base_reg,
+        outer_const_reg: outer_const_reg,
+    }
+    (true, occurrence, 0)
+}
+
+fn ocp_rebracket_occurrences_equal(
+    a: OcpExactBitwiseRebracketOccurrence,
+    b: OcpExactBitwiseRebracketOccurrence,
+) -> bool {
+    a.outer_instr_index == b.outer_instr_index &&
+        a.inner_instr_index == b.inner_instr_index &&
+        a.outer_const_def_index == b.outer_const_def_index &&
+        a.operator_key == b.operator_key && a.base_reg == b.base_reg &&
+        a.outer_const_reg == b.outer_const_reg
+}
+
+fn ocp_issue_exact_bitwise_rebracket_authority(
+    occurrence: OcpExactBitwiseRebracketOccurrence,
+) -> OcpSealedExactBitwiseRebracketAuthority with Panic {
+    assert(occurrence.operator_key >= 3 && occurrence.operator_key <= 5)
+    OcpSealedExactBitwiseRebracketAuthority { occurrence: occurrence }
+}
+
+fn ocp_apply_exact_bitwise_rebracket_authority(
+    func: &! IrFunction,
+    authority: OcpSealedExactBitwiseRebracketAuthority,
+) -> OcpExactBitwiseRebracketAudit with Mut, Div, Panic {
+    // The authority never escapes this private transaction. Its occurrence is
+    // checked against freshly captured current IR immediately before mutation.
+    let expected = authority.occurrence
+    let current = ocp_capture_exact_bitwise_rebracket_occurrence(
+        func,
+        expected.outer_instr_index,
+        expected.inner_instr_index,
+    )
+    if !current.0 || !ocp_rebracket_occurrences_equal(expected, current.1) {
+        return ocp_rebracket_empty_audit(13)
+    }
+
+    let inner = func.instrs[current.1.inner_instr_index as usize]
+    let outer = func.instrs[current.1.outer_instr_index as usize]
+    let inner_const_def_idx = ocp_rebracket_last_value_def_before(
+        func,
+        inner.src2,
+        current.1.inner_instr_index,
+    )
+    let inner_const_def = func.instrs[inner_const_def_idx as usize]
+    let outer_const_def = func.instrs[current.1.outer_const_def_index as usize]
+    let combined = ocp_rebracket_combine(
+        outer.bin_op,
+        inner_const_def.imm_i64,
+        outer_const_def.imm_i64,
+    )
+    assert(combined.0)
+    let combined_value = combined.1
+    // Diagnostic only: deliberately collision-prone and overflow-free. Structural
+    // revalidation above, never this fingerprint, authorizes the mutation.
+    let occurrence_fingerprint = expected.operator_key ^ expected.base_reg ^ inner.src2 ^
+        expected.outer_const_reg ^ expected.inner_instr_index ^ expected.outer_instr_index
+    let source_tree_fingerprint = occurrence_fingerprint ^ inner_const_def.imm_i64 ^
+        outer_const_def.imm_i64
+    let target_tree_fingerprint = occurrence_fingerprint ^ combined_value ^ 104729
+    func.instrs[expected.outer_const_def_index as usize] = ir_load_imm(
+        expected.outer_const_reg,
+        combined_value,
+    )
+    func.instrs[expected.outer_instr_index as usize] = ir_binop(
+        outer.dst,
+        expected.base_reg,
+        outer.bin_op,
+        expected.outer_const_reg,
+    )
+    OcpExactBitwiseRebracketAudit {
+        authorization_count: 1,
+        application_count: 1,
+        refusal_count: 0,
+        reason_code: 0,
+        outer_instr_index: expected.outer_instr_index,
+        operator_key: expected.operator_key,
+        combined_const_value: combined_value,
+        diagnostic_fingerprint: source_tree_fingerprint ^ target_tree_fingerprint,
+    }
+}
+
+fn ocp_try_exact_bitwise_rebracket(
+    func: &! IrFunction,
+    outer_idx: i64,
+    inner_idx: i64,
+) -> OcpExactBitwiseRebracketAudit with Mut, Div, Panic {
+    let captured = ocp_capture_exact_bitwise_rebracket_occurrence(func, outer_idx, inner_idx)
+    if !captured.0 {
+        return ocp_rebracket_empty_audit(captured.2)
+    }
+    let authority = ocp_issue_exact_bitwise_rebracket_authority(captured.1)
+    ocp_apply_exact_bitwise_rebracket_authority(func, authority)
+}
+
+fn ocp_rebracket_probe_chain(op: BinaryOp, c1: i64, c2: i64) -> IrFunction with Mut, Panic {
+    var func = ir_empty_function()
+    func.instrs[0] = ir_load_imm(1, c1)
+    func.instrs[1] = ir_binop(2, 0, op, 1)
+    func.instrs[2] = ir_load_imm(3, c2)
+    func.instrs[3] = ir_binop(4, 2, op, 3)
+    func.instr_count = 4
+    func.reg_count = 5
+    func
+}
+
+fn ocp_rebracket_probe_two_scopes() -> IrFunction with Mut, Panic {
+    var func = ocp_rebracket_probe_chain(BinaryOp::OpBitXor, 5, 3)
+    func.instrs[4] = ir_load_imm(6, 12)
+    func.instrs[5] = ir_binop(7, 5, BinaryOp::OpBitXor, 6)
+    func.instrs[6] = ir_load_imm(8, 10)
+    func.instrs[7] = ir_binop(9, 7, BinaryOp::OpBitXor, 8)
+    func.instr_count = 8
+    func.reg_count = 10
+    func
+}
+
+fn ocp_rebracket_probe_float_marked_chain() -> IrFunction with Mut, Panic {
+    var func = ir_empty_function()
+    func.instrs[0] = ir_mark_float_reg(0)
+    func.instrs[1] = ir_load_imm(1, 255)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    func.instrs[3] = ir_load_imm(3, 15)
+    func.instrs[4] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    func.instr_count = 5
+    func.reg_count = 5
+    func
+}
+
+pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracketProbeReceipt with Mut, Div, Panic {
+    var positive_input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
+    let positive = ocp_try_exact_bitwise_rebracket(&! positive_input, 3, 1)
+    let positive_ok = positive.application_count == 1 &&
+        positive_input.instrs[2].op == IrOpcode::IrLoadImm &&
+        positive_input.instrs[2].imm_i64 == 15 &&
+        positive_input.instrs[3].src1 == 0 &&
+        positive_input.instrs[3].src2 == 3
+    let positive_count = if positive_ok { 1 } else { 0 }
+
+    var or_input = ocp_rebracket_probe_chain(BinaryOp::OpBitOr, 128, 64)
+    let or_audit = ocp_try_exact_bitwise_rebracket(&! or_input, 3, 1)
+    let or_ok = or_audit.application_count == 1 &&
+        or_input.instrs[2].imm_i64 == 192 &&
+        or_input.instrs[3].src1 == 0
+    let or_count = if or_ok { 1 } else { 0 }
+
+    let replay_const_before = positive_input.instrs[2]
+    let replay_outer_before = positive_input.instrs[3]
+    let replay = ocp_try_exact_bitwise_rebracket(&! positive_input, 3, 1)
+    let replay_count = replay.application_count
+    let replay_unchanged = replay_count == 0 &&
+        ocp_rebracket_instr_equal(positive_input.instrs[2], replay_const_before) &&
+        ocp_rebracket_instr_equal(positive_input.instrs[3], replay_outer_before)
+
+    var scoped_input = ocp_rebracket_probe_two_scopes()
+    let wrong_const_before = scoped_input.instrs[6]
+    let wrong_outer_before = scoped_input.instrs[7]
+    let wrong_scope = ocp_try_exact_bitwise_rebracket(&! scoped_input, 7, 1)
+    let wrong_scope_count = wrong_scope.application_count
+    let wrong_scope_unchanged = wrong_scope_count == 0 &&
+        ocp_rebracket_instr_equal(scoped_input.instrs[6], wrong_const_before) &&
+        ocp_rebracket_instr_equal(scoped_input.instrs[7], wrong_outer_before)
+    let named_scope = ocp_try_exact_bitwise_rebracket(&! scoped_input, 7, 5)
+    let named_scope_ok = named_scope.application_count == 1 &&
+        scoped_input.instrs[3].src1 == 2 &&
+        scoped_input.instrs[6].imm_i64 == 6 &&
+        scoped_input.instrs[7].src1 == 5
+    let named_scope_count = if named_scope_ok { 1 } else { 0 }
+
+    var swapped_input = ocp_rebracket_probe_chain(BinaryOp::OpBitOr, 128, 64)
+    swapped_input.instrs[3] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)
+    let swapped_const_before = swapped_input.instrs[2]
+    let swapped_before = swapped_input.instrs[3]
+    let swapped = ocp_try_exact_bitwise_rebracket(&! swapped_input, 3, 1)
+    let swapped_count = swapped.application_count
+    let swapped_unchanged = swapped_count == 0 &&
+        ocp_rebracket_instr_equal(swapped_input.instrs[2], swapped_const_before) &&
+        ocp_rebracket_instr_equal(swapped_input.instrs[3], swapped_before)
+
+    var arithmetic_input = ocp_rebracket_probe_chain(BinaryOp::OpAdd, 3, 5)
+    let arithmetic_const_before = arithmetic_input.instrs[2]
+    let arithmetic_before = arithmetic_input.instrs[3]
+    let arithmetic = ocp_try_exact_bitwise_rebracket(&! arithmetic_input, 3, 1)
+    let arithmetic_count = arithmetic.application_count
+    let arithmetic_unchanged = arithmetic_count == 0 &&
+        ocp_rebracket_instr_equal(arithmetic_input.instrs[2], arithmetic_const_before) &&
+        ocp_rebracket_instr_equal(arithmetic_input.instrs[3], arithmetic_before)
+
+    var float_input = ocp_rebracket_probe_float_marked_chain()
+    let float_const_before = float_input.instrs[3]
+    let float_before = float_input.instrs[4]
+    let float_marked = ocp_try_exact_bitwise_rebracket(&! float_input, 4, 2)
+    let float_count = float_marked.application_count
+    let float_unchanged = float_count == 0 &&
+        ocp_rebracket_instr_equal(float_input.instrs[3], float_const_before) &&
+        ocp_rebracket_instr_equal(float_input.instrs[4], float_before)
+
+    var shared_constant_input = ocp_rebracket_probe_chain(BinaryOp::OpBitOr, 128, 64)
+    shared_constant_input.instrs[4] = ir_copy(5, 3)
+    shared_constant_input.instr_count = 5
+    shared_constant_input.reg_count = 6
+    let shared_const_before = shared_constant_input.instrs[2]
+    let shared_outer_before = shared_constant_input.instrs[3]
+    let shared_use_before = shared_constant_input.instrs[4]
+    let shared_constant = ocp_try_exact_bitwise_rebracket(&! shared_constant_input, 3, 1)
+    let shared_constant_count = shared_constant.application_count
+    let shared_constant_unchanged = shared_constant_count == 0 &&
+        ocp_rebracket_instr_equal(shared_constant_input.instrs[2], shared_const_before) &&
+        ocp_rebracket_instr_equal(shared_constant_input.instrs[3], shared_outer_before) &&
+        ocp_rebracket_instr_equal(shared_constant_input.instrs[4], shared_use_before)
+
+    let stale_input = ocp_rebracket_probe_chain(BinaryOp::OpBitXor, 5, 3)
+    let stale_capture = ocp_capture_exact_bitwise_rebracket_occurrence(&stale_input, 3, 1)
+    assert(stale_capture.0)
+    let stale_authority = ocp_issue_exact_bitwise_rebracket_authority(stale_capture.1)
+    var stale_changed = stale_input
+    stale_changed.instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let stale_const_before = stale_changed.instrs[2]
+    let stale_before = stale_changed.instrs[3]
+    let stale = ocp_apply_exact_bitwise_rebracket_authority(&! stale_changed, stale_authority)
+    let stale_count = stale.application_count
+    let stale_unchanged = stale_count == 0 &&
+        ocp_rebracket_instr_equal(stale_changed.instrs[2], stale_const_before) &&
+        ocp_rebracket_instr_equal(stale_changed.instrs[3], stale_before)
+
+    var call_input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
+    var call_instr = ir_instr_new(IrOpcode::IrCallExtern)
+    call_instr.arg_count = 1
+    call_input.instrs[4] = call_instr
+    call_input.instr_count = 5
+    let call_const_before = call_input.instrs[2]
+    let call_outer_before = call_input.instrs[3]
+    let call_operand = ocp_try_exact_bitwise_rebracket(&! call_input, 3, 1)
+    let call_count = call_operand.application_count
+    let call_unchanged = call_count == 0 &&
+        ocp_rebracket_instr_equal(call_input.instrs[2], call_const_before) &&
+        ocp_rebracket_instr_equal(call_input.instrs[3], call_outer_before)
+
+    var packed_input = ocp_rebracket_probe_chain(BinaryOp::OpBitXor, 12, 10)
+    var packed_instr = ir_instr_new(IrOpcode::IrAssociator)
+    packed_instr.src1 = 6
+    packed_instr.src2 = 7
+    packed_instr.imm_i64 = 3
+    packed_input.instrs[4] = packed_instr
+    packed_input.instr_count = 5
+    let packed_const_before = packed_input.instrs[2]
+    let packed_outer_before = packed_input.instrs[3]
+    let packed_operand = ocp_try_exact_bitwise_rebracket(&! packed_input, 3, 1)
+    let packed_count = packed_operand.application_count
+    let packed_unchanged = packed_count == 0 &&
+        ocp_rebracket_instr_equal(packed_input.instrs[2], packed_const_before) &&
+        ocp_rebracket_instr_equal(packed_input.instrs[3], packed_outer_before)
+
+    var control_input = ocp_rebracket_probe_chain(BinaryOp::OpBitOr, 128, 64)
+    var control_instr = ir_instr_new(IrOpcode::IrJump)
+    control_instr.label_id = 1
+    control_input.instrs[4] = control_instr
+    control_input.instr_count = 5
+    let control_const_before = control_input.instrs[2]
+    let control_outer_before = control_input.instrs[3]
+    let control_flow = ocp_try_exact_bitwise_rebracket(&! control_input, 3, 1)
+    let control_count = control_flow.application_count
+    let control_unchanged = control_count == 0 &&
+        ocp_rebracket_instr_equal(control_input.instrs[2], control_const_before) &&
+        ocp_rebracket_instr_equal(control_input.instrs[3], control_outer_before)
+
+    var float_opcode_input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
+    var float_opcode_instr = ir_instr_new(IrOpcode::IrLoadFloat)
+    float_opcode_instr.dst = 6
+    float_opcode_instr.imm_f64 = 1.0
+    float_opcode_input.instrs[4] = float_opcode_instr
+    float_opcode_input.instr_count = 5
+    let float_opcode_const_before = float_opcode_input.instrs[2]
+    let float_opcode_outer_before = float_opcode_input.instrs[3]
+    let float_opcode = ocp_try_exact_bitwise_rebracket(&! float_opcode_input, 3, 1)
+    let float_opcode_count = float_opcode.application_count
+    let float_opcode_unchanged = float_opcode_count == 0 &&
+        ocp_rebracket_instr_equal(float_opcode_input.instrs[2], float_opcode_const_before) &&
+        ocp_rebracket_instr_equal(float_opcode_input.instrs[3], float_opcode_outer_before)
+
+    var application_mask: i64 = 0
+    if positive_count == 1 { application_mask = application_mask | 1 }
+    if or_count == 1 { application_mask = application_mask | 2 }
+    if named_scope_count == 1 { application_mask = application_mask | 4 }
+
+    var refusal_mask: i64 = 0
+    if replay_count == 0 { refusal_mask = refusal_mask | 1 }
+    if wrong_scope_count == 0 { refusal_mask = refusal_mask | 2 }
+    if swapped_count == 0 { refusal_mask = refusal_mask | 4 }
+    if arithmetic_count == 0 { refusal_mask = refusal_mask | 8 }
+    if float_count == 0 { refusal_mask = refusal_mask | 16 }
+    if shared_constant_count == 0 { refusal_mask = refusal_mask | 32 }
+    if stale_count == 0 { refusal_mask = refusal_mask | 64 }
+    if call_count == 0 { refusal_mask = refusal_mask | 128 }
+    if packed_count == 0 { refusal_mask = refusal_mask | 256 }
+    if control_count == 0 { refusal_mask = refusal_mask | 512 }
+    if float_opcode_count == 0 { refusal_mask = refusal_mask | 1024 }
+
+    var unchanged_refusal_mask: i64 = 0
+    if replay_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 1
+    }
+    if wrong_scope_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 2
+    }
+    if swapped_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 4
+    }
+    if arithmetic_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 8
+    }
+    if float_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 16
+    }
+    if shared_constant_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 32
+    }
+    if stale_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 64
+    }
+    if call_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 128
+    }
+    if packed_unchanged {
+        unchanged_refusal_mask = unchanged_refusal_mask | 256
+    }
+    if control_unchanged { unchanged_refusal_mask = unchanged_refusal_mask | 512 }
+    if float_opcode_unchanged { unchanged_refusal_mask = unchanged_refusal_mask | 1024 }
+    OcpExactBitwiseRebracketProbeReceipt {
+        case_count: 14,
+        application_mask: application_mask,
+        refusal_mask: refusal_mask,
+        unchanged_refusal_mask: unchanged_refusal_mask,
+        boundary_claim_mask: 1,
+    }
+}
+
 // ============================================================================
 // Opcode helpers (local, no flat-namespace dependency)
 // ============================================================================
@@ -5376,6 +6048,7 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var ra_base:      [i64;  256] = [-1;   256]
     var ra_const_val: [i64;  256] = [0;    256]
     var ra_op:        [i64;  256] = [0;    256]
+    var ra_def_idx:   [i64;  256] = [-1;   256]
     // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
     var is_neg:  [bool; 256] = [false; 256]
     var neg_src: [i64;  256] = [-1;    256]
@@ -5401,6 +6074,11 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bt_add_src:   [i64;  256] = [-1;    256]
     var bt_add_cval:  [i64;  256] = [0;     256]
 
+    // Avoid rediscovering an unsupported whole-function operand model for every
+    // bitwise candidate. The transaction still repeats the live check before
+    // each mutation because earlier cleanup rewrites may have changed the IR.
+    let exact_bitwise_operand_model_ok = ocp_rebracket_function_has_canonical_scalar_operands(&result)
+
     var i: i64 = 0
     while i < result.instr_count {
         let instr = result.instrs[i as usize]
@@ -5409,6 +6087,7 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             let d = instr.dst as usize
             is_const[d] = false
             has_ra[d] = false
+            ra_def_idx[d] = -1
             is_neg[d] = false
             is_cmp_result[d] = false
             bs_sub_valid[d] = false
@@ -6104,17 +6783,38 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 if la_instr.bin_op == BinaryOp::OpBitOr  { la_combined = la_c1 | la_c2; la_did = true }
                 if la_instr.bin_op == BinaryOp::OpBitXor { la_combined = la_c1 ^ la_c2; la_did = true }
                 if la_did && la_c2_def >= 0 {
-                    result.instrs[la_c2_def as usize] = ir_load_imm(la_s2, la_combined)
-                    result.instrs[i as usize] = ir_binop(la_instr.dst, la_base, la_instr.bin_op, la_s2)
-                    const_val[la_s2 as usize] = la_combined
-                    if la_instr.dst >= 0 && la_instr.dst < 256 {
-                        has_ra[la_instr.dst as usize] = true
-                        ra_base[la_instr.dst as usize] = la_base
-                        ra_const_val[la_instr.dst as usize] = la_combined
-                        ra_op[la_instr.dst as usize] = la_ra_key
+                    var la_applied = false
+                    if ocp_rebracket_is_exact_bitwise_op(la_instr.bin_op) {
+                        // The exact bitwise slice intentionally refuses every candidate
+                        // in a function containing uncertified operand/control encodings.
+                        // The legacy Add/Mul branch below does not call this transaction.
+                        if exact_bitwise_operand_model_ok {
+                            let la_inner_def = ra_def_idx[la_s1 as usize]
+                            let la_txn = ocp_try_exact_bitwise_rebracket(&! result, i, la_inner_def)
+                            if la_txn.application_count == 1 {
+                                la_combined = la_txn.combined_const_value
+                                la_applied = true
+                            }
+                        }
+                    } else {
+                        // Legacy integer Add/Mul folding is retained unchanged in this
+                        // slice. It is not evidence for the exact bitwise authority gate.
+                        result.instrs[la_c2_def as usize] = ir_load_imm(la_s2, la_combined)
+                        result.instrs[i as usize] = ir_binop(la_instr.dst, la_base, la_instr.bin_op, la_s2)
+                        la_applied = true
                     }
-                    if la_instr.bin_op == BinaryOp::OpMul {
-                        preserve_mul_chain = true
+                    if la_applied {
+                        const_val[la_s2 as usize] = la_combined
+                        if la_instr.dst >= 0 && la_instr.dst < 256 {
+                            has_ra[la_instr.dst as usize] = true
+                            ra_base[la_instr.dst as usize] = la_base
+                            ra_const_val[la_instr.dst as usize] = la_combined
+                            ra_op[la_instr.dst as usize] = la_ra_key
+                            ra_def_idx[la_instr.dst as usize] = i
+                        }
+                        if la_instr.bin_op == BinaryOp::OpMul {
+                            preserve_mul_chain = true
+                        }
                     }
                 }
             }
@@ -6134,6 +6834,7 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     ra_base[la_rec.dst as usize] = la_rec_s1
                     ra_const_val[la_rec.dst as usize] = const_val[la_rec_s2 as usize]
                     ra_op[la_rec.dst as usize] = la_rec_key
+                    ra_def_idx[la_rec.dst as usize] = i
                 }
                 // s1 const, s2 non-const (commutative assoc ops only)
                 if is_const[la_rec_s1 as usize] && !is_const[la_rec_s2 as usize]
@@ -6142,6 +6843,7 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     ra_base[la_rec.dst as usize] = la_rec_s2
                     ra_const_val[la_rec.dst as usize] = const_val[la_rec_s1 as usize]
                     ra_op[la_rec.dst as usize] = la_rec_key
+                    ra_def_idx[la_rec.dst as usize] = i
                 }
             }
         }
