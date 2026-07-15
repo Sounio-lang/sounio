@@ -184,3 +184,100 @@ pub fn font_draw_string(
         i = i + 1
     }
 }
+
+// ============================================================
+// Opt-in LTR + integer-scaled text
+// ============================================================
+//
+// The legacy draw path is preserved byte-for-byte. This path interprets the
+// atlas low bit as the left edge and normalises directional punctuation whose
+// stored pair follows the opposite convention.
+
+fn font_ltr_source_char(ch: i64) -> i64 {
+    // Exhaustive mirrored pairs in the ASCII atlas. Slash and backslash are
+    // already correctly oriented after low-bit-left decoding.
+    if ch == 40 { 41 }
+    else if ch == 41 { 40 }
+    else if ch == 60 { 62 }
+    else if ch == 62 { 60 }
+    else if ch == 91 { 93 }
+    else if ch == 93 { 91 }
+    else if ch == 123 { 125 }
+    else if ch == 125 { 123 }
+    else { ch }
+}
+
+pub fn font_draw_char_ltr_scaled(
+    pixels: *mut i64,
+    buf_w: i64,
+    buf_h: i64,
+    ch: i64,
+    px: i64,
+    py: i64,
+    scale: i64,
+    r: i64,
+    g: i64,
+    b: i64,
+) with Mut {
+    if scale <= 0 || buf_w <= 0 || buf_h <= 0 { return }
+    let glyph = font_glyph(font_ltr_source_char(ch))
+    let color = b | (g << 8) | (r << 16)
+    var row: i64 = 0
+    while row < 8 {
+        let bits = (glyph >> (row * 8)) & 0xFF
+        var col: i64 = 0
+        while col < 8 {
+            if ((bits >> col) & 1) == 1 {
+                var sy: i64 = 0
+                while sy < scale {
+                    var sx: i64 = 0
+                    while sx < scale {
+                        let dx = px + col * scale + sx
+                        let dy = py + row * scale + sy
+                        if dx >= 0 && dy >= 0 && dx < buf_w && dy < buf_h {
+                            write_i64(pixels, dy * buf_w + dx, color)
+                        }
+                        sx = sx + 1
+                    }
+                    sy = sy + 1
+                }
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+pub fn font_draw_string_ltr_scaled(
+    pixels: *mut i64,
+    buf_w: i64,
+    buf_h: i64,
+    s: &[i8; 256],
+    len: i64,
+    px: i64,
+    py: i64,
+    scale: i64,
+    tracking: i64,
+    r: i64,
+    g: i64,
+    b: i64,
+) with Mut {
+    if scale <= 0 || buf_w <= 0 || buf_h <= 0 || len <= 0 { return }
+    let advance = 8 * scale + tracking
+    var cx = px
+    var cy = py
+    var i: i64 = 0
+    while i < len && i < 256 {
+        let raw = s[i as usize] as i64
+        let ch = if raw < 0 { raw + 256 } else { raw }
+        if ch == 10 {
+            cx = px
+            // One atlas pixel of leading, scaled with the glyph.
+            cy = cy + 9 * scale
+        } else {
+            font_draw_char_ltr_scaled(pixels, buf_w, buf_h, ch, cx, cy, scale, r, g, b)
+            cx = cx + advance
+        }
+        i = i + 1
+    }
+}

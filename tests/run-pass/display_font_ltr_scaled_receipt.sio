@@ -1,0 +1,119 @@
+//@ run-pass
+// Expected output: DISPLAY_FONT_LTR_SCALED_RECEIPT_PASS
+
+use display::canvas::{Canvas, canvas_clear, canvas_draw_char, canvas_draw_char_scaled, canvas_draw_text_scaled}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn put_char(buf: &![i8; 256], idx: i64, ch: i64) with Mut {
+    buf[idx as usize] = ch as i8
+}
+
+fn pixel(c: &Canvas, x: i64, y: i64) -> i64 with Mut {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn render_probe(c: &!Canvas) with Mut {
+    canvas_clear(c, 7, 12, 20)
+    canvas_draw_char_scaled(c, 70, 20, 20, 1, 105, 225, 224)  // F
+    canvas_draw_char_scaled(c, 82, 40, 20, 1, 238, 178, 62)   // R
+    canvas_draw_char_scaled(c, 74, 60, 20, 1, 250, 128, 184)  // J
+    canvas_draw_char_scaled(c, 67, 80, 20, 1, 220, 231, 238)  // C at 1x
+    canvas_draw_char_scaled(c, 67, 110, 20, 2, 220, 231, 238) // C at 2x
+    canvas_draw_char_scaled(c, 40, 150, 20, 1, 105, 225, 224) // (
+    canvas_draw_char_scaled(c, 41, 170, 20, 1, 105, 225, 224) // )
+    canvas_draw_char_scaled(c, 123, 190, 20, 1, 238, 178, 62)
+    canvas_draw_char_scaled(c, 125, 210, 20, 1, 238, 178, 62)
+    canvas_draw_char_scaled(c, 79, 0 - 4, 0 - 4, 2, 250, 128, 184)
+
+    var text: [i8; 256] = [0; 256]
+    put_char(&!text, 0, 50)
+    put_char(&!text, 1, 32)
+    put_char(&!text, 2, 51)
+    put_char(&!text, 3, 32)
+    put_char(&!text, 4, 55)
+    put_char(&!text, 5, 32)
+    put_char(&!text, 6, 47)
+    canvas_draw_text_scaled(c, &text, 7, 250, 20, 2, 1, 105, 225, 224)
+
+    // Legacy path remains callable and keeps its original orientation.
+    canvas_draw_char(c, 70, 440, 20, 120, 130, 140)
+}
+
+fn main() with IO, Alloc, Mut {
+    let bg: i64 = 20 | (12 << 8) | (7 << 16)
+    let white: i64 = 238 | (231 << 8) | (220 << 16)
+    let cyan: i64 = 224 | (225 << 8) | (105 << 16)
+    var a = make_canvas(480, 300)
+    var b = make_canvas(480, 300)
+    render_probe(&!a)
+    render_probe(&!b)
+    assert(a.width * a.height * 3 == 432000)
+
+    // F row 3 is 0x1E in the atlas: LTR has x+1 set and x+6 clear.
+    assert(pixel(&a, 21, 23) == cyan)
+    assert(pixel(&a, 26, 23) == bg)
+    // Directional punctuation is normalised after low-bit-left decoding.
+    assert(pixel(&a, 154, 20) == cyan)
+    assert(pixel(&a, 152, 20) == bg)
+    assert(pixel(&a, 172, 20) == cyan)
+    assert(pixel(&a, 174, 20) == bg)
+
+    // Every 1x C sample is replicated into an exact 2x2 block at 2x.
+    var row: i64 = 0
+    while row < 8 {
+        var col: i64 = 0
+        while col < 8 {
+            let source_lit = pixel(&a, 80 + col, 20 + row) == white
+            var sy: i64 = 0
+            while sy < 2 {
+                var sx: i64 = 0
+                while sx < 2 {
+                    let scaled_lit = pixel(&a, 110 + col * 2 + sx, 20 + row * 2 + sy) == white
+                    assert(source_lit == scaled_lit)
+                    sx = sx + 1
+                }
+                sy = sy + 1
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    // Negative-origin clipping draws only the visible part and does not fail.
+    var clipped: i64 = 0
+    var cy: i64 = 0
+    while cy < 12 {
+        var cx: i64 = 0
+        while cx < 12 {
+            if pixel(&a, cx, cy) != bg { clipped = clipped + 1 }
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    assert(clipped > 0)
+
+    var mismatch: i64 = 0
+    var cyan_count: i64 = 0
+    var amber_count: i64 = 0
+    var magenta_count: i64 = 0
+    var i: i64 = 0
+    while i < a.width * a.height {
+        let pa = read_i64(a.pixels, i)
+        if pa != read_i64(b.pixels, i) { mismatch = mismatch + 1 }
+        if pa == 0x69E1E0 { cyan_count = cyan_count + 1 }
+        if pa == 0xEEB23E { amber_count = amber_count + 1 }
+        if pa == 0xFA80B8 { magenta_count = magenta_count + 1 }
+        i = i + 1
+    }
+    assert(mismatch == 0)
+    assert(cyan_count > 0)
+    assert(amber_count > 0)
+    assert(magenta_count > 0)
+    heap_free(a.pixels as *mut i8)
+    heap_free(b.pixels as *mut i8)
+    println("DISPLAY_FONT_LTR_SCALED_RECEIPT_PASS")
+}
