@@ -2878,3 +2878,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Note: test_separated initially used 3-vs-3 (permutation floor 2/20=0.1, can't reject at 0.05) — the failing assertion caught my hand-reasoning error; switched to 5-vs-5 (floor 2/252≈0.008). Another derivable-values catch.
 - Theme: resampling inference — extends the resampling family to two-sample and correlation, promoting the permutation test to a first-class module (was an external example). All seeded/reproducible, #852-safe. Suite runner: 82 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-4fFm8k/`, `/tmp/llm-offload-4Ksd2v/`, `/tmp/llm-offload-UN4If6/`.
+
+## 2026-07-15 — math-review: stats::mantel_haenszel, stats::attributable, stats::standardized_rate
+- Files (all new): `stdlib/stats/mantel_haenszel.sio` (M-H pooled OR across k 2×2 strata + M-H χ² + Robins-Breslow-Greenland CI), `stdlib/stats/attributable.sio` (AR/RR/AFE/PAF from a cohort 2×2), `stdlib/stats/standardized_rate.sio` (direct standardized rate + Poisson SE, indirect SMR). Provider: xAI/Grok 4.3.
+- mantel_haenszel = **PASS**: OR_MH=Σ(ad/n)/Σ(bc/n), M-H χ², RBG var(lnOR)=sPR/(2sR²)+sPSQR/(2sR·sS)+sQS/(2sS²) all match; two-strata OR=2 example → OR_MH=2, χ²=4.111, CI [1.024,3.906] verified.
+- attributable = **PASS**: AR, RR, AFE=(RR−1)/RR, Levin PAF=(I−Rᵤ)/I all correct; Rₑ=0.2/Rᵤ=0.1 → AFE=0.5, PAF=0.333 verified.
+- standardized_rate = **PASS**: DSR=Σwr/Σw + Poisson SE, SMR=Σobs/Σexp; DSR=0.022, SMR=0.8 verified.
+- Theme: epidemiological confounding adjustment — extends the epidemiology/rate_epi family from crude single-table to stratified/standardized measures. All derivable, #852-safe. Suite runner: 85 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-M5Sfo4/`, `/tmp/llm-offload-OSy10Z/`, `/tmp/llm-offload-zWkR61/`.

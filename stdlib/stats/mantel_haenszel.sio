@@ -1,0 +1,217 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/mantel_haenszel.sio — Mantel-Haenszel stratified odds ratio
+//
+// Pools the odds ratio across k strata of a confounder, giving a single adjusted
+// estimate with the Mantel-Haenszel test and the Robins-Breslow-Greenland CI:
+//
+//   mantel_haenszel(a, b, c, d, k) -> MHResult      (each stratum a 2×2)
+//
+//   OR_MH = Σ(aᵢdᵢ/nᵢ) / Σ(bᵢcᵢ/nᵢ),
+//   χ²_MH = [Σ(aᵢ − E(aᵢ))]² / Σ Var(aᵢ)  (df 1),
+//   Var(ln OR_MH) via Robins-Breslow-Greenland (1986) for the CI.
+//
+// Pure Sounio: inline exp/ln/sqrt/erf; a single pass over the strata. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Mantel & Haenszel (1959); Robins, Breslow & Greenland (1986) Biometrics 42:311.
+
+module stats::mantel_haenszel
+
+fn mh_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / mh_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn mh_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn mh_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * mh_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn mh_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - mh_erf(z * INV_SQRT2))
+}
+
+pub struct MHResult {
+    pub or_mh: f64,   // pooled odds ratio
+    pub chi2: f64,    // Mantel-Haenszel statistic (df 1)
+    pub p: f64,       // two-sided p
+    pub lo: f64,      // 95% CI lower (RBG)
+    pub hi: f64,      // 95% CI upper
+}
+
+/// Mantel-Haenszel pooled odds ratio across k 2×2 strata.
+///
+/// Parâmetros: a,b,c,d — per-stratum cell counts [[a,b],[c,d]]; k — strata (1..16).
+/// Retorno: MHResult (or_mh, chi2, p, lo, hi).
+/// Referências: Mantel & Haenszel (1959); Robins-Breslow-Greenland (1986).
+pub fn mantel_haenszel(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> MHResult with Mut, Div, Panic {
+    if k < 1 || k > 16 { return MHResult { or_mh: 0.0, chi2: 0.0, p: 1.0, lo: 0.0, hi: 0.0 } }
+    var num = 0.0        // Σ a d / n
+    var den = 0.0        // Σ b c / n
+    var sum_a = 0.0
+    var sum_ea = 0.0
+    var sum_va = 0.0
+    // RBG accumulators
+    var sR = 0.0
+    var sS = 0.0
+    var sPR = 0.0
+    var sQS = 0.0
+    var sPSQR = 0.0
+    var i = 0
+    while i < k {
+        let ai = a[i as usize]
+        let bi = b[i as usize]
+        let ci = c[i as usize]
+        let di = d[i as usize]
+        let n = ai + bi + ci + di
+        if n > 0.0 {
+            num = num + ai * di / n
+            den = den + bi * ci / n
+            let r1 = ai + bi
+            let r2 = ci + di
+            let c1 = ai + ci
+            let c2 = bi + di
+            sum_a = sum_a + ai
+            sum_ea = sum_ea + r1 * c1 / n
+            if n > 1.0 { sum_va = sum_va + r1 * r2 * c1 * c2 / (n * n * (n - 1.0)) }
+            let P = (ai + di) / n
+            let Q = (bi + ci) / n
+            let R = ai * di / n
+            let S = bi * ci / n
+            sR = sR + R
+            sS = sS + S
+            sPR = sPR + P * R
+            sQS = sQS + Q * S
+            sPSQR = sPSQR + P * S + Q * R
+        }
+        i = i + 1
+    }
+    if den <= 0.0 || sR <= 0.0 || sS <= 0.0 {
+        return MHResult { or_mh: 0.0, chi2: 0.0, p: 1.0, lo: 0.0, hi: 0.0 }
+    }
+    let or_mh = num / den
+    var chi2 = 0.0
+    if sum_va > 0.0 {
+        let dev = sum_a - sum_ea
+        chi2 = dev * dev / sum_va
+    }
+    let p = 2.0 * mh_normal_sf(mh_sqrt(chi2))
+    // Robins-Breslow-Greenland variance of ln OR_MH
+    let var_ln = sPR / (2.0 * sR * sR) + sPSQR / (2.0 * sR * sS) + sQS / (2.0 * sS * sS)
+    let se = mh_sqrt(var_ln)
+    let lnor = mh_ln(or_mh)
+    let z = 1.959963984540054
+    return MHResult { or_mh: or_mh, chi2: chi2, p: p, lo: mh_exp(lnor - z * se), hi: mh_exp(lnor + z * se) }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// two strata, each OR=2. S1:[[20,10],[10,10]], S2:[[40,20],[20,20]].
+// OR_MH = (20·10/50 + 40·20/100)/(10·10/50 + 20·20/100) = (4+8)/(2+4) = 2.
+// chi2 = (6)²/8.756958 = 4.111; RBG var=0.116667, SE=0.341565,
+// CI = exp(ln2 ± 1.959964·0.341565) = [1.023978, 3.906455].
+fn test_mh() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var d: [f64; 16] = [0.0; 16]
+    a[0]=20.0; b[0]=10.0; c[0]=10.0; d[0]=10.0
+    a[1]=40.0; b[1]=20.0; c[1]=20.0; d[1]=20.0
+    let r = mantel_haenszel(&a, &b, &c, &d, 2)
+    var ok = true
+    ok = check(1, approx(r.or_mh, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.chi2, 4.111266, 1.0e-3)) && ok
+    ok = check(3, approx(r.lo, 1.023978, 1.0e-3)) && ok
+    ok = check(4, approx(r.hi, 3.906455, 1.0e-2)) && ok
+    return ok
+}
+
+// null: each stratum OR=1. S1:[[10,10],[10,10]], S2:[[20,20],[20,20]].
+// OR_MH=1, chi2≈0, CI brackets 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var d: [f64; 16] = [0.0; 16]
+    a[0]=10.0; b[0]=10.0; c[0]=10.0; d[0]=10.0
+    a[1]=20.0; b[1]=20.0; c[1]=20.0; d[1]=20.0
+    let r = mantel_haenszel(&a, &b, &c, &d, 2)
+    var ok = true
+    ok = check(10, approx(r.or_mh, 1.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.chi2, 0.0, 1.0e-6)) && ok
+    ok = check(12, r.lo < 1.0 && r.hi > 1.0) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_mh() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
