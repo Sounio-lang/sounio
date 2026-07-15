@@ -41,6 +41,8 @@ fourteen families:
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Time series** — simple and Holt (linear-trend) exponential smoothing and an
   AR(1) fit with one-step forecasts, beside the serial-dependence diagnostics.
+- **Process control (SPC)** — process capability indices (Cp/Cpk), the Shewhart
+  individuals (I-MR) control chart, and the tabular CUSUM.
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
   MINSTD generator (exact f64), the nonparametric bootstrap for the mean, the
   two-sample difference and correlation bootstraps, and a permutation test.
@@ -1224,6 +1226,39 @@ The AR(1) fit by the lag-1 autocorrelation (Yule-Walker), with the intercept
 `c=μ(1−φ)`, the one-step forecast and residual sd. Validated: {1..5} → φ=0.4,
 μ=3, intercept 1.8, forecast 3.8; a ramp → φ>0.6; alternating → φ<0.
 
+### `stats::process_capability` — process capability indices
+
+| Function | Signature |
+|---|---|
+| `process_capability` | `pub fn process_capability(mu: f64, sigma: f64, lsl: f64, usl: f64) -> CapabilityResult with Mut, Div, Panic` |
+
+The quality-control capability measures against specification limits:
+`Cp=(USL−LSL)/6σ` (potential) and `Cpk=min(Cpu,Cpl)` (centring-aware).
+Validated: centred (μ=6, σ=1, spec 2–10) → Cp=Cpk=1.333; off-centre (μ=7) →
+Cp=1.333 but Cpk=1.
+
+### `stats::control_chart` — Shewhart I-MR control chart
+
+| Function | Signature |
+|---|---|
+| `imr_chart` | `pub fn imr_chart(x: &[f64; 256], n: i32) -> IMRResult with Mut, Div, Panic` |
+
+Individuals & moving-range control limits from a measurement stream:
+`σ̂=M̄R/d₂`, `UCL/LCL=x̄±3σ̂`, `UCL_MR=D₄·M̄R`, with an out-of-control count.
+Validated: {10,12,11,13,12} → CL=11.6, M̄R=1.5, UCL=15.589, UCL_MR=4.9005; an
+obvious outlier trips the limit.
+
+### `stats::cusum` — tabular CUSUM control chart
+
+| Function | Signature |
+|---|---|
+| `cusum` | `pub fn cusum(x: &[f64; 256], n: i32, target: f64, k: f64, h: f64) -> CusumResult with Mut, Div, Panic` |
+
+The cumulative-sum chart, sensitive to small sustained shifts:
+`Cᵢ⁺=max(0,Cᵢ₋₁⁺+(xᵢ−(target+k)))` (and the lower analogue), signalling when a
+CUSUM exceeds the decision interval h. Validated: an upward drift → C⁺ reaches 8,
+signals at index 4; on-target → no signal; downward drift → lower CUSUM signals.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1316,6 +1351,9 @@ use stats::standardized_rate::{DSRResult, SMRResult, direct_standardized, smr}
 use stats::exp_smoothing::{SESResult, exp_smoothing}
 use stats::holt::{HoltResult, holt}
 use stats::ar1::{AR1Result, ar1}
+use stats::process_capability::{CapabilityResult, process_capability}
+use stats::control_chart::{IMRResult, imr_chart}
+use stats::cusum::{CusumResult, cusum}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
