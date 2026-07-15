@@ -36,6 +36,8 @@ fourteen families:
   a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
   NNT, and person-time incidence rates.
+- **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
+  Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Bayesian & model selection** — conjugate updates, the Beta-posterior
   credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
   Schwarz Bayes-factor approximation.
@@ -1052,6 +1054,37 @@ Bayes-factor approximation `ln BF₁₀≈(BIC₀−BIC₁)/2`. Validated: lnL �
 −90/k3, n=50 → BIC 207.82 / 191.74, ln BF₁₀=8.044; equal fit + extra parameter →
 BIC penalty −ln(100).
 
+### `stats::mahalanobis` — bivariate Mahalanobis distance
+
+| Function | Signature |
+|---|---|
+| `mahalanobis` | `pub fn mahalanobis(x: &[f64; 256], y: &[f64; 256], n: i32, qx: f64, qy: f64) -> MahalResult with Mut, Div, Panic` |
+
+The covariance-aware distance of a point from a 2-D sample (multivariate outlier
+detection): `D²=(syy·dx²−2sxy·dx·dy+sxx·dy²)/(sxx·syy−sxy²)`, asymptotically
+χ²(2). Validated: a unit square, query (2,0) → D²=3, D=1.732; centre → 0.
+
+### `stats::hotelling_t2` — one-sample Hotelling's T²
+
+| Function | Signature |
+|---|---|
+| `hotelling_t2` | `pub fn hotelling_t2(x: &[f64; 256], y: &[f64; 256], n: i32, m0x: f64, m0y: f64) -> HotellingResult with Mut, Div, Panic` |
+
+The multivariate one-sample t-test for a 2-D mean vector: `T²=n·dᵀS⁻¹d`,
+`F=(n−p)/(p(n−1))·T² ~ F(2,n−2)`. Validated: 5-point example, μ₀=(0,0) →
+T²=10, F=3.75, df (2,3); testing the true mean → T²=0, p=1.
+
+### `stats::pca2` — two-variable PCA
+
+| Function | Signature |
+|---|---|
+| `pca2` | `pub fn pca2(x: &[f64; 256], y: &[f64; 256], n: i32) -> PCA2Result with Mut, Div, Panic` |
+
+The closed-form eigen-decomposition of the 2×2 covariance:
+`λ₁,₂=½[(sxx+syy)±√((sxx−syy)²+4sxy²)]`, the variance explained by PC1, and the
+PC1 unit axis. Validated: perfectly correlated data → λ₂=0, explained=1, axis
+(0.707, 0.707); isotropic → explained=0.5.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1129,6 +1162,9 @@ use stats::partial_corr::{PartialResult, partial_corr}
 use stats::bayes_ab::{ABResult, bayes_ab}
 use stats::beta_hdi::{BetaPostResult, beta_hdi, beta_tail_leq}
 use stats::bic::{BICResult, aic, bic, bic_compare}
+use stats::mahalanobis::{MahalResult, mahalanobis}
+use stats::hotelling_t2::{HotellingResult, hotelling_t2}
+use stats::pca2::{PCA2Result, pca2}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

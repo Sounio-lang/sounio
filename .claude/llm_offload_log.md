@@ -2853,3 +2853,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - bic = **PASS**: AIC=2k−2lnL, BIC=k·ln(n)−2lnL, ln BF₁₀≈(BIC₀−BIC₁)/2 all exact; worked values verified.
 - Theme: Bayesian inference & model selection — expands the previously single-module Bayesian family (bayes_conjugate). All derivable, #852-safe. Suite runner: 73 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-n4B5X5/`, `/tmp/llm-offload-jNnXGV/`, `/tmp/llm-offload-ylWpE0/`.
+
+## 2026-07-15 — math-review: stats::mahalanobis, stats::hotelling_t2, stats::pca2
+- Files (all new): `stdlib/stats/mahalanobis.sio` (bivariate Mahalanobis distance via closed-form 2×2 inverse), `stdlib/stats/hotelling_t2.sio` (one-sample bivariate Hotelling's T² → F test), `stdlib/stats/pca2.sio` (two-variable PCA: closed-form eigenvalues + eigenvector + variance explained). Provider: xAI/Grok 4.3.
+- mahalanobis = **PASS**: D²=(syy·dx²−2sxy·dx·dy+sxx·dy²)/det, χ²(2) threshold; unit-square query (2,0)→D²=3 verified.
+- hotelling_t2 = **PASS**: T²=n·dᵀS⁻¹d, F=(n−p)/(p(n−1))·T² ~ F(2,n−2); 5-point example T²=10, F=3.75 verified.
+- pca2 = **PASS**: closed-form 2×2 eigenvalues, explained=λ₁/tr, null-space eigenvector with larger-norm candidate selection; correlated→λ₂=0, axis (0.707,0.707) verified.
+- Theme: multivariate (bivariate) — the suite's first multivariate tools, all closed-form over the 2×2 covariance (no general matrix inversion needed). All derivable, #852-safe. Suite runner: 76 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Lz8r2j/`, `/tmp/llm-offload-ztMqlk/`, `/tmp/llm-offload-zLhBWR/`.

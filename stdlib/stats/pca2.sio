@@ -1,0 +1,182 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/pca2.sio — two-variable principal component analysis
+//
+// The closed-form eigen-decomposition of a 2×2 covariance — the principal axes,
+// their variances and the fraction of variance each explains:
+//
+//   pca2(x, y, n) -> PCA2Result
+//
+// For Σ = [[sxx, sxy], [sxy, syy]] the eigenvalues are
+//   λ₁,₂ = ½[ (sxx+syy) ± √((sxx−syy)² + 4 sxy²) ]   (λ₁ ≥ λ₂),
+// PC1 explains λ₁/(λ₁+λ₂); the PC1 axis is the (normalised) eigenvector of λ₁.
+//
+// Pure Sounio: one pass for the covariance; closed-form eigenvalues; inline
+// sqrt. No external dependency, no nested data-array calls.
+//
+// References:
+//   Pearson (1901); Jolliffe, "Principal Component Analysis" 2e.
+
+module stats::pca2
+
+fn pc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct PCA2Result {
+    pub lambda1: f64,     // larger eigenvalue (PC1 variance)
+    pub lambda2: f64,     // smaller eigenvalue (PC2 variance)
+    pub explained1: f64,  // λ₁/(λ₁+λ₂)
+    pub v1x: f64,         // PC1 axis (unit vector)
+    pub v1y: f64,
+}
+
+/// Two-variable PCA from raw data.
+///
+/// Parâmetros: x, y — the two variables; n — size (>=2).
+/// Retorno: PCA2Result (lambda1, lambda2, explained1, PC1 unit vector).
+/// Referências: Pearson (1901).
+pub fn pca2(x: &[f64; 256], y: &[f64; 256], n: i32) -> PCA2Result with Mut, Div, Panic {
+    if n < 2 { return PCA2Result { lambda1: 0.0, lambda2: 0.0, explained1: 0.0, v1x: 1.0, v1y: 0.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        sxy = sxy + dx * dy
+        j = j + 1
+    }
+    let df = nf - 1.0
+    sxx = sxx / df
+    syy = syy / df
+    sxy = sxy / df
+    let tr = sxx + syy
+    let diff = sxx - syy
+    let disc = pc_sqrt(diff * diff + 4.0 * sxy * sxy)
+    let l1 = 0.5 * (tr + disc)
+    let l2 = 0.5 * (tr - disc)
+    var explained = 0.0
+    if tr > 0.0 { explained = l1 / tr }
+    // eigenvector for λ₁: pick the larger-norm of the two candidate columns
+    let c1x = sxy
+    let c1y = l1 - sxx
+    let c2x = l1 - syy
+    let c2y = sxy
+    var vx = c1x
+    var vy = c1y
+    if (c2x * c2x + c2y * c2y) > (c1x * c1x + c1y * c1y) { vx = c2x; vy = c2y }
+    let nrm = pc_sqrt(vx * vx + vy * vy)
+    if nrm > 1.0e-300 { vx = vx / nrm; vy = vy / nrm } else { vx = 1.0; vy = 0.0 }
+    return PCA2Result { lambda1: l1, lambda2: l2, explained1: explained, v1x: vx, v1y: vy }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn abseq(a: f64, b: f64, tol: f64) -> bool {
+    let aa = if a < 0.0 { 0.0 - a } else { a }
+    let ab = if b < 0.0 { 0.0 - b } else { b }
+    let d = if aa > ab { aa - ab } else { ab - aa }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// axis-aligned: x variance 2, y variance 1, uncorrelated.
+// x={-2,-1,1,2,0,0,-... } — build sxx=2, syy=... let me use a direct construction.
+// x={0,2,0,2,1,1} deviations give some cov; simpler: use points on axes.
+// Data: x has spread, y small. x={-2,2,-2,2}, y={-1,1,1,-1}: sxx=Σx²/3=16/3, sxy=?
+// Use the clean case sxx=2,syy=1,sxy=0 via x={-1,1,-1,1}·sqrt-ish is messy;
+// instead test the CORRELATED clean case below and an eigenvalue-sum identity here.
+fn test_eig_sum() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0-1.0; x[1]=1.0; x[2]=0.0-1.0; x[3]=1.0
+    y[0]=0.0-1.0; y[1]=0.0-1.0; y[2]=1.0; y[3]=1.0
+    let r = pca2(&x, &y, 4)
+    // sxx=syy=4/3, sxy=0 -> l1=l2=4/3, explained 0.5, axis degenerate but unit.
+    var ok = true
+    ok = check(1, approx(r.lambda1, 1.333333, 1.0e-5)) && ok
+    ok = check(2, approx(r.lambda2, 1.333333, 1.0e-5)) && ok
+    ok = check(3, approx(r.explained1, 0.5, 1.0e-6)) && ok
+    ok = check(4, approx(r.v1x * r.v1x + r.v1y * r.v1y, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+// perfectly correlated y=x: {(0,0),(1,1),(2,2),(3,3)}. sxx=syy=sxy=5/3.
+// l1=(2·5/3 + sqrt(0+4·25/9))/2=(10/3 + 10/3)/2=10/3; l2=0. explained=1.
+// PC1 axis along (1,1)/sqrt2 = (0.707,0.707).
+fn test_correlated() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=0.0; y[1]=1.0; y[2]=2.0; y[3]=3.0
+    let r = pca2(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.lambda1, 3.333333, 1.0e-5)) && ok
+    ok = check(11, approx(r.lambda2, 0.0, 1.0e-6)) && ok
+    ok = check(12, approx(r.explained1, 1.0, 1.0e-6)) && ok
+    ok = check(13, abseq(r.v1x, 0.707107, 1.0e-4)) && ok      // sign is arbitrary
+    ok = check(14, abseq(r.v1y, 0.707107, 1.0e-4)) && ok
+    return ok
+}
+
+// anti-correlated y=-x direction: axis along (1,-1). {(0,0),(1,-1),(2,-2),(3,-3)}.
+fn test_anti() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=0.0; y[1]=0.0-1.0; y[2]=0.0-2.0; y[3]=0.0-3.0
+    let r = pca2(&x, &y, 4)
+    var ok = true
+    ok = check(20, approx(r.explained1, 1.0, 1.0e-6)) && ok
+    ok = check(21, abseq(r.v1x, 0.707107, 1.0e-4)) && ok
+    ok = check(22, abseq(r.v1y, 0.707107, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_eig_sum() && ok
+    ok = test_correlated() && ok
+    ok = test_anti() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
