@@ -103,6 +103,9 @@ MODULES=(
   stdlib/stats/effect_convert.sio
   stdlib/stats/effect_from_test.sio
   stdlib/stats/cles.sio
+  stdlib/stats/gwet_ac1.sio
+  stdlib/stats/krippendorff.sio
+  stdlib/stats/icc_forms.sio
 )
 
 fail=0

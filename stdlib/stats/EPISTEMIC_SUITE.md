@@ -28,7 +28,8 @@ fourteen families:
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
   Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
-  Fleiss' κ, and ICC / Cronbach's α.
+  Fleiss' κ, Gwet's AC1, Krippendorff's α, ICC / Cronbach's α and the full
+  Shrout-Fleiss ICC family.
 - **Diagnostic accuracy** — sensitivity / specificity / likelihood ratios and
   ROC AUC.
 - **Survival analysis** — Kaplan-Meier, Nelson-Aalen cumulative hazard,
@@ -1295,6 +1296,39 @@ The probability that a random draw from one group exceeds one from the other —
 (= the ROC AUC). Validated: d=0 → 0.5, d=1 → 0.7603; fully-separated samples → 1;
 interleaved → 1/3.
 
+### `stats::gwet_ac1` — Gwet's AC1 agreement
+
+| Function | Signature |
+|---|---|
+| `gwet_ac1` | `pub fn gwet_ac1(table: &[f64; 256], k: i32) -> AC1Result with Mut, Div, Panic` |
+
+A chance-corrected two-rater agreement coefficient that resists the kappa
+paradox (high agreement but low κ under lopsided prevalence): its chance term
+uses `πc(1−πc)` rather than κ's `πc²`. Validated: [[8,1],[1,0]] → Pₐ=0.8, AC1=0.756
+(where Cohen's κ goes negative); perfect → 1.
+
+### `stats::krippendorff` — Krippendorff's alpha (nominal)
+
+| Function | Signature |
+|---|---|
+| `krippendorff` | `pub fn krippendorff(rating: &[i64; 256], n_units: i32, m_raters: i32, k: i32) -> f64 with Mut, Div, Panic` |
+
+The general chance-corrected reliability coefficient for any number of raters
+(nominal, complete data), via the coincidence matrix: `α=1−Dₒ/Dₑ`. Validated:
+a 4-unit / 2-rater example → α=0.125; perfect agreement → 1; three concordant
+raters → 1.
+
+### `stats::icc_forms` — the intraclass-correlation family
+
+| Function | Signature |
+|---|---|
+| `icc_forms` | `pub fn icc_forms(data: &[f64; 256], n: i32, k: i32) -> ICCFormsResult with Mut, Div, Panic` |
+
+All six Shrout-Fleiss ICC forms — single- and average-measure ICC(1,1)/(2,1)/(3,1)
+— from the two-way ANOVA of a subjects×raters matrix. Validated against the
+published Shrout-Fleiss (1979) 6×4 example: ICC(1,1)=0.166, ICC(2,1)=0.290,
+ICC(3,1)=0.715.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1393,6 +1427,9 @@ use stats::cusum::{CusumResult, cusum}
 use stats::effect_convert::{d_to_r, r_to_d, d_to_logor, logor_to_d, d_to_or, hedges_g}
 use stats::effect_from_test::{r_from_t, d_from_t, eta2_from_f, omega2_from_f, d_from_means}
 use stats::cles::{cles_from_d, cles_from_samples}
+use stats::gwet_ac1::{AC1Result, gwet_ac1}
+use stats::krippendorff::{krippendorff}
+use stats::icc_forms::{ICCFormsResult, icc_forms}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
