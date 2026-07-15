@@ -28,11 +28,13 @@ It is a **first-class language feature**, not merely a library: there is a nativ
 dedicated type-checker, IR-level algebra semantics, x86 lowering, a PTX emitter, and two custom
 effects (`NonAssoc`, `NaturalityG2`) threaded through non-associative multiplication signatures.
 
-The core is healthy. The binding constraints are **compiler-owned blockers** and a
-**consolidation-debt problem** (the same product re-implemented 5–6 times with divergent Fano sign
-conventions). On the science side, the headline honest result stands: **octonion structure is null
-on the brain**, while the positive synthetic control works — and the single most important unbuilt
-experiment is isolating the *associator* from the non-commutativity confounder.
+The core is healthy. The binding constraints are **compiler-owned blockers** (the #919/#921 codegen
+defects + Madaros M1–M3 generics); the **consolidation-debt problem** — the same product
+re-implemented across ~11 sites with divergent Fano sign conventions — has since been **resolved**
+(canonicalized onto Convention X, PRs #940 + #942, merged 2026-07-15; see the consolidation section).
+On the science side, the headline honest result stands: **octonion structure is null on the brain**,
+while the positive synthetic control works — and the single most important unbuilt experiment is
+isolating the *associator* from the non-commutativity confounder.
 
 Open PRs at audit time: **#907** (hypercomplex/SSM lane — clean home for the octonion commits),
 **#904** (epistemic-GUM hardening, currently also carrying those commits), **#742** (GPU od256
@@ -114,19 +116,26 @@ invariance), `SounioSedenionBipartite.lean`, the **168 theorem** + associator-no
 | **#891** | Madaros v0.80.0 codegen: `print_int` garbled after f64; scalar-global-in-unit-fn does not persist to caller; `[i64;1]` SIGSEGV (use len ≥2); many f64-locals-across-calls corrupt the return addr | probes need manual source workarounds; Madaros is not the oracle for these paths | `BLK-20260714-madaros-print_int-f64`, owner codex-2 |
 | — | Madaros support for **generic** exact CD (tracks M1–M3) | generic-`F` engine (`cd_exact_generic_i64.sio`) runs only on lean_single/fable5, not the default `souc` (Madaros); the concrete/monomorphized ℚ path works on Madaros | pending |
 
-## 🟡 FALTA — consolidation debt (language)
+## 🟢 consolidation debt (language) — convention divergence RESOLVED 2026-07-15
 
-- **`oct_mul` re-implemented in ≥6 places** (`math/octonion.sio`, `algebra/octonion.sio`,
-  `onn/lib.sio`, `nn/octonion.sio`, `hypercomplex_graph/oct_graph.sio`,
-  `self-hosted/hypercomplex/octonion.sio`) with **divergent Fano sign conventions** (some hardcoded,
-  some via `cd_sigma`). `sed_mul` similarly re-implemented in ≥5 (`math/sedenion.sio`,
-  `algebra/sedenion.sio`, `snn/base.sio`, `ssm/lib.sio`, `compiler/ast/sedenion_ops.sio`).
-  **Risk:** cross-module results can silently disagree.
-- GA engine duplicated between `ga/quaternion.sio` and `ga/dual_quaternion.sio`.
-- **Disabled stubs:** `genomics/quaternion_protein.sio`, `genomics/octonion_grn.sio`
-  ("disabled — pending parser support"); `hypercomplex_graph/mod.sio` (readiness stub);
-  `algebra/sedenion_verdict.sio` (f256 arithmetic intentionally unimplemented — boundary tag only).
-- `stdlib/algebra/README.md` is stale (no mention of the exact layer).
+- **~~`oct_mul` / `sed_mul` divergent Fano conventions~~ → CANONICALIZED onto Convention X
+  (`cd_sigma` / XOR, `e1·e2=+e3`).** The divergence was verified real (octonion X vs Y differ 42/64
+  basis products; `snn/base.sio` sedenion table 56/256 off), then unified:
+  - **PR #940** (merged, `0c2493899`) — executable oracle
+    `tests/run-pass/hypercomplex_convention_crosscheck.sio` (asserts the full 8×8+16×16 `cd_sigma`
+    tables; guards future drift) + `stdlib/algebra/README.md` convention section + fixed a real **e7
+    sign bug** in `ssm/lib.sio` (the flip made the octonion sub-product non-normed / non-alternative).
+  - **PR #942** (merged, `dcd147e16`) — migrated the two Convention-Y octonion files
+    (`hypercomplex_graph/oct_graph.sio`, `self-hosted/hypercomplex/octonion.sio`) and the divergent
+    `snn/base.sio` sedenion sign table onto `cd_sigma`. Migrating the self-hosted `oct_mul` also
+    reconciled its `oct_mul_cayley_dickson` (already X). X and Y are isomorphic (both 168
+    non-associative triples), so invariants (norm, associator-norm, ZD) are unchanged — only
+    component-level outputs of those files move (connectome/EEG artifacts should re-baseline).
+- Still open: GA engine duplicated between `ga/quaternion.sio` and `ga/dual_quaternion.sio`;
+  disabled stubs (`genomics/quaternion_protein.sio`, `genomics/octonion_grn.sio` — "pending parser
+  support"; `hypercomplex_graph/mod.sio`; `algebra/sedenion_verdict.sio` f256 boundary tag).
+- ~~`stdlib/algebra/README.md` is stale~~ → updated by PR #940 (now declares X canonical + a
+  per-file conformance map + the exact layer).
 
 ## 🔵 FALTA — research/science gaps (outside this window's focus; listed for completeness)
 
@@ -152,9 +161,11 @@ invariance), `SounioSedenionBipartite.lean`, the **168 theorem** + associator-no
    value-struct returns) and **#921** (multimodule thin-link with `math::rational`). Unbounded-ℚ over
    the *generic* engine still waits on Madaros generics (M1–M3), but `zd_exact` over ℚ is no longer
    the exact layer's blocker.
-2. **Canonicalize `oct_mul` / `sed_mul`** — one source module with a single Fano convention; the
-   other sites re-export. Today there are 6/5 parallel truths.
-3. **Madaros M1–M3** for exact CD — remove the generic-`F` dependency on lean_single/fable5.
+2. **~~Canonicalize `oct_mul` / `sed_mul`~~ → DONE (2026-07-15, PRs #940 + #942, merged).** Convention
+   X (`cd_sigma` / XOR) is now the single convention; a run-pass oracle guards against drift, and the
+   `ssm/lib.sio` e7 sign bug was fixed along the way.
+3. **Madaros M1–M3** for exact CD — remove the generic-`F` dependency on lean_single/fable5. Now the
+   highest-leverage remaining language item, alongside the #919/#921 compiler fixes.
 
 On the science side, the highest-value single build is the **pre-registered associator-injection
 recovery test** that isolates the associator from the non-commutativity confounder.
@@ -171,3 +182,11 @@ against `main` and PRs #907/#904/#742/#541 on 2026-07-14. Every `docs/research/*
 bug; the exact ZD product over ℚ runs correctly (proof landed PR #816). Split into #919 (2²⁰
 handle-table wrap, root cause) and #921 (multimodule thin-link). Full forensic dispatch:
 `docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md` (PR #923).
+
+**Update 2026-07-15** — the `oct_mul`/`sed_mul` convention divergence flagged as consolidation debt
+was verified real (X vs Y differ 42/64) and **canonicalized onto Convention X** (`cd_sigma` / XOR):
+PR #940 (oracle test + README convention map + `ssm/lib.sio` e7 sign-bug fix) and PR #942 (migrated
+`oct_graph.sio`, `self-hosted/hypercomplex/octonion.sio`, `snn/base.sio`) — both merged. The
+`stdlib/algebra/README.md` staleness is also cleared. Note: the checked-in `artifacts/self-hosted/
+madaros` (Jul-11) is stale w.r.t. main — build fresh before concluding a codegen bug is live (the
+"multiple `&[f64;N]` ref-param" and ssm-harness SIGSEGV symptoms were stale-binary artifacts).
