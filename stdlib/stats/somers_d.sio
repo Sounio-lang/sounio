@@ -1,0 +1,158 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/somers_d.sio — Somers' D (asymmetric ordinal association)
+//
+// The asymmetric rank-association measure: unlike gamma it penalises ties in the
+// dependent variable, and D(Y|X) is directly the rescaled AUC (D = 2·AUC − 1)
+// for a binary outcome:
+//
+//   somers_d(x, y, n) -> SomersResult
+//
+//   D(Y|X) = (C − D) / (C + D + T_x),      (ties on the predictor X)
+//   D(X|Y) = (C − D) / (C + D + T_y),
+// where T_x / T_y are pairs tied on X / Y (but not both). Putting the predictor's
+// ties in the denominator is what makes D(Y|X) = 2·AUC − 1 for a binary Y.
+// Kendall's τ_b is the geometric mean √(D(Y|X)·D(X|Y)).
+//
+// Pure Sounio: an O(n²) pair scan classifying each pair; no external dependency,
+// no nested data-array calls.
+//
+// References:
+//   Somers (1962) Am. Sociol. Rev. 27:799; Newson (2002) Stata J. 2:45.
+
+module stats::somers_d
+
+pub struct SomersResult {
+    pub d_yx: f64,        // Somers' D(Y|X)  (= 2·AUC − 1 for binary Y)
+    pub d_xy: f64,        // Somers' D(X|Y)
+    pub concordant: i64,
+    pub discordant: i64,
+    pub ties_x: i64,      // pairs tied in X only
+    pub ties_y: i64,      // pairs tied in Y only
+}
+
+/// Somers' D between x and y in both asymmetric directions.
+///
+/// Parâmetros: x, y — paired ordinal data; n — size (2..256).
+/// Retorno: SomersResult (d_yx, d_xy, C, D, Tx, Ty).
+/// Referências: Somers (1962).
+pub fn somers_d(x: &[f64; 256], y: &[f64; 256], n: i32) -> SomersResult with Mut, Div, Panic {
+    if n < 2 {
+        return SomersResult { d_yx: 0.0, d_xy: 0.0, concordant: 0, discordant: 0, ties_x: 0, ties_y: 0 }
+    }
+    var c = 0
+    var d = 0
+    var tx = 0
+    var ty = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let dx = x[j as usize] - x[i as usize]
+            let dy = y[j as usize] - y[i as usize]
+            let ex = dx == 0.0
+            let ey = dy == 0.0
+            if ex && ey {
+                // tied in both -> excluded
+            } else {
+                if ex { tx = tx + 1 }        // tied on X only
+                else {
+                    if ey { ty = ty + 1 }    // tied on Y only
+                    else {
+                        if (dx > 0.0) == (dy > 0.0) { c = c + 1 } else { d = d + 1 }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let s = (c - d) as f64
+    let cd = (c + d) as f64
+    // D(Y|X) conditions on the predictor X: its ties (Tx) go in the denominator.
+    var d_yx = 0.0
+    let den_yx = cd + (tx as f64)
+    if den_yx > 0.0 { d_yx = s / den_yx }
+    var d_xy = 0.0
+    let den_xy = cd + (ty as f64)
+    if den_xy > 0.0 { d_xy = s / den_xy }
+    return SomersResult { d_yx: d_yx, d_xy: d_xy, concordant: c as i64, discordant: d as i64, ties_x: tx as i64, ties_y: ty as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// no ties x={1,2,3,4}, y={1,3,2,4}: C=5,D=1,Tx=Ty=0.
+// D(Y|X)=D(X|Y)=(5-1)/6=0.666667.
+fn test_no_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=1.0; y[1]=3.0; y[2]=2.0; y[3]=4.0
+    let r = somers_d(&x, &y, 4)
+    var ok = true
+    ok = check(1, approx(r.d_yx, 0.666667, 1.0e-5)) && ok
+    ok = check(2, approx(r.d_xy, 0.666667, 1.0e-5)) && ok
+    return ok
+}
+
+// ties: x={1,1,2,3}, y={1,2,2,3}. C=4,D=0,Tx=1,Ty=1.
+// D(Y|X)=4/(4+1)=0.8; D(X|Y)=4/(4+1)=0.8. tau_b = sqrt(0.8·0.8)=0.8 (matches kendall).
+fn test_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=1.0; y[1]=2.0; y[2]=2.0; y[3]=3.0
+    let r = somers_d(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.d_yx, 0.8, 1.0e-5)) && ok
+    ok = check(11, approx(r.d_xy, 0.8, 1.0e-5)) && ok
+    ok = check(12, r.ties_x == 1) && ok
+    ok = check(13, r.ties_y == 1) && ok
+    return ok
+}
+
+// binary Y -> D(Y|X) = 2·AUC - 1. x scores, y in {0,1}, perfect separation:
+// x={1,2,3,4}, y={0,0,1,1}. all cross-pairs concordant: C=4, D=0, and pairs
+// within each y-level are tied in Y (Ty). AUC=1 -> D(Y|X)=1.
+fn test_auc() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=0.0; y[1]=0.0; y[2]=1.0; y[3]=1.0
+    let r = somers_d(&x, &y, 4)
+    // cross pairs (one y=0, one y=1): 4 of them, all concordant. within-level: 2 tied in Y.
+    var ok = true
+    ok = check(20, approx(r.d_yx, 1.0, 1.0e-9)) && ok
+    ok = check(21, r.ties_y == 2) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_no_ties() && ok
+    ok = test_ties() && ok
+    ok = test_auc() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

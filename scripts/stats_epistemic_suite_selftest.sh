@@ -55,6 +55,21 @@ MODULES=(
   stdlib/stats/fisher_exact.sio
   stdlib/stats/cochran_q.sio
   stdlib/stats/fleiss_kappa.sio
+  stdlib/stats/logistic.sio
+  stdlib/stats/poisson_reg.sio
+  stdlib/stats/wls.sio
+  stdlib/stats/runs_test.sio
+  stdlib/stats/durbin_watson.sio
+  stdlib/stats/autocorr.sio
+  stdlib/stats/nelson_aalen.sio
+  stdlib/stats/rmst.sio
+  stdlib/stats/life_table.sio
+  stdlib/stats/kendall_tau.sio
+  stdlib/stats/goodman_kruskal.sio
+  stdlib/stats/somers_d.sio
+  stdlib/stats/bartlett.sio
+  stdlib/stats/levene.sio
+  stdlib/stats/var_ftest.sio
 )
 
 fail=0

@@ -723,6 +723,170 @@ agreement `κ=(P̄−P̄ₑ)/(1−P̄ₑ)` from a row-major N×k rater-count mat
 worked 2-subject case → P̄=0.6667, P̄ₑ=0.7222, κ=−0.2; perfect within-subject
 agreement → κ=1.
 
+### `stats::logistic` — one-predictor logistic regression
+
+| Function | Signature |
+|---|---|
+| `logistic_fit` | `pub fn logistic_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> LogisticFit with Mut, Div, Panic` |
+| `logistic_predict` | `pub fn logistic_predict(fit: &LogisticFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood logistic regression `logit(pᵢ)=b₀+b₁xᵢ`, fit by
+Newton-Raphson (IRLS) — the workhorse for binary dose-response. Returns the
+coefficients, standard errors, slope Wald z/p and convergence diagnostics.
+Validated: two-point saturated design → b₀=−0.6931, b₁=1.3863, p̂(0)=⅓, p̂(1)=⅔;
+balanced null → b₁=0.
+
+### `stats::poisson_reg` — one-predictor Poisson regression
+
+| Function | Signature |
+|---|---|
+| `poisson_fit` | `pub fn poisson_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> PoissonFit with Mut, Div, Panic` |
+| `poisson_predict` | `pub fn poisson_predict(fit: &PoissonFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood Poisson (log-link) count/rate regression `log(μᵢ)=b₀+b₁xᵢ`
+by Newton-Raphson; `exp(b₁)` is the rate ratio per unit x. Validated: two-point
+saturated design → b₀=ln3, b₁=ln4, rate ratio 4, μ̂(0)=3, μ̂(1)=12; flat counts
+→ b₁=0.
+
+### `stats::wls` — weighted least-squares regression
+
+| Function | Signature |
+|---|---|
+| `wls_fit` | `pub fn wls_fit(x: &[f64; 256], y: &[f64; 256], w: &[f64; 256], n: i32) -> WLSFit with Mut, Div, Panic` |
+
+Straight-line regression with per-observation weights (wᵢ∝1/σᵢ²) — the fit for
+heteroscedastic assay data. Closed-form coefficients, standard errors from
+`σ̂²(XᵀWX)⁻¹`, and a weighted R². Validated: perfect line → (1,2), R²=1;
+downweighting an outlier pulls the slope from OLS 5 to 1.229.
+
+### `stats::runs_test` — Wald-Wolfowitz runs test
+
+| Function | Signature |
+|---|---|
+| `runs_test` | `pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic` |
+
+Tests a 0/1 sequence for randomness against serial dependence: with n₁ ones, n₂
+zeros and R runs, `z=(R−μ_R)/σ_R` where `μ_R=2n₁n₂/n+1`. Too few runs →
+clustering, too many → over-alternation. Validated: balanced random-like →
+R=6, z=0; clustered → R=2, z=−2.683, p<0.01; alternating → R=10, z=2.683.
+
+### `stats::durbin_watson` — Durbin-Watson statistic
+
+| Function | Signature |
+|---|---|
+| `durbin_watson` | `pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic` |
+
+First-order serial-correlation diagnostic for residuals:
+`d=Σ(eᵢ−e_{i−1})²/Σeᵢ² ∈ [0,4]`, with ρ̂≈1−d/2 (d≈2 → none, d<2 → positive,
+d>2 → negative). Validated: alternating residuals → d=3.333, ρ̂=−0.667;
+block residuals → d=0.667, ρ̂=0.667.
+
+### `stats::autocorr` — autocorrelation & Ljung-Box
+
+| Function | Signature |
+|---|---|
+| `acf` | `pub fn acf(x: &[f64; 256], n: i32, k: i32) -> f64 with Mut, Div, Panic` |
+| `ljung_box` | `pub fn ljung_box(x: &[f64; 256], n: i32, m: i32) -> LBResult with Mut, Div, Panic` |
+
+Sample autocorrelation at lag k and the Ljung-Box portmanteau test
+`Q=n(n+2)Σr_k²/(n−k) ~ χ²(m)` for white noise up to lag m. Validated:
+{1,2,3,4,5}→acf(1)=0.4, acf(2)=−0.1; Ljung-Box(m=2)→Q=1.517; a monotone ramp →
+acf(1)>0.6, Q significant.
+
+### `stats::nelson_aalen` — Nelson-Aalen cumulative hazard
+
+| Function | Signature |
+|---|---|
+| `nelson_aalen` | `pub fn nelson_aalen(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> NAResult with Mut, Div, Panic` |
+
+The non-parametric cumulative hazard `Ĥ(t)=Σd_j/n_j` with variance `Σd_j/n_j²`
+and implied survival `Ŝ=e^{−Ĥ}` — the KM companion, better-behaved in the tail.
+Validated: times 1–5 all deaths → Ĥ(3)=0.7833, Var=0.2136, Ŝ(3)=0.4569; with
+censoring → Ĥ(4)=0.5333.
+
+### `stats::rmst` — restricted mean survival time
+
+| Function | Signature |
+|---|---|
+| `rmst` | `pub fn rmst(time: &[f64; 256], event: &[i64; 256], n: i32, tau: f64) -> f64 with Mut, Div, Panic` |
+
+The area under the KM curve up to a horizon τ — a clinically interpretable
+event-free-time summary, robust to non-proportional hazards. Exact truncated
+step-function integral. Validated: times 1–5 → RMST(5)=3.0, RMST(3)=2.4,
+RMST(2.5)=2.1; with censoring → RMST(5)=3.667.
+
+### `stats::life_table` — actuarial (cohort) life table
+
+| Function | Signature |
+|---|---|
+| `life_table_survival` | `pub fn life_table_survival(entering: &[f64; 64], deaths: &[f64; 64], withdrawn: &[f64; 64], k: i32, q_interval: i32) -> f64 with Mut, Div, Panic` |
+| `life_table_hazard` | `pub fn life_table_hazard(entering, deaths, withdrawn, k, q_interval) -> f64` |
+
+Interval-grouped survival for count-per-interval data: with the withdrawal-
+adjusted risk set `n'ᵢ=nᵢ−wᵢ/2`, `qᵢ=dᵢ/n'ᵢ` and `Ŝ=Πpᵢ` (Cutler-Ederer).
+Validated: 3-interval example → S=0.9, 0.8047, 0.7231; hazard(i1)=0.1059.
+
+### `stats::kendall_tau` — Kendall's rank correlation
+
+| Function | Signature |
+|---|---|
+| `kendall_tau` | `pub fn kendall_tau(x: &[f64; 256], y: &[f64; 256], n: i32) -> KendallResult with Mut, Div, Panic` |
+
+Concordance-based rank correlation robust to outliers and monotone non-linear
+relationships: τ_a=(C−D)/(n(n−1)/2), the tie-corrected τ_b, and the no-tie null
+z-test. Validated: perfect concordance → τ=1; {1,3,2,4} → τ_a=0.667, z=1.359;
+ties → τ_a=0.667 but τ_b=0.8; perfect discordance → τ=−1.
+
+### `stats::goodman_kruskal` — Goodman-Kruskal gamma
+
+| Function | Signature |
+|---|---|
+| `goodman_kruskal` | `pub fn goodman_kruskal(x: &[f64; 256], y: &[f64; 256], n: i32) -> GammaResult with Mut, Div, Panic` |
+
+Ordinal association ignoring tied pairs entirely: γ=(C−D)/(C+D) with the
+pair-count Wald z. Validated: {1,3,2,4} → γ=0.667; ties (using only untied
+pairs) → γ=1; perfect discordance → γ=−1.
+
+### `stats::somers_d` — Somers' D (asymmetric)
+
+| Function | Signature |
+|---|---|
+| `somers_d` | `pub fn somers_d(x: &[f64; 256], y: &[f64; 256], n: i32) -> SomersResult with Mut, Div, Panic` |
+
+Asymmetric ordinal association: D(Y|X)=(C−D)/(C+D+Tx) penalises ties on the
+predictor, so for a binary Y it equals 2·AUC−1. Validated: no ties → D=0.667;
+ties → D(Y|X)=D(X|Y)=0.8; binary Y with perfect separation → D(Y|X)=1 (AUC=1).
+
+### `stats::bartlett` — Bartlett's test for equal variance
+
+| Function | Signature |
+|---|---|
+| `bartlett` | `pub fn bartlett(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> BartlettResult with Mut, Div, Panic` |
+
+Homogeneity-of-variance test across k consecutive-block groups (powerful under
+normality): `χ²=[(N−k)ln(s_p²)−Σ(n_i−1)ln(s_i²)]/C ~ χ²(k−1)`. Validated:
+{1..5} vs {2,4..10} → pooled 6.25, χ²=1.5868, df=1; equal-spread → χ²=0.
+
+### `stats::levene` — Levene / Brown-Forsythe test
+
+| Function | Signature |
+|---|---|
+| `levene` | `pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic` |
+
+The distribution-robust variance test: one-way ANOVA on absolute deviations from
+each group's centre (`center` = 0 mean → Levene, 1 median → Brown-Forsythe).
+`W ~ F(k−1, N−k)`. Validated: worked example → W=2.0571 (both centerings on
+symmetric data); equal-spread → W=0.
+
+### `stats::var_ftest` — two-sample variance F-test
+
+| Function | Signature |
+|---|---|
+| `var_ftest` | `pub fn var_ftest(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> VarFResult with Mut, Div, Panic` |
+
+The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
+p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -773,6 +937,21 @@ use stats::passing_bablok::{PBFit, passing_bablok}
 use stats::fisher_exact::{FisherResult, fisher_exact}
 use stats::cochran_q::{CochranQResult, cochran_q}
 use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
+use stats::logistic::{LogisticFit, logistic_fit, logistic_predict}
+use stats::poisson_reg::{PoissonFit, poisson_fit, poisson_predict}
+use stats::wls::{WLSFit, wls_fit}
+use stats::runs_test::{RunsResult, runs_test}
+use stats::durbin_watson::{DWResult, durbin_watson}
+use stats::autocorr::{LBResult, acf, ljung_box}
+use stats::nelson_aalen::{NAResult, nelson_aalen}
+use stats::rmst::{rmst}
+use stats::life_table::{life_table_survival, life_table_hazard}
+use stats::kendall_tau::{KendallResult, kendall_tau}
+use stats::goodman_kruskal::{GammaResult, goodman_kruskal}
+use stats::somers_d::{SomersResult, somers_d}
+use stats::bartlett::{BartlettResult, bartlett}
+use stats::levene::{LeveneResult, levene}
+use stats::var_ftest::{VarFResult, var_ftest}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

@@ -1,0 +1,256 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/autocorr.sio — sample autocorrelation & Ljung-Box test
+//
+// The serial-dependence diagnostics for an ordered series:
+//
+//   acf(x, n, k)          -> f64         autocorrelation at lag k
+//   ljung_box(x, n, m)    -> LBResult    portmanteau test over lags 1..m
+//
+//   r_k = Σ_{i=1}^{n−k}(xᵢ−x̄)(x_{i+k}−x̄) / Σ_{i=1}^n (xᵢ−x̄)²,
+//   Q = n(n+2) Σ_{k=1}^m r_k²/(n−k)   ~   χ²(m)   under independence.
+//
+// Q is the Ljung-Box refinement of Box-Pierce; a large Q rejects the hypothesis
+// that the series is white noise up to lag m.
+//
+// Pure Sounio: mean and total variance in one pass, each lag numerator inline;
+// χ² tail via inline Lanczos log-gamma + incomplete gamma. No nested data-array
+// calls.
+//
+// References:
+//   Box & Pierce (1970); Ljung & Box (1978) Biometrika 65:297.
+
+module stats::autocorr
+
+fn ac_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ac_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ac_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ac_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * ac_ln(tt) - tt + ac_ln(a)
+}
+
+fn ac_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * ac_exp(0.0 - x + s * ac_ln(x) - ac_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = ac_exp(0.0 - x + s * ac_ln(x) - ac_lgamma(s)) * h
+    return 1.0 - q
+}
+
+fn ac_chi2_sf(x: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    if df <= 0.0 { return 1.0 }
+    return 1.0 - ac_igamma_p(df * 0.5, x * 0.5)
+}
+
+/// Sample autocorrelation at lag k (biased / divide-by-total-variance form).
+///
+/// Parâmetros: x — series; n — length; k — lag (0 <= k < n).
+/// Retorno: r_k in [-1,1] (r_0 = 1).
+pub fn acf(x: &[f64; 256], n: i32, k: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 || k < 0 || k >= n { return 0.0 }
+    let nf = n as f64
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + x[i as usize]; i = i + 1 }
+    let mean = sum / nf
+    var den = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; den = den + d * d; j = j + 1 }
+    if den <= 1.0e-300 { return 0.0 }
+    var num = 0.0
+    var t = 0
+    while t < n - k {
+        num = num + (x[t as usize] - mean) * (x[(t + k) as usize] - mean)
+        t = t + 1
+    }
+    return num / den
+}
+
+pub struct LBResult {
+    pub q: f64,   // Ljung-Box statistic
+    pub df: i64,  // m
+    pub p: f64,   // chi-squared p-value
+}
+
+/// Ljung-Box portmanteau test over lags 1..m.
+///
+/// Parâmetros: x — series; n — length (>=3); m — max lag (1 <= m < n).
+/// Retorno: LBResult (q, df=m, p).
+/// Referências: Ljung & Box (1978).
+pub fn ljung_box(x: &[f64; 256], n: i32, m: i32) -> LBResult with Mut, Div, Panic {
+    if n < 3 || m < 1 || m >= n { return LBResult { q: 0.0, df: 0, p: 1.0 } }
+    let nf = n as f64
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + x[i as usize]; i = i + 1 }
+    let mean = sum / nf
+    var den = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; den = den + d * d; j = j + 1 }
+    if den <= 1.0e-300 { return LBResult { q: 0.0, df: m as i64, p: 1.0 } }
+    var acc = 0.0
+    var k = 1
+    while k <= m {
+        var num = 0.0
+        var t = 0
+        while t < n - k {
+            num = num + (x[t as usize] - mean) * (x[(t + k) as usize] - mean)
+            t = t + 1
+        }
+        let rk = num / den
+        acc = acc + rk * rk / ((n - k) as f64)
+        k = k + 1
+    }
+    let q = nf * (nf + 2.0) * acc
+    let p = ac_chi2_sf(q, m as f64)
+    return LBResult { q: q, df: m as i64, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3,4,5}, mean 3, Σd²=10. acf(1)=4/10=0.4; acf(2)=-1/10=-0.1; acf(0)=1.
+fn test_acf() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    var ok = true
+    ok = check(1, approx(acf(&x, 5, 0), 1.0, 1.0e-9)) && ok
+    ok = check(2, approx(acf(&x, 5, 1), 0.4, 1.0e-9)) && ok
+    ok = check(3, approx(acf(&x, 5, 2), 0.0 - 0.1, 1.0e-9)) && ok
+    return ok
+}
+
+// Ljung-Box m=2: Q = 5·7·(0.4²/4 + 0.1²/3) = 35·(0.04+0.003333) = 1.516667. df=2.
+fn test_ljung_box() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = ljung_box(&x, 5, 2)
+    var ok = true
+    ok = check(10, approx(r.q, 1.516667, 1.0e-4)) && ok
+    ok = check(11, r.df == 2) && ok
+    ok = check(12, r.p > 0.1) && ok
+    return ok
+}
+
+// strong autocorrelation: a long monotone ramp has large lag-1 acf and a large Q.
+fn test_strong() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 12 { x[i as usize] = (i + 1) as f64; i = i + 1 }
+    let r = ljung_box(&x, 12, 3)
+    // lag-1 acf of a ramp is high (~0.7); Q over 3 lags is large -> p small.
+    var ok = true
+    ok = check(20, acf(&x, 12, 1) > 0.6) && ok
+    ok = check(21, r.p < 0.05) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_acf() && ok
+    ok = test_ljung_box() && ok
+    ok = test_strong() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
