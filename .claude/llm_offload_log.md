@@ -2991,3 +2991,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - rank_transform = **PASS**: mid-rank less+(equal+1)/2, tie-group detection (first && equal>1) with Σ(t³−t); {3,1,4,1,5}→{3,1.5,4,1.5,5}, correction 6 verified.
 - Theme: data-transformation primitives — foundational preprocessing (feature scaling, rank transform) completing the descriptive layer. All derivable, #852-safe. Suite runner: 118 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-BIlCZ5/`, `/tmp/llm-offload-7CoTZR/`, `/tmp/llm-offload-Y2h33J/`.
+
+## 2026-07-15 — math-review: stats::weighted_stats, stats::grouped_stats, stats::weighted_quantile
+- Files (all new): `stdlib/stats/weighted_stats.sio` (weighted mean + population & Kish-unbiased variance), `stdlib/stats/grouped_stats.sio` (mean/variance/modal-class from a frequency table), `stdlib/stats/weighted_quantile.sio` (sort-free weighted p-quantile/median). Provider: xAI/Grok 4.3.
+- weighted_stats = **PASS**: x̄_w=Σwx/Σw, σ²_w=Σw(x−x̄)²/V₁, unbiased ÷(V₁−V₂/V₁); x={1,2,3}/w={1,2,3}→mean 2.333, var_pop 0.5556, var_ub 0.9091 verified.
+- grouped_stats = **PASS**: mean=Σfm/Σf, sample var ÷(Σf−1), modal class argmax; {5,15,25}/{10,20,10}→mean 15, var_pop 50, var_sample 51.28 verified.
+- weighted_quantile = **PASS**: smallest v with Σ_{x≤v}w ≥ p·Σw, sort-free O(n²); equal→median 2, heavy weight→median 4, quartiles verified.
+- Theme: weighted & grouped estimators — support for survey weights / frequency tables / meta-analytic precisions, absent until now. All derivable, #852-safe. Suite runner: 121 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-n3PQpI/`, `/tmp/llm-offload-lcsGkl/`, `/tmp/llm-offload-anzkI3/`.
