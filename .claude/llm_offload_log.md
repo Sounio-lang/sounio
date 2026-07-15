@@ -2657,3 +2657,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-effects-covered-desktop.png`, `/tmp/sounio-effects-refused-desktop.png`, `/tmp/sounio-effects-mobile-covered.png`, `/tmp/sounio-effects-mobile-refused.png`, and `/tmp/sounio-effects-320.png`; all three controls expose `aria-pressed`, the literal refusal remains readable, and desktop/mobile/320 px measured zero overflow.
 - Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directory: `/tmp/llm-offload-xDcZZC/`.
+
+## 2026-07-15 — M3 visual review: effect boundary threshold background
+- Files: `website/public/assets/vision/effect-boundary-threshold.webp` and `website/src/components/home/EffectBoundaryInstrument.css`.
+- Task: replace the generic science-fiction machinery in the public effect-row scene with an original, Sounio-specific background.
+- Asset: built-in ImageGen produced a realistic ancient Greek marble threshold at Aegean twilight, with thin gold and teal paths crossing the boundary and one muted red path stopping at it; the result was converted with Sharp to a 1536x1024 WebP at 133 KB.
+- External-facing review: xAI/Grok 4.3 approved with no blockers, confirming that the Greek threshold metaphor, text contrast, and tested responsive crops remain coherent with the surrounding Sounio identity.
+- Claim boundary: the image supports the effect-boundary scene as visual metaphor only. It is not executable evidence and adds no language, compiler, runtime, or scientific claim.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-effect-bg-desktop-v2.png`, `/tmp/sounio-effect-bg-mobile.png`, and `/tmp/sounio-effect-bg-comparison.jpg`; both tested viewports had zero broken images, and the mobile viewport measured no positive horizontal overflow.
+- Validation: `npm run check:astro` passed 211 files with zero errors, warnings, or hints; `npm run check:quality` passed 904 pages and all route, navigation, and brand checks. Render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directory: `/tmp/llm-offload-p19zw7/`.
