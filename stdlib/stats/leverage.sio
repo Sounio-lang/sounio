@@ -1,0 +1,115 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/leverage.sio — leverage (hat values) for simple linear regression
+//
+// The leverage of each observation — how far its predictor is from the mean, and
+// hence how much pull it has on its own fitted value:
+//
+//   leverage(x, n, out_h) -> LeverageResult
+//
+//   hᵢ = 1/n + (xᵢ − x̄)² / Sₓₓ,   Sₓₓ = Σ(xⱼ − x̄)².
+// The hat values sum to p = 2 (the number of parameters); a point with
+// hᵢ > 2p/n = 4/n is conventionally flagged as high-leverage.
+//
+// Pure Sounio: one pass for the mean and Sₓₓ, a second to fill the hat vector.
+// No external dependency, no nested data-array calls.
+//
+// References:
+//   Belsley, Kuh & Welsch (1980) "Regression Diagnostics".
+
+module stats::leverage
+
+pub struct LeverageResult {
+    pub max_h: f64,    // largest leverage
+    pub sum_h: f64,    // Σ hᵢ (= p = 2)
+    pub n_high: i64,   // count with hᵢ > 4/n
+}
+
+/// Leverage (hat values) for simple linear regression; fills out_h[0..n).
+///
+/// Parâmetros: x — predictor; n — size (>=3, <=256); out_h — receives the hat values.
+/// Retorno: LeverageResult (max_h, sum_h, n_high).
+/// Referências: Belsley, Kuh & Welsch (1980).
+pub fn leverage(x: &[f64; 256], n: i32, out_h: &![f64; 256]) -> LeverageResult with Mut, Div, Panic {
+    if n < 3 { return LeverageResult { max_h: 0.0, sum_h: 0.0, n_high: 0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mx = s / nf
+    var sxx = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mx; sxx = sxx + d * d; j = j + 1 }
+    let thresh = 4.0 / nf
+    var maxh = 0.0
+    var sumh = 0.0
+    var nhigh = 0
+    var k = 0
+    while k < n {
+        let d = x[k as usize] - mx
+        var h = 1.0 / nf
+        if sxx > 1.0e-300 { h = 1.0 / nf + d * d / sxx }
+        out_h[k as usize] = h
+        sumh = sumh + h
+        if h > maxh { maxh = h }
+        if h > thresh { nhigh = nhigh + 1 }
+        k = k + 1
+    }
+    return LeverageResult { max_h: maxh, sum_h: sumh, n_high: nhigh as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3,4,5}: x̄=3, Sxx=10. h={0.6,0.3,0.2,0.3,0.6}; Σh=2.
+fn test_leverage() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var h: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = leverage(&x, 5, &!h)
+    var ok = true
+    ok = check(1, approx(h[0], 0.6, 1.0e-9)) && ok
+    ok = check(2, approx(h[2], 0.2, 1.0e-9)) && ok
+    ok = check(3, approx(h[4], 0.6, 1.0e-9)) && ok
+    ok = check(4, approx(r.sum_h, 2.0, 1.0e-9)) && ok
+    ok = check(5, approx(r.max_h, 0.6, 1.0e-9)) && ok
+    return ok
+}
+
+// an extreme x pulls its leverage up. x has one far point.
+fn test_high() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var h: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=50.0
+    let r = leverage(&x, 5, &!h)
+    // the far point dominates Sxx -> its leverage approaches 1.
+    return check(10, h[4] > 0.9)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_leverage() && ok
+    ok = test_high() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
