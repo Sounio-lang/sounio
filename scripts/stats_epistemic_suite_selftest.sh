@@ -115,6 +115,9 @@ MODULES=(
   stdlib/stats/sample_size_survival.sio
   stdlib/stats/sample_size_precision.sio
   stdlib/stats/detectable_effect.sio
+  stdlib/stats/central_tendency.sio
+  stdlib/stats/dispersion.sio
+  stdlib/stats/shape.sio
 )
 
 fail=0

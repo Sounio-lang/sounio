@@ -10,7 +10,9 @@ fourteen families:
   (full `pdf`/`cdf`/`sf`/`quantile` surfaces), a `densities` bank, Weibull /
   negative-binomial, and method-of-moments fitting for the gamma, beta and
   lognormal.
-- **Robust descriptives** — median / IQR / MAD / trimmed & Winsorized means,
+- **Descriptives** — the classical means (arithmetic / geometric / harmonic /
+  RMS), dispersion (variance / sd / range / CV / SEM), and shape (skewness /
+  kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
   the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
   χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
@@ -1430,6 +1432,38 @@ The smallest Cohen's d a study can detect: `d=(z_{1−α/2}+z_{1−β})·√(2/n
 (two-sample) or `/√n` (one-sample) — for judging whether a study was adequately
 powered. Validated: n=64/group, α=0.05, 80% → d=0.495; one-sample → 0.350.
 
+### `stats::central_tendency` — the mean family
+
+| Function | Signature |
+|---|---|
+| `arithmetic_mean` / `geometric_mean` / `harmonic_mean` / `rms` | `pub fn *(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic` |
+
+The classical means — arithmetic, geometric (ratios/growth), harmonic (rates)
+and root-mean-square. Validated: {1,2,4} → AM=2.333, GM=2, HM=1.714, RMS=2.646;
+the ordering HM≤GM≤AM≤RMS holds.
+
+### `stats::dispersion` — measures of spread
+
+| Function | Signature |
+|---|---|
+| `dispersion` | `pub fn dispersion(x: &[f64; 256], n: i32) -> DispersionResult with Mut, Div, Panic` |
+
+The classical variability summaries in one pass: sample variance & sd, range,
+the coefficient of variation (dimensionless relative spread) and the standard
+error of the mean. Validated: {2,4,4,4,5,5,7,9} → var 4.571, sd 2.138, range 7,
+CV 0.4276, SEM 0.7559.
+
+### `stats::shape` — skewness & kurtosis
+
+| Function | Signature |
+|---|---|
+| `shape` | `pub fn shape(x: &[f64; 256], n: i32) -> ShapeResult with Mut, Div, Panic` |
+
+The third and fourth standardised moments: population skewness `g₁`, the
+Fisher-Pearson sample-adjusted `G₁`, and (excess) kurtosis. Validated:
+{2,4,4,4,5,5,7,9} → g₁=0.6563, G₁=0.8185, excess kurtosis −0.2188; symmetric
+data → skewness 0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1540,6 +1574,9 @@ use stats::vif::{vif_from_r2, vif_two, tolerance}
 use stats::sample_size_survival::{SurvSSResult, ss_survival}
 use stats::sample_size_precision::{ss_mean, ss_proportion}
 use stats::detectable_effect::{mde_two_means, mde_one_mean}
+use stats::central_tendency::{arithmetic_mean, geometric_mean, harmonic_mean, rms}
+use stats::dispersion::{DispersionResult, dispersion}
+use stats::shape::{ShapeResult, shape}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
