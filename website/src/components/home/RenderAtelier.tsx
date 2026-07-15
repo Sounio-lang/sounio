@@ -10,6 +10,12 @@ export type RenderReceipt = {
   width: number;
   height: number;
   sourceHref: string;
+  engine?: string;
+  sha256?: string;
+  renderSha256?: string;
+  verification?: string;
+  gate?: string;
+  receipt?: string;
   title: string;
   body: string;
 };
@@ -28,10 +34,12 @@ const copy = {
     body: 'Not decorative science graphics. Select a checked-in render and inspect the Sounio source, exact command, dimensions, and manifest path attached to it.',
     manifest: 'generated manifest', compiler: 'compiler entrypoint', registry: 'registered renders',
     source: 'source program', command: 'render command', dimensions: 'raster dimensions', asset: 'manifest asset',
+    engine: 'verified engine', integrity: 'receipt sha-256', renderIntegrity: 'PPM sha-256', verification: 'determinism', gate: 'executable gate', receipt: 'pass receipt',
     inspect: 'Inspect the Sounio source', frame: 'active compiled visual receipt', status: 'CHECKED-IN RENDER',
     boundary: 'Generated artifact boundary',
-    boundaryText: 'This atelier displays checked-in render assets and their manifest records. It does not claim that the current default compiler regenerated them during this page build; the current quality gate retained them after an explicit render-check skip.',
+    boundaryText: 'The coverage crystal was regenerated twice with lean_single and produced byte-identical output. Historical receipts remain checked-in assets; this page does not claim the current default compiler regenerated them during the website build.',
     buildState: 'render check: explicit SKIP · pre-rendered assets retained',
+    verifiedState: 'lean_single verified · deterministic receipt',
   },
   pt: {
     eyebrow: 'ATELIER DE RENDER SOUNIO / SAÍDA MANIFESTADA',
@@ -39,10 +47,12 @@ const copy = {
     body: 'Não são gráficos científicos decorativos. Selecione um render checked-in e inspecione o código Sounio, comando exato, dimensões e caminho de manifesto ligados a ele.',
     manifest: 'manifesto gerado', compiler: 'entrada do compilador', registry: 'renders registrados',
     source: 'programa fonte', command: 'comando de render', dimensions: 'dimensões raster', asset: 'asset no manifesto',
+    engine: 'engine verificado', integrity: 'sha-256 do recibo', renderIntegrity: 'sha-256 do PPM', verification: 'determinismo', gate: 'gate executável', receipt: 'recibo de aprovação',
     inspect: 'Inspecionar o código Sounio', frame: 'recibo visual compilado ativo', status: 'RENDER CHECKED-IN',
     boundary: 'Fronteira do artefato gerado',
-    boundaryText: 'Este atelier exibe assets de render checked-in e seus registros no manifesto. Ele não afirma que o compilador padrão atual os regenerou durante este build; o gate de qualidade os preservou após um render-check explicitamente ignorado.',
+    boundaryText: 'O cristal de cobertura foi regenerado duas vezes com lean_single e produziu saídas byte a byte idênticas. Os recibos históricos continuam como assets checked-in; esta página não afirma que o compilador padrão atual os regenerou durante o build.',
     buildState: 'render check: SKIP explícito · assets pré-renderizados preservados',
+    verifiedState: 'lean_single verificado · recibo determinístico',
   },
 };
 
@@ -106,7 +116,7 @@ export default function RenderAtelier({ locale = 'en', receipts, compilerArtifac
           <div className="ra-stage" id="ra-panel" role="tabpanel" aria-labelledby={`ra-tab-${selected}`}>
             <figure className="ra-render">
               <div className="ra-frame-label"><span>{d.frame}</span><code>{active.assetFile}</code></div>
-              <div className={`ra-canvas ${active.width > active.height ? 'is-wide' : 'is-square'}`}>
+              <div className={`ra-canvas ${active.width > active.height ? 'is-wide' : 'is-square'} ${active.sha256 ? 'is-verified' : ''}`}>
                 <img src={active.publicPath} alt={`${active.title}. ${active.body}`} width={active.width} height={active.height} />
               </div>
               <figcaption><span>{d.status}</span><code>{active.width} × {active.height} px</code></figcaption>
@@ -120,9 +130,15 @@ export default function RenderAtelier({ locale = 'en', receipts, compilerArtifac
                 <div><dt>{d.command}</dt><dd><code>{active.command}</code></dd></div>
                 <div><dt>{d.dimensions}</dt><dd><code>{active.width} × {active.height}</code></dd></div>
                 <div><dt>{d.asset}</dt><dd><code>{active.assetPath}</code></dd></div>
+                {active.engine && <div><dt>{d.engine}</dt><dd><code>{active.engine}</code></dd></div>}
+                {active.sha256 && <div><dt>{d.integrity}</dt><dd><code>{active.sha256}</code></dd></div>}
+                {active.renderSha256 && <div><dt>{d.renderIntegrity}</dt><dd><code>{active.renderSha256}</code></dd></div>}
+                {active.verification && <div><dt>{d.verification}</dt><dd><code>{active.verification}</code></dd></div>}
+                {active.gate && <div><dt>{d.gate}</dt><dd><code>{active.gate}</code></dd></div>}
+                {active.receipt && <div><dt>{d.receipt}</dt><dd><code>{active.receipt}</code></dd></div>}
               </dl>
               <a href={active.sourceHref} target="_blank" rel="noreferrer">{d.inspect} <span aria-hidden="true">↗</span></a>
-              <div className="ra-build-state"><span>{d.buildState}</span><code>npm run check:render-assets</code></div>
+              <div className={`ra-build-state ${active.sha256 ? 'is-verified' : ''}`}><span>{active.sha256 ? d.verifiedState : d.buildState}</span><code>{active.receipt ?? 'npm run check:render-assets'}</code></div>
             </aside>
           </div>
         </div>

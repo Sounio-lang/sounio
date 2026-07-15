@@ -2693,3 +2693,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Raw review directories: `/tmp/llm-offload-x9EYiy/` and `/tmp/llm-offload-L06lQz/`.
 
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | external artifact + code review | renderer3d.sio; coverage_crystal_atelier.sio; viz_renderer3d_coverage4.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted the fixed-point depth ordering, four-sample coverage-AA semantics, deterministic receipt, and test strength, with only non-blocking depth-range and winding notes. DeepSeek failed for insufficient balance and Gemini failed with OpenRouter HTTP 402. Raw: `/tmp/llm-offload-Kkyfyv/`. |
+
+## 2026-07-15 — M3 prose/design review: deterministic crystal receipt integration
+- Files: `website/src/components/home/CompiledVisualReceipts.astro`, `RenderAtelier.tsx`, `RenderAtelier.css`, `website/scripts/render-assets.mjs`, and the coverage-crystal manifest/PNG receipt.
+- Task: make the renderer-quality receipt the primary Render Atelier artifact while exposing its engine, executable gate, pass marker, deterministic PPM hash, published PNG hash, and honest historical-asset boundary.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR issues. It accepted the provenance boundary, manifest integrity, React/Astro accessibility, responsive layout, and preview readiness.
+- Fan-out degradation: DeepSeek and Gemini were attempted and returned provider balance/credit errors; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px screenshots confirmed the PNG loaded at 320x200, zero horizontal overflow, 2x2 mobile tabs, pointer selection, and ArrowRight keyboard selection. No runtime overlay or page error was detected.
+- Validation: `npm run check:quality` passed 904 pages and every route, navigation, brand, localization, search, and Astro check. The new deterministic static receipt check passes before the known historical Madaros cube-render SIGSEGV triggers the explicit legacy-render skip.
+- Raw review directory: `/tmp/llm-offload-aGaN94/`.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -21,6 +22,25 @@ const outputDir = path.join(websiteDir, 'public/assets/generated/render');
 const manifestPath = path.join(outputDir, 'manifest.json');
 
 const renderSpecs = [
+  {
+    example: 'examples/render/coverage_crystal_atelier.sio',
+    sourceAsset: 'examples/render/assets/coverage-crystal-atelier.png',
+    assetFile: 'coverage-crystal-atelier.png',
+    title: 'Coverage crystal atelier',
+    description:
+      'Deterministic Phong material study with four-sample edge coverage and fixed-point depth authored in Sounio.',
+    width: 320,
+    height: 200,
+    engine: 'lean_single',
+    sha256: '89c3db4423165068a13bbf4e78891d0e69da04dc245bf36f85bfe42e0fccf7c1',
+    renderSha256: 'b6135cd4d037840ac4036d7e8efc8dbeb41cd99658dcd8784d5c13d0b7169ea8',
+    verification: 'byte-identical output across two independent runs',
+    gate: 'tests/run-pass/viz_renderer3d_coverage4.sio',
+    receipt: 'VIZ_RENDERER3D_COVERAGE4_PASS',
+    sourceRef: 'codex/renderer-quality-20260715',
+    command:
+      'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/coverage_crystal_atelier.sio > coverage_crystal_atelier.ppm',
+  },
   {
     example: 'examples/render/triangle_basic.sio',
     assetFile: 'triangle-basic.svg',
@@ -179,6 +199,14 @@ function buildManifest(entries) {
         width: entry.width,
         height: entry.height,
         command: entry.command,
+        ...(entry.engine ? { engine: entry.engine } : {}),
+        ...(entry.sourceAsset ? { source_asset: entry.sourceAsset } : {}),
+        ...(entry.sha256 ? { sha256: entry.sha256 } : {}),
+        ...(entry.renderSha256 ? { render_sha256: entry.renderSha256 } : {}),
+        ...(entry.verification ? { verification: entry.verification } : {}),
+        ...(entry.gate ? { gate: entry.gate } : {}),
+        ...(entry.receipt ? { receipt: entry.receipt } : {}),
+        ...(entry.sourceRef ? { source_ref: entry.sourceRef } : {}),
       })),
     },
     null,
@@ -214,6 +242,15 @@ async function collectAssets() {
 
   const assets = [];
   for (const spec of renderSpecs) {
+    if (spec.sourceAsset) {
+      const binary = await readFile(path.join(repoRoot, spec.sourceAsset));
+      const digest = createHash('sha256').update(binary).digest('hex');
+      if (digest !== spec.sha256) {
+        throw new Error(`${spec.sourceAsset}: expected sha256 ${spec.sha256}, got ${digest}`);
+      }
+      assets.push({ ...spec, binary });
+      continue;
+    }
     const ppmText = runExample(spec.example);
     const ppm = parsePpm(ppmText, spec.example);
     assets.push({
@@ -231,7 +268,11 @@ async function generate() {
   await mkdir(outputDir, { recursive: true });
 
   for (const asset of assets) {
-    await writeFile(path.join(outputDir, asset.assetFile), asset.svg, 'utf8');
+    if (asset.binary) {
+      await writeFile(path.join(outputDir, asset.assetFile), asset.binary);
+    } else {
+      await writeFile(path.join(outputDir, asset.assetFile), asset.svg, 'utf8');
+    }
   }
   await writeFile(manifestPath, buildManifest(assets), 'utf8');
 
@@ -239,6 +280,24 @@ async function generate() {
 }
 
 async function check() {
+  const staticSpecs = renderSpecs.filter((spec) => spec.sourceAsset);
+  const currentManifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const expectedStaticEntries = JSON.parse(buildManifest(staticSpecs)).assets;
+  for (let index = 0; index < staticSpecs.length; index += 1) {
+    const spec = staticSpecs[index];
+    const source = await readFile(path.join(repoRoot, spec.sourceAsset));
+    const published = await readFile(path.join(outputDir, spec.assetFile));
+    const digest = createHash('sha256').update(source).digest('hex');
+    const manifestEntry = currentManifest.assets.find((entry) => entry.example === spec.example);
+    const manifestMatches =
+      manifestEntry && JSON.stringify(manifestEntry) === JSON.stringify(expectedStaticEntries[index]);
+    if (digest !== spec.sha256 || !source.equals(published) || !manifestMatches) {
+      console.error(`Render asset is stale: ${spec.assetFile}`);
+      process.exit(1);
+    }
+  }
+  console.log(`OK: ${staticSpecs.length} deterministic static render receipt verified.`);
+
   let assets;
   try {
     assets = await collectAssets();
@@ -253,13 +312,14 @@ async function check() {
     const assetPath = path.join(outputDir, asset.assetFile);
     let current;
     try {
-      current = await readFile(assetPath, 'utf8');
+      current = asset.binary ? await readFile(assetPath) : await readFile(assetPath, 'utf8');
     } catch {
       stale.push(`${path.relative(repoRoot, assetPath)} is missing`);
       continue;
     }
 
-    if (current !== asset.svg) {
+    const matches = asset.binary ? current.equals(asset.binary) : current === asset.svg;
+    if (!matches) {
       stale.push(`${path.relative(repoRoot, assetPath)} is out of date`);
     }
   }
