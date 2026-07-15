@@ -887,6 +887,100 @@ symmetric data); equal-spread → W=0.
 The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
 p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
 
+### `stats::mann_whitney` — Mann-Whitney U / rank-sum test
+
+| Function | Signature |
+|---|---|
+| `mann_whitney` | `pub fn mann_whitney(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> MannWhitneyResult with Mut, Div, Panic` |
+
+The two-sample rank-sum test (unpaired counterpart to Wilcoxon signed-rank):
+`U₁=R₁−n₁(n₁+1)/2`, tie-corrected normal-approximation z. Validated: fully
+separated → U=0, z=−1.964, p=0.0495; overlapping → U₁=3, p>0.5; cross-group ties
+→ R₁=8.
+
+### `stats::sign_test` — sign test
+
+| Function | Signature |
+|---|---|
+| `sign_test` | `pub fn sign_test(x: &[f64; 256], y: &[f64; 256], n: i32) -> SignResult with Mut, Div, Panic` |
+| `sign_test_median` | `pub fn sign_test_median(x: &[f64; 256], n: i32, m0: f64) -> SignResult with Mut, Div, Panic` |
+
+The simplest distribution-free test — signs only, exact binomial p (zeros
+dropped). Validated: 7+/2− → p=0.1797; one-sample median → p=0.625.
+
+### `stats::mood_median` — Mood's median test
+
+| Function | Signature |
+|---|---|
+| `mood_median` | `pub fn mood_median(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> MoodResult with Mut, Div, Panic` |
+
+A robust k-sample equal-medians test: χ² on the 2×k above/below-pooled-median
+table. Less powerful than Kruskal-Wallis but far more outlier-resistant.
+Validated: {1..5} vs {6..10} → median 5.5, χ²=10, df=1; identical groups → χ²=0.
+
+### `stats::fit_gamma` — gamma fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_gamma` | `pub fn fit_gamma(x: &[f64; 256], n: i32) -> GammaFit with Mut, Div, Panic` |
+
+Estimates the gamma shape and scale by matching moments: `k̂=mean²/var`,
+`θ̂=var/mean`, `rate=mean/var`. Validated: {2,2,6,6} → mean 4, var 5.333,
+shape 3, scale 1.333, rate 0.75.
+
+### `stats::fit_beta` — beta fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_beta` | `pub fn fit_beta(x: &[f64; 256], n: i32) -> BetaFit with Mut, Div, Panic` |
+
+Estimates the two beta shape parameters for data on (0,1): with
+`c=m(1−m)/v−1`, `α̂=m·c`, `β̂=(1−m)·c`. Validated: {.25,.25,.75,.75} →
+α=β=1 (uniform); skewed data → α=3.536, β=3.264.
+
+### `stats::fit_lognormal` — lognormal fitting
+
+| Function | Signature |
+|---|---|
+| `fit_lognormal` | `pub fn fit_lognormal(x: &[f64; 256], n: i32) -> LogNormalFit with Mut, Div, Panic` |
+
+Fits a normal to the logs (sample moments): `μ̂=mean(ln x)`, `σ̂=sd(ln x)`, with
+the implied `median=e^{μ̂}` and `mean=e^{μ̂+σ̂²/2}`. Natural for right-skewed
+positive data (concentrations, PK exposures). Validated: data e⁰…e³ → μ=1.5,
+σ=1.291, median=4.482.
+
+### `stats::corr_ci` — Fisher-z correlation CI & test
+
+| Function | Signature |
+|---|---|
+| `corr_ci` | `pub fn corr_ci(r: f64, n: i32, conf: f64) -> CorrCIResult with Mut, Div, Panic` |
+
+Turns a Pearson r into a confidence interval and a significance test via the
+Fisher z-transform: `z=atanh(r)`, `SE=1/√(n−3)`, `CI=tanh(z±z_c·SE)`, plus the
+exact `t=r√(n−2)/√(1−r²)` test of ρ=0. Composes with `stats::correlation`.
+Validated: r=0.8, n=20 → z=1.0986, 95% CI [0.5534, 0.9177], t=5.657.
+
+### `stats::point_biserial` — point-biserial correlation
+
+| Function | Signature |
+|---|---|
+| `point_biserial` | `pub fn point_biserial(x: &[f64; 256], y: &[f64; 256], n: i32) -> PointBiserialResult with Mut, Div, Panic` |
+
+The correlation between a continuous variable and a 0/1 dichotomy (the effect-
+size companion to the two-sample t-test), with its `t(n−2)` test. Validated:
+{1,2,3,4} vs {0,0,1,1} → r=0.8944, t=2.828; equal group means → r=0.
+
+### `stats::partial_corr` — first-order partial correlation
+
+| Function | Signature |
+|---|---|
+| `partial_corr` | `pub fn partial_corr(x: &[f64; 256], y: &[f64; 256], z: &[f64; 256], n: i32) -> PartialResult with Mut, Div, Panic` |
+
+The correlation of x and y after removing the linear effect of z (confounding
+control): `r_xy·z=(r_xy−r_xz·r_yz)/√((1−r_xz²)(1−r_yz²))` with a `t(n−3)` test.
+Validated: r_xy=0 but r_xz=0.6, r_yz=0.8 → partial=−1; z uncorrelated with both
+→ partial=r_xy.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -952,6 +1046,15 @@ use stats::somers_d::{SomersResult, somers_d}
 use stats::bartlett::{BartlettResult, bartlett}
 use stats::levene::{LeveneResult, levene}
 use stats::var_ftest::{VarFResult, var_ftest}
+use stats::mann_whitney::{MannWhitneyResult, mann_whitney}
+use stats::sign_test::{SignResult, sign_test, sign_test_median}
+use stats::mood_median::{MoodResult, mood_median}
+use stats::fit_gamma::{GammaFit, fit_gamma}
+use stats::fit_beta::{BetaFit, fit_beta}
+use stats::fit_lognormal::{LogNormalFit, fit_lognormal}
+use stats::corr_ci::{CorrCIResult, corr_ci}
+use stats::point_biserial::{PointBiserialResult, point_biserial}
+use stats::partial_corr::{PartialResult, partial_corr}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

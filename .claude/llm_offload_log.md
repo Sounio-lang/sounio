@@ -2726,6 +2726,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.
 
+## 2026-07-14 — math-review: data::csv fixed-point + GUM row (Trilha A, Data I/O)
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Grok 4.3: fixed-point digit extraction, f64 round-half-up scaling, GUM u_c/U95 reproduction = OK; one exact-*.5 f64 tie TIGHTENABLE addressed with a caveat + tie-free decimals. (Z.AI empty; xai + independent awk recompute used.)
+
+## 2026-07-14 — math-review: GUM coverage factor (finite dof) for the f64-cast dispatch
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Both OK: coverage factor = Student-t quantile (not fixed 1.96); t-table values; Welch-Satterthwaite worked example (nu_eff≈4.17). Z.AI TIGHTENABLE: U95 ≈ 0.571 (t(4.173)=2.743 × 0.20817). Confirms MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST science.
+
 ## 2026-07-14 — math-review: signal::fft vertical
 - Files: `stdlib/signal/fft.sio` (pub fields + note), `tests/stdlib/signal/test_fft_stdlib.sio`, `examples/signal/spectrum_report.sio`.
 - Provider: xAI/Grok 4.3 = **PASS** (all 4). Confirmed DC→|X|[0]=4/rest 0; impulse→flat 1; IDFT(DFT(x))=x (1/N inverse); real cosine cos(2πn/8)→|X[1]|=|X[7]|=4, other bins exactly 0 (residual at 3,5 is fft_cos input precision, not FFT error).
@@ -2758,6 +2766,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - fleiss_kappa = **PASS**: Pᵢ, P̄, pⱼ, P̄ₑ, κ all match Fleiss (1971); three test cases (κ=-0.2, κ=1, three-category) correct. Note: significance-test SE deliberately omitted (fiddly Fleiss variance) — point estimate + components only.
 - Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
+
+## 2026-07-14 — math-review: epistemic trust-map criteria
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2). Both OK on all 4 claims.
+- Cov(indep)=0, p-box gap/midpoint, u_c=0.290402, k95=1.96-wrong-for-finite-nu. Z.AI caveat: exact-0 tolerance valid only for ANALYTIC covariance (correlation::covariance is analytic/shared-source, so appropriate) — noted in EPISTEMIC_TRUST_MAP.
 
 ## 2026-07-14 — math-review: special::erf run-proof
 - Files: `tests/stdlib/special/test_erf_stdlib.sio`, `examples/special/erf_report.sio` (no source edited).
@@ -2809,3 +2821,27 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - var_ftest = **PASS**: F=s1²/s2², two-sided p=2·min(cdf,1−cdf), F-CDF via I_x(d1/2,d2/2); F(4,4) at 0.25 → p=0.208 exact. Reviewer flagged the inline exp/ln/betacf helpers as bounded-precision without proven error bounds at extreme args — a general property of every inline special function in the suite; reviewer confirms "all downstream statistical claims remain valid." Not a defect; sufficient for the tested tolerances.
 - Theme: homogeneity-of-variance / homoscedasticity tests — completes the parametric-assumption-checking trio (normality, independence, now equal variance). All scalar/small-array, #852-safe. Suite runner: 61 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-orKL2v/`, `/tmp/llm-offload-2oDw1A/`, `/tmp/llm-offload-5aKJEh/`.
+
+## 2026-07-14 — math-review: stats::mann_whitney, stats::sign_test, stats::mood_median
+- Files (all new): `stdlib/stats/mann_whitney.sio` (two-sample rank-sum U test with tie-corrected normal approx), `stdlib/stats/sign_test.sio` (paired & one-sample sign test, exact binomial), `stdlib/stats/mood_median.sio` (k-sample median test, χ² on 2×k table). Provider: xAI/Grok 4.3.
+- mann_whitney = **PASS**: μ_U=n₁n₂/2, tie-corrected σ²_U=(n₁n₂/12)[(N+1)−Σ(t³−t)/(N(N−1))], z, two-sided p all match; mid-rank less/eq counting correct; separated case z=−1.964, p=0.0495 verified.
+- sign_test = **PASS**: Bin(m,½) exact two-sided p via forward binomial recurrence, zeros dropped; 46/512=0.1797 and 5/16=0.625 verified.
+- mood_median = **PASS**: 2×k Pearson χ², df=k−1, degenerate-split guard; median 5.5/χ²=10 verified.
+- Theme: non-parametric location tests — fills the standalone rank-sum / sign / median-test gap beside wilcoxon (paired) and kruskal_wallis (k-sample). All deterministic/derivable, #852-safe. Suite runner: 64 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-ChPzJD/`, `/tmp/llm-offload-sVEzvh/`, `/tmp/llm-offload-nZbhUO/`.
+
+## 2026-07-15 — math-review: stats::fit_gamma, stats::fit_beta, stats::fit_lognormal
+- Files (all new): `stdlib/stats/fit_gamma.sio` (gamma MoM: shape=mean²/var, scale=var/mean), `stdlib/stats/fit_beta.sio` (beta MoM: α=m·c, β=(1−m)·c, c=m(1−m)/v−1), `stdlib/stats/fit_lognormal.sio` (normal fit to logs → μ, σ, median, mean). Provider: xAI/Grok 4.3.
+- fit_gamma = **PASS**: moment inversion exact; {2,2,6,6}→shape 3, scale 1.333, rate 0.75 verified.
+- fit_beta = **PASS**: all three arithmetic cases (α=β=1 uniform; α=2.625; α=3.536/β=3.264) exact; invalid-variance guard correct.
+- fit_lognormal = **PASS after fix**: reviewer flagged the docstring claim "exact MLE" as WRONG (code uses unbiased ÷(n−1), MLE uses ÷n) — corrected the docstring to "sample-moment fit (consistent with fit_gamma/fit_beta); strict MLE divides by n"; the math (μ̂, median=e^μ̂, mean=e^{μ̂+σ̂²/2}) is correct. Also calibrated the fitted-mean tolerance to 3e-3: exp amplifies the inline-ln error in var_y (d(mean)/d(var)≈mean/2), giving ~1.5e-3 absolute error — the reviewer's 3e-6 estimate assumed exact arithmetic.
+- Theme: distribution parameter fitting (method of moments) — pairs with densities/weibull_negbin. All deterministic/derivable, #852-safe. Suite runner: 67 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Sub7Nk/`, `/tmp/llm-offload-t2Rz1k/`, `/tmp/llm-offload-tfPQe1/`.
+
+## 2026-07-15 — math-review: stats::corr_ci, stats::point_biserial, stats::partial_corr
+- Files (all new): `stdlib/stats/corr_ci.sio` (Fisher-z CI + ρ=0 t-test from r,n), `stdlib/stats/point_biserial.sio` (continuous-vs-binary correlation + t-test), `stdlib/stats/partial_corr.sio` (first-order partial correlation r_xy·z + t-test). Provider: xAI/Grok 4.3.
+- corr_ci = **PASS**: z=atanh(r), CI=tanh(z±z_c/√(n−3)), t=r√(n−2)/√(1−r²), t-tail via I_x(ν/2,½); r=0.8/n=20 → CI [0.5534,0.9177], t=5.657 verified.
+- point_biserial = **PASS**: Pearson-equivalent r_pb + t(n−2) test; {1,2,3,4}vs{0,0,1,1}→r=0.8944, t=2.828 verified.
+- partial_corr = **PASS**: r_xy·z formula + t(n−3) test; discriminating case r_xy=0 but partial=−1 (r_xz=0.6,r_yz=0.8) verified; uncorrelated-z → partial=r_xy.
+- Theme: correlation-inference toolkit — the Fisher-z CI, point-biserial, and partial correlation beside the existing Pearson/Spearman module. partial_corr makes 3 nested pc_pearson calls (shared-ref reads, scalar return) — #852-safe. Suite runner: 70 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-1ZtLOb/`, `/tmp/llm-offload-rTCcaN/`, `/tmp/llm-offload-CqFiN9/`.
