@@ -124,6 +124,9 @@ MODULES=(
   stdlib/stats/anderson_darling.sio
   stdlib/stats/cramer_von_mises.sio
   stdlib/stats/bowker.sio
+  stdlib/stats/zscore.sio
+  stdlib/stats/normalize.sio
+  stdlib/stats/rank_transform.sio
 )
 
 fail=0

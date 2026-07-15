@@ -2983,3 +2983,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - bowker = **PASS**: χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ), df=k(k−1)/2, k=2 → McNemar; 3×3→χ²=4.667, reduction→4.545 verified.
 - Theme: EDF normality tests (A-D, CvM — more tail-sensitive than the existing KS) + Bowker matched-table symmetry (beyond 2×2 McNemar). AD/CvM reference constants cross-checked with Python (verification, not retrofit — the formulas are explicit). All derivable, #852-safe. Suite runner: 115 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-rzwVOv/`, `/tmp/llm-offload-rJWBlD/`, `/tmp/llm-offload-iLeZZI/`.
+
+## 2026-07-15 — math-review: stats::zscore, stats::normalize, stats::rank_transform
+- Files (all new): `stdlib/stats/zscore.sio` (standardization + percentile rank), `stdlib/stats/normalize.sio` (min-max & robust scaling), `stdlib/stats/rank_transform.sio` (mid-rank transform + tie correction). Provider: xAI/Grok 4.3. All use the out-array `&![f64;256]` fill pattern.
+- zscore = **PASS**: z=(x−mean)/s (÷(n−1) sd), Σz=0 property, mid-rank percentile (#<+½#=)/n·100; {2,4,4,4,5,5,7,9}→z₀=−1.403, prank(5)=62.5 verified.
+- normalize = **PASS**: min-max (x−min)/(max−min), robust (x−median)/IQR (type-7 quantiles); {1..5}→[0..1] and median-centred verified.
+- rank_transform = **PASS**: mid-rank less+(equal+1)/2, tie-group detection (first && equal>1) with Σ(t³−t); {3,1,4,1,5}→{3,1.5,4,1.5,5}, correction 6 verified.
+- Theme: data-transformation primitives — foundational preprocessing (feature scaling, rank transform) completing the descriptive layer. All derivable, #852-safe. Suite runner: 118 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-BIlCZ5/`, `/tmp/llm-offload-7CoTZR/`, `/tmp/llm-offload-Y2h33J/`.
