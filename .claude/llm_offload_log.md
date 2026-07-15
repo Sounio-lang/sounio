@@ -2733,3 +2733,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Browser evidence: desktop and 390 px screenshots confirmed the selected fourth tab, loaded 480x300 PNG, receipt visibility, responsive inspector, and zero horizontal overflow.
 - Validation: `npm run check:quality` verified four deterministic receipts and gates, built 904 pages, validated 28,454 internal links, and reported zero Astro errors, warnings, or hints. The historical Madaros cube-render `SIGSEGV` remains an explicit fallback after the verified receipts pass.
 - Raw review directory: `/tmp/llm-offload-Fo6YZf/`.
+
+## 2026-07-15 - Domain Evidence Docket review
+- File: `website/src/components/home/FlagshipApplications.astro`.
+- Task: replace the eight-card promotional application catalog with four manifest-backed domain evidence rows.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR finding. It accepted the renderer, molecular, epistemic, and causal claim boundaries together with the manifest-backed custody fields.
+- Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px screenshots confirmed four loaded natural-dimension images, responsive evidence rows, and zero horizontal overflow.
+- Raw review directory: `/tmp/llm-offload-JO1LeE/`.
