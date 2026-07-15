@@ -100,6 +100,9 @@ MODULES=(
   stdlib/stats/process_capability.sio
   stdlib/stats/control_chart.sio
   stdlib/stats/cusum.sio
+  stdlib/stats/effect_convert.sio
+  stdlib/stats/effect_from_test.sio
+  stdlib/stats/cles.sio
 )
 
 fail=0

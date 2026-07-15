@@ -2918,3 +2918,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - cusum = **PASS**: tabular Page/Montgomery C⁺/C⁻ recurrences; upward-drift C⁺ sequence 0,0,0.5,2,4.5,8 signalling at index 4 verified step-by-step.
 - Theme: statistical process control (SPC) — the lab-QC / manufacturing quality toolkit (relevant to biomaterials production). All derivable, #852-safe. Suite runner: 91 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-M8a5V7/`, `/tmp/llm-offload-Di0Efu/`, `/tmp/llm-offload-HR4OMO/`.
+
+## 2026-07-15 — math-review: stats::effect_convert, stats::effect_from_test, stats::cles
+- Files (all new): `stdlib/stats/effect_convert.sio` (d↔r, d↔ln OR / OR, Hedges g), `stdlib/stats/effect_from_test.sio` (r/d from t, η²/ω² from F, d from means), `stdlib/stats/cles.sio` (common-language effect size Φ(d/√2) + non-parametric pair proportion). Provider: xAI/Grok 4.3.
+- effect_convert = **PASS**: r=d/√(d²+4), ln OR=d·π/√3, Hedges J=1−3/(4df−1) all correct; d=0.5→r=0.2425, OR=2.4766, g=0.4615; round-trips involutive. Note: test constant OR=2.476381 was a hand-exp error (correct 2.476632, cross-checked vs Python) — caught by the failing assertion, fixed.
+- effect_from_test = **PASS**: r=t/√(t²+df), d=t√(1/n₁+1/n₂), η²=df₁F/(df₁F+df₂), ω²=df₁(F−1)/(df₁F+df₂+1), pooled-sd d all match.
+- cles = **PASS**: Φ(d/√2) from X₁−X₂~N(dσ,2σ²), non-parametric pair count (ties ½) = ROC AUC; d=1→0.7603, interleaved→1/3 verified.
+- Theme: effect-size conversion & derivation — the meta-analysis/reporting glue complementing effect_size (which computes from data). All derivable, #852-safe. Suite runner: 94 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-mWCVbQ/`, `/tmp/llm-offload-pTAF9f/`, `/tmp/llm-offload-rYFbnF/`.
