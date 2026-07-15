@@ -15,7 +15,8 @@ fourteen families:
   kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
   the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
   the data-transformation primitives (z-scores, min-max & robust scaling, rank
-  transform).
+  transform), and the weighted / grouped estimators (weighted mean & variance,
+  grouped-frequency statistics, weighted quantiles).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
   Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
   (Wald-Wolfowitz runs, Durbin-Watson,
@@ -1565,6 +1566,37 @@ every rank-based method, plus the tie-correction `Σ(tᵢ³−tᵢ)`. Validated:
 {3,1,4,1,5} → ranks {3,1.5,4,1.5,5}, one tie group, correction 6; distinct data →
 1..n.
 
+### `stats::weighted_stats` — weighted mean & variance
+
+| Function | Signature |
+|---|---|
+| `weighted_stats` | `pub fn weighted_stats(x: &[f64; 256], w: &[f64; 256], n: i32) -> WeightedResult with Mut, Div, Panic` |
+
+The mean and variance for weighted observations (survey weights, precisions,
+counts): `x̄_w=Σwx/Σw`, population and reliability-weight unbiased variances
+(Kish `V₁−V₂/V₁` correction). Validated: x={1,2,3}, w={1,2,3} → mean 2.333,
+var_pop 0.5556, var_unbiased 0.9091.
+
+### `stats::grouped_stats` — grouped-frequency statistics
+
+| Function | Signature |
+|---|---|
+| `grouped_stats` | `pub fn grouped_stats(midpoint: &[f64; 64], freq: &[f64; 64], k: i32) -> GroupedResult with Mut, Div, Panic` |
+
+Statistics from a frequency table (bin midpoints + counts): mean, population &
+sample variance, and the modal class. Validated: midpoints {5,15,25}, freqs
+{10,20,10} → mean 15, var_pop 50, modal class 15, sample var 51.28.
+
+### `stats::weighted_quantile` — weighted quantiles
+
+| Function | Signature |
+|---|---|
+| `weighted_quantile` / `weighted_median` | `pub fn weighted_quantile(x: &[f64; 256], w: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic` |
+
+The p-quantile of weighted data (smallest value carrying ≥p of the total weight),
+via a sort-free cumulative scan. Validated: equal weights {1,2,3} → median 2;
+{1,2,3,4} w={1,1,1,5} → weighted median 4; quartiles of {1,2,3,4}.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1687,6 +1719,9 @@ use stats::bowker::{BowkerResult, bowker}
 use stats::zscore::{ZResult, zscore, percentile_rank}
 use stats::normalize::{MinMaxResult, RobustResult, minmax, robust_scale}
 use stats::rank_transform::{RankResult, rank_transform}
+use stats::weighted_stats::{WeightedResult, weighted_stats}
+use stats::grouped_stats::{GroupedResult, grouped_stats}
+use stats::weighted_quantile::{weighted_quantile, weighted_median}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

@@ -127,6 +127,9 @@ MODULES=(
   stdlib/stats/zscore.sio
   stdlib/stats/normalize.sio
   stdlib/stats/rank_transform.sio
+  stdlib/stats/weighted_stats.sio
+  stdlib/stats/grouped_stats.sio
+  stdlib/stats/weighted_quantile.sio
 )
 
 fail=0
