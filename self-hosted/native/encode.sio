@@ -22,7 +22,38 @@ pub struct CodeBuffer {
 // to the same global at the shared offset, so no persist/call-site changes are
 // needed. Accessed INLINE only — never via a returning helper (miscompiles under
 // the seed). NOT used by the aarch64/suite scratch-buffer paths (those keep .bytes).
-pub var NC_BIG_CODE: [i8; 2097152] = [0; 2097152]
+// The first measured whole-SOIR compile required 5,355,994 bytes. Keep the
+// bootstrap-safe BSS representation and select the next established tier (8 MiB),
+// leaving 3,032,614 bytes of measured headroom without growing NativeCompiler.
+pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
+// Capacity accounting is scalar global state because both by-value and by-ref
+// emitters append to NC_BIG_CODE. It records demand even after storage is full,
+// while code.len remains the number of bytes actually materialized.
+pub var NC_CODE_REQUIRED_BYTES: i64 = 0
+pub var NC_CODE_DROPPED_BYTES: i64 = 0
+pub var NC_CODE_OVERFLOWED: bool = false
+
+pub fn nc_code_capacity_bytes() -> i64 { 8388608 }
+
+pub fn nc_code_offset_is_writable(offset: i64) -> bool {
+    offset >= 0 && offset < nc_code_capacity_bytes()
+}
+
+pub fn nc_code_emit_offset_status(offset: i64) -> i32 {
+    if nc_code_offset_is_writable(offset) { return 0 }
+    19
+}
+
+pub fn nc_code_capacity_status() -> i32 {
+    if NC_CODE_OVERFLOWED { return 19 }
+    0
+}
+
+pub fn nc_code_capacity_reset() with Mut {
+    NC_CODE_REQUIRED_BYTES = 0
+    NC_CODE_DROPPED_BYTES = 0
+    NC_CODE_OVERFLOWED = false
+}
 
 pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
@@ -71,21 +102,25 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
-    if out.len >= 0 {
-        if out.len < 2097152 {
-            NC_BIG_CODE[out.len as usize] = low8(b) as i8
-            out.len = out.len + 1
-        }
+    NC_CODE_REQUIRED_BYTES = NC_CODE_REQUIRED_BYTES + 1
+    if nc_code_offset_is_writable(out.len) {
+        NC_BIG_CODE[out.len as usize] = low8(b) as i8
+        out.len = out.len + 1
+    } else {
+        NC_CODE_DROPPED_BYTES = NC_CODE_DROPPED_BYTES + 1
+        NC_CODE_OVERFLOWED = true
     }
     out
 }
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
-    if (*buf).len >= 0 {
-        if (*buf).len < 2097152 {
-            NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
-            (*buf).len = (*buf).len + 1
-        }
+    NC_CODE_REQUIRED_BYTES = NC_CODE_REQUIRED_BYTES + 1
+    if nc_code_offset_is_writable((*buf).len) {
+        NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
+        (*buf).len = (*buf).len + 1
+    } else {
+        NC_CODE_DROPPED_BYTES = NC_CODE_DROPPED_BYTES + 1
+        NC_CODE_OVERFLOWED = true
     }
 }
 
