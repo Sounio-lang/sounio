@@ -4825,22 +4825,19 @@ fn module_frontend_function_defining_module(
     IR_DEFINING_MODULE_UNKNOWN
 }
 
-fn module_frontend_binding_already_present(
+fn module_frontend_binding_name_index(
     names: &![Name; 2048],
-    module_ids: &![i64; 2048],
     count: i64,
-    defining_module_id: i64,
     name: Name
-) -> bool with Mut, Panic, Div {
+) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < count {
-        if (*module_ids)[i as usize] == defining_module_id &&
-           ir_name_eq((*names)[i as usize], name) {
-            return true
+        if ir_name_eq((*names)[i as usize], name) {
+            return i
         }
         i = i + 1
     }
-    false
+    -1
 }
 
 fn module_frontend_collect_external_bindings(
@@ -4859,24 +4856,43 @@ fn module_frontend_collect_external_bindings(
                     Some(list) => {
                         let item = (*list).head
                         if item.kind == ItemKind::ItemFn {
-                            let owner = module_frontend_function_defining_module(
+                            var owner = module_frontend_function_defining_module(
                                 programs,
                                 file_paths,
                                 program_count,
                                 self_index,
                                 item.name
                             )
-                            if owner == module_index &&
-                               !module_frontend_binding_already_present(
-                                   &! MF_EXTERN_BINDING_NAMES,
-                                   &! MF_EXTERN_BINDING_MODULE_IDS,
-                                   count,
-                                   owner,
-                                   item.name
-                               ) {
-                                MF_EXTERN_BINDING_NAMES[count as usize] = item.name
-                                MF_EXTERN_BINDING_MODULE_IDS[count as usize] = owner
-                                count = count + 1
+                            // The loader-resolved import route plus the ItemFn we
+                            // are currently visiting is already an exact DefId.
+                            // Do not re-derive it through another large AST scan.
+                            if (owner == IR_DEFINING_MODULE_UNKNOWN ||
+                                owner == IR_DEFINING_MODULE_AMBIGUOUS ||
+                                owner == module_index) &&
+                               module_frontend_items_explicitly_import_from(
+                                &(*programs)[self_index as usize].items,
+                                (*file_paths)[self_index as usize],
+                                (*file_paths)[module_index as usize],
+                                item.name
+                            ) {
+                                owner = module_index
+                            }
+                            if owner == module_index {
+                                let prior = module_frontend_binding_name_index(
+                                    &! MF_EXTERN_BINDING_NAMES,
+                                    count,
+                                    item.name
+                                )
+                                if prior < 0 {
+                                    MF_EXTERN_BINDING_NAMES[count as usize] = item.name
+                                    MF_EXTERN_BINDING_MODULE_IDS[count as usize] = owner
+                                    count = count + 1
+                                } else if MF_EXTERN_BINDING_MODULE_IDS[prior as usize] != owner {
+                                    // Two explicit routes with the same symbol are
+                                    // not an identity. Keep both from preseeding so
+                                    // downstream provenance validation fails closed.
+                                    MF_EXTERN_BINDING_MODULE_IDS[prior as usize] = IR_DEFINING_MODULE_AMBIGUOUS
+                                }
                             }
                         }
                         current = &(*list).tail
