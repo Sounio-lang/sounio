@@ -2646,3 +2646,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Deferred public claim: `viz_workbench_roundtrip.sio` was not exposed because the current default Madaros run ended with `SIGSEGV` (exit 139) before producing its pass marker.
 - Raw review directory: `/tmp/llm-offload-4YPyPj/`.
+
+## 2026-07-15 — M3 prose/design review: effect boundary instrument
+- Files: `website/src/components/home/EffectBoundaryInstrument.tsx`, `EffectBoundaryInstrument.css`, and `website/src/pages/index.astro`.
+- Task: review the public homepage instrument showing one pure callee, one covered IO call, and one missing-IO refusal across static function boundaries.
+- Executable evidence: `bash scripts/ci/serious_language_conformance_gate.sh` passed all 16 current cases on the default compiler path. The focused positive fixture admits caller `{IO, Mut, Div}` to callee `{IO}` with exit 0 and `effect superset: PASS`; the negative fixture refuses caller `{}` to callee `{IO}` with exit 1 and `E035 ... (missing: IO)`.
+- External-facing review: xAI/Grok 4.3 returned `Ship` with no concrete blockers. It confirmed that the displayed receipts match the supplied evidence, the accessibility pattern is consistent with the current site, and the boundary does not overstate the canonical matrix.
+- Claim boundary: these two fixtures demonstrate static effect-row calling and one missing-IO diagnostic. They do not prove custom handlers, effect polymorphism, inference completeness, runtime isolation, or soundness of the full effect system; the canonical matrix remains `partially_executable`.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-effects-covered-desktop.png`, `/tmp/sounio-effects-refused-desktop.png`, `/tmp/sounio-effects-mobile-covered.png`, `/tmp/sounio-effects-mobile-refused.png`, and `/tmp/sounio-effects-320.png`; all three controls expose `aria-pressed`, the literal refusal remains readable, and desktop/mobile/320 px measured zero overflow.
+- Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directory: `/tmp/llm-offload-xDcZZC/`.
