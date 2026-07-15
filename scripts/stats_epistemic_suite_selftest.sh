@@ -82,6 +82,12 @@ MODULES=(
   stdlib/stats/bayes_ab.sio
   stdlib/stats/beta_hdi.sio
   stdlib/stats/bic.sio
+  stdlib/stats/mahalanobis.sio
+  stdlib/stats/hotelling_t2.sio
+  stdlib/stats/pca2.sio
+  stdlib/stats/jackknife.sio
+  stdlib/stats/rng.sio
+  stdlib/stats/bootstrap.sio
 )
 
 fail=0
