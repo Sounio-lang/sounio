@@ -11,10 +11,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-REBRACKETING-AUTHORITY`
 
-Status: hypothesis. The scalar protocol is executable locally and the compiler
-source contains a focused internal smoke that calls the production probe. The
-checked-in compiler predates that mode, so fresh-source execution remains
-blocked pending remote build evidence.
+Status: hypothesis. The scalar protocol is executable locally and a compiler
+built from this source has executed the focused production probe under the
+strict hash-bound gate. Default native-v2 optimization reachability remains
+unproven and outside the current claim.
 
 ## Founder Intent
 
@@ -138,6 +138,17 @@ tracked worktree. Its receipt records both compiler and source hashes. It must
 be run in the Sounio Compiler Foundry or the approved Slurm path, not as a full
 stress build in `/workspace/sounio`.
 
+PR #1001 CI run `29436451446` built source SHA
+`7e256c64177f7a66e92b2d065e81e707344ec0db`. Artifact `8351758740`
+contained a 98,646,693-byte Madaros ELF with SHA-256
+`9c46090f624363fee3fbc28c7c8d751018ace3c5ed87ce30185754821c9ecbfc`.
+The strict gate returned:
+
+```text
+compiler_state=executable compiler_path=internal-smoke
+source_sha=7e256c64177f7a66e92b2d065e81e707344ec0db merge_ready=1
+```
+
 ## D7 Boundary
 
 The psychiatric-regime D7 work motivates occurrence-bound authority and the
@@ -193,11 +204,11 @@ Only after the strict gate passes may this lane claim:
 - A claim that Add/Mul legacy reassociation now satisfies this authority model.
 - Merge readiness while the strict gate reports a blocked production smoke.
 
-## Current Blocker
+## Closed Compiler-Smoke Blocker
 
 ```text
 Blocker-ID: BLK-20260715-REBRACKET-CURRENT-SOURCE-SMOKE
-Status: review-ready
+Status: closed
 Severity: B3
 Class: evidence-gap
 Owner: Codex rebracketing-authority coordination lane
@@ -207,16 +218,16 @@ Branch: codex/rebracketing-authority-binding-20260715
 Files-Owned: self-hosted/compiler/main.sio; scripts/ci/exact_bitwise_rebracket_authority_gate.sh; docs/internal/concepts/rebracketing-authority.md
 Files-Read-Only: self-hosted/check/*; self-hosted/ir/ir.sio; self-hosted/ir/egraph.sio; blocked issue #854 and SOIR stacks
 Do-Not-Touch: contextual visibility semantics; IrFunction/SOIR capacity stack; legacy Add/Mul rewrite
-Repro: SOUNIO_REBRACKET_REQUIRE_COMPILER=1 bash scripts/ci/exact_bitwise_rebracket_authority_gate.sh
-Observed: the checked-in compiler predates `--rebracket-authority-smoke`; the diagnostic modular runner separately exposes historical cross-module privacy and IrFunction initializer failures
+Repro: SOUNIO_REBRACKET_COMPILER_BIN=<downloaded-artifact>/madaros SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256=9c46090f624363fee3fbc28c7c8d751018ace3c5ed87ce30185754821c9ecbfc SOUNIO_REBRACKET_REQUIRE_COMPILER=1 bash scripts/ci/exact_bitwise_rebracket_authority_gate.sh
+Observed: the fresh compiler advertised the internal mode and emitted the exact 14-case receipt with merge_ready=1; the checked-in prebuilt still classifies separately as blocked-prebuilt-no-smoke
 Expected: a compiler built from this branch advertises the focused mode and prints its exact PASS receipt
 Acceptance-Gate: SOUNIO_REBRACKET_COMPILER_BIN=<current-source-foundry-madaros> SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256=<artifact-sha256> SOUNIO_REBRACKET_REQUIRE_COMPILER=1 bash scripts/ci/exact_bitwise_rebracket_authority_gate.sh
-Evidence-Level: E3
-Evidence: local strict gate fails closed on the checked-in prebuilt; remote fresh-source result pending
+Evidence-Level: E4
+Evidence: PR #1001 CI run 29436451446, job 87424483977, artifact 8351758740, compiler SHA-256 9c46090f624363fee3fbc28c7c8d751018ace3c5ed87ce30185754821c9ecbfc
 Fallback-Path: none
 Legacy-Kept: yes; legacy Add/Mul rewriting remains explicitly outside this authority claim
 LLM-Offload: logged:.claude/llm_offload_log.md
-Next-Action: build the exact branch SHA remotely, run the strict internal-smoke gate, then separately prove default native-v2 optimizer reachability
+Next-Action: separately transport optimization intent through the default native-v2 frontend and prove guarded Block L reachability without broadening the authority claim
 ```
 
 ## Semantic Lane Declaration
@@ -230,7 +241,7 @@ Transformation: route one ordered i64 AND/OR/XOR constant-chain rewrite through 
 Types-Changed: private optimizer occurrence, authority, audit, and public compact probe receipt
 Effects-Changed: none
 IR-Changed: no new opcode or field; existing Block L mutation is gated
-Claims-Introduced: focused exact-bitwise transaction only, contingent on the strict gate
+Claims-Introduced: focused exact-bitwise transaction exercised by the strict current-source internal smoke
 Claims-Forbidden: formal proof, float/GUM/clinical authority, D7 receipt consumption, global coverage, native-v2 reachability, cryptographic sealing
 Assumptions: the admitted IrFunction slice is integer-only and straight-line and uses SSA-like register definitions within the inspected window; c2 has one observable use; every instruction uses the admitted canonical scalar operand encoding; calls, control flow, phi lists, explicit float IR, and packed or implicit operand forms cause conservative refusal
 Write-Set: self-hosted/ir/opt_cleanup.sio; self-hosted/ir/rebracket_authority_self_test_runner.sio; self-hosted/compiler/main.sio; tests/compiler/rebracket_authority_*; scripts/ci/exact_bitwise_rebracket_authority_gate.sh; docs/internal/concepts/rebracketing-authority.md; docs/internal/concepts/registry.tsv
@@ -239,7 +250,7 @@ Positive-Witness: scalar kernel AND/OR/XOR masks plus production probe applicati
 Negative-Witness: scalar refusal matrix; exact E175/E176 fixtures; production refusal mask 2047 including call-bearing, packed-register, uncertified control-flow, and explicit-float IR
 Acceptance-Gate: strict exact_bitwise_rebracket_authority_gate.sh with a current-source Foundry compiler
 Integration-Target: current-source Madaros optimizer followed by default native-v2 optimizer reachability
-Authoritative-Only-If: strict internal production smoke executes from the recorded clean source SHA and compiler hash, no fallback is used, Foundry build is green, and the default compiler path is shown separately to reach the guarded mutation
+Authoritative-Only-If: the narrow internal-transaction claim uses the recorded clean source SHA and compiler hash with no fallback; any default-path reachability claim additionally requires its own executable gate
 ```
 
 ## Integration Receipt
@@ -251,7 +262,7 @@ Concept-Status-After: hypothesis
 Distinctions-Added: observed receipt != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; local oracle != production compiler execution
 Distinctions-Preserved: parenthesization != formatting; compile success != runtime parity; formal model != empirical or clinical claim
 Distinctions-Erased: none
-Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke blocker classifier
+Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 current-source build and strict hash-bound internal smoke
 Fallback-Path: none
 Legacy-Kept: legacy Add/Mul Block L path retained outside the new claim
 Conflicting-Lanes: none; issue #854 and IrFunction/SOIR capacity stacks remain read-only and are no longer prerequisites for the focused smoke
