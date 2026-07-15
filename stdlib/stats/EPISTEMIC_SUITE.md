@@ -36,7 +36,9 @@ fourteen families:
   a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
   NNT, and person-time incidence rates.
-- **Bayesian** — conjugate updates with credible sets.
+- **Bayesian & model selection** — conjugate updates, the Beta-posterior
+  credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
+  Schwarz Bayes-factor approximation.
 
 Every routine is written in Sounio with no FFI, no sampling dependency and no
 external solver: the analytic core rests only on the special-function modules
@@ -1015,6 +1017,41 @@ control): `r_xy·z=(r_xy−r_xz·r_yz)/√((1−r_xz²)(1−r_yz²))` with a `t(
 Validated: r_xy=0 but r_xz=0.6, r_yz=0.8 → partial=−1; z uncorrelated with both
 → partial=r_xy.
 
+### `stats::bayes_ab` — Bayesian A/B test
+
+| Function | Signature |
+|---|---|
+| `bayes_ab` | `pub fn bayes_ab(aA: f64, bA: f64, aB: f64, bB: f64) -> ABResult with Mut, Div, Panic` |
+
+The posterior probability that one rate exceeds another, for two conjugate Beta
+posteriors — the decision quantity a Bayesian A/B test reports instead of a
+p-value. Exact finite-sum (Miller). Validated: Beta(2,1) vs Beta(1,1) →
+P(pB>pA)=2/3; identical → 0.5; well-separated → >0.999.
+
+### `stats::beta_hdi` — Beta posterior credible interval
+
+| Function | Signature |
+|---|---|
+| `beta_hdi` | `pub fn beta_hdi(a: f64, b: f64, conf: f64) -> BetaPostResult with Mut, Div, Panic` |
+| `beta_tail_leq` | `pub fn beta_tail_leq(a: f64, b: f64, t: f64) -> f64 with Mut, Div, Panic` |
+
+An equal-tailed credible interval for a Beta(a,b) posterior (inverse incomplete
+beta by bisection), plus the tail probability `P(p≤t)=I_t(a,b)`, posterior mean
+and mode. Validated: Beta(1,1) → 95% interval [0.025, 0.975]; Beta(2,2) → mode
+0.5, `P(p≤0.8)=0.896`.
+
+### `stats::bic` — AIC / BIC model selection
+
+| Function | Signature |
+|---|---|
+| `aic` / `bic` | `pub fn aic(loglik: f64, k: i32) -> f64` · `bic(loglik, k, n) -> f64` |
+| `bic_compare` | `pub fn bic_compare(ll0: f64, k0: i32, ll1: f64, k1: i32, n: i32) -> BICResult with Mut, Div, Panic` |
+
+Information criteria `AIC=2k−2lnL`, `BIC=k·ln(n)−2lnL` and the Schwarz
+Bayes-factor approximation `ln BF₁₀≈(BIC₀−BIC₁)/2`. Validated: lnL −100/k2 vs
+−90/k3, n=50 → BIC 207.82 / 191.74, ln BF₁₀=8.044; equal fit + extra parameter →
+BIC penalty −ln(100).
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1089,6 +1126,9 @@ use stats::fit_lognormal::{LogNormalFit, fit_lognormal}
 use stats::corr_ci::{CorrCIResult, corr_ci}
 use stats::point_biserial::{PointBiserialResult, point_biserial}
 use stats::partial_corr::{PartialResult, partial_corr}
+use stats::bayes_ab::{ABResult, bayes_ab}
+use stats::beta_hdi::{BetaPostResult, beta_hdi, beta_tail_leq}
+use stats::bic::{BICResult, aic, bic, bic_compare}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
