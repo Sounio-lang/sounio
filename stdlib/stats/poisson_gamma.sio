@@ -1,0 +1,222 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/poisson_gamma.sio — Gamma-Poisson conjugate rate posterior
+//
+// Bayesian inference for a Poisson rate λ with a conjugate Gamma prior — the
+// count/rate analogue of the Beta-Binomial:
+//
+//   poisson_gamma(a0, b0, count, exposure, conf) -> RatePosterior
+//
+// Prior Gamma(a₀, b₀) (shape, rate) × Poisson likelihood over exposure T with
+// total count C gives the posterior
+//   Gamma(a₀ + C, b₀ + T),   mean = (a₀+C)/(b₀+T),   var = (a₀+C)/(b₀+T)²,
+// with an equal-tailed credible interval from the Gamma quantile (inverse of the
+// regularised lower incomplete gamma, by bisection).
+//
+// Pure Sounio: inline exp/ln, Lanczos log-gamma and incomplete gamma, inverted
+// by bisection. No external dependency, no nested data-array calls.
+//
+// References:
+//   Gelman et al., "Bayesian Data Analysis" 3e, §2.6.
+
+module stats::poisson_gamma
+
+fn pg_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / pg_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn pg_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn pg_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * pg_ln(tt) - tt + pg_ln(a)
+}
+
+// regularised lower incomplete gamma P(s,x)
+fn pg_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * pg_exp(0.0 - x + s * pg_ln(x) - pg_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = pg_exp(0.0 - x + s * pg_ln(x) - pg_lgamma(s)) * h
+    return 1.0 - q
+}
+
+// inverse of P(s, x) in x by bisection, for target in (0,1).
+fn pg_igamma_inv(s: f64, target: f64) -> f64 with Mut, Div, Panic {
+    if target <= 0.0 { return 0.0 }
+    // bracket: grow hi until P exceeds target
+    var lo = 0.0
+    var hi = s + 10.0
+    var guard = 0
+    while pg_igamma_p(s, hi) < target && guard < 100 { hi = hi * 2.0; guard = guard + 1 }
+    var mid = 0.5 * (lo + hi)
+    var it = 0
+    while it < 100 {
+        mid = 0.5 * (lo + hi)
+        if pg_igamma_p(s, mid) < target { lo = mid } else { hi = mid }
+        it = it + 1
+    }
+    return mid
+}
+
+pub struct RatePosterior {
+    pub mean: f64,       // posterior mean rate
+    pub variance: f64,   // posterior variance
+    pub lo: f64,         // credible interval lower
+    pub hi: f64,         // credible interval upper
+    pub a_post: f64,     // posterior shape
+    pub b_post: f64,     // posterior rate
+}
+
+/// Gamma-Poisson conjugate posterior for a rate.
+///
+/// Parâmetros: a0, b0 — Gamma prior shape & rate (>0); count — total events;
+///             exposure — total person-time; conf — credible level (e.g. 0.95).
+/// Retorno: RatePosterior (mean, variance, lo, hi, a_post, b_post).
+/// Referências: Gelman et al. §2.6.
+pub fn poisson_gamma(a0: f64, b0: f64, count: f64, exposure: f64, conf: f64) -> RatePosterior with Mut, Div, Panic {
+    let a = a0 + count
+    let b = b0 + exposure
+    if a <= 0.0 || b <= 0.0 {
+        return RatePosterior { mean: 0.0, variance: 0.0, lo: 0.0, hi: 0.0, a_post: a, b_post: b }
+    }
+    let mean = a / b
+    let variance = a / (b * b)
+    let alpha = 1.0 - conf
+    // credible interval: gamma(a, rate=b) quantile = igamma_inv(a, p)/b
+    let lo = pg_igamma_inv(a, alpha * 0.5) / b
+    let hi = pg_igamma_inv(a, 1.0 - alpha * 0.5) / b
+    return RatePosterior { mean: mean, variance: variance, lo: lo, hi: hi, a_post: a, b_post: b }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// prior Gamma(1,1), observe C=10 over T=5 -> posterior Gamma(11,6).
+// mean=11/6=1.833333; var=11/36=0.305556; CI brackets the mean.
+fn test_posterior() -> bool with IO, Mut, Div, Panic {
+    let r = poisson_gamma(1.0, 1.0, 10.0, 5.0, 0.95)
+    var ok = true
+    ok = check(1, approx(r.mean, 1.833333, 1.0e-5)) && ok
+    ok = check(2, approx(r.variance, 0.305556, 1.0e-5)) && ok
+    ok = check(3, approx(r.a_post, 11.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.b_post, 6.0, 1.0e-9)) && ok
+    ok = check(5, r.lo < 1.833333 && r.hi > 1.833333) && ok
+    return ok
+}
+
+// self-consistency: the CDF at the returned bounds hits the target probabilities.
+fn test_ci_consistency() -> bool with IO, Mut, Div, Panic {
+    let r = poisson_gamma(1.0, 1.0, 10.0, 5.0, 0.95)
+    // P(rate <= lo) should be 0.025; check via P(a, b·lo)
+    let plo = pg_igamma_p(r.a_post, r.b_post * r.lo)
+    let phi = pg_igamma_p(r.a_post, r.b_post * r.hi)
+    var ok = true
+    ok = check(10, approx(plo, 0.025, 1.0e-4)) && ok
+    ok = check(11, approx(phi, 0.975, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_posterior() && ok
+    ok = test_ci_consistency() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

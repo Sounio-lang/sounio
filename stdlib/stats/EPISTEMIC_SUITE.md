@@ -36,8 +36,9 @@ fourteen families:
   restricted mean survival time, the actuarial life table, the log-rank test and
   a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
-  NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio,
-  attributable risk / fractions, and directly / indirectly standardised rates.
+  NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio
+  with the Breslow-Day homogeneity test, attributable risk / fractions, and
+  directly / indirectly standardised rates.
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Time series** — simple and Holt (linear-trend) exponential smoothing and an
@@ -47,9 +48,10 @@ fourteen families:
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
   MINSTD generator (exact f64), the nonparametric bootstrap for the mean, the
   two-sample difference and correlation bootstraps, and a permutation test.
-- **Bayesian & model selection** — conjugate updates, the Beta-posterior
-  credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
-  Schwarz Bayes-factor approximation.
+- **Bayesian & model selection** — Beta-Binomial / Normal-Normal / Gamma-Poisson
+  / Dirichlet-Multinomial conjugate posteriors, the Beta-posterior credible
+  interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the Schwarz
+  Bayes-factor approximation.
 
 Every routine is written in Sounio with no FFI, no sampling dependency and no
 external solver: the analytic core rests only on the special-function modules
@@ -1329,6 +1331,41 @@ All six Shrout-Fleiss ICC forms — single- and average-measure ICC(1,1)/(2,1)/(
 published Shrout-Fleiss (1979) 6×4 example: ICC(1,1)=0.166, ICC(2,1)=0.290,
 ICC(3,1)=0.715.
 
+### `stats::poisson_gamma` — Gamma-Poisson rate posterior
+
+| Function | Signature |
+|---|---|
+| `poisson_gamma` | `pub fn poisson_gamma(a0: f64, b0: f64, count: f64, exposure: f64, conf: f64) -> RatePosterior with Mut, Div, Panic` |
+
+Bayesian inference for a Poisson rate with a conjugate Gamma prior (the
+count/rate analogue of Beta-Binomial): posterior `Gamma(a₀+C, b₀+T)`, mean,
+variance and a credible interval from the Gamma quantile (inverse incomplete
+gamma). Validated: Gamma(1,1) + 10 events over 5 → mean 1.833, var 0.3056, CI
+self-consistent (CDF at bounds = 0.025/0.975).
+
+### `stats::dirichlet_mult` — Dirichlet-Multinomial category posterior
+
+| Function | Signature |
+|---|---|
+| `dirichlet_mult` | `pub fn dirichlet_mult(alpha_prior: &[f64; 64], counts: &[f64; 64], k: i32, q: i32, conf: f64) -> DirichletPosterior with Mut, Div, Panic` |
+
+The k-category generalisation of Beta-Binomial: posterior `Dirichlet(α+counts)`
+with the queried category's Beta marginal giving a posterior mean and credible
+interval. Validated: prior (1,1,1) + counts (10,20,70) → cat-3 mean 71/103=0.689;
+uniform → 1/k.
+
+### `stats::breslow_day` — homogeneity of odds ratios
+
+| Function | Signature |
+|---|---|
+| `breslow_day` | `pub fn breslow_day(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> BDResult with Mut, Div, Panic` |
+
+The companion to Mantel-Haenszel: tests whether the stratum odds ratios are
+homogeneous enough to pool (a significant result warns against a single pooled
+OR). Fits each stratum under the common OR by the quadratic and forms
+`χ²=Σ(aᵢ−Aᵢ)²/Vᵢ`. Validated: two strata each OR 2 → χ²≈0 (poolable); OR 4 vs
+0.25 → large χ², p<0.05 (heterogeneous).
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1430,6 +1467,9 @@ use stats::cles::{cles_from_d, cles_from_samples}
 use stats::gwet_ac1::{AC1Result, gwet_ac1}
 use stats::krippendorff::{krippendorff}
 use stats::icc_forms::{ICCFormsResult, icc_forms}
+use stats::poisson_gamma::{RatePosterior, poisson_gamma}
+use stats::dirichlet_mult::{DirichletPosterior, dirichlet_mult}
+use stats::breslow_day::{BDResult, breslow_day}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

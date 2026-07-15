@@ -106,6 +106,9 @@ MODULES=(
   stdlib/stats/gwet_ac1.sio
   stdlib/stats/krippendorff.sio
   stdlib/stats/icc_forms.sio
+  stdlib/stats/poisson_gamma.sio
+  stdlib/stats/dirichlet_mult.sio
+  stdlib/stats/breslow_day.sio
 )
 
 fail=0
