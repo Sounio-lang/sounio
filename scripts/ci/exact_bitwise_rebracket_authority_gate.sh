@@ -264,8 +264,15 @@ run_elf_expect_zero() {
   local elf="$2"
   local log="$WORK/$label.runtime.log"
   local rc=0
+  local magic=""
 
-  [[ -x "$elf" ]] || fail "$label did not produce an executable ELF: $elf"
+  [[ -s "$elf" ]] || fail "$label did not produce a non-empty ELF: $elf"
+  magic="$(od -An -tx1 -N4 "$elf" | tr -d ' \n')"
+  [[ "$magic" == 7f454c46 ]] || fail "$label produced a non-ELF artifact: magic=$magic path=$elf"
+  # The raw Madaros path writes the ELF payload; the public `build` launcher
+  # normally supplies this file-mode step. The gate uses the raw `-O` ordering
+  # to avoid source-first lean_single routing, so mirror that launcher action.
+  chmod +x "$elf"
   set +e
   "$elf" >"$log" 2>&1
   rc=$?
