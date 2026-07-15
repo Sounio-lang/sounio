@@ -23,6 +23,14 @@ pub struct CodeBuffer {
 // needed. Accessed INLINE only — never via a returning helper (miscompiles under
 // the seed). NOT used by the aarch64/suite scratch-buffer paths (those keep .bytes).
 pub var NC_BIG_CODE: [i8; 2097152] = [0; 2097152]
+// Capacity accounting is scalar global state because both by-value and by-ref
+// emitters append to NC_BIG_CODE. It records demand even after storage is full,
+// while code.len remains the number of bytes actually materialized.
+pub var NC_CODE_REQUIRED_BYTES: i64 = 0
+pub var NC_CODE_DROPPED_BYTES: i64 = 0
+pub var NC_CODE_OVERFLOWED: bool = false
+
+pub fn nc_code_capacity_bytes() -> i64 { 2097152 }
 
 pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
@@ -71,21 +79,25 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
-    if out.len >= 0 {
-        if out.len < 2097152 {
-            NC_BIG_CODE[out.len as usize] = low8(b) as i8
-            out.len = out.len + 1
-        }
+    NC_CODE_REQUIRED_BYTES = NC_CODE_REQUIRED_BYTES + 1
+    if out.len >= 0 && out.len < nc_code_capacity_bytes() {
+        NC_BIG_CODE[out.len as usize] = low8(b) as i8
+        out.len = out.len + 1
+    } else {
+        NC_CODE_DROPPED_BYTES = NC_CODE_DROPPED_BYTES + 1
+        NC_CODE_OVERFLOWED = true
     }
     out
 }
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
-    if (*buf).len >= 0 {
-        if (*buf).len < 2097152 {
-            NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
-            (*buf).len = (*buf).len + 1
-        }
+    NC_CODE_REQUIRED_BYTES = NC_CODE_REQUIRED_BYTES + 1
+    if (*buf).len >= 0 && (*buf).len < nc_code_capacity_bytes() {
+        NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
+        (*buf).len = (*buf).len + 1
+    } else {
+        NC_CODE_DROPPED_BYTES = NC_CODE_DROPPED_BYTES + 1
+        NC_CODE_OVERFLOWED = true
     }
 }
 
