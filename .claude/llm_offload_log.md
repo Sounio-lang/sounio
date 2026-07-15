@@ -2983,3 +2983,8 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Targets: `tests/compiler/rebracket_authority_default_o_reachability.sio` and `tests/compiler/rebracket_authority_imported_main.sio`.
 - **Math review PASS (Z.AI GLM-5.2)**: verified that `observed ^ 11 == 0` exactly when `observed == 11`; because each witness result is range-limited by `& 15`, every mismatch produces a nonzero exit code in `[1, 15]`. This preserves exact runtime equality while avoiding an unrelated historical `-O` conditional-control-flow defect. Raw: `/tmp/llm-offload-mgW8QZ/`.
 - **xAI response not counted**: the same mandatory fan-out completed, but Grok 4.3 returned `NO MATHEMATICAL CONTENT TO REVIEW`; Z.AI supplied the substantive proof used for this change.
+
+## 2026-07-15 — default-`-O` reachability receipt documentation
+- Target: `docs/internal/concepts/rebracketing-authority.md`.
+- **Math review PASS with clarification (Z.AI GLM-5.2)**: independently verified the XOR equality witness and bounded `1..15` mismatch codes. It requested that "exact equality" identify the compared value; the receipt now states explicitly that `observed` is the masked return of `authority_apply(171)`, so the claim is about `observed == 11`, not about the original argument modulo 16. Raw: `/tmp/llm-offload-68QgIa/`.
+- **xAI response not counted**: Grok 4.3 returned `NO MATHEMATICAL CONTENT TO REVIEW`; Z.AI supplied the substantive review.
