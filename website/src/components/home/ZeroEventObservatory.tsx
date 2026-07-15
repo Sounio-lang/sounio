@@ -16,6 +16,7 @@ interface ZeroTrace {
   pt: string;
   color: string;
   witness: string;
+  flag: number;
   detailEn: string;
   detailPt: string;
 }
@@ -26,7 +27,8 @@ const traces: ZeroTrace[] = [
     en: 'Absent observation',
     pt: 'Observação ausente',
     color: '#D6B35A',
-    witness: 'ZE_ABSENT',
+    witness: 'ze_flag_absent()',
+    flag: 1,
     detailEn: 'No observation was made. The zero is not a measurement.',
     detailPt: 'Nenhuma observação foi feita. O zero não é uma medição.',
   },
@@ -35,7 +37,8 @@ const traces: ZeroTrace[] = [
     en: 'Cancellation',
     pt: 'Cancelamento',
     color: '#EBD6A2',
-    witness: 'ZE_CANCELLED',
+    witness: 'ze_flag_cancelled()',
+    flag: 2,
     detailEn: 'Non-zero terms cancelled while their provenance remained distinct.',
     detailPt: 'Termos não nulos se cancelaram, mantendo proveniências distintas.',
   },
@@ -44,7 +47,8 @@ const traces: ZeroTrace[] = [
     en: 'Annihilation',
     pt: 'Aniquilação',
     color: '#B99B4A',
-    witness: 'ZE_ANNIHILATED',
+    witness: 'ze_flag_annihilated()',
+    flag: 4,
     detailEn: 'The computation produced zero through an annihilating operation.',
     detailPt: 'A computação produziu zero por uma operação aniquiladora.',
   },
@@ -53,7 +57,8 @@ const traces: ZeroTrace[] = [
     en: 'Below resolution',
     pt: 'Abaixo da resolução',
     color: '#2BA6B3',
-    witness: 'ZE_SUBRESOLUTION',
+    witness: 'ze_flag_below_resolution()',
+    flag: 8,
     detailEn: 'The signal exists but falls below the declared measurement resolution.',
     detailPt: 'O sinal existe, mas está abaixo da resolução de medição declarada.',
   },
@@ -62,7 +67,8 @@ const traces: ZeroTrace[] = [
     en: 'Rounded to zero',
     pt: 'Arredondado a zero',
     color: '#7BA7B5',
-    witness: 'ZE_ROUNDED',
+    witness: 'ze_flag_rounded()',
+    flag: 16,
     detailEn: 'A representable non-zero value became zero under explicit rounding.',
     detailPt: 'Um valor não nulo representável virou zero por arredondamento explícito.',
   },
@@ -71,7 +77,8 @@ const traces: ZeroTrace[] = [
     en: 'Confidence gated',
     pt: 'Bloqueado por confiança',
     color: '#C9B37A',
-    witness: 'ZE_GATED',
+    witness: 'ze_flag_gated()',
+    flag: 32,
     detailEn: 'A decision boundary suppressed a value whose confidence was insufficient.',
     detailPt: 'Um limite de decisão suprimiu um valor com confiança insuficiente.',
   },
@@ -80,7 +87,8 @@ const traces: ZeroTrace[] = [
     en: 'Unknown origin',
     pt: 'Origem desconhecida',
     color: '#8C9AA8',
-    witness: 'ZE_UNKNOWN',
+    witness: 'ze_flag_unknown()',
+    flag: 64,
     detailEn: 'The origin cannot be reconstructed, so the uncertainty remains explicit.',
     detailPt: 'A origem não pode ser reconstruída, então a incerteza permanece explícita.',
   },
@@ -232,7 +240,6 @@ export default function ZeroEventObservatory({ locale, traceLabel, traceTitle, c
                   className={active ? 'zero-trace active' : 'zero-trace'}
                   style={{ borderLeftColor: trace.color }}
                   onClick={() => setSelectedId(trace.id)}
-                  onPointerEnter={() => setSelectedId(trace.id)}
                 >
                   <span>{locale === 'pt' ? trace.pt : trace.en}</span>
                   <code>{trace.witness}</code>
@@ -243,7 +250,11 @@ export default function ZeroEventObservatory({ locale, traceLabel, traceTitle, c
         </ul>
 
         <div className="zero-event-canvas-wrap">
-          <canvas ref={canvasRef} aria-hidden="true" />
+          <canvas
+            ref={canvasRef}
+            role="img"
+            aria-label={`${locale === 'pt' ? selected.pt : selected.en}: surface value 0.0, evidence flag ${selected.flag}, witness ${selected.witness}.`}
+          />
           <div className="zero-event-value" aria-live="polite">
             <strong>0.0</strong>
             <span>{selected.witness}</span>
@@ -252,7 +263,10 @@ export default function ZeroEventObservatory({ locale, traceLabel, traceTitle, c
       </div>
 
       <div className="zero-event-detail" aria-live="polite">
-        <span style={{ color: selected.color }}>{selected.witness}</span>
+        <div>
+          <span style={{ color: selected.color }}>{selected.witness}</span>
+          <code>evidence_flags = {selected.flag}</code>
+        </div>
         <p>{locale === 'pt' ? selected.detailPt : selected.detailEn}</p>
       </div>
     </div>

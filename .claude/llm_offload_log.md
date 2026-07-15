@@ -2634,3 +2634,15 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-bayesian-desktop.png`, `/tmp/sounio-bayesian-mobile.png`, `/tmp/sounio-bayesian-320-posterior-fixed.png`, and `/tmp/sounio-bayesian-design-qa.png`; all interaction states exposed correct `aria-pressed` values and desktop/mobile/320 px measured zero overflow.
 - Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directories: `/tmp/llm-offload-My4OsK/` and `/tmp/llm-offload-79Us2s/`.
+
+## 2026-07-15 — M3 prose/design review: zero provenance instrument
+- Files: `website/src/components/home/ZeroEventObservatory.tsx`, `ZeroEventObservatory.css`, `ZeroProvenanceInstrument.tsx`, `ZeroProvenanceInstrument.css`, and `website/src/pages/index.astro`.
+- Task: review the public homepage instrument exposing seven computational evidence categories that retain distinct provenance while sharing the surface value `0.0`.
+- Executable evidence: `bash scripts/ci/zero_event_gate.sh` returned exit 0 with `[zero-event] PASS: receipts, evidence, explicit discharge, and derived EISA flags are verified`. The gate checks the stdlib module and three required refusals on the default Madaros path and executes positive witnesses with the preserved `lean_single` engine.
+- External-facing review: xAI/Grok 4.3 approved the conceptual accuracy and claim boundary with no major findings. Its stable-link recommendation was applied by pointing source and gate URLs at `main`. Its keyboard concern was disproved by direct inspection and browser snapshots: every trace is already a native `<button>` with `aria-pressed`.
+- Claim boundary: these are computational evidence categories only. They do not establish biological, clinical, physical, causal, or metaphysical explanations, and the gate does not claim that every scalar zero requires this runtime representation.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-zero-desktop.png`, `/tmp/sounio-zero-mobile.png`, `/tmp/sounio-zero-mobile-instrument.png`, `/tmp/sounio-zero-320.png`, and `/tmp/sounio-zero-design-qa.png`; all seven states were keyboard-addressable, the selected flag and witness remained available as text, and desktop/mobile/320 px measured zero overflow.
+- Validation: `npm run check:quality` passed with 904 pages and zero Astro diagnostics; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Deferred public claim: `viz_workbench_roundtrip.sio` was not exposed because the current default Madaros run ended with `SIGSEGV` (exit 139) before producing its pass marker.
+- Raw review directory: `/tmp/llm-offload-4YPyPj/`.
