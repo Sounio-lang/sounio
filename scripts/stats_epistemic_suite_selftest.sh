@@ -118,6 +118,9 @@ MODULES=(
   stdlib/stats/central_tendency.sio
   stdlib/stats/dispersion.sio
   stdlib/stats/shape.sio
+  stdlib/stats/gk_lambda.sio
+  stdlib/stats/gk_tau.sio
+  stdlib/stats/uncertainty_coefficient.sio
 )
 
 fail=0

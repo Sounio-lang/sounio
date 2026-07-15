@@ -31,7 +31,8 @@ fourteen families:
   Deming / Theil-Sen / Passing-Bablok method-comparison fits, and the regression
   diagnostics (leverage, Cook's distance, VIF).
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
-  Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
+  Cochran's Q, the Cochran-Armitage trend test, proportion CIs, and the nominal
+  association measures (Goodman-Kruskal λ and τ, Theil's uncertainty coefficient).
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
   Fleiss' κ, Gwet's AC1, Krippendorff's α, ICC / Cronbach's α and the full
   Shrout-Fleiss ICC family.
@@ -1464,6 +1465,38 @@ Fisher-Pearson sample-adjusted `G₁`, and (excess) kurtosis. Validated:
 {2,4,4,4,5,5,7,9} → g₁=0.6563, G₁=0.8185, excess kurtosis −0.2188; symmetric
 data → skewness 0.
 
+### `stats::gk_lambda` — Goodman-Kruskal lambda
+
+| Function | Signature |
+|---|---|
+| `gk_lambda` | `pub fn gk_lambda(table: &[f64; 256], nr: i32, nc: i32) -> LambdaResult with Mut, Div, Panic` |
+
+A proportional-reduction-in-error nominal association measure (mode prediction):
+`λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+)`, both directions and symmetric.
+Validated: [[40,10],[5,45]] → λ(R|C)=0.7, λ(C|R)=0.667; mode-only table → 0;
+diagonal → 1.
+
+### `stats::gk_tau` — Goodman-Kruskal tau
+
+| Function | Signature |
+|---|---|
+| `gk_tau` | `pub fn gk_tau(table: &[f64; 256], nr: i32, nc: i32) -> TauResult with Mut, Div, Panic` |
+
+Like lambda but predicting with the full category distribution, so it is non-zero
+under any dependence: `τ(R|C)=(Σ_c Σ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N)`.
+Validated: [[40,10],[5,45]] → τ(R|C)=0.4949; rank-1 table → 0; diagonal → 1.
+
+### `stats::uncertainty_coefficient` — Theil's U
+
+| Function | Signature |
+|---|---|
+| `uncertainty_coefficient` | `pub fn uncertainty_coefficient(table: &[f64; 256], nr: i32, nc: i32) -> UResult with Mut, Div, Panic` |
+
+The information-theoretic association measure: `U(R|C)=I(R;C)/H(R)`, the fraction
+of one variable's entropy explained by the other, both directions and symmetric.
+Validated: [[40,10],[5,45]] → I=0.2754, U(R|C)=0.3973; independence → 0; diagonal
+→ 1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1577,6 +1610,9 @@ use stats::detectable_effect::{mde_two_means, mde_one_mean}
 use stats::central_tendency::{arithmetic_mean, geometric_mean, harmonic_mean, rms}
 use stats::dispersion::{DispersionResult, dispersion}
 use stats::shape::{ShapeResult, shape}
+use stats::gk_lambda::{LambdaResult, gk_lambda}
+use stats::gk_tau::{TauResult, gk_tau}
+use stats::uncertainty_coefficient::{UResult, uncertainty_coefficient}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
