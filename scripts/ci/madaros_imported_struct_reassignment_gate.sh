@@ -22,10 +22,9 @@ fail() {
 
 # The runtime scalar copy proves the non-call control remains operational; this
 # structural guard proves only ExprCall can reach the compatibility binder.
-grep -Fq 'if (*rhs_expr_struct).kind == ExprKind::ExprCall {' "$LOWERER" \
-  || fail 'struct identity binder is no longer guarded by ExprCall'
-grep -Fq 'lowerer_bind_local_struct_type_mut(&! lo, (*target_expr).name, rhs_struct_type)' "$LOWERER" \
-  || fail 'direct-call struct identity binder is missing'
+guard_window="$(grep -F -A3 'if (*rhs_expr_struct).kind == ExprKind::ExprCall {' "$LOWERER" || true)"
+grep -Fq 'lowerer_bind_local_struct_type_mut(&! lo, (*target_expr).name, rhs_struct_type)' <<<"$guard_window" \
+  || fail 'struct identity binder is no longer nested under the ExprCall guard'
 
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" build "$WITNESS" -o "$WORK/witness" >"$WORK/build.log" 2>&1 || {
