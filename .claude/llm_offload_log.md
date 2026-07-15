@@ -2934,3 +2934,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - icc_forms = **PASS**: ICC(1,1)/(2,1)/(3,1) + average-measure forms from ANOVA MSB/MSR/MSW/MSE; **validated against the published Shrout-Fleiss (1979) 6×4 example** → 0.166/0.290/0.715 (all three match).
 - Theme: chance-corrected agreement — extends cohen_kappa/fleiss_kappa/reliability with the general Krippendorff α, the paradox-resistant Gwet AC1, and the full ICC family. All derivable, #852-safe. Suite runner: 97 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-QU0X4f/`, `/tmp/llm-offload-DxNLA5/`, `/tmp/llm-offload-xj10Av/`.
+
+## 2026-07-15 — math-review: stats::poisson_gamma, stats::dirichlet_mult, stats::breslow_day (100-module milestone)
+- Files (all new): `stdlib/stats/poisson_gamma.sio` (Gamma-Poisson rate posterior + gamma-quantile credible interval), `stdlib/stats/dirichlet_mult.sio` (Dirichlet-Multinomial category posterior + Beta-marginal credible interval), `stdlib/stats/breslow_day.sio` (Breslow-Day OR-homogeneity test, companion to mantel_haenszel). Provider: xAI/Grok 4.3.
+- poisson_gamma = **PASS**: posterior Gamma(a0+C, b0+T), mean/var, credible interval via inverse-igamma bisection; Gamma(1,1)+10/5→mean 1.833, CI CDF-consistent (0.025/0.975). One TIGHTENABLE note on the inline exp series being crude — no accuracy claim affected, harmless (same inline-special-function property as the whole suite).
+- dirichlet_mult = **PASS**: Dirichlet(α+counts), Beta-marginal credible interval via inverse-ibeta; prior(1,1,1)+counts(10,20,70)→cat3 mean 71/103=0.689 verified.
+- breslow_day = **PASS**: common OR ψ=OR_MH, per-stratum fitted A via the quadratic with feasible-root selection, ψ=1 linear limit, χ²=Σ(a−A)²/V; homogeneous strata (both OR 2)→χ²≈0, heterogeneous (OR 4 vs 0.25)→large χ²/p<0.05 verified.
+- Theme: conjugate rate/category posteriors + the M-H homogeneity companion. **Milestone: the suite reaches 100 modules** + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Mn4tzk/`, `/tmp/llm-offload-zk00U0/`, `/tmp/llm-offload-MmHjA9/`.
