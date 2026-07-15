@@ -43,9 +43,10 @@ fourteen families:
   Shrout-Fleiss ICC family.
 - **Diagnostic accuracy** — sensitivity / specificity / likelihood ratios and
   ROC AUC.
-- **Survival analysis** — Kaplan-Meier, Nelson-Aalen cumulative hazard,
-  restricted mean survival time, the actuarial life table, the log-rank test and
-  a parametric exponential fit.
+- **Survival analysis** — Kaplan-Meier (with the Greenwood CI), conditional
+  survival, the competing-risks cumulative incidence, Nelson-Aalen cumulative
+  hazard, restricted mean survival time, the actuarial life table, the log-rank
+  test and a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
   NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio
   with the Breslow-Day homogeneity test, attributable risk / fractions, and
@@ -1597,6 +1598,38 @@ The p-quantile of weighted data (smallest value carrying ≥p of the total weigh
 via a sort-free cumulative scan. Validated: equal weights {1,2,3} → median 2;
 {1,2,3,4} w={1,1,1,5} → weighted median 4; quartiles of {1,2,3,4}.
 
+### `stats::km_greenwood` — KM survival with a Greenwood CI
+
+| Function | Signature |
+|---|---|
+| `km_greenwood` | `pub fn km_greenwood(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64, conf: f64) -> KMCIResult with Mut, Div, Panic` |
+
+The Kaplan-Meier survival at a queried time with its Greenwood standard error
+`Var(Ŝ)=Ŝ²Σdⱼ/(nⱼ(nⱼ−dⱼ))` and a complementary-log-log confidence interval (which
+keeps the bounds inside [0,1]). Validated: times 1–5, query 3 → Ŝ=0.4, SE=0.2191,
+CI inside (0,1).
+
+### `stats::conditional_survival` — conditional survival probability
+
+| Function | Signature |
+|---|---|
+| `conditional_survival` | `pub fn conditional_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t0: f64, t1: f64) -> f64 with Mut, Div, Panic` |
+
+The probability of surviving to t₁ given survival to t₀: `S(t₁|t₀)=Ŝ(t₁)/Ŝ(t₀)`
+— the "given you've made it this far" prognosis. Validated: times 1–5 →
+S(4|2)=0.333; S(t|t)=1; S(t1|0)=Ŝ(t1).
+
+### `stats::cumulative_incidence` — competing-risks CIF
+
+| Function | Signature |
+|---|---|
+| `cumulative_incidence` | `pub fn cumulative_incidence(time: &[f64; 256], cause: &[i64; 256], n: i32, t_query: f64) -> f64 with Mut, Div, Panic` |
+
+The cumulative incidence of one event type in the presence of competing risks
+(where 1−KM would overstate it): `CIF₁(t)=ΣŜ(t₍ⱼ₋₁₎)·d₁ⱼ/nⱼ`, with `cause` 0/1/2.
+Validated: a table with one competing event → CIF₁(4)=0.75 (not 1); no competing
+events → CIF₁=1−KM.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1722,6 +1755,9 @@ use stats::rank_transform::{RankResult, rank_transform}
 use stats::weighted_stats::{WeightedResult, weighted_stats}
 use stats::grouped_stats::{GroupedResult, grouped_stats}
 use stats::weighted_quantile::{weighted_quantile, weighted_median}
+use stats::km_greenwood::{KMCIResult, km_greenwood}
+use stats::conditional_survival::{conditional_survival}
+use stats::cumulative_incidence::{cumulative_incidence}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
