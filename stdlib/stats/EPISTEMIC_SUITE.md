@@ -1259,6 +1259,42 @@ The cumulative-sum chart, sensitive to small sustained shifts:
 CUSUM exceeds the decision interval h. Validated: an upward drift → C⁺ reaches 8,
 signals at index 4; on-target → no signal; downward drift → lower CUSUM signals.
 
+### `stats::effect_convert` — effect-size conversions
+
+| Function | Signature |
+|---|---|
+| `d_to_r` / `r_to_d` | `pub fn d_to_r(d: f64) -> f64 …` (equal-n) |
+| `d_to_logor` / `logor_to_d` / `d_to_or` | Cox logit-method odds-ratio conversions |
+| `hedges_g` | `pub fn hedges_g(d: f64, df: i32) -> f64` (small-sample correction) |
+
+The standard meta-analysis conversions between Cohen's d, the correlation r, the
+(log) odds ratio and Hedges' g. Validated: d=0.5 → r=0.2425, ln OR=0.9069,
+OR=2.4766, g(df=10)=0.4615; d↔r and d↔ln OR round-trip.
+
+### `stats::effect_from_test` — effect sizes from test statistics
+
+| Function | Signature |
+|---|---|
+| `r_from_t` / `d_from_t` | `pub fn r_from_t(t, df) -> f64` · `d_from_t(t, n1, n2) -> f64` |
+| `eta2_from_f` / `omega2_from_f` | variance-explained from an F statistic |
+| `d_from_means` | Cohen's d from two groups' means, sds and sizes |
+
+Recovers a standardised effect from a reported statistic (for meta-analysing
+published t/F results). Validated: t=2,df=10 → r=0.5345; t=2,n=10,10 → d=0.8944;
+F=4,(2,10) → η²=0.4444, ω²=0.3158; means → d=1.5.
+
+### `stats::cles` — common-language effect size
+
+| Function | Signature |
+|---|---|
+| `cles_from_d` | `pub fn cles_from_d(d: f64) -> f64 with Mut, Div, Panic` |
+| `cles_from_samples` | `pub fn cles_from_samples(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic` |
+
+The probability that a random draw from one group exceeds one from the other —
+`Φ(d/√2)` under normality, or the distribution-free proportion of superior pairs
+(= the ROC AUC). Validated: d=0 → 0.5, d=1 → 0.7603; fully-separated samples → 1;
+interleaved → 1/3.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1354,6 +1390,9 @@ use stats::ar1::{AR1Result, ar1}
 use stats::process_capability::{CapabilityResult, process_capability}
 use stats::control_chart::{IMRResult, imr_chart}
 use stats::cusum::{CusumResult, cusum}
+use stats::effect_convert::{d_to_r, r_to_d, d_to_logor, logor_to_d, d_to_or, hedges_g}
+use stats::effect_from_test::{r_from_t, d_from_t, eta2_from_f, omega2_from_f, d_from_means}
+use stats::cles::{cles_from_d, cles_from_samples}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
