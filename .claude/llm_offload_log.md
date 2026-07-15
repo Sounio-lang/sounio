@@ -2726,6 +2726,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.
 
+## 2026-07-14 — math-review: data::csv fixed-point + GUM row (Trilha A, Data I/O)
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Grok 4.3: fixed-point digit extraction, f64 round-half-up scaling, GUM u_c/U95 reproduction = OK; one exact-*.5 f64 tie TIGHTENABLE addressed with a caveat + tie-free decimals. (Z.AI empty; xai + independent awk recompute used.)
+
+## 2026-07-14 — math-review: GUM coverage factor (finite dof) for the f64-cast dispatch
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Both OK: coverage factor = Student-t quantile (not fixed 1.96); t-table values; Welch-Satterthwaite worked example (nu_eff≈4.17). Z.AI TIGHTENABLE: U95 ≈ 0.571 (t(4.173)=2.743 × 0.20817). Confirms MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST science.
+
 ## 2026-07-14 — math-review: signal::fft vertical
 - Files: `stdlib/signal/fft.sio` (pub fields + note), `tests/stdlib/signal/test_fft_stdlib.sio`, `examples/signal/spectrum_report.sio`.
 - Provider: xAI/Grok 4.3 = **PASS** (all 4). Confirmed DC→|X|[0]=4/rest 0; impulse→flat 1; IDFT(DFT(x))=x (1/N inverse); real cosine cos(2πn/8)→|X[1]|=|X[7]|=4, other bins exactly 0 (residual at 3,5 is fft_cos input precision, not FFT error).
