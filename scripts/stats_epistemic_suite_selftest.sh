@@ -76,6 +76,9 @@ MODULES=(
   stdlib/stats/fit_gamma.sio
   stdlib/stats/fit_beta.sio
   stdlib/stats/fit_lognormal.sio
+  stdlib/stats/corr_ci.sio
+  stdlib/stats/point_biserial.sio
+  stdlib/stats/partial_corr.sio
 )
 
 fail=0

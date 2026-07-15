@@ -949,6 +949,38 @@ the implied `median=e^{μ̂}` and `mean=e^{μ̂+σ̂²/2}`. Natural for right-sk
 positive data (concentrations, PK exposures). Validated: data e⁰…e³ → μ=1.5,
 σ=1.291, median=4.482.
 
+### `stats::corr_ci` — Fisher-z correlation CI & test
+
+| Function | Signature |
+|---|---|
+| `corr_ci` | `pub fn corr_ci(r: f64, n: i32, conf: f64) -> CorrCIResult with Mut, Div, Panic` |
+
+Turns a Pearson r into a confidence interval and a significance test via the
+Fisher z-transform: `z=atanh(r)`, `SE=1/√(n−3)`, `CI=tanh(z±z_c·SE)`, plus the
+exact `t=r√(n−2)/√(1−r²)` test of ρ=0. Composes with `stats::correlation`.
+Validated: r=0.8, n=20 → z=1.0986, 95% CI [0.5534, 0.9177], t=5.657.
+
+### `stats::point_biserial` — point-biserial correlation
+
+| Function | Signature |
+|---|---|
+| `point_biserial` | `pub fn point_biserial(x: &[f64; 256], y: &[f64; 256], n: i32) -> PointBiserialResult with Mut, Div, Panic` |
+
+The correlation between a continuous variable and a 0/1 dichotomy (the effect-
+size companion to the two-sample t-test), with its `t(n−2)` test. Validated:
+{1,2,3,4} vs {0,0,1,1} → r=0.8944, t=2.828; equal group means → r=0.
+
+### `stats::partial_corr` — first-order partial correlation
+
+| Function | Signature |
+|---|---|
+| `partial_corr` | `pub fn partial_corr(x: &[f64; 256], y: &[f64; 256], z: &[f64; 256], n: i32) -> PartialResult with Mut, Div, Panic` |
+
+The correlation of x and y after removing the linear effect of z (confounding
+control): `r_xy·z=(r_xy−r_xz·r_yz)/√((1−r_xz²)(1−r_yz²))` with a `t(n−3)` test.
+Validated: r_xy=0 but r_xz=0.6, r_yz=0.8 → partial=−1; z uncorrelated with both
+→ partial=r_xy.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1020,6 +1052,9 @@ use stats::mood_median::{MoodResult, mood_median}
 use stats::fit_gamma::{GammaFit, fit_gamma}
 use stats::fit_beta::{BetaFit, fit_beta}
 use stats::fit_lognormal::{LogNormalFit, fit_lognormal}
+use stats::corr_ci::{CorrCIResult, corr_ci}
+use stats::point_biserial::{PointBiserialResult, point_biserial}
+use stats::partial_corr::{PartialResult, partial_corr}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
