@@ -97,6 +97,9 @@ MODULES=(
   stdlib/stats/exp_smoothing.sio
   stdlib/stats/holt.sio
   stdlib/stats/ar1.sio
+  stdlib/stats/process_capability.sio
+  stdlib/stats/control_chart.sio
+  stdlib/stats/cusum.sio
 )
 
 fail=0

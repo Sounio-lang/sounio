@@ -2894,3 +2894,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - ar1 = **PASS**: Yule-Walker φ̂=lag-1 autocorr, c=μ(1−φ), forecast=c+φ·x_last, resid_sd over n−1 residuals; {1..5}→φ=0.4, forecast 3.8 verified.
 - Theme: time-series smoothing & forecasting — the actionable complement to the serial-dependence diagnostics (runs/durbin_watson/autocorr). All single-pass recurrences, scalar returns, derivable, #852-safe. Suite runner: 88 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Xz9JAt/`, `/tmp/llm-offload-KGiEVt/`, `/tmp/llm-offload-KNJO6S/`.
+
+## 2026-07-15 — math-review: stats::process_capability, stats::control_chart, stats::cusum
+- Files (all new): `stdlib/stats/process_capability.sio` (Cp/Cpk/Cpu/Cpl), `stdlib/stats/control_chart.sio` (Shewhart individuals-moving-range I-MR chart), `stdlib/stats/cusum.sio` (tabular CUSUM). Provider: xAI/Grok 4.3.
+- process_capability = **PASS**: Cp=(USL−LSL)/6σ, Cpk=min(Cpu,Cpl); centred→1.333, off-centre→Cpk=1 verified.
+- control_chart = **PASS**: σ̂=M̄R/d₂ (d₂=1.128), UCL/LCL=x̄±3σ̂ (=±2.66·M̄R), UCL_MR=D₄·M̄R (D₄=3.267); {10,12,11,13,12}→CL 11.6, UCL 15.589, UCL_MR 4.9005 verified.
+- cusum = **PASS**: tabular Page/Montgomery C⁺/C⁻ recurrences; upward-drift C⁺ sequence 0,0,0.5,2,4.5,8 signalling at index 4 verified step-by-step.
+- Theme: statistical process control (SPC) — the lab-QC / manufacturing quality toolkit (relevant to biomaterials production). All derivable, #852-safe. Suite runner: 91 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-M8a5V7/`, `/tmp/llm-offload-Di0Efu/`, `/tmp/llm-offload-HR4OMO/`.
