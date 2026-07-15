@@ -2869,3 +2869,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - bootstrap = **PASS**: floor(u·n) index bound proven, percentile order statistics, SE→√(σ̂²/n); reviewer confirmed tolerances "explicitly stated and justified" (MC-error-calibrated 0.08 on SE).
 - Theme: resampling — the last major modern-staple gap. Derivability preserved: jackknife fully deterministic; the MINSTD stream is exactly reproducible from the recurrence (auditable), so the bootstrap tests assert derivable-in-expectation properties (exact point estimate, MC-calibrated SE tolerance, reproducibility). #852-safe. Suite runner: 79 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Tq92DO/`, `/tmp/llm-offload-zDJZrw/`, `/tmp/llm-offload-wXrCs6/`.
+
+## 2026-07-15 — math-review: stats::perm_test, stats::bootstrap_diff, stats::bootstrap_corr
+- Files (all new): `stdlib/stats/perm_test.sio` (Monte-Carlo two-sample permutation test on mean difference, Fisher-Yates via seeded MINSTD), `stdlib/stats/bootstrap_diff.sio` (two-sample bootstrap difference-in-means CI/SE), `stdlib/stats/bootstrap_corr.sio` (bootstrap Pearson-correlation CI). Provider: xAI/Grok 4.3.
+- perm_test = **PASS**: Fisher-Yates uniform permutation, MINSTD exact, p=(count+1)/(b+1); identical means→p=1, separated 5-vs-5→p<0.05 (reviewer confirmed 2/252≈0.0079 enumeration floor), reproducible.
+- bootstrap_diff = **PASS**: percentile CI + SE for x̄−ȳ, independent group resampling, MINSTD; point-estimate/coverage/reproducibility verified.
+- bootstrap_corr = **PASS**: paired resampling, r from raw sums, percentile CI; perfect dependence→r=1/SE=0/CI=[1,1] verified.
+- Note: test_separated initially used 3-vs-3 (permutation floor 2/20=0.1, can't reject at 0.05) — the failing assertion caught my hand-reasoning error; switched to 5-vs-5 (floor 2/252≈0.008). Another derivable-values catch.
+- Theme: resampling inference — extends the resampling family to two-sample and correlation, promoting the permutation test to a first-class module (was an external example). All seeded/reproducible, #852-safe. Suite runner: 82 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-4fFm8k/`, `/tmp/llm-offload-4Ksd2v/`, `/tmp/llm-offload-UN4If6/`.
