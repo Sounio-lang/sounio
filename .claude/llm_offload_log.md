@@ -2759,6 +2759,10 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
 
+## 2026-07-14 — math-review: epistemic trust-map criteria
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2). Both OK on all 4 claims.
+- Cov(indep)=0, p-box gap/midpoint, u_c=0.290402, k95=1.96-wrong-for-finite-nu. Z.AI caveat: exact-0 tolerance valid only for ANALYTIC covariance (correlation::covariance is analytic/shared-source, so appropriate) — noted in EPISTEMIC_TRUST_MAP.
+
 ## 2026-07-14 — math-review: special::erf run-proof
 - Files: `tests/stdlib/special/test_erf_stdlib.sio`, `examples/special/erf_report.sio` (no source edited).
 - Provider: xAI/Grok 4.3 = PASS. erf(1)=0.8427008, odd symmetry, erfc=1-erf, Phi(0)=0.5/Phi(1)=0.8413447/Phi(1.96)=0.9750, z(0.975)=1.95996, round-trip Phi(z(0.9))=0.9. normal_quantile deep-tail approximation not over-claimed. Default Madaros. SPECIAL_ERF_GATE_OK.
