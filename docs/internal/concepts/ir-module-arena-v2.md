@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.concepts.ir-module-arena-v2
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.ir-module-arena-v2
+-->
+
 # IrModuleArena v2 Shadow Kernel
 
 Status: shadow prototype; not a canonical IR representation
@@ -35,7 +44,7 @@ and public getters borrow the arena shared. No operation loads a whole
 
 ```text
 Semantic-Lane-ID: IR-MODULE-ARENA-V2-SHADOW
-Owner: codex/irmodule-arena-v2-shadow-20260714
+Owner: codex/irmodule-arena-v2-shadow-20260715
 Concept-IDs: SOUNIO-IR-STORAGE-OWNERSHIP
 Intent-Preserved: IR identity and provenance must not disappear across a storage migration.
 Transformation: introduce an unintegrated bounded ownership kernel with typed generational handles and one arena authority.
@@ -71,6 +80,37 @@ shadow kernel
 -> bounded repeated-use lifecycle
 -> selected read-path switch
 -> legacy retirement only after explicit parity authority
+```
+
+## Empty-module store slice
+
+The stacked 2026-07-15 slice adds a multi-module store without widening the
+legacy aggregate. `IrModuleArenaV2ModuleId` contains arena identity, slot, and
+generation. The singleton shadow arena owns only individual scalar columns for module identity and the
+empty-state counters required by the first differential boundary: functions,
+strings, epistemic entries, models, contests, algebras, ontologies, and BSS.
+
+Allocation zeroes every column before publishing the ID through a caller-owned
+out parameter. Reads validate the ID and project scalar predicates directly;
+no API accepts or returns `IrModule`, a store aggregate, or a projection
+aggregate. A read-only scalar adapter defines the future comparison boundary
+for observations borrowed from the legacy module. This gate supplies the
+declared legacy-zero contract but does not execute the heap bridge. It deliberately
+does not call `ir_empty_module()`, whose 404,144,224-byte by-value return is the
+failure this architecture is intended to retire.
+
+The witness distinguishes two live modules, rejects duplicate, cross-arena,
+stale, and over-capacity IDs, proves one module's BSS mutation cannot change
+another module, and proves reset invalidates old generations before a reused
+slot is published in exact empty state.
+
+```text
+Claims-Introduced: the bounded shadow module store publishes deterministic empty modules through stable generation-checked caller-owned ModuleIds and scalar read-only projections.
+Claims-Forbidden: legacy IrModule replacement; writer integration; full epistemic payload storage; canonical ModuleId minting; performance or memory-reduction claims.
+Positive-Witness: two distinct exact-empty modules, independent scalar columns, deterministic reset, and the prepared scalar legacy-zero contract.
+Negative-Witness: duplicate identity, cross-arena ID, stale generation, invalid store identity, negative BSS, and capacity overflow fail closed.
+Integration-Target: shadow-only continuation stacked on PR #961; default compiler and writer remain unwired.
+Authoritative-Only-If: later differential traces populate real sections and match legacy observable semantics without any by-value IrModule boundary.
 ```
 
 ## Honest boundary

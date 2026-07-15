@@ -419,3 +419,282 @@ pub fn ir_module_arena_v2_release(arena: &! IrModuleArenaV2) -> i64 with Mut, Pa
     (*arena).state = IR_MODULE_ARENA_V2_ARENA_RELEASED
     IR_MODULE_ARENA_V2_OK
 }
+
+// --------------------------------------------------------------------------
+// Multi-module shadow store. This is intentionally scalar-column storage: it
+// never owns, accepts, or returns the 404 MB legacy IrModule aggregate.
+
+pub let IR_MODULE_ARENA_V2_MODULE_CAPACITY: i64 = 2
+pub let IR_MODULE_ARENA_V2_ERR_DUPLICATE_MODULE: i64 = -7
+
+pub struct IrModuleArenaV2ModuleId {
+    arena_identity: i64,
+    slot: i64,
+    generation: i64,
+}
+
+var IR_MODULE_ARENA_V2_MODULE_ARENA_IDENTITY: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_STORE_STATE: i64 = IR_MODULE_ARENA_V2_ARENA_INVALID
+var IR_MODULE_ARENA_V2_MODULE_RESET_COUNT: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_STATE_0: i64 = IR_MODULE_ARENA_V2_SLOT_FREE
+var IR_MODULE_ARENA_V2_MODULE_STATE_1: i64 = IR_MODULE_ARENA_V2_SLOT_FREE
+var IR_MODULE_ARENA_V2_MODULE_GENERATION_0: i64 = 1
+var IR_MODULE_ARENA_V2_MODULE_GENERATION_1: i64 = 1
+var IR_MODULE_ARENA_V2_MODULE_IDENTITY_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_IDENTITY_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_0: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_1: i64 = 0
+var IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT: i64 = 0
+
+pub fn ir_module_arena_v2_invalid_module_id() -> IrModuleArenaV2ModuleId {
+    IrModuleArenaV2ModuleId { arena_identity: 0, slot: -1, generation: 0 }
+}
+
+fn ir_module_arena_v2_slot_state(slot: i64) -> i64 {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_STATE_0 } else { IR_MODULE_ARENA_V2_MODULE_STATE_1 }
+}
+
+fn ir_module_arena_v2_slot_generation(slot: i64) -> i64 {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_GENERATION_0 } else { IR_MODULE_ARENA_V2_MODULE_GENERATION_1 }
+}
+
+fn ir_module_arena_v2_slot_identity(slot: i64) -> i64 {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_IDENTITY_0 } else { IR_MODULE_ARENA_V2_MODULE_IDENTITY_1 }
+}
+
+fn ir_module_arena_v2_set_slot_state(slot: i64, value: i64) with Mut {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_STATE_0 = value } else { IR_MODULE_ARENA_V2_MODULE_STATE_1 = value }
+}
+
+fn ir_module_arena_v2_set_slot_generation(slot: i64, value: i64) with Mut {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_GENERATION_0 = value } else { IR_MODULE_ARENA_V2_MODULE_GENERATION_1 = value }
+}
+
+fn ir_module_arena_v2_set_slot_identity(slot: i64, value: i64) with Mut {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_IDENTITY_0 = value } else { IR_MODULE_ARENA_V2_MODULE_IDENTITY_1 = value }
+}
+
+fn ir_module_arena_v2_set_slot_bss(slot: i64, value: i64) with Mut {
+    if slot == 0 { IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_0 = value } else { IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_1 = value }
+}
+
+fn ir_module_arena_v2_slot_is_exact_empty(slot: i64) -> bool {
+    if slot == 0 {
+        return IR_MODULE_ARENA_V2_MODULE_IDENTITY_0 > 0 &&
+            IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_0 == 0 && IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_0 == 0 &&
+            IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_0 == 0 && IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_0 == 0 &&
+            IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_0 == 0 && IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_0 == 0 &&
+            IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_0 == 0 && IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_0 == 0
+    }
+    IR_MODULE_ARENA_V2_MODULE_IDENTITY_1 > 0 &&
+        IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_1 == 0 && IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_1 == 0 &&
+        IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_1 == 0 && IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_1 == 0 &&
+        IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_1 == 0 && IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_1 == 0 &&
+        IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_1 == 0 && IR_MODULE_ARENA_V2_MODULE_BSS_TOTAL_SIZE_1 == 0
+}
+
+pub fn ir_module_arena_v2_module_store_init(arena_identity: i64) -> i64 with Mut, Panic, Div {
+    if arena_identity <= 0 {
+        var invalid_slot: i64 = 0
+        while invalid_slot < IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+            if ir_module_arena_v2_slot_state(invalid_slot) == IR_MODULE_ARENA_V2_SLOT_LIVE {
+                ir_module_arena_v2_set_slot_generation(invalid_slot, ir_module_arena_v2_slot_generation(invalid_slot) + 1)
+            }
+            ir_module_arena_v2_zero_module_slot(invalid_slot)
+            ir_module_arena_v2_set_slot_state(invalid_slot, IR_MODULE_ARENA_V2_SLOT_FREE)
+            invalid_slot = invalid_slot + 1
+        }
+        IR_MODULE_ARENA_V2_MODULE_ARENA_IDENTITY = 0
+        IR_MODULE_ARENA_V2_MODULE_STORE_STATE = IR_MODULE_ARENA_V2_ARENA_INVALID
+        IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT = 0
+        IR_MODULE_ARENA_V2_MODULE_RESET_COUNT = 0
+        return IR_MODULE_ARENA_V2_ERR_INVALID_ARENA
+    }
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+        if ir_module_arena_v2_slot_state(slot) == IR_MODULE_ARENA_V2_SLOT_LIVE {
+            ir_module_arena_v2_set_slot_generation(slot, ir_module_arena_v2_slot_generation(slot) + 1)
+        }
+        ir_module_arena_v2_zero_module_slot(slot)
+        ir_module_arena_v2_set_slot_state(slot, IR_MODULE_ARENA_V2_SLOT_FREE)
+        slot = slot + 1
+    }
+    IR_MODULE_ARENA_V2_MODULE_ARENA_IDENTITY = arena_identity
+    IR_MODULE_ARENA_V2_MODULE_STORE_STATE = IR_MODULE_ARENA_V2_ARENA_LIVE
+    IR_MODULE_ARENA_V2_MODULE_RESET_COUNT = 0
+    IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT = 0
+    IR_MODULE_ARENA_V2_OK
+}
+
+pub fn ir_module_arena_v2_module_id_slot(id: &IrModuleArenaV2ModuleId) -> i64 {
+    (*id).slot
+}
+
+pub fn ir_module_arena_v2_module_id_generation(id: &IrModuleArenaV2ModuleId) -> i64 {
+    (*id).generation
+}
+
+pub fn ir_module_arena_v2_module_store_live_count() -> i64 {
+    IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT
+}
+
+pub fn ir_module_arena_v2_module_store_reset_count() -> i64 {
+    IR_MODULE_ARENA_V2_MODULE_RESET_COUNT
+}
+
+pub fn ir_module_arena_v2_module_id_is_live(
+    id: &IrModuleArenaV2ModuleId,
+) -> bool with Panic, Div {
+    if IR_MODULE_ARENA_V2_MODULE_STORE_STATE != IR_MODULE_ARENA_V2_ARENA_LIVE ||
+       (*id).arena_identity != IR_MODULE_ARENA_V2_MODULE_ARENA_IDENTITY {
+        return false
+    }
+    let slot = (*id).slot
+    if slot < 0 || slot >= IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+        return false
+    }
+    ir_module_arena_v2_slot_state(slot) == IR_MODULE_ARENA_V2_SLOT_LIVE &&
+        ir_module_arena_v2_slot_generation(slot) == (*id).generation
+}
+
+fn ir_module_arena_v2_zero_module_slot(
+    slot: i64,
+) with Mut, Panic, Div {
+    ir_module_arena_v2_set_slot_identity(slot, 0)
+    ir_module_arena_v2_set_slot_bss(slot, 0)
+    if slot == 0 {
+        IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_0 = 0
+        IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_0 = 0
+    } else {
+        IR_MODULE_ARENA_V2_MODULE_FUNCTION_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_STRING_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_EPISTEMIC_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_MODEL_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_CONTEST_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_ALGEBRA_COUNT_1 = 0
+        IR_MODULE_ARENA_V2_MODULE_ONTOLOGY_COUNT_1 = 0
+    }
+}
+
+pub fn ir_module_arena_v2_alloc_empty_module(
+    module_identity: i64,
+    out: &! IrModuleArenaV2ModuleId,
+) -> i64 with Mut, Panic, Div {
+    if IR_MODULE_ARENA_V2_MODULE_STORE_STATE != IR_MODULE_ARENA_V2_ARENA_LIVE || module_identity <= 0 {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_ARENA
+    }
+    var scan: i64 = 0
+    while scan < IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+        if ir_module_arena_v2_slot_state(scan) == IR_MODULE_ARENA_V2_SLOT_LIVE &&
+           ir_module_arena_v2_slot_identity(scan) == module_identity {
+            return IR_MODULE_ARENA_V2_ERR_DUPLICATE_MODULE
+        }
+        scan = scan + 1
+    }
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+        if ir_module_arena_v2_slot_state(slot) != IR_MODULE_ARENA_V2_SLOT_LIVE {
+            ir_module_arena_v2_zero_module_slot(slot)
+            ir_module_arena_v2_set_slot_state(slot, IR_MODULE_ARENA_V2_SLOT_LIVE)
+            ir_module_arena_v2_set_slot_identity(slot, module_identity)
+            IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT = IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT + 1
+            (*out).arena_identity = IR_MODULE_ARENA_V2_MODULE_ARENA_IDENTITY
+            (*out).slot = slot
+            (*out).generation = ir_module_arena_v2_slot_generation(slot)
+            return IR_MODULE_ARENA_V2_OK
+        }
+        slot = slot + 1
+    }
+    IR_MODULE_ARENA_V2_ERR_CAPACITY
+}
+
+pub fn ir_module_arena_v2_project_empty_module_is_exact(
+    id: &IrModuleArenaV2ModuleId,
+) -> bool with Panic, Div {
+    if !ir_module_arena_v2_module_id_is_live(id) { return false }
+    let slot = (*id).slot
+    ir_module_arena_v2_slot_is_exact_empty(slot)
+}
+
+// Read-only differential adapter. A legacy caller may borrow IrModule and pass
+// only these scalar observations; neither side copies or returns IrModule.
+pub fn ir_module_arena_v2_empty_matches_legacy_scalars(
+    id: &IrModuleArenaV2ModuleId,
+    function_count: i64,
+    string_count: i64,
+    epistemic_count: i64,
+    model_count: i64,
+    contest_count: i64,
+    algebra_count: i64,
+    ontology_count: i64,
+    bss_total_size: i64,
+) -> bool with Panic, Div {
+    ir_module_arena_v2_project_empty_module_is_exact(id) &&
+    function_count == 0 && string_count == 0 && epistemic_count == 0 &&
+    model_count == 0 && contest_count == 0 && algebra_count == 0 &&
+    ontology_count == 0 && bss_total_size == 0
+}
+
+pub fn ir_module_arena_v2_configure_module_bss_size(
+    id: &IrModuleArenaV2ModuleId,
+    size: i64,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_module_id_is_live(id) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    if size < 0 { return IR_MODULE_ARENA_V2_ERR_RANGE }
+    ir_module_arena_v2_set_slot_bss((*id).slot, size)
+    IR_MODULE_ARENA_V2_OK
+}
+
+pub fn ir_module_arena_v2_remove_module(
+    id: &IrModuleArenaV2ModuleId,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_module_id_is_live(id) {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_HANDLE
+    }
+    let slot = (*id).slot
+    ir_module_arena_v2_zero_module_slot(slot)
+    ir_module_arena_v2_set_slot_state(slot, IR_MODULE_ARENA_V2_SLOT_RELEASED)
+    ir_module_arena_v2_set_slot_generation(slot, ir_module_arena_v2_slot_generation(slot) + 1)
+    IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT = IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT - 1
+    IR_MODULE_ARENA_V2_OK
+}
+
+pub fn ir_module_arena_v2_reset_modules(
+) -> i64 with Mut, Panic, Div {
+    if IR_MODULE_ARENA_V2_MODULE_STORE_STATE != IR_MODULE_ARENA_V2_ARENA_LIVE {
+        return IR_MODULE_ARENA_V2_ERR_INVALID_ARENA
+    }
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_MODULE_CAPACITY {
+        if ir_module_arena_v2_slot_state(slot) == IR_MODULE_ARENA_V2_SLOT_LIVE {
+            ir_module_arena_v2_set_slot_generation(slot, ir_module_arena_v2_slot_generation(slot) + 1)
+        }
+        ir_module_arena_v2_zero_module_slot(slot)
+        ir_module_arena_v2_set_slot_state(slot, IR_MODULE_ARENA_V2_SLOT_FREE)
+        slot = slot + 1
+    }
+    IR_MODULE_ARENA_V2_MODULE_LIVE_COUNT = 0
+    IR_MODULE_ARENA_V2_MODULE_RESET_COUNT = IR_MODULE_ARENA_V2_MODULE_RESET_COUNT + 1
+    IR_MODULE_ARENA_V2_OK
+}
