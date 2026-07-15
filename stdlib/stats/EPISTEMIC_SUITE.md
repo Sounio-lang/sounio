@@ -23,8 +23,9 @@ fourteen families:
 - **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
   point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
   Somers' D.
-- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, and
-  the Deming / Theil-Sen / Passing-Bablok method-comparison fits.
+- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, the
+  Deming / Theil-Sen / Passing-Bablok method-comparison fits, and the regression
+  diagnostics (leverage, Cook's distance, VIF).
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
   Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
@@ -1366,6 +1367,37 @@ OR). Fits each stratum under the common OR by the quadratic and forms
 `χ²=Σ(aᵢ−Aᵢ)²/Vᵢ`. Validated: two strata each OR 2 → χ²≈0 (poolable); OR 4 vs
 0.25 → large χ², p<0.05 (heterogeneous).
 
+### `stats::leverage` — regression leverage (hat values)
+
+| Function | Signature |
+|---|---|
+| `leverage` | `pub fn leverage(x: &[f64; 256], n: i32, out_h: &![f64; 256]) -> LeverageResult with Mut, Div, Panic` |
+
+The hat value `hᵢ=1/n+(xᵢ−x̄)²/Sₓₓ` for each observation in simple linear
+regression, flagging high-leverage points (`hᵢ>4/n`); the hat vector is written
+to `out_h`. Validated: {1..5} → h={0.6,0.3,0.2,0.3,0.6}, Σh=2 (=p); a far point
+→ h≈1.
+
+### `stats::cooks_distance` — Cook's distance
+
+| Function | Signature |
+|---|---|
+| `cooks_distance` | `pub fn cooks_distance(x: &[f64; 256], y: &[f64; 256], n: i32, out_d: &![f64; 256]) -> CooksResult with Mut, Div, Panic` |
+
+The influence of each point on the OLS fit,
+`Dᵢ=eᵢ²hᵢ/(p·s²(1−hᵢ)²)`, flagging influential points (`Dᵢ>4/n`); the
+distances are written to `out_d`. Validated: an off-line last point → D₅=2.25,
+D₁=0.5625; perfect fit → all 0.
+
+### `stats::vif` — variance inflation factor
+
+| Function | Signature |
+|---|---|
+| `vif_from_r2` / `vif_two` / `tolerance` | `pub fn vif_from_r2(r2: f64) -> f64` · `vif_two(r)` · `tolerance(r2)` |
+
+The multicollinearity diagnostic `VIFⱼ=1/(1−R²ⱼ)` (VIF>5 concern, >10 serious).
+Validated: r=0.8 → VIF=2.778, tolerance=0.36; R²=0.9 → VIF=10; R²=0 → VIF=1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1470,6 +1502,9 @@ use stats::icc_forms::{ICCFormsResult, icc_forms}
 use stats::poisson_gamma::{RatePosterior, poisson_gamma}
 use stats::dirichlet_mult::{DirichletPosterior, dirichlet_mult}
 use stats::breslow_day::{BDResult, breslow_day}
+use stats::leverage::{LeverageResult, leverage}
+use stats::cooks_distance::{CooksResult, cooks_distance}
+use stats::vif::{vif_from_r2, vif_two, tolerance}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

@@ -2942,3 +2942,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - breslow_day = **PASS**: common OR ψ=OR_MH, per-stratum fitted A via the quadratic with feasible-root selection, ψ=1 linear limit, χ²=Σ(a−A)²/V; homogeneous strata (both OR 2)→χ²≈0, heterogeneous (OR 4 vs 0.25)→large χ²/p<0.05 verified.
 - Theme: conjugate rate/category posteriors + the M-H homogeneity companion. **Milestone: the suite reaches 100 modules** + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Mn4tzk/`, `/tmp/llm-offload-zk00U0/`, `/tmp/llm-offload-MmHjA9/`.
+
+## 2026-07-15 — math-review: stats::leverage, stats::cooks_distance, stats::vif
+- Files (all new): `stdlib/stats/leverage.sio` (hat values for simple linear regression, out-array fill), `stdlib/stats/cooks_distance.sio` (Cook's distance per point, out-array fill), `stdlib/stats/vif.sio` (variance inflation factor). Provider: xAI/Grok 4.3.
+- leverage = **PASS**: hᵢ=1/n+(xᵢ−x̄)²/Sₓₓ, 4/n threshold; {1..5}→h={0.6,0.3,0.2,0.3,0.6}, Σh=2=p verified.
+- cooks_distance = **PASS**: Dᵢ=eᵢ²hᵢ/(p·s²(1−hᵢ)²); off-line point→D₅=2.25, D₁=0.5625, perfect fit→0 verified.
+- vif = **PASS**: VIF=1/(1−R²), tolerance=1−R²; r=0.8→2.778, R²=0.9→10 verified.
+- Theme: regression diagnostics — influence & multicollinearity checks complementing reg_bands/wls/logistic. leverage & cooks_distance use the out-array `&![f64;256]` fill pattern (works under lean_single). All derivable, #852-safe. Suite runner: 103 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-EUXpvg/`, `/tmp/llm-offload-VZ23Js/`, `/tmp/llm-offload-jJfuQo/`.

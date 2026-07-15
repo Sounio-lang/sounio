@@ -109,6 +109,9 @@ MODULES=(
   stdlib/stats/poisson_gamma.sio
   stdlib/stats/dirichlet_mult.sio
   stdlib/stats/breslow_day.sio
+  stdlib/stats/leverage.sio
+  stdlib/stats/cooks_distance.sio
+  stdlib/stats/vif.sio
 )
 
 fail=0
