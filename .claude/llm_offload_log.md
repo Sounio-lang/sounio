@@ -2829,3 +2829,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - mood_median = **PASS**: 2×k Pearson χ², df=k−1, degenerate-split guard; median 5.5/χ²=10 verified.
 - Theme: non-parametric location tests — fills the standalone rank-sum / sign / median-test gap beside wilcoxon (paired) and kruskal_wallis (k-sample). All deterministic/derivable, #852-safe. Suite runner: 64 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-ChPzJD/`, `/tmp/llm-offload-sVEzvh/`, `/tmp/llm-offload-nZbhUO/`.
+
+## 2026-07-15 — math-review: stats::fit_gamma, stats::fit_beta, stats::fit_lognormal
+- Files (all new): `stdlib/stats/fit_gamma.sio` (gamma MoM: shape=mean²/var, scale=var/mean), `stdlib/stats/fit_beta.sio` (beta MoM: α=m·c, β=(1−m)·c, c=m(1−m)/v−1), `stdlib/stats/fit_lognormal.sio` (normal fit to logs → μ, σ, median, mean). Provider: xAI/Grok 4.3.
+- fit_gamma = **PASS**: moment inversion exact; {2,2,6,6}→shape 3, scale 1.333, rate 0.75 verified.
+- fit_beta = **PASS**: all three arithmetic cases (α=β=1 uniform; α=2.625; α=3.536/β=3.264) exact; invalid-variance guard correct.
+- fit_lognormal = **PASS after fix**: reviewer flagged the docstring claim "exact MLE" as WRONG (code uses unbiased ÷(n−1), MLE uses ÷n) — corrected the docstring to "sample-moment fit (consistent with fit_gamma/fit_beta); strict MLE divides by n"; the math (μ̂, median=e^μ̂, mean=e^{μ̂+σ̂²/2}) is correct. Also calibrated the fitted-mean tolerance to 3e-3: exp amplifies the inline-ln error in var_y (d(mean)/d(var)≈mean/2), giving ~1.5e-3 absolute error — the reviewer's 3e-6 estimate assumed exact arithmetic.
+- Theme: distribution parameter fitting (method of moments) — pairs with densities/weibull_negbin. All deterministic/derivable, #852-safe. Suite runner: 67 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Sub7Nk/`, `/tmp/llm-offload-t2Rz1k/`, `/tmp/llm-offload-tfPQe1/`.

@@ -73,6 +73,9 @@ MODULES=(
   stdlib/stats/mann_whitney.sio
   stdlib/stats/sign_test.sio
   stdlib/stats/mood_median.sio
+  stdlib/stats/fit_gamma.sio
+  stdlib/stats/fit_beta.sio
+  stdlib/stats/fit_lognormal.sio
 )
 
 fail=0

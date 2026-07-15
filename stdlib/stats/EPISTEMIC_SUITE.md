@@ -918,6 +918,37 @@ A robust k-sample equal-medians test: χ² on the 2×k above/below-pooled-median
 table. Less powerful than Kruskal-Wallis but far more outlier-resistant.
 Validated: {1..5} vs {6..10} → median 5.5, χ²=10, df=1; identical groups → χ²=0.
 
+### `stats::fit_gamma` — gamma fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_gamma` | `pub fn fit_gamma(x: &[f64; 256], n: i32) -> GammaFit with Mut, Div, Panic` |
+
+Estimates the gamma shape and scale by matching moments: `k̂=mean²/var`,
+`θ̂=var/mean`, `rate=mean/var`. Validated: {2,2,6,6} → mean 4, var 5.333,
+shape 3, scale 1.333, rate 0.75.
+
+### `stats::fit_beta` — beta fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_beta` | `pub fn fit_beta(x: &[f64; 256], n: i32) -> BetaFit with Mut, Div, Panic` |
+
+Estimates the two beta shape parameters for data on (0,1): with
+`c=m(1−m)/v−1`, `α̂=m·c`, `β̂=(1−m)·c`. Validated: {.25,.25,.75,.75} →
+α=β=1 (uniform); skewed data → α=3.536, β=3.264.
+
+### `stats::fit_lognormal` — lognormal fitting
+
+| Function | Signature |
+|---|---|
+| `fit_lognormal` | `pub fn fit_lognormal(x: &[f64; 256], n: i32) -> LogNormalFit with Mut, Div, Panic` |
+
+Fits a normal to the logs (sample moments): `μ̂=mean(ln x)`, `σ̂=sd(ln x)`, with
+the implied `median=e^{μ̂}` and `mean=e^{μ̂+σ̂²/2}`. Natural for right-skewed
+positive data (concentrations, PK exposures). Validated: data e⁰…e³ → μ=1.5,
+σ=1.291, median=4.482.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -986,6 +1017,9 @@ use stats::var_ftest::{VarFResult, var_ftest}
 use stats::mann_whitney::{MannWhitneyResult, mann_whitney}
 use stats::sign_test::{SignResult, sign_test, sign_test_median}
 use stats::mood_median::{MoodResult, mood_median}
+use stats::fit_gamma::{GammaFit, fit_gamma}
+use stats::fit_beta::{BetaFit, fit_beta}
+use stats::fit_lognormal::{LogNormalFit, fit_lognormal}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at
