@@ -88,6 +88,7 @@ printf '%s\n' \
   scripts/ci/nominal_field_resolution_receipt_shadow_gate.sh \
   self-hosted/check/check.sio \
   self-hosted/check/nominal_field_resolution_receipt_shadow_probe.sio \
+  self-hosted/compiler/module_frontend.sio \
   self-hosted/ir/arena_v2_place_nominal_receipt_binding_shadow.sio \
   tests/native-v2/nominal_field_resolution_local_witness.sio \
   tests/native-v2/nominal_field_resolution_nested_witness.sio \
@@ -114,23 +115,15 @@ done
   cat "$TMP/witness.check.log" >&2
   fail witness_source_check
 }
-"$SOUC" compile "$WITNESS" -o "$TMP/witness.elf" >"$TMP/witness.build.log" 2>&1 || {
+if "$SOUC" compile "$WITNESS" -o "$TMP/witness.elf" >"$TMP/witness.build.log" 2>&1; then
   cat "$TMP/witness.build.log" >&2
-  fail witness_compile
-}
-chmod +x "$TMP/witness.elf"
-set +e
-"$TMP/witness.elf" >"$TMP/witness.out" 2>&1
-witness_rc=$?
-set -e
-[[ "$witness_rc" -eq 139 ]] || {
-  cat "$TMP/witness.out" >&2
-  fail "imported_transitive_lowering_expected_139_actual_${witness_rc}"
-}
-grep -Fq 'Merged IR: 2' "$TMP/witness.build.log" || {
+  fail imported_transitive_lowering_must_fail_closed
+fi
+grep -Fq 'imported_compile: unresolved import graph; closure incomplete path=check/nominal_field_resolution_receipt_shadow_probe.sio source=tests/native-v2/nominal_field_resolution_receipt_shadow_witness.sio' "$TMP/witness.build.log" || {
   cat "$TMP/witness.build.log" >&2
-  fail imported_transitive_lowering_evidence_missing
+  fail imported_transitive_lowering_fail_closed_evidence_missing
 }
+[[ ! -e "$TMP/witness.elf" ]] || fail imported_transitive_lowering_emitted_incomplete_elf
 
 run_legacy() {
   local label="$1"
@@ -161,5 +154,5 @@ printf '%s\n' 'NOMINAL_FIELD_RECEIPT_CHECK source=pass default_surfaces=unchange
 printf '%s\n' 'NOMINAL_FIELD_RECEIPT_OBSERVATION scope=snapshot_local authority=observational_only resolver_defid=false cross_snapshot_stable=false cross_order_numeric_comparison=forbidden ready_mask=31 lifecycle_contract=structural_begin,freeze,reset stale_snapshot_contract=reject stale_receipt_contract=reject live_output_contract=reject parent_link=structurally_present adversaries=encoded_not_executed_due_imported_lowering_blocker'
 printf '%s\n' 'NOMINAL_FIELD_RECEIPT_PLACE preflight=fail_closed target_layout=false layout_epoch=false place_allocated=false status=-75'
 printf 'NOMINAL_FIELD_RECEIPT_DIFFERENTIAL original=%s swapped=%s import_ab=%s import_ba=%s default_legacy_kept=true\n' "$original_rc" "$swapped_rc" "$import_ab_rc" "$import_ba_rc"
-printf '%s\n' 'NOMINAL_FIELD_RECEIPT_BLOCKER Blocker-ID=BLK-20260715-nominal-receipt-imported-transitive-lowering Status=classified Severity=B1 Class=harness-routing Evidence-Level=E2 Result=BLOCKED_IMPORTED_TRANSITIVE_LOWERING Observed=compile_success_merged_ir_2_runtime_rc_139 Expected=probe_facade_transitive_checker_bodies_lowered Acceptance-Gate=witness_runtime_prints_42 Owner=native-v2-imported-module-lowering Next-Action=lower_transitive_imported_function_closure'
+printf '%s\n' 'NOMINAL_FIELD_RECEIPT_BLOCKER Blocker-ID=BLK-20260715-nominal-receipt-imported-transitive-lowering Status=contained_not_unblocked Severity=B1 Class=harness-routing Evidence-Level=E3 Result=BLOCKED_IMPORTED_TRANSITIVE_LOWERING Observed=compile_fail_closed_unresolved_import_graph_no_elf Expected=probe_facade_transitive_checker_bodies_lowered Acceptance-Gate=witness_runtime_prints_42 Owner=native-v2-imported-module-lowering Next-Action=define_module_root_and_alias_semantics_before_lower_transitive_imported_function_closure'
 printf 'NOMINAL_FIELD_RECEIPT_PASS mode=source_preservation_slice_not_executable_hook_proof compiler=%s compiler_sha256=%s base=%s\n' "$SOUC" "$compiler_sha256" "$BASE"
