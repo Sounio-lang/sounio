@@ -2975,3 +2975,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - uncertainty_coefficient = **PASS**: H(R), I(R;C), U(R|C)=I/H(R); I=0.2754, U=0.3973 verified, independence→0, diagonal→1.
 - Theme: nominal association / PRE & entropy measures — complements chi2_independence (Cramér's V) for contingency tables. All derivable, #852-safe. Suite runner: 112 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-rFk7TQ/`, `/tmp/llm-offload-nnqkco/`, `/tmp/llm-offload-wl6Rgd/`.
+
+## 2026-07-15 — math-review: stats::anderson_darling, stats::cramer_von_mises, stats::bowker
+- Files (all new): `stdlib/stats/anderson_darling.sio` (A-D normality, tail-weighted EDF test + Stephens p), `stdlib/stats/cramer_von_mises.sio` (CvM normality, evenly-weighted EDF), `stdlib/stats/bowker.sio` (Bowker k×k symmetry test, generalizes McNemar). Provider: xAI/Grok 4.3.
+- anderson_darling = **PASS**: A²=−n−(1/n)Σ(2i−1)[ln F_i+ln(1−F_{n+1−i})], A²*=A²(1+0.75/n+2.25/n²), Stephens 4-piece p; {1..5}→A²=0.1436 (Python-cross-checked), p>0.5.
+- cramer_von_mises = **PASS**: W²=1/(12n)+Σ(F_i−(2i−1)/(2n))²; {1..5}→W²=0.01934 (Python-cross-checked).
+- bowker = **PASS**: χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ), df=k(k−1)/2, k=2 → McNemar; 3×3→χ²=4.667, reduction→4.545 verified.
+- Theme: EDF normality tests (A-D, CvM — more tail-sensitive than the existing KS) + Bowker matched-table symmetry (beyond 2×2 McNemar). AD/CvM reference constants cross-checked with Python (verification, not retrofit — the formulas are explicit). All derivable, #852-safe. Suite runner: 115 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rzwVOv/`, `/tmp/llm-offload-rJWBlD/`, `/tmp/llm-offload-iLeZZI/`.

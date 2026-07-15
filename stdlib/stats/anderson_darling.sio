@@ -1,0 +1,191 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/anderson_darling.sio — Anderson-Darling normality test
+//
+// An empirical-distribution-function test of normality that weights the tails
+// heavily, so it is more sensitive than Kolmogorov-Smirnov to departures where
+// they matter most:
+//
+//   anderson_darling(x, n) -> ADResult
+//
+//   A² = −n − (1/n) Σ_{i=1}^n (2i−1)[ ln F(z_(i)) + ln(1 − F(z_(n+1−i))) ],
+// with z standardised by the sample mean and sd and F = Φ; the small-sample
+// adjustment is A²* = A²(1 + 0.75/n + 2.25/n²), with the Stephens p-value.
+//
+// Pure Sounio: inline erf/exp/ln/sqrt and an insertion sort. No external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Anderson & Darling (1954); D'Agostino & Stephens (1986) "Goodness-of-Fit
+//   Techniques".
+
+module stats::anderson_darling
+
+fn ad_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ad_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ad_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 700.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ad_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ad_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * ad_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn ad_normal_cdf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 + ad_erf(z * INV_SQRT2))
+}
+
+pub struct ADResult {
+    pub a2: f64,       // Anderson-Darling A²
+    pub a2_star: f64,  // small-sample adjusted A²*
+    pub p: f64,        // p-value (Stephens)
+}
+
+/// Anderson-Darling test of normality.
+///
+/// Parâmetros: x — sample; n — size (>=3, <=256).
+/// Retorno: ADResult (a2, a2_star, p).
+/// Referências: Anderson & Darling (1954); D'Agostino & Stephens (1986).
+pub fn anderson_darling(x: &[f64; 256], n: i32) -> ADResult with Mut, Div, Panic {
+    if n < 3 { return ADResult { a2: 0.0, a2_star: 0.0, p: 1.0 } }
+    let nf = n as f64
+    // mean and sample sd
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let sd = ad_sqrt(ss / (nf - 1.0))
+    if sd <= 0.0 { return ADResult { a2: 0.0, a2_star: 0.0, p: 1.0 } }
+    // sorted standardized CDF values F_i
+    var f: [f64; 256] = [0.0; 256]
+    var a = 0
+    while a < n { f[a as usize] = x[a as usize]; a = a + 1 }
+    // insertion sort
+    var p = 1
+    while p < n {
+        let key = f[p as usize]
+        var q = p - 1
+        while q >= 0 && f[q as usize] > key { f[(q + 1) as usize] = f[q as usize]; q = q - 1 }
+        f[(q + 1) as usize] = key
+        p = p + 1
+    }
+    var t = 0
+    while t < n { f[t as usize] = ad_normal_cdf((f[t as usize] - mean) / sd); t = t + 1 }
+    // A² sum
+    var acc = 0.0
+    var k = 0
+    while k < n {
+        let fi = f[k as usize]
+        let frev = f[(n - 1 - k) as usize]
+        acc = acc + ((2 * (k + 1) - 1) as f64) * (ad_ln(fi) + ad_ln(1.0 - frev))
+        k = k + 1
+    }
+    let a2 = 0.0 - nf - acc / nf
+    let a2s = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf))
+    // Stephens p-value from A²*
+    var pv = 0.0
+    if a2s < 0.2 { pv = 1.0 - ad_exp(0.0 - 13.436 + 101.14 * a2s - 223.73 * a2s * a2s) }
+    else { if a2s < 0.34 { pv = 1.0 - ad_exp(0.0 - 8.318 + 42.796 * a2s - 59.938 * a2s * a2s) }
+    else { if a2s < 0.6 { pv = ad_exp(0.9177 - 4.279 * a2s - 1.38 * a2s * a2s) }
+    else { pv = ad_exp(1.2937 - 5.709 * a2s + 0.0186 * a2s * a2s) } } }
+    if pv < 0.0 { pv = 0.0 }
+    if pv > 1.0 { pv = 1.0 }
+    return ADResult { a2: a2, a2_star: a2s, p: pv }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4,5}: mean 3, sd=√2.5. A²=0.143594, A²*=0.178057 (Python-verified);
+// small A²* -> p large (no evidence against normality for n=5).
+fn test_ad() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = anderson_darling(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.a2, 0.143594, 1.0e-3)) && ok
+    ok = check(2, approx(r.a2_star, 0.178057, 1.0e-3)) && ok
+    ok = check(3, r.p > 0.5) && ok
+    return ok
+}
+
+// strongly skewed data -> large A², small p.
+fn test_skewed() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=1.0; x[2]=1.0; x[3]=1.0; x[4]=1.0; x[5]=1.0; x[6]=1.0; x[7]=100.0
+    let r = anderson_darling(&x, 8)
+    return check(10, r.a2 > 1.0)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_ad() && ok
+    ok = test_skewed() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
