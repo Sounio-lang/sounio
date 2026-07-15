@@ -577,6 +577,10 @@ fn mangle_append_type_name(result: &! Name, ty: &TypeEntry) with Mut, Panic, Div
         mangle_append_literal(result, 102, 51, 50, 0, 3)  // "f32"
     } else if (*ty).kind == TypeKind::TyF64 {
         mangle_append_literal(result, 102, 54, 52, 0, 3)  // "f64"
+    } else if (*ty).kind == TypeKind::TyF128 {
+        mangle_append_literal(result, 102, 49, 50, 56, 4)  // "f128"
+    } else if (*ty).kind == TypeKind::TyF256 {
+        mangle_append_literal(result, 102, 50, 53, 54, 4)  // "f256"
     } else if (*ty).kind == TypeKind::TyBool {
         mangle_append_literal(result, 98, 111, 111, 108, 4)  // "bool"
     } else if (*ty).kind == TypeKind::TyNamed {
@@ -1209,6 +1213,10 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_f32()
     } else if name_is_f64(name) {
         ty_f64()
+    } else if name_is_f128(name) {
+        ty_f128()
+    } else if name_is_f256(name) {
+        ty_f256()
     } else if name_is_bool(name) {
         ty_bool()
     } else if name_is_string(name) {
@@ -1711,8 +1719,62 @@ fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<Refinement
     }
 }
 
+fn checker_type_expr_list_contains_reserved_wide_float(
+    types: &Option<Box<TypeExprList>>
+) -> bool with Mut, Panic, Div, Alloc {
+    var current = types
+    while true {
+        match *current {
+            Some(list) => {
+                if checker_type_expr_contains_reserved_wide_float(&(*list).head) { return true }
+                current = &(*list).tail
+            }
+            None => return false
+        }
+    }
+    false
+}
+
+fn checker_type_expr_contains_reserved_wide_float(te: &TypeExpr) -> bool with Mut, Panic, Div, Alloc {
+    if (*te).kind == TypeExprKind::TypeNamed {
+        let source_name = checker_copy_string_list_to_name((*te).path.segments)
+        if name_is_f128(source_name) || name_is_f256(source_name) { return true }
+    }
+    match (*te).inner {
+        Some(inner) => {
+            if checker_type_expr_contains_reserved_wide_float(&(*inner)) { return true }
+        }
+        None => {}
+    }
+    if checker_type_expr_list_contains_reserved_wide_float(&(*te).type_args) { return true }
+    match (*te).knowledge_info {
+        Some(info) => {
+            if checker_type_expr_contains_reserved_wide_float(&(*(*info).inner_type)) { return true }
+        }
+        None => {}
+    }
+    match (*te).refinement_info {
+        Some(info) => {
+            match (*info).base_type {
+                Some(base) => {
+                    if checker_type_expr_contains_reserved_wide_float(&(*base)) { return true }
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+    false
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
+        return ty_error()
+    }
+
+    if checker_type_expr_contains_reserved_wide_float(&te) {
+        checker_report_error_at_inplace(c, te.span, 218, 0, 0, 0)
+        checker_exit_type_expr_mut(c)
         return ty_error()
     }
 
@@ -2974,7 +3036,19 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
     }
 }
 
-fn checker_collect_global_item_inplace(c: *mut Checker, name: Name) with Mut, Panic, Div {
+fn checker_collect_global_item_inplace(
+    c: *mut Checker,
+    name: Name,
+    declared_ty: Option<Box<TypeExpr>>
+) with Mut, Panic, Div, Alloc, IO {
+    match declared_ty {
+        Some(te) => {
+            // Validate the annotation at the checker boundary, but preserve the
+            // legacy TyUnknown binding until global typing has its own milestone.
+            let _validated_global_ty = checker_lower_type_expr_mut(c, *te)
+        }
+        None => {}
+    }
     let benv_idx = (*c).env.count
     if benv_idx < 4096 {
         (*c).env.bindings[benv_idx as usize] = TypeBinding {
@@ -3294,7 +3368,7 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
     if item.kind == ItemKind::ItemFn {
         match item.fn_def {
             Some(fd) => checker_collect_fn_def_inplace(c, Some(fd), item.visibility, (*c).current_module)
-            None => checker_collect_global_item_inplace(c, item.name)
+            None => checker_collect_global_item_inplace(c, item.name, item.type_alias_ty)
         }
     } else if item.kind == ItemKind::ItemStruct {
         checker_collect_struct_def_inplace(c, item.name, item.struct_def, item.visibility, (*c).current_module)
@@ -6882,6 +6956,10 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     match e.cast_type {
         Some(ty) => {
             let target_ty = checker_lower_type_expr_mut(c, *ty)
+            if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
+                checker_report_error_at_inplace(c, e.span, 217, 0, 0, 0)
+                return ty_error()
+            }
             let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
                 || src_ty.kind == TypeKind::TyIntervention
                 || src_ty.kind == TypeKind::TyCounterfactual
@@ -8565,6 +8643,8 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         TypeKind::TyU128 => { print("u"); print_int(ty.clifford_p) }
         TypeKind::TyF32 => print("f32")
         TypeKind::TyF64 => print("f64")
+        TypeKind::TyF128 => print("f128")
+        TypeKind::TyF256 => print("f256")
         TypeKind::TyBool => print("bool")
         TypeKind::TyUnit => print("()")
         TypeKind::TyString => print("string")
@@ -11592,6 +11672,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 216 { print("infinite recursive type") }
+    else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
+    else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else { print("unknown error") }
 }
 
@@ -11869,6 +11951,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
+    }
+    else if code == 217 {
+        print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
+    }
+    else if code == 218 {
+        print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
     }
     else {
         // No help available for unknown errors
@@ -12184,6 +12272,12 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 155 {
         print("   = note: a study without hypotheses cannot support the declared statistical analysis contract\n")
+    }
+    else if code == 217 {
+        print("   = note: V0-A defines format identity only and intentionally emits no wide value or lowering\n")
+    }
+    else if code == 218 {
+        print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
     }
     else {
         // No note available for unknown errors
@@ -14130,6 +14224,10 @@ impl Checker {
         if !complexity_pair.1 {
             return (c.exit_type_depth(), ty_error())
         }
+        if checker_type_expr_contains_reserved_wide_float(&te) {
+            let blocked = c.report_error_at(te.span, 218, 0, 0, 0)
+            return (blocked.exit_type_depth(), ty_error())
+        }
         let result = match te.kind {
             TypeExprKind::TypeNamed => c.lower_named_type_with_args(te.path, te.type_args)
             TypeExprKind::TypeUnit => (c, ty_unit())
@@ -14358,6 +14456,10 @@ impl Checker {
             (self, ty_f32())
         } else if name_is_f64(name) {
             (self, ty_f64())
+        } else if name_is_f128(name) {
+            (self, ty_f128())
+        } else if name_is_f256(name) {
+            (self, ty_f256())
         } else if name_is_bool(name) {
             (self, ty_bool())
         } else if name_is_string(name) {
@@ -15237,7 +15339,12 @@ impl Checker {
 
     fn collect_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
         match item.kind {
-            ItemKind::ItemFn => self.collect_fn_def(item.name, item.fn_def, item.visibility, self.current_module)
+            ItemKind::ItemFn => {
+                match item.fn_def {
+                    Some(fd) => self.collect_fn_def(item.name, Some(fd), item.visibility, self.current_module)
+                    None => self.collect_global_item_annotation(item.type_alias_ty)
+                }
+            }
             ItemKind::ItemStruct => self.collect_struct_def(item.name, item.struct_def, item.visibility, self.current_module)
             ItemKind::ItemEnum => self.collect_enum_def(item.name, item.enum_def, item.visibility, self.current_module)
             ItemKind::ItemImpl => self.collect_impl_def(item.impl_def)
@@ -15263,6 +15370,13 @@ impl Checker {
             ItemKind::ItemAlgebra => self.collect_algebra_def(item.algebra_def)
             ItemKind::ItemStudy => self.collect_study_def(item.span, item.study_def)
             ItemKind::ItemOntology => self.collect_ontology_def(item.ontology_def)
+        }
+    }
+
+    fn collect_global_item_annotation(self, declared_ty: Option<Box<TypeExpr>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match declared_ty {
+            Some(te) => self.lower_type_expr(*te).0
+            None => self
         }
     }
 
@@ -22516,6 +22630,10 @@ impl Checker {
                 let ty_pair = c.lower_type_expr(*ty)
                 c = ty_pair.0
                 let target_ty = ty_pair.1
+                if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
+                    c = c.report_error_at(e.span, 217, 0, 0, 0)
+                    return (c, ty_error())
+                }
                 // Epistemic enforcement: cannot cast Knowledge<T> to T via `as`
                 let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
                     || src_ty.kind == TypeKind::TyIntervention

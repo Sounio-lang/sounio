@@ -1,0 +1,176 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/runs_test.sio — Wald-Wolfowitz runs test for randomness
+//
+// Tests whether a dichotomous sequence is random against the alternative that
+// its elements are serially dependent (clustered or over-alternating):
+//
+//   runs_test(seq, n) -> RunsResult          seq ∈ {0,1}
+//
+// A run is a maximal block of identical symbols. With n₁ ones, n₂ zeros and R
+// runs, under randomness
+//   μ_R = 2 n₁ n₂ / n + 1,
+//   σ²_R = 2 n₁ n₂ (2 n₁ n₂ − n) / ( n²(n−1) ),
+// and z = (R − μ_R)/σ_R is asymptotically standard normal (two-sided p). Too few
+// runs ⇒ clustering / positive dependence; too many ⇒ over-alternation.
+//
+// Pure Sounio: inline sqrt/erf; a single pass counts runs and symbol totals; no
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Wald & Wolfowitz (1940) Ann. Math. Stat. 11:147.
+
+module stats::runs_test
+
+fn rt_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn rt_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / rt_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn rt_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * rt_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn rt_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - rt_erf(z * INV_SQRT2))
+}
+
+pub struct RunsResult {
+    pub runs: i64,   // observed number of runs
+    pub z: f64,      // standardized statistic
+    pub p: f64,      // two-sided p-value
+    pub n1: i64,     // count of ones
+    pub n2: i64,     // count of zeros
+}
+
+/// Wald-Wolfowitz runs test on a 0/1 sequence.
+///
+/// Parâmetros: seq — sequence of 0/1; n — length (>=2, <=256).
+/// Retorno: RunsResult (runs, z, p, n1, n2).
+/// Referências: Wald & Wolfowitz (1940).
+pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic {
+    if n < 2 { return RunsResult { runs: 0, z: 0.0, p: 1.0, n1: 0, n2: 0 } }
+    var n1 = 0
+    var n2 = 0
+    var runs = 1
+    var i = 0
+    while i < n {
+        if seq[i as usize] == 1 { n1 = n1 + 1 } else { n2 = n2 + 1 }
+        if i > 0 {
+            if seq[i as usize] != seq[(i - 1) as usize] { runs = runs + 1 }
+        }
+        i = i + 1
+    }
+    if n1 == 0 || n2 == 0 {
+        // a single symbol: one run, test undefined -> p = 1
+        return RunsResult { runs: runs as i64, z: 0.0, p: 1.0, n1: n1 as i64, n2: n2 as i64 }
+    }
+    let n1f = n1 as f64
+    let n2f = n2 as f64
+    let nf = n as f64
+    let prod = 2.0 * n1f * n2f
+    let mu = prod / nf + 1.0
+    let varr = prod * (prod - nf) / (nf * nf * (nf - 1.0))
+    var z = 0.0
+    if varr > 0.0 { z = ((runs as f64) - mu) / rt_sqrt(varr) }
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    let p = 2.0 * rt_normal_sf(az)
+    return RunsResult { runs: runs as i64, z: z, p: p, n1: n1 as i64, n2: n2 as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// random-looking: 1,1,0,0,1,0,1,1,0,0. n1=5,n2=5,R=6. mu=6 -> z=0, p=1.
+fn test_random() -> bool with IO, Mut, Div, Panic {
+    var s: [i64; 256] = [0; 256]
+    s[0]=1; s[1]=1; s[2]=0; s[3]=0; s[4]=1; s[5]=0; s[6]=1; s[7]=1; s[8]=0; s[9]=0
+    let r = runs_test(&s, 10)
+    var ok = true
+    ok = check(1, r.runs == 6) && ok
+    ok = check(2, approx(r.z, 0.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+// clustered: 1,1,1,1,1,0,0,0,0,0. R=2. mu=6, sd=sqrt(2.222222)=1.490712.
+// z=(2-6)/1.490712=-2.683281 -> p<0.01.
+fn test_clustered() -> bool with IO, Mut, Div, Panic {
+    var s: [i64; 256] = [0; 256]
+    s[0]=1; s[1]=1; s[2]=1; s[3]=1; s[4]=1; s[5]=0; s[6]=0; s[7]=0; s[8]=0; s[9]=0
+    let r = runs_test(&s, 10)
+    var ok = true
+    ok = check(10, r.runs == 2) && ok
+    ok = check(11, approx(r.z, 0.0 - 2.683281, 1.0e-4)) && ok
+    ok = check(12, r.p < 0.01) && ok
+    return ok
+}
+
+// over-alternating: 1,0,1,0,1,0,1,0,1,0. R=10. z=(10-6)/1.490712=2.683281 -> p<0.01.
+fn test_alternating() -> bool with IO, Mut, Div, Panic {
+    var s: [i64; 256] = [0; 256]
+    var i = 0
+    while i < 10 { s[i as usize] = if i % 2 == 0 { 1 } else { 0 }; i = i + 1 }
+    let r = runs_test(&s, 10)
+    var ok = true
+    ok = check(20, r.runs == 10) && ok
+    ok = check(21, approx(r.z, 2.683281, 1.0e-4)) && ok
+    ok = check(22, r.p < 0.01) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_random() && ok
+    ok = test_clustered() && ok
+    ok = test_alternating() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,242 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bartlett.sio — Bartlett's test for homogeneity of variance
+//
+// Tests whether k groups share a common variance (the homoscedasticity
+// assumption behind ANOVA), under the assumption of normal data:
+//
+//   bartlett(values, sizes, k) -> BartlettResult    (groups = consecutive blocks)
+//
+// With group variances s_i², pooled s_p² = Σ(n_i−1)s_i²/(N−k),
+//   χ² = [ (N−k)·ln(s_p²) − Σ(n_i−1)·ln(s_i²) ] / C,
+//   C  = 1 + ( Σ 1/(n_i−1) − 1/(N−k) ) / (3(k−1)),   df = k−1.
+// Bartlett is powerful when normality holds but sensitive to departures from it
+// (use Levene / Brown-Forsythe otherwise).
+//
+// Pure Sounio: one pass per group for the variances; inline ln/exp + Lanczos
+// log-gamma & incomplete gamma for the χ² tail. No nested data-array calls.
+//
+// References:
+//   Bartlett (1937) Proc. R. Soc. A 160:268.
+
+module stats::bartlett
+
+fn bt_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / bt_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn bt_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn bt_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * bt_ln(tt) - tt + bt_ln(a)
+}
+
+fn bt_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * bt_exp(0.0 - x + s * bt_ln(x) - bt_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = bt_exp(0.0 - x + s * bt_ln(x) - bt_lgamma(s)) * h
+    return 1.0 - q
+}
+
+fn bt_chi2_sf(x: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    if df <= 0.0 { return 1.0 }
+    return 1.0 - bt_igamma_p(df * 0.5, x * 0.5)
+}
+
+pub struct BartlettResult {
+    pub chi2: f64,
+    pub df: i64,
+    pub p: f64,
+    pub pooled_var: f64,
+}
+
+/// Bartlett's test for equal variances across k consecutive-block groups.
+///
+/// Parâmetros: values — concatenated group data; sizes — per-group n (>=2);
+///             k — number of groups (2..16).
+/// Retorno: BartlettResult (chi2, df, p, pooled_var).
+/// Referências: Bartlett (1937).
+pub fn bartlett(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> BartlettResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return BartlettResult { chi2: 0.0, df: 0, p: 1.0, pooled_var: 0.0 } }
+    var off = 0
+    var nk = 0.0            // N - k = Σ(n_i - 1)
+    var sum_dfvar = 0.0     // Σ(n_i-1)·s_i²
+    var sum_df_lnvar = 0.0  // Σ(n_i-1)·ln(s_i²)
+    var sum_inv = 0.0       // Σ 1/(n_i-1)
+    var g = 0
+    while g < k {
+        let ni = sizes[g as usize]
+        if ni < 2 { return BartlettResult { chi2: 0.0, df: 0, p: 1.0, pooled_var: 0.0 } }
+        let nif = ni as f64
+        var s = 0.0
+        var a = 0
+        while a < ni { s = s + values[(off + a) as usize]; a = a + 1 }
+        let mean = s / nif
+        var ss = 0.0
+        var b = 0
+        while b < ni {
+            let dv = values[(off + b) as usize] - mean
+            ss = ss + dv * dv
+            b = b + 1
+        }
+        let dfi = nif - 1.0
+        let vi = ss / dfi
+        nk = nk + dfi
+        sum_dfvar = sum_dfvar + dfi * vi
+        sum_df_lnvar = sum_df_lnvar + dfi * bt_ln(vi)
+        sum_inv = sum_inv + 1.0 / dfi
+        off = off + ni
+        g = g + 1
+    }
+    if nk <= 0.0 { return BartlettResult { chi2: 0.0, df: 0, p: 1.0, pooled_var: 0.0 } }
+    let sp2 = sum_dfvar / nk
+    let kf = k as f64
+    let num = nk * bt_ln(sp2) - sum_df_lnvar
+    let cfac = 1.0 + (sum_inv - 1.0 / nk) / (3.0 * (kf - 1.0))
+    var chi2 = 0.0
+    if cfac > 0.0 { chi2 = num / cfac }
+    let df = k - 1
+    let p = bt_chi2_sf(chi2, df as f64)
+    return BartlettResult { chi2: chi2, df: df as i64, p: p, pooled_var: sp2 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// g1={1,2,3,4,5} s²=2.5; g2={2,4,6,8,10} s²=10. N=10,k=2.
+// sp²=(4·2.5+4·10)/8=6.25. num=8·ln6.25-(4·ln2.5+4·ln10)=14.660650-12.875503=1.785147.
+// C=1+(0.5-0.125)/3=1.125. chi2=1.785147/1.125=1.586797. df=1.
+fn test_bartlett() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0; v[4]=5.0
+    v[5]=2.0; v[6]=4.0; v[7]=6.0; v[8]=8.0; v[9]=10.0
+    sz[0]=5; sz[1]=5
+    let r = bartlett(&v, &sz, 2)
+    var ok = true
+    ok = check(1, approx(r.pooled_var, 6.25, 1.0e-6)) && ok
+    ok = check(2, approx(r.chi2, 1.586797, 1.0e-4)) && ok
+    ok = check(3, r.df == 1) && ok
+    return ok
+}
+
+// equal variances (shifted copies) -> chi2 ~ 0, p ~ 1.
+fn test_equal() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0
+    v[4]=11.0; v[5]=12.0; v[6]=13.0; v[7]=14.0
+    sz[0]=4; sz[1]=4
+    let r = bartlett(&v, &sz, 2)
+    var ok = true
+    ok = check(10, approx(r.chi2, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_bartlett() && ok
+    ok = test_equal() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

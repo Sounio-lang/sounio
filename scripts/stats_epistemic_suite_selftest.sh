@@ -46,6 +46,33 @@ MODULES=(
   stdlib/stats/km.sio
   stdlib/stats/logrank.sio
   stdlib/stats/exp_survival.sio
+  stdlib/stats/robust.sio
+  stdlib/stats/hodges_lehmann.sio
+  stdlib/stats/outlier.sio
+  stdlib/stats/deming.sio
+  stdlib/stats/theil_sen.sio
+  stdlib/stats/passing_bablok.sio
+  stdlib/stats/fisher_exact.sio
+  stdlib/stats/cochran_q.sio
+  stdlib/stats/fleiss_kappa.sio
+  stdlib/stats/logistic.sio
+  stdlib/stats/poisson_reg.sio
+  stdlib/stats/wls.sio
+  stdlib/stats/runs_test.sio
+  stdlib/stats/durbin_watson.sio
+  stdlib/stats/autocorr.sio
+  stdlib/stats/nelson_aalen.sio
+  stdlib/stats/rmst.sio
+  stdlib/stats/life_table.sio
+  stdlib/stats/kendall_tau.sio
+  stdlib/stats/goodman_kruskal.sio
+  stdlib/stats/somers_d.sio
+  stdlib/stats/bartlett.sio
+  stdlib/stats/levene.sio
+  stdlib/stats/var_ftest.sio
+  stdlib/stats/mann_whitney.sio
+  stdlib/stats/sign_test.sio
+  stdlib/stats/mood_median.sio
 )
 
 fail=0

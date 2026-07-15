@@ -1,0 +1,187 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/passing_bablok.sio — Passing-Bablok regression
+//
+// The clinical-chemistry standard for method comparison: a non-parametric line
+// fit robust to error in both variables and to outliers, with no distributional
+// assumption on the measurements.
+//
+//   passing_bablok(x, y, n) -> PBFit
+//
+// Pairwise slopes Sᵢⱼ = (yⱼ−yᵢ)/(xⱼ−xᵢ) (i<j, xᵢ≠xⱼ) are formed; those equal to
+// −1 are excluded (they cancel the shift correction). With N valid slopes sorted
+// ascending and K = #{Sᵢⱼ < −1}, the estimated slope is the *shifted* median
+//   b = S_{(N+1)/2 + K}                (N odd)
+//   b = ½(S_{N/2+K} + S_{N/2+K+1})     (N even)   [1-indexed],
+// and the intercept a = median_i(yᵢ − b·xᵢ).  The K offset corrects the bias of
+// the plain slope median (Passing & Bablok 1983; matches the R `mcr` package).
+//
+// Pure Sounio: pairwise slopes in a bounded [2080] scratch (n ≤ 64) with an
+// *inline* sort; residual median with a second inline sort. No nested call is
+// made while a large buffer is live.
+//
+// References:
+//   Passing & Bablok (1983) J. Clin. Chem. Clin. Biochem. 21:709.
+
+module stats::passing_bablok
+
+// sort the first m entries of a [2080] buffer ascending (inline insertion sort).
+fn pb_sort_big(buf: &![f64; 2080], m: i32) with Mut {
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// median of the first m entries of a [256] buffer (inline insertion sort).
+fn pb_median_small(buf: &![f64; 256], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    return 0.5 * (buf[(m / 2 - 1) as usize] + buf[(m / 2) as usize])
+}
+
+pub struct PBFit {
+    pub slope: f64,
+    pub intercept: f64,
+}
+
+/// Passing-Bablok regression.
+///
+/// Parâmetros: x, y — paired measurements; n — size (2..64).
+/// Retorno: PBFit (slope, intercept).
+/// Referências: Passing & Bablok (1983).
+pub fn passing_bablok(x: &[f64; 256], y: &[f64; 256], n: i32) -> PBFit with Mut, Div, Panic {
+    if n < 2 || n > 64 { return PBFit { slope: 0.0, intercept: 0.0 } }
+    var slopes: [f64; 2080] = [0.0; 2080]
+    var m = 0
+    var kneg = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let dx = x[j as usize] - x[i as usize]
+            if dx != 0.0 {
+                let s = (y[j as usize] - y[i as usize]) / dx
+                if s != 0.0 - 1.0 {            // exclude slopes exactly -1
+                    slopes[m as usize] = s
+                    m = m + 1
+                    if s < 0.0 - 1.0 { kneg = kneg + 1 }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if m < 1 { return PBFit { slope: 0.0, intercept: 0.0 } }
+    pb_sort_big(&!slopes, m)
+    // shifted median (1-indexed rank (N+1)/2 + K), translated to 0-indexed
+    var slope = 0.0
+    if m % 2 == 1 {
+        var idx = (m + 1) / 2 + kneg - 1
+        if idx < 0 { idx = 0 }
+        if idx > m - 1 { idx = m - 1 }
+        slope = slopes[idx as usize]
+    } else {
+        var idlo = m / 2 + kneg - 1
+        var idhi = m / 2 + kneg
+        if idlo < 0 { idlo = 0 }
+        if idhi > m - 1 { idhi = m - 1 }
+        slope = 0.5 * (slopes[idlo as usize] + slopes[idhi as usize])
+    }
+    // intercept = median residual
+    var resid: [f64; 256] = [0.0; 256]
+    var k = 0
+    while k < n {
+        resid[k as usize] = y[k as usize] - slope * x[k as usize]
+        k = k + 1
+    }
+    let intercept = pb_median_small(&!resid, n)
+    return PBFit { slope: slope, intercept: intercept }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect line y=2x+1: all 6 slopes = 2, N=6, K=0 -> b=(S3+S4)/2=2, intercept 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0
+    let r = passing_bablok(&x, &y, 4)
+    var ok = true
+    ok = check(1, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// -1 exclusion: (1,1),(2,3),(3,2),(4,5). the (2,3) pair has slope -1 and is
+// dropped, leaving valid {2,0.5,1.333333,1,3}, N=5, K=0 -> b=S_3=1.333333.
+// intercept = median(y-b·x) = median{-0.333333,0.333333,-2,-0.333333} = -0.333333.
+fn test_exclude_minus1() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=1.0; y[1]=3.0; y[2]=2.0; y[3]=5.0
+    let r = passing_bablok(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.slope, 1.333333, 1.0e-5)) && ok
+    ok = check(11, approx(r.intercept, 0.0 - 0.333333, 1.0e-5)) && ok
+    return ok
+}
+
+// K-offset case: (1,5),(2,1),(3,6),(4,7). slopes {-4,0.5,0.666667,5,3,1}, N=6,
+// K=1 (the -4 < -1). sorted -4,0.5,0.666667,1,3,5 -> b=(S_{3+1}+S_{3+2})/2
+// = (S_4+S_5)/2 = (1+3)/2 = 2. intercept=median(5-2,1-4,6-6,7-8)=med{3,-3,0,-1}=-0.5.
+fn test_k_offset() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=5.0; y[1]=1.0; y[2]=6.0; y[3]=7.0
+    let r = passing_bablok(&x, &y, 4)
+    var ok = true
+    ok = check(20, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.intercept, 0.0 - 0.5, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_exclude_minus1() && ok
+    ok = test_k_offset() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

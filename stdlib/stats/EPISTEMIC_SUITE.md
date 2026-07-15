@@ -619,6 +619,305 @@ companion to Kaplan-Meier: `λ̂ = D/T` with a log-scale 95% CI `λ̂·exp(±1.9
 plus median `ln2/λ̂`, mean `1/λ̂`, and Ŝ(t)=e^{−λ̂t}. Validated: {2,3,5⁺,6,7}
 with one censored → λ̂=0.1739, median 3.986, mean 5.75, S(4)=0.4988.
 
+### `stats::robust` — robust location & scale
+
+| Function | Signature |
+|---|---|
+| `median` / `quantile` | `pub fn median(x: &[f64; 256], n: i32) -> f64 …` · `quantile(x, n, p)` (type-7) |
+| `iqr` / `mad` | `pub fn iqr(x, n) -> f64` · `mad(x, n) -> f64` (σ-consistent, ×1.4826) |
+| `trimmed_mean` / `winsorized_mean` | `pub fn trimmed_mean(x, n, frac) -> f64` · `winsorized_mean(x, n, frac) -> f64` |
+
+Outlier-resistant descriptives: type-7 (R/NumPy-linear) quantiles, the median,
+IQR, the σ-consistent MAD, and symmetric trimmed / Winsorized means. Validated:
+{1,2,3,4,5}→median 3, IQR 2, MAD 1.4826; {1,2,3,4,1000}→median & 20%-trimmed
+mean both 3 (vs raw mean 202).
+
+### `stats::hodges_lehmann` — Hodges-Lehmann estimators
+
+| Function | Signature |
+|---|---|
+| `hl_one` | `pub fn hl_one(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic` |
+| `hl_two` | `pub fn hl_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic` |
+
+The robust location estimators that invert the Wilcoxon tests: `hl_one` is the
+median of the Walsh averages `(xᵢ+xⱼ)/2` (i≤j), `hl_two` the median of the
+pairwise differences `xᵢ−yⱼ`. Validated: {1,2,3,4}→2.5; {1,2,3,4,100}→3.0
+(robust); two-sample shift y=x+5 → −5.
+
+### `stats::outlier` — outlier detection
+
+| Function | Signature |
+|---|---|
+| `tukey_outliers` | `pub fn tukey_outliers(x: &[f64; 256], n: i32, k: f64) -> OutlierFences with Mut, Div, Panic` |
+| `grubbs` | `pub fn grubbs(x: &[f64; 256], n: i32) -> GrubbsResult with Mut, Div, Panic` |
+| `modified_z` | `pub fn modified_z(x: &[f64; 256], n: i32, thresh: f64) -> ModZResult with Mut, Div, Panic` |
+
+Three complementary rules: Tukey boxplot fences (Q1−k·IQR, Q3+k·IQR), Grubbs'
+single-outlier test `G=max|xᵢ−x̄|/s` with the exact two-sided Bonferroni t
+p-value, and the MAD-based Iglewicz-Hoaglin modified z-score. Validated:
+{…,100}→1 Tukey outlier; {1,2,3,4,5,50}→G=2.036, p<0.01, modified-z=20.9.
+
+### `stats::deming` — Deming regression (errors-in-variables)
+
+| Function | Signature |
+|---|---|
+| `deming` | `pub fn deming(x: &[f64; 256], y: &[f64; 256], n: i32, lambda: f64) -> DemingFit with Mut, Div, Panic` |
+
+The method-comparison regression that allows measurement error in *both*
+variables (λ = error-variance ratio; λ=1 → orthogonal). Closed-form slope
+`b = [(Syy−λSxx)+√((Syy−λSxx)²+4λSxy²)]/(2Sxy)`, intercept ȳ−b·x̄. Validated:
+perfect line → slope 2, intercept 1; staircase → slope 0.8828 (vs OLS 0.8).
+
+### `stats::theil_sen` — Theil-Sen robust regression
+
+| Function | Signature |
+|---|---|
+| `theil_sen` | `pub fn theil_sen(x: &[f64; 256], y: &[f64; 256], n: i32) -> TSFit with Mut, Div, Panic` |
+
+Distribution-free line fit: slope = median of pairwise slopes, intercept =
+median residual — resistant to ~29% arbitrary outliers. Validated: perfect line
+→ (2,1); with a wild outlier at (5,100) still → (2,1); negative slope → −3.
+
+### `stats::passing_bablok` — Passing-Bablok regression
+
+| Function | Signature |
+|---|---|
+| `passing_bablok` | `pub fn passing_bablok(x: &[f64; 256], y: &[f64; 256], n: i32) -> PBFit with Mut, Div, Panic` |
+
+The clinical-chemistry standard for method comparison: the shifted-median slope
+(pairwise slopes with the −1 exclusion and the `K` = #{slope<−1} rank offset,
+per Passing & Bablok 1983 / the R `mcr` package) and the median-residual
+intercept. Validated: perfect line → (2,1); −1-slope pair correctly excluded;
+K-offset case → slope 2.
+
+### `stats::fisher_exact` — Fisher's exact test (2×2)
+
+| Function | Signature |
+|---|---|
+| `fisher_exact` | `pub fn fisher_exact(a: i64, b: i64, c: i64, d: i64) -> FisherResult with Mut, Div, Panic` |
+
+The exact small-sample test of 2×2 association (valid where χ² is not): the
+two-sided p sums hypergeometric probabilities of all tables with P≤P(observed);
+one-sided tails and the sample odds ratio too. Validated: tea-test [[3,1],[1,3]]
+→ p_two=0.4857, p_greater=0.2429, OR=9; [[9,1],[1,9]] → p<0.01, OR=81;
+[[5,5],[5,5]] → p=1, OR=1.
+
+### `stats::cochran_q` — Cochran's Q test
+
+| Function | Signature |
+|---|---|
+| `cochran_q` | `pub fn cochran_q(data: &[f64; 256], n: i32, k: i32) -> CochranQResult with Mut, Div, Panic` |
+
+McNemar extended to k≥2 matched binary conditions: `Q=(k−1)(k·ΣCⱼ²−N²)/(k·N−ΣRᵢ²)
+~ χ²(k−1)` on a row-major n×k 0/1 matrix. Validated: 4×3 example → Q=2.667, df=2;
+one-condition-always-positive → Q=6, p<0.05; all-agree → Q=0.
+
+### `stats::fleiss_kappa` — Fleiss' kappa (multi-rater)
+
+| Function | Signature |
+|---|---|
+| `fleiss_kappa` | `pub fn fleiss_kappa(counts: &[f64; 256], subjects: i32, k: i32, raters: i32) -> FleissResult with Mut, Div, Panic` |
+
+Cohen's κ extended to a fixed number of raters per subject: chance-corrected
+agreement `κ=(P̄−P̄ₑ)/(1−P̄ₑ)` from a row-major N×k rater-count matrix. Validated:
+worked 2-subject case → P̄=0.6667, P̄ₑ=0.7222, κ=−0.2; perfect within-subject
+agreement → κ=1.
+
+### `stats::logistic` — one-predictor logistic regression
+
+| Function | Signature |
+|---|---|
+| `logistic_fit` | `pub fn logistic_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> LogisticFit with Mut, Div, Panic` |
+| `logistic_predict` | `pub fn logistic_predict(fit: &LogisticFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood logistic regression `logit(pᵢ)=b₀+b₁xᵢ`, fit by
+Newton-Raphson (IRLS) — the workhorse for binary dose-response. Returns the
+coefficients, standard errors, slope Wald z/p and convergence diagnostics.
+Validated: two-point saturated design → b₀=−0.6931, b₁=1.3863, p̂(0)=⅓, p̂(1)=⅔;
+balanced null → b₁=0.
+
+### `stats::poisson_reg` — one-predictor Poisson regression
+
+| Function | Signature |
+|---|---|
+| `poisson_fit` | `pub fn poisson_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> PoissonFit with Mut, Div, Panic` |
+| `poisson_predict` | `pub fn poisson_predict(fit: &PoissonFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood Poisson (log-link) count/rate regression `log(μᵢ)=b₀+b₁xᵢ`
+by Newton-Raphson; `exp(b₁)` is the rate ratio per unit x. Validated: two-point
+saturated design → b₀=ln3, b₁=ln4, rate ratio 4, μ̂(0)=3, μ̂(1)=12; flat counts
+→ b₁=0.
+
+### `stats::wls` — weighted least-squares regression
+
+| Function | Signature |
+|---|---|
+| `wls_fit` | `pub fn wls_fit(x: &[f64; 256], y: &[f64; 256], w: &[f64; 256], n: i32) -> WLSFit with Mut, Div, Panic` |
+
+Straight-line regression with per-observation weights (wᵢ∝1/σᵢ²) — the fit for
+heteroscedastic assay data. Closed-form coefficients, standard errors from
+`σ̂²(XᵀWX)⁻¹`, and a weighted R². Validated: perfect line → (1,2), R²=1;
+downweighting an outlier pulls the slope from OLS 5 to 1.229.
+
+### `stats::runs_test` — Wald-Wolfowitz runs test
+
+| Function | Signature |
+|---|---|
+| `runs_test` | `pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic` |
+
+Tests a 0/1 sequence for randomness against serial dependence: with n₁ ones, n₂
+zeros and R runs, `z=(R−μ_R)/σ_R` where `μ_R=2n₁n₂/n+1`. Too few runs →
+clustering, too many → over-alternation. Validated: balanced random-like →
+R=6, z=0; clustered → R=2, z=−2.683, p<0.01; alternating → R=10, z=2.683.
+
+### `stats::durbin_watson` — Durbin-Watson statistic
+
+| Function | Signature |
+|---|---|
+| `durbin_watson` | `pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic` |
+
+First-order serial-correlation diagnostic for residuals:
+`d=Σ(eᵢ−e_{i−1})²/Σeᵢ² ∈ [0,4]`, with ρ̂≈1−d/2 (d≈2 → none, d<2 → positive,
+d>2 → negative). Validated: alternating residuals → d=3.333, ρ̂=−0.667;
+block residuals → d=0.667, ρ̂=0.667.
+
+### `stats::autocorr` — autocorrelation & Ljung-Box
+
+| Function | Signature |
+|---|---|
+| `acf` | `pub fn acf(x: &[f64; 256], n: i32, k: i32) -> f64 with Mut, Div, Panic` |
+| `ljung_box` | `pub fn ljung_box(x: &[f64; 256], n: i32, m: i32) -> LBResult with Mut, Div, Panic` |
+
+Sample autocorrelation at lag k and the Ljung-Box portmanteau test
+`Q=n(n+2)Σr_k²/(n−k) ~ χ²(m)` for white noise up to lag m. Validated:
+{1,2,3,4,5}→acf(1)=0.4, acf(2)=−0.1; Ljung-Box(m=2)→Q=1.517; a monotone ramp →
+acf(1)>0.6, Q significant.
+
+### `stats::nelson_aalen` — Nelson-Aalen cumulative hazard
+
+| Function | Signature |
+|---|---|
+| `nelson_aalen` | `pub fn nelson_aalen(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> NAResult with Mut, Div, Panic` |
+
+The non-parametric cumulative hazard `Ĥ(t)=Σd_j/n_j` with variance `Σd_j/n_j²`
+and implied survival `Ŝ=e^{−Ĥ}` — the KM companion, better-behaved in the tail.
+Validated: times 1–5 all deaths → Ĥ(3)=0.7833, Var=0.2136, Ŝ(3)=0.4569; with
+censoring → Ĥ(4)=0.5333.
+
+### `stats::rmst` — restricted mean survival time
+
+| Function | Signature |
+|---|---|
+| `rmst` | `pub fn rmst(time: &[f64; 256], event: &[i64; 256], n: i32, tau: f64) -> f64 with Mut, Div, Panic` |
+
+The area under the KM curve up to a horizon τ — a clinically interpretable
+event-free-time summary, robust to non-proportional hazards. Exact truncated
+step-function integral. Validated: times 1–5 → RMST(5)=3.0, RMST(3)=2.4,
+RMST(2.5)=2.1; with censoring → RMST(5)=3.667.
+
+### `stats::life_table` — actuarial (cohort) life table
+
+| Function | Signature |
+|---|---|
+| `life_table_survival` | `pub fn life_table_survival(entering: &[f64; 64], deaths: &[f64; 64], withdrawn: &[f64; 64], k: i32, q_interval: i32) -> f64 with Mut, Div, Panic` |
+| `life_table_hazard` | `pub fn life_table_hazard(entering, deaths, withdrawn, k, q_interval) -> f64` |
+
+Interval-grouped survival for count-per-interval data: with the withdrawal-
+adjusted risk set `n'ᵢ=nᵢ−wᵢ/2`, `qᵢ=dᵢ/n'ᵢ` and `Ŝ=Πpᵢ` (Cutler-Ederer).
+Validated: 3-interval example → S=0.9, 0.8047, 0.7231; hazard(i1)=0.1059.
+
+### `stats::kendall_tau` — Kendall's rank correlation
+
+| Function | Signature |
+|---|---|
+| `kendall_tau` | `pub fn kendall_tau(x: &[f64; 256], y: &[f64; 256], n: i32) -> KendallResult with Mut, Div, Panic` |
+
+Concordance-based rank correlation robust to outliers and monotone non-linear
+relationships: τ_a=(C−D)/(n(n−1)/2), the tie-corrected τ_b, and the no-tie null
+z-test. Validated: perfect concordance → τ=1; {1,3,2,4} → τ_a=0.667, z=1.359;
+ties → τ_a=0.667 but τ_b=0.8; perfect discordance → τ=−1.
+
+### `stats::goodman_kruskal` — Goodman-Kruskal gamma
+
+| Function | Signature |
+|---|---|
+| `goodman_kruskal` | `pub fn goodman_kruskal(x: &[f64; 256], y: &[f64; 256], n: i32) -> GammaResult with Mut, Div, Panic` |
+
+Ordinal association ignoring tied pairs entirely: γ=(C−D)/(C+D) with the
+pair-count Wald z. Validated: {1,3,2,4} → γ=0.667; ties (using only untied
+pairs) → γ=1; perfect discordance → γ=−1.
+
+### `stats::somers_d` — Somers' D (asymmetric)
+
+| Function | Signature |
+|---|---|
+| `somers_d` | `pub fn somers_d(x: &[f64; 256], y: &[f64; 256], n: i32) -> SomersResult with Mut, Div, Panic` |
+
+Asymmetric ordinal association: D(Y|X)=(C−D)/(C+D+Tx) penalises ties on the
+predictor, so for a binary Y it equals 2·AUC−1. Validated: no ties → D=0.667;
+ties → D(Y|X)=D(X|Y)=0.8; binary Y with perfect separation → D(Y|X)=1 (AUC=1).
+
+### `stats::bartlett` — Bartlett's test for equal variance
+
+| Function | Signature |
+|---|---|
+| `bartlett` | `pub fn bartlett(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> BartlettResult with Mut, Div, Panic` |
+
+Homogeneity-of-variance test across k consecutive-block groups (powerful under
+normality): `χ²=[(N−k)ln(s_p²)−Σ(n_i−1)ln(s_i²)]/C ~ χ²(k−1)`. Validated:
+{1..5} vs {2,4..10} → pooled 6.25, χ²=1.5868, df=1; equal-spread → χ²=0.
+
+### `stats::levene` — Levene / Brown-Forsythe test
+
+| Function | Signature |
+|---|---|
+| `levene` | `pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic` |
+
+The distribution-robust variance test: one-way ANOVA on absolute deviations from
+each group's centre (`center` = 0 mean → Levene, 1 median → Brown-Forsythe).
+`W ~ F(k−1, N−k)`. Validated: worked example → W=2.0571 (both centerings on
+symmetric data); equal-spread → W=0.
+
+### `stats::var_ftest` — two-sample variance F-test
+
+| Function | Signature |
+|---|---|
+| `var_ftest` | `pub fn var_ftest(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> VarFResult with Mut, Div, Panic` |
+
+The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
+p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
+
+### `stats::mann_whitney` — Mann-Whitney U / rank-sum test
+
+| Function | Signature |
+|---|---|
+| `mann_whitney` | `pub fn mann_whitney(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> MannWhitneyResult with Mut, Div, Panic` |
+
+The two-sample rank-sum test (unpaired counterpart to Wilcoxon signed-rank):
+`U₁=R₁−n₁(n₁+1)/2`, tie-corrected normal-approximation z. Validated: fully
+separated → U=0, z=−1.964, p=0.0495; overlapping → U₁=3, p>0.5; cross-group ties
+→ R₁=8.
+
+### `stats::sign_test` — sign test
+
+| Function | Signature |
+|---|---|
+| `sign_test` | `pub fn sign_test(x: &[f64; 256], y: &[f64; 256], n: i32) -> SignResult with Mut, Div, Panic` |
+| `sign_test_median` | `pub fn sign_test_median(x: &[f64; 256], n: i32, m0: f64) -> SignResult with Mut, Div, Panic` |
+
+The simplest distribution-free test — signs only, exact binomial p (zeros
+dropped). Validated: 7+/2− → p=0.1797; one-sample median → p=0.625.
+
+### `stats::mood_median` — Mood's median test
+
+| Function | Signature |
+|---|---|
+| `mood_median` | `pub fn mood_median(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> MoodResult with Mut, Div, Panic` |
+
+A robust k-sample equal-medians test: χ² on the 2×k above/below-pooled-median
+table. Less powerful than Kruskal-Wallis but far more outlier-resistant.
+Validated: {1..5} vs {6..10} → median 5.5, χ²=10, df=1; identical groups → χ²=0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -660,6 +959,33 @@ use stats::normality::{NormalityResult, normality}
 use stats::km::{KMResult, km}
 use stats::logrank::{LogRankResult, logrank}
 use stats::exp_survival::{ExpSurvResult, exp_survival}
+use stats::robust::{median, quantile, iqr, mad, trimmed_mean, winsorized_mean}
+use stats::hodges_lehmann::{hl_one, hl_two}
+use stats::outlier::{OutlierFences, GrubbsResult, ModZResult, tukey_outliers, grubbs, modified_z}
+use stats::deming::{DemingFit, deming}
+use stats::theil_sen::{TSFit, theil_sen}
+use stats::passing_bablok::{PBFit, passing_bablok}
+use stats::fisher_exact::{FisherResult, fisher_exact}
+use stats::cochran_q::{CochranQResult, cochran_q}
+use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
+use stats::logistic::{LogisticFit, logistic_fit, logistic_predict}
+use stats::poisson_reg::{PoissonFit, poisson_fit, poisson_predict}
+use stats::wls::{WLSFit, wls_fit}
+use stats::runs_test::{RunsResult, runs_test}
+use stats::durbin_watson::{DWResult, durbin_watson}
+use stats::autocorr::{LBResult, acf, ljung_box}
+use stats::nelson_aalen::{NAResult, nelson_aalen}
+use stats::rmst::{rmst}
+use stats::life_table::{life_table_survival, life_table_hazard}
+use stats::kendall_tau::{KendallResult, kendall_tau}
+use stats::goodman_kruskal::{GammaResult, goodman_kruskal}
+use stats::somers_d::{SomersResult, somers_d}
+use stats::bartlett::{BartlettResult, bartlett}
+use stats::levene::{LeveneResult, levene}
+use stats::var_ftest::{VarFResult, var_ftest}
+use stats::mann_whitney::{MannWhitneyResult, mann_whitney}
+use stats::sign_test::{SignResult, sign_test, sign_test_median}
+use stats::mood_median::{MoodResult, mood_median}
 ```
 
 A worked end-to-end example that runs all five tools on one dataset lives at

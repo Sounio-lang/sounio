@@ -1,0 +1,164 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/theil_sen.sio — Theil-Sen robust regression
+//
+// The distribution-free line fit: the slope is the median of the pairwise
+// slopes, so up to ~29% of the points can be arbitrary outliers without moving
+// it:
+//
+//   theil_sen(x, y, n) -> TSFit
+//
+//   slope  b = median_{i<j, xᵢ≠xⱼ} (yⱼ − yᵢ)/(xⱼ − xᵢ),
+//   intercept a = median_i (yᵢ − b·xᵢ).
+//
+// Pure Sounio: the pairwise slopes are materialised into a bounded [2080]
+// scratch (n ≤ 64) and the median is taken with an *inline* insertion sort;
+// the residual median for the intercept uses a second inline sort. No nested
+// call is made while a large buffer is live.
+//
+// References:
+//   Theil (1950); Sen (1968) JASA 63:1379.
+
+module stats::theil_sen
+
+// median of the first m entries of a [2080] buffer (inline insertion sort).
+fn ts_median_big(buf: &![f64; 2080], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    return 0.5 * (buf[(m / 2 - 1) as usize] + buf[(m / 2) as usize])
+}
+
+// median of the first m entries of a [256] buffer (inline insertion sort).
+fn ts_median_small(buf: &![f64; 256], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    return 0.5 * (buf[(m / 2 - 1) as usize] + buf[(m / 2) as usize])
+}
+
+pub struct TSFit {
+    pub slope: f64,
+    pub intercept: f64,
+}
+
+/// Theil-Sen robust regression.
+///
+/// Parâmetros: x, y — paired data; n — size (2..64).
+/// Retorno: TSFit (slope = median pairwise slope, intercept = median residual).
+/// Referências: Theil (1950); Sen (1968).
+pub fn theil_sen(x: &[f64; 256], y: &[f64; 256], n: i32) -> TSFit with Mut, Div, Panic {
+    if n < 2 || n > 64 { return TSFit { slope: 0.0, intercept: 0.0 } }
+    var slopes: [f64; 2080] = [0.0; 2080]
+    var m = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let dx = x[j as usize] - x[i as usize]
+            if dx != 0.0 {
+                slopes[m as usize] = (y[j as usize] - y[i as usize]) / dx
+                m = m + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if m < 1 { return TSFit { slope: 0.0, intercept: 0.0 } }
+    let slope = ts_median_big(&!slopes, m)
+    // intercept = median residual y_i - slope*x_i
+    var resid: [f64; 256] = [0.0; 256]
+    var k = 0
+    while k < n {
+        resid[k as usize] = y[k as usize] - slope * x[k as usize]
+        k = k + 1
+    }
+    let intercept = ts_median_small(&!resid, n)
+    return TSFit { slope: slope, intercept: intercept }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect line y=2x+1: all pairwise slopes 2, all residuals 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0
+    let r = theil_sen(&x, &y, 4)
+    var ok = true
+    ok = check(1, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// robustness: y=2x+1 for x=1..4, then a wild outlier (5,100).
+// 10 slopes: six 2's + four large -> median (5th,6th) = 2. residual median = 1.
+fn test_robust() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0; y[4]=100.0
+    let r = theil_sen(&x, &y, 5)
+    var ok = true
+    ok = check(10, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// negative slope y = -3x + 10: (0,10),(1,7),(2,4),(3,1). slopes all -3, resid 10.
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=10.0; y[1]=7.0; y[2]=4.0; y[3]=1.0
+    let r = theil_sen(&x, &y, 4)
+    var ok = true
+    ok = check(20, approx(r.slope, 0.0 - 3.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.intercept, 10.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_robust() && ok
+    ok = test_negative() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
