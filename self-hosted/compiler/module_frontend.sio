@@ -1924,7 +1924,49 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
 // provenance is missing or ambiguous. Returning false keeps the compiler on a
 // diagnostic exit instead of executing whichever same-name slot was collected
 // first. Single-module bootstrap paths do not call this guard.
-fn ir_module_direct_fn_provenance_is_complete(module: &IrModule) -> bool with Mut, Div, Panic {
+fn ir_module_report_direct_fn_provenance_failure(
+    module: &IrModule,
+    owner_idx: i64,
+    instr_idx: i64,
+    reason: string
+) with IO, Mut, Div, Panic {
+    let owner_module_id = (*module).functions[owner_idx as usize].defining_module_id
+    let owner_name = (*module).functions[owner_idx as usize].name
+    let opcode = (*module).functions[owner_idx as usize].instrs[instr_idx as usize].op
+    let fn_id = (*module).functions[owner_idx as usize].instrs[instr_idx as usize].fn_id
+    let instr_name = (*module).functions[owner_idx as usize].instrs[instr_idx as usize].name
+    print("PROVENANCE_FAIL reason=")
+    print(reason)
+    print("\nPROVENANCE_FAIL owner_idx ")
+    print_int(owner_idx)
+    print("PROVENANCE_FAIL owner_module_id ")
+    print_int(owner_module_id)
+    print("PROVENANCE_FAIL owner_name [")
+    print(str_from_bytes(owner_name.buf, owner_name.len))
+    print("]\nPROVENANCE_FAIL instr_idx ")
+    print_int(instr_idx)
+    print("PROVENANCE_FAIL opcode ")
+    print_int(ir_diag_opcode_tag(opcode))
+    print("PROVENANCE_FAIL fn_id ")
+    print_int(fn_id)
+    print("PROVENANCE_FAIL instr_name [")
+    print(str_from_bytes(instr_name.buf, instr_name.len))
+    print("]\n")
+    if fn_id >= 0 && fn_id < (*module).fn_count {
+        let target_module_id = (*module).functions[fn_id as usize].defining_module_id
+        let target_instr_count = (*module).functions[fn_id as usize].instr_count
+        let target_name = (*module).functions[fn_id as usize].name
+        print("PROVENANCE_FAIL target_module_id ")
+        print_int(target_module_id)
+        print("PROVENANCE_FAIL target_instr_count ")
+        print_int(target_instr_count)
+        print("PROVENANCE_FAIL target_name [")
+        print(str_from_bytes(target_name.buf, target_name.len))
+        print("]\n")
+    }
+}
+
+fn ir_module_direct_fn_provenance_is_complete(module: &IrModule) -> bool with IO, Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
         let func = (*module).functions[fi as usize]
@@ -1933,13 +1975,16 @@ fn ir_module_direct_fn_provenance_is_complete(module: &IrModule) -> bool with Mu
             let ins = func.instrs[ii as usize]
             if ir_merge_is_direct_fn_ref_opcode(ins.op) {
                 if ins.fn_id < 0 || ins.fn_id >= (*module).fn_count {
+                    ir_module_report_direct_fn_provenance_failure(module, fi, ii, "fn_id_range")
                     return false
                 }
                 let target = (*module).functions[ins.fn_id as usize]
                 if !ir_function_has_exact_definition_identity(target) {
+                    ir_module_report_direct_fn_provenance_failure(module, fi, ii, "target_identity")
                     return false
                 }
                 if ins.name.len > 0 && !ir_name_eq(ins.name, target.name) {
+                    ir_module_report_direct_fn_provenance_failure(module, fi, ii, "name_mismatch")
                     return false
                 }
             }
