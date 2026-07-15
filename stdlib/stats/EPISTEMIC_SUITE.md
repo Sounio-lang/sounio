@@ -3,18 +3,52 @@
 ## Overview
 
 The **epistemic statistics suite** is a cohesive, pure-Sounio, dependency-light
-toolkit for classical inferential statistics. It completes the stdlib
-distribution family — Student's t, chi-squared and Fisher-Snedecor F, each with
-a full `pdf` / `cdf` / `sf` / `quantile` surface — and adds two analyses that
-clinical and pharmacometric work routinely need but that the stdlib previously
-lacked: the non-parametric Wilcoxon signed-rank test and Bland-Altman
-method-agreement analysis. Every routine is written in Sounio with no FFI, no
-sampling dependency and no external solver: the analytic core rests only on the
-special-function modules (`special::beta`, `special::gamma`, `special::igamma`,
-`special::erf`). Every non-trivial routine returns an **explicit result struct**
-that carries the point estimate together with a confidence interval (or, for
-Wilcoxon, the test statistics, z, p-value and effect size), so callers receive
-auditable numbers rather than a bare scalar.
+toolkit that spans the full applied-biostatistics arc — **70 modules** across
+fourteen families:
+
+- **Distributions & fitting** — Student's t, chi-squared, Fisher-Snedecor F
+  (full `pdf`/`cdf`/`sf`/`quantile` surfaces), a `densities` bank, Weibull /
+  negative-binomial, and method-of-moments fitting for the gamma, beta and
+  lognormal.
+- **Robust descriptives** — median / IQR / MAD / trimmed & Winsorized means,
+  the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
+- **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
+  χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
+  autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
+  Brown-Forsythe, the variance F-test).
+- **Group comparison** — one-way ANOVA, inference from summary statistics,
+  standardised effect sizes, and power / sample-size planning.
+- **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
+  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
+- **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
+  point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
+  Somers' D.
+- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, and
+  the Deming / Theil-Sen / Passing-Bablok method-comparison fits.
+- **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
+  Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
+- **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
+  Fleiss' κ, and ICC / Cronbach's α.
+- **Diagnostic accuracy** — sensitivity / specificity / likelihood ratios and
+  ROC AUC.
+- **Survival analysis** — Kaplan-Meier, Nelson-Aalen cumulative hazard,
+  restricted mean survival time, the actuarial life table, the log-rank test and
+  a parametric exponential fit.
+- **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
+  NNT, and person-time incidence rates.
+- **Bayesian** — conjugate updates with credible sets.
+
+Every routine is written in Sounio with no FFI, no sampling dependency and no
+external solver: the analytic core rests only on the special-function modules
+(`special::beta`, `special::gamma`, `special::igamma`, `special::erf`), and every
+tail, quantile and p-value is built from those by hand. Every non-trivial routine
+returns an **explicit result struct** carrying the point estimate together with a
+confidence interval or the test statistics, z, p-value and effect size — so
+callers receive auditable numbers rather than a bare scalar. Each module ships
+inline tests against hand-derived textbook constants and is independently
+math-reviewed by an orthogonal LLM before merge (audit trail in
+`.claude/llm_offload_log.md`); the whole suite runs green under the `lean_single`
+engine (`scripts/stats_epistemic_suite_selftest.sh`).
 
 ## Modules
 
@@ -1057,8 +1091,8 @@ use stats::point_biserial::{PointBiserialResult, point_biserial}
 use stats::partial_corr::{PartialResult, partial_corr}
 ```
 
-A worked end-to-end example that runs all five tools on one dataset lives at
-`examples/stats/epistemic_suite_demo.sio`.
+Worked end-to-end examples that compose several tools on one dataset live at
+`examples/stats/epistemic_suite_demo.sio` and `examples/stats/full_analysis_report.sio`.
 
 > **Note — no single-import facade yet.** A `mod.sio`-style `pub use` re-export
 > surface (`use stats::epistemic_suite::{…}`) is what `stdlib/CONVENTIONS.md` §2
