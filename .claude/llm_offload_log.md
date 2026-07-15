@@ -2894,3 +2894,20 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - ar1 = **PASS**: Yule-Walker φ̂=lag-1 autocorr, c=μ(1−φ), forecast=c+φ·x_last, resid_sd over n−1 residuals; {1..5}→φ=0.4, forecast 3.8 verified.
 - Theme: time-series smoothing & forecasting — the actionable complement to the serial-dependence diagnostics (runs/durbin_watson/autocorr). All single-pass recurrences, scalar returns, derivable, #852-safe. Suite runner: 88 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Xz9JAt/`, `/tmp/llm-offload-KGiEVt/`, `/tmp/llm-offload-KNJO6S/`.
+
+## 2026-07-15 — math-review housekeeping: grouped stdlib run-proof batches (#941–#967)
+The following math-reviews were run (xAI/Grok 4.3, all **PASS**) during grouped run-proof PRs whose branches
+were kept lean (tests+gate only) for clean merges; recorded here in batch for offload-policy compliance.
+Each verifies stdlib module outputs against known/first-principles values (gates under scripts/*_gate.sh).
+
+- **#941** special::beta (beta(2,3)=1/12, beta(0.5,0.5)=π, ibeta bounds + I_{0.5}(2,2)=0.5 + ibeta_inv round-trip), math::hyperbolic (cosh/sinh(0,1), cosh²−sinh²=1, arccosh round-trip), math::rational (exact fractions via rat_cmp). PASS.
+- **#948** encoding::hex (0xff10→"ff10"/"FF10", decode round-trip), math::dd64 (double-double: recovers 1e-20, √2²=2 to 1e-25), math::combinatorics_perm (n! + next_permutation lexicographic). PASS.
+- **#950** autodiff::epistemic_dual (d/dx x²=2x, product rule, d/dx eˣ=1), collections::vec (push/pop/sum/mean/reverse), collections::stack (LIFO). PASS.
+- **#954** collections::hashmap (insert/get/count/contains/remove), core::result (IntResult/FloatResult ok/err/unwrap), math::qd128 (quad-double ~63-digit: recovers 1e-40, √2²=2 to 1e-28; lean_single). PASS.
+- **#957** viz::colormap (viridis knots (68,1,84)/(35,144,138)/(253,231,37) = matplotlib, [0,255]), geo::pure::types (Euclidean 3-4-5=5, 3D=3, triangle area=6), queue::pure::types (FIFO). PASS.
+- **#963** data::json (serializer output-conformance, RFC-8259), data::csv (header+row), math::approx (Newton sqrt, Taylor sin). PASS.
+- **#967** epistemic::covariance (std, correlation_coefficient=0.5/perfect=1), cybernetic::variety (Ashby: variety=log₂ states, requisite + deficit), audio::pure::types (buffer; lean_single). PASS.
+
+Evidence boundary: each verifies numeric/serialization/structural correctness of the named module's public
+API against known values; no source or compiler edits. Compiler bugs surfaced during the campaign are
+tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/.
