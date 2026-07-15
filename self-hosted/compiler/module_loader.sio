@@ -10,7 +10,7 @@
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
-use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
+use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_BSS_GLOBAL, IR_STRATEGY_STANDARD, make_name}
 use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put}
@@ -889,6 +889,23 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
 // IR module merging
 // ============================================================
 
+fn ir_merge_rebase_bss_function(func_in: IrFunction, bss_offset: i64) -> IrFunction with Mut, Panic, Div {
+    var func = func_in
+    if bss_offset == 0 { return func }
+    if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+        func.param_count = func.param_count + bss_offset
+    }
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        if func.instrs[ii as usize].op == IrOpcode::IrLoadGlobal ||
+            func.instrs[ii as usize].op == IrOpcode::IrStoreGlobal {
+            func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + bss_offset
+        }
+        ii = ii + 1
+    }
+    func
+}
+
 fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, Div {
     // Merge src functions into dst, adjusting fn_ids in call instructions
     var merged = dst
@@ -908,7 +925,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     // Copy functions
     var fi: i64 = 0
     while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
-        var func = src.functions[fi]
+        var func = ir_merge_rebase_bss_function(src.functions[fi], dst.bss_total_size)
         // Preserve per-function strategy metadata across multimodule IR merges.
         func.compile_strategy = src.functions[fi].compile_strategy
         // Adjust call targets: shift fn_id by fn_offset
@@ -918,6 +935,11 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
                 if func.instrs[ii].fn_id >= 0 {
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
                 }
+            }
+            if (func.instrs[ii].op == IrOpcode::IrLoadGlobal ||
+                func.instrs[ii].op == IrOpcode::IrStoreGlobal) &&
+                func.instrs[ii].fn_id >= 0 {
+                func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
             }
             func.instrs[ii] = ir_merge_adjust_epistemic_instr(
                 func.instrs[ii],
@@ -951,6 +973,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
     merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
+    merged.bss_total_size = dst.bss_total_size + src.bss_total_size
 
     merged
 }

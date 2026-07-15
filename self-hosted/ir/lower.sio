@@ -963,6 +963,40 @@ fn lowerer_extern_binding_contains(
     false
 }
 
+fn lowerer_preseed_external_global_mut(
+    lo: &! Lowerer,
+    defining_module_id: i64,
+    item: &Item
+) with Mut, Panic, Div, Alloc {
+    let fn_id = lowerer_find_or_add_fn_identity_mut(lo, defining_module_id, (*item).name)
+    if fn_id < 0 { return }
+
+    var module_box = (*lo).module
+    var slot = (*module_box).functions[fn_id as usize]
+    if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+        (*lo).module = module_box
+        return
+    }
+
+    lowerer_record_global_type_mut(lo, fn_id, &(*item).type_alias_ty)
+    module_box = (*lo).module
+    slot = (*module_box).functions[fn_id as usize]
+    let bss_size = lower_typeexpr_byte_size(&(*item).type_alias_ty)
+    let aligned_size = ((bss_size + 7) / 8) * 8
+    slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+    slot.param_count = (*module_box).bss_total_size
+    slot.bss_size = bss_size
+    slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&(*item).type_alias_ty)
+    let init = lower_global_i64_literal_init(&(*item).global_init)
+    if init.0 {
+        slot.returns_float = 1
+        slot.prof_counter_id = init.1
+    }
+    (*module_box).functions[fn_id as usize] = slot
+    (*module_box).bss_total_size = (*module_box).bss_total_size + aligned_size
+    (*lo).module = module_box
+}
+
 fn lowerer_preseed_external_function_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
@@ -994,7 +1028,7 @@ fn lowerer_preseed_external_function_items_mut(
                                 &(*fd).effects
                             )
                         }
-                        _ => {}
+                        _ => lowerer_preseed_external_global_mut(lo, defining_module_id, head),
                     }
                 }
                 current = &(*list).tail
@@ -1280,10 +1314,10 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.param_count = bss_off
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
-                                    let init_val = ast_lookup_global_var_init(name)
-                                    if init_val != 0 {
+                                    let init = lower_global_i64_literal_init(&head.global_init)
+                                    if init.0 {
                                         bss_slot.returns_float = 1
-                                        bss_slot.prof_counter_id = init_val
+                                        bss_slot.prof_counter_id = init.1
                                     }
                                     (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox2).bss_total_size = bss_off + aligned_size
@@ -1717,10 +1751,10 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.param_count = bss_mod.bss_total_size
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
-                                        let init_val = ast_lookup_global_var_init(name)
-                                        if init_val != 0 {
+                                        let init = lower_global_i64_literal_init(&item.global_init)
+                                        if init.0 {
                                             bss_slot.returns_float = 1
-                                            bss_slot.prof_counter_id = init_val
+                                            bss_slot.prof_counter_id = init.1
                                         }
                                         bss_mod.functions[bss_fid as usize] = bss_slot
                                         bss_mod.fn_count = bss_fid + 1
@@ -1831,10 +1865,10 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.param_count = module.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
-                                let init_val = ast_lookup_global_var_init(name)
-                                if init_val != 0 {
+                                let init = lower_global_i64_literal_init(&item.global_init)
+                                if init.0 {
                                     bss_slot.returns_float = 1
-                                    bss_slot.prof_counter_id = init_val
+                                    bss_slot.prof_counter_id = init.1
                                 }
                                 module.functions[bss_fid as usize] = bss_slot
                                 module.fn_count = bss_fid + 1
@@ -2542,6 +2576,30 @@ fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pan
         2
     } else {
         0
+    }
+}
+
+// First vertical slice for item-owned global initialization. Presence is
+// explicit, so `= 0` remains distinct from an absent/unsupported initializer.
+fn lower_global_i64_literal_init(opt: &Option<Box<Expr>>) -> (bool, i64) with Mut, Panic, Div {
+    match *opt {
+        Some(expr) => {
+            if (*expr).kind == ExprKind::ExprIntLit {
+                return (true, (*expr).int_val)
+            }
+            if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpNeg {
+                match (*expr).left {
+                    Some(operand) => {
+                        if (*operand).kind == ExprKind::ExprIntLit {
+                            return (true, 0 - (*operand).int_val)
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (false, 0)
+        }
+        _ => (false, 0),
     }
 }
 
@@ -4678,7 +4736,7 @@ impl Lowerer {
                 if g.bss_size > 8 {
                     lo = lo.emit(ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
                 } else {
-                    lo = lo.emit(ir_load_global(reg, g.param_count, g.name))
+                    lo = lo.emit(ir_load_global(reg, g.param_count, i, g.name))
                 }
                 lowerer_bind_local_mut(&! lo, g.name, reg, false)
                 lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
@@ -7271,7 +7329,7 @@ impl Lowerer {
                             let bss_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*target_expr).name)
                             if bss_fn_id >= 0 && bss_fn_id < lo.module.fn_count && lo.module.functions[bss_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
                                 let bss_off = lo.module.functions[bss_fn_id as usize].param_count
-                                lo = lo.emit(ir_store_global(rhs, bss_off, (*target_expr).name))
+                                lo = lo.emit(ir_store_global(rhs, bss_off, bss_fn_id, (*target_expr).name))
                                 (lo, rhs)
                             } else {
                                 lo = lo.report_error()
@@ -7280,7 +7338,8 @@ impl Lowerer {
                         } else {
                             if lo.lookup_local_is_global((*target_expr).name) {
                                 let bss_off_local = lo.lookup_local_global_bss_offset((*target_expr).name)
-                                lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
+                                let global_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*target_expr).name)
+                                lo = lo.emit(ir_store_global(rhs, bss_off_local, global_fn_id, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
                             // Final raw-field compatibility boundary: preserve an
@@ -9868,7 +9927,7 @@ impl Lowerer {
                         if gsize > 8 {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
-                            lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                            lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, fn_id, e.name))
                         }
                         (lo3, ref_reg)
                     } else {

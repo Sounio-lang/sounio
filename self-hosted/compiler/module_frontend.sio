@@ -1079,6 +1079,23 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
 // IR module merging
 // ============================================================
 
+fn ir_merge_rebase_bss_function(func_in: IrFunction, bss_offset: i64) -> IrFunction with Mut, Panic, Div {
+    var func = func_in
+    if bss_offset == 0 { return func }
+    if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+        func.param_count = func.param_count + bss_offset
+    }
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        if func.instrs[ii as usize].op == IrOpcode::IrLoadGlobal ||
+            func.instrs[ii as usize].op == IrOpcode::IrStoreGlobal {
+            func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + bss_offset
+        }
+        ii = ii + 1
+    }
+    func
+}
+
 fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, Div {
     // Merge src functions into dst, adjusting fn_ids in call instructions
     var merged = dst
@@ -1098,7 +1115,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     // Copy functions
     var fi: i64 = 0
     while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
-        var func = src.functions[fi]
+        var func = ir_merge_rebase_bss_function(src.functions[fi], dst.bss_total_size)
         func.compile_strategy = src.functions[fi].compile_strategy
         var ii: i64 = 0
         while ii < func.instr_count {
@@ -1106,6 +1123,11 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
                 if func.instrs[ii].fn_id >= 0 {
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
                 }
+            }
+            if (func.instrs[ii].op == IrOpcode::IrLoadGlobal ||
+                func.instrs[ii].op == IrOpcode::IrStoreGlobal) &&
+                func.instrs[ii].fn_id >= 0 {
+                func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
             }
             func.instrs[ii] = ir_merge_adjust_epistemic_instr(
                 func.instrs[ii],
@@ -1138,6 +1160,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
     merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
+    merged.bss_total_size = dst.bss_total_size + src.bss_total_size
 
     merged
 }
@@ -1164,6 +1187,7 @@ fn ir_merge_prepare_function_with_remap_from_func(
     dst: &IrModule,
     dep_fn_count: i64,
     fn_remap: &[i64; 2048],
+    bss_offset: i64,
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -1176,7 +1200,7 @@ fn ir_merge_prepare_function_with_remap_from_func(
     observed_transition_offset: i64,
     rollback_certificate_offset: i64
 ) -> IrFunction with Mut, Panic, Div {
-    var func = func_in
+    var func = ir_merge_rebase_bss_function(func_in, bss_offset)
     var ii: i64 = 0
     while ii < func.instr_count {
         if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
@@ -1188,6 +1212,20 @@ fn ir_merge_prepare_function_with_remap_from_func(
                     // (defining_module_id, name) identity. Rechecking by bare
                     // name here reintroduced the collision the remap removed.
                     func.instrs[ii as usize].fn_id = mapped_id
+                }
+            }
+        }
+        if func.instrs[ii as usize].op == IrOpcode::IrLoadGlobal ||
+            func.instrs[ii as usize].op == IrOpcode::IrStoreGlobal {
+            let old_id = func.instrs[ii as usize].fn_id
+            if old_id >= 0 && old_id < dep_fn_count {
+                let mapped_id = fn_remap[old_id as usize]
+                if mapped_id >= 0 {
+                    func.instrs[ii as usize].fn_id = mapped_id
+                    if mapped_id < (*dst).fn_count &&
+                        (*dst).functions[mapped_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                        func.instrs[ii as usize].imm_i64 = (*dst).functions[mapped_id as usize].param_count
+                    }
                 }
             }
         }
@@ -1233,6 +1271,7 @@ fn ir_merge_prepare_function_with_remap(
         src,
         dep_fn_count,
         fn_remap,
+        0,
         contest_offset,
         robust_offset,
         decision_offset,
@@ -5222,6 +5261,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         // acc_box.fn_count only grows in the mfi loop below, so
                         // this is the exact appended range [old_fn_count, ..).
                         let dep_merge_old_fn_count = (*acc_box).fn_count
+                        let bss_offset = (*acc_box).bss_total_size
                         let string_offset = (*acc_box).string_count
                         let contest_offset = (*acc_box).epistemic.contest_count
                         let robust_offset = (*acc_box).epistemic.robust_proof_count
@@ -5250,7 +5290,10 @@ fn module_frontend_lower_programs_array_direct_box(
                                     (*acc_box).functions[sfi as usize],
                                     (*dep_box).functions[rfi as usize]
                                 ) {
-                                    if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                    if (*acc_box).functions[sfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL &&
+                                        (*dep_box).functions[rfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        existing_body_idx = sfi
+                                    } else if (*acc_box).functions[sfi as usize].instr_count <= 0 {
                                         stub_idx = sfi
                                     } else {
                                         existing_body_idx = sfi
@@ -5298,6 +5341,7 @@ fn module_frontend_lower_programs_array_direct_box(
                                     &(*acc_box),
                                     dep_fn_count,
                                     &fn_remap,
+                                    bss_offset,
                                     contest_offset,
                                     robust_offset,
                                     decision_offset,
@@ -5319,6 +5363,7 @@ fn module_frontend_lower_programs_array_direct_box(
                             }
                             mfi = mfi + 1
                         }
+                        (*acc_box).bss_total_size = bss_offset + (*dep_box).bss_total_size
                         var si: i64 = 0
                         while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
                             (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
