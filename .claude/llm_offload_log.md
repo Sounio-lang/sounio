@@ -2950,3 +2950,12 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - vif = **PASS**: VIF=1/(1−R²), tolerance=1−R²; r=0.8→2.778, R²=0.9→10 verified.
 - Theme: regression diagnostics — influence & multicollinearity checks complementing reg_bands/wls/logistic. leverage & cooks_distance use the out-array `&![f64;256]` fill pattern (works under lean_single). All derivable, #852-safe. Suite runner: 103 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-EUXpvg/`, `/tmp/llm-offload-VZ23Js/`, `/tmp/llm-offload-jJfuQo/`.
+
+## 2026-07-15 — math-review: stats::sample_size_survival, stats::sample_size_precision, stats::detectable_effect
+- Files (all new): `stdlib/stats/sample_size_survival.sio` (Schoenfeld log-rank events + enrolment), `stdlib/stats/sample_size_precision.sio` (CI-half-width n for mean/proportion), `stdlib/stats/detectable_effect.sio` (minimum detectable Cohen's d). All use an inline Acklam inverse-normal-CDF. Provider: xAI/Grok 4.3.
+- sample_size_survival = **PASS**: events=(z_{1−α/2}+z_{1−β})²/(πA·πB·(ln HR)²); HR=2/α=0.05/80% → 65.35 events, Acklam z's (1.959964, 0.841621) exact.
+- sample_size_precision = **PASS**: n=(z·σ/E)² and z²p(1−p)/E²; 97 and 385 verified.
+- detectable_effect = **PASS**: d=(z+zb)·√(2/n) two-sample, /√n one-sample; 0.495228 and 0.350198 verified.
+- Note: sample_size_precision initially failed `souc check` (a standalone `sp_ceil` helper mutated a var without `with Mut`); `souc run` silently produced NO output on the failed type-check. Fixed by adding `with Mut`. Reminder logged: treat empty `souc run` output as a possible type-check failure — run `souc check`.
+- Theme: sample-size & power planning for designs beyond t-test/proportions (survival, precision, MDE). All derivable, #852-safe. Suite runner: 106 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-LLvTHx/`, `/tmp/llm-offload-IEFtUA/`, `/tmp/llm-offload-G3JirB/`.

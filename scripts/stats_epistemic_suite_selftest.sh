@@ -112,6 +112,9 @@ MODULES=(
   stdlib/stats/leverage.sio
   stdlib/stats/cooks_distance.sio
   stdlib/stats/vif.sio
+  stdlib/stats/sample_size_survival.sio
+  stdlib/stats/sample_size_precision.sio
+  stdlib/stats/detectable_effect.sio
 )
 
 fail=0
