@@ -5,6 +5,8 @@
 // numerical value and epistemic uncertainty from being silently conflated.
 
 use display::canvas::{Canvas, canvas_set_pixel, canvas_draw_rect, canvas_fill_rect}
+use epistemic::knowledge::{Epistemic}
+use epistemic::knightian::{PBox, pb_new, pb_lo_mean, pb_hi_mean}
 use viz::colormap::{viridis_r, viridis_g, viridis_b, magma_r, magma_g, magma_b}
 use viz::physchem::{ScalarField2D}
 
@@ -21,6 +23,17 @@ fn fc_sqrt(x: f64) -> f64 with Mut, Div {
 
 fn fc_clamp01(x: f64) -> f64 {
     if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }
+}
+
+pub fn field_epistemic_at(field: &ScalarField2D, idx: i64, confidence: i64) -> Epistemic {
+    Epistemic::new(field.values[idx as usize], field.variances[idx as usize], confidence)
+}
+
+// Mean-band decision only. This is not a confidence interval classification.
+pub fn field_pbox_threshold_class(p: &PBox, threshold: f64) -> i64 {
+    if pb_lo_mean(p) > threshold { 1 }
+    else if pb_hi_mean(p) < threshold { 0 - 1 }
+    else { 0 }
 }
 
 pub fn field_render_value_uncertainty(
@@ -59,8 +72,9 @@ pub fn field_render_value_uncertainty(
         while px < panel_w {
             let col = (px * field.cols) / panel_w
             let idx = row * field.cols + col
-            let value_t = fc_clamp01((field.values[idx as usize] - value_min) / value_range)
-            let sigma = fc_sqrt(field.variances[idx as usize])
+            let epistemic = field_epistemic_at(field, idx, 900)
+            let value_t = fc_clamp01((epistemic.val() - value_min) / value_range)
+            let sigma = fc_sqrt(epistemic.variance())
             let sigma_t = fc_clamp01((sigma - sigma_min) / sigma_range)
             canvas_set_pixel(c, left_x + px, top + py,
                 viridis_r(value_t), viridis_g(value_t), viridis_b(value_t))
@@ -85,4 +99,43 @@ pub fn field_render_value_uncertainty(
             magma_r(t), magma_g(t), magma_b(t))
         bx = bx + 1
     }
+}
+
+pub fn field_render_epistemic_frontier(
+    field: &ScalarField2D,
+    c: &!Canvas,
+    left_x: i64,
+    top: i64,
+    panel_w: i64,
+    panel_h: i64,
+    gap: i64,
+    threshold: f64,
+    mean_ambiguity_half_width: f64,
+) with Mut, Div {
+    field_render_value_uncertainty(field, c, left_x, top, panel_w, panel_h, gap)
+    let strip_y = top + panel_h + 22
+    let strip_w = panel_w * 2 + gap
+    let row = field.rows / 2
+    var x: i64 = 0
+    while x < strip_w {
+        let col = (x * field.cols) / strip_w
+        let idx = row * field.cols + col
+        let epistemic = field_epistemic_at(field, idx, 860)
+        let pbox = pb_new(
+            epistemic.val() - mean_ambiguity_half_width,
+            epistemic.val() + mean_ambiguity_half_width,
+            epistemic.variance(),
+            epistemic.confidence(),
+        )
+        let class = field_pbox_threshold_class(&pbox, threshold)
+        if class > 0 {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 86, 211, 224)
+        } else if class < 0 {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 220, 231, 238)
+        } else {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 238, 178, 62)
+        }
+        x = x + 1
+    }
+    canvas_draw_rect(c, left_x - 1, strip_y - 1, strip_w + 2, 14, 80, 91, 108)
 }
