@@ -85,6 +85,9 @@ MODULES=(
   stdlib/stats/mahalanobis.sio
   stdlib/stats/hotelling_t2.sio
   stdlib/stats/pca2.sio
+  stdlib/stats/jackknife.sio
+  stdlib/stats/rng.sio
+  stdlib/stats/bootstrap.sio
 )
 
 fail=0

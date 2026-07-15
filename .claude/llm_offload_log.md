@@ -2861,3 +2861,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - pca2 = **PASS**: closed-form 2×2 eigenvalues, explained=λ₁/tr, null-space eigenvector with larger-norm candidate selection; correlated→λ₂=0, axis (0.707,0.707) verified.
 - Theme: multivariate (bivariate) — the suite's first multivariate tools, all closed-form over the 2×2 covariance (no general matrix inversion needed). All derivable, #852-safe. Suite runner: 76 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Lz8r2j/`, `/tmp/llm-offload-ztMqlk/`, `/tmp/llm-offload-zLhBWR/`.
+
+## 2026-07-15 — math-review: stats::jackknife, stats::rng, stats::bootstrap
+- Files (all new): `stdlib/stats/jackknife.sio` (leave-one-out jackknife bias/SE for mean & ÷n variance), `stdlib/stats/rng.sio` (Park-Miller MINSTD PRNG in exact f64 + Box-Muller normal), `stdlib/stats/bootstrap.sio` (nonparametric percentile bootstrap for the mean, seeded MINSTD). Provider: xAI/Grok 4.3.
+- jackknife = **PASS**: mean SE=s/√n, ÷n variance bias-corrected to unbiased ÷(n−1) (θ̂=2→2.5, bias −0.5, SE 1.0458); Quenouille formula verified.
+- rng = **PASS**: MINSTD xₙ₊₁=(16807·xₙ)mod(2³¹−1) exact in f64 (16807·(m−1)<2⁵³), seed-1 stream 7.826e−6/0.13154 exact, Box-Muller correct.
+- bootstrap = **PASS**: floor(u·n) index bound proven, percentile order statistics, SE→√(σ̂²/n); reviewer confirmed tolerances "explicitly stated and justified" (MC-error-calibrated 0.08 on SE).
+- Theme: resampling — the last major modern-staple gap. Derivability preserved: jackknife fully deterministic; the MINSTD stream is exactly reproducible from the recurrence (auditable), so the bootstrap tests assert derivable-in-expectation properties (exact point estimate, MC-calibrated SE tolerance, reproducibility). #852-safe. Suite runner: 79 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Tq92DO/`, `/tmp/llm-offload-zDJZrw/`, `/tmp/llm-offload-wXrCs6/`.

@@ -38,6 +38,8 @@ fourteen families:
   NNT, and person-time incidence rates.
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
+- **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
+  MINSTD generator (exact f64), and the nonparametric bootstrap for the mean.
 - **Bayesian & model selection** — conjugate updates, the Beta-posterior
   credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
   Schwarz Bayes-factor approximation.
@@ -1085,6 +1087,42 @@ The closed-form eigen-decomposition of the 2×2 covariance:
 PC1 unit axis. Validated: perfectly correlated data → λ₂=0, explained=1, axis
 (0.707, 0.707); isotropic → explained=0.5.
 
+### `stats::jackknife` — leave-one-out jackknife
+
+| Function | Signature |
+|---|---|
+| `jackknife_mean` | `pub fn jackknife_mean(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic` |
+| `jackknife_variance` | `pub fn jackknife_variance(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic` |
+
+The deterministic resampling estimator of a statistic's bias and standard error
+from the n leave-one-out recomputations. Validated: mean of {1..5} → SE=0.7071,
+bias 0; the ÷n variance is bias-corrected back to the unbiased ÷(n−1) value
+(θ̂=2, jackknife estimate 2.5, bias −0.5, SE 1.0458).
+
+### `stats::rng` — Park-Miller MINSTD generator
+
+| Function | Signature |
+|---|---|
+| `rng_seed` / `rng_uniform` | `pub fn rng_seed(s: i64) -> Rng` · `rng_uniform(&!r) -> f64` |
+| `rng_range` / `rng_int` / `rng_normal` | uniforms in a range, integers, and Box-Muller normals |
+
+A deterministic, bit-reproducible uniform generator implemented entirely in
+exact f64 (no bit operations): `xₙ₊₁=(16807·xₙ) mod 2147483647`. Validated:
+seed-1 stream = 7.826e−6, 0.13154 (exact); uniforms in [0,1), integers in range,
+identical streams from identical seeds, Box-Muller normals ≈ mean 0.
+
+### `stats::bootstrap` — nonparametric bootstrap for the mean
+
+| Function | Signature |
+|---|---|
+| `bootstrap_mean` | `pub fn bootstrap_mean(x: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootResult with Mut, Div, Panic` |
+
+Resamples with replacement (seeded MINSTD, so bit-reproducible) to give a
+percentile confidence interval and standard error for the mean, with no
+distributional assumption. Validated: {1..5} → point estimate 3 exactly, SE
+converging to √(σ̂²/n)=0.6325 (within Monte-Carlo error), CI bracketing the mean,
+identical results from identical seeds.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1165,6 +1203,9 @@ use stats::bic::{BICResult, aic, bic, bic_compare}
 use stats::mahalanobis::{MahalResult, mahalanobis}
 use stats::hotelling_t2::{HotellingResult, hotelling_t2}
 use stats::pca2::{PCA2Result, pca2}
+use stats::jackknife::{JackResult, jackknife_mean, jackknife_variance}
+use stats::rng::{Rng, rng_seed, rng_uniform, rng_range, rng_int, rng_normal}
+use stats::bootstrap::{BootResult, bootstrap_mean}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
