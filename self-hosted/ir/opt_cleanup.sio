@@ -79,6 +79,63 @@ pub struct OcpExactBitwiseRebracketProbeReceipt {
     pub boundary_claim_mask: i64,
 }
 
+// Compiler-visible evidence from one module cleanup invocation. This is an
+// audit receipt only: it contains no occurrence capability and cannot
+// authorize a later rewrite.
+pub struct OcpCleanupModuleReceipt {
+    pub function_count: i64,
+    pub exact_bitwise_transaction_count: i64,
+    pub exact_bitwise_authorization_count: i64,
+    pub exact_bitwise_application_count: i64,
+    pub exact_bitwise_refusal_count: i64,
+    // Application bits: 0=AND, 1=OR, 2=XOR.
+    pub exact_bitwise_operator_mask: i64,
+    pub last_application_function_index: i64,
+    pub last_combined_const_value: i64,
+}
+
+struct OcpExactBitwiseRebracketPassAudit {
+    transaction_count: i64,
+    authorization_count: i64,
+    application_count: i64,
+    refusal_count: i64,
+    operator_mask: i64,
+    last_outer_instr_index: i64,
+    last_combined_const_value: i64,
+    diagnostic_fingerprint: i64,
+}
+
+fn ocp_empty_exact_bitwise_rebracket_pass_audit() -> OcpExactBitwiseRebracketPassAudit {
+    OcpExactBitwiseRebracketPassAudit {
+        transaction_count: 0,
+        authorization_count: 0,
+        application_count: 0,
+        refusal_count: 0,
+        operator_mask: 0,
+        last_outer_instr_index: -1,
+        last_combined_const_value: 0,
+        diagnostic_fingerprint: 0,
+    }
+}
+
+fn ocp_record_exact_bitwise_rebracket_audit(
+    aggregate: &! OcpExactBitwiseRebracketPassAudit,
+    audit: OcpExactBitwiseRebracketAudit,
+) with Mut {
+    (*aggregate).transaction_count = (*aggregate).transaction_count + 1
+    (*aggregate).authorization_count = (*aggregate).authorization_count + audit.authorization_count
+    (*aggregate).application_count = (*aggregate).application_count + audit.application_count
+    (*aggregate).refusal_count = (*aggregate).refusal_count + audit.refusal_count
+    (*aggregate).diagnostic_fingerprint = (*aggregate).diagnostic_fingerprint ^ audit.diagnostic_fingerprint
+    if audit.application_count == 1 {
+        if audit.operator_key == 3 { (*aggregate).operator_mask = (*aggregate).operator_mask | 1 }
+        if audit.operator_key == 4 { (*aggregate).operator_mask = (*aggregate).operator_mask | 2 }
+        if audit.operator_key == 5 { (*aggregate).operator_mask = (*aggregate).operator_mask | 4 }
+        (*aggregate).last_outer_instr_index = audit.outer_instr_index
+        (*aggregate).last_combined_const_value = audit.combined_const_value
+    }
+}
+
 fn ocp_rebracket_empty_occurrence() -> OcpExactBitwiseRebracketOccurrence {
     OcpExactBitwiseRebracketOccurrence {
         outer_instr_index: -1,
@@ -1155,6 +1212,14 @@ fn ocp_binop_to_ra_key(op: BinaryOp) -> i64 {
 // Sprint 68: def_at[r] records the instruction index where r was last set by IrLoadImm,
 // enabling in-place patching of the constant when strength reduction rewrites it.
 fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
+    ocp_const_fold_with_audit(func, &! audit)
+}
+
+fn ocp_const_fold_with_audit(
+    func: IrFunction,
+    exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
+) -> IrFunction with Mut, Div, Panic {
     // Split below the gen N-1 bootstrap compiler's hard cap of 1024 local
     // variables per function. NOTE on the cap: the bootstrap counts EVERY let/var
     // DECLARATION, including mid-line ones after a semicolon (`let a = x; let b = y`
@@ -1188,7 +1253,7 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     result = ocp_const_fold_pass_a1(result)
     result = ocp_const_fold_pass_a2(result)
-    result = ocp_const_fold_pass_b(result)
+    result = ocp_const_fold_pass_b(result, exact_bitwise_audit)
     return result
 }
 
@@ -6037,7 +6102,10 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     return result
 }
 
-fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+fn ocp_const_fold_pass_b(
+    func: IrFunction,
+    exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
+) -> IrFunction with Mut, Div, Panic {
     var result = func
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
@@ -6791,6 +6859,7 @@ fn ocp_const_fold_pass_b(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         if exact_bitwise_operand_model_ok {
                             let la_inner_def = ra_def_idx[la_s1 as usize]
                             let la_txn = ocp_try_exact_bitwise_rebracket(&! result, i, la_inner_def)
+                            ocp_record_exact_bitwise_rebracket_audit(exact_bitwise_audit, la_txn)
                             if la_txn.application_count == 1 {
                                 la_combined = la_txn.combined_const_value
                                 la_applied = true
@@ -8278,8 +8347,17 @@ fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 }
 
 fn opt_cleanup_function_with_algebras(func: IrFunction, algebras: IrAlgebraTable) -> IrFunction with Mut, Div, Panic {
+    var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
+    opt_cleanup_function_with_algebras_and_audit(func, algebras, &! audit)
+}
+
+fn opt_cleanup_function_with_algebras_and_audit(
+    func: IrFunction,
+    algebras: IrAlgebraTable,
+    exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
+) -> IrFunction with Mut, Div, Panic {
     var current = ocp_dedup_imm(func)
-    current = ocp_const_fold(current)
+    current = ocp_const_fold_with_audit(current, exact_bitwise_audit)
     current = ocp_mul3_sr(current)            // Sprint 102 Block Z: non-pow-2 multiply SR
     current = ocp_egraph_pass(current)        // full e-graph: deferred (always skips guard)
     current = ocp_egraph_mini_pass_with_algebras(current, algebras)   // mini e-graph: activates for instr_count <= 8
@@ -8343,13 +8421,38 @@ fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     result
 }
 
-// Run const_fold + DCE on every function in an IrModule.
-pub fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var result = module
+// Run const_fold + DCE on every function without copying the whole IrModule.
+pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Mut, Div, Panic {
+    var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
+    var last_application_function_index: i64 = -1
     var fi: i64 = 0
-    while fi < result.fn_count {
-        result.functions[fi as usize] = opt_cleanup_function_with_algebras(result.functions[fi as usize], result.algebras)
+    while fi < (*module).fn_count {
+        let applications_before = audit.application_count
+        (*module).functions[fi as usize] = opt_cleanup_function_with_algebras_and_audit(
+            (*module).functions[fi as usize],
+            (*module).algebras,
+            &! audit,
+        )
+        if audit.application_count > applications_before {
+            last_application_function_index = fi
+        }
         fi = fi + 1
     }
+    OcpCleanupModuleReceipt {
+        function_count: (*module).fn_count,
+        exact_bitwise_transaction_count: audit.transaction_count,
+        exact_bitwise_authorization_count: audit.authorization_count,
+        exact_bitwise_application_count: audit.application_count,
+        exact_bitwise_refusal_count: audit.refusal_count,
+        exact_bitwise_operator_mask: audit.operator_mask,
+        last_application_function_index: last_application_function_index,
+        last_combined_const_value: audit.last_combined_const_value,
+    }
+}
+
+// Legacy by-value API retained for callers that already own an IrModule value.
+pub fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var result = module
+    opt_cleanup_module_inplace(&! result)
     result
 }

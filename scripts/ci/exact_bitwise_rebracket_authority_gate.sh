@@ -11,9 +11,13 @@ REQUIRE_COMPILER="${SOUNIO_REBRACKET_REQUIRE_COMPILER:-0}"
 KEEP_WORK="${SOUNIO_REBRACKET_KEEP:-0}"
 OPT="$ROOT_DIR/self-hosted/ir/opt_cleanup.sio"
 MAIN="$ROOT_DIR/self-hosted/compiler/main.sio"
+FRONTEND="$ROOT_DIR/self-hosted/compiler/module_frontend.sio"
+NATIVE_DRIVER="$ROOT_DIR/self-hosted/compiler/module_native_driver.sio"
 RUNNER="$ROOT_DIR/self-hosted/ir/rebracket_authority_self_test_runner.sio"
 KERNEL="$ROOT_DIR/tests/compiler/rebracket_authority_atomic_kernel.sio"
 PRIVACY="$ROOT_DIR/tests/compiler/rebracket_authority_privacy"
+DEFAULT_O_WITNESS="$ROOT_DIR/tests/compiler/rebracket_authority_default_o_reachability.sio"
+IMPORTED_O_WITNESS="$ROOT_DIR/tests/compiler/rebracket_authority_imported_main.sio"
 
 fail() {
   echo "[rebracket-authority] FAIL: $*" >&2
@@ -91,18 +95,31 @@ require_text 'ocp_rebracket_occurrences_equal\(expected, current\.1\)' "$OPT"
 require_text 'ocp_rebracket_instr_equal' "$OPT"
 require_text 'boundary_claim_mask: 1' "$OPT"
 reject_text 'runtime_d7_receipt_consumed|float_or_gum_authority_established|global_reassociation_authority_established' "$OPT"
+require_text '^pub struct OcpCleanupModuleReceipt \{' "$OPT"
+require_text '^pub fn opt_cleanup_module_inplace\(module: &! IrModule\)' "$OPT"
+require_text 'ocp_record_exact_bitwise_rebracket_audit\(exact_bitwise_audit, la_txn\)' "$OPT"
+require_text 'exact_bitwise_application_count: audit\.application_count' "$OPT"
 require_text '^fn run_exact_bitwise_rebracket_authority_smoke\(\)' "$MAIN"
 require_text 'let receipt = ocp_exact_bitwise_rebracket_authority_probe\(\)' "$MAIN"
 require_text 'receipt\.boundary_claim_mask != 1' "$MAIN"
 require_text 'mode == "--rebracket-authority-smoke"' "$MAIN"
 require_text '\[rebracket-compiler\] PASS: cases=14 applications=3 unchanged_refusals=11' "$MAIN"
+require_text 'module_frontend_compile_imported_to_file\(opts\.input_file, opts\.output_file, opts\.optimize\)' "$MAIN"
+require_text '^pub fn module_frontend_compile_imported_to_file\(' "$FRONTEND"
+require_text 'opt_cleanup_module_inplace\(&! \(\*module_box\)\)' "$FRONTEND"
+require_text 'opt_cleanup_module_inplace\(&! merged_module\)' "$FRONTEND"
+require_text '\[rebracket-native-v2\] phase=' "$FRONTEND"
+require_text 'if !optimize \{' "$NATIVE_DRIVER"
+require_text 'module_frontend_compile_imported_to_file\(main_path, output_path, optimize\)' "$NATIVE_DRIVER"
 
 occurrence_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketOccurrence)"
 audit_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketAudit)"
 receipt_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketProbeReceipt)"
+module_receipt_fields="$(count_struct_i64_fields OcpCleanupModuleReceipt)"
 [[ "$occurrence_fields" == 6 ]] || fail "authority occurrence must remain 6 i64 fields, got $occurrence_fields"
 [[ "$audit_fields" == 8 ]] || fail "authority audit must remain 8 i64 fields, got $audit_fields"
 [[ "$receipt_fields" == 5 ]] || fail "probe receipt must remain 5 i64 fields, got $receipt_fields"
+[[ "$module_receipt_fields" == 8 ]] || fail "module cleanup receipt must remain 8 i64 fields, got $module_receipt_fields"
 # These compact record counts are compatibility tripwires, not inferred ABIs:
 # changing one must force an explicit gate review instead of passing silently.
 
@@ -183,6 +200,7 @@ bash "$ROOT_DIR/scripts/ci/no_false_float_axioms.sh" >"$WORK/no-false-float.log"
 
 compiler_state="unknown"
 compiler_path="unknown"
+native_v2_reachability="not-required"
 compiler_help_log="$WORK/compiler.help.log"
 "$SOUC" --help >"$compiler_help_log" 2>&1 || true
 
@@ -241,9 +259,96 @@ if [[ "$REQUIRE_COMPILER" == 1 && "$compiler_state" != executable ]]; then
   exit 1
 fi
 
+run_elf_expect_zero() {
+  local label="$1"
+  local elf="$2"
+  local log="$WORK/$label.runtime.log"
+  local rc=0
+
+  [[ -x "$elf" ]] || fail "$label did not produce an executable ELF: $elf"
+  set +e
+  "$elf" >"$log" 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 ]] || {
+    cat "$log" >&2
+    fail "$label runtime witness returned rc=$rc"
+  }
+}
+
+if [[ "$REQUIRE_COMPILER" == 1 ]]; then
+  wrapper_info_log="$WORK/wrapper.info.log"
+  MADAROS_RAW_BIN="$SOUC" SOUNIO_SOUC_ENGINE=madaros \
+    "$ROOT_DIR/bin/souc" info >"$wrapper_info_log" 2>&1 || {
+      cat "$wrapper_info_log" >&2
+      fail "public wrapper could not bind the explicit strict compiler"
+    }
+  rg -Fq "raw_elf:      $SOUC" "$wrapper_info_log" || {
+    cat "$wrapper_info_log" >&2
+    fail "public wrapper resolved a compiler other than the explicit strict ELF"
+  }
+
+  noopt_elf="$WORK/rebracket-noopt.elf"
+  noopt_log="$WORK/rebracket-noopt.compile.log"
+  SOUNIO_REBRACKET_TRACE=1 MADAROS_RAW_BIN="$SOUC" SOUNIO_SOUC_ENGINE=madaros \
+    "$ROOT_DIR/bin/souc" -t native "$DEFAULT_O_WITNESS" -o "$noopt_elf" >"$noopt_log" 2>&1 || {
+      cat "$noopt_log" >&2
+      fail "default native-v2 no-opt control failed to compile"
+    }
+  rg -q '^\[rebracket-native-v2\] phase=single-disabled optimize=0 functions=[0-9]+ transactions=0 authorizations=0 applications=0 refusals=0 operator_mask=0 last_function=-1 combined=0$' \
+    "$noopt_log" || {
+      cat "$noopt_log" >&2
+      fail "no-opt control omitted its exact disabled receipt"
+    }
+  reject_text 'optimize=1' "$noopt_log"
+  run_elf_expect_zero default-noopt "$noopt_elf"
+
+  optimized_elf="$WORK/rebracket-optimized.elf"
+  optimized_log="$WORK/rebracket-optimized.compile.log"
+  SOUNIO_REBRACKET_TRACE=1 MADAROS_RAW_BIN="$SOUC" SOUNIO_SOUC_ENGINE=madaros \
+    "$ROOT_DIR/bin/souc" -O "$DEFAULT_O_WITNESS" -o "$optimized_elf" >"$optimized_log" 2>&1 || {
+      cat "$optimized_log" >&2
+      fail "default native-v2 -O witness failed to compile"
+    }
+  rg -q '^\[rebracket-native-v2\] phase=single-post-resolve optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
+    "$optimized_log" || {
+      cat "$optimized_log" >&2
+      fail "default native-v2 -O witness omitted its exact application receipt"
+    }
+  [[ "$(rg -c '^\[rebracket-native-v2\]' "$optimized_log")" -eq 1 ]] || {
+    cat "$optimized_log" >&2
+    fail "default native-v2 -O witness emitted an ambiguous number of receipts"
+  }
+  reject_text 'falling back|lean_single' "$optimized_log"
+  run_elf_expect_zero default-optimized "$optimized_elf"
+
+  imported_elf="$WORK/rebracket-imported-optimized.elf"
+  imported_log="$WORK/rebracket-imported-optimized.compile.log"
+  SOUNIO_REBRACKET_TRACE=1 MADAROS_RAW_BIN="$SOUC" SOUNIO_SOUC_ENGINE=madaros \
+    "$ROOT_DIR/bin/souc" -O "$IMPORTED_O_WITNESS" -o "$imported_elf" >"$imported_log" 2>&1 || {
+      cat "$imported_log" >&2
+      fail "merged native-v2 -O witness failed to compile"
+    }
+  require_text 'module_native_driver: -O selects finalized full IR cleanup path' "$imported_log"
+  rg -q '^\[rebracket-native-v2\] phase=merged-post-finalize optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
+    "$imported_log" || {
+      cat "$imported_log" >&2
+      fail "merged native-v2 -O witness omitted its exact application receipt"
+    }
+  [[ "$(rg -c '^\[rebracket-native-v2\]' "$imported_log")" -eq 1 ]] || {
+    cat "$imported_log" >&2
+    fail "merged native-v2 -O witness emitted an ambiguous number of receipts"
+  }
+  reject_text 'falling back|lean_single' "$imported_log"
+  run_elf_expect_zero merged-optimized "$imported_elf"
+
+  native_v2_reachability="single-and-merged"
+  compiler_path="internal-smoke+default-o"
+fi
+
 merge_ready=0
-if [[ "$compiler_state" == executable && "$REQUIRE_COMPILER" == 1 ]]; then
+if [[ "$compiler_state" == executable && "$REQUIRE_COMPILER" == 1 && "$native_v2_reachability" == single-and-merged ]]; then
   merge_ready=1
 fi
 
-echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields audit_words=$audit_fields receipt_words=$receipt_fields compiler_state=$compiler_state compiler_path=$compiler_path compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=$merge_ready"
+echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields audit_words=$audit_fields receipt_words=$receipt_fields module_receipt_words=$module_receipt_fields compiler_state=$compiler_state compiler_path=$compiler_path native_v2_reachability=$native_v2_reachability compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=$merge_ready"
