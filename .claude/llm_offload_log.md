@@ -2703,7 +2703,6 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Raw review directory: `/tmp/llm-offload-aGaN94/`.
 
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | external artifact + code review | rapamycin_material_study.sio; viz_molecule_headless_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted claim honesty, stdlib topology provenance, deterministic pixel proof, clipping guard, and external wording. DeepSeek failed for insufficient balance and Gemini failed with OpenRouter HTTP 402. Raw: `/tmp/llm-offload-XGioHl/`. |
-
 ## 2026-07-15 — M3 prose/design review: molecular render receipt integration
 - Files: `website/src/components/home/CompiledVisualReceipts.astro`, `website/scripts/render-assets.mjs`, the render manifest, and `rapamycin-material-study.png`.
 - Task: place the deterministic coarse rapamycin scaffold inside Render Atelier with executable provenance and an explicit non-crystallographic claim boundary.
@@ -2712,3 +2711,5 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Browser evidence: desktop and 390 px screenshots confirmed tab selection, a loaded 480x300 PNG, four receipts in a 2x2 mobile grid, and zero horizontal overflow.
 - Validation: both native renderer gates passed on `lean_single`; `npm run check:quality` built 904 pages and reported zero Astro errors, warnings, or hints. The historical Madaros cube-render `SIGSEGV` remains an explicit checked-in-asset fallback.
 - Raw review directory: `/tmp/llm-offload-iC9mEV/`.
+
+| 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | external artifact + code review | field_canvas.sio; epistemic_field_atelier.sio; viz_epistemic_field_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted dual-channel value/standard-uncertainty separation, independent scales, deterministic pixel proof, synthetic-data claim boundary, and external wording. DeepSeek failed for insufficient balance and Gemini failed with OpenRouter HTTP 402. Raw: `/tmp/llm-offload-Fsip12/`. |
