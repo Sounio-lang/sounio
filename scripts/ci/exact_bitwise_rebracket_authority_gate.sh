@@ -4,10 +4,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SOUC="${SOUNIO_REBRACKET_COMPILER_BIN:-$ROOT_DIR/bin/souc}"
+EXPLICIT_SOUC="${SOUNIO_REBRACKET_COMPILER_BIN:-}"
+SOUC="${EXPLICIT_SOUC:-$ROOT_DIR/bin/souc}"
+EXPECTED_COMPILER_SHA256="${SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256:-}"
 REQUIRE_COMPILER="${SOUNIO_REBRACKET_REQUIRE_COMPILER:-0}"
 KEEP_WORK="${SOUNIO_REBRACKET_KEEP:-0}"
 OPT="$ROOT_DIR/self-hosted/ir/opt_cleanup.sio"
+MAIN="$ROOT_DIR/self-hosted/compiler/main.sio"
 RUNNER="$ROOT_DIR/self-hosted/ir/rebracket_authority_self_test_runner.sio"
 KERNEL="$ROOT_DIR/tests/compiler/rebracket_authority_atomic_kernel.sio"
 PRIVACY="$ROOT_DIR/tests/compiler/rebracket_authority_privacy"
@@ -22,6 +25,20 @@ case "$REQUIRE_COMPILER" in
   0|1) ;;
   *) fail "SOUNIO_REBRACKET_REQUIRE_COMPILER must be 0 or 1" ;;
 esac
+
+compiler_sha256="$(sha256sum "$SOUC" | awk '{print $1}')"
+source_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+if [[ "$REQUIRE_COMPILER" == 1 ]]; then
+  [[ -n "$EXPLICIT_SOUC" ]] || fail "strict mode requires SOUNIO_REBRACKET_COMPILER_BIN"
+  compiler_magic="$(od -An -tx1 -N4 "$SOUC" | tr -d ' \n')"
+  [[ "$compiler_magic" == 7f454c46 ]] || fail "strict compiler must be an explicit ELF, got magic=$compiler_magic"
+  [[ "$EXPECTED_COMPILER_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "strict mode requires a lowercase 64-hex SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256"
+  [[ "$compiler_sha256" == "$EXPECTED_COMPILER_SHA256" ]] ||
+    fail "compiler SHA-256 mismatch: expected=$EXPECTED_COMPILER_SHA256 actual=$compiler_sha256"
+  [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]] ||
+    fail "strict mode requires a clean tracked source worktree"
+fi
 
 if [[ -n "${SOUNIO_REBRACKET_WORK_DIR:-}" ]]; then
   WORK="$SOUNIO_REBRACKET_WORK_DIR"
@@ -74,6 +91,11 @@ require_text 'ocp_rebracket_occurrences_equal\(expected, current\.1\)' "$OPT"
 require_text 'ocp_rebracket_instr_equal' "$OPT"
 require_text 'boundary_claim_mask: 1' "$OPT"
 reject_text 'runtime_d7_receipt_consumed|float_or_gum_authority_established|global_reassociation_authority_established' "$OPT"
+require_text '^fn run_exact_bitwise_rebracket_authority_smoke\(\)' "$MAIN"
+require_text 'let receipt = ocp_exact_bitwise_rebracket_authority_probe\(\)' "$MAIN"
+require_text 'receipt\.boundary_claim_mask != 1' "$MAIN"
+require_text 'mode == "--rebracket-authority-smoke"' "$MAIN"
+require_text '\[rebracket-compiler\] PASS: cases=14 applications=3 unchanged_refusals=11' "$MAIN"
 
 occurrence_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketOccurrence)"
 audit_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketAudit)"
@@ -159,26 +181,38 @@ bash "$ROOT_DIR/scripts/ci/no_false_float_axioms.sh" >"$WORK/no-false-float.log"
   fail "false-float-axiom guard failed"
 }
 
-compiler_check_log="$WORK/compiler.check.log"
 compiler_state="unknown"
-set +e
-"$SOUC" check "$RUNNER" >"$compiler_check_log" 2>&1
-compiler_check_rc=$?
-set -e
+compiler_path="unknown"
+compiler_help_log="$WORK/compiler.help.log"
+"$SOUC" --help >"$compiler_help_log" 2>&1 || true
 
-if [[ "$compiler_check_rc" -eq 0 ]]; then
-  compiler_run_log="$WORK/compiler.run.log"
-  if ! "$SOUC" run "$RUNNER" >"$compiler_run_log" 2>&1; then
-    cat "$compiler_run_log" >&2
-    fail "production runner checked but did not execute"
+if rg -Fq -- '--rebracket-authority-smoke' "$compiler_help_log"; then
+  compiler_smoke_log="$WORK/compiler.smoke.log"
+  if ! "$SOUC" --rebracket-authority-smoke >"$compiler_smoke_log" 2>&1; then
+    cat "$compiler_smoke_log" >&2
+    fail "current-source compiler advertised the authority smoke but failed it"
   fi
-  rg -Fq '[rebracket-compiler] PASS: cases=14 applications=3 unchanged_refusals=11' \
-    "$compiler_run_log" || {
-      cat "$compiler_run_log" >&2
-      fail "production runner omitted its exact receipt"
+  rg -Fxq '[rebracket-compiler] PASS: cases=14 applications=3 unchanged_refusals=11 replay=0 calls=0 packed=0 control=0 float_ir=0 runtime_d7=0 float_gum=0 global=0' \
+    "$compiler_smoke_log" || {
+      cat "$compiler_smoke_log" >&2
+      fail "current-source compiler authority smoke omitted its exact receipt"
     }
   compiler_state="executable"
+  compiler_path="internal-smoke"
 else
+  # The checked-in compiler predates the focused internal mode. Keep the
+  # modular import as a diagnostic classifier only: its historical real
+  # cross-module privacy and IrFunction-capacity failures are not acceptance.
+  compiler_check_log="$WORK/compiler.check.log"
+  set +e
+  "$SOUC" check "$RUNNER" >"$compiler_check_log" 2>&1
+  compiler_check_rc=$?
+  set -e
+
+  [[ "$compiler_check_rc" -ne 0 ]] || {
+    cat "$compiler_check_log" >&2
+    fail "compiler lacks the internal smoke but unexpectedly accepts the diagnostic runner"
+  }
   rg -q 'run_check_mode: verdict=1' "$compiler_check_log" || {
     cat "$compiler_check_log" >&2
     fail "production runner failed outside checker preflight"
@@ -198,11 +232,12 @@ else
       *) cat "$compiler_check_log" >&2; fail "unexpected production diagnostic: $code" ;;
     esac
   done <<<"$diagnostic_codes"
-  compiler_state="blocked-known-baseline"
+  compiler_state="blocked-prebuilt-no-smoke"
+  compiler_path="modular-baseline"
 fi
 
 if [[ "$REQUIRE_COMPILER" == 1 && "$compiler_state" != executable ]]; then
-  echo '[rebracket-authority] BLOCKED BLK-20260715-REBRACKET-MODULAR-SOURCE: strict compiler execution is required' >&2
+  echo '[rebracket-authority] BLOCKED BLK-20260715-REBRACKET-CURRENT-SOURCE-SMOKE: a fresh compiler with the internal smoke is required' >&2
   exit 1
 fi
 
@@ -211,4 +246,4 @@ if [[ "$compiler_state" == executable && "$REQUIRE_COMPILER" == 1 ]]; then
   merge_ready=1
 fi
 
-echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields audit_words=$audit_fields receipt_words=$receipt_fields compiler_state=$compiler_state merge_ready=$merge_ready"
+echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields audit_words=$audit_fields receipt_words=$receipt_fields compiler_state=$compiler_state compiler_path=$compiler_path compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=$merge_ready"
