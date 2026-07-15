@@ -121,6 +121,9 @@ MODULES=(
   stdlib/stats/gk_lambda.sio
   stdlib/stats/gk_tau.sio
   stdlib/stats/uncertainty_coefficient.sio
+  stdlib/stats/anderson_darling.sio
+  stdlib/stats/cramer_von_mises.sio
+  stdlib/stats/bowker.sio
 )
 
 fail=0

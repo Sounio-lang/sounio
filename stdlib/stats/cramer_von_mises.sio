@@ -1,0 +1,158 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/cramer_von_mises.sio — Cramér-von Mises normality test
+//
+// An empirical-distribution-function test of normality using the integrated
+// squared gap between the empirical and fitted CDF — the evenly-weighted
+// companion to Anderson-Darling (which weights the tails):
+//
+//   cramer_von_mises(x, n) -> CvMResult
+//
+//   W² = 1/(12n) + Σ_{i=1}^n ( F(z_(i)) − (2i−1)/(2n) )²,
+// with z standardised by the sample mean and sd and F = Φ; the small-sample
+// adjustment is W²* = W²(1 + 0.5/n).
+//
+// Pure Sounio: inline erf/exp/sqrt and an insertion sort. No external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Cramér (1928); von Mises (1931); D'Agostino & Stephens (1986).
+
+module stats::cramer_von_mises
+
+fn cm_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / cm_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn cm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn cm_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * cm_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn cm_normal_cdf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 + cm_erf(z * INV_SQRT2))
+}
+
+pub struct CvMResult {
+    pub w2: f64,       // Cramér-von Mises W²
+    pub w2_star: f64,  // small-sample adjusted W²*
+}
+
+/// Cramér-von Mises test of normality.
+///
+/// Parâmetros: x — sample; n — size (>=3, <=256).
+/// Retorno: CvMResult (w2, w2_star).
+/// Referências: Cramér (1928); von Mises (1931).
+pub fn cramer_von_mises(x: &[f64; 256], n: i32) -> CvMResult with Mut, Div, Panic {
+    if n < 3 { return CvMResult { w2: 0.0, w2_star: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let sd = cm_sqrt(ss / (nf - 1.0))
+    if sd <= 0.0 { return CvMResult { w2: 0.0, w2_star: 0.0 } }
+    var f: [f64; 256] = [0.0; 256]
+    var a = 0
+    while a < n { f[a as usize] = x[a as usize]; a = a + 1 }
+    var p = 1
+    while p < n {
+        let key = f[p as usize]
+        var q = p - 1
+        while q >= 0 && f[q as usize] > key { f[(q + 1) as usize] = f[q as usize]; q = q - 1 }
+        f[(q + 1) as usize] = key
+        p = p + 1
+    }
+    var acc = 0.0
+    var k = 0
+    while k < n {
+        let fi = cm_normal_cdf((f[k as usize] - mean) / sd)
+        let target = ((2 * (k + 1) - 1) as f64) / (2.0 * nf)
+        let d = fi - target
+        acc = acc + d * d
+        k = k + 1
+    }
+    let w2 = 1.0 / (12.0 * nf) + acc
+    let w2s = w2 * (1.0 + 0.5 / nf)
+    return CvMResult { w2: w2, w2_star: w2s }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4,5}: W²=0.019342 (Python-verified). W²*=W²(1+0.5/5)=W²·1.1.
+fn test_cvm() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = cramer_von_mises(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.w2, 0.019342, 1.0e-4)) && ok
+    ok = check(2, approx(r.w2_star, 0.021276, 1.0e-4)) && ok
+    return ok
+}
+
+// skewed data -> larger W².
+fn test_skewed() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=1.0; x[2]=1.0; x[3]=1.0; x[4]=1.0; x[5]=1.0; x[6]=1.0; x[7]=100.0
+    let r = cramer_von_mises(&x, 8)
+    return check(10, r.w2 > 0.1)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_cvm() && ok
+    ok = test_skewed() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

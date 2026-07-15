@@ -15,7 +15,8 @@ fourteen families:
   kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
   the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
-  χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
+  Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
+  (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
 - **Group comparison & planning** — one-way ANOVA, inference from summary
@@ -31,8 +32,9 @@ fourteen families:
   Deming / Theil-Sen / Passing-Bablok method-comparison fits, and the regression
   diagnostics (leverage, Cook's distance, VIF).
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
-  Cochran's Q, the Cochran-Armitage trend test, proportion CIs, and the nominal
-  association measures (Goodman-Kruskal λ and τ, Theil's uncertainty coefficient).
+  Cochran's Q, Bowker's k×k symmetry test, the Cochran-Armitage trend test,
+  proportion CIs, and the nominal association measures (Goodman-Kruskal λ and τ,
+  Theil's uncertainty coefficient).
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
   Fleiss' κ, Gwet's AC1, Krippendorff's α, ICC / Cronbach's α and the full
   Shrout-Fleiss ICC family.
@@ -1497,6 +1499,37 @@ of one variable's entropy explained by the other, both directions and symmetric.
 Validated: [[40,10],[5,45]] → I=0.2754, U(R|C)=0.3973; independence → 0; diagonal
 → 1.
 
+### `stats::anderson_darling` — Anderson-Darling normality test
+
+| Function | Signature |
+|---|---|
+| `anderson_darling` | `pub fn anderson_darling(x: &[f64; 256], n: i32) -> ADResult with Mut, Div, Panic` |
+
+An EDF normality test that weights the tails heavily (more tail-sensitive than
+KS): `A²=−n−(1/n)Σ(2i−1)[ln F(z₍ᵢ₎)+ln(1−F(z₍ₙ₊₁₋ᵢ₎))]`, with the small-sample
+adjustment and the Stephens p-value. Validated (Python-cross-checked): {1..5} →
+A²=0.1436, A²*=0.1781, p>0.5; skewed data → large A².
+
+### `stats::cramer_von_mises` — Cramér-von Mises normality test
+
+| Function | Signature |
+|---|---|
+| `cramer_von_mises` | `pub fn cramer_von_mises(x: &[f64; 256], n: i32) -> CvMResult with Mut, Div, Panic` |
+
+The evenly-weighted EDF companion to Anderson-Darling:
+`W²=1/(12n)+Σ(F(z₍ᵢ₎)−(2i−1)/(2n))²` with the small-sample adjustment. Validated
+(Python-cross-checked): {1..5} → W²=0.01934, W²*=0.02128; skewed data → large W².
+
+### `stats::bowker` — Bowker's test of symmetry
+
+| Function | Signature |
+|---|---|
+| `bowker` | `pub fn bowker(table: &[f64; 256], k: i32) -> BowkerResult with Mut, Div, Panic` |
+
+McNemar's test generalised to a k×k matched table:
+`χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ)`, df k(k−1)/2. Validated: a 3×3 table → χ²=4.667,
+df=3; symmetric → χ²=0; k=2 reduces exactly to McNemar (χ²=4.545).
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1613,6 +1646,9 @@ use stats::shape::{ShapeResult, shape}
 use stats::gk_lambda::{LambdaResult, gk_lambda}
 use stats::gk_tau::{TauResult, gk_tau}
 use stats::uncertainty_coefficient::{UResult, uncertainty_coefficient}
+use stats::anderson_darling::{ADResult, anderson_darling}
+use stats::cramer_von_mises::{CvMResult, cramer_von_mises}
+use stats::bowker::{BowkerResult, bowker}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
