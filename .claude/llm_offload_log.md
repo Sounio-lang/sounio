@@ -2714,3 +2714,12 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | external artifact + code review | field_canvas.sio; epistemic_field_atelier.sio; viz_epistemic_field_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted dual-channel value/standard-uncertainty separation, independent scales, deterministic pixel proof, synthetic-data claim boundary, and external wording. DeepSeek failed for insufficient balance and Gemini failed with OpenRouter HTTP 402. Raw: `/tmp/llm-offload-Fsip12/`. |
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | math-review + external artifact review | field_canvas.sio; epistemic_field_atelier.sio; viz_epistemic_field_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted first-order independent-source variance propagation, PBox mean-band threshold classification, three-witness receipt, decision-strip semantics, and the explicit non-clinical/non-ISO-GUM/non-95%-CI boundary. DeepSeek and Gemini provider calls failed; no fallback claim was made. Raw: `/tmp/llm-offload-gk8zDJ/`, `/tmp/llm-offload-TZ9iIy/`. |
+
+## 2026-07-15 — M3 prose/design review: epistemic receipt inspector
+- Files: `website/src/components/home/CompiledVisualReceipts.astro`, `RenderAtelier.tsx`, `RenderAtelier.css`, `website/scripts/render-assets.mjs`, and the epistemic-field manifest/PNG receipt.
+- Task: replace the integer-only uncertainty thumbnail with a native `Epistemic` plus `PBox` receipt and expose Source → Artifact → Gate as an interactive custody chain.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR issue. It accepted the independent-source, non-ISO-GUM, non-95%-CI and synthetic-data boundaries together with the provenance and accessibility design.
+- Fan-out degradation: DeepSeek and Gemini returned provider balance/credit errors; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px screenshots confirmed the 480x300 image, responsive inspector, source/gate links, clipboard feedback, 2x2 tabs, and zero horizontal overflow.
+- Validation: the website check now regenerates three verified receipts with their declared engine, reproduces their PPM hashes and dimensions, and executes every gate before the historical-render fallback. `npm run check:quality` built 904 pages successfully; the follow-up Astro check reported zero errors, warnings, or hints.
+- Raw review directory: `/tmp/llm-offload-r36LVT/`.

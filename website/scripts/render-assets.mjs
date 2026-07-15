@@ -61,6 +61,25 @@ const renderSpecs = [
       'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/rapamycin_material_study.sio > rapamycin_material_study.ppm',
   },
   {
+    example: 'examples/render/epistemic_field_atelier.sio',
+    sourceAsset: 'examples/render/assets/epistemic-field-atelier.png',
+    assetFile: 'epistemic-field-atelier.png',
+    title: 'Epistemic frontier',
+    description:
+      'Illustrative dual-channel field separating first-order variance from PBox mean ambiguity; not empirical or clinical.',
+    width: 480,
+    height: 300,
+    engine: 'lean_single',
+    sha256: '2ad6b49e1fe0ee0cf50149727882bd0476a26c0a20a12975ae6a8cff7f3128c3',
+    renderSha256: 'dfd7e288f0e91221400f89e830e48c16f97a0d47b45ce59d54c33bc83f812465',
+    verification: 'byte-identical output across two independent runs',
+    gate: 'tests/run-pass/viz_epistemic_field_receipt.sio',
+    receipt: 'VIZ_EPISTEMIC_FIELD_RECEIPT_PASS',
+    sourceRef: 'website/living-observatory-20260713',
+    command:
+      'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/epistemic_field_atelier.sio > epistemic_field_atelier.ppm',
+  },
+  {
     example: 'examples/render/triangle_basic.sio',
     assetFile: 'triangle-basic.svg',
     title: 'Triangle raster render',
@@ -253,6 +272,34 @@ function runExample(example) {
   }
 }
 
+function verifyStaticReceipt(spec) {
+  const env = { ...process.env, SOUNIO_SOUC_ENGINE: spec.engine };
+  const output = execFileSync(soucBin, ['run', spec.example], {
+    cwd: repoRoot,
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const digest = createHash('sha256').update(output).digest('hex');
+  if (digest !== spec.renderSha256) {
+    throw new Error(`${spec.example}: expected render sha256 ${spec.renderSha256}, got ${digest}`);
+  }
+
+  const ppm = parsePpm(output.toString('utf8'), spec.example);
+  if (ppm.width !== spec.width || ppm.height !== spec.height) {
+    throw new Error(`${spec.example}: expected ${spec.width}x${spec.height}, got ${ppm.width}x${ppm.height}`);
+  }
+
+  const gateOutput = execFileSync(soucBin, ['run', spec.gate], {
+    cwd: repoRoot,
+    env,
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (!gateOutput.split(/\r?\n/).includes(spec.receipt)) {
+    throw new Error(`${spec.gate}: missing receipt ${spec.receipt}`);
+  }
+}
+
 async function collectAssets() {
   if (!existsSync(soucBin)) {
     console.log(`SKIP: compiler not found at ${path.relative(repoRoot, soucBin)} — using pre-rendered assets`);
@@ -314,8 +361,16 @@ async function check() {
       console.error(`Render asset is stale: ${spec.assetFile}`);
       process.exit(1);
     }
+    if (existsSync(soucBin)) {
+      try {
+        verifyStaticReceipt(spec);
+      } catch (error) {
+        console.error(`Verified render receipt failed: ${error.message}`);
+        process.exit(1);
+      }
+    }
   }
-  console.log(`OK: ${staticSpecs.length} deterministic static render receipt verified.`);
+  console.log(`OK: ${staticSpecs.length} deterministic static render receipts and gates verified.`);
 
   let assets;
   try {
