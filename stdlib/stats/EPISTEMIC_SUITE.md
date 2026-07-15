@@ -3,18 +3,58 @@
 ## Overview
 
 The **epistemic statistics suite** is a cohesive, pure-Sounio, dependency-light
-toolkit for classical inferential statistics. It completes the stdlib
-distribution family — Student's t, chi-squared and Fisher-Snedecor F, each with
-a full `pdf` / `cdf` / `sf` / `quantile` surface — and adds two analyses that
-clinical and pharmacometric work routinely need but that the stdlib previously
-lacked: the non-parametric Wilcoxon signed-rank test and Bland-Altman
-method-agreement analysis. Every routine is written in Sounio with no FFI, no
-sampling dependency and no external solver: the analytic core rests only on the
-special-function modules (`special::beta`, `special::gamma`, `special::igamma`,
-`special::erf`). Every non-trivial routine returns an **explicit result struct**
-that carries the point estimate together with a confidence interval (or, for
-Wilcoxon, the test statistics, z, p-value and effect size), so callers receive
-auditable numbers rather than a bare scalar.
+toolkit that spans the full applied-biostatistics arc — **70 modules** across
+fourteen families:
+
+- **Distributions & fitting** — Student's t, chi-squared, Fisher-Snedecor F
+  (full `pdf`/`cdf`/`sf`/`quantile` surfaces), a `densities` bank, Weibull /
+  negative-binomial, and method-of-moments fitting for the gamma, beta and
+  lognormal.
+- **Robust descriptives** — median / IQR / MAD / trimmed & Winsorized means,
+  the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
+- **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
+  χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
+  autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
+  Brown-Forsythe, the variance F-test).
+- **Group comparison** — one-way ANOVA, inference from summary statistics,
+  standardised effect sizes, and power / sample-size planning.
+- **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
+  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
+- **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
+  point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
+  Somers' D.
+- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, and
+  the Deming / Theil-Sen / Passing-Bablok method-comparison fits.
+- **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
+  Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
+- **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
+  Fleiss' κ, and ICC / Cronbach's α.
+- **Diagnostic accuracy** — sensitivity / specificity / likelihood ratios and
+  ROC AUC.
+- **Survival analysis** — Kaplan-Meier, Nelson-Aalen cumulative hazard,
+  restricted mean survival time, the actuarial life table, the log-rank test and
+  a parametric exponential fit.
+- **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
+  NNT, and person-time incidence rates.
+- **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
+  Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
+- **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
+  MINSTD generator (exact f64), and the nonparametric bootstrap for the mean.
+- **Bayesian & model selection** — conjugate updates, the Beta-posterior
+  credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
+  Schwarz Bayes-factor approximation.
+
+Every routine is written in Sounio with no FFI, no sampling dependency and no
+external solver: the analytic core rests only on the special-function modules
+(`special::beta`, `special::gamma`, `special::igamma`, `special::erf`), and every
+tail, quantile and p-value is built from those by hand. Every non-trivial routine
+returns an **explicit result struct** carrying the point estimate together with a
+confidence interval or the test statistics, z, p-value and effect size — so
+callers receive auditable numbers rather than a bare scalar. Each module ships
+inline tests against hand-derived textbook constants and is independently
+math-reviewed by an orthogonal LLM before merge (audit trail in
+`.claude/llm_offload_log.md`); the whole suite runs green under the `lean_single`
+engine (`scripts/stats_epistemic_suite_selftest.sh`).
 
 ## Modules
 
@@ -690,6 +730,399 @@ per Passing & Bablok 1983 / the R `mcr` package) and the median-residual
 intercept. Validated: perfect line → (2,1); −1-slope pair correctly excluded;
 K-offset case → slope 2.
 
+### `stats::fisher_exact` — Fisher's exact test (2×2)
+
+| Function | Signature |
+|---|---|
+| `fisher_exact` | `pub fn fisher_exact(a: i64, b: i64, c: i64, d: i64) -> FisherResult with Mut, Div, Panic` |
+
+The exact small-sample test of 2×2 association (valid where χ² is not): the
+two-sided p sums hypergeometric probabilities of all tables with P≤P(observed);
+one-sided tails and the sample odds ratio too. Validated: tea-test [[3,1],[1,3]]
+→ p_two=0.4857, p_greater=0.2429, OR=9; [[9,1],[1,9]] → p<0.01, OR=81;
+[[5,5],[5,5]] → p=1, OR=1.
+
+### `stats::cochran_q` — Cochran's Q test
+
+| Function | Signature |
+|---|---|
+| `cochran_q` | `pub fn cochran_q(data: &[f64; 256], n: i32, k: i32) -> CochranQResult with Mut, Div, Panic` |
+
+McNemar extended to k≥2 matched binary conditions: `Q=(k−1)(k·ΣCⱼ²−N²)/(k·N−ΣRᵢ²)
+~ χ²(k−1)` on a row-major n×k 0/1 matrix. Validated: 4×3 example → Q=2.667, df=2;
+one-condition-always-positive → Q=6, p<0.05; all-agree → Q=0.
+
+### `stats::fleiss_kappa` — Fleiss' kappa (multi-rater)
+
+| Function | Signature |
+|---|---|
+| `fleiss_kappa` | `pub fn fleiss_kappa(counts: &[f64; 256], subjects: i32, k: i32, raters: i32) -> FleissResult with Mut, Div, Panic` |
+
+Cohen's κ extended to a fixed number of raters per subject: chance-corrected
+agreement `κ=(P̄−P̄ₑ)/(1−P̄ₑ)` from a row-major N×k rater-count matrix. Validated:
+worked 2-subject case → P̄=0.6667, P̄ₑ=0.7222, κ=−0.2; perfect within-subject
+agreement → κ=1.
+
+### `stats::logistic` — one-predictor logistic regression
+
+| Function | Signature |
+|---|---|
+| `logistic_fit` | `pub fn logistic_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> LogisticFit with Mut, Div, Panic` |
+| `logistic_predict` | `pub fn logistic_predict(fit: &LogisticFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood logistic regression `logit(pᵢ)=b₀+b₁xᵢ`, fit by
+Newton-Raphson (IRLS) — the workhorse for binary dose-response. Returns the
+coefficients, standard errors, slope Wald z/p and convergence diagnostics.
+Validated: two-point saturated design → b₀=−0.6931, b₁=1.3863, p̂(0)=⅓, p̂(1)=⅔;
+balanced null → b₁=0.
+
+### `stats::poisson_reg` — one-predictor Poisson regression
+
+| Function | Signature |
+|---|---|
+| `poisson_fit` | `pub fn poisson_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> PoissonFit with Mut, Div, Panic` |
+| `poisson_predict` | `pub fn poisson_predict(fit: &PoissonFit, x: f64) -> f64 with Mut, Div, Panic` |
+
+Maximum-likelihood Poisson (log-link) count/rate regression `log(μᵢ)=b₀+b₁xᵢ`
+by Newton-Raphson; `exp(b₁)` is the rate ratio per unit x. Validated: two-point
+saturated design → b₀=ln3, b₁=ln4, rate ratio 4, μ̂(0)=3, μ̂(1)=12; flat counts
+→ b₁=0.
+
+### `stats::wls` — weighted least-squares regression
+
+| Function | Signature |
+|---|---|
+| `wls_fit` | `pub fn wls_fit(x: &[f64; 256], y: &[f64; 256], w: &[f64; 256], n: i32) -> WLSFit with Mut, Div, Panic` |
+
+Straight-line regression with per-observation weights (wᵢ∝1/σᵢ²) — the fit for
+heteroscedastic assay data. Closed-form coefficients, standard errors from
+`σ̂²(XᵀWX)⁻¹`, and a weighted R². Validated: perfect line → (1,2), R²=1;
+downweighting an outlier pulls the slope from OLS 5 to 1.229.
+
+### `stats::runs_test` — Wald-Wolfowitz runs test
+
+| Function | Signature |
+|---|---|
+| `runs_test` | `pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic` |
+
+Tests a 0/1 sequence for randomness against serial dependence: with n₁ ones, n₂
+zeros and R runs, `z=(R−μ_R)/σ_R` where `μ_R=2n₁n₂/n+1`. Too few runs →
+clustering, too many → over-alternation. Validated: balanced random-like →
+R=6, z=0; clustered → R=2, z=−2.683, p<0.01; alternating → R=10, z=2.683.
+
+### `stats::durbin_watson` — Durbin-Watson statistic
+
+| Function | Signature |
+|---|---|
+| `durbin_watson` | `pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic` |
+
+First-order serial-correlation diagnostic for residuals:
+`d=Σ(eᵢ−e_{i−1})²/Σeᵢ² ∈ [0,4]`, with ρ̂≈1−d/2 (d≈2 → none, d<2 → positive,
+d>2 → negative). Validated: alternating residuals → d=3.333, ρ̂=−0.667;
+block residuals → d=0.667, ρ̂=0.667.
+
+### `stats::autocorr` — autocorrelation & Ljung-Box
+
+| Function | Signature |
+|---|---|
+| `acf` | `pub fn acf(x: &[f64; 256], n: i32, k: i32) -> f64 with Mut, Div, Panic` |
+| `ljung_box` | `pub fn ljung_box(x: &[f64; 256], n: i32, m: i32) -> LBResult with Mut, Div, Panic` |
+
+Sample autocorrelation at lag k and the Ljung-Box portmanteau test
+`Q=n(n+2)Σr_k²/(n−k) ~ χ²(m)` for white noise up to lag m. Validated:
+{1,2,3,4,5}→acf(1)=0.4, acf(2)=−0.1; Ljung-Box(m=2)→Q=1.517; a monotone ramp →
+acf(1)>0.6, Q significant.
+
+### `stats::nelson_aalen` — Nelson-Aalen cumulative hazard
+
+| Function | Signature |
+|---|---|
+| `nelson_aalen` | `pub fn nelson_aalen(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> NAResult with Mut, Div, Panic` |
+
+The non-parametric cumulative hazard `Ĥ(t)=Σd_j/n_j` with variance `Σd_j/n_j²`
+and implied survival `Ŝ=e^{−Ĥ}` — the KM companion, better-behaved in the tail.
+Validated: times 1–5 all deaths → Ĥ(3)=0.7833, Var=0.2136, Ŝ(3)=0.4569; with
+censoring → Ĥ(4)=0.5333.
+
+### `stats::rmst` — restricted mean survival time
+
+| Function | Signature |
+|---|---|
+| `rmst` | `pub fn rmst(time: &[f64; 256], event: &[i64; 256], n: i32, tau: f64) -> f64 with Mut, Div, Panic` |
+
+The area under the KM curve up to a horizon τ — a clinically interpretable
+event-free-time summary, robust to non-proportional hazards. Exact truncated
+step-function integral. Validated: times 1–5 → RMST(5)=3.0, RMST(3)=2.4,
+RMST(2.5)=2.1; with censoring → RMST(5)=3.667.
+
+### `stats::life_table` — actuarial (cohort) life table
+
+| Function | Signature |
+|---|---|
+| `life_table_survival` | `pub fn life_table_survival(entering: &[f64; 64], deaths: &[f64; 64], withdrawn: &[f64; 64], k: i32, q_interval: i32) -> f64 with Mut, Div, Panic` |
+| `life_table_hazard` | `pub fn life_table_hazard(entering, deaths, withdrawn, k, q_interval) -> f64` |
+
+Interval-grouped survival for count-per-interval data: with the withdrawal-
+adjusted risk set `n'ᵢ=nᵢ−wᵢ/2`, `qᵢ=dᵢ/n'ᵢ` and `Ŝ=Πpᵢ` (Cutler-Ederer).
+Validated: 3-interval example → S=0.9, 0.8047, 0.7231; hazard(i1)=0.1059.
+
+### `stats::kendall_tau` — Kendall's rank correlation
+
+| Function | Signature |
+|---|---|
+| `kendall_tau` | `pub fn kendall_tau(x: &[f64; 256], y: &[f64; 256], n: i32) -> KendallResult with Mut, Div, Panic` |
+
+Concordance-based rank correlation robust to outliers and monotone non-linear
+relationships: τ_a=(C−D)/(n(n−1)/2), the tie-corrected τ_b, and the no-tie null
+z-test. Validated: perfect concordance → τ=1; {1,3,2,4} → τ_a=0.667, z=1.359;
+ties → τ_a=0.667 but τ_b=0.8; perfect discordance → τ=−1.
+
+### `stats::goodman_kruskal` — Goodman-Kruskal gamma
+
+| Function | Signature |
+|---|---|
+| `goodman_kruskal` | `pub fn goodman_kruskal(x: &[f64; 256], y: &[f64; 256], n: i32) -> GammaResult with Mut, Div, Panic` |
+
+Ordinal association ignoring tied pairs entirely: γ=(C−D)/(C+D) with the
+pair-count Wald z. Validated: {1,3,2,4} → γ=0.667; ties (using only untied
+pairs) → γ=1; perfect discordance → γ=−1.
+
+### `stats::somers_d` — Somers' D (asymmetric)
+
+| Function | Signature |
+|---|---|
+| `somers_d` | `pub fn somers_d(x: &[f64; 256], y: &[f64; 256], n: i32) -> SomersResult with Mut, Div, Panic` |
+
+Asymmetric ordinal association: D(Y|X)=(C−D)/(C+D+Tx) penalises ties on the
+predictor, so for a binary Y it equals 2·AUC−1. Validated: no ties → D=0.667;
+ties → D(Y|X)=D(X|Y)=0.8; binary Y with perfect separation → D(Y|X)=1 (AUC=1).
+
+### `stats::bartlett` — Bartlett's test for equal variance
+
+| Function | Signature |
+|---|---|
+| `bartlett` | `pub fn bartlett(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> BartlettResult with Mut, Div, Panic` |
+
+Homogeneity-of-variance test across k consecutive-block groups (powerful under
+normality): `χ²=[(N−k)ln(s_p²)−Σ(n_i−1)ln(s_i²)]/C ~ χ²(k−1)`. Validated:
+{1..5} vs {2,4..10} → pooled 6.25, χ²=1.5868, df=1; equal-spread → χ²=0.
+
+### `stats::levene` — Levene / Brown-Forsythe test
+
+| Function | Signature |
+|---|---|
+| `levene` | `pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic` |
+
+The distribution-robust variance test: one-way ANOVA on absolute deviations from
+each group's centre (`center` = 0 mean → Levene, 1 median → Brown-Forsythe).
+`W ~ F(k−1, N−k)`. Validated: worked example → W=2.0571 (both centerings on
+symmetric data); equal-spread → W=0.
+
+### `stats::var_ftest` — two-sample variance F-test
+
+| Function | Signature |
+|---|---|
+| `var_ftest` | `pub fn var_ftest(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> VarFResult with Mut, Div, Panic` |
+
+The classical variance-ratio test `F=s₁²/s₂² ~ F(n₁−1,n₂−1)` with a two-sided
+p-value. Validated: var 2.5 vs 10 → F=0.25, p=0.208; equal variances → F=1, p=1.
+
+### `stats::mann_whitney` — Mann-Whitney U / rank-sum test
+
+| Function | Signature |
+|---|---|
+| `mann_whitney` | `pub fn mann_whitney(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> MannWhitneyResult with Mut, Div, Panic` |
+
+The two-sample rank-sum test (unpaired counterpart to Wilcoxon signed-rank):
+`U₁=R₁−n₁(n₁+1)/2`, tie-corrected normal-approximation z. Validated: fully
+separated → U=0, z=−1.964, p=0.0495; overlapping → U₁=3, p>0.5; cross-group ties
+→ R₁=8.
+
+### `stats::sign_test` — sign test
+
+| Function | Signature |
+|---|---|
+| `sign_test` | `pub fn sign_test(x: &[f64; 256], y: &[f64; 256], n: i32) -> SignResult with Mut, Div, Panic` |
+| `sign_test_median` | `pub fn sign_test_median(x: &[f64; 256], n: i32, m0: f64) -> SignResult with Mut, Div, Panic` |
+
+The simplest distribution-free test — signs only, exact binomial p (zeros
+dropped). Validated: 7+/2− → p=0.1797; one-sample median → p=0.625.
+
+### `stats::mood_median` — Mood's median test
+
+| Function | Signature |
+|---|---|
+| `mood_median` | `pub fn mood_median(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> MoodResult with Mut, Div, Panic` |
+
+A robust k-sample equal-medians test: χ² on the 2×k above/below-pooled-median
+table. Less powerful than Kruskal-Wallis but far more outlier-resistant.
+Validated: {1..5} vs {6..10} → median 5.5, χ²=10, df=1; identical groups → χ²=0.
+
+### `stats::fit_gamma` — gamma fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_gamma` | `pub fn fit_gamma(x: &[f64; 256], n: i32) -> GammaFit with Mut, Div, Panic` |
+
+Estimates the gamma shape and scale by matching moments: `k̂=mean²/var`,
+`θ̂=var/mean`, `rate=mean/var`. Validated: {2,2,6,6} → mean 4, var 5.333,
+shape 3, scale 1.333, rate 0.75.
+
+### `stats::fit_beta` — beta fitting (method of moments)
+
+| Function | Signature |
+|---|---|
+| `fit_beta` | `pub fn fit_beta(x: &[f64; 256], n: i32) -> BetaFit with Mut, Div, Panic` |
+
+Estimates the two beta shape parameters for data on (0,1): with
+`c=m(1−m)/v−1`, `α̂=m·c`, `β̂=(1−m)·c`. Validated: {.25,.25,.75,.75} →
+α=β=1 (uniform); skewed data → α=3.536, β=3.264.
+
+### `stats::fit_lognormal` — lognormal fitting
+
+| Function | Signature |
+|---|---|
+| `fit_lognormal` | `pub fn fit_lognormal(x: &[f64; 256], n: i32) -> LogNormalFit with Mut, Div, Panic` |
+
+Fits a normal to the logs (sample moments): `μ̂=mean(ln x)`, `σ̂=sd(ln x)`, with
+the implied `median=e^{μ̂}` and `mean=e^{μ̂+σ̂²/2}`. Natural for right-skewed
+positive data (concentrations, PK exposures). Validated: data e⁰…e³ → μ=1.5,
+σ=1.291, median=4.482.
+
+### `stats::corr_ci` — Fisher-z correlation CI & test
+
+| Function | Signature |
+|---|---|
+| `corr_ci` | `pub fn corr_ci(r: f64, n: i32, conf: f64) -> CorrCIResult with Mut, Div, Panic` |
+
+Turns a Pearson r into a confidence interval and a significance test via the
+Fisher z-transform: `z=atanh(r)`, `SE=1/√(n−3)`, `CI=tanh(z±z_c·SE)`, plus the
+exact `t=r√(n−2)/√(1−r²)` test of ρ=0. Composes with `stats::correlation`.
+Validated: r=0.8, n=20 → z=1.0986, 95% CI [0.5534, 0.9177], t=5.657.
+
+### `stats::point_biserial` — point-biserial correlation
+
+| Function | Signature |
+|---|---|
+| `point_biserial` | `pub fn point_biserial(x: &[f64; 256], y: &[f64; 256], n: i32) -> PointBiserialResult with Mut, Div, Panic` |
+
+The correlation between a continuous variable and a 0/1 dichotomy (the effect-
+size companion to the two-sample t-test), with its `t(n−2)` test. Validated:
+{1,2,3,4} vs {0,0,1,1} → r=0.8944, t=2.828; equal group means → r=0.
+
+### `stats::partial_corr` — first-order partial correlation
+
+| Function | Signature |
+|---|---|
+| `partial_corr` | `pub fn partial_corr(x: &[f64; 256], y: &[f64; 256], z: &[f64; 256], n: i32) -> PartialResult with Mut, Div, Panic` |
+
+The correlation of x and y after removing the linear effect of z (confounding
+control): `r_xy·z=(r_xy−r_xz·r_yz)/√((1−r_xz²)(1−r_yz²))` with a `t(n−3)` test.
+Validated: r_xy=0 but r_xz=0.6, r_yz=0.8 → partial=−1; z uncorrelated with both
+→ partial=r_xy.
+
+### `stats::bayes_ab` — Bayesian A/B test
+
+| Function | Signature |
+|---|---|
+| `bayes_ab` | `pub fn bayes_ab(aA: f64, bA: f64, aB: f64, bB: f64) -> ABResult with Mut, Div, Panic` |
+
+The posterior probability that one rate exceeds another, for two conjugate Beta
+posteriors — the decision quantity a Bayesian A/B test reports instead of a
+p-value. Exact finite-sum (Miller). Validated: Beta(2,1) vs Beta(1,1) →
+P(pB>pA)=2/3; identical → 0.5; well-separated → >0.999.
+
+### `stats::beta_hdi` — Beta posterior credible interval
+
+| Function | Signature |
+|---|---|
+| `beta_hdi` | `pub fn beta_hdi(a: f64, b: f64, conf: f64) -> BetaPostResult with Mut, Div, Panic` |
+| `beta_tail_leq` | `pub fn beta_tail_leq(a: f64, b: f64, t: f64) -> f64 with Mut, Div, Panic` |
+
+An equal-tailed credible interval for a Beta(a,b) posterior (inverse incomplete
+beta by bisection), plus the tail probability `P(p≤t)=I_t(a,b)`, posterior mean
+and mode. Validated: Beta(1,1) → 95% interval [0.025, 0.975]; Beta(2,2) → mode
+0.5, `P(p≤0.8)=0.896`.
+
+### `stats::bic` — AIC / BIC model selection
+
+| Function | Signature |
+|---|---|
+| `aic` / `bic` | `pub fn aic(loglik: f64, k: i32) -> f64` · `bic(loglik, k, n) -> f64` |
+| `bic_compare` | `pub fn bic_compare(ll0: f64, k0: i32, ll1: f64, k1: i32, n: i32) -> BICResult with Mut, Div, Panic` |
+
+Information criteria `AIC=2k−2lnL`, `BIC=k·ln(n)−2lnL` and the Schwarz
+Bayes-factor approximation `ln BF₁₀≈(BIC₀−BIC₁)/2`. Validated: lnL −100/k2 vs
+−90/k3, n=50 → BIC 207.82 / 191.74, ln BF₁₀=8.044; equal fit + extra parameter →
+BIC penalty −ln(100).
+
+### `stats::mahalanobis` — bivariate Mahalanobis distance
+
+| Function | Signature |
+|---|---|
+| `mahalanobis` | `pub fn mahalanobis(x: &[f64; 256], y: &[f64; 256], n: i32, qx: f64, qy: f64) -> MahalResult with Mut, Div, Panic` |
+
+The covariance-aware distance of a point from a 2-D sample (multivariate outlier
+detection): `D²=(syy·dx²−2sxy·dx·dy+sxx·dy²)/(sxx·syy−sxy²)`, asymptotically
+χ²(2). Validated: a unit square, query (2,0) → D²=3, D=1.732; centre → 0.
+
+### `stats::hotelling_t2` — one-sample Hotelling's T²
+
+| Function | Signature |
+|---|---|
+| `hotelling_t2` | `pub fn hotelling_t2(x: &[f64; 256], y: &[f64; 256], n: i32, m0x: f64, m0y: f64) -> HotellingResult with Mut, Div, Panic` |
+
+The multivariate one-sample t-test for a 2-D mean vector: `T²=n·dᵀS⁻¹d`,
+`F=(n−p)/(p(n−1))·T² ~ F(2,n−2)`. Validated: 5-point example, μ₀=(0,0) →
+T²=10, F=3.75, df (2,3); testing the true mean → T²=0, p=1.
+
+### `stats::pca2` — two-variable PCA
+
+| Function | Signature |
+|---|---|
+| `pca2` | `pub fn pca2(x: &[f64; 256], y: &[f64; 256], n: i32) -> PCA2Result with Mut, Div, Panic` |
+
+The closed-form eigen-decomposition of the 2×2 covariance:
+`λ₁,₂=½[(sxx+syy)±√((sxx−syy)²+4sxy²)]`, the variance explained by PC1, and the
+PC1 unit axis. Validated: perfectly correlated data → λ₂=0, explained=1, axis
+(0.707, 0.707); isotropic → explained=0.5.
+
+### `stats::jackknife` — leave-one-out jackknife
+
+| Function | Signature |
+|---|---|
+| `jackknife_mean` | `pub fn jackknife_mean(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic` |
+| `jackknife_variance` | `pub fn jackknife_variance(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic` |
+
+The deterministic resampling estimator of a statistic's bias and standard error
+from the n leave-one-out recomputations. Validated: mean of {1..5} → SE=0.7071,
+bias 0; the ÷n variance is bias-corrected back to the unbiased ÷(n−1) value
+(θ̂=2, jackknife estimate 2.5, bias −0.5, SE 1.0458).
+
+### `stats::rng` — Park-Miller MINSTD generator
+
+| Function | Signature |
+|---|---|
+| `rng_seed` / `rng_uniform` | `pub fn rng_seed(s: i64) -> Rng` · `rng_uniform(&!r) -> f64` |
+| `rng_range` / `rng_int` / `rng_normal` | uniforms in a range, integers, and Box-Muller normals |
+
+A deterministic, bit-reproducible uniform generator implemented entirely in
+exact f64 (no bit operations): `xₙ₊₁=(16807·xₙ) mod 2147483647`. Validated:
+seed-1 stream = 7.826e−6, 0.13154 (exact); uniforms in [0,1), integers in range,
+identical streams from identical seeds, Box-Muller normals ≈ mean 0.
+
+### `stats::bootstrap` — nonparametric bootstrap for the mean
+
+| Function | Signature |
+|---|---|
+| `bootstrap_mean` | `pub fn bootstrap_mean(x: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootResult with Mut, Div, Panic` |
+
+Resamples with replacement (seeded MINSTD, so bit-reproducible) to give a
+percentile confidence interval and standard error for the mean, with no
+distributional assumption. Validated: {1..5} → point estimate 3 exactly, SE
+converging to √(σ̂²/n)=0.6325 (within Monte-Carlo error), CI bracketing the mean,
+identical results from identical seeds.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -737,10 +1170,46 @@ use stats::outlier::{OutlierFences, GrubbsResult, ModZResult, tukey_outliers, gr
 use stats::deming::{DemingFit, deming}
 use stats::theil_sen::{TSFit, theil_sen}
 use stats::passing_bablok::{PBFit, passing_bablok}
+use stats::fisher_exact::{FisherResult, fisher_exact}
+use stats::cochran_q::{CochranQResult, cochran_q}
+use stats::fleiss_kappa::{FleissResult, fleiss_kappa}
+use stats::logistic::{LogisticFit, logistic_fit, logistic_predict}
+use stats::poisson_reg::{PoissonFit, poisson_fit, poisson_predict}
+use stats::wls::{WLSFit, wls_fit}
+use stats::runs_test::{RunsResult, runs_test}
+use stats::durbin_watson::{DWResult, durbin_watson}
+use stats::autocorr::{LBResult, acf, ljung_box}
+use stats::nelson_aalen::{NAResult, nelson_aalen}
+use stats::rmst::{rmst}
+use stats::life_table::{life_table_survival, life_table_hazard}
+use stats::kendall_tau::{KendallResult, kendall_tau}
+use stats::goodman_kruskal::{GammaResult, goodman_kruskal}
+use stats::somers_d::{SomersResult, somers_d}
+use stats::bartlett::{BartlettResult, bartlett}
+use stats::levene::{LeveneResult, levene}
+use stats::var_ftest::{VarFResult, var_ftest}
+use stats::mann_whitney::{MannWhitneyResult, mann_whitney}
+use stats::sign_test::{SignResult, sign_test, sign_test_median}
+use stats::mood_median::{MoodResult, mood_median}
+use stats::fit_gamma::{GammaFit, fit_gamma}
+use stats::fit_beta::{BetaFit, fit_beta}
+use stats::fit_lognormal::{LogNormalFit, fit_lognormal}
+use stats::corr_ci::{CorrCIResult, corr_ci}
+use stats::point_biserial::{PointBiserialResult, point_biserial}
+use stats::partial_corr::{PartialResult, partial_corr}
+use stats::bayes_ab::{ABResult, bayes_ab}
+use stats::beta_hdi::{BetaPostResult, beta_hdi, beta_tail_leq}
+use stats::bic::{BICResult, aic, bic, bic_compare}
+use stats::mahalanobis::{MahalResult, mahalanobis}
+use stats::hotelling_t2::{HotellingResult, hotelling_t2}
+use stats::pca2::{PCA2Result, pca2}
+use stats::jackknife::{JackResult, jackknife_mean, jackknife_variance}
+use stats::rng::{Rng, rng_seed, rng_uniform, rng_range, rng_int, rng_normal}
+use stats::bootstrap::{BootResult, bootstrap_mean}
 ```
 
-A worked end-to-end example that runs all five tools on one dataset lives at
-`examples/stats/epistemic_suite_demo.sio`.
+Worked end-to-end examples that compose several tools on one dataset live at
+`examples/stats/epistemic_suite_demo.sio` and `examples/stats/full_analysis_report.sio`.
 
 > **Note — no single-import facade yet.** A `mod.sio`-style `pub use` re-export
 > surface (`use stats::epistemic_suite::{…}`) is what `stdlib/CONVENTIONS.md` §2

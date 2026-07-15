@@ -1,0 +1,221 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/logistic.sio — one-predictor logistic regression
+//
+// Maximum-likelihood logistic regression logit(pᵢ) = b₀ + b₁·xᵢ, fit by
+// Newton-Raphson (iteratively reweighted least squares) — the workhorse for
+// binary dose-response:
+//
+//   logistic_fit(x, y, n) -> LogisticFit          (y ∈ {0,1})
+//   logistic_predict(fit, x) -> f64               (fitted probability)
+//
+// Score g = Σ(yᵢ−pᵢ)[1, xᵢ], Fisher information H = Σ pᵢ(1−pᵢ)[1,xᵢ]⊗[1,xᵢ];
+// update β ← β + H⁻¹g. Standard errors are √diag(H⁻¹); the slope Wald test is
+// z = b₁/se₁ with a two-sided normal p-value.
+//
+// Pure Sounio: inline exp/ln/sqrt/erf, a 2×2 solve; flat per-iteration passes
+// over the data (no nested data-array calls).
+//
+// References:
+//   McCullagh & Nelder, "Generalized Linear Models" 2e, §4.
+
+module stats::logistic
+
+fn lg_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / lg_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn lg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn lg_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * lg_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn lg_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - lg_erf(z * INV_SQRT2))
+}
+
+fn lg_sigmoid(z: f64) -> f64 with Mut, Div, Panic {
+    return 1.0 / (1.0 + lg_exp(0.0 - z))
+}
+
+pub struct LogisticFit {
+    pub b0: f64,       // intercept
+    pub b1: f64,       // slope (log-odds per unit x)
+    pub se0: f64,      // SE(b0)
+    pub se1: f64,      // SE(b1)
+    pub z1: f64,       // Wald z for the slope
+    pub p1: f64,       // two-sided p for the slope
+    pub iters: i64,    // Newton iterations used
+    pub converged: i64,// 1 if converged
+}
+
+/// One-predictor logistic regression by Newton-Raphson.
+///
+/// Parâmetros: x — predictor; y — 0/1 outcome; n — size (>=3, <=256).
+/// Retorno: LogisticFit (b0, b1, SEs, Wald z/p, iteration diagnostics).
+/// Referências: McCullagh & Nelder §4.
+pub fn logistic_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> LogisticFit with Mut, Div, Panic {
+    if n < 3 {
+        return LogisticFit { b0: 0.0, b1: 0.0, se0: 0.0, se1: 0.0, z1: 0.0, p1: 1.0, iters: 0, converged: 0 }
+    }
+    var b0 = 0.0
+    var b1 = 0.0
+    var last_det = 1.0
+    var conv = 0
+    var used = 0
+    var it = 0
+    while it < 50 {
+        var g0 = 0.0
+        var g1 = 0.0
+        var h00 = 0.0
+        var h01 = 0.0
+        var h11 = 0.0
+        var i = 0
+        while i < n {
+            let xi = x[i as usize]
+            let p = lg_sigmoid(b0 + b1 * xi)
+            let w = p * (1.0 - p)
+            let resid = y[i as usize] - p
+            g0 = g0 + resid
+            g1 = g1 + resid * xi
+            h00 = h00 + w
+            h01 = h01 + w * xi
+            h11 = h11 + w * xi * xi
+            i = i + 1
+        }
+        let det = h00 * h11 - h01 * h01
+        last_det = det
+        if det <= 1.0e-300 && det >= 0.0 - 1.0e-300 { it = 50 }
+        else {
+            let db0 = (h11 * g0 - h01 * g1) / det
+            let db1 = (h00 * g1 - h01 * g0) / det
+            b0 = b0 + db0
+            b1 = b1 + db1
+            used = it + 1
+            let ad0 = if db0 < 0.0 { 0.0 - db0 } else { db0 }
+            let ad1 = if db1 < 0.0 { 0.0 - db1 } else { db1 }
+            if ad0 < 1.0e-10 && ad1 < 1.0e-10 { conv = 1; it = 50 } else { it = it + 1 }
+        }
+    }
+    // final information matrix for standard errors
+    var h00 = 0.0
+    var h01 = 0.0
+    var h11 = 0.0
+    var i2 = 0
+    while i2 < n {
+        let xi = x[i2 as usize]
+        let p = lg_sigmoid(b0 + b1 * xi)
+        let w = p * (1.0 - p)
+        h00 = h00 + w
+        h01 = h01 + w * xi
+        h11 = h11 + w * xi * xi
+        i2 = i2 + 1
+    }
+    let det = h00 * h11 - h01 * h01
+    var se0 = 0.0
+    var se1 = 0.0
+    if det > 1.0e-300 {
+        se0 = lg_sqrt(h11 / det)
+        se1 = lg_sqrt(h00 / det)
+    }
+    var z1 = 0.0
+    if se1 > 0.0 { z1 = b1 / se1 }
+    let az = if z1 < 0.0 { 0.0 - z1 } else { z1 }
+    let p1 = 2.0 * lg_normal_sf(az)
+    return LogisticFit { b0: b0, b1: b1, se0: se0, se1: se1, z1: z1, p1: p1, iters: used as i64, converged: conv as i64 }
+}
+
+/// Fitted probability p = sigmoid(b0 + b1·x).
+pub fn logistic_predict(fit: &LogisticFit, x: f64) -> f64 with Mut, Div, Panic {
+    return lg_sigmoid(fit.b0 + fit.b1 * x)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Two-point design x∈{0,1}: at x=0 successes 1/3, at x=1 successes 2/3.
+// Saturated MLE: b0=logit(1/3)=ln(0.5)=-0.693147; b1=logit(2/3)-logit(1/3)=1.386294.
+// predict(0)=1/3, predict(1)=2/3.
+fn test_two_point() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=0.0; x[2]=0.0; x[3]=1.0; x[4]=1.0; x[5]=1.0
+    y[0]=0.0; y[1]=0.0; y[2]=1.0; y[3]=1.0; y[4]=1.0; y[5]=0.0
+    let r = logistic_fit(&x, &y, 6)
+    var ok = true
+    ok = check(1, r.converged == 1) && ok
+    ok = check(2, approx(r.b0, 0.0 - 0.693147, 1.0e-4)) && ok
+    ok = check(3, approx(r.b1, 1.386294, 1.0e-4)) && ok
+    ok = check(4, approx(logistic_predict(&r, 0.0), 0.333333, 1.0e-4)) && ok
+    ok = check(5, approx(logistic_predict(&r, 1.0), 0.666667, 1.0e-4)) && ok
+    return ok
+}
+
+// Balanced null: at each x the successes are 50/50 -> b1=0, b0=0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=0.0; x[2]=1.0; x[3]=1.0
+    y[0]=0.0; y[1]=1.0; y[2]=0.0; y[3]=1.0
+    let r = logistic_fit(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.b0, 0.0, 1.0e-4)) && ok
+    ok = check(11, approx(r.b1, 0.0, 1.0e-4)) && ok
+    ok = check(12, r.p1 > 0.9) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_two_point() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

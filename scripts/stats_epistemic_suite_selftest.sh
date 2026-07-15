@@ -52,6 +52,42 @@ MODULES=(
   stdlib/stats/deming.sio
   stdlib/stats/theil_sen.sio
   stdlib/stats/passing_bablok.sio
+  stdlib/stats/fisher_exact.sio
+  stdlib/stats/cochran_q.sio
+  stdlib/stats/fleiss_kappa.sio
+  stdlib/stats/logistic.sio
+  stdlib/stats/poisson_reg.sio
+  stdlib/stats/wls.sio
+  stdlib/stats/runs_test.sio
+  stdlib/stats/durbin_watson.sio
+  stdlib/stats/autocorr.sio
+  stdlib/stats/nelson_aalen.sio
+  stdlib/stats/rmst.sio
+  stdlib/stats/life_table.sio
+  stdlib/stats/kendall_tau.sio
+  stdlib/stats/goodman_kruskal.sio
+  stdlib/stats/somers_d.sio
+  stdlib/stats/bartlett.sio
+  stdlib/stats/levene.sio
+  stdlib/stats/var_ftest.sio
+  stdlib/stats/mann_whitney.sio
+  stdlib/stats/sign_test.sio
+  stdlib/stats/mood_median.sio
+  stdlib/stats/fit_gamma.sio
+  stdlib/stats/fit_beta.sio
+  stdlib/stats/fit_lognormal.sio
+  stdlib/stats/corr_ci.sio
+  stdlib/stats/point_biserial.sio
+  stdlib/stats/partial_corr.sio
+  stdlib/stats/bayes_ab.sio
+  stdlib/stats/beta_hdi.sio
+  stdlib/stats/bic.sio
+  stdlib/stats/mahalanobis.sio
+  stdlib/stats/hotelling_t2.sio
+  stdlib/stats/pca2.sio
+  stdlib/stats/jackknife.sio
+  stdlib/stats/rng.sio
+  stdlib/stats/bootstrap.sio
 )
 
 fail=0

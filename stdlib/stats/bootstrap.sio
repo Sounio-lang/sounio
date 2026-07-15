@@ -1,0 +1,170 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bootstrap.sio — nonparametric bootstrap for the mean
+//
+// Resamples the data with replacement to estimate the sampling distribution of
+// the mean — a percentile confidence interval and standard error that need no
+// distributional assumption:
+//
+//   bootstrap_mean(x, n, b, conf, seed) -> BootResult
+//
+// Draw `b` resamples of size n (with replacement), take each resample mean; the
+// SE is the sd of those means and the percentile CI is their α/2 and 1−α/2
+// quantiles. As b → ∞ the SE converges to √(σ̂²/n) with σ̂² the ÷n variance.
+//
+// The generator is the Park-Miller MINSTD in exact f64 (seeded, so the whole run
+// is bit-reproducible). Pure Sounio: inline sort of the resample means; no
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Efron (1979); Efron & Tibshirani, "An Introduction to the Bootstrap".
+
+module stats::bootstrap
+
+fn bs_floor(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+fn bs_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct BootResult {
+    pub mean: f64,   // original sample mean (point estimate)
+    pub se: f64,     // bootstrap standard error
+    pub lo: f64,     // percentile CI lower
+    pub hi: f64,     // percentile CI upper
+    pub b: i64,      // resamples used
+}
+
+/// Percentile bootstrap CI and SE for the sample mean.
+///
+/// Parâmetros: x — data; n — size (<=256); b — resamples (2..1024);
+///             conf — confidence (e.g. 0.95); seed — PRNG seed (>0).
+/// Retorno: BootResult (mean, se, lo, hi, b).
+/// Referências: Efron (1979).
+pub fn bootstrap_mean(x: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootResult with Mut, Div, Panic {
+    if n < 2 || b < 2 { return BootResult { mean: 0.0, se: 0.0, lo: 0.0, hi: 0.0, b: 0 } }
+    var bb = b
+    if bb > 1024 { bb = 1024 }
+    let nf = n as f64
+    // original mean
+    var s0 = 0.0
+    var i = 0
+    while i < n { s0 = s0 + x[i as usize]; i = i + 1 }
+    let mean0 = s0 / nf
+    // MINSTD state
+    let A = 16807.0
+    let M = 2147483647.0
+    var st = seed as f64
+    if st < 1.0 { st = 1.0 }
+    var means: [f64; 1024] = [0.0; 1024]
+    var rep = 0
+    while rep < bb {
+        var acc = 0.0
+        var k = 0
+        while k < n {
+            // next uniform
+            let prod = A * st
+            st = prod - bs_floor(prod / M) * M
+            let u = st / M
+            var idx = bs_floor(u * nf) as i32
+            if idx >= n { idx = n - 1 }
+            acc = acc + x[idx as usize]
+            k = k + 1
+        }
+        means[rep as usize] = acc / nf
+        rep = rep + 1
+    }
+    // bootstrap SE = sd of resample means
+    var sm = 0.0
+    var a = 0
+    while a < bb { sm = sm + means[a as usize]; a = a + 1 }
+    let mbar = sm / (bb as f64)
+    var ss = 0.0
+    var c = 0
+    while c < bb { let d = means[c as usize] - mbar; ss = ss + d * d; c = c + 1 }
+    let se = bs_sqrt(ss / ((bb - 1) as f64))
+    // percentile CI: inline insertion sort of the resample means
+    var p = 1
+    while p < bb {
+        let key = means[p as usize]
+        var q = p - 1
+        while q >= 0 && means[q as usize] > key { means[(q + 1) as usize] = means[q as usize]; q = q - 1 }
+        means[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let alpha = 1.0 - conf
+    var ilo = bs_floor(alpha * 0.5 * (bb as f64)) as i32
+    var ihi = bs_floor((1.0 - alpha * 0.5) * (bb as f64)) as i32
+    if ilo < 0 { ilo = 0 }
+    if ihi > bb - 1 { ihi = bb - 1 }
+    return BootResult { mean: mean0, se: se, lo: means[ilo as usize], hi: means[ihi as usize], b: bb as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4,5}: point estimate = sample mean = 3 (exact).
+// Bootstrap SE -> sqrt(biased_var/n) = sqrt(2/5) = 0.632456 as b grows;
+// with b=1000 the Monte-Carlo estimate lands within ~0.08. CI brackets the mean.
+fn test_bootstrap() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = bootstrap_mean(&x, 5, 1000, 0.95, 20260715)
+    var ok = true
+    ok = check(1, approx(r.mean, 3.0, 1.0e-9)) && ok               // exact
+    ok = check(2, approx(r.se, 0.632456, 0.08)) && ok              // MC estimate of √(2/5)
+    ok = check(3, r.lo < 3.0 && r.hi > 3.0) && ok                  // CI brackets the mean
+    ok = check(4, r.b == 1000) && ok
+    return ok
+}
+
+// reproducibility: same seed -> identical CI bounds.
+fn test_reproducible() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=6.0; x[3]=8.0; x[4]=10.0; x[5]=12.0
+    let r1 = bootstrap_mean(&x, 6, 500, 0.90, 99)
+    let r2 = bootstrap_mean(&x, 6, 500, 0.90, 99)
+    var ok = true
+    ok = check(10, approx(r1.lo, r2.lo, 1.0e-12)) && ok
+    ok = check(11, approx(r1.hi, r2.hi, 1.0e-12)) && ok
+    ok = check(12, approx(r1.se, r2.se, 1.0e-12)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_bootstrap() && ok
+    ok = test_reproducible() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

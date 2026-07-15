@@ -1,0 +1,223 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/beta_hdi.sio — Beta posterior credible interval & tail probability
+//
+// Summarises a Beta(α, β) posterior (e.g. the conjugate posterior of a rate)
+// with an equal-tailed credible interval and tail probabilities:
+//
+//   beta_hdi(a, b, conf) -> BetaPostResult
+//   beta_tail_leq(a, b, t)  -> f64         P(p ≤ t) = I_t(α, β)
+//
+// The credible interval [Q(α/2), Q(1−α/2)] inverts the regularised incomplete
+// beta by bisection; the posterior mean is α/(α+β) and the mode (α−1)/(α+β−2)
+// for α,β > 1.
+//
+// Pure Sounio: inline Lanczos log-gamma + continued-fraction incomplete beta,
+// inverted by bisection. No external dependency, no nested data-array calls.
+//
+// References:
+//   Gelman et al., "Bayesian Data Analysis" 3e, §2.
+
+module stats::beta_hdi
+
+fn bh_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / bh_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn bh_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn bh_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * bh_ln(tt) - tt + bh_ln(a)
+}
+
+fn bh_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn bh_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = bh_lgamma(a) + bh_lgamma(b) - bh_lgamma(a + b)
+    let front = bh_exp(a * bh_ln(x) + b * bh_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * bh_betacf(a, b, x) / a }
+    return 1.0 - front * bh_betacf(b, a, 1.0 - x) / b
+}
+
+// inverse incomplete beta: solve I_x(a,b) = target for x, by bisection.
+fn bh_ibeta_inv(a: f64, b: f64, target: f64) -> f64 with Mut, Div, Panic {
+    if target <= 0.0 { return 0.0 }
+    if target >= 1.0 { return 1.0 }
+    var lo = 0.0
+    var hi = 1.0
+    var mid = 0.5
+    var it = 0
+    while it < 80 {
+        mid = 0.5 * (lo + hi)
+        let cdf = bh_ibeta(a, b, mid)
+        if cdf < target { lo = mid } else { hi = mid }
+        it = it + 1
+    }
+    return mid
+}
+
+/// P(p ≤ t) under a Beta(a,b) posterior.
+pub fn beta_tail_leq(a: f64, b: f64, t: f64) -> f64 with Mut, Div, Panic {
+    return bh_ibeta(a, b, t)
+}
+
+pub struct BetaPostResult {
+    pub lo: f64,     // credible interval lower
+    pub hi: f64,     // credible interval upper
+    pub mean: f64,   // a/(a+b)
+    pub mode: f64,   // (a-1)/(a+b-2), or -1 if undefined
+}
+
+/// Equal-tailed credible interval and summaries for a Beta(a,b) posterior.
+///
+/// Parâmetros: a, b — Beta parameters (>0); conf — credible level (e.g. 0.95).
+/// Retorno: BetaPostResult (lo, hi, mean, mode).
+/// Referências: Gelman et al. §2.
+pub fn beta_hdi(a: f64, b: f64, conf: f64) -> BetaPostResult with Mut, Div, Panic {
+    if a <= 0.0 || b <= 0.0 { return BetaPostResult { lo: 0.0, hi: 0.0, mean: 0.0, mode: 0.0 - 1.0 } }
+    let alpha = 1.0 - conf
+    let lo = bh_ibeta_inv(a, b, alpha * 0.5)
+    let hi = bh_ibeta_inv(a, b, 1.0 - alpha * 0.5)
+    let mean = a / (a + b)
+    var mode = 0.0 - 1.0
+    if a > 1.0 && b > 1.0 { mode = (a - 1.0) / (a + b - 2.0) }
+    return BetaPostResult { lo: lo, hi: hi, mean: mean, mode: mode }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Beta(1,1) is uniform: 95% equal-tailed interval = [0.025, 0.975]; mean 0.5.
+fn test_uniform() -> bool with IO, Mut, Div, Panic {
+    let r = beta_hdi(1.0, 1.0, 0.95)
+    var ok = true
+    ok = check(1, approx(r.lo, 0.025, 1.0e-4)) && ok
+    ok = check(2, approx(r.hi, 0.975, 1.0e-4)) && ok
+    ok = check(3, approx(r.mean, 0.5, 1.0e-9)) && ok
+    return ok
+}
+
+// Beta(2,2): symmetric about 0.5. P(p<=0.5)=0.5; mean 0.5; mode 0.5.
+fn test_beta22() -> bool with IO, Mut, Div, Panic {
+    let r = beta_hdi(2.0, 2.0, 0.95)
+    var ok = true
+    ok = check(10, approx(r.mean, 0.5, 1.0e-9)) && ok
+    ok = check(11, approx(r.mode, 0.5, 1.0e-9)) && ok
+    ok = check(12, approx(r.lo, 1.0 - r.hi, 1.0e-4)) && ok        // symmetric interval
+    ok = check(13, approx(beta_tail_leq(2.0, 2.0, 0.5), 0.5, 1.0e-6)) && ok
+    return ok
+}
+
+// tail probability check: I_{0.8}(2,2) = 0.8²(3-1.6) = 0.64·1.4 = 0.896.
+fn test_tail() -> bool with IO, Mut, Div, Panic {
+    return check(20, approx(beta_tail_leq(2.0, 2.0, 0.8), 0.896, 1.0e-5))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_uniform() && ok
+    ok = test_beta22() && ok
+    ok = test_tail() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

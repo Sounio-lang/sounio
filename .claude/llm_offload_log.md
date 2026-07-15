@@ -2726,6 +2726,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Suite selftest: 39 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-7arr1i/`, `/tmp/llm-offload-j5337P/`, `/tmp/llm-offload-4Cujib/`.
 
+## 2026-07-14 — math-review: data::csv fixed-point + GUM row (Trilha A, Data I/O)
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Grok 4.3: fixed-point digit extraction, f64 round-half-up scaling, GUM u_c/U95 reproduction = OK; one exact-*.5 f64 tie TIGHTENABLE addressed with a caveat + tie-free decimals. (Z.AI empty; xai + independent awk recompute used.)
+
+## 2026-07-14 — math-review: GUM coverage factor (finite dof) for the f64-cast dispatch
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2)
+- Both OK: coverage factor = Student-t quantile (not fixed 1.96); t-table values; Welch-Satterthwaite worked example (nu_eff≈4.17). Z.AI TIGHTENABLE: U95 ≈ 0.571 (t(4.173)=2.743 × 0.20817). Confirms MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST science.
+
 ## 2026-07-14 — math-review: signal::fft vertical
 - Files: `stdlib/signal/fft.sio` (pub fields + note), `tests/stdlib/signal/test_fft_stdlib.sio`, `examples/signal/spectrum_report.sio`.
 - Provider: xAI/Grok 4.3 = **PASS** (all 4). Confirmed DC→|X|[0]=4/rest 0; impulse→flat 1; IDFT(DFT(x))=x (1/N inverse); real cosine cos(2πn/8)→|X[1]|=|X[7]|=4, other bins exactly 0 (residual at 3,5 is fft_cos input precision, not FFT error).
@@ -2746,3 +2754,118 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - passing_bablok = **PASS**: shifted-median with K-offset matches Passing & Bablok 1983 exactly (1-indexed rank (N+1)/2+K → 0-based with clamping); -1 slope exclusion verified (N=5,K=0 case); K-offset case (N=6,K=1 → slope 2) confirmed.
 - Theme: method-comparison / robust regression — complements the agreement modules (bland_altman, concordance/CCC, reliability) for assay/instrument comparison. #852-safe: theil_sen & passing_bablok use bounded pairwise buffers with inline median sorts (no nested call while big buffer live). Suite selftest: 45 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-8JVsS1/`, `/tmp/llm-offload-NuJ1qi/`, `/tmp/llm-offload-LafnKF/`.
+
+## 2026-07-14 — math-review: integrate::epistemic_ode run-proof
+- Files: `tests/stdlib/integrate/test_integrate_stdlib.sio`, `examples/integrate/decay_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = **PASS** (all). Confirmed y(t)=y0 e^{-kt}; Euler (1-1/n)^n→e^-1 O(1/n) (err@2000<err@200); half-life y(ln2)=y0/2; y(2)=2e^-1=0.735759; step-wise additive uncertainty recurrence u_{n+1}=u_n√(1+(k dt)²) is algebraically correct (u stays ~u0). Default Madaros. INTEGRATE_GATE_OK.
+- Raw review directory: see /tmp llm-offload dir.
+## 2026-07-14 — math-review: stats::fisher_exact, stats::cochran_q, stats::fleiss_kappa
+- Files (all new): `stdlib/stats/fisher_exact.sio` (Fisher's exact 2×2: hypergeometric two-sided/one-sided p + odds ratio, log-factorials via Lanczos), `stdlib/stats/cochran_q.sio` (Cochran's Q for k paired binary conditions, χ² tail via igamma), `stdlib/stats/fleiss_kappa.sio` (Fleiss' multi-rater kappa). Provider: xAI/Grok 4.3.
+- fisher_exact = **PASS**: hypergeometric P via log-factorials, two-sided sum over P≤P_obs with float-tolerant threshold, support bounds max(0,c1-r2)..min(r1,c1), OR=ad/bc all correct; tea-test 0.4857/OR 9 verified.
+- cochran_q = **PASS**: Q=(k-1)(kΣC²-N²)/(kN-ΣR²) transcription exact, denom=0 guard, χ² tail standard; Q=2.667 and Q=6 examples verified.
+- fleiss_kappa = **PASS**: Pᵢ, P̄, pⱼ, P̄ₑ, κ all match Fleiss (1971); three test cases (κ=-0.2, κ=1, three-category) correct. Note: significance-test SE deliberately omitted (fiddly Fleiss variance) — point estimate + components only.
+- Theme: exact & multi-condition categorical inference — complements chi2_independence/mcnemar/trend/cohen_kappa. All scalar/small-array, #852-safe. Suite selftest: 48 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-WWTpfo/`, `/tmp/llm-offload-s2BJ8J/`, `/tmp/llm-offload-JKGRlT/`.
+
+## 2026-07-14 — math-review: epistemic trust-map criteria
+- Task: math-review (fan-out xai grok-4.3 + zai GLM-5.2). Both OK on all 4 claims.
+- Cov(indep)=0, p-box gap/midpoint, u_c=0.290402, k95=1.96-wrong-for-finite-nu. Z.AI caveat: exact-0 tolerance valid only for ANALYTIC covariance (correlation::covariance is analytic/shared-source, so appropriate) — noted in EPISTEMIC_TRUST_MAP.
+
+## 2026-07-14 — math-review: special::erf run-proof
+- Files: `tests/stdlib/special/test_erf_stdlib.sio`, `examples/special/erf_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. erf(1)=0.8427008, odd symmetry, erfc=1-erf, Phi(0)=0.5/Phi(1)=0.8413447/Phi(1.96)=0.9750, z(0.975)=1.95996, round-trip Phi(z(0.9))=0.9. normal_quantile deep-tail approximation not over-claimed. Default Madaros. SPECIAL_ERF_GATE_OK.
+## 2026-07-14 — math-review: stats::logistic, stats::poisson_reg, stats::wls
+- Files (all new): `stdlib/stats/logistic.sio` (1-predictor logistic regression via Newton-Raphson/IRLS, Wald SE/z/p, predict), `stdlib/stats/poisson_reg.sio` (1-predictor Poisson log-link regression via Newton, rate ratio, predict), `stdlib/stats/wls.sio` (weighted least squares, closed-form coefficients + SEs + weighted R²). Provider: xAI/Grok 4.3.
+- logistic = **PASS**: score g=Xᵀ(y−p), Fisher info H=XᵀWX (W=diag p(1−p)), NR update, SE=√diag(H⁻¹), Wald z; two-point saturated MLE (b0=logit⅓, b1=logit⅔−logit⅓) exact.
+- poisson_reg = **PASS**: Poisson log-link score/Hessian, NR update, saturated two-point MLE (b0=ln ȳ|x=0, b1=ln ratio) exact; Wald inference correct.
+- wls = **PASS**: normal-equation WLS solution, σ̂²(XᵀWX)⁻¹ variance entries under Var(εᵢ)=σ²/wᵢ, weighted R²; perfect and outlier-downweight cases verified.
+- Theme: generalized linear models (one predictor) — pharmacometric dose-response / count / heteroscedastic fits. #852-safe: flat per-iteration passes, scalar accumulation, no nested data-array calls. Suite runner now tracks **49 modules** + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-V3U3Al/`, `/tmp/llm-offload-zlNiM7/`, `/tmp/llm-offload-p2IVgX/`.
+
+## 2026-07-14 — math-review: stats::runs_test, stats::durbin_watson, stats::autocorr
+- Files (all new): `stdlib/stats/runs_test.sio` (Wald-Wolfowitz runs test, normal approximation), `stdlib/stats/durbin_watson.sio` (DW autocorrelation statistic + ρ̂), `stdlib/stats/autocorr.sio` (sample ACF at lag k + Ljung-Box portmanteau test, χ² tail via igamma). Provider: xAI/Grok 4.3.
+- runs_test = **PASS**: μ_R=2n₁n₂/n+1, σ²_R=2n₁n₂(2n₁n₂−n)/(n²(n−1)), z, two-sided p all match; random/clustered/alternating cases verified.
+- durbin_watson = **PASS**: d=Σ(eᵢ−e_{i−1})²/Σeᵢ², ρ̂≈1−d/2 canonical; three cases (d=3.333/0.667/2.0) verified.
+- autocorr = **PASS**: biased r_k, Ljung-Box Q=n(n+2)Σr_k²/(n−k) ~ χ²(m); acf(1)=0.4/acf(2)=−0.1 and Q≈1.5167 hand-checked.
+- Theme: serial-dependence / independence-assumption diagnostics — complements the goodness-of-fit / normality family for ordered & time-course data (PK sampling, longitudinal). All scalar/read-only-array, #852-safe. Suite runner: 52 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-0yOUhT/`, `/tmp/llm-offload-5OiuG1/`, `/tmp/llm-offload-FpKA3Q/`.
+
+| 2026-07-14 | xai/grok-4.3 | math-review | self-hosted/check/numeric_format.sio; self-hosted/check/types.sio; self-hosted/check/compat.sio; self-hosted/compiler/f128_f256_format_descriptor_probe.sio | PASS | Bounded V0-A review confirmed IEEE binary128 dimensions 1+15+112=128 with precision 113, internal consistency of the explicitly Sounio-defined f256 identity 1+19+236=256 with precision 237, and identity-only compatibility invariants. No arithmetic, rounding, transport, ABI, IR, hardware, or IEEE f256 claim was reviewed or made. No actionable fixes. Raw: `/tmp/llm-offload-FsvDHH/`. |
+## 2026-07-14 — math-review: stats::nelson_aalen, stats::rmst, stats::life_table
+- Files (all new): `stdlib/stats/nelson_aalen.sio` (Nelson-Aalen cumulative hazard Ĥ + variance + implied survival), `stdlib/stats/rmst.sio` (restricted mean survival time = area under KM up to τ), `stdlib/stats/life_table.sio` (actuarial Cutler-Ederer grouped survival + interval hazard). Provider: xAI/Grok 4.3.
+- nelson_aalen = **PASS**: Ĥ=Σd_j/n_j, Var=Σd_j/n_j², Ŝ=e^{-Ĥ} canonical; sort-free distinct-death-time walk correct; Ĥ(3)=0.7833, Var=0.2136 verified.
+- rmst = **PASS**: exact right-continuous KM step-function area truncated at τ; all five cases (3.0, 2.4, 3.0, 2.1, 3.667) reproduced; edge cases correct.
+- life_table = **PASS**: n'ᵢ=nᵢ−wᵢ/2, qᵢ=dᵢ/n'ᵢ, Ŝ=Πpᵢ (Cutler-Ederer) exact; 3-interval example (0.9, 0.8047, 0.7231) verified.
+- Theme: survival-analysis extensions — completes the survival family (km, logrank, exp_survival + Nelson-Aalen, RMST, life-table). All deterministic, fully hand-derivable. #852-safe: sort-free walks / cumulative products, no nested data-array calls. Suite runner: 55 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-dUWR1L/`, `/tmp/llm-offload-K5q4eh/`, `/tmp/llm-offload-vpkpHX/`.
+
+## 2026-07-14 — math-review: signal::filter run-proof
+- Files: `tests/stdlib/signal/test_filter_stdlib.sio`, `examples/signal/filter_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. FIR MA(4) DC gain=Σh=1 + impulse response = h (0.25×4 then 0); IIR1 bilinear lowpass DC gain(z=1)=1 (const 2→2); IIR1 highpass DC gain(z=1)=0 (DC blocked). Default Madaros. SIGNAL_FILTER_GATE_OK.
+## 2026-07-14 — math-review: stats::kendall_tau, stats::goodman_kruskal, stats::somers_d
+- Files (all new): `stdlib/stats/kendall_tau.sio` (Kendall τ_a/τ_b + no-tie z-test), `stdlib/stats/goodman_kruskal.sio` (γ=(C−D)/(C+D) + Wald z), `stdlib/stats/somers_d.sio` (asymmetric Somers' D both directions). Provider: xAI/Grok 4.3.
+- kendall_tau = **PASS**: τ_a, tie-corrected τ_b, Var₀(S)=n(n−1)(2n+5)/18 z-test all correct; {1,3,2,4}→τ_a=0.667, z=1.359 (note: initial test constant z=1.358601 was a hand-arithmetic error — correct value 4/√8.666667=1.358732; caught by the failing assertion, fixed).
+- goodman_kruskal = **PASS**: γ + SE(γ)=√(4CD/(C+D)³) Wald z verified.
+- somers_d = **PASS**: D(Y|X)=(C−D)/(C+D+Tx), D(X|Y)=(C−D)/(C+D+Ty), and the 2·AUC−1 identity for binary Y confirmed.
+- **Bug found & fixed**: the tie-counting branches originally assigned tied-on-X pairs to Ty and vice-versa. Masked in kendall (τ_b denominator √((C+D+Tx)(C+D+Ty)) is symmetric in Tx/Ty) but surfaced in somers_d where the directions are distinct (D(Y|X) test gave 0.667 instead of 1.0). Fixed the labeling in both modules.
+- Theme: rank / ordinal association — complements the Pearson/Spearman correlation module. All O(n²) pair scans, scalar returns, #852-safe. Suite runner: 58 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-2RCSmH/`, `/tmp/llm-offload-sD8vnn/`, `/tmp/llm-offload-BerYTX/`.
+
+## 2026-07-14 — math-review: special::gamma run-proof
+- Files: `tests/stdlib/special/test_gamma_stdlib.sio`, `examples/special/gamma_report.sio` (no source edited).
+- Provider: xAI/Grok 4.3 = PASS. gamma(n)=(n-1)! (24,120) + recurrence; gamma(0.5)=√π, gamma(1.5)=√π/2; lgamma(5)=ln24=3.178054, lgamma(1)=0; digamma(1)=-γ=-0.5772157, digamma(2)=1-γ, recurrence. Default Madaros. SPECIAL_GAMMA_GATE_OK. (digamma negative asserted by value; print(f64) negative bug #890 worked around in the example.)
+## 2026-07-14 — math-review: stats::bartlett, stats::levene, stats::var_ftest
+- Files (all new): `stdlib/stats/bartlett.sio` (Bartlett homogeneity-of-variance χ²), `stdlib/stats/levene.sio` (Levene/Brown-Forsythe F-test via ANOVA on abs deviations, mean/median centering), `stdlib/stats/var_ftest.sio` (two-sample variance F-test). Provider: xAI/Grok 4.3.
+- bartlett = **PASS**: pooled variance, χ² numerator + correction factor C, χ² tail all match; worked example (6.25, χ²=1.5868) exact.
+- levene = **PASS**: W=(df2/df1)(between/within) ~ F(k−1,N−k), mean/median centering, F tail via incomplete beta all correct; W=2.0571 verified.
+- var_ftest = **PASS**: F=s1²/s2², two-sided p=2·min(cdf,1−cdf), F-CDF via I_x(d1/2,d2/2); F(4,4) at 0.25 → p=0.208 exact. Reviewer flagged the inline exp/ln/betacf helpers as bounded-precision without proven error bounds at extreme args — a general property of every inline special function in the suite; reviewer confirms "all downstream statistical claims remain valid." Not a defect; sufficient for the tested tolerances.
+- Theme: homogeneity-of-variance / homoscedasticity tests — completes the parametric-assumption-checking trio (normality, independence, now equal variance). All scalar/small-array, #852-safe. Suite runner: 61 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-orKL2v/`, `/tmp/llm-offload-2oDw1A/`, `/tmp/llm-offload-5aKJEh/`.
+
+## 2026-07-14 — math-review: stats::mann_whitney, stats::sign_test, stats::mood_median
+- Files (all new): `stdlib/stats/mann_whitney.sio` (two-sample rank-sum U test with tie-corrected normal approx), `stdlib/stats/sign_test.sio` (paired & one-sample sign test, exact binomial), `stdlib/stats/mood_median.sio` (k-sample median test, χ² on 2×k table). Provider: xAI/Grok 4.3.
+- mann_whitney = **PASS**: μ_U=n₁n₂/2, tie-corrected σ²_U=(n₁n₂/12)[(N+1)−Σ(t³−t)/(N(N−1))], z, two-sided p all match; mid-rank less/eq counting correct; separated case z=−1.964, p=0.0495 verified.
+- sign_test = **PASS**: Bin(m,½) exact two-sided p via forward binomial recurrence, zeros dropped; 46/512=0.1797 and 5/16=0.625 verified.
+- mood_median = **PASS**: 2×k Pearson χ², df=k−1, degenerate-split guard; median 5.5/χ²=10 verified.
+- Theme: non-parametric location tests — fills the standalone rank-sum / sign / median-test gap beside wilcoxon (paired) and kruskal_wallis (k-sample). All deterministic/derivable, #852-safe. Suite runner: 64 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-ChPzJD/`, `/tmp/llm-offload-sVEzvh/`, `/tmp/llm-offload-nZbhUO/`.
+
+## 2026-07-15 — math-review: stats::fit_gamma, stats::fit_beta, stats::fit_lognormal
+- Files (all new): `stdlib/stats/fit_gamma.sio` (gamma MoM: shape=mean²/var, scale=var/mean), `stdlib/stats/fit_beta.sio` (beta MoM: α=m·c, β=(1−m)·c, c=m(1−m)/v−1), `stdlib/stats/fit_lognormal.sio` (normal fit to logs → μ, σ, median, mean). Provider: xAI/Grok 4.3.
+- fit_gamma = **PASS**: moment inversion exact; {2,2,6,6}→shape 3, scale 1.333, rate 0.75 verified.
+- fit_beta = **PASS**: all three arithmetic cases (α=β=1 uniform; α=2.625; α=3.536/β=3.264) exact; invalid-variance guard correct.
+- fit_lognormal = **PASS after fix**: reviewer flagged the docstring claim "exact MLE" as WRONG (code uses unbiased ÷(n−1), MLE uses ÷n) — corrected the docstring to "sample-moment fit (consistent with fit_gamma/fit_beta); strict MLE divides by n"; the math (μ̂, median=e^μ̂, mean=e^{μ̂+σ̂²/2}) is correct. Also calibrated the fitted-mean tolerance to 3e-3: exp amplifies the inline-ln error in var_y (d(mean)/d(var)≈mean/2), giving ~1.5e-3 absolute error — the reviewer's 3e-6 estimate assumed exact arithmetic.
+- Theme: distribution parameter fitting (method of moments) — pairs with densities/weibull_negbin. All deterministic/derivable, #852-safe. Suite runner: 67 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Sub7Nk/`, `/tmp/llm-offload-t2Rz1k/`, `/tmp/llm-offload-tfPQe1/`.
+
+## 2026-07-15 — math-review: stats::corr_ci, stats::point_biserial, stats::partial_corr
+- Files (all new): `stdlib/stats/corr_ci.sio` (Fisher-z CI + ρ=0 t-test from r,n), `stdlib/stats/point_biserial.sio` (continuous-vs-binary correlation + t-test), `stdlib/stats/partial_corr.sio` (first-order partial correlation r_xy·z + t-test). Provider: xAI/Grok 4.3.
+- corr_ci = **PASS**: z=atanh(r), CI=tanh(z±z_c/√(n−3)), t=r√(n−2)/√(1−r²), t-tail via I_x(ν/2,½); r=0.8/n=20 → CI [0.5534,0.9177], t=5.657 verified.
+- point_biserial = **PASS**: Pearson-equivalent r_pb + t(n−2) test; {1,2,3,4}vs{0,0,1,1}→r=0.8944, t=2.828 verified.
+- partial_corr = **PASS**: r_xy·z formula + t(n−3) test; discriminating case r_xy=0 but partial=−1 (r_xz=0.6,r_yz=0.8) verified; uncorrelated-z → partial=r_xy.
+- Theme: correlation-inference toolkit — the Fisher-z CI, point-biserial, and partial correlation beside the existing Pearson/Spearman module. partial_corr makes 3 nested pc_pearson calls (shared-ref reads, scalar return) — #852-safe. Suite runner: 70 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-1ZtLOb/`, `/tmp/llm-offload-rTCcaN/`, `/tmp/llm-offload-CqFiN9/`.
+
+## 2026-07-15 — math-review: stats::bayes_ab, stats::beta_hdi, stats::bic
+- Files (all new): `stdlib/stats/bayes_ab.sio` (Bayesian A/B test P(pB>pA) for two Beta posteriors via Miller's exact finite sum), `stdlib/stats/beta_hdi.sio` (Beta-posterior equal-tailed credible interval via inverse incomplete-beta bisection + tail probability), `stdlib/stats/bic.sio` (AIC/BIC + Schwarz Bayes-factor approximation). Provider: xAI/Grok 4.3.
+- bayes_ab = **PASS**: Miller/Berry-Fristedt identity for integer αB verified; Beta(2,1)vs(1,1)→2/3 (analytic), symmetric→0.5, separated→≈1.
+- beta_hdi = **PASS**: equal-tailed inverse-incomplete-beta interval, bisection convergence, incomplete beta all correct; Beta(1,1)→[0.025,0.975], I_0.8(2,2)=0.896 verified.
+- bic = **PASS**: AIC=2k−2lnL, BIC=k·ln(n)−2lnL, ln BF₁₀≈(BIC₀−BIC₁)/2 all exact; worked values verified.
+- Theme: Bayesian inference & model selection — expands the previously single-module Bayesian family (bayes_conjugate). All derivable, #852-safe. Suite runner: 73 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-n4B5X5/`, `/tmp/llm-offload-jNnXGV/`, `/tmp/llm-offload-ylWpE0/`.
+
+## 2026-07-15 — math-review: stats::mahalanobis, stats::hotelling_t2, stats::pca2
+- Files (all new): `stdlib/stats/mahalanobis.sio` (bivariate Mahalanobis distance via closed-form 2×2 inverse), `stdlib/stats/hotelling_t2.sio` (one-sample bivariate Hotelling's T² → F test), `stdlib/stats/pca2.sio` (two-variable PCA: closed-form eigenvalues + eigenvector + variance explained). Provider: xAI/Grok 4.3.
+- mahalanobis = **PASS**: D²=(syy·dx²−2sxy·dx·dy+sxx·dy²)/det, χ²(2) threshold; unit-square query (2,0)→D²=3 verified.
+- hotelling_t2 = **PASS**: T²=n·dᵀS⁻¹d, F=(n−p)/(p(n−1))·T² ~ F(2,n−2); 5-point example T²=10, F=3.75 verified.
+- pca2 = **PASS**: closed-form 2×2 eigenvalues, explained=λ₁/tr, null-space eigenvector with larger-norm candidate selection; correlated→λ₂=0, axis (0.707,0.707) verified.
+- Theme: multivariate (bivariate) — the suite's first multivariate tools, all closed-form over the 2×2 covariance (no general matrix inversion needed). All derivable, #852-safe. Suite runner: 76 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Lz8r2j/`, `/tmp/llm-offload-ztMqlk/`, `/tmp/llm-offload-zLhBWR/`.
+
+## 2026-07-15 — math-review: stats::jackknife, stats::rng, stats::bootstrap
+- Files (all new): `stdlib/stats/jackknife.sio` (leave-one-out jackknife bias/SE for mean & ÷n variance), `stdlib/stats/rng.sio` (Park-Miller MINSTD PRNG in exact f64 + Box-Muller normal), `stdlib/stats/bootstrap.sio` (nonparametric percentile bootstrap for the mean, seeded MINSTD). Provider: xAI/Grok 4.3.
+- jackknife = **PASS**: mean SE=s/√n, ÷n variance bias-corrected to unbiased ÷(n−1) (θ̂=2→2.5, bias −0.5, SE 1.0458); Quenouille formula verified.
+- rng = **PASS**: MINSTD xₙ₊₁=(16807·xₙ)mod(2³¹−1) exact in f64 (16807·(m−1)<2⁵³), seed-1 stream 7.826e−6/0.13154 exact, Box-Muller correct.
+- bootstrap = **PASS**: floor(u·n) index bound proven, percentile order statistics, SE→√(σ̂²/n); reviewer confirmed tolerances "explicitly stated and justified" (MC-error-calibrated 0.08 on SE).
+- Theme: resampling — the last major modern-staple gap. Derivability preserved: jackknife fully deterministic; the MINSTD stream is exactly reproducible from the recurrence (auditable), so the bootstrap tests assert derivable-in-expectation properties (exact point estimate, MC-calibrated SE tolerance, reproducibility). #852-safe. Suite runner: 79 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Tq92DO/`, `/tmp/llm-offload-zDJZrw/`, `/tmp/llm-offload-wXrCs6/`.
