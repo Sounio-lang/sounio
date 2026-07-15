@@ -1,0 +1,666 @@
+// Executable Place IR shadow over the scalar IrModuleArena v2 store.
+//
+// This module is deliberately off-default. It reuses the semantic vocabulary
+// characterized by PRs #894 and #910, but replaces their aggregate Place
+// values with generational IDs and private scalar columns.
+
+module ir::arena_v2_place_shadow
+
+use ir::arena_v2_shadow::*
+
+pub let IR_MODULE_ARENA_V2_PLACE_CAPACITY: i64 = 2
+pub let IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY: i64 = 2
+
+pub let IR_MODULE_ARENA_V2_PLACE_OK: i64 = 0
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_MODULE: i64 = -30
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_PLACE: i64 = -31
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_STALE_ROOT: i64 = -32
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_CAPACITY: i64 = -33
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_OUTPUT_LIVE: i64 = -34
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_PROJECTION_CAPACITY: i64 = -35
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_TYPE_CHAIN: i64 = -36
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_SAME_HASH_STRUCTURAL_COLLISION: i64 = -37
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_STRUCTURAL_MISMATCH: i64 = -38
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_WRITE_FORBIDDEN: i64 = -39
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_ACCESS_ORDER: i64 = -40
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_RANGE: i64 = -41
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_FINALIZED: i64 = -42
+pub let IR_MODULE_ARENA_V2_PLACE_ERR_UNFINALIZED: i64 = -43
+
+let PLACE_SLOT_FREE: i64 = 0
+let PLACE_SLOT_LIVE: i64 = 1
+let PLACE_SLOT_RELEASED: i64 = 2
+
+pub struct IrModuleArenaV2PlaceId {
+    slot: i64,
+    generation: i64,
+}
+
+var PLACE_STORE_LIVE: i64 = 0
+var PLACE_ACCESS_SEQUENCE: i64 = 0
+
+var PLACE_STATE_0: i64 = PLACE_SLOT_FREE
+var PLACE_STATE_1: i64 = PLACE_SLOT_FREE
+var PLACE_GENERATION_0: i64 = 1
+var PLACE_GENERATION_1: i64 = 1
+
+var PLACE_MODULE_ARENA_0: i64 = 0
+var PLACE_MODULE_ARENA_1: i64 = 0
+var PLACE_MODULE_SLOT_0: i64 = -1
+var PLACE_MODULE_SLOT_1: i64 = -1
+var PLACE_MODULE_GENERATION_0: i64 = 0
+var PLACE_MODULE_GENERATION_1: i64 = 0
+var PLACE_MODULE_EPOCH_0: i64 = 0
+var PLACE_MODULE_EPOCH_1: i64 = 0
+var PLACE_ROOT_IDENTITY_0: i64 = 0
+var PLACE_ROOT_IDENTITY_1: i64 = 0
+var PLACE_ROOT_TYPE_0: i64 = 0
+var PLACE_ROOT_TYPE_1: i64 = 0
+var PLACE_ROOT_LAYOUT_0: i64 = 0
+var PLACE_ROOT_LAYOUT_1: i64 = 0
+var PLACE_FINALIZED_0: i64 = 0
+var PLACE_FINALIZED_1: i64 = 0
+var PLACE_PROJECTION_COUNT_0: i64 = 0
+var PLACE_PROJECTION_COUNT_1: i64 = 0
+var PLACE_LAST_LOAD_0: i64 = 0
+var PLACE_LAST_LOAD_1: i64 = 0
+var PLACE_LAST_STORE_0: i64 = 0
+var PLACE_LAST_STORE_1: i64 = 0
+
+// Four projection cells: place_slot * 2 + projection_index. Every logical
+// field remains its own scalar column; no aggregate Place/Projection store
+// crosses a function boundary.
+var PROJ_OWNER_TYPE_0: i64 = 0
+var PROJ_OWNER_TYPE_1: i64 = 0
+var PROJ_OWNER_TYPE_2: i64 = 0
+var PROJ_OWNER_TYPE_3: i64 = 0
+var PROJ_OWNER_LAYOUT_0: i64 = 0
+var PROJ_OWNER_LAYOUT_1: i64 = 0
+var PROJ_OWNER_LAYOUT_2: i64 = 0
+var PROJ_OWNER_LAYOUT_3: i64 = 0
+var PROJ_FIELD_ORDINAL_0: i64 = 0
+var PROJ_FIELD_ORDINAL_1: i64 = 0
+var PROJ_FIELD_ORDINAL_2: i64 = 0
+var PROJ_FIELD_ORDINAL_3: i64 = 0
+// Name hashes are diagnostic collision witnesses only; they never select a
+// field or participate as the sole structural authority.
+var PROJ_FIELD_NAME_HASH_0: i64 = 0
+var PROJ_FIELD_NAME_HASH_1: i64 = 0
+var PROJ_FIELD_NAME_HASH_2: i64 = 0
+var PROJ_FIELD_NAME_HASH_3: i64 = 0
+var PROJ_RESULT_TYPE_0: i64 = 0
+var PROJ_RESULT_TYPE_1: i64 = 0
+var PROJ_RESULT_TYPE_2: i64 = 0
+var PROJ_RESULT_TYPE_3: i64 = 0
+var PROJ_RESULT_LAYOUT_0: i64 = 0
+var PROJ_RESULT_LAYOUT_1: i64 = 0
+var PROJ_RESULT_LAYOUT_2: i64 = 0
+var PROJ_RESULT_LAYOUT_3: i64 = 0
+
+pub fn ir_module_arena_v2_invalid_place_id() -> IrModuleArenaV2PlaceId {
+    IrModuleArenaV2PlaceId { slot: -1, generation: 0 }
+}
+
+pub fn ir_module_arena_v2_place_id_slot(id: &IrModuleArenaV2PlaceId) -> i64 {
+    (*id).slot
+}
+
+pub fn ir_module_arena_v2_place_id_generation(id: &IrModuleArenaV2PlaceId) -> i64 {
+    (*id).generation
+}
+
+fn place_state(slot: i64) -> i64 {
+    if slot == 0 { PLACE_STATE_0 } else { PLACE_STATE_1 }
+}
+
+fn place_generation(slot: i64) -> i64 {
+    if slot == 0 { PLACE_GENERATION_0 } else { PLACE_GENERATION_1 }
+}
+
+fn place_module_arena(slot: i64) -> i64 {
+    if slot == 0 { PLACE_MODULE_ARENA_0 } else { PLACE_MODULE_ARENA_1 }
+}
+
+fn place_module_slot(slot: i64) -> i64 {
+    if slot == 0 { PLACE_MODULE_SLOT_0 } else { PLACE_MODULE_SLOT_1 }
+}
+
+fn place_module_generation(slot: i64) -> i64 {
+    if slot == 0 { PLACE_MODULE_GENERATION_0 } else { PLACE_MODULE_GENERATION_1 }
+}
+
+fn place_module_epoch(slot: i64) -> i64 {
+    if slot == 0 { PLACE_MODULE_EPOCH_0 } else { PLACE_MODULE_EPOCH_1 }
+}
+
+fn place_root_identity(slot: i64) -> i64 {
+    if slot == 0 { PLACE_ROOT_IDENTITY_0 } else { PLACE_ROOT_IDENTITY_1 }
+}
+
+fn place_root_type(slot: i64) -> i64 {
+    if slot == 0 { PLACE_ROOT_TYPE_0 } else { PLACE_ROOT_TYPE_1 }
+}
+
+fn place_root_layout(slot: i64) -> i64 {
+    if slot == 0 { PLACE_ROOT_LAYOUT_0 } else { PLACE_ROOT_LAYOUT_1 }
+}
+
+fn place_finalized(slot: i64) -> i64 {
+    if slot == 0 { PLACE_FINALIZED_0 } else { PLACE_FINALIZED_1 }
+}
+
+fn place_projection_count(slot: i64) -> i64 {
+    if slot == 0 { PLACE_PROJECTION_COUNT_0 } else { PLACE_PROJECTION_COUNT_1 }
+}
+
+fn place_last_load(slot: i64) -> i64 {
+    if slot == 0 { PLACE_LAST_LOAD_0 } else { PLACE_LAST_LOAD_1 }
+}
+
+fn place_last_store(slot: i64) -> i64 {
+    if slot == 0 { PLACE_LAST_STORE_0 } else { PLACE_LAST_STORE_1 }
+}
+
+fn set_place_state(slot: i64, value: i64) with Mut {
+    if slot == 0 { PLACE_STATE_0 = value } else { PLACE_STATE_1 = value }
+}
+
+fn set_place_generation(slot: i64, value: i64) with Mut {
+    if slot == 0 { PLACE_GENERATION_0 = value } else { PLACE_GENERATION_1 = value }
+}
+
+fn set_place_binding(
+    slot: i64,
+    module: &IrModuleArenaV2ModuleId,
+    module_epoch: i64,
+    root_identity: i64,
+    root_type: i64,
+    root_layout: i64,
+) with Mut {
+    if slot == 0 {
+        PLACE_MODULE_ARENA_0 = ir_module_arena_v2_module_id_arena_identity(module)
+        PLACE_MODULE_SLOT_0 = ir_module_arena_v2_module_id_slot(module)
+        PLACE_MODULE_GENERATION_0 = ir_module_arena_v2_module_id_generation(module)
+        PLACE_MODULE_EPOCH_0 = module_epoch
+        PLACE_ROOT_IDENTITY_0 = root_identity
+        PLACE_ROOT_TYPE_0 = root_type
+        PLACE_ROOT_LAYOUT_0 = root_layout
+        PLACE_FINALIZED_0 = 0
+        PLACE_PROJECTION_COUNT_0 = 0
+        PLACE_LAST_LOAD_0 = 0
+        PLACE_LAST_STORE_0 = 0
+    } else {
+        PLACE_MODULE_ARENA_1 = ir_module_arena_v2_module_id_arena_identity(module)
+        PLACE_MODULE_SLOT_1 = ir_module_arena_v2_module_id_slot(module)
+        PLACE_MODULE_GENERATION_1 = ir_module_arena_v2_module_id_generation(module)
+        PLACE_MODULE_EPOCH_1 = module_epoch
+        PLACE_ROOT_IDENTITY_1 = root_identity
+        PLACE_ROOT_TYPE_1 = root_type
+        PLACE_ROOT_LAYOUT_1 = root_layout
+        PLACE_FINALIZED_1 = 0
+        PLACE_PROJECTION_COUNT_1 = 0
+        PLACE_LAST_LOAD_1 = 0
+        PLACE_LAST_STORE_1 = 0
+    }
+}
+
+fn clear_place_slot(slot: i64) with Mut {
+    if slot == 0 {
+        PLACE_MODULE_ARENA_0 = 0
+        PLACE_MODULE_SLOT_0 = -1
+        PLACE_MODULE_GENERATION_0 = 0
+        PLACE_MODULE_EPOCH_0 = 0
+        PLACE_ROOT_IDENTITY_0 = 0
+        PLACE_ROOT_TYPE_0 = 0
+        PLACE_ROOT_LAYOUT_0 = 0
+        PLACE_FINALIZED_0 = 0
+        PLACE_PROJECTION_COUNT_0 = 0
+        PLACE_LAST_LOAD_0 = 0
+        PLACE_LAST_STORE_0 = 0
+    } else {
+        PLACE_MODULE_ARENA_1 = 0
+        PLACE_MODULE_SLOT_1 = -1
+        PLACE_MODULE_GENERATION_1 = 0
+        PLACE_MODULE_EPOCH_1 = 0
+        PLACE_ROOT_IDENTITY_1 = 0
+        PLACE_ROOT_TYPE_1 = 0
+        PLACE_ROOT_LAYOUT_1 = 0
+        PLACE_FINALIZED_1 = 0
+        PLACE_PROJECTION_COUNT_1 = 0
+        PLACE_LAST_LOAD_1 = 0
+        PLACE_LAST_STORE_1 = 0
+    }
+    let cell = slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY
+    set_proj_owner_type(cell, 0)
+    set_proj_owner_layout(cell, 0)
+    set_proj_field_ordinal(cell, 0)
+    set_proj_field_name_hash(cell, 0)
+    set_proj_result_type(cell, 0)
+    set_proj_result_layout(cell, 0)
+    set_proj_owner_type(cell + 1, 0)
+    set_proj_owner_layout(cell + 1, 0)
+    set_proj_field_ordinal(cell + 1, 0)
+    set_proj_field_name_hash(cell + 1, 0)
+    set_proj_result_type(cell + 1, 0)
+    set_proj_result_layout(cell + 1, 0)
+}
+
+fn proj_owner_type(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_OWNER_TYPE_0 }
+    if cell == 1 { return PROJ_OWNER_TYPE_1 }
+    if cell == 2 { return PROJ_OWNER_TYPE_2 }
+    PROJ_OWNER_TYPE_3
+}
+
+fn proj_owner_layout(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_OWNER_LAYOUT_0 }
+    if cell == 1 { return PROJ_OWNER_LAYOUT_1 }
+    if cell == 2 { return PROJ_OWNER_LAYOUT_2 }
+    PROJ_OWNER_LAYOUT_3
+}
+
+fn proj_field_ordinal(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_FIELD_ORDINAL_0 }
+    if cell == 1 { return PROJ_FIELD_ORDINAL_1 }
+    if cell == 2 { return PROJ_FIELD_ORDINAL_2 }
+    PROJ_FIELD_ORDINAL_3
+}
+
+fn proj_field_name_hash(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_FIELD_NAME_HASH_0 }
+    if cell == 1 { return PROJ_FIELD_NAME_HASH_1 }
+    if cell == 2 { return PROJ_FIELD_NAME_HASH_2 }
+    PROJ_FIELD_NAME_HASH_3
+}
+
+fn proj_result_type(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_RESULT_TYPE_0 }
+    if cell == 1 { return PROJ_RESULT_TYPE_1 }
+    if cell == 2 { return PROJ_RESULT_TYPE_2 }
+    PROJ_RESULT_TYPE_3
+}
+
+fn proj_result_layout(cell: i64) -> i64 {
+    if cell == 0 { return PROJ_RESULT_LAYOUT_0 }
+    if cell == 1 { return PROJ_RESULT_LAYOUT_1 }
+    if cell == 2 { return PROJ_RESULT_LAYOUT_2 }
+    PROJ_RESULT_LAYOUT_3
+}
+
+fn set_proj_owner_type(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_OWNER_TYPE_0 = value }
+    else if cell == 1 { PROJ_OWNER_TYPE_1 = value }
+    else if cell == 2 { PROJ_OWNER_TYPE_2 = value }
+    else { PROJ_OWNER_TYPE_3 = value }
+}
+
+fn set_proj_owner_layout(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_OWNER_LAYOUT_0 = value }
+    else if cell == 1 { PROJ_OWNER_LAYOUT_1 = value }
+    else if cell == 2 { PROJ_OWNER_LAYOUT_2 = value }
+    else { PROJ_OWNER_LAYOUT_3 = value }
+}
+
+fn set_proj_field_ordinal(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_FIELD_ORDINAL_0 = value }
+    else if cell == 1 { PROJ_FIELD_ORDINAL_1 = value }
+    else if cell == 2 { PROJ_FIELD_ORDINAL_2 = value }
+    else { PROJ_FIELD_ORDINAL_3 = value }
+}
+
+fn set_proj_field_name_hash(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_FIELD_NAME_HASH_0 = value }
+    else if cell == 1 { PROJ_FIELD_NAME_HASH_1 = value }
+    else if cell == 2 { PROJ_FIELD_NAME_HASH_2 = value }
+    else { PROJ_FIELD_NAME_HASH_3 = value }
+}
+
+fn set_proj_result_type(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_RESULT_TYPE_0 = value }
+    else if cell == 1 { PROJ_RESULT_TYPE_1 = value }
+    else if cell == 2 { PROJ_RESULT_TYPE_2 = value }
+    else { PROJ_RESULT_TYPE_3 = value }
+}
+
+fn set_proj_result_layout(cell: i64, value: i64) with Mut {
+    if cell == 0 { PROJ_RESULT_LAYOUT_0 = value }
+    else if cell == 1 { PROJ_RESULT_LAYOUT_1 = value }
+    else if cell == 2 { PROJ_RESULT_LAYOUT_2 = value }
+    else { PROJ_RESULT_LAYOUT_3 = value }
+}
+
+fn place_id_is_live(id: &IrModuleArenaV2PlaceId) -> bool {
+    let slot = (*id).slot
+    if slot < 0 || slot >= IR_MODULE_ARENA_V2_PLACE_CAPACITY { return false }
+    place_state(slot) == PLACE_SLOT_LIVE && place_generation(slot) == (*id).generation
+}
+
+fn place_binding_matches(
+    module: &IrModuleArenaV2ModuleId,
+    slot: i64,
+) -> bool with Panic, Div {
+    place_module_arena(slot) == ir_module_arena_v2_module_id_arena_identity(module) &&
+    place_module_slot(slot) == ir_module_arena_v2_module_id_slot(module) &&
+    place_module_generation(slot) == ir_module_arena_v2_module_id_generation(module) &&
+    place_module_epoch(slot) == ir_module_arena_v2_module_mutation_epoch(module)
+}
+
+fn validate_place(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Panic, Div {
+    if !ir_module_arena_v2_module_id_is_live(module) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_MODULE
+    }
+    if !place_id_is_live(id) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_PLACE
+    }
+    if !place_binding_matches(module, (*id).slot) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_STALE_ROOT
+    }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+fn validate_finalized_place(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Panic, Div {
+    let status = validate_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    if place_finalized((*id).slot) == 0 {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_UNFINALIZED
+    }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_store_init() -> i64 with Mut {
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_PLACE_CAPACITY {
+        if place_state(slot) == PLACE_SLOT_LIVE {
+            set_place_generation(slot, place_generation(slot) + 1)
+        }
+        clear_place_slot(slot)
+        set_place_state(slot, PLACE_SLOT_FREE)
+        slot = slot + 1
+    }
+    PLACE_STORE_LIVE = 0
+    PLACE_ACCESS_SEQUENCE = 0
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_live_count() -> i64 {
+    PLACE_STORE_LIVE
+}
+
+pub fn ir_module_arena_v2_place_is_live(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> bool with Panic, Div {
+    validate_place(module, id) == IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_alloc_root(
+    module: &IrModuleArenaV2ModuleId,
+    root_identity: i64,
+    root_type: i64,
+    root_layout: i64,
+    out: &! IrModuleArenaV2PlaceId,
+) -> i64 with Mut, Panic, Div {
+    if !ir_module_arena_v2_module_id_is_live(module) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_MODULE
+    }
+    if place_id_is_live(out) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_OUTPUT_LIVE
+    }
+    if root_identity <= 0 || root_type <= 0 || root_layout <= 0 {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_RANGE
+    }
+    var slot: i64 = 0
+    while slot < IR_MODULE_ARENA_V2_PLACE_CAPACITY {
+        if place_state(slot) != PLACE_SLOT_LIVE {
+            clear_place_slot(slot)
+            set_place_binding(
+                slot,
+                module,
+                ir_module_arena_v2_module_mutation_epoch(module),
+                root_identity,
+                root_type,
+                root_layout,
+            )
+            set_place_state(slot, PLACE_SLOT_LIVE)
+            PLACE_STORE_LIVE = PLACE_STORE_LIVE + 1
+            (*out).slot = slot
+            (*out).generation = place_generation(slot)
+            return IR_MODULE_ARENA_V2_PLACE_OK
+        }
+        slot = slot + 1
+    }
+    IR_MODULE_ARENA_V2_PLACE_ERR_CAPACITY
+}
+
+pub fn ir_module_arena_v2_place_release(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Mut, Panic, Div {
+    let status = validate_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    let slot = (*id).slot
+    clear_place_slot(slot)
+    set_place_generation(slot, place_generation(slot) + 1)
+    set_place_state(slot, PLACE_SLOT_RELEASED)
+    PLACE_STORE_LIVE = PLACE_STORE_LIVE - 1
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+// Lifecycle-only discard. It validates the generational PlaceId but does not
+// grant semantic access, so a stale module/epoch binding cannot leak capacity.
+pub fn ir_module_arena_v2_place_discard(
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Mut {
+    if !place_id_is_live(id) { return IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_PLACE }
+    let slot = (*id).slot
+    clear_place_slot(slot)
+    set_place_generation(slot, place_generation(slot) + 1)
+    set_place_state(slot, PLACE_SLOT_RELEASED)
+    PLACE_STORE_LIVE = PLACE_STORE_LIVE - 1
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_finalize(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Mut, Panic, Div {
+    let status = validate_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    let slot = (*id).slot
+    if place_finalized(slot) != 0 { return IR_MODULE_ARENA_V2_PLACE_ERR_FINALIZED }
+    if slot == 0 { PLACE_FINALIZED_0 = 1 } else { PLACE_FINALIZED_1 = 1 }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_append_field(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+    owner_type: i64,
+    owner_layout: i64,
+    field_ordinal: i64,
+    field_name_hash: i64,
+    result_type: i64,
+    result_layout: i64,
+) -> i64 with Mut, Panic, Div {
+    let status = validate_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    if owner_type <= 0 || owner_layout <= 0 || field_ordinal < 0 ||
+       field_name_hash <= 0 || result_type <= 0 || result_layout <= 0 {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_RANGE
+    }
+    let slot = (*id).slot
+    if place_finalized(slot) != 0 { return IR_MODULE_ARENA_V2_PLACE_ERR_FINALIZED }
+    let count = place_projection_count(slot)
+    if count >= IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_PROJECTION_CAPACITY
+    }
+    let expected_type = if count == 0 {
+        place_root_type(slot)
+    } else {
+        proj_result_type(slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + count - 1)
+    }
+    let expected_layout = if count == 0 {
+        place_root_layout(slot)
+    } else {
+        proj_result_layout(slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + count - 1)
+    }
+    if owner_type != expected_type || owner_layout != expected_layout {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_TYPE_CHAIN
+    }
+    let cell = slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + count
+    set_proj_owner_type(cell, owner_type)
+    set_proj_owner_layout(cell, owner_layout)
+    set_proj_field_ordinal(cell, field_ordinal)
+    set_proj_field_name_hash(cell, field_name_hash)
+    set_proj_result_type(cell, result_type)
+    set_proj_result_layout(cell, result_layout)
+    if slot == 0 { PLACE_PROJECTION_COUNT_0 = count + 1 }
+    else { PLACE_PROJECTION_COUNT_1 = count + 1 }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_projection_count(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Panic, Div {
+    if validate_finalized_place(module, id) != IR_MODULE_ARENA_V2_PLACE_OK { return -1 }
+    place_projection_count((*id).slot)
+}
+
+pub fn ir_module_arena_v2_place_field_ordinal(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+    projection: i64,
+) -> i64 with Panic, Div {
+    if validate_finalized_place(module, id) != IR_MODULE_ARENA_V2_PLACE_OK { return -1 }
+    let slot = (*id).slot
+    if projection < 0 || projection >= place_projection_count(slot) { return -1 }
+    proj_field_ordinal(slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + projection)
+}
+
+pub fn ir_module_arena_v2_place_result_type(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+    projection: i64,
+) -> i64 with Panic, Div {
+    if validate_finalized_place(module, id) != IR_MODULE_ARENA_V2_PLACE_OK { return -1 }
+    let slot = (*id).slot
+    if projection < 0 || projection >= place_projection_count(slot) { return -1 }
+    proj_result_type(slot * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + projection)
+}
+
+fn projection_equal(slot_a: i64, index_a: i64, slot_b: i64, index_b: i64) -> bool {
+    let cell_a = slot_a * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + index_a
+    let cell_b = slot_b * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + index_b
+    proj_owner_type(cell_a) == proj_owner_type(cell_b) &&
+    proj_owner_layout(cell_a) == proj_owner_layout(cell_b) &&
+    proj_field_ordinal(cell_a) == proj_field_ordinal(cell_b) &&
+    proj_result_type(cell_a) == proj_result_type(cell_b) &&
+    proj_result_layout(cell_a) == proj_result_layout(cell_b)
+}
+
+pub fn ir_module_arena_v2_place_structural_equal(
+    module_a: &IrModuleArenaV2ModuleId,
+    place_a: &IrModuleArenaV2PlaceId,
+    module_b: &IrModuleArenaV2ModuleId,
+    place_b: &IrModuleArenaV2PlaceId,
+) -> bool with Panic, Div {
+    if validate_finalized_place(module_a, place_a) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       validate_finalized_place(module_b, place_b) != IR_MODULE_ARENA_V2_PLACE_OK {
+        return false
+    }
+    let slot_a = (*place_a).slot
+    let slot_b = (*place_b).slot
+    if place_module_arena(slot_a) != place_module_arena(slot_b) ||
+       place_module_slot(slot_a) != place_module_slot(slot_b) ||
+       place_module_generation(slot_a) != place_module_generation(slot_b) ||
+       place_module_epoch(slot_a) != place_module_epoch(slot_b) ||
+       place_root_identity(slot_a) != place_root_identity(slot_b) ||
+       place_root_type(slot_a) != place_root_type(slot_b) ||
+       place_root_layout(slot_a) != place_root_layout(slot_b) ||
+       place_projection_count(slot_a) != place_projection_count(slot_b) {
+        return false
+    }
+    let count = place_projection_count(slot_a)
+    if count > 0 && !projection_equal(slot_a, 0, slot_b, 0) { return false }
+    if count > 1 && !projection_equal(slot_a, 1, slot_b, 1) { return false }
+    true
+}
+
+pub fn ir_module_arena_v2_place_classify_same_name_hash(
+    module_a: &IrModuleArenaV2ModuleId,
+    place_a: &IrModuleArenaV2PlaceId,
+    projection_a: i64,
+    module_b: &IrModuleArenaV2ModuleId,
+    place_b: &IrModuleArenaV2PlaceId,
+    projection_b: i64,
+) -> i64 with Panic, Div {
+    let status_a = validate_finalized_place(module_a, place_a)
+    if status_a != IR_MODULE_ARENA_V2_PLACE_OK { return status_a }
+    let status_b = validate_finalized_place(module_b, place_b)
+    if status_b != IR_MODULE_ARENA_V2_PLACE_OK { return status_b }
+    let slot_a = (*place_a).slot
+    let slot_b = (*place_b).slot
+    if projection_a < 0 || projection_a >= place_projection_count(slot_a) ||
+       projection_b < 0 || projection_b >= place_projection_count(slot_b) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_RANGE
+    }
+    let cell_a = slot_a * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + projection_a
+    let cell_b = slot_b * IR_MODULE_ARENA_V2_PLACE_PROJECTION_CAPACITY + projection_b
+    if proj_field_name_hash(cell_a) != proj_field_name_hash(cell_b) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_STRUCTURAL_MISMATCH
+    }
+    if place_module_arena(slot_a) != place_module_arena(slot_b) ||
+       place_module_slot(slot_a) != place_module_slot(slot_b) ||
+       place_module_generation(slot_a) != place_module_generation(slot_b) ||
+       !projection_equal(slot_a, projection_a, slot_b, projection_b) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_SAME_HASH_STRUCTURAL_COLLISION
+    }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_record_load(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> i64 with Mut, Panic, Div {
+    let status = validate_finalized_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    PLACE_ACCESS_SEQUENCE = PLACE_ACCESS_SEQUENCE + 1
+    if (*id).slot == 0 { PLACE_LAST_LOAD_0 = PLACE_ACCESS_SEQUENCE }
+    else { PLACE_LAST_LOAD_1 = PLACE_ACCESS_SEQUENCE }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_record_store_after_load(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+    write_authorized: i64,
+) -> i64 with Mut, Panic, Div {
+    let status = validate_finalized_place(module, id)
+    if status != IR_MODULE_ARENA_V2_PLACE_OK { return status }
+    if write_authorized != 0 && write_authorized != 1 { return IR_MODULE_ARENA_V2_PLACE_ERR_RANGE }
+    let slot = (*id).slot
+    if write_authorized == 0 { return IR_MODULE_ARENA_V2_PLACE_ERR_WRITE_FORBIDDEN }
+    if place_last_load(slot) <= place_last_store(slot) {
+        return IR_MODULE_ARENA_V2_PLACE_ERR_ACCESS_ORDER
+    }
+    PLACE_ACCESS_SEQUENCE = PLACE_ACCESS_SEQUENCE + 1
+    if slot == 0 { PLACE_LAST_STORE_0 = PLACE_ACCESS_SEQUENCE }
+    else { PLACE_LAST_STORE_1 = PLACE_ACCESS_SEQUENCE }
+    IR_MODULE_ARENA_V2_PLACE_OK
+}
+
+pub fn ir_module_arena_v2_place_load_precedes_store(
+    module: &IrModuleArenaV2ModuleId,
+    id: &IrModuleArenaV2PlaceId,
+) -> bool with Panic, Div {
+    if validate_finalized_place(module, id) != IR_MODULE_ARENA_V2_PLACE_OK { return false }
+    let slot = (*id).slot
+    place_last_load(slot) > 0 && place_last_store(slot) > place_last_load(slot)
+}

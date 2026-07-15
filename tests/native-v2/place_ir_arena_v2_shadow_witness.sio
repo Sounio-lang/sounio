@@ -1,0 +1,116 @@
+use ir::arena_v2_shadow::*
+use ir::arena_v2_place_shadow::*
+
+fn fail(code: i64) -> i64 with IO {
+    print("PLACE_IR_ARENA_V2_SHADOW_FAIL code=")
+    print_int(code)
+    print("\n")
+    code
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_module_arena_v2_module_store_init(7001) != IR_MODULE_ARENA_V2_OK { return fail(101) }
+    if ir_module_arena_v2_place_store_init() != IR_MODULE_ARENA_V2_PLACE_OK { return fail(102) }
+
+    var module_a = ir_module_arena_v2_invalid_module_id()
+    var module_b = ir_module_arena_v2_invalid_module_id()
+    if ir_module_arena_v2_alloc_empty_module(8101, &! module_a) != IR_MODULE_ARENA_V2_OK ||
+       ir_module_arena_v2_alloc_empty_module(8102, &! module_b) != IR_MODULE_ARENA_V2_OK { return fail(103) }
+
+    var place_a = ir_module_arena_v2_invalid_place_id()
+    var place_b = ir_module_arena_v2_invalid_place_id()
+    if ir_module_arena_v2_place_alloc_root(&module_a, 1, 101, 1001, &! place_a) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_alloc_root(&module_b, 1, 202, 2002, &! place_b) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(110) }
+    if ir_module_arena_v2_place_alloc_root(&module_a, 9, 909, 9009, &! place_a) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_OUTPUT_LIVE { return fail(109) }
+
+    // Same spelling hash, different module/type/layout/ordinal/result identity.
+    if ir_module_arena_v2_place_append_field(&module_a, &place_a, 101, 1001, 0, 777, 11, 111) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_append_field(&module_b, &place_b, 202, 2002, 1, 777, 22, 222) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(111) }
+    if ir_module_arena_v2_place_record_load(&module_a, &place_a) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_UNFINALIZED { return fail(115) }
+    // Nested projection must consume the exact prior result type/layout.
+    if ir_module_arena_v2_place_append_field(&module_b, &place_b, 202, 2002, 0, 888, 33, 333) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_TYPE_CHAIN { return fail(120) }
+    if ir_module_arena_v2_place_append_field(&module_b, &place_b, 22, 222, 0, 888, 33, 333) !=
+       IR_MODULE_ARENA_V2_PLACE_OK { return fail(121) }
+    if ir_module_arena_v2_place_append_field(&module_b, &place_b, 33, 333, 0, 999, 44, 444) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_PROJECTION_CAPACITY { return fail(123) }
+    if ir_module_arena_v2_place_finalize(&module_a, &place_a) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_finalize(&module_b, &place_b) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(124) }
+    if ir_module_arena_v2_place_projection_count(&module_b, &place_b) != 2 ||
+       ir_module_arena_v2_place_result_type(&module_b, &place_b, 1) != 33 { return fail(122) }
+    if ir_module_arena_v2_place_append_field(&module_a, &place_a, 11, 111, 0, 999, 44, 444) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_FINALIZED { return fail(125) }
+    if ir_module_arena_v2_place_field_ordinal(&module_a, &place_a, 0) != 0 ||
+       ir_module_arena_v2_place_field_ordinal(&module_b, &place_b, 0) != 1 { return fail(112) }
+    if ir_module_arena_v2_place_classify_same_name_hash(&module_a, &place_a, 0, &module_b, &place_b, 0) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_SAME_HASH_STRUCTURAL_COLLISION { return fail(113) }
+    if ir_module_arena_v2_place_structural_equal(&module_a, &place_a, &module_b, &place_b) { return fail(114) }
+
+    // Access events preserve order but are not structural Place identity.
+    if ir_module_arena_v2_place_record_store_after_load(&module_b, &place_b, 1) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_ACCESS_ORDER { return fail(130) }
+    if ir_module_arena_v2_place_record_load(&module_b, &place_b) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_record_store_after_load(&module_b, &place_b, 1) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       !ir_module_arena_v2_place_load_precedes_store(&module_b, &place_b) { return fail(131) }
+
+    // Both slots are live and structurally distinct; failed allocation preserves out.
+    var over = ir_module_arena_v2_invalid_place_id()
+    if ir_module_arena_v2_place_alloc_root(&module_a, 9, 909, 9009, &! over) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_CAPACITY { return fail(140) }
+    if ir_module_arena_v2_place_id_slot(&over) != -1 || ir_module_arena_v2_place_live_count() != 2 { return fail(141) }
+    if ir_module_arena_v2_place_record_load(&module_a, &place_a) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(142) }
+    if !ir_module_arena_v2_place_is_live(&module_b, &place_b) { return fail(143) }
+
+    // Place ABA: release/reuse same slot, old generation stays rejected.
+    let old_place_slot = ir_module_arena_v2_place_id_slot(&place_a)
+    let old_place_generation = ir_module_arena_v2_place_id_generation(&place_a)
+    if ir_module_arena_v2_place_release(&module_a, &place_a) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(150) }
+    var place_reused = ir_module_arena_v2_invalid_place_id()
+    if ir_module_arena_v2_place_alloc_root(&module_a, 2, 102, 1002, &! place_reused) !=
+       IR_MODULE_ARENA_V2_PLACE_OK { return fail(151) }
+    if ir_module_arena_v2_place_id_slot(&place_reused) != old_place_slot ||
+       ir_module_arena_v2_place_id_generation(&place_reused) == old_place_generation { return fail(152) }
+    if ir_module_arena_v2_place_is_live(&module_a, &place_a) { return fail(153) }
+    if ir_module_arena_v2_place_finalize(&module_a, &place_reused) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(154) }
+    if ir_module_arena_v2_place_record_store_after_load(&module_a, &place_reused, 0) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_WRITE_FORBIDDEN { return fail(155) }
+
+    // Module mutation epoch invalidates a Place before any later access.
+    if ir_module_arena_v2_configure_module_bss_size(&module_a, 8) != IR_MODULE_ARENA_V2_OK { return fail(160) }
+    if ir_module_arena_v2_place_is_live(&module_a, &place_reused) { return fail(161) }
+    if ir_module_arena_v2_place_record_load(&module_a, &place_reused) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_STALE_ROOT { return fail(162) }
+    if ir_module_arena_v2_place_discard(&place_reused) != IR_MODULE_ARENA_V2_PLACE_OK { return fail(163) }
+
+    // Reset/reuse invalidates the old ModuleId and old Place binding.
+    let old_module_slot = ir_module_arena_v2_module_id_slot(&module_b)
+    let old_module_generation = ir_module_arena_v2_module_id_generation(&module_b)
+    if ir_module_arena_v2_reset_modules() != IR_MODULE_ARENA_V2_OK { return fail(170) }
+    if ir_module_arena_v2_place_record_load(&module_b, &place_b) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_INVALID_MODULE { return fail(171) }
+    var module_filler = ir_module_arena_v2_invalid_module_id()
+    var module_b_reused = ir_module_arena_v2_invalid_module_id()
+    if ir_module_arena_v2_alloc_empty_module(9101, &! module_filler) != IR_MODULE_ARENA_V2_OK ||
+       ir_module_arena_v2_alloc_empty_module(9102, &! module_b_reused) != IR_MODULE_ARENA_V2_OK { return fail(172) }
+    if ir_module_arena_v2_module_id_slot(&module_b_reused) != old_module_slot ||
+       ir_module_arena_v2_module_id_generation(&module_b_reused) == old_module_generation { return fail(173) }
+    if ir_module_arena_v2_place_record_load(&module_b_reused, &place_b) !=
+       IR_MODULE_ARENA_V2_PLACE_ERR_STALE_ROOT { return fail(174) }
+    if ir_module_arena_v2_place_discard(&place_b) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_live_count() != 0 { return fail(175) }
+    var reclaimed_a = ir_module_arena_v2_invalid_place_id()
+    var reclaimed_b = ir_module_arena_v2_invalid_place_id()
+    if ir_module_arena_v2_place_alloc_root(&module_filler, 3, 303, 3003, &! reclaimed_a) !=
+       IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_alloc_root(&module_b_reused, 4, 404, 4004, &! reclaimed_b) !=
+       IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_live_count() != 2 { return fail(176) }
+    if ir_module_arena_v2_place_discard(&reclaimed_a) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_discard(&reclaimed_b) != IR_MODULE_ARENA_V2_PLACE_OK ||
+       ir_module_arena_v2_place_live_count() != 0 { return fail(177) }
+
+    print("PLACE_IR_ARENA_V2_SHADOW_PASS mode=place_structural_witness_not_parity\n")
+    0
+}
