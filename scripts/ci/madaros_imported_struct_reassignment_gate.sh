@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MADAROS="${SOUNIO_IMPORTED_STRUCT_REASSIGN_MADAROS:-$ROOT_DIR/bin/madaros}"
 RAW_MADAROS="${MADAROS_RAW_BIN:-}"
 WITNESS="$ROOT_DIR/tests/compiler/imported_struct_reassignment/main.sio"
+LOWERER="$ROOT_DIR/self-hosted/ir/lower.sio"
 WORK="$(mktemp -d /tmp/sounio-imported-struct-reassign.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -18,6 +19,13 @@ fail() {
 [[ -x "$MADAROS" ]] || fail "Madaros wrapper is missing: $MADAROS"
 [[ -n "$RAW_MADAROS" ]] || fail 'MADAROS_RAW_BIN must name an explicit current-source Madaros ELF'
 [[ -x "$RAW_MADAROS" ]] || fail "current-source Madaros is missing: $RAW_MADAROS"
+
+# The runtime scalar copy proves the non-call control remains operational; this
+# structural guard proves only ExprCall can reach the compatibility binder.
+grep -Fq 'if (*rhs_expr_struct).kind == ExprKind::ExprCall {' "$LOWERER" \
+  || fail 'struct identity binder is no longer guarded by ExprCall'
+grep -Fq 'lowerer_bind_local_struct_type_mut(&! lo, (*target_expr).name, rhs_struct_type)' "$LOWERER" \
+  || fail 'direct-call struct identity binder is missing'
 
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" build "$WITNESS" -o "$WORK/witness" >"$WORK/build.log" 2>&1 || {
@@ -36,4 +44,4 @@ if [[ "$rc" -ne 42 ]]; then
   fail "witness returned rc=$rc instead of 42"
 fi
 
-echo '[imported-struct-reassignment] receipt initial_let=PASS same_type_reassign=PASS replacement_type_reassign=PASS noncall_scalar=PASS nominal_fallback=FORBIDDEN legacy_raw_field_extension=FINAL'
+echo '[imported-struct-reassignment] receipt initial_let=PASS same_type_reassign=PASS replacement_type_reassign=PASS noncall_scalar_runtime=PASS noncall_binder_guard=PASS nominal_fallback=FORBIDDEN legacy_raw_field_extension=FINAL'
