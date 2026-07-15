@@ -94,6 +94,9 @@ MODULES=(
   stdlib/stats/mantel_haenszel.sio
   stdlib/stats/attributable.sio
   stdlib/stats/standardized_rate.sio
+  stdlib/stats/exp_smoothing.sio
+  stdlib/stats/holt.sio
+  stdlib/stats/ar1.sio
 )
 
 fail=0

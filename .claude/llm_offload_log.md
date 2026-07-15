@@ -2886,3 +2886,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - standardized_rate = **PASS**: DSR=Σwr/Σw + Poisson SE, SMR=Σobs/Σexp; DSR=0.022, SMR=0.8 verified.
 - Theme: epidemiological confounding adjustment — extends the epidemiology/rate_epi family from crude single-table to stratified/standardized measures. All derivable, #852-safe. Suite runner: 85 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-M5Sfo4/`, `/tmp/llm-offload-OSy10Z/`, `/tmp/llm-offload-zWkR61/`.
+
+## 2026-07-15 — math-review: stats::exp_smoothing, stats::holt, stats::ar1
+- Files (all new): `stdlib/stats/exp_smoothing.sio` (simple exponential smoothing SES), `stdlib/stats/holt.sio` (Holt linear-trend double smoothing + h-step forecast), `stdlib/stats/ar1.sio` (AR(1) fit via lag-1 autocorrelation + forecast). Provider: xAI/Grok 4.3.
+- exp_smoothing = **PASS**: sₜ=α·xₜ+(1−α)sₜ₋₁, SSE over n−1 one-step errors; {10,12,14,16}/α=0.5→level 14.25, SSE 25.25 verified.
+- holt = **PASS**: Holt (1957) level/trend recurrence + forecast(h)=ℓ+h·b; linear {2,4,6,8}→level 8, trend 2, forecast(2)=12, SSE 0 verified.
+- ar1 = **PASS**: Yule-Walker φ̂=lag-1 autocorr, c=μ(1−φ), forecast=c+φ·x_last, resid_sd over n−1 residuals; {1..5}→φ=0.4, forecast 3.8 verified.
+- Theme: time-series smoothing & forecasting — the actionable complement to the serial-dependence diagnostics (runs/durbin_watson/autocorr). All single-pass recurrences, scalar returns, derivable, #852-safe. Suite runner: 88 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Xz9JAt/`, `/tmp/llm-offload-KGiEVt/`, `/tmp/llm-offload-KNJO6S/`.

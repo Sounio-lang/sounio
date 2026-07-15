@@ -1,0 +1,110 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/exp_smoothing.sio — simple exponential smoothing (SES)
+//
+// The one-parameter smoother / one-step forecaster for a level series with no
+// trend or seasonality:
+//
+//   exp_smoothing(x, n, alpha) -> SESResult
+//
+//   s₀ = x₀,   sₜ = α·xₜ + (1−α)·sₜ₋₁,
+// the final level sₙ₋₁ is the one-step-ahead forecast; the fit's SSE sums the
+// one-step forecast errors Σ (xₜ − sₜ₋₁)².
+//
+// Pure Sounio: a single recurrence pass. No external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Brown (1959); Hyndman & Athanasopoulos, "Forecasting: Principles and
+//   Practice", §7.1.
+
+module stats::exp_smoothing
+
+pub struct SESResult {
+    pub level: f64,      // final smoothed level = one-step forecast
+    pub sse: f64,        // sum of squared one-step forecast errors
+    pub forecast: f64,   // = level (flat forecast for any horizon)
+}
+
+/// Simple exponential smoothing with smoothing parameter alpha.
+///
+/// Parâmetros: x — series; n — length (>=2); alpha — smoothing in (0,1].
+/// Retorno: SESResult (level, sse, forecast).
+/// Referências: Brown (1959).
+pub fn exp_smoothing(x: &[f64; 256], n: i32, alpha: f64) -> SESResult with Mut, Div, Panic {
+    if n < 2 { return SESResult { level: 0.0, sse: 0.0, forecast: 0.0 } }
+    var s = x[0]
+    var sse = 0.0
+    var t = 1
+    while t < n {
+        let err = x[t as usize] - s          // one-step forecast error (forecast = s_{t-1})
+        sse = sse + err * err
+        s = alpha * x[t as usize] + (1.0 - alpha) * s
+        t = t + 1
+    }
+    return SESResult { level: s, sse: sse, forecast: s }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={10,12,14,16}, alpha=0.5. s0=10; s1=11; s2=12.5; s3=14.25.
+// errors: 2,3,3.5 -> SSE = 4+9+12.25 = 25.25.
+fn test_ses() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=12.0; x[2]=14.0; x[3]=16.0
+    let r = exp_smoothing(&x, 4, 0.5)
+    var ok = true
+    ok = check(1, approx(r.level, 14.25, 1.0e-9)) && ok
+    ok = check(2, approx(r.sse, 25.25, 1.0e-9)) && ok
+    ok = check(3, approx(r.forecast, 14.25, 1.0e-9)) && ok
+    return ok
+}
+
+// alpha=1 -> level tracks the last value exactly.
+fn test_alpha1() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=5.0; x[1]=7.0; x[2]=3.0; x[3]=9.0
+    let r = exp_smoothing(&x, 4, 1.0)
+    return check(10, approx(r.level, 9.0, 1.0e-9))
+}
+
+// constant series -> zero error, level = the constant.
+fn test_constant() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=4.0; x[1]=4.0; x[2]=4.0; x[3]=4.0
+    let r = exp_smoothing(&x, 4, 0.3)
+    var ok = true
+    ok = check(20, approx(r.level, 4.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.sse, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_ses() && ok
+    ok = test_alpha1() && ok
+    ok = test_constant() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

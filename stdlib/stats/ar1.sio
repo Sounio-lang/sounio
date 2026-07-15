@@ -1,0 +1,141 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/ar1.sio — first-order autoregressive model AR(1)
+//
+// Fits the simplest autoregressive model — each value regresses on the previous
+// one — and gives its one-step forecast:
+//
+//   ar1(x, n) -> AR1Result
+//
+//   φ̂ = Σ_{t=1}^{n−1}(xₜ−x̄)(xₜ₋₁−x̄) / Σ_{t=0}^{n−1}(xₜ−x̄)²   (lag-1 autocorr),
+//   μ̂ = x̄,   intercept c = μ̂(1−φ̂),
+//   one-step forecast = c + φ̂·xₙ₋₁ = μ̂ + φ̂(xₙ₋₁ − μ̂).
+//
+// Pure Sounio: two passes (mean, then the lag-1 and total sums); inline sqrt for
+// the residual sd. No external dependency, no nested data-array calls.
+//
+// References:
+//   Box & Jenkins (1970); Yule-Walker equations.
+
+module stats::ar1
+
+fn ar_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct AR1Result {
+    pub phi: f64,        // AR(1) coefficient
+    pub mu: f64,         // series mean
+    pub intercept: f64,  // c = μ(1−φ)
+    pub forecast: f64,   // one-step-ahead forecast
+    pub resid_sd: f64,   // residual standard deviation
+}
+
+/// Fit an AR(1) model by the lag-1 autocorrelation and give its forecast.
+///
+/// Parâmetros: x — series (in order); n — length (>=3, <=256).
+/// Retorno: AR1Result (phi, mu, intercept, forecast, resid_sd).
+/// Referências: Box & Jenkins (1970).
+pub fn ar1(x: &[f64; 256], n: i32) -> AR1Result with Mut, Div, Panic {
+    if n < 3 { return AR1Result { phi: 0.0, mu: 0.0, intercept: 0.0, forecast: 0.0, resid_sd: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mu = s / nf
+    var den = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mu; den = den + d * d; j = j + 1 }
+    var num = 0.0
+    var t = 1
+    while t < n {
+        num = num + (x[t as usize] - mu) * (x[(t - 1) as usize] - mu)
+        t = t + 1
+    }
+    var phi = 0.0
+    if den > 1.0e-300 { phi = num / den }
+    let intercept = mu * (1.0 - phi)
+    let last = x[(n - 1) as usize]
+    let forecast = intercept + phi * last
+    // residual sd: e_t = x_t - (c + phi·x_{t-1}) for t>=1
+    var sse = 0.0
+    var k = 1
+    while k < n {
+        let e = x[k as usize] - (intercept + phi * x[(k - 1) as usize])
+        sse = sse + e * e
+        k = k + 1
+    }
+    let resid_sd = ar_sqrt(sse / ((n - 1) as f64))
+    return AR1Result { phi: phi, mu: mu, intercept: intercept, forecast: forecast, resid_sd: resid_sd }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3,4,5}: mu=3, lag-1 acf phi=0.4, intercept=3·0.6=1.8,
+// forecast=1.8+0.4·5=3.8.
+fn test_ar1() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = ar1(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.phi, 0.4, 1.0e-9)) && ok
+    ok = check(2, approx(r.mu, 3.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.intercept, 1.8, 1.0e-9)) && ok
+    ok = check(4, approx(r.forecast, 3.8, 1.0e-9)) && ok
+    return ok
+}
+
+// strong persistence: a smooth ramp has phi close to 1.
+fn test_persistent() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 12 { x[i as usize] = (i + 1) as f64; i = i + 1 }
+    let r = ar1(&x, 12)
+    return check(10, r.phi > 0.6)
+}
+
+// alternating series -> negative phi.
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=0.0-1.0; x[2]=1.0; x[3]=0.0-1.0; x[4]=1.0; x[5]=0.0-1.0
+    let r = ar1(&x, 6)
+    return check(20, r.phi < 0.0)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_ar1() && ok
+    ok = test_persistent() && ok
+    ok = test_negative() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
