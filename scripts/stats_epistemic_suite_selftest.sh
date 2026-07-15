@@ -115,6 +115,21 @@ MODULES=(
   stdlib/stats/sample_size_survival.sio
   stdlib/stats/sample_size_precision.sio
   stdlib/stats/detectable_effect.sio
+  stdlib/stats/central_tendency.sio
+  stdlib/stats/dispersion.sio
+  stdlib/stats/shape.sio
+  stdlib/stats/gk_lambda.sio
+  stdlib/stats/gk_tau.sio
+  stdlib/stats/uncertainty_coefficient.sio
+  stdlib/stats/anderson_darling.sio
+  stdlib/stats/cramer_von_mises.sio
+  stdlib/stats/bowker.sio
+  stdlib/stats/zscore.sio
+  stdlib/stats/normalize.sio
+  stdlib/stats/rank_transform.sio
+  stdlib/stats/weighted_stats.sio
+  stdlib/stats/grouped_stats.sio
+  stdlib/stats/weighted_quantile.sio
 )
 
 fail=0

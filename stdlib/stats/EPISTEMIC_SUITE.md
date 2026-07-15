@@ -10,10 +10,16 @@ fourteen families:
   (full `pdf`/`cdf`/`sf`/`quantile` surfaces), a `densities` bank, Weibull /
   negative-binomial, and method-of-moments fitting for the gamma, beta and
   lognormal.
-- **Robust descriptives** — median / IQR / MAD / trimmed & Winsorized means,
-  the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
+- **Descriptives** — the classical means (arithmetic / geometric / harmonic /
+  RMS), dispersion (variance / sd / range / CV / SEM), and shape (skewness /
+  kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
+  the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
+  the data-transformation primitives (z-scores, min-max & robust scaling, rank
+  transform), and the weighted / grouped estimators (weighted mean & variance,
+  grouped-frequency statistics, weighted quantiles).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
-  χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
+  Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
+  (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
 - **Group comparison & planning** — one-way ANOVA, inference from summary
@@ -29,7 +35,9 @@ fourteen families:
   Deming / Theil-Sen / Passing-Bablok method-comparison fits, and the regression
   diagnostics (leverage, Cook's distance, VIF).
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
-  Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
+  Cochran's Q, Bowker's k×k symmetry test, the Cochran-Armitage trend test,
+  proportion CIs, and the nominal association measures (Goodman-Kruskal λ and τ,
+  Theil's uncertainty coefficient).
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
   Fleiss' κ, Gwet's AC1, Krippendorff's α, ICC / Cronbach's α and the full
   Shrout-Fleiss ICC family.
@@ -1430,6 +1438,165 @@ The smallest Cohen's d a study can detect: `d=(z_{1−α/2}+z_{1−β})·√(2/n
 (two-sample) or `/√n` (one-sample) — for judging whether a study was adequately
 powered. Validated: n=64/group, α=0.05, 80% → d=0.495; one-sample → 0.350.
 
+### `stats::central_tendency` — the mean family
+
+| Function | Signature |
+|---|---|
+| `arithmetic_mean` / `geometric_mean` / `harmonic_mean` / `rms` | `pub fn *(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic` |
+
+The classical means — arithmetic, geometric (ratios/growth), harmonic (rates)
+and root-mean-square. Validated: {1,2,4} → AM=2.333, GM=2, HM=1.714, RMS=2.646;
+the ordering HM≤GM≤AM≤RMS holds.
+
+### `stats::dispersion` — measures of spread
+
+| Function | Signature |
+|---|---|
+| `dispersion` | `pub fn dispersion(x: &[f64; 256], n: i32) -> DispersionResult with Mut, Div, Panic` |
+
+The classical variability summaries in one pass: sample variance & sd, range,
+the coefficient of variation (dimensionless relative spread) and the standard
+error of the mean. Validated: {2,4,4,4,5,5,7,9} → var 4.571, sd 2.138, range 7,
+CV 0.4276, SEM 0.7559.
+
+### `stats::shape` — skewness & kurtosis
+
+| Function | Signature |
+|---|---|
+| `shape` | `pub fn shape(x: &[f64; 256], n: i32) -> ShapeResult with Mut, Div, Panic` |
+
+The third and fourth standardised moments: population skewness `g₁`, the
+Fisher-Pearson sample-adjusted `G₁`, and (excess) kurtosis. Validated:
+{2,4,4,4,5,5,7,9} → g₁=0.6563, G₁=0.8185, excess kurtosis −0.2188; symmetric
+data → skewness 0.
+
+### `stats::gk_lambda` — Goodman-Kruskal lambda
+
+| Function | Signature |
+|---|---|
+| `gk_lambda` | `pub fn gk_lambda(table: &[f64; 256], nr: i32, nc: i32) -> LambdaResult with Mut, Div, Panic` |
+
+A proportional-reduction-in-error nominal association measure (mode prediction):
+`λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+)`, both directions and symmetric.
+Validated: [[40,10],[5,45]] → λ(R|C)=0.7, λ(C|R)=0.667; mode-only table → 0;
+diagonal → 1.
+
+### `stats::gk_tau` — Goodman-Kruskal tau
+
+| Function | Signature |
+|---|---|
+| `gk_tau` | `pub fn gk_tau(table: &[f64; 256], nr: i32, nc: i32) -> TauResult with Mut, Div, Panic` |
+
+Like lambda but predicting with the full category distribution, so it is non-zero
+under any dependence: `τ(R|C)=(Σ_c Σ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N)`.
+Validated: [[40,10],[5,45]] → τ(R|C)=0.4949; rank-1 table → 0; diagonal → 1.
+
+### `stats::uncertainty_coefficient` — Theil's U
+
+| Function | Signature |
+|---|---|
+| `uncertainty_coefficient` | `pub fn uncertainty_coefficient(table: &[f64; 256], nr: i32, nc: i32) -> UResult with Mut, Div, Panic` |
+
+The information-theoretic association measure: `U(R|C)=I(R;C)/H(R)`, the fraction
+of one variable's entropy explained by the other, both directions and symmetric.
+Validated: [[40,10],[5,45]] → I=0.2754, U(R|C)=0.3973; independence → 0; diagonal
+→ 1.
+
+### `stats::anderson_darling` — Anderson-Darling normality test
+
+| Function | Signature |
+|---|---|
+| `anderson_darling` | `pub fn anderson_darling(x: &[f64; 256], n: i32) -> ADResult with Mut, Div, Panic` |
+
+An EDF normality test that weights the tails heavily (more tail-sensitive than
+KS): `A²=−n−(1/n)Σ(2i−1)[ln F(z₍ᵢ₎)+ln(1−F(z₍ₙ₊₁₋ᵢ₎))]`, with the small-sample
+adjustment and the Stephens p-value. Validated (Python-cross-checked): {1..5} →
+A²=0.1436, A²*=0.1781, p>0.5; skewed data → large A².
+
+### `stats::cramer_von_mises` — Cramér-von Mises normality test
+
+| Function | Signature |
+|---|---|
+| `cramer_von_mises` | `pub fn cramer_von_mises(x: &[f64; 256], n: i32) -> CvMResult with Mut, Div, Panic` |
+
+The evenly-weighted EDF companion to Anderson-Darling:
+`W²=1/(12n)+Σ(F(z₍ᵢ₎)−(2i−1)/(2n))²` with the small-sample adjustment. Validated
+(Python-cross-checked): {1..5} → W²=0.01934, W²*=0.02128; skewed data → large W².
+
+### `stats::bowker` — Bowker's test of symmetry
+
+| Function | Signature |
+|---|---|
+| `bowker` | `pub fn bowker(table: &[f64; 256], k: i32) -> BowkerResult with Mut, Div, Panic` |
+
+McNemar's test generalised to a k×k matched table:
+`χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ)`, df k(k−1)/2. Validated: a 3×3 table → χ²=4.667,
+df=3; symmetric → χ²=0; k=2 reduces exactly to McNemar (χ²=4.545).
+
+### `stats::zscore` — standardisation & percentile rank
+
+| Function | Signature |
+|---|---|
+| `zscore` | `pub fn zscore(x: &[f64; 256], n: i32, out_z: &![f64; 256]) -> ZResult with Mut, Div, Panic` |
+| `percentile_rank` | `pub fn percentile_rank(x: &[f64; 256], n: i32, value: f64) -> f64 with Mut, Div, Panic` |
+
+Standardise to zero mean / unit sd (fills `out_z`), and locate a value in the
+sample by its mid-rank percentile. Validated: {2,4,4,4,5,5,7,9} → z₀=−1.403,
+z₇=1.871, Σz=0; percentile rank of 5 → 62.5.
+
+### `stats::normalize` — feature scaling
+
+| Function | Signature |
+|---|---|
+| `minmax` | `pub fn minmax(x: &[f64; 256], n: i32, out: &![f64; 256]) -> MinMaxResult with Mut, Div, Panic` |
+| `robust_scale` | `pub fn robust_scale(x: &[f64; 256], n: i32, out: &![f64; 256]) -> RobustResult with Mut, Div, Panic` |
+
+The two non-standardising scalers: min-max to [0,1], and robust scaling by
+median & IQR (outlier-resistant). Validated: {1..5} → min-max {0,.25,.5,.75,1};
+robust → median 3, IQR 2, centred.
+
+### `stats::rank_transform` — rank transform with mid-ranks
+
+| Function | Signature |
+|---|---|
+| `rank_transform` | `pub fn rank_transform(x: &[f64; 256], n: i32, out_r: &![f64; 256]) -> RankResult with Mut, Div, Panic` |
+
+Replaces each value by its 1-based rank (ties → average), the primitive under
+every rank-based method, plus the tie-correction `Σ(tᵢ³−tᵢ)`. Validated:
+{3,1,4,1,5} → ranks {3,1.5,4,1.5,5}, one tie group, correction 6; distinct data →
+1..n.
+
+### `stats::weighted_stats` — weighted mean & variance
+
+| Function | Signature |
+|---|---|
+| `weighted_stats` | `pub fn weighted_stats(x: &[f64; 256], w: &[f64; 256], n: i32) -> WeightedResult with Mut, Div, Panic` |
+
+The mean and variance for weighted observations (survey weights, precisions,
+counts): `x̄_w=Σwx/Σw`, population and reliability-weight unbiased variances
+(Kish `V₁−V₂/V₁` correction). Validated: x={1,2,3}, w={1,2,3} → mean 2.333,
+var_pop 0.5556, var_unbiased 0.9091.
+
+### `stats::grouped_stats` — grouped-frequency statistics
+
+| Function | Signature |
+|---|---|
+| `grouped_stats` | `pub fn grouped_stats(midpoint: &[f64; 64], freq: &[f64; 64], k: i32) -> GroupedResult with Mut, Div, Panic` |
+
+Statistics from a frequency table (bin midpoints + counts): mean, population &
+sample variance, and the modal class. Validated: midpoints {5,15,25}, freqs
+{10,20,10} → mean 15, var_pop 50, modal class 15, sample var 51.28.
+
+### `stats::weighted_quantile` — weighted quantiles
+
+| Function | Signature |
+|---|---|
+| `weighted_quantile` / `weighted_median` | `pub fn weighted_quantile(x: &[f64; 256], w: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic` |
+
+The p-quantile of weighted data (smallest value carrying ≥p of the total weight),
+via a sort-free cumulative scan. Validated: equal weights {1,2,3} → median 2;
+{1,2,3,4} w={1,1,1,5} → weighted median 4; quartiles of {1,2,3,4}.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1540,6 +1707,21 @@ use stats::vif::{vif_from_r2, vif_two, tolerance}
 use stats::sample_size_survival::{SurvSSResult, ss_survival}
 use stats::sample_size_precision::{ss_mean, ss_proportion}
 use stats::detectable_effect::{mde_two_means, mde_one_mean}
+use stats::central_tendency::{arithmetic_mean, geometric_mean, harmonic_mean, rms}
+use stats::dispersion::{DispersionResult, dispersion}
+use stats::shape::{ShapeResult, shape}
+use stats::gk_lambda::{LambdaResult, gk_lambda}
+use stats::gk_tau::{TauResult, gk_tau}
+use stats::uncertainty_coefficient::{UResult, uncertainty_coefficient}
+use stats::anderson_darling::{ADResult, anderson_darling}
+use stats::cramer_von_mises::{CvMResult, cramer_von_mises}
+use stats::bowker::{BowkerResult, bowker}
+use stats::zscore::{ZResult, zscore, percentile_rank}
+use stats::normalize::{MinMaxResult, RobustResult, minmax, robust_scale}
+use stats::rank_transform::{RankResult, rank_transform}
+use stats::weighted_stats::{WeightedResult, weighted_stats}
+use stats::grouped_stats::{GroupedResult, grouped_stats}
+use stats::weighted_quantile::{weighted_quantile, weighted_median}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

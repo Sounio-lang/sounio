@@ -2988,3 +2988,43 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Target: `docs/internal/concepts/rebracketing-authority.md`.
 - **Math review PASS with clarification (Z.AI GLM-5.2)**: independently verified the XOR equality witness and bounded `1..15` mismatch codes. It requested that "exact equality" identify the compared value; the receipt now states explicitly that `observed` is the masked return of `authority_apply(171)`, so the claim is about `observed == 11`, not about the original argument modulo 16. Raw: `/tmp/llm-offload-68QgIa/`.
 - **xAI response not counted**: Grok 4.3 returned `NO MATHEMATICAL CONTENT TO REVIEW`; Z.AI supplied the substantive review.
+
+## 2026-07-15 — math-review: stats::central_tendency, stats::dispersion, stats::shape
+- Files (all new): `stdlib/stats/central_tendency.sio` (arithmetic/geometric/harmonic/RMS means), `stdlib/stats/dispersion.sio` (variance/sd/range/CV/SEM), `stdlib/stats/shape.sio` (skewness g₁ + Fisher-Pearson G₁, excess kurtosis). Provider: xAI/Grok 4.3.
+- central_tendency = **PASS**: AM/GM/HM/RMS definitions, HM≤GM≤AM≤RMS ordering; {1,2,4}→2.333/2/1.714/2.646 verified.
+- dispersion = **PASS**: sample variance ÷(n−1), CV=sd/mean, SEM=sd/√n; {2,4,4,4,5,5,7,9}→var 4.571, sd 2.138, CV 0.4276, SEM 0.7559 verified.
+- shape = **PASS**: population g₁=m₃/m₂^1.5, excess kurtosis m₄/m₂²−3, Fisher-Pearson G₁=g₁√(n(n−1))/(n−2); g₁=0.6563, G₁=0.8185 verified.
+- Theme: classical descriptive statistics — completes the descriptive layer beside the robust module (median/IQR/MAD). All derivable, #852-safe. Suite runner: 109 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Krlbft/`, `/tmp/llm-offload-gamSmC/`, `/tmp/llm-offload-iH6HMi/`.
+
+## 2026-07-15 — math-review: stats::gk_lambda, stats::gk_tau, stats::uncertainty_coefficient
+- Files (all new): `stdlib/stats/gk_lambda.sio` (Goodman-Kruskal λ, mode-prediction PRE), `stdlib/stats/gk_tau.sio` (Goodman-Kruskal τ, proportional-prediction PRE), `stdlib/stats/uncertainty_coefficient.sio` (Theil's U, entropy/mutual-information). Provider: xAI/Grok 4.3.
+- gk_lambda = **PASS**: λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+), both directions + symmetric; [[40,10],[5,45]]→0.7/0.667, mode-only→0, diagonal→1.
+- gk_tau = **PASS**: τ(R|C)=(Σ_cΣ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N); 0.4949 verified, independence→0, diagonal→1.
+- uncertainty_coefficient = **PASS**: H(R), I(R;C), U(R|C)=I/H(R); I=0.2754, U=0.3973 verified, independence→0, diagonal→1.
+- Theme: nominal association / PRE & entropy measures — complements chi2_independence (Cramér's V) for contingency tables. All derivable, #852-safe. Suite runner: 112 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rFk7TQ/`, `/tmp/llm-offload-nnqkco/`, `/tmp/llm-offload-wl6Rgd/`.
+
+## 2026-07-15 — math-review: stats::anderson_darling, stats::cramer_von_mises, stats::bowker
+- Files (all new): `stdlib/stats/anderson_darling.sio` (A-D normality, tail-weighted EDF test + Stephens p), `stdlib/stats/cramer_von_mises.sio` (CvM normality, evenly-weighted EDF), `stdlib/stats/bowker.sio` (Bowker k×k symmetry test, generalizes McNemar). Provider: xAI/Grok 4.3.
+- anderson_darling = **PASS**: A²=−n−(1/n)Σ(2i−1)[ln F_i+ln(1−F_{n+1−i})], A²*=A²(1+0.75/n+2.25/n²), Stephens 4-piece p; {1..5}→A²=0.1436 (Python-cross-checked), p>0.5.
+- cramer_von_mises = **PASS**: W²=1/(12n)+Σ(F_i−(2i−1)/(2n))²; {1..5}→W²=0.01934 (Python-cross-checked).
+- bowker = **PASS**: χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ), df=k(k−1)/2, k=2 → McNemar; 3×3→χ²=4.667, reduction→4.545 verified.
+- Theme: EDF normality tests (A-D, CvM — more tail-sensitive than the existing KS) + Bowker matched-table symmetry (beyond 2×2 McNemar). AD/CvM reference constants cross-checked with Python (verification, not retrofit — the formulas are explicit). All derivable, #852-safe. Suite runner: 115 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rzwVOv/`, `/tmp/llm-offload-rJWBlD/`, `/tmp/llm-offload-iLeZZI/`.
+
+## 2026-07-15 — math-review: stats::zscore, stats::normalize, stats::rank_transform
+- Files (all new): `stdlib/stats/zscore.sio` (standardization + percentile rank), `stdlib/stats/normalize.sio` (min-max & robust scaling), `stdlib/stats/rank_transform.sio` (mid-rank transform + tie correction). Provider: xAI/Grok 4.3. All use the out-array `&![f64;256]` fill pattern.
+- zscore = **PASS**: z=(x−mean)/s (÷(n−1) sd), Σz=0 property, mid-rank percentile (#<+½#=)/n·100; {2,4,4,4,5,5,7,9}→z₀=−1.403, prank(5)=62.5 verified.
+- normalize = **PASS**: min-max (x−min)/(max−min), robust (x−median)/IQR (type-7 quantiles); {1..5}→[0..1] and median-centred verified.
+- rank_transform = **PASS**: mid-rank less+(equal+1)/2, tie-group detection (first && equal>1) with Σ(t³−t); {3,1,4,1,5}→{3,1.5,4,1.5,5}, correction 6 verified.
+- Theme: data-transformation primitives — foundational preprocessing (feature scaling, rank transform) completing the descriptive layer. All derivable, #852-safe. Suite runner: 118 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-BIlCZ5/`, `/tmp/llm-offload-7CoTZR/`, `/tmp/llm-offload-Y2h33J/`.
+
+## 2026-07-15 — math-review: stats::weighted_stats, stats::grouped_stats, stats::weighted_quantile
+- Files (all new): `stdlib/stats/weighted_stats.sio` (weighted mean + population & Kish-unbiased variance), `stdlib/stats/grouped_stats.sio` (mean/variance/modal-class from a frequency table), `stdlib/stats/weighted_quantile.sio` (sort-free weighted p-quantile/median). Provider: xAI/Grok 4.3.
+- weighted_stats = **PASS**: x̄_w=Σwx/Σw, σ²_w=Σw(x−x̄)²/V₁, unbiased ÷(V₁−V₂/V₁); x={1,2,3}/w={1,2,3}→mean 2.333, var_pop 0.5556, var_ub 0.9091 verified.
+- grouped_stats = **PASS**: mean=Σfm/Σf, sample var ÷(Σf−1), modal class argmax; {5,15,25}/{10,20,10}→mean 15, var_pop 50, var_sample 51.28 verified.
+- weighted_quantile = **PASS**: smallest v with Σ_{x≤v}w ≥ p·Σw, sort-free O(n²); equal→median 2, heavy weight→median 4, quartiles verified.
+- Theme: weighted & grouped estimators — support for survey weights / frequency tables / meta-analytic precisions, absent until now. All derivable, #852-safe. Suite runner: 121 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-n3PQpI/`, `/tmp/llm-offload-lcsGkl/`, `/tmp/llm-offload-anzkI3/`.
