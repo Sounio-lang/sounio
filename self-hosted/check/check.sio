@@ -171,6 +171,111 @@ fn ir_alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
 // Checker state
 // ============================================================
 
+// Off-default preservation sidecar for one shared-checker snapshot.  The
+// checker keeps only a nullable pointer to this store; default checking never
+// allocates or observes it.  The scalar columns preserve observational
+// provenance while the exact checker tables are alive and become immutable
+// after freeze.  Their numeric tokens are snapshot-local traversal products,
+// not resolver-owned DefIds and not semantic authority across snapshots.
+pub let NOMINAL_FIELD_RECEIPT_CAPACITY: i64 = 8
+pub let NOMINAL_FIELD_RECEIPT_OK: i64 = 0
+pub let NOMINAL_FIELD_RECEIPT_ERR_INVALID_STORE: i64 = -70
+pub let NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT: i64 = -71
+pub let NOMINAL_FIELD_RECEIPT_ERR_INVALID_RECEIPT: i64 = -72
+pub let NOMINAL_FIELD_RECEIPT_ERR_CAPACITY: i64 = -73
+pub let NOMINAL_FIELD_RECEIPT_ERR_NOT_FROZEN: i64 = -74
+pub let NOMINAL_FIELD_RECEIPT_ERR_TARGET_LAYOUT_MISSING: i64 = -75
+
+pub let NOMINAL_FIELD_RECEIPT_READY_ROOT: i64 = 1
+pub let NOMINAL_FIELD_RECEIPT_READY_CALLEE: i64 = 2
+pub let NOMINAL_FIELD_RECEIPT_READY_OWNER: i64 = 4
+pub let NOMINAL_FIELD_RECEIPT_READY_FIELD: i64 = 8
+pub let NOMINAL_FIELD_RECEIPT_READY_RESULT: i64 = 16
+pub let NOMINAL_FIELD_RECEIPT_READY_TARGET_LAYOUT: i64 = 32
+pub let NOMINAL_FIELD_RECEIPT_READY_LAYOUT_EPOCH: i64 = 64
+pub let NOMINAL_FIELD_RECEIPT_NOMINAL_READY: i64 = 31
+pub let NOMINAL_FIELD_RECEIPT_BINDER_READY: i64 = 127
+
+pub struct NominalFieldResolutionSnapshotId {
+    store_identity: i64,
+    generation: i64,
+}
+
+pub struct NominalFieldResolutionReceiptId {
+    store_identity: i64,
+    slot: i64,
+    generation: i64,
+}
+
+pub struct NominalFieldResolutionShadow {
+    store_identity: i64,
+    state: i64,
+    snapshot_generation: i64,
+    target_module_id: i64,
+    target_span_file: i64,
+    target_span_start: i64,
+    target_span_end: i64,
+    selected_receipt_slot: i64,
+    receipt_count: i64,
+    capture_error: i64,
+    next_observation_token: i64,
+
+    receipt_state: [i64; 8],
+    receipt_generation: [i64; 8],
+    receipt_snapshot_generation: [i64; 8],
+    receipt_source_module: [i64; 8],
+    receipt_span_file: [i64; 8],
+    receipt_span_start: [i64; 8],
+    receipt_span_end: [i64; 8],
+    receipt_ready_mask: [i64; 8],
+    receipt_root_observation_token: [i64; 8],
+    receipt_callee_observation_token: [i64; 8],
+    receipt_callee_module: [i64; 8],
+    receipt_owner_type_observation_token: [i64; 8],
+    receipt_owner_module: [i64; 8],
+    receipt_field_observation_token: [i64; 8],
+    receipt_field_ordinal: [i64; 8],
+    receipt_result_type_observation_token: [i64; 8],
+    receipt_parent_slot: [i64; 8],
+    receipt_parent_generation: [i64; 8],
+
+    expr_valid: [i64; 257],
+    expr_root_observation_token: [i64; 257],
+    expr_callee_observation_token: [i64; 257],
+    expr_callee_module: [i64; 257],
+    expr_result_type_observation_token: [i64; 257],
+    expr_result_module: [i64; 257],
+    expr_result_struct_slot: [i64; 257],
+    expr_parent_receipt_slot: [i64; 257],
+    expr_parent_receipt_generation: [i64; 257],
+
+    binding_valid: [i64; 4096],
+    binding_observation_token: [i64; 4096],
+    binding_callee_observation_token: [i64; 4096],
+    binding_callee_module: [i64; 4096],
+    binding_result_type_observation_token: [i64; 4096],
+    binding_result_module: [i64; 4096],
+    binding_result_struct_slot: [i64; 4096],
+    binding_parent_receipt_slot: [i64; 4096],
+    binding_parent_receipt_generation: [i64; 4096],
+
+    type_cache_count: i64,
+    type_cache_kind: [i64; 64],
+    type_cache_struct_slot: [i64; 64],
+    type_cache_module: [i64; 64],
+    type_cache_observation_token: [i64; 64],
+    callee_cache_count: i64,
+    callee_cache_sig_slot: [i64; 64],
+    callee_cache_module: [i64; 64],
+    callee_cache_observation_token: [i64; 64],
+    field_cache_count: i64,
+    field_cache_struct_slot: [i64; 64],
+    field_cache_ordinal: [i64; 64],
+    field_cache_observation_token: [i64; 64],
+}
+
+var NOMINAL_FIELD_RECEIPT_NEXT_STORE_ID: i64 = 1
+
 pub struct Checker {
     env: TypeEnv,
     borrows: BorrowEnv,
@@ -275,6 +380,7 @@ pub struct Checker {
     // both the un-writable kernel and threading the list through the call chain.
     // Placed at struct end to keep all existing field offsets unchanged.
     ontology_items: Option<Box<ItemList> >,
+    nominal_field_resolution_shadow: *mut NominalFieldResolutionShadow,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -952,6 +1058,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         refine_violations: 0,
         refine_cond_env: refine_static_env_new(),
         ontology_items: None,
+        nominal_field_resolution_shadow: 0 as *mut NominalFieldResolutionShadow,
     }
 }
 
@@ -1053,6 +1160,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).refine_violations = 0
     (*raw).refine_cond_env = refine_static_env_new()
     (*raw).ontology_items = None
+    (*raw).nominal_field_resolution_shadow = 0 as *mut NominalFieldResolutionShadow
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -1149,6 +1257,627 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).refine_violations = src.refine_violations
     (*dst).refine_cond_env = src.refine_cond_env
     (*dst).ontology_items = src.ontology_items
+    (*dst).nominal_field_resolution_shadow = src.nominal_field_resolution_shadow
+}
+
+pub fn nominal_field_resolution_invalid_snapshot_id() -> NominalFieldResolutionSnapshotId {
+    NominalFieldResolutionSnapshotId { store_identity: 0, generation: 0 }
+}
+
+pub fn nominal_field_resolution_invalid_receipt_id() -> NominalFieldResolutionReceiptId {
+    NominalFieldResolutionReceiptId { store_identity: 0, slot: -1, generation: 0 }
+}
+
+pub fn nominal_field_resolution_shadow_alloc() -> *mut NominalFieldResolutionShadow with Mut, Alloc {
+    let p = heap_alloc(4194304) as *mut NominalFieldResolutionShadow
+    (*p).store_identity = NOMINAL_FIELD_RECEIPT_NEXT_STORE_ID
+    NOMINAL_FIELD_RECEIPT_NEXT_STORE_ID = NOMINAL_FIELD_RECEIPT_NEXT_STORE_ID + 1
+    (*p).state = 0
+    (*p).snapshot_generation = 0
+    (*p).selected_receipt_slot = -1
+    (*p).receipt_generation = [1; 8]
+    (*p).expr_result_struct_slot = [-1; 257]
+    (*p).expr_parent_receipt_slot = [-1; 257]
+    (*p).binding_result_struct_slot = [-1; 4096]
+    (*p).binding_parent_receipt_slot = [-1; 4096]
+    (*p).receipt_parent_slot = [-1; 8]
+    p
+}
+
+pub fn nominal_field_resolution_shadow_free(p: *mut NominalFieldResolutionShadow) with Mut {
+    if p != (0 as *mut NominalFieldResolutionShadow) {
+        (*p).state = 0
+        (*p).store_identity = 0
+        heap_free(p as i64)
+    }
+}
+
+fn nominal_field_resolution_snapshot_is_live(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+) -> bool {
+    p != (0 as *mut NominalFieldResolutionShadow) &&
+        (*p).store_identity > 0 &&
+        (*snapshot).store_identity == (*p).store_identity &&
+        (*snapshot).generation == (*p).snapshot_generation &&
+        ((*p).state == 1 || (*p).state == 2)
+}
+
+fn nominal_field_resolution_receipt_is_live(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> bool with Panic, Div {
+    if !nominal_field_resolution_snapshot_is_live(p, snapshot) { return false }
+    if (*receipt).store_identity != (*p).store_identity { return false }
+    let slot = (*receipt).slot
+    if slot < 0 || slot >= NOMINAL_FIELD_RECEIPT_CAPACITY { return false }
+    (*p).receipt_state[slot as usize] == 1 &&
+        (*p).receipt_generation[slot as usize] == (*receipt).generation &&
+        (*p).receipt_snapshot_generation[slot as usize] == (*snapshot).generation
+}
+
+fn nominal_field_resolution_clear_snapshot(p: *mut NominalFieldResolutionShadow) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < NOMINAL_FIELD_RECEIPT_CAPACITY {
+        (*p).receipt_state[i as usize] = 0
+        (*p).receipt_generation[i as usize] = (*p).receipt_generation[i as usize] + 1
+        (*p).receipt_snapshot_generation[i as usize] = 0
+        (*p).receipt_ready_mask[i as usize] = 0
+        (*p).receipt_parent_slot[i as usize] = -1
+        (*p).receipt_parent_generation[i as usize] = 0
+        i = i + 1
+    }
+    (*p).receipt_count = 0
+    (*p).selected_receipt_slot = -1
+    (*p).capture_error = NOMINAL_FIELD_RECEIPT_OK
+    (*p).next_observation_token = 1
+    (*p).expr_valid = [0; 257]
+    (*p).expr_result_struct_slot = [-1; 257]
+    (*p).expr_parent_receipt_slot = [-1; 257]
+    (*p).expr_parent_receipt_generation = [0; 257]
+    (*p).binding_valid = [0; 4096]
+    (*p).binding_result_struct_slot = [-1; 4096]
+    (*p).binding_parent_receipt_slot = [-1; 4096]
+    (*p).binding_parent_receipt_generation = [0; 4096]
+    (*p).type_cache_count = 0
+    (*p).callee_cache_count = 0
+    (*p).field_cache_count = 0
+}
+
+pub fn nominal_field_resolution_snapshot_begin(
+    p: *mut NominalFieldResolutionShadow,
+    target_module_id: i64,
+    target_expr: &Expr,
+    out: &! NominalFieldResolutionSnapshotId,
+) -> i64 with Mut, Panic, Div {
+    if p == (0 as *mut NominalFieldResolutionShadow) || (*p).store_identity <= 0 {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_STORE
+    }
+    // A new out-handle must not be used to overwrite an active or frozen
+    // snapshot. Reset is the only operation that advances this lifecycle.
+    if (*p).state != 0 {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT
+    }
+    nominal_field_resolution_clear_snapshot(p)
+    (*p).snapshot_generation = (*p).snapshot_generation + 1
+    if (*p).snapshot_generation <= 0 { (*p).snapshot_generation = 1 }
+    (*p).target_module_id = target_module_id
+    (*p).target_span_file = (*target_expr).span.file_id as i64
+    (*p).target_span_start = (*target_expr).span.start
+    (*p).target_span_end = (*target_expr).span.end
+    (*p).state = 1
+    (*out).store_identity = (*p).store_identity
+    (*out).generation = (*p).snapshot_generation
+    NOMINAL_FIELD_RECEIPT_OK
+}
+
+pub fn nominal_field_resolution_snapshot_freeze(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+) -> i64 with Mut {
+    if !nominal_field_resolution_snapshot_is_live(p, snapshot) || (*p).state != 1 {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT
+    }
+    (*p).state = 2
+    NOMINAL_FIELD_RECEIPT_OK
+}
+
+pub fn nominal_field_resolution_snapshot_reset(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+) -> i64 with Mut, Panic, Div {
+    if !nominal_field_resolution_snapshot_is_live(p, snapshot) {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT
+    }
+    nominal_field_resolution_clear_snapshot(p)
+    (*p).snapshot_generation = (*p).snapshot_generation + 1
+    (*p).state = 0
+    NOMINAL_FIELD_RECEIPT_OK
+}
+
+pub fn nominal_field_resolution_snapshot_receipt(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    out: &! NominalFieldResolutionReceiptId,
+) -> i64 with Mut, Panic, Div {
+    if !nominal_field_resolution_snapshot_is_live(p, snapshot) {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT
+    }
+    if (*p).state != 2 { return NOMINAL_FIELD_RECEIPT_ERR_NOT_FROZEN }
+    if (*out).store_identity == (*p).store_identity {
+        let current = NominalFieldResolutionReceiptId {
+            store_identity: (*out).store_identity,
+            slot: (*out).slot,
+            generation: (*out).generation,
+        }
+        if nominal_field_resolution_receipt_is_live(p, snapshot, &current) {
+            return NOMINAL_FIELD_RECEIPT_ERR_INVALID_RECEIPT
+        }
+    }
+    let slot = (*p).selected_receipt_slot
+    if slot < 0 || slot >= NOMINAL_FIELD_RECEIPT_CAPACITY {
+        return if (*p).capture_error != NOMINAL_FIELD_RECEIPT_OK { (*p).capture_error } else { NOMINAL_FIELD_RECEIPT_ERR_INVALID_RECEIPT }
+    }
+    (*out).store_identity = (*p).store_identity
+    (*out).slot = slot
+    (*out).generation = (*p).receipt_generation[slot as usize]
+    NOMINAL_FIELD_RECEIPT_OK
+}
+
+pub fn nominal_field_resolution_receipt_ready_mask(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_ready_mask[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_field_ordinal(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_field_ordinal[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_owner_module(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_owner_module[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_callee_module(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_callee_module[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_root_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_root_observation_token[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_owner_type_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_owner_type_observation_token[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_field_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_field_observation_token[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_result_type_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -1 }
+    (*p).receipt_result_type_observation_token[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_parent_slot(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    if !nominal_field_resolution_receipt_is_live(p, snapshot, receipt) { return -2 }
+    (*p).receipt_parent_slot[(*receipt).slot as usize]
+}
+
+pub fn nominal_field_resolution_receipt_binder_status(
+    p: *mut NominalFieldResolutionShadow,
+    snapshot: &NominalFieldResolutionSnapshotId,
+    receipt: &NominalFieldResolutionReceiptId,
+) -> i64 with Panic, Div {
+    let ready = nominal_field_resolution_receipt_ready_mask(p, snapshot, receipt)
+    if ready < 0 { return NOMINAL_FIELD_RECEIPT_ERR_INVALID_RECEIPT }
+    if ready != NOMINAL_FIELD_RECEIPT_BINDER_READY {
+        return NOMINAL_FIELD_RECEIPT_ERR_TARGET_LAYOUT_MISSING
+    }
+    NOMINAL_FIELD_RECEIPT_OK
+}
+
+fn nominal_field_resolution_next_observation_token(p: *mut NominalFieldResolutionShadow) -> i64 with Mut {
+    let token = (*p).next_observation_token
+    (*p).next_observation_token = token + 1
+    token
+}
+
+fn nominal_field_resolution_enabled(c: *mut Checker) -> bool {
+    (*c).nominal_field_resolution_shadow != (0 as *mut NominalFieldResolutionShadow) &&
+        (*(*c).nominal_field_resolution_shadow).state == 1
+}
+
+fn nominal_field_resolution_clear_expr(c: *mut Checker, depth: i64) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) || depth < 0 || depth > MAX_EXPR_DEPTH { return }
+    let p = (*c).nominal_field_resolution_shadow
+    (*p).expr_valid[depth as usize] = 0
+    (*p).expr_root_observation_token[depth as usize] = 0
+    (*p).expr_callee_observation_token[depth as usize] = 0
+    (*p).expr_callee_module[depth as usize] = -1
+    (*p).expr_result_type_observation_token[depth as usize] = 0
+    (*p).expr_result_module[depth as usize] = -1
+    (*p).expr_result_struct_slot[depth as usize] = -1
+    (*p).expr_parent_receipt_slot[depth as usize] = -1
+    (*p).expr_parent_receipt_generation[depth as usize] = 0
+}
+
+fn nominal_field_resolution_struct_in_module(c: *mut Checker, name: Name, module_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*(*c).structs).count {
+        let si = (*(*c).structs).entries[i as usize]
+        if si.defining_module_id == module_id && name_eq(si.name, name) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn nominal_field_resolution_type_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    kind: i64,
+    struct_slot: i64,
+    module_id: i64,
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*p).type_cache_count {
+        if (*p).type_cache_kind[i as usize] == kind &&
+           (*p).type_cache_struct_slot[i as usize] == struct_slot &&
+           (*p).type_cache_module[i as usize] == module_id {
+            return (*p).type_cache_observation_token[i as usize]
+        }
+        i = i + 1
+    }
+    if (*p).type_cache_count >= 64 {
+        (*p).capture_error = NOMINAL_FIELD_RECEIPT_ERR_CAPACITY
+        return -1
+    }
+    let slot = (*p).type_cache_count
+    let token = nominal_field_resolution_next_observation_token(p)
+    (*p).type_cache_kind[slot as usize] = kind
+    (*p).type_cache_struct_slot[slot as usize] = struct_slot
+    (*p).type_cache_module[slot as usize] = module_id
+    (*p).type_cache_observation_token[slot as usize] = token
+    (*p).type_cache_count = slot + 1
+    token
+}
+
+fn nominal_field_resolution_callee_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    sig_slot: i64,
+    module_id: i64,
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*p).callee_cache_count {
+        if (*p).callee_cache_sig_slot[i as usize] == sig_slot &&
+           (*p).callee_cache_module[i as usize] == module_id {
+            return (*p).callee_cache_observation_token[i as usize]
+        }
+        i = i + 1
+    }
+    if (*p).callee_cache_count >= 64 {
+        (*p).capture_error = NOMINAL_FIELD_RECEIPT_ERR_CAPACITY
+        return -1
+    }
+    let slot = (*p).callee_cache_count
+    let token = nominal_field_resolution_next_observation_token(p)
+    (*p).callee_cache_sig_slot[slot as usize] = sig_slot
+    (*p).callee_cache_module[slot as usize] = module_id
+    (*p).callee_cache_observation_token[slot as usize] = token
+    (*p).callee_cache_count = slot + 1
+    token
+}
+
+fn nominal_field_resolution_field_observation_token(
+    p: *mut NominalFieldResolutionShadow,
+    struct_slot: i64,
+    ordinal: i64,
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*p).field_cache_count {
+        if (*p).field_cache_struct_slot[i as usize] == struct_slot &&
+           (*p).field_cache_ordinal[i as usize] == ordinal {
+            return (*p).field_cache_observation_token[i as usize]
+        }
+        i = i + 1
+    }
+    if (*p).field_cache_count >= 64 {
+        (*p).capture_error = NOMINAL_FIELD_RECEIPT_ERR_CAPACITY
+        return -1
+    }
+    let slot = (*p).field_cache_count
+    let token = nominal_field_resolution_next_observation_token(p)
+    (*p).field_cache_struct_slot[slot as usize] = struct_slot
+    (*p).field_cache_ordinal[slot as usize] = ordinal
+    (*p).field_cache_observation_token[slot as usize] = token
+    (*p).field_cache_count = slot + 1
+    token
+}
+
+fn nominal_field_resolution_field_ordinal(
+    fields: Option<Box<FieldInfoList>>,
+    name: Name,
+    ordinal: i64,
+) -> i64 with Mut, Panic, Div {
+    match fields {
+        None => -1
+        Some(list) => {
+            if name_eq((*list).head.name, name) { ordinal }
+            else { nominal_field_resolution_field_ordinal((*list).tail, name, ordinal + 1) }
+        }
+    }
+}
+
+fn nominal_field_resolution_field_type(
+    fields: Option<Box<FieldInfoList>>,
+    name: Name,
+) -> TypeEntry with Mut, Panic, Div {
+    match fields {
+        None => ty_error()
+        Some(list) => {
+            if name_eq((*list).head.name, name) { (*list).head.ty }
+            else { nominal_field_resolution_field_type((*list).tail, name) }
+        }
+    }
+}
+
+fn nominal_field_resolution_record_direct_call(
+    c: *mut Checker,
+    sig_slot: i64,
+    sig: FnSig,
+    return_ty: TypeEntry,
+) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) || return_ty.kind != TypeKind::TyNamed { return }
+    let depth = (*c).expr_depth
+    if depth < 0 || depth > MAX_EXPR_DEPTH { return }
+    let struct_slot = nominal_field_resolution_struct_in_module(c, return_ty.name, sig.defining_module_id)
+    if struct_slot < 0 { return }
+    let p = (*c).nominal_field_resolution_shadow
+    let type_token = nominal_field_resolution_type_observation_token(p, return_ty.kind as i64, struct_slot, sig.defining_module_id)
+    let callee_token = nominal_field_resolution_callee_observation_token(p, sig_slot, sig.defining_module_id)
+    if type_token <= 0 || callee_token <= 0 { return }
+    (*p).expr_valid[depth as usize] = 1
+    (*p).expr_root_observation_token[depth as usize] = nominal_field_resolution_next_observation_token(p)
+    (*p).expr_callee_observation_token[depth as usize] = callee_token
+    (*p).expr_callee_module[depth as usize] = sig.defining_module_id
+    (*p).expr_result_type_observation_token[depth as usize] = type_token
+    (*p).expr_result_module[depth as usize] = sig.defining_module_id
+    (*p).expr_result_struct_slot[depth as usize] = struct_slot
+    (*p).expr_parent_receipt_slot[depth as usize] = -1
+    (*p).expr_parent_receipt_generation[depth as usize] = 0
+}
+
+fn nominal_field_resolution_binding_from_expr(c: *mut Checker, binding_slot: i64) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) || binding_slot < 0 || binding_slot >= 4096 { return }
+    let p = (*c).nominal_field_resolution_shadow
+    let source_depth = (*c).expr_depth + 1
+    (*p).binding_valid[binding_slot as usize] = 0
+    if source_depth < 0 || source_depth > MAX_EXPR_DEPTH || (*p).expr_valid[source_depth as usize] == 0 { return }
+    (*p).binding_valid[binding_slot as usize] = 1
+    (*p).binding_observation_token[binding_slot as usize] = nominal_field_resolution_next_observation_token(p)
+    (*p).binding_callee_observation_token[binding_slot as usize] = (*p).expr_callee_observation_token[source_depth as usize]
+    (*p).binding_callee_module[binding_slot as usize] = (*p).expr_callee_module[source_depth as usize]
+    (*p).binding_result_type_observation_token[binding_slot as usize] = (*p).expr_result_type_observation_token[source_depth as usize]
+    (*p).binding_result_module[binding_slot as usize] = (*p).expr_result_module[source_depth as usize]
+    (*p).binding_result_struct_slot[binding_slot as usize] = (*p).expr_result_struct_slot[source_depth as usize]
+    (*p).binding_parent_receipt_slot[binding_slot as usize] = (*p).expr_parent_receipt_slot[source_depth as usize]
+    (*p).binding_parent_receipt_generation[binding_slot as usize] = (*p).expr_parent_receipt_generation[source_depth as usize]
+}
+
+fn nominal_field_resolution_clear_binding_slot(c: *mut Checker, binding_slot: i64) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) || binding_slot < 0 || binding_slot >= 4096 { return }
+    let p = (*c).nominal_field_resolution_shadow
+    (*p).binding_valid[binding_slot as usize] = 0
+    (*p).binding_parent_receipt_slot[binding_slot as usize] = -1
+    (*p).binding_parent_receipt_generation[binding_slot as usize] = 0
+}
+
+fn nominal_field_resolution_record_ident(c: *mut Checker, name: Name) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) { return }
+    let p = (*c).nominal_field_resolution_shadow
+    var binding_slot = (*c).env.count - 1
+    while binding_slot >= 0 {
+        if name_eq((*c).env.bindings[binding_slot as usize].name, name) {
+            if (*p).binding_valid[binding_slot as usize] != 0 {
+                let depth = (*c).expr_depth
+                if depth < 0 || depth > MAX_EXPR_DEPTH { return }
+                (*p).expr_valid[depth as usize] = 1
+                (*p).expr_root_observation_token[depth as usize] = (*p).binding_observation_token[binding_slot as usize]
+                (*p).expr_callee_observation_token[depth as usize] = (*p).binding_callee_observation_token[binding_slot as usize]
+                (*p).expr_callee_module[depth as usize] = (*p).binding_callee_module[binding_slot as usize]
+                (*p).expr_result_type_observation_token[depth as usize] = (*p).binding_result_type_observation_token[binding_slot as usize]
+                (*p).expr_result_module[depth as usize] = (*p).binding_result_module[binding_slot as usize]
+                (*p).expr_result_struct_slot[depth as usize] = (*p).binding_result_struct_slot[binding_slot as usize]
+                (*p).expr_parent_receipt_slot[depth as usize] = (*p).binding_parent_receipt_slot[binding_slot as usize]
+                (*p).expr_parent_receipt_generation[depth as usize] = (*p).binding_parent_receipt_generation[binding_slot as usize]
+            }
+            return
+        }
+        binding_slot = binding_slot - 1
+    }
+}
+
+fn nominal_field_resolution_span_is_target_member(p: *mut NominalFieldResolutionShadow, e: Expr) -> bool {
+    e.span.file_id as i64 == (*p).target_span_file &&
+        e.span.start >= (*p).target_span_start &&
+        e.span.end <= (*p).target_span_end
+}
+
+fn nominal_field_resolution_record_field(
+    c: *mut Checker,
+    e: Expr,
+) with Mut, Panic, Div {
+    if !nominal_field_resolution_enabled(c) { return }
+    let p = (*c).nominal_field_resolution_shadow
+    let depth = (*c).expr_depth
+    let child_depth = depth + 1
+    if child_depth > MAX_EXPR_DEPTH || (*p).expr_valid[child_depth as usize] == 0 { return }
+    let owner_struct_slot = (*p).expr_result_struct_slot[child_depth as usize]
+    let owner_module = (*p).expr_result_module[child_depth as usize]
+    if owner_struct_slot < 0 || owner_struct_slot >= (*(*c).structs).count { return }
+    let owner = (*(*c).structs).entries[owner_struct_slot as usize]
+    if owner.defining_module_id != owner_module { return }
+    let ordinal = nominal_field_resolution_field_ordinal(owner.fields, e.name, 0)
+    if ordinal < 0 { return }
+    let exact_field_ty = nominal_field_resolution_field_type(owner.fields, e.name)
+    let field_token = nominal_field_resolution_field_observation_token(p, owner_struct_slot, ordinal)
+    var result_struct_slot: i64 = -1
+    var result_module: i64 = -1
+    if exact_field_ty.kind == TypeKind::TyNamed {
+        result_struct_slot = nominal_field_resolution_struct_in_module(c, exact_field_ty.name, owner_module)
+        if result_struct_slot < 0 { return }
+        result_module = owner_module
+    }
+    let result_type_token = nominal_field_resolution_type_observation_token(
+        p,
+        exact_field_ty.kind as i64,
+        result_struct_slot,
+        result_module,
+    )
+    if field_token <= 0 || result_type_token <= 0 { return }
+
+    var receipt_slot: i64 = -1
+    if (*c).current_module_id == (*p).target_module_id && nominal_field_resolution_span_is_target_member(p, e) {
+        if (*p).receipt_count >= NOMINAL_FIELD_RECEIPT_CAPACITY {
+            (*p).capture_error = NOMINAL_FIELD_RECEIPT_ERR_CAPACITY
+            return
+        }
+        receipt_slot = (*p).receipt_count
+        (*p).receipt_count = receipt_slot + 1
+        (*p).receipt_state[receipt_slot as usize] = 1
+        (*p).receipt_snapshot_generation[receipt_slot as usize] = (*p).snapshot_generation
+        (*p).receipt_source_module[receipt_slot as usize] = (*c).current_module_id
+        (*p).receipt_span_file[receipt_slot as usize] = e.span.file_id as i64
+        (*p).receipt_span_start[receipt_slot as usize] = e.span.start
+        (*p).receipt_span_end[receipt_slot as usize] = e.span.end
+        (*p).receipt_ready_mask[receipt_slot as usize] = NOMINAL_FIELD_RECEIPT_NOMINAL_READY
+        (*p).receipt_root_observation_token[receipt_slot as usize] = (*p).expr_root_observation_token[child_depth as usize]
+        (*p).receipt_callee_observation_token[receipt_slot as usize] = (*p).expr_callee_observation_token[child_depth as usize]
+        (*p).receipt_callee_module[receipt_slot as usize] = (*p).expr_callee_module[child_depth as usize]
+        (*p).receipt_owner_type_observation_token[receipt_slot as usize] = (*p).expr_result_type_observation_token[child_depth as usize]
+        (*p).receipt_owner_module[receipt_slot as usize] = owner_module
+        (*p).receipt_field_observation_token[receipt_slot as usize] = field_token
+        (*p).receipt_field_ordinal[receipt_slot as usize] = ordinal
+        (*p).receipt_result_type_observation_token[receipt_slot as usize] = result_type_token
+        (*p).receipt_parent_slot[receipt_slot as usize] = (*p).expr_parent_receipt_slot[child_depth as usize]
+        (*p).receipt_parent_generation[receipt_slot as usize] = (*p).expr_parent_receipt_generation[child_depth as usize]
+        if e.span.file_id as i64 == (*p).target_span_file && e.span.start == (*p).target_span_start && e.span.end == (*p).target_span_end {
+            (*p).selected_receipt_slot = receipt_slot
+        }
+    }
+
+    (*p).expr_valid[depth as usize] = 1
+    (*p).expr_root_observation_token[depth as usize] = (*p).expr_root_observation_token[child_depth as usize]
+    (*p).expr_callee_observation_token[depth as usize] = (*p).expr_callee_observation_token[child_depth as usize]
+    (*p).expr_callee_module[depth as usize] = (*p).expr_callee_module[child_depth as usize]
+    (*p).expr_result_type_observation_token[depth as usize] = result_type_token
+    (*p).expr_result_module[depth as usize] = result_module
+    (*p).expr_result_struct_slot[depth as usize] = result_struct_slot
+    if receipt_slot >= 0 {
+        (*p).expr_parent_receipt_slot[depth as usize] = receipt_slot
+        (*p).expr_parent_receipt_generation[depth as usize] = (*p).receipt_generation[receipt_slot as usize]
+    } else {
+        (*p).expr_parent_receipt_slot[depth as usize] = (*p).expr_parent_receipt_slot[child_depth as usize]
+        (*p).expr_parent_receipt_generation[depth as usize] = (*p).expr_parent_receipt_generation[child_depth as usize]
+    }
+}
+
+// Off-default shared-checker snapshot. The caller identifies only the source
+// expression and its active-load ModuleId. The checker captures observational
+// tokens while the exact FnSig/StructInfo/FieldInfo instances are alive; those
+// tokens are snapshot-local, not resolver-owned DefIds. The default verdict
+// path is intentionally not routed through this API.
+pub fn nominal_field_resolution_check_modules_snapshot(
+    programs: &! [Program; 256],
+    count: i64,
+    enforce_visibility: bool,
+    target_module_id: i64,
+    target_expr: &Expr,
+    shadow: *mut NominalFieldResolutionShadow,
+    out_snapshot: &! NominalFieldResolutionSnapshotId,
+    out_receipt: &! NominalFieldResolutionReceiptId,
+    out_type_verdict: &! i64,
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if count <= 0 || target_module_id < 0 || target_module_id >= count {
+        return NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT
+    }
+    let begin_status = nominal_field_resolution_snapshot_begin(
+        shadow,
+        target_module_id,
+        target_expr,
+        out_snapshot,
+    )
+    if begin_status != NOMINAL_FIELD_RECEIPT_OK { return begin_status }
+
+    let checker_ptr = heap_alloc(134217728) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    (*checker_ptr).nominal_field_resolution_shadow = shadow
+    (*checker_ptr).crate_root = (*programs)[0].module_path
+    (*checker_ptr).enforce_visibility = enforce_visibility
+
+    var i: i64 = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_collect_items_inplace(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    i = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    (*out_type_verdict) = if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 { 1 } else { 0 }
+    let freeze_status = nominal_field_resolution_snapshot_freeze(shadow, out_snapshot)
+    (*checker_ptr).nominal_field_resolution_shadow = 0 as *mut NominalFieldResolutionShadow
+    heap_free(checker_ptr as i64)
+    if freeze_status != NOMINAL_FIELD_RECEIPT_OK { return freeze_status }
+    nominal_field_resolution_snapshot_receipt(shadow, out_snapshot, out_receipt)
 }
 
 fn checker_note_type_error_mut(c: *mut Checker) with Mut {
@@ -3338,6 +4067,7 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
                 }
             } else {
                 let alias_ty = checker_lower_type_expr_mut(c, te)
+                nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
                 (*c).env = (*c).env.bind(name, alias_ty, false)
                 checker_const_int_bind_unknown_inplace(c, name)
             }
@@ -3884,12 +4614,14 @@ fn checker_warn_large_params_inplace(c: *mut Checker, fn_name: Name, opt: Option
 
 fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div, Alloc, IO {
     if p.is_self {
+        nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
         (*c).env = (*c).env.bind(p.name, (*c).current_impl_type, p.is_self_mut)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
         (*c).borrows = (*c).borrows.track(p.name, self_linear)
     } else {
         let param_ty = checker_lower_type_expr_mut(c, p.ty)
+        nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
         (*c).env = (*c).env.bind(p.name, param_ty, false)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let lin = checker_is_linear_type_inplace(c, param_ty)
@@ -4268,6 +5000,7 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         return ty_error()
     }
     (*c).expr_depth = (*c).expr_depth + 1
+    nominal_field_resolution_clear_expr(c, (*c).expr_depth)
     // Dispatch via explicit if-equality, NOT `match e.kind`. bin/souc miscompiles
     // a `match <enum-field>` inside a *mut function: ExprIntLit (discriminant 0)
     // silently fell through to the `_` wildcard → by-value check_expr → runaway
@@ -4788,6 +5521,7 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
+    nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
     (*c).env = (*c).env.bind(e.name, ty_i64(), false)
     (*c).loop_depth = (*c).loop_depth + 1
     (*c).borrows = (*c).borrows.release_exclusive_borrows()
@@ -5072,6 +5806,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
             }
+            nominal_field_resolution_record_field(c, e)
             field_ty
         } else {
             ty_error()
@@ -5590,6 +6325,7 @@ fn checker_lower_opt_closure_return_inplace(c: *mut Checker, opt: Option<Box<Typ
 
 fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut, Panic, Div, Alloc, IO {
     let param_ty = checker_lower_type_expr_mut(c, p.ty)
+    nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
     (*c).env = (*c).env.bind(p.name, param_ty, false)
     checker_const_int_bind_unknown_inplace(c, p.name)
 }
@@ -6435,6 +7171,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         )
         checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        nominal_field_resolution_record_direct_call(c, direct_sig_id, direct_sig, effective_return_type)
         return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
@@ -6865,6 +7602,7 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
+    nominal_field_resolution_record_ident(c, e.name)
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
@@ -6959,6 +7697,7 @@ fn pattern_list_count(opt: Option<Box<PatternList> >) -> i64 with Mut, Panic, Di
 
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
+        nominal_field_resolution_clear_binding_slot(c, (*c).env.count)
         (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
         checker_const_int_bind_unknown_inplace(c, pat.name)
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
@@ -7285,6 +8024,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
     let cur_env = (*c).env
+    nominal_field_resolution_binding_from_expr(c, cur_env.count)
     (*c).env = cur_env.bind(s.name, bind_ty, false)
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
@@ -7344,6 +8084,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+    nominal_field_resolution_binding_from_expr(c, (*c).env.count)
     (*c).env = (*c).env.bind(s.name, bind_ty, true)
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
