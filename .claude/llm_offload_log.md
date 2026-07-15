@@ -2837,3 +2837,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - fit_lognormal = **PASS after fix**: reviewer flagged the docstring claim "exact MLE" as WRONG (code uses unbiased ÷(n−1), MLE uses ÷n) — corrected the docstring to "sample-moment fit (consistent with fit_gamma/fit_beta); strict MLE divides by n"; the math (μ̂, median=e^μ̂, mean=e^{μ̂+σ̂²/2}) is correct. Also calibrated the fitted-mean tolerance to 3e-3: exp amplifies the inline-ln error in var_y (d(mean)/d(var)≈mean/2), giving ~1.5e-3 absolute error — the reviewer's 3e-6 estimate assumed exact arithmetic.
 - Theme: distribution parameter fitting (method of moments) — pairs with densities/weibull_negbin. All deterministic/derivable, #852-safe. Suite runner: 67 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Sub7Nk/`, `/tmp/llm-offload-t2Rz1k/`, `/tmp/llm-offload-tfPQe1/`.
+
+## 2026-07-15 — math-review: stats::corr_ci, stats::point_biserial, stats::partial_corr
+- Files (all new): `stdlib/stats/corr_ci.sio` (Fisher-z CI + ρ=0 t-test from r,n), `stdlib/stats/point_biserial.sio` (continuous-vs-binary correlation + t-test), `stdlib/stats/partial_corr.sio` (first-order partial correlation r_xy·z + t-test). Provider: xAI/Grok 4.3.
+- corr_ci = **PASS**: z=atanh(r), CI=tanh(z±z_c/√(n−3)), t=r√(n−2)/√(1−r²), t-tail via I_x(ν/2,½); r=0.8/n=20 → CI [0.5534,0.9177], t=5.657 verified.
+- point_biserial = **PASS**: Pearson-equivalent r_pb + t(n−2) test; {1,2,3,4}vs{0,0,1,1}→r=0.8944, t=2.828 verified.
+- partial_corr = **PASS**: r_xy·z formula + t(n−3) test; discriminating case r_xy=0 but partial=−1 (r_xz=0.6,r_yz=0.8) verified; uncorrelated-z → partial=r_xy.
+- Theme: correlation-inference toolkit — the Fisher-z CI, point-biserial, and partial correlation beside the existing Pearson/Spearman module. partial_corr makes 3 nested pc_pearson calls (shared-ref reads, scalar return) — #852-safe. Suite runner: 70 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-1ZtLOb/`, `/tmp/llm-offload-rTCcaN/`, `/tmp/llm-offload-CqFiN9/`.
