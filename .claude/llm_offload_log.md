@@ -2959,3 +2959,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Note: sample_size_precision initially failed `souc check` (a standalone `sp_ceil` helper mutated a var without `with Mut`); `souc run` silently produced NO output on the failed type-check. Fixed by adding `with Mut`. Reminder logged: treat empty `souc run` output as a possible type-check failure — run `souc check`.
 - Theme: sample-size & power planning for designs beyond t-test/proportions (survival, precision, MDE). All derivable, #852-safe. Suite runner: 106 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-LLvTHx/`, `/tmp/llm-offload-IEFtUA/`, `/tmp/llm-offload-G3JirB/`.
+
+## 2026-07-15 — math-review: stats::central_tendency, stats::dispersion, stats::shape
+- Files (all new): `stdlib/stats/central_tendency.sio` (arithmetic/geometric/harmonic/RMS means), `stdlib/stats/dispersion.sio` (variance/sd/range/CV/SEM), `stdlib/stats/shape.sio` (skewness g₁ + Fisher-Pearson G₁, excess kurtosis). Provider: xAI/Grok 4.3.
+- central_tendency = **PASS**: AM/GM/HM/RMS definitions, HM≤GM≤AM≤RMS ordering; {1,2,4}→2.333/2/1.714/2.646 verified.
+- dispersion = **PASS**: sample variance ÷(n−1), CV=sd/mean, SEM=sd/√n; {2,4,4,4,5,5,7,9}→var 4.571, sd 2.138, CV 0.4276, SEM 0.7559 verified.
+- shape = **PASS**: population g₁=m₃/m₂^1.5, excess kurtosis m₄/m₂²−3, Fisher-Pearson G₁=g₁√(n(n−1))/(n−2); g₁=0.6563, G₁=0.8185 verified.
+- Theme: classical descriptive statistics — completes the descriptive layer beside the robust module (median/IQR/MAD). All derivable, #852-safe. Suite runner: 109 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Krlbft/`, `/tmp/llm-offload-gamSmC/`, `/tmp/llm-offload-iH6HMi/`.
