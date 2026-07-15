@@ -80,7 +80,6 @@ if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
       self-hosted/native/runtime_context.sio \
       self-hosted/ir/mod.sio \
       self-hosted/ir/soir_core.sio \
-      self-hosted/ir/soir_writer.sio \
       self-hosted/parser/ast.sio \
       self-hosted/parser/items.sio \
       self-hosted/compiler/main.sio \
@@ -90,6 +89,66 @@ if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
   fi
 else
   fail base_sha_unavailable
+fi
+
+# A stacked bridge lane may extend the off-default writer while this ownership
+# kernel remains shadow-only. Normalize away only the explicit scalar block and
+# marker lines, then demand byte identity with the parent writer. This makes
+# any deletion or modification to legacy entrypoints fail closed.
+if ! git diff --quiet "$BASE" -- self-hosted/ir/soir_writer.sio; then
+  [[ -f self-hosted/ir/arena_v2_soir_bridge.sio ]] || fail soir_writer_changed_without_arena_bridge
+  [[ -f scripts/ci/ir_module_arena_v2_soir_v5_bridge_gate.sh ]] || fail soir_writer_changed_without_bridge_gate
+  writer_base="$TMP/soir_writer.base.sio"
+  writer_normalized="$TMP/soir_writer.normalized.sio"
+  git show "$BASE:self-hosted/ir/soir_writer.sio" >"$writer_base"
+  awk '
+    /^\/\/ SOIR_WRITER_SCALAR_EMPTY_CORE_BEGIN$/ { scalar=1; next }
+    /^\/\/ SOIR_WRITER_SCALAR_EMPTY_CORE_END$/ { scalar=0; next }
+    scalar { next }
+    /^\/\/ SOIR_WRITER_(PLAN_CORE|SHARED_SCALAR_PRIMITIVES)_(BEGIN|END)$/ { next }
+    { print }
+  ' self-hosted/ir/soir_writer.sio >"$writer_normalized"
+  cmp -s "$writer_base" "$writer_normalized" || fail soir_writer_changed_outside_scalar_shadow_blocks
+
+  extract_writer_fn() {
+    local fn_name="$1"
+    local file="$2"
+    awk -v target="$fn_name" '
+      $0 ~ "^pub fn " target "\\(" { active=1 }
+      active {
+        print
+        opens=$0; closes=$0
+        open_count=gsub(/\{/, "", opens)
+        close_count=gsub(/\}/, "", closes)
+        depth += open_count - close_count
+        if (open_count > 0) { saw_body=1 }
+        if (saw_body && depth == 0) { exit }
+      }
+    ' "$file"
+  }
+  for legacy_fn in soir_writer_preflight_empty_extensions_v5 soir_writer_emit_empty_extensions_v5; do
+    base_hash="$(extract_writer_fn "$legacy_fn" "$writer_base" | sha256sum | awk '{print $1}')"
+    current_hash="$(extract_writer_fn "$legacy_fn" self-hosted/ir/soir_writer.sio | sha256sum | awk '{print $1}')"
+    [[ "$base_hash" == "$current_hash" ]] || fail "legacy_${legacy_fn}_body_changed"
+  done
+
+  unauthorized="$TMP/soir_writer.unauthorized.sio"
+  cp self-hosted/ir/soir_writer.sio "$unauthorized"
+  printf '\nfn unauthorized_shadow_gate_selftest() -> i64 { 0 }\n' >>"$unauthorized"
+  unauthorized_normalized="$TMP/soir_writer.unauthorized.normalized.sio"
+  awk '
+    /^\/\/ SOIR_WRITER_SCALAR_EMPTY_CORE_BEGIN$/ { scalar=1; next }
+    /^\/\/ SOIR_WRITER_SCALAR_EMPTY_CORE_END$/ { scalar=0; next }
+    scalar { next }
+    /^\/\/ SOIR_WRITER_(PLAN_CORE|SHARED_SCALAR_PRIMITIVES)_(BEGIN|END)$/ { next }
+    { print }
+  ' "$unauthorized" >"$unauthorized_normalized"
+  if cmp -s "$writer_base" "$unauthorized_normalized"; then
+    fail unauthorized_writer_edit_selftest_not_rejected
+  fi
+
+  grep -Fq 'soir_writer_preflight_scalar_empty_module_v5' self-hosted/ir/arena_v2_soir_bridge.sio || fail arena_bridge_not_using_scalar_preflight
+  grep -Fq 'soir_writer_emit_scalar_empty_module_v5' self-hosted/ir/arena_v2_soir_bridge.sio || fail arena_bridge_not_using_scalar_emit
 fi
 
 "$SOUC" check "$SOURCE" >"$TMP/source-check.log" 2>&1 || {
