@@ -97,13 +97,14 @@ require_text 'boundary_claim_mask: 1' "$OPT"
 reject_text 'runtime_d7_receipt_consumed|float_or_gum_authority_established|global_reassociation_authority_established' "$OPT"
 require_text '^pub struct OcpCleanupModuleReceipt \{' "$OPT"
 require_text '^pub fn opt_cleanup_module_inplace\(module: &! IrModule\)' "$OPT"
+require_text '^pub fn ocp_exact_bitwise_rebracket_pipeline_probe\(\)' "$OPT"
 require_text 'ocp_record_exact_bitwise_rebracket_audit\(exact_bitwise_audit, la_txn\)' "$OPT"
 require_text 'exact_bitwise_application_count: audit\.application_count' "$OPT"
 require_text '^fn run_exact_bitwise_rebracket_authority_smoke\(\)' "$MAIN"
 require_text 'let receipt = ocp_exact_bitwise_rebracket_authority_probe\(\)' "$MAIN"
 require_text 'receipt\.boundary_claim_mask != 1' "$MAIN"
 require_text 'mode == "--rebracket-authority-smoke"' "$MAIN"
-require_text '\[rebracket-compiler\] PASS: cases=14 applications=3 unchanged_refusals=11' "$MAIN"
+require_text '\[rebracket-compiler\] PASS: cases=14 applications=3 unchanged_refusals=11 pipeline=1' "$MAIN"
 require_text 'module_frontend_compile_imported_to_file\(opts\.input_file, opts\.output_file, opts\.optimize\)' "$MAIN"
 require_text '^pub fn module_frontend_compile_imported_to_file\(' "$FRONTEND"
 require_text 'opt_cleanup_module_inplace\(&! \(\*module_box\)\)' "$FRONTEND"
@@ -143,6 +144,20 @@ for forbidden_opcode in IrLoadFloat IrIntToFloat IrFloatToInt IrCall IrCallExter
   [[ "$operand_slice" != *"IrOpcode::$forbidden_opcode => true"* ]] ||
     fail "canonical scalar slice must refuse $forbidden_opcode"
 done
+
+pass_a1_slice="$(awk '
+  /^fn ocp_const_fold_pass_a1\(/ { inside=1 }
+  /^fn ocp_const_fold_pass_a2\(/ { exit }
+  inside { print }
+' "$OPT")"
+[[ "$pass_a1_slice" == *'former direct'* || "$pass_a1_slice" == *'former Block BG direct'* ]] ||
+  fail "pass A1 must declare its authority-owned rebracketing handoff"
+[[ "$pass_a1_slice" != *'Block AE: And-mask chain fold'* ]] ||
+  fail "pass A1 must not retain the pre-authority AND-chain mutation"
+[[ "$pass_a1_slice" != *'Block BG: OR constant-chain fold'* ]] ||
+  fail "pass A1 must not retain the pre-authority OR-chain mutation"
+[[ "$pass_a1_slice" != *'Block BM: XOR constant-chain fold'* ]] ||
+  fail "pass A1 must not retain the pre-authority XOR-chain mutation"
 
 kernel_log="$WORK/kernel.log"
 if ! "$SOUC" run "$KERNEL" >"$kernel_log" 2>&1; then
@@ -210,7 +225,7 @@ if rg -Fq -- '--rebracket-authority-smoke' "$compiler_help_log"; then
     cat "$compiler_smoke_log" >&2
     fail "current-source compiler advertised the authority smoke but failed it"
   fi
-  rg -Fxq '[rebracket-compiler] PASS: cases=14 applications=3 unchanged_refusals=11 replay=0 calls=0 packed=0 control=0 float_ir=0 runtime_d7=0 float_gum=0 global=0' \
+  rg -Fxq '[rebracket-compiler] PASS: cases=14 applications=3 unchanged_refusals=11 pipeline=1 replay=0 calls=0 packed=0 control=0 float_ir=0 runtime_d7=0 float_gum=0 global=0' \
     "$compiler_smoke_log" || {
       cat "$compiler_smoke_log" >&2
       fail "current-source compiler authority smoke omitted its exact receipt"

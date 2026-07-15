@@ -1287,8 +1287,8 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var sh_var_src: [i64;  256] = [-1;    256]
     var sh_amount:  [i64;  256] = [0;     256]
     var sh_is_left: [bool; 256] = [false; 256]
-    // Sprint 108 Block AE: And-mask fold — track r = x & C.
-    // (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
+    // Sprint 108 Block AE: track r = x & C for non-rebracketing identities.
+    // Exact constant-chain rebracketing is owned exclusively by Block L.
     var and_valid:     [bool; 256] = [false; 256]
     var and_var_src:   [i64;  256] = [-1;    256]
     var and_const_val: [i64;  256] = [0;     256]
@@ -1339,9 +1339,8 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bk_shr_valid: [bool; 256] = [false; 256]
     var bk_shr_src:   [i64;  256] = [-1;    256]
     var bk_shr_amt:   [i64;  256] = [0;     256]
-    // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
-    // Mirrors Block BG (OR) and Block AE (AND) for the XOR operator.
-    // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
+    // Sprint 151 Block BM: track r = x ^ C for non-rebracketing identities.
+    // Exact constant-chain rebracketing is owned exclusively by Block L.
     var bm_xor_valid: [bool; 256] = [false; 256]
     var bm_xor_src:   [i64;  256] = [-1;    256]
     var bm_xor_cval:  [i64;  256] = [0;     256]
@@ -1674,39 +1673,11 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         }
                     }
                 }
-                // Sprint 108 Block AE: And-mask chain fold — (x & C1) & C2 → x & (C1 & C2).
-                // Only fires if Block AK didn't already fold to IrCopy.
+                // Block AE keeps only its shape tracking here. The former direct
+                // (x & C1) & C2 rewrite bypassed occurrence-bound authority and
+                // made Block L unreachable from lowered source. Block L now owns
+                // that exact ordered constant-chain mutation.
                 if ocp_is_binop(result.instrs[i as usize].op) && result.instrs[i as usize].bin_op == BinaryOp::OpBitAnd {
-                    if s2_known && s1 >= 0 && s1 < 256 && and_valid[s1 as usize] {
-                        let c1 = and_const_val[s1 as usize]
-                        let merged = c1 & v2
-                        let def_idx = def_at[s2 as usize]
-                        if def_idx >= 0 {
-                            result.instrs[def_idx as usize] = ir_load_imm(s2, merged)
-                            const_val[s2 as usize] = merged
-                        }
-                        result.instrs[i as usize] = ir_binop(instr.dst, and_var_src[s1 as usize], BinaryOp::OpBitAnd, s2)
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            and_valid[instr.dst as usize]     = true
-                            and_var_src[instr.dst as usize]   = and_var_src[s1 as usize]
-                            and_const_val[instr.dst as usize] = merged
-                        }
-                    }
-                    if s1_known && s2 >= 0 && s2 < 256 && and_valid[s2 as usize] {
-                        let c2_prev = and_const_val[s2 as usize]
-                        let merged = v1 & c2_prev
-                        let def_idx = def_at[s1 as usize]
-                        if def_idx >= 0 {
-                            result.instrs[def_idx as usize] = ir_load_imm(s1, merged)
-                            const_val[s1 as usize] = merged
-                        }
-                        result.instrs[i as usize] = ir_binop(instr.dst, and_var_src[s2 as usize], BinaryOp::OpBitAnd, s1)
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            and_valid[instr.dst as usize]     = true
-                            and_var_src[instr.dst as usize]   = and_var_src[s2 as usize]
-                            and_const_val[instr.dst as usize] = merged
-                        }
-                    }
                     if s2_known && !s1_known && !(s1 >= 0 && s1 < 256 && and_valid[s1 as usize]) && instr.dst >= 0 && instr.dst < 256 {
                         and_valid[instr.dst as usize]     = true
                         and_var_src[instr.dst as usize]   = s1
@@ -1793,44 +1764,9 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         am_or_const_val[instr.dst as usize] = v1
                     }
                 }
-                // Sprint 145 Block BG: OR constant-chain fold — (x | C1) | C2 → x | (C1 | C2).
-                // Analogue of Block AE (AND chain fold) for OR; fires when Block AM did not fold.
-                // SOTA: LLVM InstCombineAndOrXor.cpp — or(or X,C1),C2 → or X,(C1|C2);
-                // Boolean algebra associativity + idempotency (a|a=a).
-                // Distinct from Block AM ((x|C1)|C2→IrCopy when C2⊆C1): fires when C2 has new bits.
-                // Zero new arrays: reuses am_or_valid/var_src/const_val + def_at from Block AM.
-                if ocp_is_binop(result.instrs[i as usize].op) && result.instrs[i as usize].bin_op == BinaryOp::OpBitOr {
-                    if s2_known && s1 >= 0 && s1 < 256 && am_or_valid[s1 as usize] {
-                        let bg_c1 = am_or_const_val[s1 as usize]
-                        let bg_merged = bg_c1 | v2
-                        let bg_def = def_at[s2 as usize]
-                        if bg_def >= 0 {
-                            result.instrs[bg_def as usize] = ir_load_imm(s2, bg_merged)
-                            const_val[s2 as usize] = bg_merged
-                        }
-                        result.instrs[i as usize] = ir_binop(instr.dst, am_or_var_src[s1 as usize], BinaryOp::OpBitOr, s2)
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            am_or_valid[instr.dst as usize]     = true
-                            am_or_var_src[instr.dst as usize]   = am_or_var_src[s1 as usize]
-                            am_or_const_val[instr.dst as usize] = bg_merged
-                        }
-                    }
-                    if s1_known && s2 >= 0 && s2 < 256 && am_or_valid[s2 as usize] {
-                        let bg_c2 = am_or_const_val[s2 as usize]
-                        let bg_merged = v1 | bg_c2
-                        let bg_def = def_at[s1 as usize]
-                        if bg_def >= 0 {
-                            result.instrs[bg_def as usize] = ir_load_imm(s1, bg_merged)
-                            const_val[s1 as usize] = bg_merged
-                        }
-                        result.instrs[i as usize] = ir_binop(instr.dst, am_or_var_src[s2 as usize], BinaryOp::OpBitOr, s1)
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            am_or_valid[instr.dst as usize]     = true
-                            am_or_var_src[instr.dst as usize]   = am_or_var_src[s2 as usize]
-                            am_or_const_val[instr.dst as usize] = bg_merged
-                        }
-                    }
-                }
+                // The former Block BG direct OR-chain rewrite is deferred to
+                // authority-owned Block L. Block AM tracking above remains for
+                // its non-rebracketing superset and absorption consumers.
                 if instr.bin_op == BinaryOp::OpBitXor {
                     if s2_known && v2 == 0 {
                         result.instrs[i as usize] = ir_copy(instr.dst, s1)
@@ -2661,55 +2597,9 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
         }
-        // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
-        // Associativity of XOR over constants: combine two sequential XOR-with-constant ops.
-        // Also handles commutative outer: C2 ^ (x ^ C1) → x ^ (C1^C2).
-        // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
-        if ocp_is_binop(result.instrs[i as usize].op) {
-            let bm_instr = result.instrs[i as usize]
-            let bm_s1 = bm_instr.src1; let bm_s2 = bm_instr.src2
-            let bm_s1_ok = bm_s1 >= 0 && bm_s1 < 256; let bm_s2_ok = bm_s2 >= 0 && bm_s2 < 256
-            if bm_instr.bin_op == BinaryOp::OpBitXor {
-                // (x ^ C1) ^ C2 → x ^ (C1^C2)
-                if bm_s1_ok && bm_xor_valid[bm_s1 as usize]
-                        && bm_s2_ok && is_const[bm_s2 as usize] {
-                    let bm_c1 = bm_xor_cval[bm_s1 as usize]
-                    let bm_c2 = const_val[bm_s2 as usize]
-                    let bm_merged = bm_c1 ^ bm_c2
-                    let bm_def = def_at[bm_s2 as usize]
-                    if bm_def >= 0 {
-                        result.instrs[bm_def as usize] = ir_load_imm(bm_s2, bm_merged)
-                        const_val[bm_s2 as usize] = bm_merged
-                    }
-                    result.instrs[i as usize] = ir_binop(bm_instr.dst,
-                        bm_xor_src[bm_s1 as usize], BinaryOp::OpBitXor, bm_s2)
-                    if bm_instr.dst >= 0 && bm_instr.dst < 256 {
-                        bm_xor_valid[bm_instr.dst as usize] = true
-                        bm_xor_src[bm_instr.dst as usize]   = bm_xor_src[bm_s1 as usize]
-                        bm_xor_cval[bm_instr.dst as usize]  = bm_merged
-                    }
-                }
-                // C2 ^ (x ^ C1) → x ^ (C1^C2) (commutative outer)
-                if bm_s2_ok && bm_xor_valid[bm_s2 as usize]
-                        && bm_s1_ok && is_const[bm_s1 as usize] {
-                    let bm_c1 = bm_xor_cval[bm_s2 as usize]
-                    let bm_c2 = const_val[bm_s1 as usize]
-                    let bm_merged = bm_c1 ^ bm_c2
-                    let bm_def = def_at[bm_s1 as usize]
-                    if bm_def >= 0 {
-                        result.instrs[bm_def as usize] = ir_load_imm(bm_s1, bm_merged)
-                        const_val[bm_s1 as usize] = bm_merged
-                    }
-                    result.instrs[i as usize] = ir_binop(bm_instr.dst,
-                        bm_xor_src[bm_s2 as usize], BinaryOp::OpBitXor, bm_s1)
-                    if bm_instr.dst >= 0 && bm_instr.dst < 256 {
-                        bm_xor_valid[bm_instr.dst as usize] = true
-                        bm_xor_src[bm_instr.dst as usize]   = bm_xor_src[bm_s2 as usize]
-                        bm_xor_cval[bm_instr.dst as usize]  = bm_merged
-                    }
-                }
-            }
-        }
+        // The former Block BM direct XOR-chain rewrite is deferred to
+        // authority-owned Block L. Tracking below remains available to other
+        // non-rebracketing XOR identities in this pass.
         // Sprint 151 Block BM: XOR tracking — populate bm_xor arrays.
         if ocp_is_binop(result.instrs[i as usize].op) {
             let bm_t = result.instrs[i as usize]
@@ -8455,4 +8345,26 @@ pub fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
     var result = module
     opt_cleanup_module_inplace(&! result)
     result
+}
+
+// Exercises the real cleanup ordering, including the pass-A1 handoff to Block L.
+// Like every public value in this lane, the result is audit evidence only.
+pub fn ocp_exact_bitwise_rebracket_pipeline_probe() -> OcpCleanupModuleReceipt with Mut, Div, Panic {
+    var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
+    let input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
+    opt_cleanup_function_with_algebras_and_audit(
+        input,
+        ir_empty_algebra_table(),
+        &! audit,
+    )
+    OcpCleanupModuleReceipt {
+        function_count: 1,
+        exact_bitwise_transaction_count: audit.transaction_count,
+        exact_bitwise_authorization_count: audit.authorization_count,
+        exact_bitwise_application_count: audit.application_count,
+        exact_bitwise_refusal_count: audit.refusal_count,
+        exact_bitwise_operator_mask: audit.operator_mask,
+        last_application_function_index: if audit.application_count == 1 { 0 } else { -1 },
+        last_combined_const_value: audit.last_combined_const_value,
+    }
 }
