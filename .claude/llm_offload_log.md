@@ -2668,3 +2668,15 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Visual evidence: `/tmp/sounio-effect-bg-desktop-v2.png`, `/tmp/sounio-effect-bg-mobile.png`, and `/tmp/sounio-effect-bg-comparison.jpg`; both tested viewports had zero broken images, and the mobile viewport measured no positive horizontal overflow.
 - Validation: `npm run check:astro` passed 211 files with zero errors, warnings, or hints; `npm run check:quality` passed 904 pages and all route, navigation, and brand checks. Render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
 - Raw review directory: `/tmp/llm-offload-p19zw7/`.
+
+## 2026-07-15 — M3 prose/design review: borrow custody instrument
+- Files: `website/src/components/home/BorrowCustodyInstrument.tsx`, `BorrowCustodyInstrument.css`, `website/public/assets/vision/borrow-custody-archive.webp`, and `website/src/pages/index.astro`.
+- Task: expose shared reborrowing and an explicit shared-versus-exclusive conflict as a public homepage instrument without widening the repository's partial ownership claim.
+- Executable evidence: `./bin/souc run tests/run-pass/borrow_reborrow.sio` returned exit 0 with `borrow reborrow: PASS`; `./bin/souc check tests/compile-fail/borrow_call_conflict_explicit.sio` returned exit 1 with `E038` and `cannot borrow exclusively while other borrows are active`. Each focused harness filter reported one pass and zero failures on the default Madaros path.
+- Asset: built-in ImageGen produced an original Aegean archive scene with one marble custody seal, two shared woven cords, and one restrained red cord stopped at a bronze boundary; converted via Sharp to a 1536x1024 WebP at 138 KB.
+- External-facing review: xAI/Grok 4.3 approved the implementation and claim boundary. Its actionable accessibility suggestion was applied by changing the selector group to a named `tablist` with `tab`, `aria-selected`, `aria-controls`, and a labelled `tabpanel`; browser semantics then exposed the expected selected state.
+- Claim boundary: the scene demonstrates two shared borrows coexisting in one run-pass fixture and one explicit conflict at a call boundary. It does not claim Rust-equivalent ownership, general lifetime inference, concurrency safety, linear-value completeness, or formal soundness of the full borrow system.
+- Fan-out degradation: DeepSeek and Gemini returned provider errors. The completed xAI review and failed legs are recorded for later re-review if needed.
+- Visual evidence: `/tmp/sounio-borrow-desktop-pass.png`, `/tmp/sounio-borrow-desktop-refused-v2.png`, `/tmp/sounio-borrow-mobile-pass-v2.png`, `/tmp/sounio-borrow-pt-320.png`, and `/tmp/sounio-effects-borrow-comparison.jpg`; desktop, mobile, and 320 px measured no positive horizontal overflow.
+- Validation: `npm run check:quality` passed 904 pages and every route, navigation, brand, localization, search, and Astro check; render regeneration explicitly skipped on the known `expected P3 header`, so checked-in pre-rendered assets remained in use.
+- Raw review directory: `/tmp/llm-offload-U5QApj/`.
