@@ -36,6 +36,7 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
 // lowering are synchronous, so one resettable table is sufficient.
 var MF_EXTERN_BINDING_NAMES: [Name; 2048] = [ir_empty_name(); 2048]
 var MF_EXTERN_BINDING_MODULE_IDS: [i64; 2048] = [IR_DEFINING_MODULE_UNKNOWN; 2048]
+var MF_PROGRAM_ITEMS: [Option<Box<ItemList>>; 256] = [None; 256]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -4483,14 +4484,14 @@ fn module_frontend_lower_program_box_traced_with_externs(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
     var epistemic = ir_empty_epistemic_section()
     let binding_count = module_frontend_collect_external_bindings(
-        programs,
+        &! MF_PROGRAM_ITEMS,
         file_paths,
         program_count,
         module_index
     )
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(
         program,
-        programs,
+        &! MF_PROGRAM_ITEMS,
         program_count,
         module_index,
         &! MF_EXTERN_BINDING_NAMES,
@@ -4509,7 +4510,7 @@ fn module_frontend_lower_program_box_traced_with_externs(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
     let summary_module_box = summary_val.module
-    module_frontend_assign_function_provenance(&! (*summary_module_box), programs, file_paths, program_count, module_index)
+    module_frontend_assign_function_provenance(&! (*summary_module_box), &! MF_PROGRAM_ITEMS, file_paths, program_count, module_index)
     summary_val.module = summary_module_box
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         program,
@@ -4527,7 +4528,7 @@ fn module_frontend_lower_program_box_traced_with_externs(
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
     let body_module_box = body_result.module
-    module_frontend_assign_function_provenance(&! (*body_module_box), programs, file_paths, program_count, module_index)
+    module_frontend_assign_function_provenance(&! (*body_module_box), &! MF_PROGRAM_ITEMS, file_paths, program_count, module_index)
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
@@ -4552,14 +4553,14 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     var epistemic = ir_empty_epistemic_section()
     let program = mf_program_from_items(items)
     let binding_count = module_frontend_collect_external_bindings(
-        programs,
+        &! MF_PROGRAM_ITEMS,
         file_paths,
         program_count,
         module_index
     )
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(
         &program,
-        programs,
+        &! MF_PROGRAM_ITEMS,
         program_count,
         module_index,
         &! MF_EXTERN_BINDING_NAMES,
@@ -4578,7 +4579,7 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
     let summary_module_box = summary_val.module
-    module_frontend_assign_function_provenance(&! (*summary_module_box), programs, file_paths, program_count, module_index)
+    module_frontend_assign_function_provenance(&! (*summary_module_box), &! MF_PROGRAM_ITEMS, file_paths, program_count, module_index)
     summary_val.module = summary_module_box
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         &program,
@@ -4596,7 +4597,7 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
     let body_module_box = body_result.module
-    module_frontend_assign_function_provenance(&! (*body_module_box), programs, file_paths, program_count, module_index)
+    module_frontend_assign_function_provenance(&! (*body_module_box), &! MF_PROGRAM_ITEMS, file_paths, program_count, module_index)
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
@@ -4776,7 +4777,7 @@ fn module_frontend_items_explicitly_import_from(
 }
 
 fn module_frontend_function_defining_module(
-    programs: &! [Program; 256],
+    program_items: &![Option<Box<ItemList>>; 256],
     file_paths: &![string; 256],
     program_count: i64,
     self_index: i64,
@@ -4789,7 +4790,7 @@ fn module_frontend_function_defining_module(
     // field directly avoids the bootstrap compiler's known by-value aggregate
     // copy loss while preserving exact module identity.
     if module_frontend_items_define_ir_function(
-        &(*programs)[self_index as usize].items,
+        &(*program_items)[self_index as usize],
         name
     ) {
         return self_index
@@ -4806,13 +4807,13 @@ fn module_frontend_function_defining_module(
     while i < program_count {
         if i != self_index {
             if module_frontend_items_define_ir_function(
-                &(*programs)[i as usize].items,
+                &(*program_items)[i as usize],
                 name
             ) {
                 found_module = i
                 found_count = found_count + 1
                 if module_frontend_items_explicitly_import_from(
-                    &(*programs)[self_index as usize].items,
+                    &(*program_items)[self_index as usize],
                     (*file_paths)[self_index as usize],
                     (*file_paths)[i as usize],
                     name
@@ -4855,7 +4856,7 @@ fn module_frontend_binding_name_index(
 }
 
 fn module_frontend_collect_external_bindings(
-    programs: &! [Program; 256],
+    program_items: &![Option<Box<ItemList>>; 256],
     file_paths: &![string; 256],
     program_count: i64,
     self_index: i64
@@ -4873,7 +4874,7 @@ fn module_frontend_collect_external_bindings(
     }
     while module_index < program_count && count < 2048 {
         if module_index != self_index {
-            var current = &(*programs)[module_index as usize].items
+            var current = &(*program_items)[module_index as usize]
             while count < 2048 {
                 match *current {
                     Some(list) => {
@@ -4891,11 +4892,11 @@ fn module_frontend_collect_external_bindings(
                             let item_name = head.name
                             let is_builtin = native_v2_builtin_id_for_name(item_name) != 0
                             let self_defines = module_frontend_items_define_ir_function(
-                               &(*programs)[self_index as usize].items,
+                               &(*program_items)[self_index as usize],
                                item_name
                             )
                             let explicit_route = module_frontend_items_explicitly_import_from(
-                                &(*programs)[self_index as usize].items,
+                                &(*program_items)[self_index as usize],
                                 (*file_paths)[self_index as usize],
                                 (*file_paths)[module_index as usize],
                                 item_name
@@ -4948,7 +4949,7 @@ fn module_frontend_collect_external_bindings(
     module_index = 0
     while module_index < program_count && count < 2048 {
         if module_index != self_index {
-            var current = &(*programs)[module_index as usize].items
+            var current = &(*program_items)[module_index as usize]
             while count < 2048 {
                 match *current {
                     Some(list) => {
@@ -4957,11 +4958,11 @@ fn module_frontend_collect_external_bindings(
                             let item_name = head.name
                             if native_v2_builtin_id_for_name(item_name) == 0 &&
                                !module_frontend_items_define_ir_function(
-                                   &(*programs)[self_index as usize].items,
+                                   &(*program_items)[self_index as usize],
                                    item_name
                                ) &&
                                !module_frontend_items_explicitly_import_from(
-                                   &(*programs)[self_index as usize].items,
+                                   &(*program_items)[self_index as usize],
                                    (*file_paths)[self_index as usize],
                                    (*file_paths)[module_index as usize],
                                    item_name
@@ -4997,7 +4998,7 @@ fn module_frontend_collect_external_bindings(
 // explicit and must fail closed during merge/finalize.
 fn module_frontend_assign_function_provenance(
     module: &! IrModule,
-    programs: &! [Program; 256],
+    program_items: &![Option<Box<ItemList>>; 256],
     file_paths: &![string; 256],
     program_count: i64,
     self_index: i64
@@ -5010,7 +5011,7 @@ fn module_frontend_assign_function_provenance(
         if defining_module_id == IR_DEFINING_MODULE_UNKNOWN ||
            defining_module_id == IR_DEFINING_MODULE_AMBIGUOUS {
             defining_module_id = module_frontend_function_defining_module(
-                programs,
+                program_items,
                 file_paths,
                 program_count,
                 self_index,
@@ -5160,6 +5161,16 @@ fn module_frontend_lower_programs_array_direct_box(
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
     if loaded <= 0 {
         return module_frontend_lower_direct_box_error("no_modules_loaded")
+    }
+
+    // Snapshot only the stable ItemList handles. Directly projecting an
+    // external Program through the large programs array reads None under the
+    // bootstrap compiler, while copying this Option<Box<...>> handle is the
+    // already-proven seed/dep lowering path.
+    var snapshot_i: i64 = 0
+    while snapshot_i < loaded {
+        MF_PROGRAM_ITEMS[snapshot_i as usize] = (*programs)[snapshot_i as usize].items
+        snapshot_i = snapshot_i + 1
     }
 
     trace.last_stage = "lower_summary"
