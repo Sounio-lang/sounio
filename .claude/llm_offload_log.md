@@ -2934,3 +2934,5 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - icc_forms = **PASS**: ICC(1,1)/(2,1)/(3,1) + average-measure forms from ANOVA MSB/MSR/MSW/MSE; **validated against the published Shrout-Fleiss (1979) 6×4 example** → 0.166/0.290/0.715 (all three match).
 - Theme: chance-corrected agreement — extends cohen_kappa/fleiss_kappa/reliability with the general Krippendorff α, the paradox-resistant Gwet AC1, and the full ICC family. All derivable, #852-safe. Suite runner: 97 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-QU0X4f/`, `/tmp/llm-offload-DxNLA5/`, `/tmp/llm-offload-xj10Av/`.
+
+| 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | external artifact + code review | renderer3d.sio; coverage_crystal_atelier.sio; viz_renderer3d_coverage4.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted the fixed-point depth ordering, four-sample coverage-AA semantics, deterministic receipt, and test strength, with only non-blocking depth-range and winding notes. DeepSeek failed for insufficient balance and Gemini failed with OpenRouter HTTP 402. Raw: `/tmp/llm-offload-Kkyfyv/`. |
