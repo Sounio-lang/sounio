@@ -2967,3 +2967,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - shape = **PASS**: population g₁=m₃/m₂^1.5, excess kurtosis m₄/m₂²−3, Fisher-Pearson G₁=g₁√(n(n−1))/(n−2); g₁=0.6563, G₁=0.8185 verified.
 - Theme: classical descriptive statistics — completes the descriptive layer beside the robust module (median/IQR/MAD). All derivable, #852-safe. Suite runner: 109 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Krlbft/`, `/tmp/llm-offload-gamSmC/`, `/tmp/llm-offload-iH6HMi/`.
+
+## 2026-07-15 — math-review: stats::gk_lambda, stats::gk_tau, stats::uncertainty_coefficient
+- Files (all new): `stdlib/stats/gk_lambda.sio` (Goodman-Kruskal λ, mode-prediction PRE), `stdlib/stats/gk_tau.sio` (Goodman-Kruskal τ, proportional-prediction PRE), `stdlib/stats/uncertainty_coefficient.sio` (Theil's U, entropy/mutual-information). Provider: xAI/Grok 4.3.
+- gk_lambda = **PASS**: λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+), both directions + symmetric; [[40,10],[5,45]]→0.7/0.667, mode-only→0, diagonal→1.
+- gk_tau = **PASS**: τ(R|C)=(Σ_cΣ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N); 0.4949 verified, independence→0, diagonal→1.
+- uncertainty_coefficient = **PASS**: H(R), I(R;C), U(R|C)=I/H(R); I=0.2754, U=0.3973 verified, independence→0, diagonal→1.
+- Theme: nominal association / PRE & entropy measures — complements chi2_independence (Cramér's V) for contingency tables. All derivable, #852-safe. Suite runner: 112 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rFk7TQ/`, `/tmp/llm-offload-nnqkco/`, `/tmp/llm-offload-wl6Rgd/`.
