@@ -35,7 +35,8 @@ fourteen families:
   restricted mean survival time, the actuarial life table, the log-rank test and
   a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
-  NNT, and person-time incidence rates.
+  NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio,
+  attributable risk / fractions, and directly / indirectly standardised rates.
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
@@ -1157,6 +1158,40 @@ alternative to the Fisher-z interval when normality is doubtful). Validated:
 perfectly correlated data → r=1, SE=0, CI=[1,1]; noisy positive association → CI
 brackets the point r; reproducible.
 
+### `stats::mantel_haenszel` — stratified odds ratio
+
+| Function | Signature |
+|---|---|
+| `mantel_haenszel` | `pub fn mantel_haenszel(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> MHResult with Mut, Div, Panic` |
+
+The confounding-adjusted pooled odds ratio across k 2×2 strata:
+`OR_MH=Σ(aᵢdᵢ/nᵢ)/Σ(bᵢcᵢ/nᵢ)`, the Mantel-Haenszel χ² test, and the
+Robins-Breslow-Greenland confidence interval. Validated: two strata each with
+OR 2 → OR_MH=2, χ²=4.111, 95% CI [1.024, 3.906]; null strata → OR_MH=1.
+
+### `stats::attributable` — attributable risk & fractions
+
+| Function | Signature |
+|---|---|
+| `attributable` | `pub fn attributable(a: f64, b: f64, c: f64, d: f64) -> AttribResult with Mut, Div, Panic` |
+
+Public-health impact from a cohort 2×2: risk difference (AR), risk ratio, the
+attributable fraction in the exposed `AFE=(RR−1)/RR`, and the population
+attributable fraction `PAF=(I−Rᵤ)/I`. Validated: Rₑ=0.2, Rᵤ=0.1 → AR=0.1, RR=2,
+AFE=0.5, PAF=0.333.
+
+### `stats::standardized_rate` — standardised rates
+
+| Function | Signature |
+|---|---|
+| `direct_standardized` | `pub fn direct_standardized(events: &[f64; 64], pop: &[f64; 64], std_weight: &[f64; 64], k: i32) -> DSRResult with Mut, Div, Panic` |
+| `smr` | `pub fn smr(events: &[f64; 64], expected: &[f64; 64], k: i32) -> SMRResult with Mut, Div, Panic` |
+
+Age/stratum standardisation to make populations comparable: the directly
+standardised rate `DSR=Σwᵢrᵢ/Σwᵢ` with a Poisson SE, and the indirect
+standardised ratio `SMR=Σobserved/Σexpected`. Validated: stratum rates 0.01/0.03
+weighted 0.4/0.6 → DSR=0.022; observed 40 / expected 50 → SMR=0.8.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1243,6 +1278,9 @@ use stats::bootstrap::{BootResult, bootstrap_mean}
 use stats::perm_test::{PermResult, perm_test}
 use stats::bootstrap_diff::{BootDiffResult, bootstrap_diff}
 use stats::bootstrap_corr::{BootCorrResult, bootstrap_corr}
+use stats::mantel_haenszel::{MHResult, mantel_haenszel}
+use stats::attributable::{AttribResult, attributable}
+use stats::standardized_rate::{DSRResult, SMRResult, direct_standardized, smr}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

@@ -91,6 +91,9 @@ MODULES=(
   stdlib/stats/perm_test.sio
   stdlib/stats/bootstrap_diff.sio
   stdlib/stats/bootstrap_corr.sio
+  stdlib/stats/mantel_haenszel.sio
+  stdlib/stats/attributable.sio
+  stdlib/stats/standardized_rate.sio
 )
 
 fail=0
