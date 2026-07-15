@@ -13,7 +13,9 @@ fourteen families:
 - **Descriptives** — the classical means (arithmetic / geometric / harmonic /
   RMS), dispersion (variance / sd / range / CV / SEM), and shape (skewness /
   kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
-  the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
+  the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
+  the data-transformation primitives (z-scores, min-max & robust scaling, rank
+  transform).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
   Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
   (Wald-Wolfowitz runs, Durbin-Watson,
@@ -1530,6 +1532,39 @@ McNemar's test generalised to a k×k matched table:
 `χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ)`, df k(k−1)/2. Validated: a 3×3 table → χ²=4.667,
 df=3; symmetric → χ²=0; k=2 reduces exactly to McNemar (χ²=4.545).
 
+### `stats::zscore` — standardisation & percentile rank
+
+| Function | Signature |
+|---|---|
+| `zscore` | `pub fn zscore(x: &[f64; 256], n: i32, out_z: &![f64; 256]) -> ZResult with Mut, Div, Panic` |
+| `percentile_rank` | `pub fn percentile_rank(x: &[f64; 256], n: i32, value: f64) -> f64 with Mut, Div, Panic` |
+
+Standardise to zero mean / unit sd (fills `out_z`), and locate a value in the
+sample by its mid-rank percentile. Validated: {2,4,4,4,5,5,7,9} → z₀=−1.403,
+z₇=1.871, Σz=0; percentile rank of 5 → 62.5.
+
+### `stats::normalize` — feature scaling
+
+| Function | Signature |
+|---|---|
+| `minmax` | `pub fn minmax(x: &[f64; 256], n: i32, out: &![f64; 256]) -> MinMaxResult with Mut, Div, Panic` |
+| `robust_scale` | `pub fn robust_scale(x: &[f64; 256], n: i32, out: &![f64; 256]) -> RobustResult with Mut, Div, Panic` |
+
+The two non-standardising scalers: min-max to [0,1], and robust scaling by
+median & IQR (outlier-resistant). Validated: {1..5} → min-max {0,.25,.5,.75,1};
+robust → median 3, IQR 2, centred.
+
+### `stats::rank_transform` — rank transform with mid-ranks
+
+| Function | Signature |
+|---|---|
+| `rank_transform` | `pub fn rank_transform(x: &[f64; 256], n: i32, out_r: &![f64; 256]) -> RankResult with Mut, Div, Panic` |
+
+Replaces each value by its 1-based rank (ties → average), the primitive under
+every rank-based method, plus the tie-correction `Σ(tᵢ³−tᵢ)`. Validated:
+{3,1,4,1,5} → ranks {3,1.5,4,1.5,5}, one tie group, correction 6; distinct data →
+1..n.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1649,6 +1684,9 @@ use stats::uncertainty_coefficient::{UResult, uncertainty_coefficient}
 use stats::anderson_darling::{ADResult, anderson_darling}
 use stats::cramer_von_mises::{CvMResult, cramer_von_mises}
 use stats::bowker::{BowkerResult, bowker}
+use stats::zscore::{ZResult, zscore, percentile_rank}
+use stats::normalize::{MinMaxResult, RobustResult, minmax, robust_scale}
+use stats::rank_transform::{RankResult, rank_transform}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
