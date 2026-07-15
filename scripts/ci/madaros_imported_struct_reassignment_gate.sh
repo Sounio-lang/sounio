@@ -36,4 +36,4 @@ if [[ "$rc" -ne 42 ]]; then
   fail "witness returned rc=$rc instead of 42"
 fi
 
-echo '[imported-struct-reassignment] receipt initial_let=PASS same_type_reassign=PASS replacement_type_reassign=PASS noncall_scalar=PASS nominal_fallback=FORBIDDEN'
+echo '[imported-struct-reassignment] receipt initial_let=PASS same_type_reassign=PASS replacement_type_reassign=PASS noncall_scalar=PASS nominal_fallback=FORBIDDEN legacy_raw_field_extension=FINAL'

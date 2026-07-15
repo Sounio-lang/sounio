@@ -1489,8 +1489,6 @@ fn ir_module_dump_fn_body(module: &IrModule, fn_index: i64, label: string) with 
     print_int(fn_index)
     print(" name=")
     print(str_from_bytes((*module).functions[fn_index as usize].name.buf, (*module).functions[fn_index as usize].name.len))
-    print(" return=")
-    print(str_from_bytes((*module).functions[fn_index as usize].return_struct_name.buf, (*module).functions[fn_index as usize].return_struct_name.len))
     print(" ic=")
     print_int((*module).functions[fn_index as usize].instr_count)
     print("\n")
@@ -4500,17 +4498,6 @@ fn module_frontend_lower_program_box_traced_with_externs(
         binding_count,
         &epistemic
     )
-    if str_eq(read_env("SOUNIO_DUMP_RAW_FIELD_BINDING"), "1") {
-        let raw_summary_idx = ir_merge_find_function_name_index(
-            &(*(*summary_result.summary).module),
-            make_name("ir_empty_function")
-        )
-        ir_module_dump_fn_body(
-            &(*(*summary_result.summary).module),
-            raw_summary_idx,
-            "raw_field_summary_ir_empty_function"
-        )
-    }
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -4529,17 +4516,6 @@ fn module_frontend_lower_program_box_traced_with_externs(
         &summary_val,
         &epistemic
     )
-    if str_eq(read_env("SOUNIO_DUMP_RAW_FIELD_BINDING"), "1") {
-        let raw_body_idx = ir_merge_find_function_name_index(
-            &(*body_result.module),
-            make_name("ir_empty_function")
-        )
-        ir_module_dump_fn_body(
-            &(*body_result.module),
-            raw_body_idx,
-            "raw_field_body_ir_empty_function"
-        )
-    }
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if module_frontend_lower_trace_enabled() {
         print("module_frontend_lower: body_fn_count ")
@@ -4591,17 +4567,6 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         binding_count,
         &epistemic
     )
-    if str_eq(read_env("SOUNIO_DUMP_RAW_FIELD_BINDING"), "1") {
-        let raw_summary_idx = ir_merge_find_function_name_index(
-            &(*(*summary_result.summary).module),
-            make_name("ir_empty_function")
-        )
-        ir_module_dump_fn_body(
-            &(*(*summary_result.summary).module),
-            raw_summary_idx,
-            "raw_field_summary_ir_empty_function"
-        )
-    }
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -4620,17 +4585,6 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         &summary_val,
         &epistemic
     )
-    if str_eq(read_env("SOUNIO_DUMP_RAW_FIELD_BINDING"), "1") {
-        let raw_body_idx = ir_merge_find_function_name_index(
-            &(*body_result.module),
-            make_name("ir_empty_function")
-        )
-        ir_module_dump_fn_body(
-            &(*body_result.module),
-            raw_body_idx,
-            "raw_field_body_ir_empty_function"
-        )
-    }
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if module_frontend_lower_trace_enabled() {
         print("module_frontend_lower: body_fn_count ")
@@ -4699,11 +4653,11 @@ fn module_frontend_populate_imported_programs(
 // requested name. The lowering preseed represents both function declarations
 // and global storage entries as IrFunction slots, so ItemFn is the exact AST
 // surface that owns their definition identity.
-fn module_frontend_program_defines_ir_function(
-    program: &Program,
+fn module_frontend_items_define_ir_function(
+    items: &Option<Box<ItemList>>,
     name: Name
 ) -> bool with Mut, Panic, Div {
-    var current = &(*program).items
+    var current = items
     while true {
         match *current {
             Some(list) => {
@@ -4773,13 +4727,13 @@ fn module_frontend_use_path_targets_file(
     str_eq(resolved, candidate_file_path)
 }
 
-fn module_frontend_program_explicitly_imports_from(
-    program: &Program,
+fn module_frontend_items_explicitly_import_from(
+    items: &Option<Box<ItemList>>,
     importing_file_path: string,
     candidate_file_path: string,
     name: Name
 ) -> bool with IO, Mut, Panic, Div, Alloc {
-    var current = &(*program).items
+    var current = items
     while true {
         match *current {
             Some(list) => {
@@ -4817,8 +4771,13 @@ fn module_frontend_function_defining_module(
     if self_index < 0 || self_index >= program_count {
         return IR_DEFINING_MODULE_UNKNOWN
     }
-    let self_program = (*programs)[self_index as usize]
-    if module_frontend_program_defines_ir_function(&self_program, name) {
+    // Program is a large recursive aggregate. Resolving through its item-list
+    // field directly avoids the bootstrap compiler's known by-value aggregate
+    // copy loss while preserving exact module identity.
+    if module_frontend_items_define_ir_function(
+        &(*programs)[self_index as usize].items,
+        name
+    ) {
         return self_index
     }
     if native_v2_builtin_id_for_name(name) != 0 {
@@ -4832,12 +4791,14 @@ fn module_frontend_function_defining_module(
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
-            let candidate = (*programs)[i as usize]
-            if module_frontend_program_defines_ir_function(&candidate, name) {
+            if module_frontend_items_define_ir_function(
+                &(*programs)[i as usize].items,
+                name
+            ) {
                 found_module = i
                 found_count = found_count + 1
-                if module_frontend_program_explicitly_imports_from(
-                    &self_program,
+                if module_frontend_items_explicitly_import_from(
+                    &(*programs)[self_index as usize].items,
                     (*file_paths)[self_index as usize],
                     (*file_paths)[i as usize],
                     name
@@ -5687,10 +5648,6 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: post_finalize\n")
         ir_module_dump_all_calls_diag(&merged_module)
-    }
-    if str_eq(read_env("SOUNIO_DUMP_RAW_FIELD_FN5"), "1") {
-        ir_module_dump_fn_body(&merged_module, 5, "raw_field_runtime_owner")
-        ir_module_dump_fn_body(&merged_module, 18, "raw_field_ir_empty_function")
     }
     let fn_count = merged_module.fn_count
     trace.last_stage = "done"
