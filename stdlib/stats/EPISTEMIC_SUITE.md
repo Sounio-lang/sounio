@@ -39,6 +39,8 @@ fourteen families:
   attributable risk / fractions, and directly / indirectly standardised rates.
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
+- **Time series** — simple and Holt (linear-trend) exponential smoothing and an
+  AR(1) fit with one-step forecasts, beside the serial-dependence diagnostics.
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
   MINSTD generator (exact f64), the nonparametric bootstrap for the mean, the
   two-sample difference and correlation bootstraps, and a permutation test.
@@ -1192,6 +1194,36 @@ standardised rate `DSR=Σwᵢrᵢ/Σwᵢ` with a Poisson SE, and the indirect
 standardised ratio `SMR=Σobserved/Σexpected`. Validated: stratum rates 0.01/0.03
 weighted 0.4/0.6 → DSR=0.022; observed 40 / expected 50 → SMR=0.8.
 
+### `stats::exp_smoothing` — simple exponential smoothing
+
+| Function | Signature |
+|---|---|
+| `exp_smoothing` | `pub fn exp_smoothing(x: &[f64; 256], n: i32, alpha: f64) -> SESResult with Mut, Div, Panic` |
+
+The one-parameter level smoother / one-step forecaster: `sₜ=α·xₜ+(1−α)sₜ₋₁`, with
+the fit SSE from the one-step errors. Validated: {10,12,14,16}, α=0.5 →
+level=14.25, SSE=25.25; α=1 → tracks last value; constant → SSE=0.
+
+### `stats::holt` — Holt's linear-trend smoothing
+
+| Function | Signature |
+|---|---|
+| `holt` | `pub fn holt(x: &[f64; 256], n: i32, alpha: f64, beta: f64, h: i32) -> HoltResult with Mut, Div, Panic` |
+
+Double exponential smoothing with a level and trend component and an h-step
+forecast. Validated: linear {2,4,6,8}, α=β=0.5 → level 8, trend 2, forecast(2)=12,
+SSE=0; a perfect line is captured exactly for any α,β.
+
+### `stats::ar1` — first-order autoregressive model
+
+| Function | Signature |
+|---|---|
+| `ar1` | `pub fn ar1(x: &[f64; 256], n: i32) -> AR1Result with Mut, Div, Panic` |
+
+The AR(1) fit by the lag-1 autocorrelation (Yule-Walker), with the intercept
+`c=μ(1−φ)`, the one-step forecast and residual sd. Validated: {1..5} → φ=0.4,
+μ=3, intercept 1.8, forecast 3.8; a ramp → φ>0.6; alternating → φ<0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1281,6 +1313,9 @@ use stats::bootstrap_corr::{BootCorrResult, bootstrap_corr}
 use stats::mantel_haenszel::{MHResult, mantel_haenszel}
 use stats::attributable::{AttribResult, attributable}
 use stats::standardized_rate::{DSRResult, SMRResult, direct_standardized, smr}
+use stats::exp_smoothing::{SESResult, exp_smoothing}
+use stats::holt::{HoltResult, holt}
+use stats::ar1::{AR1Result, ar1}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
