@@ -42,6 +42,25 @@ const renderSpecs = [
       'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/coverage_crystal_atelier.sio > coverage_crystal_atelier.ppm',
   },
   {
+    example: 'examples/render/rapamycin_material_study.sio',
+    sourceAsset: 'examples/render/assets/rapamycin-material-study.png',
+    assetFile: 'rapamycin-material-study.png',
+    title: 'Idealized rapamycin scaffold',
+    description:
+      'Deterministic ball-and-stick receipt for the stdlib coarse 44-site, 45-bond scaffold; not a crystallographic reconstruction.',
+    width: 480,
+    height: 300,
+    engine: 'lean_single',
+    sha256: '8510ca96178aa1af29f2aefdbab973dd408a51a334e12d550c423fa12c0526ac',
+    renderSha256: '289767f0c6bfa6db548d802650da7de9cc30b0f7395d3d47e8ee47841a8cacdc',
+    verification: 'byte-identical output across two independent runs',
+    gate: 'tests/run-pass/viz_molecule_headless_receipt.sio',
+    receipt: 'VIZ_MOLECULE_HEADLESS_RECEIPT_PASS',
+    sourceRef: 'website/living-observatory-20260713',
+    command:
+      'SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/rapamycin_material_study.sio > rapamycin_material_study.ppm',
+  },
+  {
     example: 'examples/render/triangle_basic.sio',
     assetFile: 'triangle-basic.svg',
     title: 'Triangle raster render',
