@@ -3023,3 +3023,17 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
 - Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
+
+## 2026-07-16 — math-review follow-up: stats::huber_location, stats::siegel_regression, stats::yuen (PR #1009)
+- Target: `stdlib/stats/huber_location.sio`, `stdlib/stats/siegel_regression.sio`, and `stdlib/stats/yuen.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED**. It accepted the Huber IRLS update and MAD normal-consistency scale, Siegel's repeated-median slope/intercept definition, Yuen's trimmed/Winsorized variance, Welch-style degrees of freedom and t statistic, the incomplete-beta two-tail identity, and every documented test value.
+- Independent-provider fallback: Z.AI GLM-5.2 produced no response before the 65-second timeout (`/tmp/llm-offload-9WIwRq/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-3Af1we/`). Re-review with Z.AI remains pending when the provider is responsive.
+- Scope: audit-only follow-up; no statistical implementation changed. The pre-existing PR CI was fully green before this receipt update. Local hygiene: `git diff --check` -> PASS.
+
+## 2026-07-16 — math-review: stats::huber_location, stats::siegel_regression, stats::yuen
+- Files (all new): `stdlib/stats/huber_location.sio` (Huber M-estimator of location, MAD-scaled reweighting), `stdlib/stats/siegel_regression.sio` (Siegel repeated-median regression, 50% breakdown), `stdlib/stats/yuen.sio` (Yuen trimmed-means t-test). Provider: xAI/Grok 4.3.
+- huber_location = **PASS**: MAD scale 1.4826, weight 1 if |u|≤c else c/|u|, iterated location; symmetric {1..5}→3, outlier {1,2,3,4,100}→3 (Python-verified, fully robust vs mean 22).
+- siegel_regression = **PASS**: b=medianᵢ(median_{j≠i} slope), intercept=median residual; perfect→(2,1), outlier at (5,100)→(2,1). Two big buffers (point_med + slopes) live across the median helper call — ran clean under lean_single (no #852).
+- yuen = **PASS**: Winsorized variance s²_w=Σ(v−wmean)²/(n−1), d=(n−1)s²_w/(h(h−1)), t=(x̄_t1−x̄_t2)/√(d1+d2), Welch-style df; x={1..10}/y={3..11,50}/γ=0.2→tm 5.5/7.5, t=−1.188182, df=10 (Python-cross-checked).
+- Theme: robust M-estimation — robust location (Huber), robust regression (Siegel, higher breakdown than Theil-Sen), robust two-sample test (Yuen). All derivable / Python-anchored, #852-safe. Suite runner: 133 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-pxPazF/`, `/tmp/llm-offload-jQ7cVi/`, `/tmp/llm-offload-3CzPbg/`.
