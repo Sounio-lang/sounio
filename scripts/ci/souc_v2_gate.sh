@@ -152,6 +152,11 @@ fn main() -> i64 with IO { let p = 3.14 + 2.0; print_int(f64_to_i64(p)); print("
 EOF
 run_test "f64_infix" /tmp/gate_t1.sio "5"
 
+# Test: epistemic::propagate transcendental calls shadow the f64 builtins.
+run_test "propagate_epistemic_exp" tests/run-pass/propagate_epistemic_exp.sio "PROPAGATE_EPISTEMIC_EXP_OK"
+run_test "propagate_epistemic_ln" tests/run-pass/propagate_epistemic_ln.sio "PROPAGATE_EPISTEMIC_LN_OK"
+run_test "propagate_epistemic_pow" tests/run-pass/propagate_epistemic_pow.sio "PROPAGATE_EPISTEMIC_POW_OK"
+
 # Test: struct + impl method
 cat > /tmp/gate_t2.sio << 'EOF'
 struct P { x: i64, y: i64 }
