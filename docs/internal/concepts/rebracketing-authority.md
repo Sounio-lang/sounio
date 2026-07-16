@@ -90,6 +90,12 @@ path. This observation motivates compact transport; it is not a general theorem
 about all Sounio backends. Their exact counts are gate tripwires: record growth
 must force an explicit review rather than silently changing the transport shape.
 
+Certificate refusal is encoded inside the private two-word value: an invalid
+certificate has `inner_const_def_index = -1` and a negative block-start word
+whose magnitude is the refusal reason. This avoids transporting a second
+heterogeneous three-tuple through the current bootstrap. The private issuer
+asserts nonnegative indices, so a refusal-shaped value cannot become authority.
+
 The 256-register admission limit is named in the implementation and mirrors the
 existing fixed register-indexed tables in cleanup passes A2/B. It is a boundary
 of this pass, not an asserted global compiler limit.

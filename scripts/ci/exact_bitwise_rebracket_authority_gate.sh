@@ -92,6 +92,9 @@ require_text 'ocp_rebracket_function_has_complete_use_model' "$OPT"
 require_text 'exact_bitwise_use_model_ok' "$OPT"
 require_text 'ocp_rebracket_block_start_index' "$OPT"
 require_text 'ocp_certify_exact_bitwise_same_linear_region_use' "$OPT"
+require_text 'ocp_rebracket_flow_certificate_failure' "$OPT"
+require_text 'ocp_rebracket_flow_certificate_reason' "$OPT"
+reject_text 'certified\.2|current_flow\.2|stale_certificate\.2' "$OPT"
 require_text 'instr\.arg_count == 0' "$OPT"
 require_text 'ocp_rebracket_has_no_call_args\(instr\.call_args\)' "$OPT"
 require_text 'ocp_rebracket_has_float_marker_before' "$OPT"
@@ -128,7 +131,8 @@ module_receipt_fields="$(count_struct_i64_fields OcpCleanupModuleReceipt)"
 [[ "$receipt_fields" == 5 ]] || fail "probe receipt must remain 5 i64 fields, got $receipt_fields"
 [[ "$module_receipt_fields" == 8 ]] || fail "module cleanup receipt must remain 8 i64 fields, got $module_receipt_fields"
 # These compact record counts are compatibility tripwires, not inferred ABIs:
-# changing one must force an explicit gate review instead of passing silently.
+# changing one, or reintroducing a heterogeneous certificate-result tuple, must
+# force an explicit gate review instead of passing silently.
 
 combine_slice="$(awk '
   /^fn ocp_rebracket_combine\(/ { inside=1 }
