@@ -1,0 +1,253 @@
+//@ run-pass
+
+// Executable semantic oracle for the first compiler authority slice.
+//
+// The current Madaros artifact cannot reliably transport or mutate the large
+// aggregate used by IrFunction. This witness therefore checks the scalar
+// authority protocol only. The production optimizer integration is pinned by
+// a separate pre-Foundry gate and still requires a current-source Foundry run.
+
+struct KAuthority {
+    scope_left: i64,
+    scope_right: i64,
+    occurrence_id: i64,
+    operator_key: i64,
+    pass_epoch: i64,
+    source_tree_token: i64,
+}
+
+struct KAudit {
+    applications: i64,
+    refusals: i64,
+    reason: i64,
+    combined: i64,
+    source_tree_token: i64,
+    target_tree_token: i64,
+}
+
+fn k_is_exact_bitwise_op(op: i64) -> bool {
+    op == 3 || op == 4 || op == 5
+}
+
+fn k_combine(op: i64, a: i64, b: i64) -> (bool, i64) {
+    if op == 3 { return (true, a & b) }
+    if op == 4 { return (true, a | b) }
+    if op == 5 { return (true, a ^ b) }
+    (false, 0)
+}
+
+fn k_scope_hash(left: i64, right: i64) -> i64 {
+    left * 33 + right
+}
+
+fn k_empty_authority(reason: i64) -> KAuthority {
+    KAuthority {
+        scope_left: 0,
+        scope_right: 0,
+        occurrence_id: 0 - reason,
+        operator_key: 0,
+        pass_epoch: 0,
+        source_tree_token: 0,
+    }
+}
+
+fn k_refusal(reason: i64, source_tree_token: i64) -> KAudit {
+    KAudit {
+        applications: 0,
+        refusals: 1,
+        reason: reason,
+        combined: 0,
+        source_tree_token: source_tree_token,
+        target_tree_token: source_tree_token,
+    }
+}
+
+fn k_issue(
+    scope_left: i64,
+    scope_right: i64,
+    occurrence_id: i64,
+    inner_op: i64,
+    outer_op: i64,
+    representation_bits: i64,
+    ordered_tree: bool,
+    float_marked: bool,
+    outer_constant_uses: i64,
+    pass_epoch: i64,
+    source_tree_token: i64,
+) -> KAuthority {
+    if occurrence_id < 0 { return k_empty_authority(1) }
+    if !k_is_exact_bitwise_op(inner_op) || inner_op != outer_op {
+        return k_empty_authority(2)
+    }
+    if representation_bits != 64 { return k_empty_authority(3) }
+    if !ordered_tree { return k_empty_authority(4) }
+    if float_marked { return k_empty_authority(5) }
+    if outer_constant_uses != 1 { return k_empty_authority(6) }
+    if pass_epoch < 0 { return k_empty_authority(7) }
+    KAuthority {
+        scope_left: scope_left,
+        scope_right: scope_right,
+        occurrence_id: occurrence_id,
+        operator_key: inner_op,
+        pass_epoch: pass_epoch,
+        source_tree_token: source_tree_token,
+    }
+}
+
+fn k_apply(
+    authority: KAuthority,
+    scope_left: i64,
+    scope_right: i64,
+    occurrence_id: i64,
+    inner_op: i64,
+    outer_op: i64,
+    representation_bits: i64,
+    ordered_tree: bool,
+    float_marked: bool,
+    outer_constant_uses: i64,
+    pass_epoch: i64,
+    source_tree_token: i64,
+    c1: i64,
+    c2: i64,
+) -> KAudit {
+    if authority.operator_key == 0 {
+        return k_refusal(0 - authority.occurrence_id, source_tree_token)
+    }
+    if authority.scope_left != scope_left || authority.scope_right != scope_right ||
+        authority.occurrence_id != occurrence_id || authority.pass_epoch != pass_epoch ||
+        authority.source_tree_token != source_tree_token {
+        return k_refusal(8, source_tree_token)
+    }
+    if authority.operator_key != inner_op || inner_op != outer_op ||
+        !k_is_exact_bitwise_op(inner_op) || representation_bits != 64 ||
+        !ordered_tree || float_marked || outer_constant_uses != 1 {
+        return k_refusal(9, source_tree_token)
+    }
+    let combined = k_combine(inner_op, c1, c2)
+    if !combined.0 { return k_refusal(10, source_tree_token) }
+    let combined_value = combined.1
+    KAudit {
+        applications: 1,
+        refusals: 0,
+        reason: 0,
+        combined: combined_value,
+        source_tree_token: source_tree_token,
+        target_tree_token: source_tree_token ^ combined_value ^ 104729,
+    }
+}
+
+fn k_try(
+    scope_left: i64,
+    scope_right: i64,
+    occurrence_id: i64,
+    inner_op: i64,
+    outer_op: i64,
+    representation_bits: i64,
+    ordered_tree: bool,
+    float_marked: bool,
+    outer_constant_uses: i64,
+    pass_epoch: i64,
+    source_tree_token: i64,
+    c1: i64,
+    c2: i64,
+) -> KAudit {
+    let authority = k_issue(
+        scope_left,
+        scope_right,
+        occurrence_id,
+        inner_op,
+        outer_op,
+        representation_bits,
+        ordered_tree,
+        float_marked,
+        outer_constant_uses,
+        pass_epoch,
+        source_tree_token,
+    )
+    k_apply(
+        authority,
+        scope_left,
+        scope_right,
+        occurrence_id,
+        inner_op,
+        outer_op,
+        representation_bits,
+        ordered_tree,
+        float_marked,
+        outer_constant_uses,
+        pass_epoch,
+        source_tree_token,
+        c1,
+        c2,
+    )
+}
+
+fn main() -> i64 with IO, Panic {
+    var applications: i64 = 0
+    var unchanged_refusals: i64 = 0
+
+    let and_authority = k_issue(7, 11, 1, 3, 3, 64, true, false, 1, 1, 1001)
+    let and_audit = k_apply(and_authority, 7, 11, 1, 3, 3, 64, true, false, 1, 1, 1001, 255, 15)
+    assert(and_audit.applications == 1 && and_audit.combined == 15)
+    applications = applications + and_audit.applications
+
+    let replay = k_apply(and_authority, 7, 11, 1, 3, 3, 64, true, false, 1, 1,
+        and_audit.target_tree_token, 255, 15)
+    if replay.applications == 0 && replay.target_tree_token == and_audit.target_tree_token {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    let or_audit = k_try(7, 11, 1, 4, 4, 64, true, false, 1, 1, 1002, 128, 64)
+    assert(or_audit.applications == 1 && or_audit.combined == 192)
+    applications = applications + or_audit.applications
+
+    let occurrence_one = k_issue(7, 11, 1, 5, 5, 64, true, false, 1, 1, 1003)
+    let wrong_occurrence = k_apply(occurrence_one, 7, 11, 2, 5, 5, 64, true,
+        false, 1, 1, 1003, 12, 10)
+    if wrong_occurrence.applications == 0 && wrong_occurrence.target_tree_token == 1003 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+    let xor_audit = k_try(7, 11, 2, 5, 5, 64, true, false, 1, 1, 1003, 12, 10)
+    assert(xor_audit.applications == 1 && xor_audit.combined == 6)
+    applications = applications + xor_audit.applications
+
+    let swapped = k_try(7, 11, 3, 4, 4, 64, false, false, 1, 1, 1004, 128, 64)
+    if swapped.applications == 0 && swapped.target_tree_token == 1004 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    let arithmetic = k_try(7, 11, 4, 1, 1, 64, true, false, 1, 1, 1005, 3, 5)
+    if arithmetic.applications == 0 && arithmetic.target_tree_token == 1005 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    let float_marked = k_try(7, 11, 5, 3, 3, 64, true, true, 1, 1, 1006, 255, 15)
+    if float_marked.applications == 0 && float_marked.target_tree_token == 1006 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    let shared_constant = k_try(7, 11, 6, 4, 4, 64, true, false, 2, 1, 1007, 128, 64)
+    if shared_constant.applications == 0 && shared_constant.target_tree_token == 1007 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    let stale_authority = k_issue(7, 11, 7, 5, 5, 64, true, false, 1, 1, 1008)
+    let stale = k_apply(stale_authority, 7, 11, 7, 5, 5, 64, true, false, 1, 2,
+        1008, 5, 3)
+    if stale.applications == 0 && stale.target_tree_token == 1008 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    assert(k_scope_hash(0, 33) == k_scope_hash(1, 0))
+    let collision_authority = k_issue(0, 33, 8, 3, 3, 64, true, false, 1, 1, 1009)
+    let collision = k_apply(collision_authority, 1, 0, 8, 3, 3, 64, true, false, 1,
+        1, 1009, 255, 15)
+    if collision.applications == 0 && collision.target_tree_token == 1009 {
+        unchanged_refusals = unchanged_refusals + 1
+    }
+
+    assert(applications == 3)
+    assert(unchanged_refusals == 8)
+    println("[rebracket-kernel] PASS cases=11 apps=3 refusals=8 replay=0 float=0 shared=0 collision=0")
+    0
+}
