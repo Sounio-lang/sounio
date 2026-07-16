@@ -2999,3 +2999,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - weighted_quantile = **PASS**: smallest v with Σ_{x≤v}w ≥ p·Σw, sort-free O(n²); equal→median 2, heavy weight→median 4, quartiles verified.
 - Theme: weighted & grouped estimators — support for survey weights / frequency tables / meta-analytic precisions, absent until now. All derivable, #852-safe. Suite runner: 121 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-n3PQpI/`, `/tmp/llm-offload-lcsGkl/`, `/tmp/llm-offload-anzkI3/`.
+
+## 2026-07-15 — math-review: stats::km_greenwood, stats::conditional_survival, stats::cumulative_incidence
+- Files (all new): `stdlib/stats/km_greenwood.sio` (KM survival + Greenwood SE + complementary-log-log CI), `stdlib/stats/conditional_survival.sio` (S(t1|t0)=Ŝ(t1)/Ŝ(t0)), `stdlib/stats/cumulative_incidence.sio` (competing-risks CIF). Provider: xAI/Grok 4.3.
+- km_greenwood = **PASS**: Var(Ŝ)=Ŝ²Σd/(n(n−d)), log-log CI Ŝ^exp(±z·σ_L) keeping bounds in [0,1]; times 1–5 query 3→Ŝ=0.4, SE=0.2191 verified.
+- conditional_survival = **PASS**: Ŝ(t1)/Ŝ(t0) step-function values, S(t|t)=1, t0=0→unconditional; S(4|2)=0.333 verified.
+- cumulative_incidence = **PASS**: Aalen-Johansen/K-P CIF₁=ΣŜ(t_{j-1})d1/n with all-cause survival update; competing-event table→CIF₁(4)=0.75 (not 1), no-competing→1−KM verified.
+- Theme: survival extensions — the Greenwood CI the bare km lacked, conditional survival, and competing-risks CIF. All sort-free walks, derivable, #852-safe. Suite runner: 124 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-840gyX/`, `/tmp/llm-offload-LJbaM2/`, `/tmp/llm-offload-YWV9jA/`.
