@@ -3045,3 +3045,15 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Independent-provider fallback: Z.AI GLM-5.2 timed out after more than 120 seconds (`/tmp/llm-offload-mxTIVr/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-83btKx/`); DeepSeek returned `Insufficient Balance` (`/tmp/llm-offload-xlyMGm/`); Groq returned `Invalid API Key` (`/tmp/llm-offload-sFR2Ue/`). Re-review with Z.AI remains pending when that provider is responsive.
 - Scope boundary: Grok also marked the pre-existing `calibrate` slope uncertainty and `mm_rate` rough uncertainty as overreach. Neither is changed by this PR or used to support its pH regression claim; they remain separate investigation items rather than silently being folded into this numerical-fix patch.
 - Gate: `bash scripts/verticals_rng_iter_acids_gate.sh` -> `VERTICALS_RNG_ITER_ACIDS_GATE_OK`; `git diff --check` -> PASS.
+
+## 2026-07-16 — post-merge math-review: tensor-core HMMA Convention X (PR #1016)
+- Target: merged diff `827852d47^..827852d47` over `self-hosted/gpu/kernels/hmma_signs.sio`, `tests/gpu/test_hmma_octonion.sio`, `docs/gpu/oct_wmma_validate.cu`, and `scripts/ci/native_v2_epistemic_accel_spine_gate.sh`.
+- xAI/Grok 4.3 = **PASS**: accepted the bilinear left-multiply representation `L(a)[k][j] = sigma(k xor j, j) * a[k xor j]`, the recursive Convention X sign, the 8x8-to-16x16 WMMA construction, and the `e1*e2` discriminator. Raw: `/tmp/llm-offload-eOI06E/grok.md`.
+- Independent review is incomplete: default Z.AI GLM-5.2 ran for 125 s and timed out with an empty response; DeepSeek returned `Insufficient Balance`; Gemini returned OpenRouter HTTP 402 insufficient credits. Raw: `/tmp/llm-offload-eOI06E/`, `/tmp/llm-offload-tVR4tH/`, `/tmp/llm-offload-GVFRRL/`.
+- Local source-level witness: `SOUNIO_TEST_JOBS=1 bash scripts/run_sio_test_suite.sh --filter-exact test_hmma_octonion.sio --verbose --jobs 1` = **PASS** (1/1) under the canonical `bin/souc` path.
+- Outcome: **PASS_SINGLE_PROVIDER_DEGRADED** for the algebraic review only; no provider or local test here establishes the documented GB10 execution. Hardware evidence is tracked separately in #1022; independent math re-review remains pending when a second provider is available.
+
+## 2026-07-16 — hardware evidence update: tensor-core HMMA Convention X
+- Manual GB10 witness: `docs/gpu/oct_wmma_validate.cu` at commit `8b5e07050` (SHA-256 `5bd22146ac869c92854b0821418d742e43141c1a3b4a137583325311b21e913f`) compiled with CUDA 13.0 for `sm_121` and ran on `spark-8e54` (`NVIDIA GB10`, driver `580.159.03`, compute capability `12.1`).
+- Runtime result: `e1*e2` produced component 3 = 1.00 and component 4 = 0.00; batch result was `0/128` mismatches with `maxerr=0.000`; process printed `PASS: WMMA octonion multiply is Convention X on GB10`.
+- Retained receipt: `docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md`. Scope remains manual hardware evidence only: the GitHub `validate-on-gpu` job is still conditional/skipped, so workflow automation and artifact retention remain tracked in #1022.
