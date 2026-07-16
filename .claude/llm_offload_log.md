@@ -2913,3 +2913,173 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - v11 SHA-256 is `02cce2ae8a2c517b4119ccc9c3e16ae556b4eb561cc626a7fc9794a8ffe82498` (98,547,134 bytes). Its raw `SOUNIO_BOUNDARY_CLOSURE_V1` report for `examples/projects/hello_pkg/src/main.sio` is complete and contains `main.sio`, `greet.sio`, and the exact import edge; `--check` consumes the same closure and returns `verdict=0`.
 - Final gates: `SOUNIO_SCIENCE_BOUNDARY_GATE_PASS` with 87 assertions, `PROJECT_SPINE_PASS`, `SOUNIO_PACKAGE_SUPPORT_GATE_PASS`, exact `hello.sio` suite Pass 1 / Fail 0, and both public/raw project checks. The Concept-ID is promoted from `hypothesis` to `executable`; R3 extraction, clinical authority, remote signatures, attested execution, and independent replay remain excluded.
 - Review disposition remains **FIXED-AFTER-REVIEW / PARTIAL-PROVIDER-AVAILABILITY**. xAI and Z.AI reviews informed the implementation; DeepSeek and Gemini billing failures remain unavailable and are not reclassified as passes.
+## 2026-07-15 — math-review housekeeping: grouped stdlib run-proof batches (#941–#967)
+The following math-reviews were run (xAI/Grok 4.3, all **PASS**) during grouped run-proof PRs whose branches
+were kept lean (tests+gate only) for clean merges; recorded here in batch for offload-policy compliance.
+Each verifies stdlib module outputs against known/first-principles values (gates under scripts/*_gate.sh).
+
+- **#941** special::beta (beta(2,3)=1/12, beta(0.5,0.5)=π, ibeta bounds + I_{0.5}(2,2)=0.5 + ibeta_inv round-trip), math::hyperbolic (cosh/sinh(0,1), cosh²−sinh²=1, arccosh round-trip), math::rational (exact fractions via rat_cmp). PASS.
+- **#948** encoding::hex (0xff10→"ff10"/"FF10", decode round-trip), math::dd64 (double-double: recovers 1e-20, √2²=2 to 1e-25), math::combinatorics_perm (n! + next_permutation lexicographic). PASS.
+- **#950** autodiff::epistemic_dual (d/dx x²=2x, product rule, d/dx eˣ=1), collections::vec (push/pop/sum/mean/reverse), collections::stack (LIFO). PASS.
+- **#954** collections::hashmap (insert/get/count/contains/remove), core::result (IntResult/FloatResult ok/err/unwrap), math::qd128 (quad-double ~63-digit: recovers 1e-40, √2²=2 to 1e-28; lean_single). PASS.
+- **#957** viz::colormap (viridis knots (68,1,84)/(35,144,138)/(253,231,37) = matplotlib, [0,255]), geo::pure::types (Euclidean 3-4-5=5, 3D=3, triangle area=6), queue::pure::types (FIFO). PASS.
+- **#963** data::json (serializer output-conformance, RFC-8259), data::csv (header+row), math::approx (Newton sqrt, Taylor sin). PASS.
+- **#967** epistemic::covariance (std, correlation_coefficient=0.5/perfect=1), cybernetic::variety (Ashby: variety=log₂ states, requisite + deficit), audio::pure::types (buffer; lean_single). PASS.
+
+Evidence boundary: each verifies numeric/serialization/structural correctness of the named module's public
+API against known values; no source or compiler edits. Compiler bugs surfaced during the campaign are
+tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/.
+## 2026-07-15 — math-review: stats::process_capability, stats::control_chart, stats::cusum
+- Files (all new): `stdlib/stats/process_capability.sio` (Cp/Cpk/Cpu/Cpl), `stdlib/stats/control_chart.sio` (Shewhart individuals-moving-range I-MR chart), `stdlib/stats/cusum.sio` (tabular CUSUM). Provider: xAI/Grok 4.3.
+- process_capability = **PASS**: Cp=(USL−LSL)/6σ, Cpk=min(Cpu,Cpl); centred→1.333, off-centre→Cpk=1 verified.
+- control_chart = **PASS**: σ̂=M̄R/d₂ (d₂=1.128), UCL/LCL=x̄±3σ̂ (=±2.66·M̄R), UCL_MR=D₄·M̄R (D₄=3.267); {10,12,11,13,12}→CL 11.6, UCL 15.589, UCL_MR 4.9005 verified.
+- cusum = **PASS**: tabular Page/Montgomery C⁺/C⁻ recurrences; upward-drift C⁺ sequence 0,0,0.5,2,4.5,8 signalling at index 4 verified step-by-step.
+- Theme: statistical process control (SPC) — the lab-QC / manufacturing quality toolkit (relevant to biomaterials production). All derivable, #852-safe. Suite runner: 91 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-M8a5V7/`, `/tmp/llm-offload-Di0Efu/`, `/tmp/llm-offload-HR4OMO/`.
+
+## 2026-07-15 — math-review: stats::effect_convert, stats::effect_from_test, stats::cles
+- Files (all new): `stdlib/stats/effect_convert.sio` (d↔r, d↔ln OR / OR, Hedges g), `stdlib/stats/effect_from_test.sio` (r/d from t, η²/ω² from F, d from means), `stdlib/stats/cles.sio` (common-language effect size Φ(d/√2) + non-parametric pair proportion). Provider: xAI/Grok 4.3.
+- effect_convert = **PASS**: r=d/√(d²+4), ln OR=d·π/√3, Hedges J=1−3/(4df−1) all correct; d=0.5→r=0.2425, OR=2.4766, g=0.4615; round-trips involutive. Note: test constant OR=2.476381 was a hand-exp error (correct 2.476632, cross-checked vs Python) — caught by the failing assertion, fixed.
+- effect_from_test = **PASS**: r=t/√(t²+df), d=t√(1/n₁+1/n₂), η²=df₁F/(df₁F+df₂), ω²=df₁(F−1)/(df₁F+df₂+1), pooled-sd d all match.
+- cles = **PASS**: Φ(d/√2) from X₁−X₂~N(dσ,2σ²), non-parametric pair count (ties ½) = ROC AUC; d=1→0.7603, interleaved→1/3 verified.
+- Theme: effect-size conversion & derivation — the meta-analysis/reporting glue complementing effect_size (which computes from data). All derivable, #852-safe. Suite runner: 94 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-mWCVbQ/`, `/tmp/llm-offload-pTAF9f/`, `/tmp/llm-offload-rYFbnF/`.
+
+## 2026-07-15 — math-review: stats::gwet_ac1, stats::krippendorff, stats::icc_forms
+- Files (all new): `stdlib/stats/gwet_ac1.sio` (Gwet's AC1 paradox-resistant agreement), `stdlib/stats/krippendorff.sio` (Krippendorff's alpha, nominal, complete data, m raters), `stdlib/stats/icc_forms.sio` (all six Shrout-Fleiss ICC forms via two-way ANOVA). Provider: xAI/Grok 4.3.
+- gwet_ac1 = **PASS**: AC1=(Pₐ−Pₑ)/(1−Pₑ), Pₑ=1/(k−1)Σπc(1−πc); paradox case [[8,1],[1,0]]→AC1=0.756 (κ negative) verified.
+- krippendorff = **PASS**: coincidence-matrix Dₒ/Dₑ, α=1−Dₒ/Dₑ; 4-unit/2-rater→α=0.125, perfect→1 verified.
+- icc_forms = **PASS**: ICC(1,1)/(2,1)/(3,1) + average-measure forms from ANOVA MSB/MSR/MSW/MSE; **validated against the published Shrout-Fleiss (1979) 6×4 example** → 0.166/0.290/0.715 (all three match).
+- Theme: chance-corrected agreement — extends cohen_kappa/fleiss_kappa/reliability with the general Krippendorff α, the paradox-resistant Gwet AC1, and the full ICC family. All derivable, #852-safe. Suite runner: 97 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-QU0X4f/`, `/tmp/llm-offload-DxNLA5/`, `/tmp/llm-offload-xj10Av/`.
+
+## 2026-07-15 — math-review: stats::poisson_gamma, stats::dirichlet_mult, stats::breslow_day (100-module milestone)
+- Files (all new): `stdlib/stats/poisson_gamma.sio` (Gamma-Poisson rate posterior + gamma-quantile credible interval), `stdlib/stats/dirichlet_mult.sio` (Dirichlet-Multinomial category posterior + Beta-marginal credible interval), `stdlib/stats/breslow_day.sio` (Breslow-Day OR-homogeneity test, companion to mantel_haenszel). Provider: xAI/Grok 4.3.
+- poisson_gamma = **PASS**: posterior Gamma(a0+C, b0+T), mean/var, credible interval via inverse-igamma bisection; Gamma(1,1)+10/5→mean 1.833, CI CDF-consistent (0.025/0.975). One TIGHTENABLE note on the inline exp series being crude — no accuracy claim affected, harmless (same inline-special-function property as the whole suite).
+- dirichlet_mult = **PASS**: Dirichlet(α+counts), Beta-marginal credible interval via inverse-ibeta; prior(1,1,1)+counts(10,20,70)→cat3 mean 71/103=0.689 verified.
+- breslow_day = **PASS**: common OR ψ=OR_MH, per-stratum fitted A via the quadratic with feasible-root selection, ψ=1 linear limit, χ²=Σ(a−A)²/V; homogeneous strata (both OR 2)→χ²≈0, heterogeneous (OR 4 vs 0.25)→large χ²/p<0.05 verified.
+- Theme: conjugate rate/category posteriors + the M-H homogeneity companion. **Milestone: the suite reaches 100 modules** + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Mn4tzk/`, `/tmp/llm-offload-zk00U0/`, `/tmp/llm-offload-MmHjA9/`.
+
+## 2026-07-15 — math-review: stats::leverage, stats::cooks_distance, stats::vif
+- Files (all new): `stdlib/stats/leverage.sio` (hat values for simple linear regression, out-array fill), `stdlib/stats/cooks_distance.sio` (Cook's distance per point, out-array fill), `stdlib/stats/vif.sio` (variance inflation factor). Provider: xAI/Grok 4.3.
+- leverage = **PASS**: hᵢ=1/n+(xᵢ−x̄)²/Sₓₓ, 4/n threshold; {1..5}→h={0.6,0.3,0.2,0.3,0.6}, Σh=2=p verified.
+- cooks_distance = **PASS**: Dᵢ=eᵢ²hᵢ/(p·s²(1−hᵢ)²); off-line point→D₅=2.25, D₁=0.5625, perfect fit→0 verified.
+- vif = **PASS**: VIF=1/(1−R²), tolerance=1−R²; r=0.8→2.778, R²=0.9→10 verified.
+- Theme: regression diagnostics — influence & multicollinearity checks complementing reg_bands/wls/logistic. leverage & cooks_distance use the out-array `&![f64;256]` fill pattern (works under lean_single). All derivable, #852-safe. Suite runner: 103 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-EUXpvg/`, `/tmp/llm-offload-VZ23Js/`, `/tmp/llm-offload-jJfuQo/`.
+
+## 2026-07-15 — math-review: stats::sample_size_survival, stats::sample_size_precision, stats::detectable_effect
+- Files (all new): `stdlib/stats/sample_size_survival.sio` (Schoenfeld log-rank events + enrolment), `stdlib/stats/sample_size_precision.sio` (CI-half-width n for mean/proportion), `stdlib/stats/detectable_effect.sio` (minimum detectable Cohen's d). All use an inline Acklam inverse-normal-CDF. Provider: xAI/Grok 4.3.
+- sample_size_survival = **PASS**: events=(z_{1−α/2}+z_{1−β})²/(πA·πB·(ln HR)²); HR=2/α=0.05/80% → 65.35 events, Acklam z's (1.959964, 0.841621) exact.
+- sample_size_precision = **PASS**: n=(z·σ/E)² and z²p(1−p)/E²; 97 and 385 verified.
+- detectable_effect = **PASS**: d=(z+zb)·√(2/n) two-sample, /√n one-sample; 0.495228 and 0.350198 verified.
+- Note: sample_size_precision initially failed `souc check` (a standalone `sp_ceil` helper mutated a var without `with Mut`); `souc run` silently produced NO output on the failed type-check. Fixed by adding `with Mut`. Reminder logged: treat empty `souc run` output as a possible type-check failure — run `souc check`.
+- Theme: sample-size & power planning for designs beyond t-test/proportions (survival, precision, MDE). All derivable, #852-safe. Suite runner: 106 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-LLvTHx/`, `/tmp/llm-offload-IEFtUA/`, `/tmp/llm-offload-G3JirB/`.
+
+## 2026-07-15 — math-review: stats::central_tendency, stats::dispersion, stats::shape
+- Files (all new): `stdlib/stats/central_tendency.sio` (arithmetic/geometric/harmonic/RMS means), `stdlib/stats/dispersion.sio` (variance/sd/range/CV/SEM), `stdlib/stats/shape.sio` (skewness g₁ + Fisher-Pearson G₁, excess kurtosis). Provider: xAI/Grok 4.3.
+- central_tendency = **PASS**: AM/GM/HM/RMS definitions, HM≤GM≤AM≤RMS ordering; {1,2,4}→2.333/2/1.714/2.646 verified.
+- dispersion = **PASS**: sample variance ÷(n−1), CV=sd/mean, SEM=sd/√n; {2,4,4,4,5,5,7,9}→var 4.571, sd 2.138, CV 0.4276, SEM 0.7559 verified.
+- shape = **PASS**: population g₁=m₃/m₂^1.5, excess kurtosis m₄/m₂²−3, Fisher-Pearson G₁=g₁√(n(n−1))/(n−2); g₁=0.6563, G₁=0.8185 verified.
+- Theme: classical descriptive statistics — completes the descriptive layer beside the robust module (median/IQR/MAD). All derivable, #852-safe. Suite runner: 109 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-Krlbft/`, `/tmp/llm-offload-gamSmC/`, `/tmp/llm-offload-iH6HMi/`.
+
+## 2026-07-15 — math-review: stats::gk_lambda, stats::gk_tau, stats::uncertainty_coefficient
+- Files (all new): `stdlib/stats/gk_lambda.sio` (Goodman-Kruskal λ, mode-prediction PRE), `stdlib/stats/gk_tau.sio` (Goodman-Kruskal τ, proportional-prediction PRE), `stdlib/stats/uncertainty_coefficient.sio` (Theil's U, entropy/mutual-information). Provider: xAI/Grok 4.3.
+- gk_lambda = **PASS**: λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+), both directions + symmetric; [[40,10],[5,45]]→0.7/0.667, mode-only→0, diagonal→1.
+- gk_tau = **PASS**: τ(R|C)=(Σ_cΣ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N); 0.4949 verified, independence→0, diagonal→1.
+- uncertainty_coefficient = **PASS**: H(R), I(R;C), U(R|C)=I/H(R); I=0.2754, U=0.3973 verified, independence→0, diagonal→1.
+- Theme: nominal association / PRE & entropy measures — complements chi2_independence (Cramér's V) for contingency tables. All derivable, #852-safe. Suite runner: 112 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rFk7TQ/`, `/tmp/llm-offload-nnqkco/`, `/tmp/llm-offload-wl6Rgd/`.
+
+## 2026-07-15 — math-review: stats::anderson_darling, stats::cramer_von_mises, stats::bowker
+- Files (all new): `stdlib/stats/anderson_darling.sio` (A-D normality, tail-weighted EDF test + Stephens p), `stdlib/stats/cramer_von_mises.sio` (CvM normality, evenly-weighted EDF), `stdlib/stats/bowker.sio` (Bowker k×k symmetry test, generalizes McNemar). Provider: xAI/Grok 4.3.
+- anderson_darling = **PASS**: A²=−n−(1/n)Σ(2i−1)[ln F_i+ln(1−F_{n+1−i})], A²*=A²(1+0.75/n+2.25/n²), Stephens 4-piece p; {1..5}→A²=0.1436 (Python-cross-checked), p>0.5.
+- cramer_von_mises = **PASS**: W²=1/(12n)+Σ(F_i−(2i−1)/(2n))²; {1..5}→W²=0.01934 (Python-cross-checked).
+- bowker = **PASS**: χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ), df=k(k−1)/2, k=2 → McNemar; 3×3→χ²=4.667, reduction→4.545 verified.
+- Theme: EDF normality tests (A-D, CvM — more tail-sensitive than the existing KS) + Bowker matched-table symmetry (beyond 2×2 McNemar). AD/CvM reference constants cross-checked with Python (verification, not retrofit — the formulas are explicit). All derivable, #852-safe. Suite runner: 115 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-rzwVOv/`, `/tmp/llm-offload-rJWBlD/`, `/tmp/llm-offload-iLeZZI/`.
+
+## 2026-07-15 — math-review: stats::zscore, stats::normalize, stats::rank_transform
+- Files (all new): `stdlib/stats/zscore.sio` (standardization + percentile rank), `stdlib/stats/normalize.sio` (min-max & robust scaling), `stdlib/stats/rank_transform.sio` (mid-rank transform + tie correction). Provider: xAI/Grok 4.3. All use the out-array `&![f64;256]` fill pattern.
+- zscore = **PASS**: z=(x−mean)/s (÷(n−1) sd), Σz=0 property, mid-rank percentile (#<+½#=)/n·100; {2,4,4,4,5,5,7,9}→z₀=−1.403, prank(5)=62.5 verified.
+- normalize = **PASS**: min-max (x−min)/(max−min), robust (x−median)/IQR (type-7 quantiles); {1..5}→[0..1] and median-centred verified.
+- rank_transform = **PASS**: mid-rank less+(equal+1)/2, tie-group detection (first && equal>1) with Σ(t³−t); {3,1,4,1,5}→{3,1.5,4,1.5,5}, correction 6 verified.
+- Theme: data-transformation primitives — foundational preprocessing (feature scaling, rank transform) completing the descriptive layer. All derivable, #852-safe. Suite runner: 118 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-BIlCZ5/`, `/tmp/llm-offload-7CoTZR/`, `/tmp/llm-offload-Y2h33J/`.
+
+## 2026-07-15 — math-review: stats::weighted_stats, stats::grouped_stats, stats::weighted_quantile
+- Files (all new): `stdlib/stats/weighted_stats.sio` (weighted mean + population & Kish-unbiased variance), `stdlib/stats/grouped_stats.sio` (mean/variance/modal-class from a frequency table), `stdlib/stats/weighted_quantile.sio` (sort-free weighted p-quantile/median). Provider: xAI/Grok 4.3.
+- weighted_stats = **PASS**: x̄_w=Σwx/Σw, σ²_w=Σw(x−x̄)²/V₁, unbiased ÷(V₁−V₂/V₁); x={1,2,3}/w={1,2,3}→mean 2.333, var_pop 0.5556, var_ub 0.9091 verified.
+- grouped_stats = **PASS**: mean=Σfm/Σf, sample var ÷(Σf−1), modal class argmax; {5,15,25}/{10,20,10}→mean 15, var_pop 50, var_sample 51.28 verified.
+- weighted_quantile = **PASS**: smallest v with Σ_{x≤v}w ≥ p·Σw, sort-free O(n²); equal→median 2, heavy weight→median 4, quartiles verified.
+- Theme: weighted & grouped estimators — support for survey weights / frequency tables / meta-analytic precisions, absent until now. All derivable, #852-safe. Suite runner: 121 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-n3PQpI/`, `/tmp/llm-offload-lcsGkl/`, `/tmp/llm-offload-anzkI3/`.
+
+## 2026-07-15 — math-review: stats::km_greenwood, stats::conditional_survival, stats::cumulative_incidence
+- Files (all new): `stdlib/stats/km_greenwood.sio` (KM survival + Greenwood SE + complementary-log-log CI), `stdlib/stats/conditional_survival.sio` (S(t1|t0)=Ŝ(t1)/Ŝ(t0)), `stdlib/stats/cumulative_incidence.sio` (competing-risks CIF). Provider: xAI/Grok 4.3.
+- km_greenwood = **PASS**: Var(Ŝ)=Ŝ²Σd/(n(n−d)), log-log CI Ŝ^exp(±z·σ_L) keeping bounds in [0,1]; times 1–5 query 3→Ŝ=0.4, SE=0.2191 verified.
+- conditional_survival = **PASS**: Ŝ(t1)/Ŝ(t0) step-function values, S(t|t)=1, t0=0→unconditional; S(4|2)=0.333 verified.
+- cumulative_incidence = **PASS**: Aalen-Johansen/K-P CIF₁=ΣŜ(t_{j-1})d1/n with all-cause survival update; competing-event table→CIF₁(4)=0.75 (not 1), no-competing→1−KM verified.
+- Theme: survival extensions — the Greenwood CI the bare km lacked, conditional survival, and competing-risks CIF. All sort-free walks, derivable, #852-safe. Suite runner: 124 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-840gyX/`, `/tmp/llm-offload-LJbaM2/`, `/tmp/llm-offload-YWV9jA/`.
+
+## 2026-07-16 — math-review: stats::linear_contrast, stats::scheffe, stats::welch_anova
+- Files (all new): `stdlib/stats/linear_contrast.sio` (planned contrast t-test), `stdlib/stats/scheffe.sio` (Scheffé family-wise F for a contrast), `stdlib/stats/welch_anova.sio` (Welch unequal-variance one-way ANOVA). Provider: xAI/Grok 4.3.
+- linear_contrast = **PASS**: L=Σcᵢx̄ᵢ, SE=√(MSE·Σcᵢ²/nᵢ), t(N−k); means{10,12,20}/{−½,−½,1}→L=9, SE=1.0954, t=8.216 verified.
+- scheffe = **PASS**: F_S=t²/(k−1) ~ F(k−1,N−k); primary case F_S=33.75 verified. Reviewer flagged test_conservative as failing (claimed SE≈0.632→F_S≈101) but that was the reviewer's own arithmetic slip — verified directly + vs Python: SE=1.2649, F_S=2.8125, p=0.0996 correct. Test only asserts p∈(0,1]; ran green. False positive.
+- welch_anova = **PASS**: weighted F with Welch fractional df₂=(k²−1)/(3A); groups var 2.5/10/0.5 → F=3.405, df₂=6.398 (Python-cross-checked).
+- Theme: ANOVA contrasts & robust ANOVA — planned/post-hoc contrasts (linear, Scheffé) and the unequal-variance ANOVA complementing anova + bartlett/levene. All derivable, #852-safe. Suite runner: 127 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-GjsIyt/`, `/tmp/llm-offload-Z5IqUV/`, `/tmp/llm-offload-NWs9px/`.
+
+## 2026-07-16 — math-review: stats::jonckheere, stats::page_trend, stats::mann_kendall
+- Files (all new): `stdlib/stats/jonckheere.sio` (Jonckheere-Terpstra ordered-groups trend), `stdlib/stats/page_trend.sio` (Page's L repeated-measures ordered trend), `stdlib/stats/mann_kendall.sio` (Mann-Kendall time-series monotonic trend). Provider: xAI/Grok 4.3.
+- jonckheere = **PASS**: J=Σ_{i<j}Uᵢⱼ (+½ ties), E[J]=(N²−Σn²)/4, Var[J]=(N²(2N+3)−Σn²(2n+3))/72; increasing 3×3→J=27, E=13.5, z=3.0 verified.
+- page_trend = **PASS**: L=Σj·Rⱼ, E[L]=nk(k+1)²/4, Var[L]=nk²(k²−1)(k+1)/144, mid-rank ties; ordered 3×3→L=42, z=2.449 verified.
+- mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
+- Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
+
+## 2026-07-16 — math-review follow-up: stats::huber_location, stats::siegel_regression, stats::yuen (PR #1009)
+- Target: `stdlib/stats/huber_location.sio`, `stdlib/stats/siegel_regression.sio`, and `stdlib/stats/yuen.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED**. It accepted the Huber IRLS update and MAD normal-consistency scale, Siegel's repeated-median slope/intercept definition, Yuen's trimmed/Winsorized variance, Welch-style degrees of freedom and t statistic, the incomplete-beta two-tail identity, and every documented test value.
+- Independent-provider fallback: Z.AI GLM-5.2 produced no response before the 65-second timeout (`/tmp/llm-offload-9WIwRq/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-3Af1we/`). Re-review with Z.AI remains pending when the provider is responsive.
+- Scope: audit-only follow-up; no statistical implementation changed. The pre-existing PR CI was fully green before this receipt update. Local hygiene: `git diff --check` -> PASS.
+
+## 2026-07-16 — math-review: stats::huber_location, stats::siegel_regression, stats::yuen
+- Files (all new): `stdlib/stats/huber_location.sio` (Huber M-estimator of location, MAD-scaled reweighting), `stdlib/stats/siegel_regression.sio` (Siegel repeated-median regression, 50% breakdown), `stdlib/stats/yuen.sio` (Yuen trimmed-means t-test). Provider: xAI/Grok 4.3.
+- huber_location = **PASS**: MAD scale 1.4826, weight 1 if |u|≤c else c/|u|, iterated location; symmetric {1..5}→3, outlier {1,2,3,4,100}→3 (Python-verified, fully robust vs mean 22).
+- siegel_regression = **PASS**: b=medianᵢ(median_{j≠i} slope), intercept=median residual; perfect→(2,1), outlier at (5,100)→(2,1). Two big buffers (point_med + slopes) live across the median helper call — ran clean under lean_single (no #852).
+- yuen = **PASS**: Winsorized variance s²_w=Σ(v−wmean)²/(n−1), d=(n−1)s²_w/(h(h−1)), t=(x̄_t1−x̄_t2)/√(d1+d2), Welch-style df; x={1..10}/y={3..11,50}/γ=0.2→tm 5.5/7.5, t=−1.188182, df=10 (Python-cross-checked).
+- Theme: robust M-estimation — robust location (Huber), robust regression (Siegel, higher breakdown than Theil-Sen), robust two-sample test (Yuen). All derivable / Python-anchored, #852-safe. Suite runner: 133 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-pxPazF/`, `/tmp/llm-offload-jQ7cVi/`, `/tmp/llm-offload-3CzPbg/`.
+
+## 2026-07-16 — math-review: chemistry::acids pH range reduction (PR #1014)
+- Target: `stdlib/chemistry/acids.sio`; regression: `tests/stdlib/chemistry/test_acids_stdlib.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED** for the changed `ln_approx` range reduction, `ph`, and Henderson-Hasselbalch formulas. It correctly accepted the reduction of `x` to `[1/sqrt(10), sqrt(10)]` before the artanh series and the first-order pH uncertainty formula.
+- Documented disagreement: Grok called the excess-base branch `14 + log10(oh)` wrong. It is correct because `pOH = -log10([OH-])`, hence `pH = 14 - pOH = 14 + log10([OH-])`. The added regression uses `[OH-]=0.01`, where the implemented branch returns `12` and the suggested alternative would incorrectly return `16`.
+- Independent-provider fallback: Z.AI GLM-5.2 timed out after more than 120 seconds (`/tmp/llm-offload-mxTIVr/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-83btKx/`); DeepSeek returned `Insufficient Balance` (`/tmp/llm-offload-xlyMGm/`); Groq returned `Invalid API Key` (`/tmp/llm-offload-sFR2Ue/`). Re-review with Z.AI remains pending when that provider is responsive.
+- Scope boundary: Grok also marked the pre-existing `calibrate` slope uncertainty and `mm_rate` rough uncertainty as overreach. Neither is changed by this PR or used to support its pH regression claim; they remain separate investigation items rather than silently being folded into this numerical-fix patch.
+- Gate: `bash scripts/verticals_rng_iter_acids_gate.sh` -> `VERTICALS_RNG_ITER_ACIDS_GATE_OK`; `git diff --check` -> PASS.
+
+## 2026-07-16 — post-merge math-review: tensor-core HMMA Convention X (PR #1016)
+- Target: merged diff `827852d47^..827852d47` over `self-hosted/gpu/kernels/hmma_signs.sio`, `tests/gpu/test_hmma_octonion.sio`, `docs/gpu/oct_wmma_validate.cu`, and `scripts/ci/native_v2_epistemic_accel_spine_gate.sh`.
+- xAI/Grok 4.3 = **PASS**: accepted the bilinear left-multiply representation `L(a)[k][j] = sigma(k xor j, j) * a[k xor j]`, the recursive Convention X sign, the 8x8-to-16x16 WMMA construction, and the `e1*e2` discriminator. Raw: `/tmp/llm-offload-eOI06E/grok.md`.
+- Independent review is incomplete: default Z.AI GLM-5.2 ran for 125 s and timed out with an empty response; DeepSeek returned `Insufficient Balance`; Gemini returned OpenRouter HTTP 402 insufficient credits. Raw: `/tmp/llm-offload-eOI06E/`, `/tmp/llm-offload-tVR4tH/`, `/tmp/llm-offload-GVFRRL/`.
+- Local source-level witness: `SOUNIO_TEST_JOBS=1 bash scripts/run_sio_test_suite.sh --filter-exact test_hmma_octonion.sio --verbose --jobs 1` = **PASS** (1/1) under the canonical `bin/souc` path.
+- Outcome: **PASS_SINGLE_PROVIDER_DEGRADED** for the algebraic review only; no provider or local test here establishes the documented GB10 execution. Hardware evidence is tracked separately in #1022; independent math re-review remains pending when a second provider is available.
+
+## 2026-07-16 — hardware evidence update: tensor-core HMMA Convention X
+- Manual GB10 witness: `docs/gpu/oct_wmma_validate.cu` at commit `8b5e07050` (SHA-256 `5bd22146ac869c92854b0821418d742e43141c1a3b4a137583325311b21e913f`) compiled with CUDA 13.0 for `sm_121` and ran on `spark-8e54` (`NVIDIA GB10`, driver `580.159.03`, compute capability `12.1`).
+- Runtime result: `e1*e2` produced component 3 = 1.00 and component 4 = 0.00; batch result was `0/128` mismatches with `maxerr=0.000`; process printed `PASS: WMMA octonion multiply is Convention X on GB10`.
+- Retained receipt: `docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md`. Scope remains manual hardware evidence only: the GitHub `validate-on-gpu` job is still conditional/skipped, so workflow automation and artifact retention remain tracked in #1022.
+
+## 2026-07-16 — merge-time clinical-test review for PR #1028
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-16 | deepseek attempted; xai/grok-4.3 fallback | review | test_aminoglycoside_pbpk_stdlib.sio | WAIVED_SCOPE_DISAGREEMENT | DeepSeek returned `Insufficient Balance`; xAI reviewed the upstream runtime regression without its imported modules and consequently called its symbols undefined and required an unrelated Lean theorem. The canonical harness supplies `epistemic::knightian` and `clinical::aminoglycoside_pbpk`; the cited PK sources are present in both the test and module. No dosing recommendation or formal-proof claim is introduced by this test. The midpoint equalities plus positive p-box gap establish that each asserted midpoint lies strictly inside its band. Raw: `/tmp/llm-offload-5MuUoO/`, `/tmp/llm-offload-Npbfuf/`. |
+| 2026-07-16 | deepseek attempted; xai/grok-4.3 fallback | review | test_tacrolimus_stdlib.sio | ADDRESSED_AND_WAIVED_FALSE_POSITIVES | xAI correctly found that the original test checked only the midpoint while its comment claimed the entire oral-bioavailability band was in `(0,1)`; fixed by rejecting `pb_lo_mean <= 0` or `pb_hi_mean >= 1`. The follow-up review read that guard backwards and claimed it accepts the endpoints. Its missing-definition and Lean-proof blockers are scope mismatches for an imported runtime regression. The source module explicitly ignores the CrCl argument and documents its PK references; the two-point assertion is a regression witness, not a universal theorem. DeepSeek was unavailable as recorded on the first target. Raw: `/tmp/llm-offload-iRPKbP/`, `/tmp/llm-offload-3PjONw/`. |
+| 2026-07-16 | deepseek attempted; xai/grok-4.3 fallback | review | test_vancomycin_pbpk_stdlib.sio | WAIVED_SCOPE_DISAGREEMENT | xAI requested a Lean theorem and self-contained imported definitions from a canonical runtime regression. The test explicitly anchors the module's documented parameters; the module carries the primary references and a no-medical-guidance warning. Its midpoint equalities and positive p-box gap imply the asserted value is strictly between the lower and upper means, so the claimed untested-band defect does not hold. No clinical implementation changed. DeepSeek was unavailable as recorded on the first target. Raw: `/tmp/llm-offload-nPtb5W/`. |

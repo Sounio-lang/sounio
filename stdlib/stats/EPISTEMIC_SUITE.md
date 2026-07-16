@@ -10,43 +10,64 @@ fourteen families:
   (full `pdf`/`cdf`/`sf`/`quantile` surfaces), a `densities` bank, Weibull /
   negative-binomial, and method-of-moments fitting for the gamma, beta and
   lognormal.
-- **Robust descriptives** — median / IQR / MAD / trimmed & Winsorized means,
-  the Hodges-Lehmann estimators, and Tukey / Grubbs / modified-z outlier rules.
+- **Descriptives** — the classical means (arithmetic / geometric / harmonic /
+  RMS), dispersion (variance / sd / range / CV / SEM), and shape (skewness /
+  kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
+  the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
+  the data-transformation primitives (z-scores, min-max & robust scaling, rank
+  transform), the weighted / grouped estimators (weighted mean & variance,
+  grouped-frequency statistics, weighted quantiles), and the robust M-estimators
+  (Huber location, Siegel repeated-median regression, Yuen's trimmed t-test).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
-  χ²/G goodness-of-fit), independence (Wald-Wolfowitz runs, Durbin-Watson,
+  Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
+  (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
-- **Group comparison** — one-way ANOVA, inference from summary statistics,
-  standardised effect sizes, and power / sample-size planning.
+- **Group comparison & planning** — one-way ANOVA and Welch's unequal-variance
+  ANOVA, planned linear contrasts and Scheffé's family-wise method, inference from
+  summary
+  statistics, standardised effect sizes, t-test power, and sample-size planning
+  for proportions/correlations, survival trials (Schoenfeld), target precision,
+  and the minimum detectable effect.
 - **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
-  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
+  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD, plus the
+  ordered-alternative / trend tests (Jonckheere-Terpstra, Page's L, Mann-Kendall).
 - **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
   point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
   Somers' D.
-- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, and
-  the Deming / Theil-Sen / Passing-Bablok method-comparison fits.
+- **Regression** — OLS with bands, weighted LS, logistic and Poisson GLMs, the
+  Deming / Theil-Sen / Passing-Bablok method-comparison fits, and the regression
+  diagnostics (leverage, Cook's distance, VIF).
 - **Categorical & exact** — χ² independence, Fisher's exact 2×2, McNemar,
-  Cochran's Q, the Cochran-Armitage trend test and proportion CIs.
+  Cochran's Q, Bowker's k×k symmetry test, the Cochran-Armitage trend test,
+  proportion CIs, and the nominal association measures (Goodman-Kruskal λ and τ,
+  Theil's uncertainty coefficient).
 - **Agreement & reliability** — Bland-Altman, Lin's CCC + Cliff's δ, Cohen's and
-  Fleiss' κ, and ICC / Cronbach's α.
+  Fleiss' κ, Gwet's AC1, Krippendorff's α, ICC / Cronbach's α and the full
+  Shrout-Fleiss ICC family.
 - **Diagnostic accuracy** — sensitivity / specificity / likelihood ratios and
   ROC AUC.
-- **Survival analysis** — Kaplan-Meier, Nelson-Aalen cumulative hazard,
-  restricted mean survival time, the actuarial life table, the log-rank test and
-  a parametric exponential fit.
+- **Survival analysis** — Kaplan-Meier (with the Greenwood CI), conditional
+  survival, the competing-risks cumulative incidence, Nelson-Aalen cumulative
+  hazard, restricted mean survival time, the actuarial life table, the log-rank
+  test and a parametric exponential fit.
 - **Meta-analysis & epidemiology** — fixed / random-effects pooling, RR / OR /
-  NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio,
-  attributable risk / fractions, and directly / indirectly standardised rates.
+  NNT, person-time incidence rates, the Mantel-Haenszel stratified odds ratio
+  with the Breslow-Day homogeneity test, attributable risk / fractions, and
+  directly / indirectly standardised rates.
 - **Multivariate (bivariate)** — the Mahalanobis distance, one-sample
   Hotelling's T² and two-variable PCA, all closed-form over the 2×2 covariance.
 - **Time series** — simple and Holt (linear-trend) exponential smoothing and an
   AR(1) fit with one-step forecasts, beside the serial-dependence diagnostics.
+- **Process control (SPC)** — process capability indices (Cp/Cpk), the Shewhart
+  individuals (I-MR) control chart, and the tabular CUSUM.
 - **Resampling** — the leave-one-out jackknife, a bit-reproducible Park-Miller
   MINSTD generator (exact f64), the nonparametric bootstrap for the mean, the
   two-sample difference and correlation bootstraps, and a permutation test.
-- **Bayesian & model selection** — conjugate updates, the Beta-posterior
-  credible interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the
-  Schwarz Bayes-factor approximation.
+- **Bayesian & model selection** — Beta-Binomial / Normal-Normal / Gamma-Poisson
+  / Dirichlet-Multinomial conjugate posteriors, the Beta-posterior credible
+  interval, the Bayesian A/B test (P(pB>pA)), and AIC / BIC with the Schwarz
+  Bayes-factor approximation.
 
 Every routine is written in Sounio with no FFI, no sampling dependency and no
 external solver: the analytic core rests only on the special-function modules
@@ -1224,6 +1245,488 @@ The AR(1) fit by the lag-1 autocorrelation (Yule-Walker), with the intercept
 `c=μ(1−φ)`, the one-step forecast and residual sd. Validated: {1..5} → φ=0.4,
 μ=3, intercept 1.8, forecast 3.8; a ramp → φ>0.6; alternating → φ<0.
 
+### `stats::process_capability` — process capability indices
+
+| Function | Signature |
+|---|---|
+| `process_capability` | `pub fn process_capability(mu: f64, sigma: f64, lsl: f64, usl: f64) -> CapabilityResult with Mut, Div, Panic` |
+
+The quality-control capability measures against specification limits:
+`Cp=(USL−LSL)/6σ` (potential) and `Cpk=min(Cpu,Cpl)` (centring-aware).
+Validated: centred (μ=6, σ=1, spec 2–10) → Cp=Cpk=1.333; off-centre (μ=7) →
+Cp=1.333 but Cpk=1.
+
+### `stats::control_chart` — Shewhart I-MR control chart
+
+| Function | Signature |
+|---|---|
+| `imr_chart` | `pub fn imr_chart(x: &[f64; 256], n: i32) -> IMRResult with Mut, Div, Panic` |
+
+Individuals & moving-range control limits from a measurement stream:
+`σ̂=M̄R/d₂`, `UCL/LCL=x̄±3σ̂`, `UCL_MR=D₄·M̄R`, with an out-of-control count.
+Validated: {10,12,11,13,12} → CL=11.6, M̄R=1.5, UCL=15.589, UCL_MR=4.9005; an
+obvious outlier trips the limit.
+
+### `stats::cusum` — tabular CUSUM control chart
+
+| Function | Signature |
+|---|---|
+| `cusum` | `pub fn cusum(x: &[f64; 256], n: i32, target: f64, k: f64, h: f64) -> CusumResult with Mut, Div, Panic` |
+
+The cumulative-sum chart, sensitive to small sustained shifts:
+`Cᵢ⁺=max(0,Cᵢ₋₁⁺+(xᵢ−(target+k)))` (and the lower analogue), signalling when a
+CUSUM exceeds the decision interval h. Validated: an upward drift → C⁺ reaches 8,
+signals at index 4; on-target → no signal; downward drift → lower CUSUM signals.
+
+### `stats::effect_convert` — effect-size conversions
+
+| Function | Signature |
+|---|---|
+| `d_to_r` / `r_to_d` | `pub fn d_to_r(d: f64) -> f64 …` (equal-n) |
+| `d_to_logor` / `logor_to_d` / `d_to_or` | Cox logit-method odds-ratio conversions |
+| `hedges_g` | `pub fn hedges_g(d: f64, df: i32) -> f64` (small-sample correction) |
+
+The standard meta-analysis conversions between Cohen's d, the correlation r, the
+(log) odds ratio and Hedges' g. Validated: d=0.5 → r=0.2425, ln OR=0.9069,
+OR=2.4766, g(df=10)=0.4615; d↔r and d↔ln OR round-trip.
+
+### `stats::effect_from_test` — effect sizes from test statistics
+
+| Function | Signature |
+|---|---|
+| `r_from_t` / `d_from_t` | `pub fn r_from_t(t, df) -> f64` · `d_from_t(t, n1, n2) -> f64` |
+| `eta2_from_f` / `omega2_from_f` | variance-explained from an F statistic |
+| `d_from_means` | Cohen's d from two groups' means, sds and sizes |
+
+Recovers a standardised effect from a reported statistic (for meta-analysing
+published t/F results). Validated: t=2,df=10 → r=0.5345; t=2,n=10,10 → d=0.8944;
+F=4,(2,10) → η²=0.4444, ω²=0.3158; means → d=1.5.
+
+### `stats::cles` — common-language effect size
+
+| Function | Signature |
+|---|---|
+| `cles_from_d` | `pub fn cles_from_d(d: f64) -> f64 with Mut, Div, Panic` |
+| `cles_from_samples` | `pub fn cles_from_samples(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic` |
+
+The probability that a random draw from one group exceeds one from the other —
+`Φ(d/√2)` under normality, or the distribution-free proportion of superior pairs
+(= the ROC AUC). Validated: d=0 → 0.5, d=1 → 0.7603; fully-separated samples → 1;
+interleaved → 1/3.
+
+### `stats::gwet_ac1` — Gwet's AC1 agreement
+
+| Function | Signature |
+|---|---|
+| `gwet_ac1` | `pub fn gwet_ac1(table: &[f64; 256], k: i32) -> AC1Result with Mut, Div, Panic` |
+
+A chance-corrected two-rater agreement coefficient that resists the kappa
+paradox (high agreement but low κ under lopsided prevalence): its chance term
+uses `πc(1−πc)` rather than κ's `πc²`. Validated: [[8,1],[1,0]] → Pₐ=0.8, AC1=0.756
+(where Cohen's κ goes negative); perfect → 1.
+
+### `stats::krippendorff` — Krippendorff's alpha (nominal)
+
+| Function | Signature |
+|---|---|
+| `krippendorff` | `pub fn krippendorff(rating: &[i64; 256], n_units: i32, m_raters: i32, k: i32) -> f64 with Mut, Div, Panic` |
+
+The general chance-corrected reliability coefficient for any number of raters
+(nominal, complete data), via the coincidence matrix: `α=1−Dₒ/Dₑ`. Validated:
+a 4-unit / 2-rater example → α=0.125; perfect agreement → 1; three concordant
+raters → 1.
+
+### `stats::icc_forms` — the intraclass-correlation family
+
+| Function | Signature |
+|---|---|
+| `icc_forms` | `pub fn icc_forms(data: &[f64; 256], n: i32, k: i32) -> ICCFormsResult with Mut, Div, Panic` |
+
+All six Shrout-Fleiss ICC forms — single- and average-measure ICC(1,1)/(2,1)/(3,1)
+— from the two-way ANOVA of a subjects×raters matrix. Validated against the
+published Shrout-Fleiss (1979) 6×4 example: ICC(1,1)=0.166, ICC(2,1)=0.290,
+ICC(3,1)=0.715.
+
+### `stats::poisson_gamma` — Gamma-Poisson rate posterior
+
+| Function | Signature |
+|---|---|
+| `poisson_gamma` | `pub fn poisson_gamma(a0: f64, b0: f64, count: f64, exposure: f64, conf: f64) -> RatePosterior with Mut, Div, Panic` |
+
+Bayesian inference for a Poisson rate with a conjugate Gamma prior (the
+count/rate analogue of Beta-Binomial): posterior `Gamma(a₀+C, b₀+T)`, mean,
+variance and a credible interval from the Gamma quantile (inverse incomplete
+gamma). Validated: Gamma(1,1) + 10 events over 5 → mean 1.833, var 0.3056, CI
+self-consistent (CDF at bounds = 0.025/0.975).
+
+### `stats::dirichlet_mult` — Dirichlet-Multinomial category posterior
+
+| Function | Signature |
+|---|---|
+| `dirichlet_mult` | `pub fn dirichlet_mult(alpha_prior: &[f64; 64], counts: &[f64; 64], k: i32, q: i32, conf: f64) -> DirichletPosterior with Mut, Div, Panic` |
+
+The k-category generalisation of Beta-Binomial: posterior `Dirichlet(α+counts)`
+with the queried category's Beta marginal giving a posterior mean and credible
+interval. Validated: prior (1,1,1) + counts (10,20,70) → cat-3 mean 71/103=0.689;
+uniform → 1/k.
+
+### `stats::breslow_day` — homogeneity of odds ratios
+
+| Function | Signature |
+|---|---|
+| `breslow_day` | `pub fn breslow_day(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> BDResult with Mut, Div, Panic` |
+
+The companion to Mantel-Haenszel: tests whether the stratum odds ratios are
+homogeneous enough to pool (a significant result warns against a single pooled
+OR). Fits each stratum under the common OR by the quadratic and forms
+`χ²=Σ(aᵢ−Aᵢ)²/Vᵢ`. Validated: two strata each OR 2 → χ²≈0 (poolable); OR 4 vs
+0.25 → large χ², p<0.05 (heterogeneous).
+
+### `stats::leverage` — regression leverage (hat values)
+
+| Function | Signature |
+|---|---|
+| `leverage` | `pub fn leverage(x: &[f64; 256], n: i32, out_h: &![f64; 256]) -> LeverageResult with Mut, Div, Panic` |
+
+The hat value `hᵢ=1/n+(xᵢ−x̄)²/Sₓₓ` for each observation in simple linear
+regression, flagging high-leverage points (`hᵢ>4/n`); the hat vector is written
+to `out_h`. Validated: {1..5} → h={0.6,0.3,0.2,0.3,0.6}, Σh=2 (=p); a far point
+→ h≈1.
+
+### `stats::cooks_distance` — Cook's distance
+
+| Function | Signature |
+|---|---|
+| `cooks_distance` | `pub fn cooks_distance(x: &[f64; 256], y: &[f64; 256], n: i32, out_d: &![f64; 256]) -> CooksResult with Mut, Div, Panic` |
+
+The influence of each point on the OLS fit,
+`Dᵢ=eᵢ²hᵢ/(p·s²(1−hᵢ)²)`, flagging influential points (`Dᵢ>4/n`); the
+distances are written to `out_d`. Validated: an off-line last point → D₅=2.25,
+D₁=0.5625; perfect fit → all 0.
+
+### `stats::vif` — variance inflation factor
+
+| Function | Signature |
+|---|---|
+| `vif_from_r2` / `vif_two` / `tolerance` | `pub fn vif_from_r2(r2: f64) -> f64` · `vif_two(r)` · `tolerance(r2)` |
+
+The multicollinearity diagnostic `VIFⱼ=1/(1−R²ⱼ)` (VIF>5 concern, >10 serious).
+Validated: r=0.8 → VIF=2.778, tolerance=0.36; R²=0.9 → VIF=10; R²=0 → VIF=1.
+
+### `stats::sample_size_survival` — survival-trial sample size
+
+| Function | Signature |
+|---|---|
+| `ss_survival` | `pub fn ss_survival(hr: f64, alpha: f64, power: f64, alloc: f64, event_prob: f64) -> SurvSSResult with Mut, Div, Panic` |
+
+The Schoenfeld required number of events and enrolment for a log-rank / Cox test:
+`events=(z_{1−α/2}+z_{1−β})²/(πA·πB·(ln HR)²)`, `n=events/P(event)`. Validated:
+HR=2, α=0.05, 80% power, 1:1 → 65.3 events; a larger HR needs fewer.
+
+### `stats::sample_size_precision` — precision-based sample size
+
+| Function | Signature |
+|---|---|
+| `ss_mean` / `ss_proportion` | `pub fn ss_mean(sigma, margin, conf) -> i64` · `ss_proportion(p, margin, conf) -> i64` |
+
+The n needed for a confidence interval no wider than a chosen half-width:
+`n=(z·σ/E)²` for a mean, `n=z²p(1−p)/E²` for a proportion. Validated: σ=10, E=2,
+95% → 97; p=0.5, E=0.05, 95% → 385.
+
+### `stats::detectable_effect` — minimum detectable effect
+
+| Function | Signature |
+|---|---|
+| `mde_two_means` / `mde_one_mean` | `pub fn mde_two_means(n_per_group, alpha, power) -> f64` · `mde_one_mean(n, alpha, power) -> f64` |
+
+The smallest Cohen's d a study can detect: `d=(z_{1−α/2}+z_{1−β})·√(2/n)`
+(two-sample) or `/√n` (one-sample) — for judging whether a study was adequately
+powered. Validated: n=64/group, α=0.05, 80% → d=0.495; one-sample → 0.350.
+
+### `stats::central_tendency` — the mean family
+
+| Function | Signature |
+|---|---|
+| `arithmetic_mean` / `geometric_mean` / `harmonic_mean` / `rms` | `pub fn *(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic` |
+
+The classical means — arithmetic, geometric (ratios/growth), harmonic (rates)
+and root-mean-square. Validated: {1,2,4} → AM=2.333, GM=2, HM=1.714, RMS=2.646;
+the ordering HM≤GM≤AM≤RMS holds.
+
+### `stats::dispersion` — measures of spread
+
+| Function | Signature |
+|---|---|
+| `dispersion` | `pub fn dispersion(x: &[f64; 256], n: i32) -> DispersionResult with Mut, Div, Panic` |
+
+The classical variability summaries in one pass: sample variance & sd, range,
+the coefficient of variation (dimensionless relative spread) and the standard
+error of the mean. Validated: {2,4,4,4,5,5,7,9} → var 4.571, sd 2.138, range 7,
+CV 0.4276, SEM 0.7559.
+
+### `stats::shape` — skewness & kurtosis
+
+| Function | Signature |
+|---|---|
+| `shape` | `pub fn shape(x: &[f64; 256], n: i32) -> ShapeResult with Mut, Div, Panic` |
+
+The third and fourth standardised moments: population skewness `g₁`, the
+Fisher-Pearson sample-adjusted `G₁`, and (excess) kurtosis. Validated:
+{2,4,4,4,5,5,7,9} → g₁=0.6563, G₁=0.8185, excess kurtosis −0.2188; symmetric
+data → skewness 0.
+
+### `stats::gk_lambda` — Goodman-Kruskal lambda
+
+| Function | Signature |
+|---|---|
+| `gk_lambda` | `pub fn gk_lambda(table: &[f64; 256], nr: i32, nc: i32) -> LambdaResult with Mut, Div, Panic` |
+
+A proportional-reduction-in-error nominal association measure (mode prediction):
+`λ(R|C)=(Σ_c maxᵣn_rc−maxᵣn_r+)/(N−maxᵣn_r+)`, both directions and symmetric.
+Validated: [[40,10],[5,45]] → λ(R|C)=0.7, λ(C|R)=0.667; mode-only table → 0;
+diagonal → 1.
+
+### `stats::gk_tau` — Goodman-Kruskal tau
+
+| Function | Signature |
+|---|---|
+| `gk_tau` | `pub fn gk_tau(table: &[f64; 256], nr: i32, nc: i32) -> TauResult with Mut, Div, Panic` |
+
+Like lambda but predicting with the full category distribution, so it is non-zero
+under any dependence: `τ(R|C)=(Σ_c Σ_r n_rc²/n_+c − Σ_r n_r+²/N)/(N−Σn_r+²/N)`.
+Validated: [[40,10],[5,45]] → τ(R|C)=0.4949; rank-1 table → 0; diagonal → 1.
+
+### `stats::uncertainty_coefficient` — Theil's U
+
+| Function | Signature |
+|---|---|
+| `uncertainty_coefficient` | `pub fn uncertainty_coefficient(table: &[f64; 256], nr: i32, nc: i32) -> UResult with Mut, Div, Panic` |
+
+The information-theoretic association measure: `U(R|C)=I(R;C)/H(R)`, the fraction
+of one variable's entropy explained by the other, both directions and symmetric.
+Validated: [[40,10],[5,45]] → I=0.2754, U(R|C)=0.3973; independence → 0; diagonal
+→ 1.
+
+### `stats::anderson_darling` — Anderson-Darling normality test
+
+| Function | Signature |
+|---|---|
+| `anderson_darling` | `pub fn anderson_darling(x: &[f64; 256], n: i32) -> ADResult with Mut, Div, Panic` |
+
+An EDF normality test that weights the tails heavily (more tail-sensitive than
+KS): `A²=−n−(1/n)Σ(2i−1)[ln F(z₍ᵢ₎)+ln(1−F(z₍ₙ₊₁₋ᵢ₎))]`, with the small-sample
+adjustment and the Stephens p-value. Validated (Python-cross-checked): {1..5} →
+A²=0.1436, A²*=0.1781, p>0.5; skewed data → large A².
+
+### `stats::cramer_von_mises` — Cramér-von Mises normality test
+
+| Function | Signature |
+|---|---|
+| `cramer_von_mises` | `pub fn cramer_von_mises(x: &[f64; 256], n: i32) -> CvMResult with Mut, Div, Panic` |
+
+The evenly-weighted EDF companion to Anderson-Darling:
+`W²=1/(12n)+Σ(F(z₍ᵢ₎)−(2i−1)/(2n))²` with the small-sample adjustment. Validated
+(Python-cross-checked): {1..5} → W²=0.01934, W²*=0.02128; skewed data → large W².
+
+### `stats::bowker` — Bowker's test of symmetry
+
+| Function | Signature |
+|---|---|
+| `bowker` | `pub fn bowker(table: &[f64; 256], k: i32) -> BowkerResult with Mut, Div, Panic` |
+
+McNemar's test generalised to a k×k matched table:
+`χ²=Σ_{i<j}(nᵢⱼ−nⱼᵢ)²/(nᵢⱼ+nⱼᵢ)`, df k(k−1)/2. Validated: a 3×3 table → χ²=4.667,
+df=3; symmetric → χ²=0; k=2 reduces exactly to McNemar (χ²=4.545).
+
+### `stats::zscore` — standardisation & percentile rank
+
+| Function | Signature |
+|---|---|
+| `zscore` | `pub fn zscore(x: &[f64; 256], n: i32, out_z: &![f64; 256]) -> ZResult with Mut, Div, Panic` |
+| `percentile_rank` | `pub fn percentile_rank(x: &[f64; 256], n: i32, value: f64) -> f64 with Mut, Div, Panic` |
+
+Standardise to zero mean / unit sd (fills `out_z`), and locate a value in the
+sample by its mid-rank percentile. Validated: {2,4,4,4,5,5,7,9} → z₀=−1.403,
+z₇=1.871, Σz=0; percentile rank of 5 → 62.5.
+
+### `stats::normalize` — feature scaling
+
+| Function | Signature |
+|---|---|
+| `minmax` | `pub fn minmax(x: &[f64; 256], n: i32, out: &![f64; 256]) -> MinMaxResult with Mut, Div, Panic` |
+| `robust_scale` | `pub fn robust_scale(x: &[f64; 256], n: i32, out: &![f64; 256]) -> RobustResult with Mut, Div, Panic` |
+
+The two non-standardising scalers: min-max to [0,1], and robust scaling by
+median & IQR (outlier-resistant). Validated: {1..5} → min-max {0,.25,.5,.75,1};
+robust → median 3, IQR 2, centred.
+
+### `stats::rank_transform` — rank transform with mid-ranks
+
+| Function | Signature |
+|---|---|
+| `rank_transform` | `pub fn rank_transform(x: &[f64; 256], n: i32, out_r: &![f64; 256]) -> RankResult with Mut, Div, Panic` |
+
+Replaces each value by its 1-based rank (ties → average), the primitive under
+every rank-based method, plus the tie-correction `Σ(tᵢ³−tᵢ)`. Validated:
+{3,1,4,1,5} → ranks {3,1.5,4,1.5,5}, one tie group, correction 6; distinct data →
+1..n.
+
+### `stats::weighted_stats` — weighted mean & variance
+
+| Function | Signature |
+|---|---|
+| `weighted_stats` | `pub fn weighted_stats(x: &[f64; 256], w: &[f64; 256], n: i32) -> WeightedResult with Mut, Div, Panic` |
+
+The mean and variance for weighted observations (survey weights, precisions,
+counts): `x̄_w=Σwx/Σw`, population and reliability-weight unbiased variances
+(Kish `V₁−V₂/V₁` correction). Validated: x={1,2,3}, w={1,2,3} → mean 2.333,
+var_pop 0.5556, var_unbiased 0.9091.
+
+### `stats::grouped_stats` — grouped-frequency statistics
+
+| Function | Signature |
+|---|---|
+| `grouped_stats` | `pub fn grouped_stats(midpoint: &[f64; 64], freq: &[f64; 64], k: i32) -> GroupedResult with Mut, Div, Panic` |
+
+Statistics from a frequency table (bin midpoints + counts): mean, population &
+sample variance, and the modal class. Validated: midpoints {5,15,25}, freqs
+{10,20,10} → mean 15, var_pop 50, modal class 15, sample var 51.28.
+
+### `stats::weighted_quantile` — weighted quantiles
+
+| Function | Signature |
+|---|---|
+| `weighted_quantile` / `weighted_median` | `pub fn weighted_quantile(x: &[f64; 256], w: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic` |
+
+The p-quantile of weighted data (smallest value carrying ≥p of the total weight),
+via a sort-free cumulative scan. Validated: equal weights {1,2,3} → median 2;
+{1,2,3,4} w={1,1,1,5} → weighted median 4; quartiles of {1,2,3,4}.
+
+### `stats::km_greenwood` — KM survival with a Greenwood CI
+
+| Function | Signature |
+|---|---|
+| `km_greenwood` | `pub fn km_greenwood(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64, conf: f64) -> KMCIResult with Mut, Div, Panic` |
+
+The Kaplan-Meier survival at a queried time with its Greenwood standard error
+`Var(Ŝ)=Ŝ²Σdⱼ/(nⱼ(nⱼ−dⱼ))` and a complementary-log-log confidence interval (which
+keeps the bounds inside [0,1]). Validated: times 1–5, query 3 → Ŝ=0.4, SE=0.2191,
+CI inside (0,1).
+
+### `stats::conditional_survival` — conditional survival probability
+
+| Function | Signature |
+|---|---|
+| `conditional_survival` | `pub fn conditional_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t0: f64, t1: f64) -> f64 with Mut, Div, Panic` |
+
+The probability of surviving to t₁ given survival to t₀: `S(t₁|t₀)=Ŝ(t₁)/Ŝ(t₀)`
+— the "given you've made it this far" prognosis. Validated: times 1–5 →
+S(4|2)=0.333; S(t|t)=1; S(t1|0)=Ŝ(t1).
+
+### `stats::cumulative_incidence` — competing-risks CIF
+
+| Function | Signature |
+|---|---|
+| `cumulative_incidence` | `pub fn cumulative_incidence(time: &[f64; 256], cause: &[i64; 256], n: i32, t_query: f64) -> f64 with Mut, Div, Panic` |
+
+The cumulative incidence of one event type in the presence of competing risks
+(where 1−KM would overstate it): `CIF₁(t)=ΣŜ(t₍ⱼ₋₁₎)·d₁ⱼ/nⱼ`, with `cause` 0/1/2.
+Validated: a table with one competing event → CIF₁(4)=0.75 (not 1); no competing
+events → CIF₁=1−KM.
+
+### `stats::linear_contrast` — planned linear contrast
+
+| Function | Signature |
+|---|---|
+| `linear_contrast` | `pub fn linear_contrast(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ContrastResult with Mut, Div, Panic` |
+
+A single a-priori comparison of group means: `L=Σcᵢx̄ᵢ`, `SE=√(MSE·Σcᵢ²/nᵢ)`,
+`t=L/SE ~ t(N−k)`. Validated: means {10,12,20}, contrast {−½,−½,1} → L=9,
+SE=1.0954, t=8.216, df=12.
+
+### `stats::scheffe` — Scheffé's method
+
+| Function | Signature |
+|---|---|
+| `scheffe` | `pub fn scheffe(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ScheffeResult with Mut, Div, Panic` |
+
+The same contrast, family-wise over *all* contrasts (conservative, valid
+post-hoc): `F_S=t²/(k−1) ~ F(k−1,N−k)`. Validated: the {−½,−½,1} contrast →
+F_S=33.75; a modest contrast → F_S=2.8125, p=0.0996.
+
+### `stats::welch_anova` — Welch's one-way ANOVA
+
+| Function | Signature |
+|---|---|
+| `welch_anova` | `pub fn welch_anova(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> WelchAnovaResult with Mut, Div, Panic` |
+
+The heteroscedasticity-robust ANOVA (the safe choice when Levene/Bartlett flag
+unequal variances): weighted between-group F with the Welch-corrected fractional
+df₂. Validated (Python-cross-checked): three groups with variances 2.5/10/0.5 →
+F=3.405, df₂=6.398; equal groups → F=0.
+
+### `stats::jonckheere` — Jonckheere-Terpstra ordered-alternatives test
+
+| Function | Signature |
+|---|---|
+| `jonckheere` | `pub fn jonckheere(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> JTResult with Mut, Div, Panic` |
+
+A non-parametric test for a monotone trend across k *ordered* groups (more
+powerful than Kruskal-Wallis when the order is known): `J=Σ_{i<j}Uᵢⱼ` with the
+normal-approximation z. Validated: three increasing groups → J=27, E[J]=13.5,
+z=3.0; identical groups → z=0.
+
+### `stats::page_trend` — Page's L test
+
+| Function | Signature |
+|---|---|
+| `page_trend` | `pub fn page_trend(data: &[f64; 256], n: i32, k: i32) -> PageResult with Mut, Div, Panic` |
+
+The repeated-measures ordered-alternative test (ordered Friedman): `L=Σj·Rⱼ` on
+a row-major n×k matrix. Validated: perfectly ordered 3×3 → L=42, E[L]=36,
+z=2.449; no trend → z=0.
+
+### `stats::mann_kendall` — Mann-Kendall trend test
+
+| Function | Signature |
+|---|---|
+| `mann_kendall` | `pub fn mann_kendall(x: &[f64; 256], n: i32) -> MKResult with Mut, Div, Panic` |
+
+The rank-based monotonic-trend test for a time-ordered series (the environmental-
+statistics standard): `S=Σ_{i<j}sign(xⱼ−xᵢ)`, continuity-corrected z, and Kendall's
+τ. Validated: increasing {1..5} → S=10, z=2.2045, τ=1; decreasing → S=−10, τ=−1.
+
+### `stats::huber_location` — Huber M-estimator of location
+
+| Function | Signature |
+|---|---|
+| `huber_location` | `pub fn huber_location(x: &[f64; 256], n: i32, c: f64) -> HuberResult with Mut, Div, Panic` |
+
+A robust centre that behaves like the mean near the bulk but downweights outliers
+(iteratively reweighted with a MAD scale and tuning constant c≈1.345). Validated:
+symmetric {1..5} → 3; {1,2,3,4,100} → 3 (fully robust, vs the mean 22).
+
+### `stats::siegel_regression` — repeated-median regression
+
+| Function | Signature |
+|---|---|
+| `siegel_regression` | `pub fn siegel_regression(x: &[f64; 256], y: &[f64; 256], n: i32) -> SiegelFit with Mut, Div, Panic` |
+
+The 50%-breakdown robust regression: `b=medianᵢ(median_{j≠i} slopeᵢⱼ)` — the inner
+per-point median then the median across points buys higher robustness than
+Theil-Sen. Validated: perfect line → (2,1); a wild outlier at (5,100) still →
+(2,1).
+
+### `stats::yuen` — Yuen's trimmed-means t-test
+
+| Function | Signature |
+|---|---|
+| `yuen` | `pub fn yuen(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, gamma: f64) -> YuenResult with Mut, Div, Panic` |
+
+A robust two-sample test comparing γ-trimmed means with Winsorized variances (the
+outlier-resistant Welch). Validated (Python-cross-checked): x={1..10} vs
+{3..11,50}, γ=0.2 → trimmed means 5.5/7.5, t=−1.188, df=10.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1316,6 +1819,51 @@ use stats::standardized_rate::{DSRResult, SMRResult, direct_standardized, smr}
 use stats::exp_smoothing::{SESResult, exp_smoothing}
 use stats::holt::{HoltResult, holt}
 use stats::ar1::{AR1Result, ar1}
+use stats::process_capability::{CapabilityResult, process_capability}
+use stats::control_chart::{IMRResult, imr_chart}
+use stats::cusum::{CusumResult, cusum}
+use stats::effect_convert::{d_to_r, r_to_d, d_to_logor, logor_to_d, d_to_or, hedges_g}
+use stats::effect_from_test::{r_from_t, d_from_t, eta2_from_f, omega2_from_f, d_from_means}
+use stats::cles::{cles_from_d, cles_from_samples}
+use stats::gwet_ac1::{AC1Result, gwet_ac1}
+use stats::krippendorff::{krippendorff}
+use stats::icc_forms::{ICCFormsResult, icc_forms}
+use stats::poisson_gamma::{RatePosterior, poisson_gamma}
+use stats::dirichlet_mult::{DirichletPosterior, dirichlet_mult}
+use stats::breslow_day::{BDResult, breslow_day}
+use stats::leverage::{LeverageResult, leverage}
+use stats::cooks_distance::{CooksResult, cooks_distance}
+use stats::vif::{vif_from_r2, vif_two, tolerance}
+use stats::sample_size_survival::{SurvSSResult, ss_survival}
+use stats::sample_size_precision::{ss_mean, ss_proportion}
+use stats::detectable_effect::{mde_two_means, mde_one_mean}
+use stats::central_tendency::{arithmetic_mean, geometric_mean, harmonic_mean, rms}
+use stats::dispersion::{DispersionResult, dispersion}
+use stats::shape::{ShapeResult, shape}
+use stats::gk_lambda::{LambdaResult, gk_lambda}
+use stats::gk_tau::{TauResult, gk_tau}
+use stats::uncertainty_coefficient::{UResult, uncertainty_coefficient}
+use stats::anderson_darling::{ADResult, anderson_darling}
+use stats::cramer_von_mises::{CvMResult, cramer_von_mises}
+use stats::bowker::{BowkerResult, bowker}
+use stats::zscore::{ZResult, zscore, percentile_rank}
+use stats::normalize::{MinMaxResult, RobustResult, minmax, robust_scale}
+use stats::rank_transform::{RankResult, rank_transform}
+use stats::weighted_stats::{WeightedResult, weighted_stats}
+use stats::grouped_stats::{GroupedResult, grouped_stats}
+use stats::weighted_quantile::{weighted_quantile, weighted_median}
+use stats::km_greenwood::{KMCIResult, km_greenwood}
+use stats::conditional_survival::{conditional_survival}
+use stats::cumulative_incidence::{cumulative_incidence}
+use stats::linear_contrast::{ContrastResult, linear_contrast}
+use stats::scheffe::{ScheffeResult, scheffe}
+use stats::welch_anova::{WelchAnovaResult, welch_anova}
+use stats::jonckheere::{JTResult, jonckheere}
+use stats::page_trend::{PageResult, page_trend}
+use stats::mann_kendall::{MKResult, mann_kendall}
+use stats::huber_location::{HuberResult, huber_location}
+use stats::siegel_regression::{SiegelFit, siegel_regression}
+use stats::yuen::{YuenResult, yuen}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

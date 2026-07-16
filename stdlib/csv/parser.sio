@@ -138,37 +138,48 @@ fn pow10(n: i32) -> f64 {
     r
 }
 
-/// Parse an f64 from bytes[start..end) (exclusive end).
-/// Handles optional leading '-', integer part, optional '.' + fraction.
-/// Returns 0.0 for an empty range.
-fn parse_f64(bytes: &[u8; 4096], start: i32, end: i32) -> f64 with Mut, Div, Panic {
-    if start >= end { return 0.0 }
+/// Field-buffer capacity for a single numeric CSV cell (see NOTE below).
+const CSV_FIELD_CAP: i32 = 64
 
-    var pos: i32 = start
+/// Parse an f64 from a *field-local* buffer buf[0..n) (index 0 based).
+/// Handles optional leading '-', integer part, optional '.' + fraction.
+//
+// NOTE (compiler workaround, do not "simplify" away): the caller MUST copy the
+// field's bytes into a fresh local buffer and call this with the copy — never pass
+// csv_parse's `input` ref straight through with a nonzero start. The current
+// lean_single backend miscompiles the integer-digit loop of a function that indexes
+// a *re-passed* `&[u8; N]` ref at a nonzero start offset: it accumulates nothing, so
+// every CSV field after column 0 parsed as 0.0. Parsing from a local buffer at
+// start 0 (and doing the offset copy in csv_parse, which owns the ref directly)
+// dodges the defect. Minimal repro filed for the compiler owner.
+fn parse_num(buf: &[u8; 64], n: i32) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+
+    var i: i32 = 0
     var neg: i32 = 0
 
     // Sign
-    if bytes[pos as usize] == (45 as u8) {   // '-'
+    if buf[0] == (45 as u8) {   // '-'
         neg = 1
-        pos = pos + 1
+        i = 1
     }
 
     // Integer part
     var int_part: f64 = 0.0
-    while pos < end && is_digit(bytes[pos as usize]) {
-        int_part = int_part * 10.0 + ((bytes[pos as usize] as i32) - 48) as f64
-        pos = pos + 1
+    while i < n && is_digit(buf[i as usize]) {
+        int_part = int_part * 10.0 + ((buf[i as usize] as i32) - 48) as f64
+        i = i + 1
     }
 
     // Fractional part
     var frac: f64 = 0.0
-    if pos < end && bytes[pos as usize] == (46 as u8) {   // '.'
-        pos = pos + 1
+    if i < n && buf[i as usize] == (46 as u8) {   // '.'
+        i = i + 1
         var denom: f64 = 10.0
-        while pos < end && is_digit(bytes[pos as usize]) {
-            frac = frac + ((bytes[pos as usize] as i32) - 48) as f64 / denom
+        while i < n && is_digit(buf[i as usize]) {
+            frac = frac + ((buf[i as usize] as i32) - 48) as f64 / denom
             denom = denom * 10.0
-            pos = pos + 1
+            i = i + 1
         }
     }
 
@@ -264,6 +275,10 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
     var col_count: i32 = 0      // columns seen in current row
     var n_cols_expected: i32 = 0  // established from first data row
     var row_vals: [f64; 16] = [0.0; 16]
+    // Per-field scratch buffer. Fields are copied here (by csv_parse's own direct
+    // indexing of `input`) before parsing, so parse_num never indexes a re-passed
+    // ref at a nonzero offset — see the NOTE on parse_num.
+    var fieldbuf: [u8; 64] = [0u8; 64]
     var field_start: i32 = pos
 
     while pos <= input_len {
@@ -281,7 +296,15 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
             let field_len = fe - field_start
             if field_len > 0 || col_count > 0 {
                 if col_count < 16 {
-                    row_vals[col_count as usize] = parse_f64(input, field_start, fe)
+                    // copy field bytes into local scratch, then parse from index 0
+                    var fn_len: i32 = 0
+                    var fq: i32 = field_start
+                    while fq < fe && fn_len < 64 {
+                        fieldbuf[fn_len as usize] = input[fq as usize]
+                        fq = fq + 1
+                        fn_len = fn_len + 1
+                    }
+                    row_vals[col_count as usize] = parse_num(&fieldbuf, fn_len)
                     col_count = col_count + 1
                 }
                 // store row
@@ -316,7 +339,15 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
         } else if c == delimiter {
             // end of field, not end of row
             if col_count < 16 {
-                row_vals[col_count as usize] = parse_f64(input, field_start, pos)
+                // copy field bytes into local scratch, then parse from index 0
+                var fn_len: i32 = 0
+                var fq: i32 = field_start
+                while fq < pos && fn_len < 64 {
+                    fieldbuf[fn_len as usize] = input[fq as usize]
+                    fq = fq + 1
+                    fn_len = fn_len + 1
+                }
+                row_vals[col_count as usize] = parse_num(&fieldbuf, fn_len)
                 col_count = col_count + 1
             }
             pos = pos + 1

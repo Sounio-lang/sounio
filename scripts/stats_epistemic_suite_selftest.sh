@@ -97,6 +97,51 @@ MODULES=(
   stdlib/stats/exp_smoothing.sio
   stdlib/stats/holt.sio
   stdlib/stats/ar1.sio
+  stdlib/stats/process_capability.sio
+  stdlib/stats/control_chart.sio
+  stdlib/stats/cusum.sio
+  stdlib/stats/effect_convert.sio
+  stdlib/stats/effect_from_test.sio
+  stdlib/stats/cles.sio
+  stdlib/stats/gwet_ac1.sio
+  stdlib/stats/krippendorff.sio
+  stdlib/stats/icc_forms.sio
+  stdlib/stats/poisson_gamma.sio
+  stdlib/stats/dirichlet_mult.sio
+  stdlib/stats/breslow_day.sio
+  stdlib/stats/leverage.sio
+  stdlib/stats/cooks_distance.sio
+  stdlib/stats/vif.sio
+  stdlib/stats/sample_size_survival.sio
+  stdlib/stats/sample_size_precision.sio
+  stdlib/stats/detectable_effect.sio
+  stdlib/stats/central_tendency.sio
+  stdlib/stats/dispersion.sio
+  stdlib/stats/shape.sio
+  stdlib/stats/gk_lambda.sio
+  stdlib/stats/gk_tau.sio
+  stdlib/stats/uncertainty_coefficient.sio
+  stdlib/stats/anderson_darling.sio
+  stdlib/stats/cramer_von_mises.sio
+  stdlib/stats/bowker.sio
+  stdlib/stats/zscore.sio
+  stdlib/stats/normalize.sio
+  stdlib/stats/rank_transform.sio
+  stdlib/stats/weighted_stats.sio
+  stdlib/stats/grouped_stats.sio
+  stdlib/stats/weighted_quantile.sio
+  stdlib/stats/km_greenwood.sio
+  stdlib/stats/conditional_survival.sio
+  stdlib/stats/cumulative_incidence.sio
+  stdlib/stats/linear_contrast.sio
+  stdlib/stats/scheffe.sio
+  stdlib/stats/welch_anova.sio
+  stdlib/stats/jonckheere.sio
+  stdlib/stats/page_trend.sio
+  stdlib/stats/mann_kendall.sio
+  stdlib/stats/huber_location.sio
+  stdlib/stats/siegel_regression.sio
+  stdlib/stats/yuen.sio
 )
 
 fail=0

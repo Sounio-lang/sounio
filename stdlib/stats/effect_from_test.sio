@@ -1,0 +1,122 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/effect_from_test.sio — effect sizes from test statistics
+//
+// Recovers a standardised effect size from a reported test statistic — the tool
+// for extracting effect sizes from published results that only give t / F:
+//
+//   r_from_t(t, df)               d_from_t(t, n1, n2)
+//   eta2_from_f(f, df1, df2)      omega2_from_f(f, df1, df2)
+//   d_from_means(m1, s1, n1, m2, s2, n2)
+//
+//   r = t/√(t²+df),   d = t·√(1/n₁ + 1/n₂),
+//   η² = df₁·F/(df₁·F + df₂),   ω² = df₁(F−1)/(df₁·F + df₂ + 1),
+//   d = (m₁−m₂)/s_pooled.
+//
+// Pure Sounio: inline sqrt. No external dependency, no nested data-array calls.
+//
+// References:
+//   Rosnow & Rosenthal (1996); Lakens (2013) Front. Psychol. 4:863.
+
+module stats::effect_from_test
+
+fn ef_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+/// Pearson r from a t statistic and its df.
+pub fn r_from_t(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 0.0 }
+    return t / ef_sqrt(t * t + df)
+}
+
+/// Cohen's d from a two-sample t statistic and group sizes.
+pub fn d_from_t(t: f64, n1: i32, n2: i32) -> f64 with Mut, Div, Panic {
+    if n1 < 1 || n2 < 1 { return 0.0 }
+    return t * ef_sqrt(1.0 / (n1 as f64) + 1.0 / (n2 as f64))
+}
+
+/// η² (proportion of variance) from an F statistic.
+pub fn eta2_from_f(f: f64, df1: f64, df2: f64) -> f64 with Mut, Div, Panic {
+    let den = df1 * f + df2
+    if den <= 0.0 { return 0.0 }
+    return df1 * f / den
+}
+
+/// ω² (less-biased variance explained) from an F statistic.
+pub fn omega2_from_f(f: f64, df1: f64, df2: f64) -> f64 with Mut, Div, Panic {
+    let den = df1 * f + df2 + 1.0
+    if den <= 0.0 { return 0.0 }
+    let num = df1 * (f - 1.0)
+    var w = num / den
+    if w < 0.0 { w = 0.0 }
+    return w
+}
+
+/// Cohen's d from two groups' means, sds and sizes (pooled sd).
+pub fn d_from_means(m1: f64, s1: f64, n1: i32, m2: f64, s2: f64, n2: i32) -> f64 with Mut, Div, Panic {
+    if n1 < 2 || n2 < 2 { return 0.0 }
+    let df1 = (n1 - 1) as f64
+    let df2 = (n2 - 1) as f64
+    let sp2 = (df1 * s1 * s1 + df2 * s2 * s2) / (df1 + df2)
+    let sp = ef_sqrt(sp2)
+    if sp <= 1.0e-300 { return 0.0 }
+    return (m1 - m2) / sp
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// t=2, df=10: r=2/sqrt(14)=0.534522.
+// d from t=2, n1=n2=10: d=2·sqrt(0.2)=0.894427.
+// F=4, df1=2, df2=10: eta²=8/18=0.444444; omega²=2·3/(8+10+1)=6/19=0.315789.
+fn test_from_test() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(1, approx(r_from_t(2.0, 10.0), 0.534522, 1.0e-5)) && ok
+    ok = check(2, approx(d_from_t(2.0, 10, 10), 0.894427, 1.0e-5)) && ok
+    ok = check(3, approx(eta2_from_f(4.0, 2.0, 10.0), 0.444444, 1.0e-5)) && ok
+    ok = check(4, approx(omega2_from_f(4.0, 2.0, 10.0), 0.315789, 1.0e-5)) && ok
+    return ok
+}
+
+// d from means: m1=10,s1=2,n1=5; m2=7,s2=2,n2=5. sp=2. d=(10-7)/2=1.5.
+fn test_from_means() -> bool with IO, Mut, Div, Panic {
+    let d = d_from_means(10.0, 2.0, 5, 7.0, 2.0, 5)
+    return check(10, approx(d, 1.5, 1.0e-6))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_from_test() && ok
+    ok = test_from_means() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

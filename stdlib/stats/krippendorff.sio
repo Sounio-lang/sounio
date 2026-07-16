@@ -1,0 +1,159 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/krippendorff.sio — Krippendorff's alpha (nominal)
+//
+// A general chance-corrected reliability coefficient for any number of raters,
+// here for nominal data with complete ratings:
+//
+//   krippendorff(rating, n_units, m_raters, k) -> f64
+//
+// From the coincidence matrix o_ck (nominal metric δ² = [c ≠ k]),
+//   Dₒ = Σ_{c≠k} o_ck / n,      Dₑ = Σ_{c≠k} nc·nk / (n(n−1)),
+//   α = 1 − Dₒ/Dₑ,
+// with per-unit coincidence  o_ck += cntc·cntk/(m−1)  (c≠k) and
+//   cntc(cntc−1)/(m−1)  (c=k).  α = 1 is perfect agreement, 0 is chance.
+//
+// Pure Sounio: per-unit category counts then a k×k coincidence accumulation. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Krippendorff (2004) "Content Analysis" 2e, ch.11.
+
+module stats::krippendorff
+
+/// Krippendorff's alpha for complete nominal reliability data.
+///
+/// Parâmetros: rating — row-major n_units × m_raters category codes (0..k-1);
+///             n_units — units (>=2); m_raters — raters per unit (>=2); k — categories (2..16).
+/// Retorno: alpha (1 = perfect, 0 = chance, <0 = systematic disagreement).
+/// Referências: Krippendorff (2004).
+pub fn krippendorff(rating: &[i64; 256], n_units: i32, m_raters: i32, k: i32) -> f64 with Mut, Div, Panic {
+    if n_units < 2 || m_raters < 2 || k < 2 || k > 16 { return 0.0 }
+    let mm1 = (m_raters - 1) as f64
+    var coin: [f64; 256] = [0.0; 256]   // k×k coincidence matrix
+    var u = 0
+    while u < n_units {
+        // count raters per category for this unit
+        var cnt: [f64; 16] = [0.0; 16]
+        var r = 0
+        while r < m_raters {
+            let cat = rating[(u * m_raters + r) as usize]
+            if cat >= 0 && cat < (k as i64) { cnt[cat as usize] = cnt[cat as usize] + 1.0 }
+            r = r + 1
+        }
+        // accumulate coincidences
+        var c = 0
+        while c < k {
+            var kk = 0
+            while kk < k {
+                let idx = (c * k + kk) as usize
+                if c == kk {
+                    coin[idx] = coin[idx] + cnt[c as usize] * (cnt[c as usize] - 1.0) / mm1
+                } else {
+                    coin[idx] = coin[idx] + cnt[c as usize] * cnt[kk as usize] / mm1
+                }
+                kk = kk + 1
+            }
+            c = c + 1
+        }
+        u = u + 1
+    }
+    // marginals and n
+    var nc: [f64; 16] = [0.0; 16]
+    var n = 0.0
+    var a = 0
+    while a < k {
+        var s = 0.0
+        var b = 0
+        while b < k { s = s + coin[(a * k + b) as usize]; b = b + 1 }
+        nc[a as usize] = s
+        n = n + s
+        a = a + 1
+    }
+    if n <= 1.0 { return 0.0 }
+    // observed and expected disagreement (nominal)
+    var do_off = 0.0
+    var de_off = 0.0
+    var i = 0
+    while i < k {
+        var j = 0
+        while j < k {
+            if i != j {
+                do_off = do_off + coin[(i * k + j) as usize]
+                de_off = de_off + nc[i as usize] * nc[j as usize]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let d_o = do_off / n
+    let d_e = de_off / (n * (n - 1.0))
+    if d_e <= 1.0e-300 { return 1.0 }
+    return 1.0 - d_o / d_e
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 4 units, 2 raters, 2 categories: (0,1),(1,0),(0,0),(1,1).
+// o00=2,o11=2,o01=2,o10=2; n0=n1=4, n=8. Do=4/8=0.5; De=32/56=0.571429.
+// alpha = 1 - 0.5/0.571429 = 0.125.
+fn test_krippendorff() -> bool with IO, Mut, Div, Panic {
+    var d: [i64; 256] = [0; 256]
+    d[0]=0; d[1]=1
+    d[2]=1; d[3]=0
+    d[4]=0; d[5]=0
+    d[6]=1; d[7]=1
+    let a = krippendorff(&d, 4, 2, 2)
+    return check(1, approx(a, 0.125, 1.0e-5))
+}
+
+// perfect agreement -> alpha = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var d: [i64; 256] = [0; 256]
+    d[0]=0; d[1]=0
+    d[2]=1; d[3]=1
+    d[4]=0; d[5]=0
+    d[6]=1; d[7]=1
+    let a = krippendorff(&d, 4, 2, 2)
+    return check(10, approx(a, 1.0, 1.0e-9))
+}
+
+// three raters, 3 units, 3 categories, all agree within unit -> alpha 1.
+fn test_three_raters() -> bool with IO, Mut, Div, Panic {
+    var d: [i64; 256] = [0; 256]
+    d[0]=0; d[1]=0; d[2]=0
+    d[3]=1; d[4]=1; d[5]=1
+    d[6]=2; d[7]=2; d[8]=2
+    let a = krippendorff(&d, 3, 3, 3)
+    return check(20, approx(a, 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_krippendorff() && ok
+    ok = test_perfect() && ok
+    ok = test_three_raters() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

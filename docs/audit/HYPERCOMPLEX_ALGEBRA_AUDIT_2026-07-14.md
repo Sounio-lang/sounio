@@ -111,8 +111,8 @@ invariance), `SounioSedenionBipartite.lean`, the **168 theorem** + associator-no
 | ID | Blocker | Impact | Status |
 |---|---|---|---|
 | ~~**#651**~~ | ~~`[struct;N]` multiply-accumulate codegen corrupts~~ — **RE-DIAGNOSED 2026-07-14 (Madaros): misdiagnosed.** Not aggregate codegen; the exact CD product over ℚ **runs correctly** (256-iter sedenion mul, `RAT-ZD PROVED`). The d8 SIGSEGV was two conflated defects (below); the N=16 garbage was lean_single/fable5, plus a separate value-copy aliasing already fixed by `ff7afab69`. | Exact ZD over ℚ **no longer blocked** on Madaros. ℚ proof landed (`tests/run-pass/cd_exact_rational_concrete.sio`, PR #816); dispatch PR #923. | **resolved as filed**; split into #919/#921 |
-| **#919** | native handle-table wraps at **2²⁰** allocations → `gc_empty_frame_reset` wipes live heap (liveness probe under-detects boxed value-locals). Scalar → wrong value; array-of-struct → SIGSEGV. Root cause of the d8 segfault; same family as PBPK (PR #555). | any Sounio program exceeding 2²⁰ heap-boxed value-struct allocs corrupts (training loops, sweeps). The 256-iter science target is **unaffected**. | open, B1; owner CODEX-2 (root fix: don't heap-box ≤16B value-struct returns) |
-| **#921** | multimodule thin-link (compact-IR ELF writer) fails rc=12 when `math::rational` is imported alongside a second module | forces single-module/inline (code duplication) for exact-arithmetic clients | open, E1; owner CODEX-2 |
+| **#919** | native handle-table wraps at **2²⁰** allocations → `gc_empty_frame_reset` wipes live heap (liveness probe under-detects boxed value-locals). Scalar → wrong value; array-of-struct → SIGSEGV. Root cause of the d8 segfault; same family as PBPK (PR #555). | any Sounio program exceeding 2²⁰ heap-boxed value-struct allocs corrupts (training loops, sweeps). The 256-iter science target is **unaffected**. | open, B1; **dispatched to CODEX-2** (`docs/handoff/compiler_651_defects_codex_dispatch_2026-07-15.md`, PR #966); root fix: don't heap-box ≤16B value-struct returns |
+| **#921** | multimodule thin-link (compact-IR ELF writer) fails rc=12 when `math::rational` is imported alongside a second module | forces single-module/inline (code duplication) for exact-arithmetic clients | open, E1; **dispatched to CODEX-2** (PR #966) |
 | **#891** | Madaros v0.80.0 codegen: `print_int` garbled after f64; scalar-global-in-unit-fn does not persist to caller; `[i64;1]` SIGSEGV (use len ≥2); many f64-locals-across-calls corrupt the return addr | probes need manual source workarounds; Madaros is not the oracle for these paths | `BLK-20260714-madaros-print_int-f64`, owner codex-2 |
 | — | Madaros support for **generic** exact CD (tracks M1–M3) | generic-`F` engine (`cd_exact_generic_i64.sio`) runs only on lean_single/fable5, not the default `souc` (Madaros); the concrete/monomorphized ℚ path works on Madaros | pending |
 
@@ -190,3 +190,9 @@ PR #940 (oracle test + README convention map + `ssm/lib.sio` e7 sign-bug fix) an
 `stdlib/algebra/README.md` staleness is also cleared. Note: the checked-in `artifacts/self-hosted/
 madaros` (Jul-11) is stale w.r.t. main — build fresh before concluding a codegen bug is live (the
 "multiple `&[f64;N]` ref-param" and ssm-harness SIGSEGV symptoms were stale-binary artifacts).
+
+**Update 2026-07-15 (dispatch)** — the two remaining compiler defects #919 (2²⁰ handle-table wrap)
+and #921 (multimodule thin-link) were **dispatched to CODEX-2** as a forensic fix prompt:
+`docs/handoff/compiler_651_defects_codex_dispatch_2026-07-15.md` (PR #966, merged), cross-linked on
+both issues. Each carries root-cause mechanism (`file:line`), a checked-in repro, and acceptance
+criteria. They are compiler-owned (`self-hosted/`, CLAUDE.md §8) — now in CODEX-2's queue.
