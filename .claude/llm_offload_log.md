@@ -2757,3 +2757,14 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
 - Browser evidence: desktop and 390 px states confirmed loaded natural-dimension artifacts, pointer and arrow-key selection, custody reset on domain change, and zero horizontal overflow.
 - Raw review directory: `/tmp/llm-offload-jeDVju/`.
+
+| 2026-07-16 | xai/grok-4.3 + zai/glm-5.2 | math-review | website/src/components/home/ParticleLoom.tsx | PASS_WITH_RESOLVED_DISAGREEMENT | xAI accepted all displayed ladder, normalization, exact-arithmetic, and occupation-spectrum claims. Z.AI questioned the sign of `{A_i,A_i^dag}` after treating `A_i=-L_a+iL_b`; direct inspection found its derivation dropped the second sign from conjugating `iL_b` while transposing the antisymmetric left-action matrices. The executable witness defines `A^dag=(Re^T,-Im^T)` and checks every matrix entry; both Sounio and the Python oracle emit `LADDER_OK 1`, `CHARGE3_{0..3} 1 3 3 1`, and `FUREY OK`. The UI now states the conjugate-transpose convention explicitly. Raw: `/tmp/llm-offload-snEYIN/`. |
+
+## 2026-07-16 - Particle Loom website review
+- Files: `website/src/components/home/ParticleLoom.tsx`, `ParticleLoom.css`, and `website/src/pages/index.astro`.
+- Task: replace `DomainGlimpses` with an exact, interactive Furey-style witness while preserving Sounio's visual identity and keeping the mathematical boundary visible.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR after reviewing a self-contained bundle of the public copy, exact provenance, tab semantics, responsive measurements, and claim boundaries.
+- Fan-out degradation: DeepSeek returned `Insufficient Balance`; Gemini returned an OpenRouter credit error. Neither unavailable provider is represented as a pass.
+- Invalid first attempt: `/tmp/llm-offload-VwTLiY/` contained only local filenames, which remote providers could not inspect, and was discarded after it falsely reported the explicitly present boundary and tab semantics as absent. The self-contained retry is the review of record.
+- Browser evidence: desktop `1440×1100` and Portuguese mobile `390×844` both measured zero horizontal overflow; native button selection exposed diagonal `4I8` and off-diagonal `0`, and the two tabs removed their inactive panel from layout.
+- Raw review directory: `/tmp/llm-offload-hbzAf0/`.
