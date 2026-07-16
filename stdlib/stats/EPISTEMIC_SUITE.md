@@ -29,7 +29,8 @@ fourteen families:
   for proportions/correlations, survival trials (Schoenfeld), target precision,
   and the minimum detectable effect.
 - **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
-  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
+  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD, plus the
+  ordered-alternative / trend tests (Jonckheere-Terpstra, Page's L, Mann-Kendall).
 - **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
   point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
   Somers' D.
@@ -1663,6 +1664,37 @@ unequal variances): weighted between-group F with the Welch-corrected fractional
 df₂. Validated (Python-cross-checked): three groups with variances 2.5/10/0.5 →
 F=3.405, df₂=6.398; equal groups → F=0.
 
+### `stats::jonckheere` — Jonckheere-Terpstra ordered-alternatives test
+
+| Function | Signature |
+|---|---|
+| `jonckheere` | `pub fn jonckheere(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> JTResult with Mut, Div, Panic` |
+
+A non-parametric test for a monotone trend across k *ordered* groups (more
+powerful than Kruskal-Wallis when the order is known): `J=Σ_{i<j}Uᵢⱼ` with the
+normal-approximation z. Validated: three increasing groups → J=27, E[J]=13.5,
+z=3.0; identical groups → z=0.
+
+### `stats::page_trend` — Page's L test
+
+| Function | Signature |
+|---|---|
+| `page_trend` | `pub fn page_trend(data: &[f64; 256], n: i32, k: i32) -> PageResult with Mut, Div, Panic` |
+
+The repeated-measures ordered-alternative test (ordered Friedman): `L=Σj·Rⱼ` on
+a row-major n×k matrix. Validated: perfectly ordered 3×3 → L=42, E[L]=36,
+z=2.449; no trend → z=0.
+
+### `stats::mann_kendall` — Mann-Kendall trend test
+
+| Function | Signature |
+|---|---|
+| `mann_kendall` | `pub fn mann_kendall(x: &[f64; 256], n: i32) -> MKResult with Mut, Div, Panic` |
+
+The rank-based monotonic-trend test for a time-ordered series (the environmental-
+statistics standard): `S=Σ_{i<j}sign(xⱼ−xᵢ)`, continuity-corrected z, and Kendall's
+τ. Validated: increasing {1..5} → S=10, z=2.2045, τ=1; decreasing → S=−10, τ=−1.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1794,6 +1826,9 @@ use stats::cumulative_incidence::{cumulative_incidence}
 use stats::linear_contrast::{ContrastResult, linear_contrast}
 use stats::scheffe::{ScheffeResult, scheffe}
 use stats::welch_anova::{WelchAnovaResult, welch_anova}
+use stats::jonckheere::{JTResult, jonckheere}
+use stats::page_trend::{PageResult, page_trend}
+use stats::mann_kendall::{MKResult, mann_kendall}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at

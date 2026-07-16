@@ -136,6 +136,9 @@ MODULES=(
   stdlib/stats/linear_contrast.sio
   stdlib/stats/scheffe.sio
   stdlib/stats/welch_anova.sio
+  stdlib/stats/jonckheere.sio
+  stdlib/stats/page_trend.sio
+  stdlib/stats/mann_kendall.sio
 )
 
 fail=0

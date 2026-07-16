@@ -1,0 +1,165 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/mann_kendall.sio — Mann-Kendall trend test
+//
+// A rank-based test for a monotone trend in a time-ordered series — the standard
+// tool in environmental and hydrological statistics because it needs no
+// distributional assumption and is robust to outliers:
+//
+//   mann_kendall(x, n) -> MKResult
+//
+//   S = Σ_{i<j} sign(xⱼ − xᵢ),   Var(S) = n(n−1)(2n+5)/18,
+//   z = (S−1)/√Var(S)  (S>0),  (S+1)/√Var(S)  (S<0),  0 (S=0)   [continuity].
+// A positive z is an increasing trend. Sen's slope (median pairwise slope) is
+// the companion estimator (see stats::theil_sen).
+//
+// Pure Sounio: an O(n²) sign count; inline sqrt/erf. No external dependency, no
+// nested data-array calls.
+//
+// References:
+//   Mann (1945); Kendall (1975); Hirsch, Slack & Smith (1982).
+
+module stats::mann_kendall
+
+fn mk_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn mk_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / mk_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn mk_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * mk_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn mk_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - mk_erf(z * INV_SQRT2))
+}
+
+pub struct MKResult {
+    pub s: f64,       // Mann-Kendall S
+    pub z: f64,       // standardized statistic (with continuity correction)
+    pub p: f64,       // two-sided p
+    pub tau: f64,     // Kendall's tau = S / (n(n-1)/2)
+}
+
+/// Mann-Kendall trend test on a time-ordered series.
+///
+/// Parâmetros: x — series in time order; n — length (>=3, <=256).
+/// Retorno: MKResult (s, z, p, tau).
+/// Referências: Mann (1945); Kendall (1975).
+pub fn mann_kendall(x: &[f64; 256], n: i32) -> MKResult with Mut, Div, Panic {
+    if n < 3 { return MKResult { s: 0.0, z: 0.0, p: 1.0, tau: 0.0 } }
+    var s = 0.0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let d = x[j as usize] - x[i as usize]
+            if d > 0.0 { s = s + 1.0 } else { if d < 0.0 { s = s - 1.0 } }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let nf = n as f64
+    let var_s = nf * (nf - 1.0) * (2.0 * nf + 5.0) / 18.0
+    var z = 0.0
+    if var_s > 0.0 {
+        if s > 0.0 { z = (s - 1.0) / mk_sqrt(var_s) }
+        else { if s < 0.0 { z = (s + 1.0) / mk_sqrt(var_s) } }
+    }
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    let p = 2.0 * mk_normal_sf(az)
+    let tau = s / (nf * (nf - 1.0) / 2.0)
+    return MKResult { s: s, z: z, p: p, tau: tau }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// monotone increasing {1,2,3,4,5}: all C(5,2)=10 pairs positive -> S=10.
+// Var=5·4·15/18=16.666667. z=(10-1)/4.082483=2.204541. tau=10/10=1.
+fn test_increasing() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = mann_kendall(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.s, 10.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.z, 2.204541, 1.0e-4)) && ok
+    ok = check(3, approx(r.tau, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// monotone decreasing -> S=-10, tau=-1, negative z.
+fn test_decreasing() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=5.0; x[1]=4.0; x[2]=3.0; x[3]=2.0; x[4]=1.0
+    let r = mann_kendall(&x, 5)
+    var ok = true
+    ok = check(10, approx(r.s, 0.0 - 10.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.tau, 0.0 - 1.0, 1.0e-9)) && ok
+    ok = check(12, r.z < 0.0) && ok
+    return ok
+}
+
+// no trend (symmetric zig-zag) -> S small, z near 0.
+fn test_notrend() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=3.0; x[1]=1.0; x[2]=4.0; x[3]=2.0; x[4]=5.0; x[5]=3.0
+    let r = mann_kendall(&x, 6)
+    return check(20, r.p > 0.3)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_increasing() && ok
+    ok = test_decreasing() && ok
+    ok = test_notrend() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}
