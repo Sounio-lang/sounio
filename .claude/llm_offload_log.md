@@ -3023,3 +3023,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
 - Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
+
+## 2026-07-16 — math-review: chemistry::acids pH range reduction (PR #1014)
+- Target: `stdlib/chemistry/acids.sio`; regression: `tests/stdlib/chemistry/test_acids_stdlib.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED** for the changed `ln_approx` range reduction, `ph`, and Henderson-Hasselbalch formulas. It correctly accepted the reduction of `x` to `[1/sqrt(10), sqrt(10)]` before the artanh series and the first-order pH uncertainty formula.
+- Documented disagreement: Grok called the excess-base branch `14 + log10(oh)` wrong. It is correct because `pOH = -log10([OH-])`, hence `pH = 14 - pOH = 14 + log10([OH-])`. The added regression uses `[OH-]=0.01`, where the implemented branch returns `12` and the suggested alternative would incorrectly return `16`.
+- Independent-provider fallback: Z.AI GLM-5.2 timed out after more than 120 seconds (`/tmp/llm-offload-mxTIVr/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-83btKx/`); DeepSeek returned `Insufficient Balance` (`/tmp/llm-offload-xlyMGm/`); Groq returned `Invalid API Key` (`/tmp/llm-offload-sFR2Ue/`). Re-review with Z.AI remains pending when that provider is responsive.
+- Scope boundary: Grok also marked the pre-existing `calibrate` slope uncertainty and `mm_rate` rough uncertainty as overreach. Neither is changed by this PR or used to support its pH regression claim; they remain separate investigation items rather than silently being folded into this numerical-fix patch.
+- Gate: `bash scripts/verticals_rng_iter_acids_gate.sh` -> `VERTICALS_RNG_ITER_ACIDS_GATE_OK`; `git diff --check` -> PASS.
