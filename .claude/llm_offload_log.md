@@ -2749,3 +2749,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
 - Browser evidence: desktop and 390 px states confirmed pointer selection, `ACCEPT` and `REFUSE · E152`, responsive lineage/crossing layouts, and zero horizontal overflow.
 - Raw review directory: `/tmp/llm-offload-0rnaFs/`.
+
+## 2026-07-16 - Sounio Observatory consolidation review
+- Files: `website/src/components/home/SounioObservatory.astro`, `SounioObservatoryStage.tsx`, `SounioObservatoryStage.css`, and `website/src/pages/index.astro`.
+- Task: replace two repetitive visual-receipt sections with one flagship, manifest-backed observatory and a disclosure-based custody record.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR finding. It accepted the four domain boundaries, manifest provenance, collapsed technical detail, and non-overclaiming headline.
+- Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px states confirmed loaded natural-dimension artifacts, pointer and arrow-key selection, custody reset on domain change, and zero horizontal overflow.
+- Raw review directory: `/tmp/llm-offload-jeDVju/`.
