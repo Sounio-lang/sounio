@@ -111,3 +111,62 @@ fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_bas
     }
     out
 }
+
+// ============================================================================
+// Complete WMMA octonion-multiply kernel emitter (Convention X)
+// ============================================================================
+
+// Emits "{%<prefix><start>, ..., %<prefix><start+count-1>}".
+fn hmma_emit_frag_list(buf: HypercomplexPtxState, prefix: string, start: i64, count: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(buf, "{")
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = hc_push_str(out, ", ") }
+        out = hc_push_str(out, prefix)
+        out = hc_push_str(out, i64_to_string(start + i))
+        i = i + 1
+    }
+    hc_push_str(out, "}")
+}
+
+// Emits a complete, runnable PTX kernel `sounio_oct_mul_wmma(L_ptr, B_ptr, out_ptr)` that
+// computes the octonion product on tensor cores: given L(a) (16×16 f16, the caller/host builds
+// L(a)[k][j]=σ(k⊕j,j)·a[k⊕j] via hmma_left_mul_sign) and B (16×16 f16), it runs one
+// wmma.m16n16k16.f16→f32 tile and stores D = L(a)·B (the octonion products, Convention X).
+// HARDWARE-VALIDATED on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0): this exact emitted PTX
+// ptxas-assembles and launches; e1·e2 → component 3 (+1), batch 0/128 mismatch vs the exact X
+// reference. Reference harness: docs/gpu/run_sounio_ptx.cu (loads the Sounio-emitted PTX).
+pub fn hmma_emit_oct_mul_wmma_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_wmma(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_lmat,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_b,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .b32 %r<18>;\n    .reg .b32 %f<10>;\n    .reg .b64 %rd<7>;\n\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_lmat];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd2, [p_b];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd5, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%rd4], %r1;\n")
+    out = hc_push_str(out, "    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%rd5], %r1;\n")
+    out = hc_push_str(out, "    mov.f32 %f1, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f1, %f1, %f1, %f1, %f1, %f1, %f1, %f1};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n")
+    out = hc_push_str(out, "    ret;\n}\n")
+    out
+}
