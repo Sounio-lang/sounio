@@ -133,6 +133,9 @@ MODULES=(
   stdlib/stats/km_greenwood.sio
   stdlib/stats/conditional_survival.sio
   stdlib/stats/cumulative_incidence.sio
+  stdlib/stats/linear_contrast.sio
+  stdlib/stats/scheffe.sio
+  stdlib/stats/welch_anova.sio
 )
 
 fail=0

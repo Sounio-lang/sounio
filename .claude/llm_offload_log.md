@@ -3007,3 +3007,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - cumulative_incidence = **PASS**: Aalen-Johansen/K-P CIF₁=ΣŜ(t_{j-1})d1/n with all-cause survival update; competing-event table→CIF₁(4)=0.75 (not 1), no-competing→1−KM verified.
 - Theme: survival extensions — the Greenwood CI the bare km lacked, conditional survival, and competing-risks CIF. All sort-free walks, derivable, #852-safe. Suite runner: 124 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-840gyX/`, `/tmp/llm-offload-LJbaM2/`, `/tmp/llm-offload-YWV9jA/`.
+
+## 2026-07-16 — math-review: stats::linear_contrast, stats::scheffe, stats::welch_anova
+- Files (all new): `stdlib/stats/linear_contrast.sio` (planned contrast t-test), `stdlib/stats/scheffe.sio` (Scheffé family-wise F for a contrast), `stdlib/stats/welch_anova.sio` (Welch unequal-variance one-way ANOVA). Provider: xAI/Grok 4.3.
+- linear_contrast = **PASS**: L=Σcᵢx̄ᵢ, SE=√(MSE·Σcᵢ²/nᵢ), t(N−k); means{10,12,20}/{−½,−½,1}→L=9, SE=1.0954, t=8.216 verified.
+- scheffe = **PASS**: F_S=t²/(k−1) ~ F(k−1,N−k); primary case F_S=33.75 verified. Reviewer flagged test_conservative as failing (claimed SE≈0.632→F_S≈101) but that was the reviewer's own arithmetic slip — verified directly + vs Python: SE=1.2649, F_S=2.8125, p=0.0996 correct. Test only asserts p∈(0,1]; ran green. False positive.
+- welch_anova = **PASS**: weighted F with Welch fractional df₂=(k²−1)/(3A); groups var 2.5/10/0.5 → F=3.405, df₂=6.398 (Python-cross-checked).
+- Theme: ANOVA contrasts & robust ANOVA — planned/post-hoc contrasts (linear, Scheffé) and the unequal-variance ANOVA complementing anova + bartlett/levene. All derivable, #852-safe. Suite runner: 127 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-GjsIyt/`, `/tmp/llm-offload-Z5IqUV/`, `/tmp/llm-offload-NWs9px/`.
