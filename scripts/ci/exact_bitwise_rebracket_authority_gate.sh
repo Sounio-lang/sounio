@@ -92,13 +92,16 @@ require_text 'ocp_rebracket_function_has_complete_use_model' "$OPT"
 require_text 'exact_bitwise_use_model_ok' "$OPT"
 require_text 'ocp_rebracket_block_start_index' "$OPT"
 require_text 'ocp_certify_exact_bitwise_same_linear_region_use' "$OPT"
+require_text 'ocp_rebracket_occurrence_failure' "$OPT"
+require_text 'ocp_rebracket_occurrence_is_valid' "$OPT"
+require_text 'ocp_rebracket_occurrence_reason' "$OPT"
 require_text 'ocp_rebracket_flow_certificate_failure' "$OPT"
 require_text 'ocp_rebracket_flow_certificate_reason' "$OPT"
-reject_text 'certified\.2|current_flow\.2|stale_certificate\.2' "$OPT"
+reject_text 'captured\.[012]|current\.[012]|stale_capture\.[012]|certified\.[012]|current_flow\.[012]|stale_certificate\.[012]' "$OPT"
 require_text 'instr\.arg_count == 0' "$OPT"
 require_text 'ocp_rebracket_has_no_call_args\(instr\.call_args\)' "$OPT"
 require_text 'ocp_rebracket_has_float_marker_before' "$OPT"
-require_text 'ocp_rebracket_occurrences_equal\(expected, current\.1\)' "$OPT"
+require_text 'ocp_rebracket_occurrences_equal\(expected, current\)' "$OPT"
 require_text 'ocp_rebracket_instr_equal' "$OPT"
 require_text 'boundary_claim_mask = boundary_claim_mask \| 16' "$OPT"
 reject_text 'runtime_d7_receipt_consumed|float_or_gum_authority_established|global_reassociation_authority_established' "$OPT"
@@ -131,7 +134,7 @@ module_receipt_fields="$(count_struct_i64_fields OcpCleanupModuleReceipt)"
 [[ "$receipt_fields" == 5 ]] || fail "probe receipt must remain 5 i64 fields, got $receipt_fields"
 [[ "$module_receipt_fields" == 8 ]] || fail "module cleanup receipt must remain 8 i64 fields, got $module_receipt_fields"
 # These compact record counts are compatibility tripwires, not inferred ABIs:
-# changing one, or reintroducing a heterogeneous certificate-result tuple, must
+# changing one, or reintroducing a heterogeneous capture-result tuple, must
 # force an explicit gate review instead of passing silently.
 
 combine_slice="$(awk '

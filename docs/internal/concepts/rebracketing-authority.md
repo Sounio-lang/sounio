@@ -96,6 +96,13 @@ whose magnitude is the refusal reason. This avoids transporting a second
 heterogeneous three-tuple through the current bootstrap. The private issuer
 asserts nonnegative indices, so a refusal-shaped value cannot become authority.
 
+Occurrence-capture refusal follows the same closed-value discipline. An invalid
+six-word occurrence has negative indices and stores the negated refusal reason
+in `operator_key`; capture consumers require nonnegative indices and one of the
+valid operator keys `3..5` before certification. This removes the remaining
+heterogeneous capture tuple from the bootstrap path without broadening the
+authority surface.
+
 The 256-register admission limit is named in the implementation and mirrors the
 existing fixed register-indexed tables in cleanup passes A2/B. It is a boundary
 of this pass, not an asserted global compiler limit.

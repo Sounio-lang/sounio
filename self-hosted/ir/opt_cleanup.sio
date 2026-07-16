@@ -147,14 +147,34 @@ fn ocp_record_exact_bitwise_rebracket_audit(
     }
 }
 
-fn ocp_rebracket_empty_occurrence() -> OcpExactBitwiseRebracketOccurrence {
+fn ocp_rebracket_occurrence_failure(
+    reason_code: i64,
+) -> OcpExactBitwiseRebracketOccurrence {
     OcpExactBitwiseRebracketOccurrence {
         outer_instr_index: -1,
         inner_instr_index: -1,
         outer_const_def_index: -1,
-        operator_key: 0,
+        operator_key: 0 - reason_code,
         base_reg: -1,
         outer_const_reg: -1,
+    }
+}
+
+fn ocp_rebracket_occurrence_is_valid(
+    occurrence: OcpExactBitwiseRebracketOccurrence,
+) -> bool {
+    occurrence.outer_instr_index >= 0 && occurrence.inner_instr_index >= 0 &&
+        occurrence.outer_const_def_index >= 0 && occurrence.operator_key >= 3 &&
+        occurrence.operator_key <= 5
+}
+
+fn ocp_rebracket_occurrence_reason(
+    occurrence: OcpExactBitwiseRebracketOccurrence,
+) -> i64 {
+    if occurrence.operator_key < 0 {
+        0 - occurrence.operator_key
+    } else {
+        0
     }
 }
 
@@ -479,22 +499,21 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
     func: &IrFunction,
     outer_idx: i64,
     inner_idx: i64,
-) -> (bool, OcpExactBitwiseRebracketOccurrence, i64) with Mut, Div, Panic {
-    let empty = ocp_rebracket_empty_occurrence()
+) -> OcpExactBitwiseRebracketOccurrence with Mut, Div, Panic {
     if inner_idx < 0 || outer_idx <= inner_idx || outer_idx >= func.instr_count {
-        return (false, empty, 1)
+        return ocp_rebracket_occurrence_failure(1)
     }
 
     let inner = func.instrs[inner_idx as usize]
     let outer = func.instrs[outer_idx as usize]
     if !ocp_rebracket_is_plain_binop(inner) || !ocp_rebracket_is_plain_binop(outer) {
-        return (false, empty, 2)
+        return ocp_rebracket_occurrence_failure(2)
     }
     if !ocp_rebracket_is_exact_bitwise_op(inner.bin_op) || inner.bin_op != outer.bin_op {
-        return (false, empty, 3)
+        return ocp_rebracket_occurrence_failure(3)
     }
     if outer.src1 != inner.dst {
-        return (false, empty, 4)
+        return ocp_rebracket_occurrence_failure(4)
     }
 
     let base_reg = inner.src1
@@ -505,26 +524,26 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
         outer_const_reg < 0 || outer_const_reg >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
         inner.dst < 0 || inner.dst >= OCP_REBRACKET_TRACKED_REG_LIMIT ||
         outer.dst < 0 || outer.dst >= OCP_REBRACKET_TRACKED_REG_LIMIT {
-        return (false, empty, 5)
+        return ocp_rebracket_occurrence_failure(5)
     }
     if base_reg == inner_const_reg || base_reg == outer_const_reg ||
         inner_const_reg == outer_const_reg || inner.dst == base_reg ||
         inner.dst == inner_const_reg || inner.dst == outer_const_reg {
-        return (false, empty, 6)
+        return ocp_rebracket_occurrence_failure(6)
     }
 
     let inner_const_def_idx = ocp_rebracket_last_value_def_before(func, inner_const_reg, inner_idx)
     let outer_const_def_idx = ocp_rebracket_last_value_def_before(func, outer_const_reg, outer_idx)
     if inner_const_def_idx < 0 || outer_const_def_idx < 0 ||
         outer_const_def_idx >= outer_idx {
-        return (false, empty, 7)
+        return ocp_rebracket_occurrence_failure(7)
     }
     let inner_const_def = func.instrs[inner_const_def_idx as usize]
     let outer_const_def = func.instrs[outer_const_def_idx as usize]
     if !ocp_rebracket_is_plain_load_imm(inner_const_def) ||
         !ocp_rebracket_is_plain_load_imm(outer_const_def) ||
         inner_const_def.dst != inner_const_reg || outer_const_def.dst != outer_const_reg {
-        return (false, empty, 8)
+        return ocp_rebracket_occurrence_failure(8)
     }
 
     if ocp_rebracket_has_float_marker_before(func, base_reg, outer_idx) ||
@@ -532,7 +551,7 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
         ocp_rebracket_has_float_marker_before(func, outer_const_reg, outer_idx) ||
         ocp_rebracket_has_float_marker_before(func, inner.dst, outer_idx) ||
         ocp_rebracket_has_float_marker_before(func, outer.dst, outer_idx) {
-        return (false, empty, 9)
+        return ocp_rebracket_occurrence_failure(9)
     }
     if ocp_rebracket_window_has_conflicting_write(
         func,
@@ -544,14 +563,14 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
         outer_const_reg,
         inner.dst,
     ) {
-        return (false, empty, 10)
+        return ocp_rebracket_occurrence_failure(10)
     }
     let combined = ocp_rebracket_combine(
         inner.bin_op,
         inner_const_def.imm_i64,
         outer_const_def.imm_i64,
     )
-    if !combined.0 { return (false, empty, 12) }
+    if !combined.0 { return ocp_rebracket_occurrence_failure(12) }
     let operator_key = ocp_rebracket_operator_key(inner.bin_op)
     let occurrence = OcpExactBitwiseRebracketOccurrence {
         outer_instr_index: outer_idx,
@@ -561,7 +580,7 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
         base_reg: base_reg,
         outer_const_reg: outer_const_reg,
     }
-    (true, occurrence, 0)
+    occurrence
 }
 
 fn ocp_rebracket_occurrences_equal(
@@ -603,23 +622,25 @@ fn ocp_apply_exact_bitwise_rebracket_authority(
         expected.outer_instr_index,
         expected.inner_instr_index,
     )
-    if !current.0 { return ocp_rebracket_empty_audit(13) }
-    let current_flow = ocp_certify_exact_bitwise_same_linear_region_use(func, current.1)
+    if !ocp_rebracket_occurrence_is_valid(current) {
+        return ocp_rebracket_empty_audit(13)
+    }
+    let current_flow = ocp_certify_exact_bitwise_same_linear_region_use(func, current)
     if !ocp_rebracket_flow_certificate_is_valid(current_flow) ||
-        !ocp_rebracket_occurrences_equal(expected, current.1) ||
+        !ocp_rebracket_occurrences_equal(expected, current) ||
         !ocp_rebracket_flow_certificates_equal(expected_flow, current_flow) {
         return ocp_rebracket_empty_audit(13)
     }
 
-    let inner = func.instrs[current.1.inner_instr_index as usize]
-    let outer = func.instrs[current.1.outer_instr_index as usize]
+    let inner = func.instrs[current.inner_instr_index as usize]
+    let outer = func.instrs[current.outer_instr_index as usize]
     let inner_const_def_idx = ocp_rebracket_last_value_def_before(
         func,
         inner.src2,
-        current.1.inner_instr_index,
+        current.inner_instr_index,
     )
     let inner_const_def = func.instrs[inner_const_def_idx as usize]
-    let outer_const_def = func.instrs[current.1.outer_const_def_index as usize]
+    let outer_const_def = func.instrs[current.outer_const_def_index as usize]
     let combined = ocp_rebracket_combine(
         outer.bin_op,
         inner_const_def.imm_i64,
@@ -662,14 +683,14 @@ fn ocp_try_exact_bitwise_rebracket(
     inner_idx: i64,
 ) -> OcpExactBitwiseRebracketAudit with Mut, Div, Panic {
     let captured = ocp_capture_exact_bitwise_rebracket_occurrence(func, outer_idx, inner_idx)
-    if !captured.0 {
-        return ocp_rebracket_empty_audit(captured.2)
+    if !ocp_rebracket_occurrence_is_valid(captured) {
+        return ocp_rebracket_empty_audit(ocp_rebracket_occurrence_reason(captured))
     }
-    let certified = ocp_certify_exact_bitwise_same_linear_region_use(func, captured.1)
+    let certified = ocp_certify_exact_bitwise_same_linear_region_use(func, captured)
     if !ocp_rebracket_flow_certificate_is_valid(certified) {
         return ocp_rebracket_empty_audit(ocp_rebracket_flow_certificate_reason(certified))
     }
-    let authority = ocp_issue_exact_bitwise_rebracket_authority(captured.1, certified)
+    let authority = ocp_issue_exact_bitwise_rebracket_authority(captured, certified)
     ocp_apply_exact_bitwise_rebracket_authority(func, authority)
 }
 
@@ -831,14 +852,14 @@ pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracket
 
     let stale_input = ocp_rebracket_probe_chain(BinaryOp::OpBitXor, 5, 3)
     let stale_capture = ocp_capture_exact_bitwise_rebracket_occurrence(&stale_input, 3, 1)
-    assert(stale_capture.0)
+    assert(ocp_rebracket_occurrence_is_valid(stale_capture))
     let stale_certificate = ocp_certify_exact_bitwise_same_linear_region_use(
         &stale_input,
-        stale_capture.1,
+        stale_capture,
     )
     assert(ocp_rebracket_flow_certificate_is_valid(stale_certificate))
     let stale_authority = ocp_issue_exact_bitwise_rebracket_authority(
-        stale_capture.1,
+        stale_capture,
         stale_certificate,
     )
     var stale_changed = stale_input
