@@ -15,14 +15,14 @@ Este documento define uma lista inicial de pacotes candidatos que devem ser dese
 
 ## Critérios de Pacote Curado
 
-Um pacote é considerado "curado" se atender **todos** os critérios:
+Um pacote candidato a curadoria deve atender **todos** os critérios:
 
-1. `epistemic-score` ≥ 0.80
-2. Cobertura de testes ≥ 85% (incluindo testes de propagação de incerteza)
-3. Documentação completa com exemplos executáveis
-4. `sounio.toml` com metadados regulatórios claros
-5. Manutenção ativa pela equipe core ou parceiro confiável
-6. Testes de regressão em CI com `STDLIB_RUNTIME_REGRESSION_STRICT=1`
+1. Ring, contexto de uso, visibilidade e classes de claim explicitamente declarados
+2. Cobertura de testes reportada como métrica de cobertura, sem inferência de validação
+3. Documentação completa com exemplos executáveis e maturidade declarada
+4. Evidências nomeadas e vinculadas por digest aos gates aplicáveis
+5. Manutenção e revisão com responsáveis identificados
+6. Receipt `package-boundary-receipt` verificável para o release avaliado
 
 ---
 
@@ -40,7 +40,7 @@ Um pacote é considerado "curado" se atender **todos** os critérios:
 - `confidence_gate` macro
 
 **Dependências:** Nenhuma
-**Epistemic Score alvo:** 0.98
+**Próximo gate:** `package-boundary-receipt`; qualquer claim GUM requer método e witness próprios.
 
 ---
 
@@ -55,7 +55,7 @@ Um pacote é considerado "curado" se atender **todos** os critérios:
 - ARIMA, correlação e regressão epistêmica
 - MCMC diagnostics (R-hat, ESS, Geweke) com uncertainty
 
-**Epistemic Score alvo:** 0.92
+**Próximo gate:** inventário científico e validação por contexto de uso.
 
 ---
 
@@ -70,7 +70,7 @@ Um pacote é considerado "curado" se atender **todos** os critérios:
 - Brain-plasma TAC reference tables
 - Integração com dados experimentais (CHB-MIT, ABIDE, etc.)
 
-**Epistemic Score alvo:** 0.95 (devido ao uso regulatório)
+**Próximo gate:** qualificação PBPK específica à finalidade e versão do modelo.
 
 ---
 
@@ -85,7 +85,7 @@ Um pacote é considerado "curado" se atender **todos** os critérios:
 - Sedenion algebra integration
 - Interpretação de incerteza em embeddings
 
-**Epistemic Score alvo:** 0.88
+**Próximo gate:** evidência experimental reproduzível no contexto declarado.
 
 ---
 
@@ -100,7 +100,7 @@ Um pacote é considerado "curado" se atender **todos** os critérios:
 - Comparação com padrões GUM, ICH Q2, etc.
 - Exportação para formatos regulatórios (PEtab, NONMEM)
 
-**Epistemic Score alvo:** 0.97
+**Próximo gate:** especificação separada; o pacote não concede autoridade regulatória.
 
 ---
 
@@ -122,7 +122,7 @@ Todo pacote curado deve ter:
 - `examples/` com pelo menos 3 exemplos reais
 - `tests/` com testes E2E epistêmicos
 - Documentação gerada via `souniodoc`
-- Badge de `epistemic-score` no registry
+- Receipt de fronteira com verdict, hashes, engine e limitações
 - Testes passando no `stdlib_hyper_execution_gate.sh`
 
 ---

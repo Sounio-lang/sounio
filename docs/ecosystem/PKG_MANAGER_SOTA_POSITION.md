@@ -7,172 +7,83 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.pkg-manager-sota-position
 -->
 
-# Sounio Package Manager: Posicionamento vs Estado da Arte (2026)
+# Sounio Package Manager: Fronteira Cientifica R0-R2
 
-**Data:** 20 de Abril de 2026
-**Versão:** 1.0
+**Data:** 16 de Julho de 2026
+**Versao:** 2.0
 
----
+## Posicionamento
 
-## Resumo Executivo
+O Sounio Package Manager separa tres perguntas que antes estavam misturadas:
 
-O **Sounio Package Manager (SPM)** introduz uma categoria inédita no ecossistema de gerenciadores de pacotes: **epistemic-first package management**. Enquanto o estado da arte em 2026 (Nix, Guix, Spack, Julia Pkg, Cargo, Conda) converge para reprodutibilidade hermética, SLSA attestations e trusted publishing via OIDC, nenhum deles quantifica *quão confiável é o conhecimento científico dentro do pacote*.
-
-O SPM responde essa pergunta nativamente.
-
----
-
-## Estado da Arte em 2026 (Pesquisa Atualizada)
-
-### Tendências Dominantes
-
-| Tendência | Adotantes | Descrição |
-|-----------|-----------|-----------|
-| Hermetic builds | Nix, Guix, Bazel | Ambiente completamente reproduzível via hash do grafo de dependências |
-| SLSA Attestations | PyPI, crates.io, npm | Linked trusted publishing via GitHub OIDC + Sigstore |
-| RO-Crate | Comunidade científica | Bundle de artefatos de pesquisa com provenance em JSON-LD |
-| W3C PROV-DM | ML/AI systems | Modelo formal de provenance para dados e modelos |
-| OSS Rebuild | Google (2025) | Rebuild automático de pacotes para verificação semântica |
-| SWHIDs | Software Heritage | Identificadores persistentes para código-fonte específico |
-| Spack | HPC/DOE | Gestão combinatorial de stacks para computação de alto desempenho |
-| Julia `Artifacts.toml` | Julia ecosystem | Melhor equilíbrio atual entre facilidade e reprodutibilidade científica |
-
-### Lacuna Identificada
-
-A pesquisa revela um **gap fundamental**: todos os sistemas acima respondem "**como foi produzido este pacote?**" mas nenhum responde "**quão confiável é o conhecimento científico dentro dele?**".
-
-Ferramentas como MONAI (UQ em imagem médica), DAKOTA (UQ em simulação científica) e dtrackr (R provenance) tratam incerteza epistêmica *dentro* de domínios específicos, mas não como propriedade do gerenciador de pacotes.
-
----
-
-## O Sounio se Posiciona Como Único
-
-### 1. Epistemic Score como Cidadão de Primeira Classe
-
-Nenhum outro package manager possui um score de qualidade epistêmica nativo. O SPM calcula automaticamente:
-
-```
-epistemic-score = 0.35 × knowledge_api_use
-                + 0.25 × gum_test_coverage
-                + 0.20 × provenance_quality
-                + 0.10 × test_coverage
-                + 0.10 × docs_quality
+```text
+qual codigo foi construido?
+qual fronteira de software foi aplicada?
+qual claim cientifica foi explicitamente solicitada e evidenciada?
 ```
 
-Este score aparece em `sounio.toml`, no registry, na CLI e nos relatórios de auditoria.
+R0-R2 responde de forma executavel apenas as duas primeiras e valida a forma
+do contrato da terceira. Nao atribui uma probabilidade de verdade ao pacote.
+Scores escalares permanecem legiveis por compatibilidade, mas nao controlam
+resolucao, promocao, publicacao, claims ou releases.
 
-### 2. Quatro Tiers de Confiança Científica
+## Relacao Com O Estado Da Arte
 
-```
-experimental  score < 0.60  — uso apenas para prototipagem
-community     0.60-0.75     — uso geral, sem garantias
-curated       0.75-0.90     — qualidade de produção, auditado
-regulatory    > 0.90        — uso em pharma/clinical, revisão humana obrigatória
-```
+Gerenciadores como Cargo, Nix, Guix, Spack, Conda e Julia Pkg tratam diferentes
+aspectos de resolucao, reproducibilidade e distribuicao. SLSA, W3C PROV,
+RO-Crate e Software Heritage tratam identidade, provenance ou preservacao sob
+contratos proprios. A fronteira Sounio nao substitui esses sistemas e nao
+infere assurance cientifica a partir de provenance.
 
-Cargo, Julia Pkg, Nix e Spack não possuem equivalente.
+O diferencial implementado e mais estreito: um build pode declarar rings,
+contexto de uso, visibilidade e classes de claim permitidas; o compilador usa
+sua closure AST para aceitar, rejeitar ou registrar autoridade incompleta. O
+resultado e um receipt deterministico `identity-only` com limitacoes explicitas.
 
-### 3. GUM Compliance como Metadado de Pacote
+## Superficies Implementadas
 
-O campo `gum-compliant = true` no `sounio.toml` declara que o pacote implementa propagação de incerteza conforme JCGM 100:2008 (Guide to the Expression of Uncertainty in Measurement). Isso é reconhecido pelo registry e pela análise estática do compilador.
-
-Nenhum gerenciador atual conecta conformidade metrológica ao ecossistema de pacotes.
-
-### 4. Confidence Gates como Política de Dependência
-
-Um pacote pode declarar `confidence-threshold = 0.90`. O resolver pode recusar dependências que não atendam esse threshold. Esta é uma forma de **epistemic dependency policy** inédita.
-
-### 5. Provenance Ledger Integrado ao Runtime
-
-Usando `stdlib/epistemic/audit_runtime.sio` (W3C PROV-DM estendido com campos epistêmicos), cada operação no pacote é rastreável com `entity_id`, `activity_id`, `regulatory_layer` e `confidence`. Isso vai além do RO-Crate (que opera em nível de arquivo) para o nível de computação individual.
-
----
-
-## Tabela Comparativa Completa
-
-| Dimensão | Nix/Guix | Spack | Julia Pkg | Cargo | Conda | **SPM (Sounio)** |
-|----------|----------|-------|-----------|-------|-------|-----------------|
-| Hermetic builds | ★★★★★ | ★★★★ | ★★★ | ★★★★ | ★★ | ★★★★ |
-| Reprodutibilidade | ★★★★★ | ★★★★ | ★★★★ | ★★★★ | ★★★ | ★★★★ |
-| Trusted publishing | ★★★★ | ★★★ | ★★★ | ★★★★★ | ★★ | ★★★★ |
-| Epistemic scoring | ✗ | ✗ | ✗ | ✗ | ✗ | **★★★★★** |
-| GUM compliance | ✗ | ✗ | ✗ | ✗ | ✗ | **★★★★★** |
-| Provenance ledger | Parcial | ✗ | ✗ | ✗ | ✗ | **★★★★★** |
-| Confidence gates | ✗ | ✗ | ✗ | ✗ | ✗ | **★★★★★** |
-| Regulatory tier | ✗ | ✗ | ✗ | ✗ | ✗ | **★★★★★** |
-| Scientific focus | ★★ | ★★★★★ | ★★★★★ | ★★ | ★★★★ | **★★★★★** |
-| Python interop | ★★★ | ★★★ | ★★ | ★★★★ | ★★★★★ | ★★★★ |
-| Developer UX | ★★★ | ★★ | ★★★★★ | ★★★★★ | ★★★★ | ★★★ |
-
----
-
-## Arquitetura do SPM: Visão Geral
-
-### Componentes Implementados (esta sessão)
-
-```
-self-hosted/compiler/pkg/
-├── manifest.sio     — Parser de sounio.toml sem heap
-├── scorer.sio       — Epistemic Scoring Engine (pesos GUM)
-├── cli.sio          — Comandos init/build/audit/install/publish
-└── lib.sio          — Módulo público do SPM
-
-ecosystem/sounio-py/
-├── pyproject.toml   — Build config (maturin + pyo3)
-├── src/sounio/
-│   ├── __init__.py      — API pública
-│   ├── _knowledge.py    — Knowledge<T> Python nativo
-│   ├── _epistemic.py    — GUMPropagation + EpistemicResult
-│   └── _compile.py      — JIT bridge (souc binary)
-└── tests/
-    ├── test_knowledge.py
-    └── test_epistemic.py
-
-docs/ecosystem/
-├── SOUNIO_TOML_SPEC.md
-├── REGISTRY_ARCHITECTURE.md
-├── ECOSYSTEM_ROADMAP_2026.md
-├── CURATED_PACKAGES.md
-└── PKG_MANAGER_SOTA_POSITION.md (este arquivo)
+```text
+sounio.toml [science]                  declaracao local
+science-rings.tsv                     inventario de repositorio
+sounio.claim-contract.v1              claim explicita e evidencia tipada
+sounio.package-boundary-receipt.v1    identidade do grafo, policy e artefato
 ```
 
-### Integração no Compilador
+Os rings conclusivos sao `pl-core`, `scientific-package` e `research`. Rings
+candidatos ou nao classificados produzem `UNKNOWN`; strict mode recusa antes
+do lowering. Claims empiricas e clinicas exigem evidencia propria e nunca sao
+autorizadas apenas por compilacao, execucao, nome de diretorio ou metadados.
 
-`main.sio` agora reconhece:
-```
-souc pkg init [--epistemic]
-souc pkg build [path]
-souc pkg audit [path]
-souc pkg publish [--dry-run]
-souc pkg info <name>
-souc pkg self-test
-souc install <name>[@version]
-souc search <query> [--min-score N]
-```
+## Superficies Legadas
 
----
+O parser de `[epistemic]` continua somente para leitura compativel e emite
+`W-SRB-LEGACY-001`. O relatorio escalar interno e um diagnostico historico sem
+autoridade. Declaracoes booleanas de conformidade GUM nao substituem metodo e
+witness nomeados. Provenance e assurance de receipt permanecem categorias
+separadas. Thresholds usados por programas em runtime pertencem a configuracao
+operacional desses programas, nao a qualidade do pacote.
 
-## Próximos Passos de Implementação
+## Registry E Publicacao
 
-| Prioridade | Item | Esforço |
-|-----------|------|---------|
-| 1 | File I/O para leitura real de sounio.toml | 1 semana |
-| 2 | Registry client (HTTPS + JSON) | 2-3 semanas |
-| 3 | sounio.lock (lockfile) + dependency resolver | 2 semanas |
-| 4 | maturin/pyo3 Rust bridge para sounio-py | 3-4 semanas |
-| 5 | MVP de registry.sounio.org (FastAPI + PostgreSQL) | 4 semanas |
-| 6 | Publicar primeiros 3 pacotes curados | 6 semanas |
+Nao existe registry publico autorizado por este marco. O servidor local de
+desenvolvimento e um catalogo read-only; `POST /api/v1/packages` e recusado.
+Trusted publishing, assinatura remota, attested execution, independent replay,
+`ClinicalAuthority` e `ClinicalRelease` exigem projetos e gates posteriores.
 
----
+## Limites Da Claim
 
-## Conclusão
+Um receipt `OK` significa que a closure declarada respeitou a matriz de rings,
+visibilidade e contratos explicitamente fornecidos, com identidades de arquivo
+verificadas. Ele nao significa que dados sao genuinos, que um modelo e correto,
+que uma revisao e independente ou que um resultado e clinicamente valido.
 
-O Sounio Package Manager não compete com Cargo, Nix ou Julia Pkg. Ele define uma **nova categoria**: gestão de conhecimento científico confiável.
+O posicionamento publico suportado por R0-R2 e, no maximo,
+`validated_research` vinculado a um gate nominal e a um contexto de uso. Essa
+classe nao equivale a validacao clinica ou regulatoria.
 
-Enquanto outros gerenciadores garantem que "o binário é reproduzível", o SPM garante que "**o conhecimento produzido por este pacote é epistemicamente fundamentado, provável e rastreável**".
+## Proximos Gates
 
-Esta é a contribuição única do Sounio para o ecossistema de computação científica em 2026.
-
----
-
-*Baseado em pesquisa do estado da arte: Nesbitt 2026 (Reproducible Builds), Nature Scientific Data (CODE beyond FAIR), OSS Rebuild (Google 2025), Spack (ACM SC), Julia Pkg, Rust Cargo, Nix/Guix ecosystem.*
+1. Fechar o inventario ring-by-ring do `stdlib`.
+2. Ativar strict de forma opt-in em fixtures e releases claim-bearing.
+3. Especificar registry attestation e assinatura separadamente.
+4. Exigir replay independente antes de qualquer ampliacao de assurance.

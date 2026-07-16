@@ -1,0 +1,149 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.science-research-boundary
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.science-research-boundary
+-->
+
+# Science and Research Boundary
+
+Status: executable R0-R2 boundary; physical extraction R3 is deferred. The
+promotion is bound to the transitive raw-AST witness in
+`scripts/ci/science_boundary_gate.sh` and a current-source Madaros.
+R3 means moving scientific-package and research sources into separately owned
+repositories or distributions; no source file is moved by this milestone.
+
+The enforced dependency direction is:
+
+```text
+Sounio Research -> Scientific Packages -> Sounio PL Core
+```
+
+The direction is a software authority boundary. It does not assert scientific
+truth, clinical validity, regulatory readiness, a security sandbox, or public
+registry status.
+
+## Rings
+
+The conclusive rings are `pl-core`, `scientific-package`, and `research`.
+`scientific-package-candidate`, `mixed-unresolved`, and `unclassified` remain
+visible in receipts but produce `UNKNOWN`. Strict mode refuses `UNKNOWN`.
+
+Allowed dependencies are:
+
+```text
+pl-core            -> pl-core
+scientific-package -> scientific-package | pl-core
+research           -> research | scientific-package | pl-core
+```
+
+A `public` caller cannot depend on a `protected` or `embargoed` module.
+
+The graph is the transitive module-import closure rooted at the compiled
+artifact. Each source module receives the most-specific matching policy path;
+every resolved import is an edge. A cycle is finite when all participating
+modules have already been visited. Saturation means the collector reached its
+declared node or edge capacity before closure completed. Root escape means a
+source, policy row, claim, or evidence path resolves outside the manifest root.
+Unresolved imports, saturation, parser failure, and root escape are incomplete
+authority and therefore cannot produce `OK`.
+
+## CLI
+
+The public `souc` and Madaros launchers accept:
+
+```text
+--science-boundary off|advisory|strict
+--science-manifest <path>
+--claim-contract <path>
+--emit-boundary-receipt <path>
+```
+
+Without a scientific declaration the effective mode is `off`. Discovery of a
+`sounio.toml` `[science]` declaration selects `advisory`. Only an explicit flag
+selects `strict`.
+
+In strict native builds the launcher compiles to a temporary file. It promotes
+the ELF only after an `OK` preflight, unchanged source/policy/compiler hashes,
+and successful receipt finalization. Refusal, `UNKNOWN`, closure saturation,
+root escape, or hashing failure leaves the requested final ELF absent.
+
+An `OK` verdict requires `SOUNIO_BOUNDARY_CLOSURE_V1` from the current-source
+raw Madaros AST collector. The launcher detects and invokes that interface
+before lowering. A stale raw ELF without the interface cannot silently fall
+back: the host syntax audit is recorded as non-authoritative and yields
+`UNKNOWN`. Rebuild with `make build-madaros` or point `MADAROS_RAW_BIN` at a
+current-source ELF before using strict mode.
+
+## Declarations
+
+The repository inventory is `science-rings.tsv`. Its columns are fixed by the
+v1 contract. A package can instead declare:
+
+```toml
+[science]
+schema = "sounio.science-manifest.v1"
+ring = "scientific-package"
+evidence-status = "passes-gate"
+context-of-use = "bounded research software"
+visibility = "public"
+allowed-claim-classes = ["compile", "runtime"]
+evidence-refs = ["gate:package-boundary-receipt"]
+```
+
+Scientific `[[example]]` entries require `maturity`, `context-of-use`, and
+`evidence-refs`. `calibrated` or `validated` examples require typed `dataset`,
+`split`, `diagnostics`, `gate`, and `review` references.
+
+Legacy `[epistemic]` metadata remains readable for compatibility and emits
+`W-SRB-LEGACY-001`. `score`, `regulatory-ready`, `provenance-level`,
+`gum-compliant`, and `validation-coverage` confer no ring, claim, promotion, or
+release authority. There is no automatic translation.
+
+## Claims and Receipts
+
+`sounio.claim-contract.v1` requires an explicit claim ID, requested class,
+context of use, root artifact, and typed evidence. Every evidence item carries
+a lowercase SHA-256 digest. Source, package policy, and compiler bindings are
+checked against the build identities; other evidence refs must be root-local
+files and are re-hashed during receipt verification. Claim classes are never
+inferred from names, directories, scores, or package metadata. A GUM claim must
+name both `method` and `witness` evidence; legacy `gum-compliant` is never a
+substitute.
+
+Those hashes establish file identity, existence, and change detection only.
+They do not establish that a dataset is genuine, a method is correct, a review
+is independent, or evidence supports scientific or clinical validity. External
+registry authority, remote signatures, attested execution, independent replay,
+`ClinicalAuthority`, and `ClinicalRelease` remain outside R0-R2.
+
+`sounio.package-boundary-receipt.v1` records the ternary verdict, mode, graph,
+diagnostics, source/policy/claim/compiler/ELF hashes, engine identity, claim
+summary, assurance level, and limitations. Identity-only receipts contain no
+timestamp or absolute path and serialize deterministically.
+They are cryptographic build manifests, not standalone reproducibility audits;
+environment capture and independent replay are deliberately not implied.
+
+`E-SRB-001` rejects ring inversion, `E-SRB-002` rejects visibility leakage,
+`E-SRB-003` rejects a conclusive ring without named evidence references,
+`E-SRB-004` rejects incompatible evidence or context, `E-SRB-005` rejects an
+empirical/clinical claim supported only by compile/runtime evidence,
+`E-SRB-006` rejects missing provenance bindings, and `E-SRB-007` rejects a
+claim class not authorized by the root ring. `E-SRB-000` identifies invalid or
+incomplete authority in strict mode.
+
+Receipts identify `madaros-raw-ast-v1` or `sounio-host-syntax-v1` explicitly.
+Only the raw AST collector can produce `OK`; the host collector is retained for
+advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
+
+## Current Acceptance Status
+
+The host attestor, CLI flags, ternary policy, deterministic receipt, claim
+contract, legacy quarantine, and strict temporary-ELF flow are implemented.
+The current-source raw collector follows the established per-node AST reload
+loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
+their import edge. The named gate passes 178 assertions, including runnable
+strict ELFs, deterministic receipts, refusal/`UNKNOWN`, tamper detection, and
+absence of a final ELF after strict refusal.
