@@ -3024,6 +3024,12 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
 
+## 2026-07-16 — math-review follow-up: stats::huber_location, stats::siegel_regression, stats::yuen (PR #1009)
+- Target: `stdlib/stats/huber_location.sio`, `stdlib/stats/siegel_regression.sio`, and `stdlib/stats/yuen.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED**. It accepted the Huber IRLS update and MAD normal-consistency scale, Siegel's repeated-median slope/intercept definition, Yuen's trimmed/Winsorized variance, Welch-style degrees of freedom and t statistic, the incomplete-beta two-tail identity, and every documented test value.
+- Independent-provider fallback: Z.AI GLM-5.2 produced no response before the 65-second timeout (`/tmp/llm-offload-9WIwRq/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-3Af1we/`). Re-review with Z.AI remains pending when the provider is responsive.
+- Scope: audit-only follow-up; no statistical implementation changed. The pre-existing PR CI was fully green before this receipt update. Local hygiene: `git diff --check` -> PASS.
+
 ## 2026-07-16 — math-review: stats::huber_location, stats::siegel_regression, stats::yuen
 - Files (all new): `stdlib/stats/huber_location.sio` (Huber M-estimator of location, MAD-scaled reweighting), `stdlib/stats/siegel_regression.sio` (Siegel repeated-median regression, 50% breakdown), `stdlib/stats/yuen.sio` (Yuen trimmed-means t-test). Provider: xAI/Grok 4.3.
 - huber_location = **PASS**: MAD scale 1.4826, weight 1 if |u|≤c else c/|u|, iterated location; symmetric {1..5}→3, outlier {1,2,3,4,100}→3 (Python-verified, fully robust vs mean 22).
