@@ -241,3 +241,76 @@ pub fn hmma_emit_oct_mul_full_kernel(s: HypercomplexPtxState) -> HypercomplexPtx
     out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
     out
 }
+
+// ============================================================================
+// Sedenion (16-dim) tensor-core multiply — same L(a) construction, bits=4
+// ============================================================================
+
+// Sign of the sedenion left-mul matrix L(a)[k][j] = σ(k⊕j, j, 4). L(a) is 16×16 = exactly one
+// wmma m16n16k16 tile (no padding).
+fn hmma_sed_left_mul_sign(k: i64, j: i64) -> i64 { hmma_oct_cd_sigma(k ^ j, j, 4) }
+
+// Emits a SELF-CONTAINED tensor-core SEDENION multiply kernel sounio_sed_mul_full(a,b,out): thread 0
+// builds L(a)[k][j]=σ(k⊕j,j,4)·a[k⊕j] into shared (f16, 16×16 full tile, compile-time σ folded into
+// optional neg), stages B, bar.sync, and the warp runs one wmma tile → D = L(a)·B = the sedenion
+// products (Convention X). HARDWARE-VALIDATED on the DGX Spark (GB10, sm_121, CUDA 13.0): the emitted
+// PTX ptxas-assembles (20576-byte cubin) + launches; e2·e5 → component 7, and the canonical zero
+// divisor (e3+e10)·(e6−e15) ANNIHILATES exactly (0/16 nonzero) on the tensor core.
+// Reference: docs/gpu/sed_mul_full.cu.
+pub fn hmma_emit_sed_mul_full_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_sed_mul_full(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_b,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<12>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sB[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_b];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sB;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    var k: i64 = 0
+    while k < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_sed_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var c: i64 = 0
+    while c < 16 {
+        var r: i64 = 0
+        while r < 16 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
+    out
+}
