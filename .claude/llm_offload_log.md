@@ -2741,3 +2741,11 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
 - Browser evidence: desktop and 390 px screenshots confirmed four loaded natural-dimension images, responsive evidence rows, and zero horizontal overflow.
 - Raw review directory: `/tmp/llm-offload-JO1LeE/`.
+
+## 2026-07-16 - Semantic Border website review
+- Files: `website/src/components/home/SemanticBorder.tsx`, `SemanticBorder.css`, `SystemAtlas.astro`, and `website/src/pages/index.astro`.
+- Task: expose the recorded GO nominal-type bridge as an interactive accept/refuse boundary with its exact compiler receipt and routing limits.
+- External-facing review: xAI/Grok 4.3 returned **PASS** with no BLOCKER or MAJOR finding. It accepted the single-bundle, trusted-ID, non-OWL/DL, legacy-positional, and non-Madaros-compile boundaries.
+- Fan-out degradation: DeepSeek and Gemini provider calls failed; neither failure is represented as a pass.
+- Browser evidence: desktop and 390 px states confirmed pointer selection, `ACCEPT` and `REFUSE · E152`, responsive lineage/crossing layouts, and zero horizontal overflow.
+- Raw review directory: `/tmp/llm-offload-0rnaFs/`.
