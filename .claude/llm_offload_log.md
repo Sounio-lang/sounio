@@ -3015,3 +3015,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - welch_anova = **PASS**: weighted F with Welch fractional df₂=(k²−1)/(3A); groups var 2.5/10/0.5 → F=3.405, df₂=6.398 (Python-cross-checked).
 - Theme: ANOVA contrasts & robust ANOVA — planned/post-hoc contrasts (linear, Scheffé) and the unequal-variance ANOVA complementing anova + bartlett/levene. All derivable, #852-safe. Suite runner: 127 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-GjsIyt/`, `/tmp/llm-offload-Z5IqUV/`, `/tmp/llm-offload-NWs9px/`.
+
+## 2026-07-16 — math-review: stats::jonckheere, stats::page_trend, stats::mann_kendall
+- Files (all new): `stdlib/stats/jonckheere.sio` (Jonckheere-Terpstra ordered-groups trend), `stdlib/stats/page_trend.sio` (Page's L repeated-measures ordered trend), `stdlib/stats/mann_kendall.sio` (Mann-Kendall time-series monotonic trend). Provider: xAI/Grok 4.3.
+- jonckheere = **PASS**: J=Σ_{i<j}Uᵢⱼ (+½ ties), E[J]=(N²−Σn²)/4, Var[J]=(N²(2N+3)−Σn²(2n+3))/72; increasing 3×3→J=27, E=13.5, z=3.0 verified.
+- page_trend = **PASS**: L=Σj·Rⱼ, E[L]=nk(k+1)²/4, Var[L]=nk²(k²−1)(k+1)/144, mid-rank ties; ordered 3×3→L=42, z=2.449 verified.
+- mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
+- Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
