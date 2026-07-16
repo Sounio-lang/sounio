@@ -3023,3 +3023,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
 - Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
+
+## 2026-07-16 — post-merge math-review: tensor-core HMMA Convention X (PR #1016)
+- Target: merged diff `827852d47^..827852d47` over `self-hosted/gpu/kernels/hmma_signs.sio`, `tests/gpu/test_hmma_octonion.sio`, `docs/gpu/oct_wmma_validate.cu`, and `scripts/ci/native_v2_epistemic_accel_spine_gate.sh`.
+- xAI/Grok 4.3 = **PASS**: accepted the bilinear left-multiply representation `L(a)[k][j] = sigma(k xor j, j) * a[k xor j]`, the recursive Convention X sign, the 8x8-to-16x16 WMMA construction, and the `e1*e2` discriminator. Raw: `/tmp/llm-offload-eOI06E/grok.md`.
+- Independent review is incomplete: default Z.AI GLM-5.2 ran for 125 s and timed out with an empty response; DeepSeek returned `Insufficient Balance`; Gemini returned OpenRouter HTTP 402 insufficient credits. Raw: `/tmp/llm-offload-eOI06E/`, `/tmp/llm-offload-tVR4tH/`, `/tmp/llm-offload-GVFRRL/`.
+- Local source-level witness: `SOUNIO_TEST_JOBS=1 bash scripts/run_sio_test_suite.sh --filter-exact test_hmma_octonion.sio --verbose --jobs 1` = **PASS** (1/1) under the canonical `bin/souc` path.
+- Outcome: **PASS_SINGLE_PROVIDER_DEGRADED** for the algebraic review only; no provider or local test here establishes the documented GB10 execution. Hardware evidence is tracked separately in #1022; independent math re-review remains pending when a second provider is available.
