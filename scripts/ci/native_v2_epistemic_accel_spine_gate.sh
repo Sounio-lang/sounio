@@ -136,11 +136,11 @@ append_native_algebra_probes() {
   append_source_probe \
     "native_octonion_hmma_signs" \
     "$HMMA_SIGNS_KERNEL" \
-    "tensor_core_fano_sign_correction_surface" \
-    "fn hmma_sign_mask_for_output_component" \
-    "fn hmma_emit_pack_oct_pair" \
-    "fn hmma_emit_full_sign_correction" \
-    "cvt.rn.f16x2.f32"
+    "tensor_core_left_mul_matrix_surface_convention_x" \
+    "fn hmma_oct_cd_sigma" \
+    "fn hmma_left_mul_sign" \
+    "fn hmma_emit_build_left_mul_matrix" \
+    "fn hmma_emit_unpack_result"
 
   append_source_probe \
     "native_ossm_ptx_emitter" \
