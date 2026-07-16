@@ -22,7 +22,9 @@ fourteen families:
   (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
-- **Group comparison & planning** — one-way ANOVA, inference from summary
+- **Group comparison & planning** — one-way ANOVA and Welch's unequal-variance
+  ANOVA, planned linear contrasts and Scheffé's family-wise method, inference from
+  summary
   statistics, standardised effect sizes, t-test power, and sample-size planning
   for proportions/correlations, survival trials (Schoenfeld), target precision,
   and the minimum detectable effect.
@@ -1630,6 +1632,37 @@ The cumulative incidence of one event type in the presence of competing risks
 Validated: a table with one competing event → CIF₁(4)=0.75 (not 1); no competing
 events → CIF₁=1−KM.
 
+### `stats::linear_contrast` — planned linear contrast
+
+| Function | Signature |
+|---|---|
+| `linear_contrast` | `pub fn linear_contrast(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ContrastResult with Mut, Div, Panic` |
+
+A single a-priori comparison of group means: `L=Σcᵢx̄ᵢ`, `SE=√(MSE·Σcᵢ²/nᵢ)`,
+`t=L/SE ~ t(N−k)`. Validated: means {10,12,20}, contrast {−½,−½,1} → L=9,
+SE=1.0954, t=8.216, df=12.
+
+### `stats::scheffe` — Scheffé's method
+
+| Function | Signature |
+|---|---|
+| `scheffe` | `pub fn scheffe(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ScheffeResult with Mut, Div, Panic` |
+
+The same contrast, family-wise over *all* contrasts (conservative, valid
+post-hoc): `F_S=t²/(k−1) ~ F(k−1,N−k)`. Validated: the {−½,−½,1} contrast →
+F_S=33.75; a modest contrast → F_S=2.8125, p=0.0996.
+
+### `stats::welch_anova` — Welch's one-way ANOVA
+
+| Function | Signature |
+|---|---|
+| `welch_anova` | `pub fn welch_anova(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> WelchAnovaResult with Mut, Div, Panic` |
+
+The heteroscedasticity-robust ANOVA (the safe choice when Levene/Bartlett flag
+unequal variances): weighted between-group F with the Welch-corrected fractional
+df₂. Validated (Python-cross-checked): three groups with variances 2.5/10/0.5 →
+F=3.405, df₂=6.398; equal groups → F=0.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1758,6 +1791,9 @@ use stats::weighted_quantile::{weighted_quantile, weighted_median}
 use stats::km_greenwood::{KMCIResult, km_greenwood}
 use stats::conditional_survival::{conditional_survival}
 use stats::cumulative_incidence::{cumulative_incidence}
+use stats::linear_contrast::{ContrastResult, linear_contrast}
+use stats::scheffe::{ScheffeResult, scheffe}
+use stats::welch_anova::{WelchAnovaResult, welch_anova}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
