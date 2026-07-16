@@ -1,0 +1,149 @@
+//@ run-pass
+// Expected output: VIZ_NATIVE_WORKBENCH_RECEIPT_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event}
+use viz::audit::{viz_audit_hash}
+use viz::inspector::{viz_inspector_draw, viz_inspector_draw_node_highlights}
+use viz::ir::{viz_scene_new}
+use viz::viz_app::{viz_app_new, viz_app_frame_hash}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_replay::{viz_replay_present, viz_replay_trace_events}
+use viz::workbench::{viz_workbench_build_scene, viz_workbench_default_events}
+
+struct WorkbenchProof {
+    initial_frame_hash: i64,
+    replay_frame_hash: i64,
+    initial_pixel_hash: i64,
+    final_pixel_hash: i64,
+    node_count: i64,
+    selected_node: i64,
+    toggle_node: i64,
+    active_tab: i64,
+    time_i: i64,
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn canvas_hash(c: &Canvas) -> i64 with Mut {
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < c.width * c.height {
+        h = (h ^ read_i64(c.pixels, i)) * 1099511628211
+        i = i + 1
+    }
+    h
+}
+
+fn count_changed(c: &Canvas, bg: i64, x: i64, y: i64, w: i64, h: i64) -> i64 with Mut {
+    var count: i64 = 0
+    var cy = y
+    while cy < y + h {
+        var cx = x
+        while cx < x + w {
+            if read_i64(c.pixels, cy * c.width + cx) != bg { count = count + 1 }
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    count
+}
+
+fn render_receipt(c: &!Canvas) -> WorkbenchProof with Mut, Div, Alloc, Panic {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var app = viz_app_new(10, 13, 18)
+    let initial_frame_hash = viz_replay_present(&!app, &!scene, c)
+    let initial_pixel_hash = canvas_hash(c)
+    assert(viz_audit_hash(&scene) != 0)
+
+    var events: [Event; 32] = [Event { kind: 0, key: 0, x: 0, y: 0, mods: 0 }; 32]
+    let event_count = viz_workbench_default_events(&!events)
+    let replay = viz_replay_trace_events(&!app, &!scene, c, &events, event_count)
+    assert(replay.count == event_count + 1)
+    assert(replay.frames[0].canvas_hash != replay.frames[5].canvas_hash)
+    assert(replay.frames[3].active_tab == 3)
+    assert(replay.frames[5].selected_node == ids.toggle)
+
+    let replay_frame_hash = viz_app_frame_hash(&app, &scene, c)
+    canvas_clear(c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, c)
+    viz_inspector_draw_node_highlights(&scene, c)
+    viz_inspector_draw(&scene, c, 306, 16, 156, 146)
+    let final_pixel_hash = canvas_hash(c)
+
+    assert(scene.node_count == 16)
+    assert(scene.series_count == 2)
+    assert(scene.heatmap_count == 2)
+    assert(scene.molecule_count == 1)
+    assert(scene.field_count == 1)
+    assert(scene.vector_field_count == 1)
+    assert(scene.trajectory_count == 1)
+    assert(scene.spectrum_count == 1)
+    assert(scene.mesh_count == 1)
+    assert(scene.nodes[ids.slider as usize].value == 5.0)
+    assert(scene.nodes[ids.toggle as usize].value == 1.0)
+
+    WorkbenchProof {
+        initial_frame_hash: initial_frame_hash,
+        replay_frame_hash: replay_frame_hash,
+        initial_pixel_hash: initial_pixel_hash,
+        final_pixel_hash: final_pixel_hash,
+        node_count: scene.node_count,
+        selected_node: scene.selected_node,
+        toggle_node: ids.toggle,
+        active_tab: scene.active_tab,
+        time_i: scene.time as i64,
+    }
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    let bg: i64 = 18 | (13 << 8) | (10 << 16)
+    var a = make_canvas(480, 320)
+    var b = make_canvas(480, 320)
+    let pa = render_receipt(&!a)
+    let pb = render_receipt(&!b)
+
+    assert(a.width * a.height * 3 == 460800)
+    assert(pa.initial_frame_hash != pa.replay_frame_hash)
+    assert(pa.initial_pixel_hash != pa.final_pixel_hash)
+    assert(pa.final_pixel_hash == pb.final_pixel_hash)
+    assert(pa.replay_frame_hash == pb.replay_frame_hash)
+    assert(pa.node_count == 16)
+    assert(pa.selected_node == pa.toggle_node)
+    assert(pa.active_tab == 3)
+    assert(pa.time_i == 5)
+
+    // Each native scientific panel and the bottom control rail paints pixels.
+    assert(count_changed(&a, bg, 16, 44, 110, 70) > 300)
+    assert(count_changed(&a, bg, 138, 44, 110, 70) > 300)
+    assert(count_changed(&a, bg, 16, 132, 90, 62) > 100)
+    assert(count_changed(&a, bg, 118, 132, 100, 62) > 100)
+    assert(count_changed(&a, bg, 230, 132, 110, 62) > 100)
+    assert(count_changed(&a, bg, 352, 132, 92, 62) > 100)
+    assert(count_changed(&a, bg, 16, 228, 428, 62) > 500)
+
+    var mismatch: i64 = 0
+    var inspector_border: i64 = 0
+    var selection_cyan: i64 = 0
+    var selection_gold: i64 = 0
+    var i: i64 = 0
+    while i < a.width * a.height {
+        let aa = read_i64(a.pixels, i)
+        if aa != read_i64(b.pixels, i) { mismatch = mismatch + 1 }
+        if aa == 0x5C7691 { inspector_border = inspector_border + 1 }
+        if aa == 0x50D2FF { selection_cyan = selection_cyan + 1 }
+        if aa == 0xFFEB78 { selection_gold = selection_gold + 1 }
+        i = i + 1
+    }
+    assert(mismatch == 0)
+    assert(inspector_border > 200)
+    assert(selection_cyan > 20)
+    assert(selection_gold > 20)
+    heap_free(a.pixels as *mut i8)
+    heap_free(b.pixels as *mut i8)
+    println("VIZ_NATIVE_WORKBENCH_RECEIPT_PASS")
+}
