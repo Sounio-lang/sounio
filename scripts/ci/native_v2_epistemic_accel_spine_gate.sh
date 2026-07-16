@@ -142,7 +142,9 @@ append_native_algebra_probes() {
     "fn hmma_emit_build_left_mul_matrix" \
     "fn hmma_emit_unpack_result" \
     "fn hmma_emit_oct_mul_wmma_kernel" \
-    ".visible .entry sounio_oct_mul_wmma"
+    ".visible .entry sounio_oct_mul_wmma" \
+    "fn hmma_emit_oct_mul_full_kernel" \
+    ".visible .entry sounio_oct_mul_full"
 
   append_source_probe \
     "native_ossm_ptx_emitter" \
