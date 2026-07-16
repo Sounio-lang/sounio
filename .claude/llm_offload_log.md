@@ -3050,3 +3050,53 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - cumulative_incidence = **PASS**: Aalen-Johansen/K-P CIF₁=ΣŜ(t_{j-1})d1/n with all-cause survival update; competing-event table→CIF₁(4)=0.75 (not 1), no-competing→1−KM verified.
 - Theme: survival extensions — the Greenwood CI the bare km lacked, conditional survival, and competing-risks CIF. All sort-free walks, derivable, #852-safe. Suite runner: 124 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-840gyX/`, `/tmp/llm-offload-LJbaM2/`, `/tmp/llm-offload-YWV9jA/`.
+
+## 2026-07-16 — math-review: stats::linear_contrast, stats::scheffe, stats::welch_anova
+- Files (all new): `stdlib/stats/linear_contrast.sio` (planned contrast t-test), `stdlib/stats/scheffe.sio` (Scheffé family-wise F for a contrast), `stdlib/stats/welch_anova.sio` (Welch unequal-variance one-way ANOVA). Provider: xAI/Grok 4.3.
+- linear_contrast = **PASS**: L=Σcᵢx̄ᵢ, SE=√(MSE·Σcᵢ²/nᵢ), t(N−k); means{10,12,20}/{−½,−½,1}→L=9, SE=1.0954, t=8.216 verified.
+- scheffe = **PASS**: F_S=t²/(k−1) ~ F(k−1,N−k); primary case F_S=33.75 verified. Reviewer flagged test_conservative as failing (claimed SE≈0.632→F_S≈101) but that was the reviewer's own arithmetic slip — verified directly + vs Python: SE=1.2649, F_S=2.8125, p=0.0996 correct. Test only asserts p∈(0,1]; ran green. False positive.
+- welch_anova = **PASS**: weighted F with Welch fractional df₂=(k²−1)/(3A); groups var 2.5/10/0.5 → F=3.405, df₂=6.398 (Python-cross-checked).
+- Theme: ANOVA contrasts & robust ANOVA — planned/post-hoc contrasts (linear, Scheffé) and the unequal-variance ANOVA complementing anova + bartlett/levene. All derivable, #852-safe. Suite runner: 127 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-GjsIyt/`, `/tmp/llm-offload-Z5IqUV/`, `/tmp/llm-offload-NWs9px/`.
+
+## 2026-07-16 — math-review: stats::jonckheere, stats::page_trend, stats::mann_kendall
+- Files (all new): `stdlib/stats/jonckheere.sio` (Jonckheere-Terpstra ordered-groups trend), `stdlib/stats/page_trend.sio` (Page's L repeated-measures ordered trend), `stdlib/stats/mann_kendall.sio` (Mann-Kendall time-series monotonic trend). Provider: xAI/Grok 4.3.
+- jonckheere = **PASS**: J=Σ_{i<j}Uᵢⱼ (+½ ties), E[J]=(N²−Σn²)/4, Var[J]=(N²(2N+3)−Σn²(2n+3))/72; increasing 3×3→J=27, E=13.5, z=3.0 verified.
+- page_trend = **PASS**: L=Σj·Rⱼ, E[L]=nk(k+1)²/4, Var[L]=nk²(k²−1)(k+1)/144, mid-rank ties; ordered 3×3→L=42, z=2.449 verified.
+- mann_kendall = **PASS**: S=Σsign, Var=n(n−1)(2n+5)/18, continuity-corrected z, τ=2S/(n(n−1)); increasing {1..5}→S=10, z=2.2045, τ=1. Note: test constant z=2.204793 was a hand slip — correct 9/√16.6667=2.204541 (Python-verified); caught by the failing assertion, fixed.
+- Theme: ordered-alternative & monotonic-trend tests — extends the non-parametric family beyond the proportion trend (cochran_armitage) to continuous/ordinal ordered groups, repeated measures, and time series. All derivable, #852-safe. Suite runner: 130 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-iOjAr1/`, `/tmp/llm-offload-5fFzUi/`, `/tmp/llm-offload-N6zSm6/`.
+
+## 2026-07-16 — math-review follow-up: stats::huber_location, stats::siegel_regression, stats::yuen (PR #1009)
+- Target: `stdlib/stats/huber_location.sio`, `stdlib/stats/siegel_regression.sio`, and `stdlib/stats/yuen.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED**. It accepted the Huber IRLS update and MAD normal-consistency scale, Siegel's repeated-median slope/intercept definition, Yuen's trimmed/Winsorized variance, Welch-style degrees of freedom and t statistic, the incomplete-beta two-tail identity, and every documented test value.
+- Independent-provider fallback: Z.AI GLM-5.2 produced no response before the 65-second timeout (`/tmp/llm-offload-9WIwRq/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-3Af1we/`). Re-review with Z.AI remains pending when the provider is responsive.
+- Scope: audit-only follow-up; no statistical implementation changed. The pre-existing PR CI was fully green before this receipt update. Local hygiene: `git diff --check` -> PASS.
+
+## 2026-07-16 — math-review: stats::huber_location, stats::siegel_regression, stats::yuen
+- Files (all new): `stdlib/stats/huber_location.sio` (Huber M-estimator of location, MAD-scaled reweighting), `stdlib/stats/siegel_regression.sio` (Siegel repeated-median regression, 50% breakdown), `stdlib/stats/yuen.sio` (Yuen trimmed-means t-test). Provider: xAI/Grok 4.3.
+- huber_location = **PASS**: MAD scale 1.4826, weight 1 if |u|≤c else c/|u|, iterated location; symmetric {1..5}→3, outlier {1,2,3,4,100}→3 (Python-verified, fully robust vs mean 22).
+- siegel_regression = **PASS**: b=medianᵢ(median_{j≠i} slope), intercept=median residual; perfect→(2,1), outlier at (5,100)→(2,1). Two big buffers (point_med + slopes) live across the median helper call — ran clean under lean_single (no #852).
+- yuen = **PASS**: Winsorized variance s²_w=Σ(v−wmean)²/(n−1), d=(n−1)s²_w/(h(h−1)), t=(x̄_t1−x̄_t2)/√(d1+d2), Welch-style df; x={1..10}/y={3..11,50}/γ=0.2→tm 5.5/7.5, t=−1.188182, df=10 (Python-cross-checked).
+- Theme: robust M-estimation — robust location (Huber), robust regression (Siegel, higher breakdown than Theil-Sen), robust two-sample test (Yuen). All derivable / Python-anchored, #852-safe. Suite runner: 133 modules + 7 demos ALL GREEN under lean_single.
+- Raw review dirs: `/tmp/llm-offload-pxPazF/`, `/tmp/llm-offload-jQ7cVi/`, `/tmp/llm-offload-3CzPbg/`.
+
+## 2026-07-16 — math-review: chemistry::acids pH range reduction (PR #1014)
+- Target: `stdlib/chemistry/acids.sio`; regression: `tests/stdlib/chemistry/test_acids_stdlib.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED** for the changed `ln_approx` range reduction, `ph`, and Henderson-Hasselbalch formulas. It correctly accepted the reduction of `x` to `[1/sqrt(10), sqrt(10)]` before the artanh series and the first-order pH uncertainty formula.
+- Documented disagreement: Grok called the excess-base branch `14 + log10(oh)` wrong. It is correct because `pOH = -log10([OH-])`, hence `pH = 14 - pOH = 14 + log10([OH-])`. The added regression uses `[OH-]=0.01`, where the implemented branch returns `12` and the suggested alternative would incorrectly return `16`.
+- Independent-provider fallback: Z.AI GLM-5.2 timed out after more than 120 seconds (`/tmp/llm-offload-mxTIVr/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-83btKx/`); DeepSeek returned `Insufficient Balance` (`/tmp/llm-offload-xlyMGm/`); Groq returned `Invalid API Key` (`/tmp/llm-offload-sFR2Ue/`). Re-review with Z.AI remains pending when that provider is responsive.
+- Scope boundary: Grok also marked the pre-existing `calibrate` slope uncertainty and `mm_rate` rough uncertainty as overreach. Neither is changed by this PR or used to support its pH regression claim; they remain separate investigation items rather than silently being folded into this numerical-fix patch.
+- Gate: `bash scripts/verticals_rng_iter_acids_gate.sh` -> `VERTICALS_RNG_ITER_ACIDS_GATE_OK`; `git diff --check` -> PASS.
+
+## 2026-07-16 — post-merge math-review: tensor-core HMMA Convention X (PR #1016)
+- Target: merged diff `827852d47^..827852d47` over `self-hosted/gpu/kernels/hmma_signs.sio`, `tests/gpu/test_hmma_octonion.sio`, `docs/gpu/oct_wmma_validate.cu`, and `scripts/ci/native_v2_epistemic_accel_spine_gate.sh`.
+- xAI/Grok 4.3 = **PASS**: accepted the bilinear left-multiply representation `L(a)[k][j] = sigma(k xor j, j) * a[k xor j]`, the recursive Convention X sign, the 8x8-to-16x16 WMMA construction, and the `e1*e2` discriminator. Raw: `/tmp/llm-offload-eOI06E/grok.md`.
+- Independent review is incomplete: default Z.AI GLM-5.2 ran for 125 s and timed out with an empty response; DeepSeek returned `Insufficient Balance`; Gemini returned OpenRouter HTTP 402 insufficient credits. Raw: `/tmp/llm-offload-eOI06E/`, `/tmp/llm-offload-tVR4tH/`, `/tmp/llm-offload-GVFRRL/`.
+- Local source-level witness: `SOUNIO_TEST_JOBS=1 bash scripts/run_sio_test_suite.sh --filter-exact test_hmma_octonion.sio --verbose --jobs 1` = **PASS** (1/1) under the canonical `bin/souc` path.
+- Outcome: **PASS_SINGLE_PROVIDER_DEGRADED** for the algebraic review only; no provider or local test here establishes the documented GB10 execution. Hardware evidence is tracked separately in #1022; independent math re-review remains pending when a second provider is available.
+
+## 2026-07-16 — hardware evidence update: tensor-core HMMA Convention X
+- Manual GB10 witness: `docs/gpu/oct_wmma_validate.cu` at commit `8b5e07050` (SHA-256 `5bd22146ac869c92854b0821418d742e43141c1a3b4a137583325311b21e913f`) compiled with CUDA 13.0 for `sm_121` and ran on `spark-8e54` (`NVIDIA GB10`, driver `580.159.03`, compute capability `12.1`).
+- Runtime result: `e1*e2` produced component 3 = 1.00 and component 4 = 0.00; batch result was `0/128` mismatches with `maxerr=0.000`; process printed `PASS: WMMA octonion multiply is Convention X on GB10`.
+- Retained receipt: `docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md`. Scope remains manual hardware evidence only: the GitHub `validate-on-gpu` job is still conditional/skipped, so workflow automation and artifact retention remain tracked in #1022.

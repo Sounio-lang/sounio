@@ -1,107 +1,86 @@
-// self-hosted::gpu::kernels::hmma_signs — Fano plane sign pattern utilities for HMMA
+// self-hosted::gpu::kernels::hmma_signs — tensor-core (WMMA) octonion multiply, Convention X
 //
-// Provides sign-mask encoding and PTX emission for post-HMMA Fano plane
-// sign correction. When octonion vectors are packed into 16-wide HMMA
-// m16n16k16 tiles, the unsigned HMMA result must be corrected by applying
-// the sign pattern (+1/-1) from the octonion multiplication table.
+// Octonion multiplication a·b is LINEAR in b, so it is a matrix–vector product:
 //
-// Two octonion vectors (each 8 components) pack side-by-side into one
-// 16-wide tile. After HMMA multiply-accumulate, the result needs Fano
-// plane sign correction to produce the correct octonion product.
+//     a·b = L(a) · b,   where   L(a)[k][j] = σ(k⊕j, j) · a[k⊕j]     (X: e1·e2 = +e3)
+//
+// σ is the recursive Cayley–Dickson twist sign (canonical Convention X, matching
+// stdlib and the hypercomplex.sio / ossm_forward.sio GPU emitters — see
+// stdlib/algebra/README.md). Because the ±1 signs are BAKED INTO the left-multiply
+// matrix, a plain signed tensor-core matmul (`wmma.mma.sync.m16n16k16.f16.f32`) of the
+// 8×8 L(a) (padded to 16×16) against b yields the correct octonion product DIRECTLY —
+// there is NO post-multiply "sign correction" step.
+//
+// HISTORY: this file previously implemented a broken post-HMMA sign-mask correction
+// (`hmma_sign_mask_for_output_component` + `hmma_emit_full_sign_correction`) that
+// double-negated shared output components (e.g. dst[1] negated 3×, dst[2]/dst[5]/dst[6]
+// negated an even number of times → net no-op) and never implemented a coherent
+// convention. It was standalone/unused. Replaced 2026-07-16 by the L(a) construction
+// below, which is **hardware-validated on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0)**:
+// a wmma m16n16k16 kernel computing L(a)·B matches the exact X reference for a full
+// 16-column batch (0/128 component mismatches) and the discriminator e1·e2 lands in
+// component 3 (+1), not 4 — Convention X. Reference: docs/gpu/oct_wmma_validate.cu.
 //
 // Architecture: all helpers precede callers (no forward references).
 // Uses HypercomplexPtxState from hypercomplex.sio for PTX emission.
 
 // ============================================================================
-// Fano plane sign table for octonion multiplication
-// ============================================================================
-//
-// The octonion basis e0..e7 multiply according to the Fano plane:
-//   Lines: (1,2,4), (2,3,5), (3,4,6), (4,5,7), (5,6,1), (6,7,2), (7,1,3)
-//   For line (a,b,c): e_a*e_b = +e_c, e_b*e_a = -e_c (cyclic)
-//   Identity: e_0 is real (all products with e_0 are positive)
-//   Self-product: e_i*e_i = -e_0 for i > 0
-//
-// Full sign table for basis(i)*basis(j) -> component(k):
-//   (i,j)->k: sign
-//   (0,0)->0: +  (1,1)->0: -  (2,2)->0: -  (3,3)->0: -  (4,4)->0: -  (5,5)->0: -  (6,6)->0: -  (7,7)->0: -
-//   (0,1)->1: +  (1,0)->1: +  (2,3)->1: +  (3,2)->1: -  (5,6)->1: +  (6,5)->1: -  (3,7)->1: +  (7,3)->1: -
-//   (0,2)->2: +  (2,0)->2: +  (1,3)->2: -  (3,1)->2: +  (4,6)->2: +  (6,4)->2: -  (5,7)->2: -  (7,5)->2: +
-//   (0,3)->3: +  (3,0)->3: +  (1,2)->3: +  (2,1)->3: -  (4,7)->3: -  (7,4)->3: +  (5,6)->3: +  (6,5)->3: -
-//     Wait, let me re-derive these systematically.
-
-// ============================================================================
-// Sign mask computation for Fano plane output component
+// Canonical Cayley–Dickson sign (Convention X) — the value baked into L(a)
 // ============================================================================
 
-// Returns a 16-bit sign mask for Fano plane output component k (0-7).
-// Bit i in the low byte is set if the HMMA tile product at position i
-// should be negated (Fano plane sign is -1).
-// The mask encodes which of the 8 contributing product terms to a given
-// output component have negative sign.
-//
-// For each output component k, we look at all (i,j) pairs where
-// oct_mul_basis(i,j) == k. If oct_mul_sign(i,j) == -1, set bit at
-// position j in the mask (the column index in the GEMM).
-//
-// Returns: 16-bit integer where bit j is 1 if the sign at column j is -1.
-// Only bits 0..7 are meaningful for single-octonion tiles.
-fn hmma_sign_mask_for_output_component(k: i64) -> i64 {
-    var mask: i64 = 0
-
-    if k == 0 {
-        mask = 0
+// Recursive Cayley–Dickson twist sign σ(a,b,bits) ∈ {+1,−1}; pure i64.
+fn hmma_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return hmma_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return hmma_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return hmma_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - hmma_oct_cd_sigma(a_lo, b_lo, bits - 1)
     }
-
-    if k == 1 {
-        mask = 0
-    }
-
-    if k == 2 {
-        mask = 2 + 32
-    }
-
-    if k == 3 {
-        mask = 2 + 128
-    }
-
-    if k == 4 {
-        mask = 4 + 16 + 64
-    }
-
-    if k == 5 {
-        mask = 8 + 32 + 128
-    }
-
-    if k == 6 {
-        mask = 2 + 16 + 64
-    }
-
-    if k == 7 {
-        mask = 4 + 16 + 128
-    }
-
-    mask
+    if b_lo == 0 { return 0 - hmma_oct_cd_sigma(0, a_lo, bits - 1) }
+    hmma_oct_cd_sigma(b_lo, a_lo, bits - 1)
 }
 
+// Which a-component feeds L(a)[k][j]:  a[k⊕j].
+fn hmma_left_mul_index(k: i64, j: i64) -> i64 { k ^ j }
+
+// Sign of L(a)[k][j] = σ(k⊕j, j) ∈ {+1,−1}. This is the entire "sign structure" —
+// it is a matrix entry, applied ONCE (baked into L(a)), never as a post-correction.
+fn hmma_left_mul_sign(k: i64, j: i64) -> i64 { hmma_oct_cd_sigma(k ^ j, j, 3) }
+
 // ============================================================================
-// PTX sign correction emitter
+// PTX: build the signed left-multiply matrix L(a) into 64 f32 registers
 // ============================================================================
 
-// Emits PTX to apply sign correction to 8 f32 registers starting at dst_base.
-// Uses the sign_mask to selectively neg.f32 components where the Fano plane
-// sign is -1. Bit i of sign_mask: 1 = negate, 0 = keep positive.
-fn hmma_emit_sign_correction(buf: HypercomplexPtxState, dst_base: i64, sign_mask: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+// Emits L(a)[k][j] into %f[lmat_base + k*8 + j] from the a-components at
+// %f[a_base + (k⊕j)], folding the compile-time σ(k⊕j,j) sign into a mov or neg.
+// The resulting register block is the matrix-A operand of the wmma matmul (padded
+// to 16×16 by the caller); after `wmma.mma.sync ... L, b`, no sign fixup is needed.
+fn hmma_emit_build_left_mul_matrix(buf: HypercomplexPtxState, a_base: i64, lmat_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
+    out = hc_push_str(out, "    // build L(a)[k][j] = sigma(k^j,j) * a[k^j]  (Convention X)\n")
     var k: i64 = 0
     while k < 8 {
-        let bit_val = (sign_mask >> k) & 1
-        if bit_val == 1 {
-            out = hc_push_str(out, "    neg.f32 %f")
-            out = hc_push_str(out, i64_to_string(dst_base + k))
+        var j: i64 = 0
+        while j < 8 {
+            let src = a_base + (k ^ j)
+            let dst = lmat_base + k * 8 + j
+            if hmma_left_mul_sign(k, j) < 0 {
+                out = hc_push_str(out, "    neg.f32 %f")
+            } else {
+                out = hc_push_str(out, "    mov.f32 %f")
+            }
+            out = hc_push_str(out, i64_to_string(dst))
             out = hc_push_str(out, ", %f")
-            out = hc_push_str(out, i64_to_string(dst_base + k))
+            out = hc_push_str(out, i64_to_string(src))
             out = hc_push_str(out, ";\n")
+            j = j + 1
         }
         k = k + 1
     }
@@ -112,47 +91,8 @@ fn hmma_emit_sign_correction(buf: HypercomplexPtxState, dst_base: i64, sign_mask
 // Fragment packing/unpacking PTX emitters
 // ============================================================================
 
-// Emits PTX to pack two 8-component octonion vectors into the packed
-// fragment ABI used by the split PTX lowering path:
-//   - oct_a pairs [0:1]..[6:7] -> fragment regs [0..3]
-//   - oct_b pairs [0:1]..[6:7] -> fragment regs [4..7]
-// Each fragment register is a packed .b32 lane formed via cvt.rn.f16x2.f32.
-fn hmma_emit_pack_oct_pair(buf: HypercomplexPtxState, oct_a_base: i64, oct_b_base: i64, frag_reg: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
-    var out = buf
-    out = hc_push_str(out, "    // pack oct_a[")
-    out = hc_push_str(out, i64_to_string(oct_a_base))
-    out = hc_push_str(out, "..] + oct_b[")
-    out = hc_push_str(out, i64_to_string(oct_b_base))
-    out = hc_push_str(out, "..] -> frag[")
-    out = hc_push_str(out, i64_to_string(frag_reg))
-    out = hc_push_str(out, "..] as 8 packed .b32 regs via f16x2 pairs\n")
-
-    var pair_idx: i64 = 0
-    while pair_idx < 4 {
-        let lane_lo = pair_idx * 2
-        let lane_hi = lane_lo + 1
-        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
-        out = hc_push_str(out, i64_to_string(frag_reg + pair_idx))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_a_base + lane_lo))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_a_base + lane_hi))
-        out = hc_push_str(out, ";\n")
-        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
-        out = hc_push_str(out, i64_to_string(frag_reg + 4 + pair_idx))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_b_base + lane_lo))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_b_base + lane_hi))
-        out = hc_push_str(out, ";\n")
-        pair_idx = pair_idx + 1
-    }
-    out
-}
-
-// Emits PTX to unpack 16-wide HMMA f32 accumulator result into an
-// 8-component octonion output. Takes the first 8 f32 accumulator
-// registers and moves them to the destination octonion registers.
+// Emits PTX to unpack the first 8 f32 accumulator registers of the wmma result
+// into an 8-component octonion output (the product a·b in Convention X).
 fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
     out = hc_push_str(out, "    // unpack HMMA result frag[")
@@ -160,7 +100,6 @@ fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_bas
     out = hc_push_str(out, "..] -> dst[")
     out = hc_push_str(out, i64_to_string(oct_dst_base))
     out = hc_push_str(out, "..]\n")
-
     var i: i64 = 0
     while i < 8 {
         out = hc_push_str(out, "    mov.f32 %f")
@@ -174,21 +113,131 @@ fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_bas
 }
 
 // ============================================================================
-// Convenience: full sign correction for all 8 output components
+// Complete WMMA octonion-multiply kernel emitter (Convention X)
 // ============================================================================
 
-// Applies Fano plane sign correction for all 8 output components of an
-// octonion HMMA multiply. Emits neg.f32 instructions for each component
-// whose sign mask indicates negative sign.
-fn hmma_emit_full_sign_correction(buf: HypercomplexPtxState, dst_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
-    var out = buf
+// Emits "{%<prefix><start>, ..., %<prefix><start+count-1>}".
+fn hmma_emit_frag_list(buf: HypercomplexPtxState, prefix: string, start: i64, count: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(buf, "{")
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = hc_push_str(out, ", ") }
+        out = hc_push_str(out, prefix)
+        out = hc_push_str(out, i64_to_string(start + i))
+        i = i + 1
+    }
+    hc_push_str(out, "}")
+}
+
+// Emits a complete, runnable PTX kernel `sounio_oct_mul_wmma(L_ptr, B_ptr, out_ptr)` that
+// computes the octonion product on tensor cores: given L(a) (16×16 f16, the caller/host builds
+// L(a)[k][j]=σ(k⊕j,j)·a[k⊕j] via hmma_left_mul_sign) and B (16×16 f16), it runs one
+// wmma.m16n16k16.f16→f32 tile and stores D = L(a)·B (the octonion products, Convention X).
+// HARDWARE-VALIDATED on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0): this exact emitted PTX
+// ptxas-assembles and launches; e1·e2 → component 3 (+1), batch 0/128 mismatch vs the exact X
+// reference. Reference harness: docs/gpu/run_sounio_ptx.cu (loads the Sounio-emitted PTX).
+pub fn hmma_emit_oct_mul_wmma_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_wmma(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_lmat,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_b,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .b32 %r<18>;\n    .reg .b32 %f<10>;\n    .reg .b64 %rd<7>;\n\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_lmat];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd2, [p_b];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd5, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%rd4], %r1;\n")
+    out = hc_push_str(out, "    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%rd5], %r1;\n")
+    out = hc_push_str(out, "    mov.f32 %f1, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f1, %f1, %f1, %f1, %f1, %f1, %f1, %f1};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n")
+    out = hc_push_str(out, "    ret;\n}\n")
+    out
+}
+
+// Emits a SELF-CONTAINED WMMA octonion-multiply kernel: sounio_oct_mul_full(a_ptr, b_ptr, out_ptr).
+// Thread 0 builds L(a) IN-KERNEL into shared memory (f16, with the compile-time σ from
+// hmma_left_mul_sign folded into an optional neg), stages B, bar.sync; the warp then runs one
+// wmma m16n16k16 tile computing D = L(a)·B = the octonion products a·b_c (Convention X). Unlike
+// hmma_emit_oct_mul_wmma_kernel (which takes a pre-built L matrix), this takes RAW octonions.
+// HARDWARE-VALIDATED on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0): the emitted PTX
+// ptxas-assembles (21096-byte cubin) + launches; e1·e2 → component 3 (+1), batch 0/128 mismatch
+// vs the exact X reference. Reference: docs/gpu/run_full_ptx.cu.
+pub fn hmma_emit_oct_mul_full_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_full(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_b,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<12>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sB[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_b];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sB;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    out = hc_push_str(out, "    mov.u16 %rs1, 0;\n    mov.u32 %r21, 0;\n$ZERO:\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r18, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r19, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r21, %r21, 2;\n    setp.lt.u32 %p1, %r21, 512;\n    @%p1 bra $ZERO;\n")
     var k: i64 = 0
     while k < 8 {
-        let mask = hmma_sign_mask_for_output_component(k)
-        if mask != 0 {
-            out = hmma_emit_sign_correction(out, dst_base, mask)
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n")
+            out = hc_push_str(out, "    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
         }
         k = k + 1
     }
+    var c: i64 = 0
+    while c < 16 {
+        var r: i64 = 0
+        while r < 8 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((c * 8 + r) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
     out
 }

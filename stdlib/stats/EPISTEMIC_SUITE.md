@@ -15,19 +15,23 @@ fourteen families:
   kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
   the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
   the data-transformation primitives (z-scores, min-max & robust scaling, rank
-  transform), and the weighted / grouped estimators (weighted mean & variance,
-  grouped-frequency statistics, weighted quantiles).
+  transform), the weighted / grouped estimators (weighted mean & variance,
+  grouped-frequency statistics, weighted quantiles), and the robust M-estimators
+  (Huber location, Siegel repeated-median regression, Yuen's trimmed t-test).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
   Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
   (Wald-Wolfowitz runs, Durbin-Watson,
   autocorrelation + Ljung-Box) and homoscedasticity (Bartlett, Levene /
   Brown-Forsythe, the variance F-test).
-- **Group comparison & planning** — one-way ANOVA, inference from summary
+- **Group comparison & planning** — one-way ANOVA and Welch's unequal-variance
+  ANOVA, planned linear contrasts and Scheffé's family-wise method, inference from
+  summary
   statistics, standardised effect sizes, t-test power, and sample-size planning
   for proportions/correlations, survival trials (Schoenfeld), target precision,
   and the minimum detectable effect.
 - **Non-parametric tests** — sign test, Mann-Whitney, Wilcoxon signed-rank,
-  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD.
+  Kruskal-Wallis, Mood's median, Friedman and Tukey HSD, plus the
+  ordered-alternative / trend tests (Jonckheere-Terpstra, Page's L, Mann-Kendall).
 - **Correlation & association** — Pearson / Spearman, the Fisher-z CI,
   point-biserial and partial correlation, Kendall's τ, Goodman-Kruskal γ and
   Somers' D.
@@ -1630,6 +1634,99 @@ The cumulative incidence of one event type in the presence of competing risks
 Validated: a table with one competing event → CIF₁(4)=0.75 (not 1); no competing
 events → CIF₁=1−KM.
 
+### `stats::linear_contrast` — planned linear contrast
+
+| Function | Signature |
+|---|---|
+| `linear_contrast` | `pub fn linear_contrast(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ContrastResult with Mut, Div, Panic` |
+
+A single a-priori comparison of group means: `L=Σcᵢx̄ᵢ`, `SE=√(MSE·Σcᵢ²/nᵢ)`,
+`t=L/SE ~ t(N−k)`. Validated: means {10,12,20}, contrast {−½,−½,1} → L=9,
+SE=1.0954, t=8.216, df=12.
+
+### `stats::scheffe` — Scheffé's method
+
+| Function | Signature |
+|---|---|
+| `scheffe` | `pub fn scheffe(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ScheffeResult with Mut, Div, Panic` |
+
+The same contrast, family-wise over *all* contrasts (conservative, valid
+post-hoc): `F_S=t²/(k−1) ~ F(k−1,N−k)`. Validated: the {−½,−½,1} contrast →
+F_S=33.75; a modest contrast → F_S=2.8125, p=0.0996.
+
+### `stats::welch_anova` — Welch's one-way ANOVA
+
+| Function | Signature |
+|---|---|
+| `welch_anova` | `pub fn welch_anova(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> WelchAnovaResult with Mut, Div, Panic` |
+
+The heteroscedasticity-robust ANOVA (the safe choice when Levene/Bartlett flag
+unequal variances): weighted between-group F with the Welch-corrected fractional
+df₂. Validated (Python-cross-checked): three groups with variances 2.5/10/0.5 →
+F=3.405, df₂=6.398; equal groups → F=0.
+
+### `stats::jonckheere` — Jonckheere-Terpstra ordered-alternatives test
+
+| Function | Signature |
+|---|---|
+| `jonckheere` | `pub fn jonckheere(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> JTResult with Mut, Div, Panic` |
+
+A non-parametric test for a monotone trend across k *ordered* groups (more
+powerful than Kruskal-Wallis when the order is known): `J=Σ_{i<j}Uᵢⱼ` with the
+normal-approximation z. Validated: three increasing groups → J=27, E[J]=13.5,
+z=3.0; identical groups → z=0.
+
+### `stats::page_trend` — Page's L test
+
+| Function | Signature |
+|---|---|
+| `page_trend` | `pub fn page_trend(data: &[f64; 256], n: i32, k: i32) -> PageResult with Mut, Div, Panic` |
+
+The repeated-measures ordered-alternative test (ordered Friedman): `L=Σj·Rⱼ` on
+a row-major n×k matrix. Validated: perfectly ordered 3×3 → L=42, E[L]=36,
+z=2.449; no trend → z=0.
+
+### `stats::mann_kendall` — Mann-Kendall trend test
+
+| Function | Signature |
+|---|---|
+| `mann_kendall` | `pub fn mann_kendall(x: &[f64; 256], n: i32) -> MKResult with Mut, Div, Panic` |
+
+The rank-based monotonic-trend test for a time-ordered series (the environmental-
+statistics standard): `S=Σ_{i<j}sign(xⱼ−xᵢ)`, continuity-corrected z, and Kendall's
+τ. Validated: increasing {1..5} → S=10, z=2.2045, τ=1; decreasing → S=−10, τ=−1.
+
+### `stats::huber_location` — Huber M-estimator of location
+
+| Function | Signature |
+|---|---|
+| `huber_location` | `pub fn huber_location(x: &[f64; 256], n: i32, c: f64) -> HuberResult with Mut, Div, Panic` |
+
+A robust centre that behaves like the mean near the bulk but downweights outliers
+(iteratively reweighted with a MAD scale and tuning constant c≈1.345). Validated:
+symmetric {1..5} → 3; {1,2,3,4,100} → 3 (fully robust, vs the mean 22).
+
+### `stats::siegel_regression` — repeated-median regression
+
+| Function | Signature |
+|---|---|
+| `siegel_regression` | `pub fn siegel_regression(x: &[f64; 256], y: &[f64; 256], n: i32) -> SiegelFit with Mut, Div, Panic` |
+
+The 50%-breakdown robust regression: `b=medianᵢ(median_{j≠i} slopeᵢⱼ)` — the inner
+per-point median then the median across points buys higher robustness than
+Theil-Sen. Validated: perfect line → (2,1); a wild outlier at (5,100) still →
+(2,1).
+
+### `stats::yuen` — Yuen's trimmed-means t-test
+
+| Function | Signature |
+|---|---|
+| `yuen` | `pub fn yuen(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, gamma: f64) -> YuenResult with Mut, Div, Panic` |
+
+A robust two-sample test comparing γ-trimmed means with Winsorized variances (the
+outlier-resistant Welch). Validated (Python-cross-checked): x={1..10} vs
+{3..11,50}, γ=0.2 → trimmed means 5.5/7.5, t=−1.188, df=10.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1758,6 +1855,15 @@ use stats::weighted_quantile::{weighted_quantile, weighted_median}
 use stats::km_greenwood::{KMCIResult, km_greenwood}
 use stats::conditional_survival::{conditional_survival}
 use stats::cumulative_incidence::{cumulative_incidence}
+use stats::linear_contrast::{ContrastResult, linear_contrast}
+use stats::scheffe::{ScheffeResult, scheffe}
+use stats::welch_anova::{WelchAnovaResult, welch_anova}
+use stats::jonckheere::{JTResult, jonckheere}
+use stats::page_trend::{PageResult, page_trend}
+use stats::mann_kendall::{MKResult, mann_kendall}
+use stats::huber_location::{HuberResult, huber_location}
+use stats::siegel_regression::{SiegelFit, siegel_regression}
+use stats::yuen::{YuenResult, yuen}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
