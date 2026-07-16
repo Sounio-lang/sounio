@@ -33,18 +33,46 @@ factors, and the entire `Knowledge<T>` / uncertainty-propagation core at once.**
 
 | # | Defect | Symptom | Repro / dispatch | Blocks |
 |---|---|---|---|---|
-| D1 | **`f64 → i64/i32` cast in an imported-module body is a bitcast**, not a truncating convert | silent wrong numbers (e.g. `4.172 as i64` → `4616383272838735331`) | `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14` | correct GUM coverage `k95`/`U95`/`U99`; any imported fn casting f64→int (confidence scaling, indices) |
+| D1 | **`f64 → i64/i32` cast whose operand is an f64 *parameter* is a bitcast**, not a truncating convert — **general, reproduces single-file** (not imported-only; see 2026-07-16 update below) | silent wrong numbers (e.g. `f(4.172)` for `fn f(x:f64)->i64 { x as i64 }` → `4616383272838735331`) | `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14`; **root-caused in #983** | correct GUM coverage `k95`/`U95`/`U99`; any fn casting an f64 param→int (confidence scaling, indices) |
 | D2 | **`&local_array` passed to a builtin gets a wrong base pointer** | SIGSEGV / garbage bytes | `DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14` | `read_file`, `write_file`, `str_from_bytes` → all Data I/O **readers** and the file sink |
 | D3 | **Multi-module native lowering fails** — segfault in `lower_array` dep-lowering, or thin-link `rc=12` | native compile fails whenever the program's dep closure has ≥2 modules or a module `use`s another | this doc's witnesses (`knowledge`, `propagate`, `order_spread_exact`, `uncertain_eq`); extends `MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30`, `MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14`, `MADAROS_MULTIMODULE_NATIVE_SEED_SEGFAULT_2026-06-22` | cross-module reuse (`data::csv` + `epistemic::gum`); `Knowledge<T>`, `propagate`, and any module with `use` deps |
 | D4 | **named `use m::sym` E137 + `print_f64` E137** in importing programs | type-check rejects valid code | `MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13` | selective imports; float printing in importing programs |
 
-**Tracking issues:** D1 → #932, D2 → #933, D3 → #901 (+ thin-link variant #921),
-D4 → #862.
+**Tracking issues:** D1 → #932 (narrow) + **#983 (general root cause)**, D2 → #933,
+D3 → #901 (+ thin-link variant #921), D4 → #862. **D5 (new) → #986** — see update.
 
-D1–D2 are silent/local mis-lowerings; D3 is the structural multi-module path; D4 is
-type-check-level. All four are the *imported-module* path — none reproduce in a
-single-file `main()` (verified: the same `f64 as i64`, `&buf`→builtin, and long
-`if`-chains all work correctly single-file).
+D2 is a silent/local mis-lowering; D3 is the structural multi-module path; D4 is
+type-check-level. D2/`&buf`→builtin and long `if`-chains do not reproduce single-file.
+**Correction (was wrong for D1):** D1 *does* reproduce single-file — the earlier
+"`f64 as i64` works single-file" check cast a **local**/literal, which is fine; the
+bug fires only when the cast operand is a **parameter**.
+
+## Update 2026-07-16 — D1 root-caused (#983), and its fix is BLOCKED by a new defect (#986)
+
+**Root cause of D1 (#983):** `lower_cast_expr_ref` (`self-hosted/ir/lower.sio` ~L9281)
+emits `IrFloatToInt` only when the operand is a detected float source
+(`lookup_local_scalar_kind == 2`). f64 **parameters carry `scalar_kind 0`**: path A
+(`lowerer_lower_fn_params_mut`) recorded the kind via `(*lo) = (*lo).bind_local_scalar_kind(...)`
+— a by-value `Lowerer` RMW through a `&!` pointer, dropped by the by-value-aggregate-store
+miscompile (the file already carries `_mut` analogues for exactly this). Locals reassign a
+`var lo`, so they survive → locals work, params don't.
+
+**⚠️ The one-line fix is UNSAFE on its own → new defect D5 (#986).** Giving params
+`scalar_kind = 2` also activates the *other* scalar_kind consumers — **println-dispatch**
+and **variance-shadow tracking** — never exercised for parameters before. A deterministic
+clean-vs-fix full-suite diff showed +10 pass (all `dissertation_pbpk28_parity_ref_*`) but
+**−20 fail with ZERO casts** (`autodiff_tape_basic`→HANG, `test_fem`/`matnm_test`→SEGFAULT,
+`arima_levinson_ar2`→HANG; +3 thin-link `rc=12`). So **f64 parameters are systemically
+under-supported (cast + println + variance-shadow)**, long masked by the `scalar_kind=0` bug.
+
+**Fix ordering:** land **#986** (println/variance-shadow of f64-param values, + thin-link
+headroom) *before/with* the D1/#983 `scalar_kind` param fix. A **safe stdlib workaround**
+(no compiler change) exists for the GUM-critical site: arithmetic-route the cast
+(`let d = dof + 0.0; d as i64`) — verified on the clean compiler. Per owner decision this is
+**dispatch-only**; no compiler/stdlib code shipped.
+
+**Aside:** the D3 "multimodule compose" symptom for `data::csv` + `epistemic::gum` is **stale**
+on current source (compiles + runs); `Knowledge<T>`/`propagate` import still fail (D3 stands).
 
 ## Impact map — what each fix unblocks
 
@@ -58,9 +86,11 @@ single-file `main()` (verified: the same `f64 as i64`, `&buf`→builtin, and lon
   the stdout writers already shipped around it (PR #918).
 - **D4 (named-import / print_f64)** — quality-of-life for importing programs.
 
-Recommended attack order: **D3 → D1 → D2 → D4** (structural enabler first, then the
-silent-corruption root, then the I/O sink, then ergonomics). D1 and D3 both bottom
-out in the imported-module lowering/merge stage the `codex/*-ir-*` rebuild owns.
+Recommended attack order: **D3 → (D5+D1) → D2 → D4** (structural enabler first, then
+the silent-corruption root — but **D5/#986 must land with D1/#983**, else the corrected
+float-marking hangs/segfaults the 20 zero-cast programs — then the I/O sink, then
+ergonomics). D1 and D3 both bottom out in the imported-module lowering/merge stage the
+`codex/*-ir-*` rebuild owns.
 
 ## Trust boundary this currently imposes
 
@@ -77,7 +107,12 @@ re-checking:
 
 - **D1:** `scripts/epistemic_trust_gate.sh` Section B prints "coverage factor may be
   FIXED" when `gum_k95` stops returning 1960; the `f64→i64` minimal repro in the
-  D1 dispatch.
+  D1 dispatch / #983. NB: the existing `witness_gum_k95.sio` is **mis-designed** — its
+  input has a dominant infinite-dof Type-B, so nu_eff is large and `k95=1.960` is
+  *correct* there (it can never flip). A genuine small-dof trip-wire is
+  `gum_combine2(100.0, gum_type_a(1.0,5), gum_type_b(0.0001))` → 1960 (bug) vs 2776 (fixed).
+- **D5 (#986):** the −20 zero-cast HANG/SEGFAULT programs above (`test_fem`, `matnm_test`,
+  `arima_levinson_ar2`, `autodiff_tape_basic`) must run correctly once params are float-marked.
 - **D2:** the byte-exact round-trip in the D2 dispatch (`str_from_bytes`/`write_file`
   + `read_file`); re-enables Data I/O readers.
 - **D3:** `scripts/epistemic_trust_gate.sh` Section C prints "now COMPILES" when
@@ -87,9 +122,11 @@ re-checking:
 
 ## Ask
 
-Fold D1–D4 into the `codex/*-ir-*` imported-module lowering rebuild as explicit
-acceptance criteria, in the D3→D1→D2→D4 order, and wire the four verification hooks
+Fold D1–D5 into the `codex/*-ir-*` imported-module lowering rebuild as explicit
+acceptance criteria, in the D3→(D5+D1)→D2→D4 order, and wire the verification hooks
 above into that lane's CI so the trust map updates automatically as fixes land.
+**D1 (#983) and D5 (#986) must land together** — the D1 float-marking fix is unsafe
+until D5's println/variance-shadow handling of f64-param values is fixed.
 
 ## AI disclosure
 
