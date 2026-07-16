@@ -15,8 +15,9 @@ fourteen families:
   kurtosis); plus the robust median / IQR / MAD / trimmed & Winsorized means,
   the Hodges-Lehmann estimators, Tukey / Grubbs / modified-z outlier rules, and
   the data-transformation primitives (z-scores, min-max & robust scaling, rank
-  transform), and the weighted / grouped estimators (weighted mean & variance,
-  grouped-frequency statistics, weighted quantiles).
+  transform), the weighted / grouped estimators (weighted mean & variance,
+  grouped-frequency statistics, weighted quantiles), and the robust M-estimators
+  (Huber location, Siegel repeated-median regression, Yuen's trimmed t-test).
 - **Assumption checks** — normality (Jarque-Bera, Q-Q, Kolmogorov-Smirnov,
   Anderson-Darling, Cramér-von Mises, χ²/G goodness-of-fit), independence
   (Wald-Wolfowitz runs, Durbin-Watson,
@@ -1695,6 +1696,37 @@ The rank-based monotonic-trend test for a time-ordered series (the environmental
 statistics standard): `S=Σ_{i<j}sign(xⱼ−xᵢ)`, continuity-corrected z, and Kendall's
 τ. Validated: increasing {1..5} → S=10, z=2.2045, τ=1; decreasing → S=−10, τ=−1.
 
+### `stats::huber_location` — Huber M-estimator of location
+
+| Function | Signature |
+|---|---|
+| `huber_location` | `pub fn huber_location(x: &[f64; 256], n: i32, c: f64) -> HuberResult with Mut, Div, Panic` |
+
+A robust centre that behaves like the mean near the bulk but downweights outliers
+(iteratively reweighted with a MAD scale and tuning constant c≈1.345). Validated:
+symmetric {1..5} → 3; {1,2,3,4,100} → 3 (fully robust, vs the mean 22).
+
+### `stats::siegel_regression` — repeated-median regression
+
+| Function | Signature |
+|---|---|
+| `siegel_regression` | `pub fn siegel_regression(x: &[f64; 256], y: &[f64; 256], n: i32) -> SiegelFit with Mut, Div, Panic` |
+
+The 50%-breakdown robust regression: `b=medianᵢ(median_{j≠i} slopeᵢⱼ)` — the inner
+per-point median then the median across points buys higher robustness than
+Theil-Sen. Validated: perfect line → (2,1); a wild outlier at (5,100) still →
+(2,1).
+
+### `stats::yuen` — Yuen's trimmed-means t-test
+
+| Function | Signature |
+|---|---|
+| `yuen` | `pub fn yuen(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, gamma: f64) -> YuenResult with Mut, Div, Panic` |
+
+A robust two-sample test comparing γ-trimmed means with Winsorized variances (the
+outlier-resistant Welch). Validated (Python-cross-checked): x={1..10} vs
+{3..11,50}, γ=0.2 → trimmed means 5.5/7.5, t=−1.188, df=10.
+
 A **funnel plot** figure (`examples/stats/funnel_plot.sio`) accompanies the
 meta-analysis (effect vs precision with the pseudo-95% funnel, for publication-bias
 assessment).
@@ -1829,6 +1861,9 @@ use stats::welch_anova::{WelchAnovaResult, welch_anova}
 use stats::jonckheere::{JTResult, jonckheere}
 use stats::page_trend::{PageResult, page_trend}
 use stats::mann_kendall::{MKResult, mann_kendall}
+use stats::huber_location::{HuberResult, huber_location}
+use stats::siegel_regression::{SiegelFit, siegel_regression}
+use stats::yuen::{YuenResult, yuen}
 ```
 
 Worked end-to-end examples that compose several tools on one dataset live at
