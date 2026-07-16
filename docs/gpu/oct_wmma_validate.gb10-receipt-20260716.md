@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.gpu.oct-wmma-validate.gb10-receipt-20260716
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.gpu.oct-wmma-validate.gb10-receipt-20260716
+-->
+
 # GB10 WMMA Receipt
 
 Status: manual hardware witness passed on 2026-07-16.
