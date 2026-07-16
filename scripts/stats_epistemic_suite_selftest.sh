@@ -130,6 +130,9 @@ MODULES=(
   stdlib/stats/weighted_stats.sio
   stdlib/stats/grouped_stats.sio
   stdlib/stats/weighted_quantile.sio
+  stdlib/stats/km_greenwood.sio
+  stdlib/stats/conditional_survival.sio
+  stdlib/stats/cumulative_incidence.sio
 )
 
 fail=0
