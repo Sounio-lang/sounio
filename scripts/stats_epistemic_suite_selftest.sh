@@ -139,6 +139,9 @@ MODULES=(
   stdlib/stats/jonckheere.sio
   stdlib/stats/page_trend.sio
   stdlib/stats/mann_kendall.sio
+  stdlib/stats/huber_location.sio
+  stdlib/stats/siegel_regression.sio
+  stdlib/stats/yuen.sio
 )
 
 fail=0
