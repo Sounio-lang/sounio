@@ -3037,3 +3037,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - yuen = **PASS**: Winsorized variance s²_w=Σ(v−wmean)²/(n−1), d=(n−1)s²_w/(h(h−1)), t=(x̄_t1−x̄_t2)/√(d1+d2), Welch-style df; x={1..10}/y={3..11,50}/γ=0.2→tm 5.5/7.5, t=−1.188182, df=10 (Python-cross-checked).
 - Theme: robust M-estimation — robust location (Huber), robust regression (Siegel, higher breakdown than Theil-Sen), robust two-sample test (Yuen). All derivable / Python-anchored, #852-safe. Suite runner: 133 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-pxPazF/`, `/tmp/llm-offload-jQ7cVi/`, `/tmp/llm-offload-3CzPbg/`.
+
+## 2026-07-16 — math-review: chemistry::acids pH range reduction (PR #1014)
+- Target: `stdlib/chemistry/acids.sio`; regression: `tests/stdlib/chemistry/test_acids_stdlib.sio`.
+- xAI/Grok 4.3: **PASS_SINGLE_PROVIDER_DEGRADED** for the changed `ln_approx` range reduction, `ph`, and Henderson-Hasselbalch formulas. It correctly accepted the reduction of `x` to `[1/sqrt(10), sqrt(10)]` before the artanh series and the first-order pH uncertainty formula.
+- Documented disagreement: Grok called the excess-base branch `14 + log10(oh)` wrong. It is correct because `pOH = -log10([OH-])`, hence `pH = 14 - pOH = 14 + log10([OH-])`. The added regression uses `[OH-]=0.01`, where the implemented branch returns `12` and the suggested alternative would incorrectly return `16`.
+- Independent-provider fallback: Z.AI GLM-5.2 timed out after more than 120 seconds (`/tmp/llm-offload-mxTIVr/`); Qwen failed with OpenRouter HTTP 402 (`/tmp/llm-offload-83btKx/`); DeepSeek returned `Insufficient Balance` (`/tmp/llm-offload-xlyMGm/`); Groq returned `Invalid API Key` (`/tmp/llm-offload-sFR2Ue/`). Re-review with Z.AI remains pending when that provider is responsive.
+- Scope boundary: Grok also marked the pre-existing `calibrate` slope uncertainty and `mm_rate` rough uncertainty as overreach. Neither is changed by this PR or used to support its pH regression claim; they remain separate investigation items rather than silently being folded into this numerical-fix patch.
+- Gate: `bash scripts/verticals_rng_iter_acids_gate.sh` -> `VERTICALS_RNG_ITER_ACIDS_GATE_OK`; `git diff --check` -> PASS.
