@@ -49,8 +49,18 @@ struct OcpExactBitwiseRebracketOccurrence {
     outer_const_reg: i64,
 }
 
+// A compact proof object for the first control-aware authority slice. The
+// constructor exists only in this module and issues the value only when every
+// relevant definition/use is in one uninterrupted linear region and the
+// rewritten outer constant has exactly one modeled observer.
+struct OcpExactBitwiseSameLinearRegionUseCertificate {
+    inner_const_def_index: i64,
+    block_start_index: i64,
+}
+
 struct OcpSealedExactBitwiseRebracketAuthority {
     occurrence: OcpExactBitwiseRebracketOccurrence,
+    flow_certificate: OcpExactBitwiseSameLinearRegionUseCertificate,
 }
 
 struct OcpExactBitwiseRebracketAudit {
@@ -71,11 +81,12 @@ pub struct OcpExactBitwiseRebracketProbeReceipt {
     pub application_mask: i64,
     // Refusal bits: replay, wrong occurrence, swapped, arithmetic, float,
     // shared constant, stale occurrence, call operands, packed operands,
-    // control flow without a dominance certificate, and explicit float IR.
+    // a cross-region candidate, and explicit float IR.
     pub refusal_mask: i64,
     pub unchanged_refusal_mask: i64,
     // Bit 0: authority is private and consumed in the local transaction.
     // Bits 1..3 would claim D7, float/GUM, or global authority and stay clear.
+    // Bit 4: a same-linear-region/use certificate admits unrelated control.
     pub boundary_claim_mask: i64,
 }
 
@@ -147,6 +158,13 @@ fn ocp_rebracket_empty_occurrence() -> OcpExactBitwiseRebracketOccurrence {
     }
 }
 
+fn ocp_rebracket_empty_flow_certificate() -> OcpExactBitwiseSameLinearRegionUseCertificate {
+    OcpExactBitwiseSameLinearRegionUseCertificate {
+        inner_const_def_index: -1,
+        block_start_index: -1,
+    }
+}
+
 fn ocp_rebracket_empty_audit(reason_code: i64) -> OcpExactBitwiseRebracketAudit {
     OcpExactBitwiseRebracketAudit {
         authorization_count: 0,
@@ -204,10 +222,10 @@ fn ocp_rebracket_has_no_call_args(args: Option<Box<IrRegList>>) -> bool {
     }
 }
 
-// This first authority slice admits only IR whose register observations are
-// fully represented by src1/src2, plus IrIndexSet's documented third operand.
-// Calls, phi lists, epistemic metadata operands, and packed/wide register
-// layouts are refused rather than guessed at by an incomplete use analysis.
+// Data opcodes whose register observations are fully represented by src1/src2,
+// plus IrIndexSet's documented third operand. Control instructions are modeled
+// separately so admitting their explicit uses cannot accidentally certify a
+// candidate that crosses a basic-block boundary.
 fn ocp_rebracket_has_canonical_scalar_operands(op: IrOpcode) -> bool {
     match op {
         IrOpcode::IrLoadImm => true,
@@ -216,7 +234,6 @@ fn ocp_rebracket_has_canonical_scalar_operands(op: IrOpcode) -> bool {
         IrOpcode::IrCopy => true,
         IrOpcode::IrBinOp => true,
         IrOpcode::IrUnaryOp => true,
-        IrOpcode::IrReturn => true,
         IrOpcode::IrFieldGet => true,
         IrOpcode::IrFieldSet => true,
         IrOpcode::IrIndexGet => true,
@@ -232,17 +249,81 @@ fn ocp_rebracket_has_canonical_scalar_operands(op: IrOpcode) -> bool {
     }
 }
 
-fn ocp_rebracket_function_has_canonical_scalar_operands(func: &IrFunction) -> bool with Div, Panic {
+fn ocp_rebracket_is_control_terminator(op: IrOpcode) -> bool {
+    op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue ||
+        op == IrOpcode::IrBranchFalse || op == IrOpcode::IrReturn ||
+        op == IrOpcode::IrReturnSret
+}
+
+fn ocp_rebracket_has_supported_control_operands(op: IrOpcode) -> bool {
+    op == IrOpcode::IrLabel || ocp_rebracket_is_control_terminator(op)
+}
+
+fn ocp_rebracket_has_plain_control_encoding(instr: IrInstr) -> bool with Mut, Div, Panic {
+    let empty = ir_empty_name()
+    let common = instr.dst == IR_INVALID_REG && instr.src2 == IR_INVALID_REG &&
+        instr.imm_i64 == 0 && instr.imm_f64 == 0.0 &&
+        instr.fn_id == IR_INVALID_FN && instr.field_idx == -1 &&
+        instr.imm_flags == 0 && instr.arg_count == 0 &&
+        ir_name_eq(instr.name, empty) && ocp_rebracket_has_no_call_args(instr.call_args)
+    if !common { return false }
+    if instr.op == IrOpcode::IrLabel || instr.op == IrOpcode::IrJump {
+        return instr.src1 == IR_INVALID_REG && instr.label_id >= 0
+    }
+    if instr.op == IrOpcode::IrBranchTrue || instr.op == IrOpcode::IrBranchFalse {
+        return instr.src1 >= 0 && instr.label_id >= 0
+    }
+    if instr.op == IrOpcode::IrReturn || instr.op == IrOpcode::IrReturnSret {
+        return instr.src1 >= 0 && instr.label_id == IR_INVALID_LABEL
+    }
+    false
+}
+
+fn ocp_rebracket_has_complete_use_encoding(instr: IrInstr) -> bool with Mut, Div, Panic {
+    if ocp_rebracket_has_canonical_scalar_operands(instr.op) {
+        return instr.arg_count == 0 && ocp_rebracket_has_no_call_args(instr.call_args)
+    }
+    if ocp_rebracket_has_supported_control_operands(instr.op) {
+        return ocp_rebracket_has_plain_control_encoding(instr)
+    }
+    false
+}
+
+// 0 = complete, 14 = an opcode has unmodeled operands, 16 = a supported
+// control opcode is encoded non-canonically.
+fn ocp_rebracket_function_use_model_status(func: &IrFunction) -> i64 with Mut, Div, Panic {
     var i: i64 = 0
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
-        if !ocp_rebracket_has_canonical_scalar_operands(instr.op) ||
-            instr.arg_count != 0 || !ocp_rebracket_has_no_call_args(instr.call_args) {
-            return false
+        if ocp_rebracket_has_supported_control_operands(instr.op) {
+            if !ocp_rebracket_has_plain_control_encoding(instr) { return 16 }
+        } else if !ocp_rebracket_has_complete_use_encoding(instr) {
+            return 14
         }
         i = i + 1
     }
-    true
+    0
+}
+
+fn ocp_rebracket_function_has_complete_use_model(func: &IrFunction) -> bool with Mut, Div, Panic {
+    ocp_rebracket_function_use_model_status(func) == 0
+}
+
+// Assigns a lexical basic-block token without constructing a global CFG. A
+// label starts a block; the instruction after any terminator starts another.
+fn ocp_rebracket_block_start_index(func: &IrFunction, instr_idx: i64) -> i64 with Div, Panic {
+    if instr_idx < 0 || instr_idx >= func.instr_count { return -1 }
+    var block_start: i64 = 0
+    var i: i64 = 0
+    while i <= instr_idx {
+        let op = func.instrs[i as usize].op
+        if op == IrOpcode::IrLabel { block_start = i }
+        if i < instr_idx && ocp_rebracket_is_control_terminator(op) {
+            block_start = i + 1
+        }
+        i = i + 1
+    }
+    block_start
 }
 
 fn ocp_rebracket_instr_equal(a: IrInstr, b: IrInstr) -> bool with Mut, Div, Panic {
@@ -306,18 +387,14 @@ fn ocp_rebracket_window_has_conflicting_write(
 }
 
 // The transform rewrites the existing outer constant definition in place.
-// Refuse unless that register has exactly one observable consumer and every
-// instruction uses the canonical scalar operand encoding admitted above.
-// A negative result means the function contains an uncertified operand shape.
-fn ocp_rebracket_source_use_count(func: &IrFunction, reg: i64) -> i64 with Div, Panic {
+// Count its observers across the whole function, including explicitly modeled
+// branch/return operands. A negative result means some use encoding is unknown.
+fn ocp_rebracket_source_use_count(func: &IrFunction, reg: i64) -> i64 with Mut, Div, Panic {
     var count: i64 = 0
     var i: i64 = 0
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
-        if !ocp_rebracket_has_canonical_scalar_operands(instr.op) ||
-            instr.arg_count != 0 || !ocp_rebracket_has_no_call_args(instr.call_args) {
-            return -1
-        }
+        if !ocp_rebracket_has_complete_use_encoding(instr) { return -1 }
         if instr.src1 == reg { count = count + 1 }
         if instr.src2 == reg { count = count + 1 }
         if instr.op == IrOpcode::IrIndexSet && instr.imm_i64 == reg {
@@ -326,6 +403,57 @@ fn ocp_rebracket_source_use_count(func: &IrFunction, reg: i64) -> i64 with Div, 
         i = i + 1
     }
     count
+}
+
+fn ocp_rebracket_flow_certificates_equal(
+    a: OcpExactBitwiseSameLinearRegionUseCertificate,
+    b: OcpExactBitwiseSameLinearRegionUseCertificate,
+) -> bool {
+    a.inner_const_def_index == b.inner_const_def_index &&
+        a.block_start_index == b.block_start_index
+}
+
+// Derives a local dominance/use fact from live IR. Equality of all four block
+// starts proves that the two constant definitions and two binops share one
+// uninterrupted linear region. The whole-function use model separately proves
+// that rewriting c2 cannot alter another observer.
+fn ocp_certify_exact_bitwise_same_linear_region_use(
+    func: &IrFunction,
+    occurrence: OcpExactBitwiseRebracketOccurrence,
+) -> (bool, OcpExactBitwiseSameLinearRegionUseCertificate, i64) with Mut, Div, Panic {
+    let empty = ocp_rebracket_empty_flow_certificate()
+    let use_model_status = ocp_rebracket_function_use_model_status(func)
+    if use_model_status != 0 { return (false, empty, use_model_status) }
+
+    let inner = func.instrs[occurrence.inner_instr_index as usize]
+    let inner_const_def_idx = ocp_rebracket_last_value_def_before(
+        func,
+        inner.src2,
+        occurrence.inner_instr_index,
+    )
+    if inner_const_def_idx < 0 { return (false, empty, 7) }
+
+    let inner_const_block = ocp_rebracket_block_start_index(func, inner_const_def_idx)
+    let inner_block = ocp_rebracket_block_start_index(func, occurrence.inner_instr_index)
+    let outer_const_block = ocp_rebracket_block_start_index(
+        func,
+        occurrence.outer_const_def_index,
+    )
+    let outer_block = ocp_rebracket_block_start_index(func, occurrence.outer_instr_index)
+    if inner_const_block < 0 || inner_const_block != inner_block ||
+        inner_const_block != outer_const_block || inner_const_block != outer_block {
+        return (false, empty, 15)
+    }
+
+    let outer_const_use_count = ocp_rebracket_source_use_count(func, occurrence.outer_const_reg)
+    if outer_const_use_count < 0 { return (false, empty, 14) }
+    if outer_const_use_count != 1 { return (false, empty, 11) }
+
+    let certificate = OcpExactBitwiseSameLinearRegionUseCertificate {
+        inner_const_def_index: inner_const_def_idx,
+        block_start_index: inner_const_block,
+    }
+    (true, certificate, 0)
 }
 
 fn ocp_capture_exact_bitwise_rebracket_occurrence(
@@ -399,14 +527,6 @@ fn ocp_capture_exact_bitwise_rebracket_occurrence(
     ) {
         return (false, empty, 10)
     }
-    let outer_const_use_count = ocp_rebracket_source_use_count(func, outer_const_reg)
-    if outer_const_use_count < 0 {
-        return (false, empty, 14)
-    }
-    if outer_const_use_count != 1 {
-        return (false, empty, 11)
-    }
-
     let combined = ocp_rebracket_combine(
         inner.bin_op,
         inner_const_def.imm_i64,
@@ -438,9 +558,17 @@ fn ocp_rebracket_occurrences_equal(
 
 fn ocp_issue_exact_bitwise_rebracket_authority(
     occurrence: OcpExactBitwiseRebracketOccurrence,
+    flow_certificate: OcpExactBitwiseSameLinearRegionUseCertificate,
 ) -> OcpSealedExactBitwiseRebracketAuthority with Panic {
     assert(occurrence.operator_key >= 3 && occurrence.operator_key <= 5)
-    OcpSealedExactBitwiseRebracketAuthority { occurrence: occurrence }
+    assert(flow_certificate.inner_const_def_index >= 0)
+    assert(flow_certificate.inner_const_def_index < occurrence.inner_instr_index)
+    assert(flow_certificate.block_start_index >= 0)
+    assert(flow_certificate.block_start_index <= flow_certificate.inner_const_def_index)
+    OcpSealedExactBitwiseRebracketAuthority {
+        occurrence: occurrence,
+        flow_certificate: flow_certificate,
+    }
 }
 
 fn ocp_apply_exact_bitwise_rebracket_authority(
@@ -450,12 +578,16 @@ fn ocp_apply_exact_bitwise_rebracket_authority(
     // The authority never escapes this private transaction. Its occurrence is
     // checked against freshly captured current IR immediately before mutation.
     let expected = authority.occurrence
+    let expected_flow = authority.flow_certificate
     let current = ocp_capture_exact_bitwise_rebracket_occurrence(
         func,
         expected.outer_instr_index,
         expected.inner_instr_index,
     )
-    if !current.0 || !ocp_rebracket_occurrences_equal(expected, current.1) {
+    if !current.0 { return ocp_rebracket_empty_audit(13) }
+    let current_flow = ocp_certify_exact_bitwise_same_linear_region_use(func, current.1)
+    if !current_flow.0 || !ocp_rebracket_occurrences_equal(expected, current.1) ||
+        !ocp_rebracket_flow_certificates_equal(expected_flow, current_flow.1) {
         return ocp_rebracket_empty_audit(13)
     }
 
@@ -513,7 +645,11 @@ fn ocp_try_exact_bitwise_rebracket(
     if !captured.0 {
         return ocp_rebracket_empty_audit(captured.2)
     }
-    let authority = ocp_issue_exact_bitwise_rebracket_authority(captured.1)
+    let certified = ocp_certify_exact_bitwise_same_linear_region_use(func, captured.1)
+    if !certified.0 {
+        return ocp_rebracket_empty_audit(certified.2)
+    }
+    let authority = ocp_issue_exact_bitwise_rebracket_authority(captured.1, certified.1)
     ocp_apply_exact_bitwise_rebracket_authority(func, authority)
 }
 
@@ -525,6 +661,46 @@ fn ocp_rebracket_probe_chain(op: BinaryOp, c1: i64, c2: i64) -> IrFunction with 
     func.instrs[3] = ir_binop(4, 2, op, 3)
     func.instr_count = 4
     func.reg_count = 5
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func
+}
+
+fn ocp_rebracket_probe_control_after_chain(
+    op: BinaryOp,
+    c1: i64,
+    c2: i64,
+) -> IrFunction with Mut, Panic {
+    var func = ocp_rebracket_probe_chain(op, c1, c2)
+    var branch = ir_instr_new(IrOpcode::IrBranchTrue)
+    branch.src1 = 0
+    branch.label_id = 1
+    var label = ir_instr_new(IrOpcode::IrLabel)
+    label.label_id = 1
+    func.instrs[4] = branch
+    func.instrs[5] = label
+    func.instr_count = 6
+    func.label_count = 2
+    func
+}
+
+fn ocp_rebracket_probe_cross_region_chain() -> IrFunction with Mut, Panic {
+    var func = ir_empty_function()
+    var jump = ir_instr_new(IrOpcode::IrJump)
+    jump.label_id = 1
+    var label = ir_instr_new(IrOpcode::IrLabel)
+    label.label_id = 1
+    func.instrs[0] = ir_load_imm(1, 128)
+    func.instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    func.instrs[2] = jump
+    func.instrs[3] = label
+    func.instrs[4] = ir_load_imm(3, 64)
+    func.instrs[5] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    func.instr_count = 6
+    func.reg_count = 5
+    func.label_count = 2
+    func.param_count = 1
+    func.param_regs[0] = 0
     func
 }
 
@@ -636,7 +812,15 @@ pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracket
     let stale_input = ocp_rebracket_probe_chain(BinaryOp::OpBitXor, 5, 3)
     let stale_capture = ocp_capture_exact_bitwise_rebracket_occurrence(&stale_input, 3, 1)
     assert(stale_capture.0)
-    let stale_authority = ocp_issue_exact_bitwise_rebracket_authority(stale_capture.1)
+    let stale_certificate = ocp_certify_exact_bitwise_same_linear_region_use(
+        &stale_input,
+        stale_capture.1,
+    )
+    assert(stale_certificate.0)
+    let stale_authority = ocp_issue_exact_bitwise_rebracket_authority(
+        stale_capture.1,
+        stale_certificate.1,
+    )
     var stale_changed = stale_input
     stale_changed.instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
     let stale_const_before = stale_changed.instrs[2]
@@ -675,18 +859,25 @@ pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracket
         ocp_rebracket_instr_equal(packed_input.instrs[2], packed_const_before) &&
         ocp_rebracket_instr_equal(packed_input.instrs[3], packed_outer_before)
 
-    var control_input = ocp_rebracket_probe_chain(BinaryOp::OpBitOr, 128, 64)
-    var control_instr = ir_instr_new(IrOpcode::IrJump)
-    control_instr.label_id = 1
-    control_input.instrs[4] = control_instr
-    control_input.instr_count = 5
-    let control_const_before = control_input.instrs[2]
-    let control_outer_before = control_input.instrs[3]
-    let control_flow = ocp_try_exact_bitwise_rebracket(&! control_input, 3, 1)
-    let control_count = control_flow.application_count
-    let control_unchanged = control_count == 0 &&
-        ocp_rebracket_instr_equal(control_input.instrs[2], control_const_before) &&
-        ocp_rebracket_instr_equal(control_input.instrs[3], control_outer_before)
+    var control_after_input = ocp_rebracket_probe_control_after_chain(BinaryOp::OpBitOr, 128, 64)
+    let control_after_branch_before = control_after_input.instrs[4]
+    let control_after_label_before = control_after_input.instrs[5]
+    let control_after = ocp_try_exact_bitwise_rebracket(&! control_after_input, 3, 1)
+    let control_after_ok = control_after.application_count == 1 &&
+        control_after_input.instrs[2].imm_i64 == 192 &&
+        control_after_input.instrs[3].src1 == 0 &&
+        ocp_rebracket_instr_equal(control_after_input.instrs[4], control_after_branch_before) &&
+        ocp_rebracket_instr_equal(control_after_input.instrs[5], control_after_label_before)
+
+    var cross_region_input = ocp_rebracket_probe_cross_region_chain()
+    let cross_region_const_before = cross_region_input.instrs[4]
+    let cross_region_outer_before = cross_region_input.instrs[5]
+    let cross_region = ocp_try_exact_bitwise_rebracket(&! cross_region_input, 5, 1)
+    let cross_region_count = cross_region.application_count
+    let cross_region_unchanged = cross_region_count == 0 &&
+        cross_region.reason_code == 15 &&
+        ocp_rebracket_instr_equal(cross_region_input.instrs[4], cross_region_const_before) &&
+        ocp_rebracket_instr_equal(cross_region_input.instrs[5], cross_region_outer_before)
 
     var float_opcode_input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
     var float_opcode_instr = ir_instr_new(IrOpcode::IrLoadFloat)
@@ -717,7 +908,9 @@ pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracket
     if stale_count == 0 { refusal_mask = refusal_mask | 64 }
     if call_count == 0 { refusal_mask = refusal_mask | 128 }
     if packed_count == 0 { refusal_mask = refusal_mask | 256 }
-    if control_count == 0 { refusal_mask = refusal_mask | 512 }
+    if cross_region_count == 0 && cross_region.reason_code == 15 {
+        refusal_mask = refusal_mask | 512
+    }
     if float_opcode_count == 0 { refusal_mask = refusal_mask | 1024 }
 
     var unchanged_refusal_mask: i64 = 0
@@ -748,14 +941,18 @@ pub fn ocp_exact_bitwise_rebracket_authority_probe() -> OcpExactBitwiseRebracket
     if packed_unchanged {
         unchanged_refusal_mask = unchanged_refusal_mask | 256
     }
-    if control_unchanged { unchanged_refusal_mask = unchanged_refusal_mask | 512 }
+    if cross_region_unchanged { unchanged_refusal_mask = unchanged_refusal_mask | 512 }
     if float_opcode_unchanged { unchanged_refusal_mask = unchanged_refusal_mask | 1024 }
+    var boundary_claim_mask: i64 = 1
+    if control_after_ok && cross_region_unchanged {
+        boundary_claim_mask = boundary_claim_mask | 16
+    }
     OcpExactBitwiseRebracketProbeReceipt {
-        case_count: 14,
+        case_count: 15,
         application_mask: application_mask,
         refusal_mask: refusal_mask,
         unchanged_refusal_mask: unchanged_refusal_mask,
-        boundary_claim_mask: 1,
+        boundary_claim_mask: boundary_claim_mask,
     }
 }
 
@@ -6032,10 +6229,11 @@ fn ocp_const_fold_pass_b(
     var bt_add_src:   [i64;  256] = [-1;    256]
     var bt_add_cval:  [i64;  256] = [0;     256]
 
-    // Avoid rediscovering an unsupported whole-function operand model for every
-    // bitwise candidate. The transaction still repeats the live check before
-    // each mutation because earlier cleanup rewrites may have changed the IR.
-    let exact_bitwise_operand_model_ok = ocp_rebracket_function_has_canonical_scalar_operands(&result)
+    // Avoid rediscovering an unsupported whole-function use model for every
+    // bitwise candidate. Explicit control operands are modeled here; the local
+    // flow certificate still refuses any candidate spanning a block boundary.
+    // The transaction repeats both checks against live IR before mutation.
+    let exact_bitwise_use_model_ok = ocp_rebracket_function_has_complete_use_model(&result)
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -6743,10 +6941,10 @@ fn ocp_const_fold_pass_b(
                 if la_did && la_c2_def >= 0 {
                     var la_applied = false
                     if ocp_rebracket_is_exact_bitwise_op(la_instr.bin_op) {
-                        // The exact bitwise slice intentionally refuses every candidate
-                        // in a function containing uncertified operand/control encodings.
+                        // The exact bitwise slice accepts only fully modeled uses. Its
+                        // private certificate separately proves local block ordering.
                         // The legacy Add/Mul branch below does not call this transaction.
-                        if exact_bitwise_operand_model_ok {
+                        if exact_bitwise_use_model_ok {
                             let la_inner_def = ra_def_idx[la_s1 as usize]
                             let la_txn = ocp_try_exact_bitwise_rebracket(&! result, i, la_inner_def)
                             ocp_record_exact_bitwise_rebracket_audit(exact_bitwise_audit, la_txn)
@@ -8351,7 +8549,7 @@ pub fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
 // Like every public value in this lane, the result is audit evidence only.
 pub fn ocp_exact_bitwise_rebracket_pipeline_probe() -> OcpCleanupModuleReceipt with Mut, Div, Panic {
     var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
-    let input = ocp_rebracket_probe_chain(BinaryOp::OpBitAnd, 255, 15)
+    let input = ocp_rebracket_probe_control_after_chain(BinaryOp::OpBitAnd, 255, 15)
     opt_cleanup_function_with_algebras_and_audit(
         input,
         ir_empty_algebra_table(),

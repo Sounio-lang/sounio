@@ -79,6 +79,7 @@ count_struct_i64_fields() {
 }
 
 require_text '^struct OcpSealedExactBitwiseRebracketAuthority \{' "$OPT"
+require_text '^struct OcpExactBitwiseSameLinearRegionUseCertificate \{' "$OPT"
 require_text '^let OCP_REBRACKET_TRACKED_REG_LIMIT: i64 = 256$' "$OPT"
 reject_text '^pub struct OcpSealedExactBitwiseRebracketAuthority \{' "$OPT"
 require_text '^fn ocp_issue_exact_bitwise_rebracket_authority\(' "$OPT"
@@ -87,13 +88,16 @@ require_text 'func: &! IrFunction,' "$OPT"
 require_text 'ocp_try_exact_bitwise_rebracket\(&! result, i, la_inner_def\)' "$OPT"
 require_text 'outer_const_use_count != 1' "$OPT"
 require_text 'ocp_rebracket_has_canonical_scalar_operands' "$OPT"
-require_text 'exact_bitwise_operand_model_ok' "$OPT"
-require_text 'instr\.arg_count != 0' "$OPT"
-require_text '!ocp_rebracket_has_no_call_args\(instr\.call_args\)' "$OPT"
+require_text 'ocp_rebracket_function_has_complete_use_model' "$OPT"
+require_text 'exact_bitwise_use_model_ok' "$OPT"
+require_text 'ocp_rebracket_block_start_index' "$OPT"
+require_text 'ocp_certify_exact_bitwise_same_linear_region_use' "$OPT"
+require_text 'instr\.arg_count == 0' "$OPT"
+require_text 'ocp_rebracket_has_no_call_args\(instr\.call_args\)' "$OPT"
 require_text 'ocp_rebracket_has_float_marker_before' "$OPT"
 require_text 'ocp_rebracket_occurrences_equal\(expected, current\.1\)' "$OPT"
 require_text 'ocp_rebracket_instr_equal' "$OPT"
-require_text 'boundary_claim_mask: 1' "$OPT"
+require_text 'boundary_claim_mask = boundary_claim_mask \| 16' "$OPT"
 reject_text 'runtime_d7_receipt_consumed|float_or_gum_authority_established|global_reassociation_authority_established' "$OPT"
 require_text '^pub struct OcpCleanupModuleReceipt \{' "$OPT"
 require_text '^pub fn opt_cleanup_module_inplace\(module: &! IrModule\)' "$OPT"
@@ -102,9 +106,9 @@ require_text 'ocp_record_exact_bitwise_rebracket_audit\(exact_bitwise_audit, la_
 require_text 'exact_bitwise_application_count: audit\.application_count' "$OPT"
 require_text '^fn run_exact_bitwise_rebracket_authority_smoke\(\)' "$MAIN"
 require_text 'let receipt = ocp_exact_bitwise_rebracket_authority_probe\(\)' "$MAIN"
-require_text 'receipt\.boundary_claim_mask != 1' "$MAIN"
+require_text 'receipt\.boundary_claim_mask != 17' "$MAIN"
 require_text 'mode == "--rebracket-authority-smoke"' "$MAIN"
-require_text '\[rebracket-compiler\] PASS: cases=14 applications=3 unchanged_refusals=11 pipeline=1' "$MAIN"
+require_text '\[rebracket-compiler\] PASS: cases=15 applications=4 unchanged_refusals=11 pipeline=1' "$MAIN"
 require_text 'module_frontend_compile_imported_to_file\(opts\.input_file, opts\.output_file, opts\.optimize\)' "$MAIN"
 require_text '^pub fn module_frontend_compile_imported_to_file\(' "$FRONTEND"
 require_text 'opt_cleanup_module_inplace\(&! \(\*module_box\)\)' "$FRONTEND"
@@ -114,10 +118,12 @@ require_text 'if !optimize \{' "$NATIVE_DRIVER"
 require_text 'module_frontend_compile_imported_to_file\(main_path, output_path, optimize\)' "$NATIVE_DRIVER"
 
 occurrence_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketOccurrence)"
+flow_certificate_fields="$(count_struct_i64_fields OcpExactBitwiseSameLinearRegionUseCertificate)"
 audit_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketAudit)"
 receipt_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketProbeReceipt)"
 module_receipt_fields="$(count_struct_i64_fields OcpCleanupModuleReceipt)"
 [[ "$occurrence_fields" == 6 ]] || fail "authority occurrence must remain 6 i64 fields, got $occurrence_fields"
+[[ "$flow_certificate_fields" == 2 ]] || fail "flow certificate must remain 2 i64 fields, got $flow_certificate_fields"
 [[ "$audit_fields" == 8 ]] || fail "authority audit must remain 8 i64 fields, got $audit_fields"
 [[ "$receipt_fields" == 5 ]] || fail "probe receipt must remain 5 i64 fields, got $receipt_fields"
 [[ "$module_receipt_fields" == 8 ]] || fail "module cleanup receipt must remain 8 i64 fields, got $module_receipt_fields"
@@ -140,9 +146,32 @@ operand_slice="$(awk '
   inside { print }
   inside && /^}/ { exit }
 ' "$OPT")"
-for forbidden_opcode in IrLoadFloat IrIntToFloat IrFloatToInt IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi IrJump IrBranchTrue IrBranchFalse IrLabel; do
+for forbidden_opcode in IrLoadFloat IrIntToFloat IrFloatToInt IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi IrJump IrBranchTrue IrBranchFalse IrLabel IrReturn IrReturnSret; do
   [[ "$operand_slice" != *"IrOpcode::$forbidden_opcode => true"* ]] ||
     fail "canonical scalar slice must refuse $forbidden_opcode"
+done
+
+control_slice="$(awk '
+  /^fn ocp_rebracket_has_supported_control_operands\(/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$OPT")"
+[[ "$control_slice" == *'IrOpcode::IrLabel'* ]] ||
+  fail "explicit control-use model is missing IrLabel"
+[[ "$control_slice" == *'ocp_rebracket_is_control_terminator(op)'* ]] ||
+  fail "explicit control-use model is not bound to its terminator set"
+terminator_slice="$(awk '
+  /^fn ocp_rebracket_is_control_terminator\(/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$OPT")"
+for admitted_control in IrJump IrBranchTrue IrBranchFalse IrReturn IrReturnSret; do
+  [[ "$terminator_slice" == *"IrOpcode::$admitted_control"* ]] ||
+    fail "explicit control-use model is missing $admitted_control"
+done
+for forbidden_control in IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi; do
+  [[ "$control_slice$terminator_slice" != *"IrOpcode::$forbidden_control"* ]] ||
+    fail "explicit control-use model must refuse $forbidden_control"
 done
 
 pass_a1_slice="$(awk '
@@ -225,7 +254,7 @@ if rg -Fq -- '--rebracket-authority-smoke' "$compiler_help_log"; then
     cat "$compiler_smoke_log" >&2
     fail "current-source compiler advertised the authority smoke but failed it"
   fi
-  rg -Fxq '[rebracket-compiler] PASS: cases=14 applications=3 unchanged_refusals=11 pipeline=1 replay=0 calls=0 packed=0 control=0 float_ir=0 runtime_d7=0 float_gum=0 global=0' \
+  rg -Fxq '[rebracket-compiler] PASS: cases=15 applications=4 unchanged_refusals=11 pipeline=1 replay=0 calls=0 packed=0 cross_region=0 control_elsewhere=1 float_ir=0 runtime_d7=0 float_gum=0 global=0' \
     "$compiler_smoke_log" || {
       cat "$compiler_smoke_log" >&2
       fail "current-source compiler authority smoke omitted its exact receipt"
@@ -373,4 +402,4 @@ if [[ "$compiler_state" == executable && "$REQUIRE_COMPILER" == 1 && "$native_v2
   merge_ready=1
 fi
 
-echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields audit_words=$audit_fields receipt_words=$receipt_fields module_receipt_words=$module_receipt_fields compiler_state=$compiler_state compiler_path=$compiler_path native_v2_reachability=$native_v2_reachability compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=$merge_ready"
+echo "[rebracket-authority] LOCAL_EVIDENCE_PASS kernel=11/11 privacy=E175,E176 occurrence_words=$occurrence_fields flow_certificate_words=$flow_certificate_fields audit_words=$audit_fields receipt_words=$receipt_fields module_receipt_words=$module_receipt_fields compiler_state=$compiler_state compiler_path=$compiler_path native_v2_reachability=$native_v2_reachability compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=$merge_ready"
