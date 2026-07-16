@@ -31,6 +31,7 @@ interface Props {
 
 const copy = {
   en: {
+    chapter: 'II · Executable image flagship',
     eyebrow: 'SOUNIO OBSERVATORY / EXECUTABLE IMAGES',
     heading: 'The claim stops where the receipt stops.',
     intro: 'Four windows into one discipline: Sounio source becomes a deterministic artifact, the gate records what passed, and the boundary keeps the picture from saying more than the program proved.',
@@ -39,7 +40,7 @@ const copy = {
     claim: 'compiled witness',
     boundary: 'where the claim stops',
     openDomain: 'Enter domain',
-    openCustody: 'Open custody record',
+    openCustody: 'Open full custody record',
     closeCustody: 'Close custody record',
     source: 'source',
     command: 'command',
@@ -54,8 +55,14 @@ const copy = {
     gateLink: 'Open gate',
     custody: 'SOURCE → ARTIFACT → GATE',
     registered: '4 / 4 MANIFEST-BACKED',
+    peekSource: 'source',
+    peekArtifact: 'artifact',
+    peekGate: 'gate',
+    prevChapter: 'Previous flagship · exact algebra',
+    prevHref: '#particle-loom',
   },
   pt: {
+    chapter: 'II · Flagship de imagens executáveis',
     eyebrow: 'OBSERVATÓRIO SOUNIO / IMAGENS EXECUTÁVEIS',
     heading: 'O claim termina onde o recibo termina.',
     intro: 'Quatro janelas para uma disciplina: fonte Sounio vira artefato determinístico, o gate registra o que passou e a fronteira impede que a imagem diga mais do que o programa provou.',
@@ -64,7 +71,7 @@ const copy = {
     claim: 'testemunho compilado',
     boundary: 'onde o claim para',
     openDomain: 'Entrar no domínio',
-    openCustody: 'Abrir cadeia de custódia',
+    openCustody: 'Abrir cadeia de custódia completa',
     closeCustody: 'Fechar cadeia de custódia',
     source: 'fonte',
     command: 'comando',
@@ -79,6 +86,11 @@ const copy = {
     gateLink: 'Abrir gate',
     custody: 'FONTE → ARTEFATO → GATE',
     registered: '4 / 4 NO MANIFESTO',
+    peekSource: 'fonte',
+    peekArtifact: 'artefato',
+    peekGate: 'gate',
+    prevChapter: 'Flagship anterior · álgebra exata',
+    prevHref: '#particle-loom',
   },
 };
 
@@ -108,6 +120,7 @@ export default function SounioObservatoryStage({ locale = 'en', domains, compile
   return (
     <section className="so-section" id="sounio-observatory" aria-labelledby="so-title">
       <div className="so-shell">
+        <p className="so-chapter">{d.chapter}</p>
         <header className="so-header">
           <div className="so-brand">
             <img src="/assets/stamps/stamp_monochrome_on_navy.png" alt="" aria-hidden="true" width="92" height="92" />
@@ -158,6 +171,21 @@ export default function SounioObservatoryStage({ locale = 'en', domains, compile
             </aside>
           </div>
 
+          <div className="so-custody-peek" aria-label={d.custody}>
+            <div>
+              <span>01 / {d.peekSource}</span>
+              <code>{active.source}</code>
+            </div>
+            <div>
+              <span>02 / {d.peekArtifact}</span>
+              <code>{active.width}×{active.height} · {active.receipt}</code>
+            </div>
+            <div>
+              <span>03 / {d.peekGate}</span>
+              <code>{active.gate}</code>
+            </div>
+          </div>
+
           <button
             type="button"
             className="so-custody-toggle"
@@ -199,6 +227,8 @@ export default function SounioObservatoryStage({ locale = 'en', domains, compile
             </div>
           </div>
         </div>
+
+        <a className="so-prev" href={d.prevHref}>{d.prevChapter}<span aria-hidden="true">↑</span></a>
       </div>
     </section>
   );

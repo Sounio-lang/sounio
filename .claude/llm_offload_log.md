@@ -2768,3 +2768,5 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - Invalid first attempt: `/tmp/llm-offload-VwTLiY/` contained only local filenames, which remote providers could not inspect, and was discarded after it falsely reported the explicitly present boundary and tab semantics as absent. The self-contained retry is the review of record.
 - Browser evidence: desktop `1440×1100` and Portuguese mobile `390×844` both measured zero horizontal overflow; native button selection exposed diagonal `4I8` and off-diagonal `0`, and the two tabs removed their inactive panel from layout.
 - Raw review directory: `/tmp/llm-offload-hbzAf0/`.
+
+| 2026-07-16 | external-artifact raw | xai/grok-4.3 | website homepage hierarchy (ParticleLoom/Observatory/InstrumentCorridor) | PASS-AFTER-EYEBROW-SOFTEN | Offload flagged BLOCKER on summary phrasing "exact Furey-style octonion witness". Softened public eyebrow from EXACT OCTONION WITNESS → EXACT LADDER WITNESS (EN) / WITNESS DE ESCADA EXATO (PT). Claim boundary text already scoped Furey-style without uniqueness/phenomenology. Hierarchy/reorder only. Raw: /tmp/llm-offload-RKVkba/ |
