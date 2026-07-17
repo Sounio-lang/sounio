@@ -425,6 +425,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.proof-carrying-inference | repo_only | docs/internal/concepts/proof-carrying-inference.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.relational-associator | repo_only | docs/internal/concepts/relational-associator.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -734,6 +735,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.proof-carrying-epistemic-contest-d2-2026-07-14 | historical | docs/research/proof_carrying_epistemic_contest_d2_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-microkernel-suite-2026-06-23 | historical | docs/research/proof-checker-microkernel-suite-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
