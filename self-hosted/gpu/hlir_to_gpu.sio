@@ -1723,6 +1723,15 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
             k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
+        } else if hlir_name_is_oct_batch_mul(cn) {
+            // Batched octonion multiply → tensor-core tile. call_args = [pa, pH, pout].
+            // L(a) is staged (row-major f16) at shared offset 0, H (col-major f16) at offset 512;
+            // the tile writes D = L(a)·H (row-major f32) to the pout global buffer. (The shared
+            // staging of L(a)/H is emitted alongside; this wires the producer + emits the tile.)
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pout_reg = instr.call_args[2]
+            var tile = gpu_op_wmma_tile(0, 512, pout_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
         }
         // Other calls: skip in MVP
     }
@@ -1732,6 +1741,16 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
 }
 
 // Check if an HlirName starts with "gpu_thread_id" (13 chars).
+// "oct_batch_mul" (13 chars) — the batched octonion multiply intrinsic that lowers to a
+// tensor-core tile: oct_batch_mul(pa, pH, pout) computes L(a)·H for a 16-state batch.
+fn hlir_name_is_oct_batch_mul(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
     if n.len < 13 { return false }
     // "gpu_thread_id" = g(103) p(112) u(117) _(95) t(116) h(104) r(114) e(101) a(97) d(100) _(95) i(105) d(100)

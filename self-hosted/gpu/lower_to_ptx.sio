@@ -522,56 +522,48 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         }
 
         GpuOpcode::GpuWmmaTile => {
-            // Compound m16n16k16 tensor-core tile: D = A·B where A (row-major f16) is at the
-            // shared address in lhs_reg, B (col-major f16) at rhs_reg, and D (row-major f32) is
-            // stored to the global address in addr_reg. Leading dim = rhs_imm. Fragment groups
-            // %wa/%wb/%wd are declared by gpu_emit_reg_decls when a tile is present.
-            let sA = gpu_reg_u32(op.lhs_reg)
-            let sB = gpu_reg_u32(op.rhs_reg)
-            let dOut = gpu_reg_u64(op.addr_reg)
-            let ldm = i64_to_string(op.rhs_imm)
+            // Compound m16n16k16 tensor-core tile: D = A·B where A (row-major f16) is at shared
+            // byte-offset lhs_reg, B (col-major f16) at shared byte-offset rhs_reg, and D
+            // (row-major f32) is stored to the global address register addr_reg. Leading dim =
+            // rhs_imm. Fragment groups %wa/%wb/%wd are declared by gpu_emit_reg_decls.
+            // Build the whole tile as ONE string via str_concat. NOTE: i64_to_string returns a
+            // shared static buffer in the Madaros binary, so a held `let ldm = i64_to_string(...)`
+            // is clobbered by later i64_to_string calls (e.g. the zero-init loop). Inline every
+            // numeric conversion so str_concat consumes it before the next call. frag8 results are
+            // safe because they are already fully-copied strings.
+            // frag8 / gpu_reg_u64 return fresh str_concat-built strings (safe to hold). But
+            // gpu_shared_addr_str (via ptx_to_string) and i64_to_string return shared static
+            // buffers, so they are INLINED at each use — consumed immediately by str_concat before
+            // the next shared-buffer call can clobber them.
             let fa = gpu_wmma_frag8("%wa")
             let fb = gpu_wmma_frag8("%wb")
             let fd = gpu_wmma_frag8("%wd")
-            var w = buf
+            let dReg = gpu_reg_u64(op.addr_reg)
+            var t = ""
             var zi: i64 = 0
             while zi < 8 {
-                w = ptx_push_str(w, "    mov.f32 %wd")
-                w = ptx_push_str(w, i64_to_string(zi))
-                w = ptx_push_str(w, ", 0f00000000;\n")
+                t = str_concat(str_concat(t, "    mov.f32 %wd"), i64_to_string(zi))
+                t = str_concat(t, ", 0f00000000;\n")
                 zi = zi + 1
             }
-            w = ptx_push_str(w, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
-            w = ptx_push_str(w, fa)
-            w = ptx_push_str(w, ", [")
-            w = ptx_push_str(w, sA)
-            w = ptx_push_str(w, "], ")
-            w = ptx_push_str(w, ldm)
-            w = ptx_push_str(w, ";\n")
-            w = ptx_push_str(w, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
-            w = ptx_push_str(w, fb)
-            w = ptx_push_str(w, ", [")
-            w = ptx_push_str(w, sB)
-            w = ptx_push_str(w, "], ")
-            w = ptx_push_str(w, ldm)
-            w = ptx_push_str(w, ";\n")
-            w = ptx_push_str(w, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
-            w = ptx_push_str(w, fd)
-            w = ptx_push_str(w, ", ")
-            w = ptx_push_str(w, fa)
-            w = ptx_push_str(w, ", ")
-            w = ptx_push_str(w, fb)
-            w = ptx_push_str(w, ", ")
-            w = ptx_push_str(w, fd)
-            w = ptx_push_str(w, ";\n")
-            w = ptx_push_str(w, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [")
-            w = ptx_push_str(w, dOut)
-            w = ptx_push_str(w, "], ")
-            w = ptx_push_str(w, fd)
-            w = ptx_push_str(w, ", ")
-            w = ptx_push_str(w, ldm)
-            w = ptx_push_str(w, ";\n")
-            w
+            t = str_concat(t, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fa), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.lhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fb), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.rhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, fa), ", ")
+            t = str_concat(str_concat(t, fb), ", ")
+            t = str_concat(str_concat(t, fd), ";\n")
+            t = str_concat(t, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [")
+            t = str_concat(str_concat(t, dReg), "], ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            ptx_push_str(buf, t)
         }
 
         GpuOpcode::GpuShflDown => {
