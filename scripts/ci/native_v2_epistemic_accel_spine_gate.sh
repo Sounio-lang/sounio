@@ -147,7 +147,12 @@ append_native_algebra_probes() {
     ".visible .entry sounio_oct_mul_full" \
     "fn hmma_emit_sed_mul_full_kernel" \
     "fn hmma_sed_left_mul_sign" \
-    ".visible .entry sounio_sed_mul_full"
+    ".visible .entry sounio_sed_mul_full" \
+    "fn hmma_right_mul_sign" \
+    "fn hmma_emit_oct_associator_kernel"
+    "fn hmma_right_mul_sign" \
+    "fn hmma_emit_oct_associator_kernel" \
+    ".visible .entry sounio_oct_associator"
 
   append_source_probe \
     "native_ossm_ptx_emitter" \
