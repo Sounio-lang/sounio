@@ -1314,6 +1314,35 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
 
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // Hyper<Algebra, T> — first-class hypercomplex type (Octonion/Sedenion/…). The non-inplace
+    // resolver lower_named_type_with_args handles this at :14322; the inplace resolver (the one
+    // that actually runs during checking) was missing it, so `Hyper<Octonion, f64>` degraded to
+    // TyNamed("Hyper") and `a * h` never reached check_hyper_binary. Mirror the branch here.
+    if name_matches_str5(name, 72, 121, 112, 101, 114) {
+        match type_args {
+            Some(args) => {
+                let alg_expr = (*args).head
+                var elem_expr = alg_expr
+                match (*args).tail {
+                    Some(rest) => { elem_expr = (*rest).head }
+                    None => { checker_note_type_error_mut(c) return ty_error() }
+                }
+                if alg_expr.kind != TypeExprKind::TypeNamed {
+                    checker_note_type_error_mut(c)
+                    return ty_error()
+                }
+                let alg_name = checker_copy_string_list_to_name(alg_expr.path.segments)
+                let algebra_tag = resolve_algebra_name(alg_name)
+                if algebra_tag < 0 {
+                    checker_note_type_error_mut(c)
+                    return ty_error()
+                }
+                let elem_ty = checker_lower_type_expr_mut(c, elem_expr)
+                return ty_hyper(algebra_tag, elem_ty)
+            }
+            None => { checker_note_type_error_mut(c) return ty_error() }
+        }
+    }
     // Feature B: Invariant<T, G> — second type-arg G is one of the four named
     // invariance groups; lower to TyNamed "Invariant<rank>" with inner = T.
     if name_matches_str9(name, 73, 110, 118, 97, 114, 105, 97, 110, 116) {
@@ -4684,7 +4713,12 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
     }
-    if !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // Hypercomplex operands (Octonion/Sedenion/Quaternion/Clifford) are validated by the
+    // check_hyper_binary dispatch below (algebra compatibility + non-associativity effects).
+    // Skip the generic types_compatible mismatch, which would otherwise reject two hyper values
+    // with a spurious E004 "cannot be combined" before hyper dispatch runs.
+    let both_hyper = left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper
+    if !both_hyper && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -18591,6 +18625,13 @@ impl Checker {
 
     fn check_binary_op_types(self, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+            return self
+        }
+        // Hypercomplex operands (Octonion/Sedenion/Quaternion/Clifford) are validated by
+        // check_hyper_binary at the call site (algebra compatibility + non-associativity effects).
+        // Skip the generic structural type-compatibility check, which would otherwise reject two
+        // hyper values with a spurious E004 "cannot be combined" before hyper dispatch runs.
+        if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
             return self
         }
         match op {
