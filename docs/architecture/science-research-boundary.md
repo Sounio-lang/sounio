@@ -10,9 +10,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 # Science and Research Boundary
 
 Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
-an R2.6 local registry-attestation policy contract, and an R3 physical
-extraction inventory plus local exact-copy materialization interface; canonical
-repository extraction remains not executed. Promotion is
+an R2.6 local registry-attestation policy contract, and R3 physical extraction
+inventory, local exact-copy materialization, and temporary-copy source-removal
+authorization interfaces; canonical repository extraction remains not
+executed. Promotion is
 bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
@@ -21,8 +22,9 @@ R3 means moving scientific-package and research sources into separately owned
 repositories or distributions. The inventory binds proposed ownership and
 exact file identity. The materializer can copy approved units to preexisting
 local destinations and verify them, but the canonical repository has no
-approved production destination policy or materialization receipt and moves no
-source file. R2.6 launches no registry service.
+approved production destination policy, materialization receipt, removal
+policy, or authorization receipt and moves no source file. R2.6 launches no
+registry service.
 
 The enforced dependency direction is:
 
@@ -187,6 +189,31 @@ canonical Sounio roots, so this executable interface does not claim that the
 repository migration occurred. The complete contract is
 `docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md`.
 
+## R3 Source-Removal Authorization
+
+`tools/science_boundary/source_removal_authorizer.py` consumes a fully
+reverified materialization and one exact approved removal policy. The policy
+must bind the complete planned scope, at least two distinct review evidence
+records, one or more byte-exact repairs, and one or more post-removal gate
+commands with expected exit and output identities.
+
+The tool snapshots every regular source file into an external temporary copy,
+removes only the `extract-planned` roots from that copy, applies the declared
+repairs, and runs the gates directly from their argument vectors. The complete
+candidate must remain equal to the original snapshot minus the planned files
+plus the exact repairs. Original sources, inventory, materialization,
+destinations, policy and evidence are reverified before receipt promotion; the
+temporary candidate is then discarded.
+
+The deterministic receipt has type
+`verified-post-removal-candidate-authorization`, status
+`authorized-not-executed`, source execution status `not-executed`, and
+`identity-only` assurance. It does not prove reviewer independence, production
+migration, source deletion, remote repository state, ownership, publication,
+independent replay, scientific truth, or clinical authority. The authorizer
+contains no canonical removal operation. The full contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -253,8 +280,8 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
 contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
 release bundle, deterministic R2.6 local registry-policy attestation, R3
-physical extraction inventory, and R3 local materialization interface are
-implemented.
+physical extraction inventory, R3 local materialization, and R3 temporary-copy
+source-removal authorization interfaces are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -303,3 +330,11 @@ attempt, `6477`, placed R2.5 temporary promotion state on OrangeFS and received
 `EINVAL` from a directory `fsync`; job `6478` corrected the harness to use
 node-local temporary storage while retaining the exact source archive,
 compiler, gate, and OrangeFS evidence logs.
+
+The focused source-removal authorization gate adds 526 checks for exact
+materialization binding, complete removal scope, distinct review records,
+byte-bound repairs, deterministic candidate receipts, source preservation,
+post-removal command evidence, candidate mutation refusal, and forged or
+rehashed policy and authorization refusal. It authorizes two fixture units and
+three fixture files as `authorized-not-executed`; all original fixture roots
+remain present. No production policy or canonical authorization exists.

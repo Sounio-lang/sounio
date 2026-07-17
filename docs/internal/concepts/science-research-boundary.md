@@ -33,8 +33,9 @@ validated research        != clinical validation
 Status: `executable`
 
 The R0-R2 host attestor, compiler integration, R2.5 package release boundary,
-R2.6 local registry attestation, R3 physical extraction inventory, and R3
-local exact-copy materialization interface are executable. The named gates
+R2.6 local registry attestation, R3 physical extraction inventory, R3 local
+exact-copy materialization, and R3 temporary-copy source-removal authorization
+interfaces are executable. The named gates
 prove pass, refuse, `UNKNOWN`, deterministic receipt identity, source
 sensitivity, evidence and receipt tamper refusal, absence of a final ELF after
 strict refusal, and a real transitive raw-AST import witness. The current-source
@@ -45,10 +46,12 @@ promotion prerequisite for one local, opt-in release bundle and preserves the
 identity-versus-assurance distinction.
 
 R2.6 binds that bundle to a local catalog policy without publication. R3 binds
-the declared roots to an exact-file ownership plan, then permits a separately
-approved local copy whose receipt keeps source removal `not-authorized`.
-Neither interface promotes scientific authority, and no canonical production
-destination policy or materialization receipt currently exists.
+the declared roots to an exact-file ownership plan, permits a separately
+approved local copy whose receipt keeps source removal `not-authorized`, and
+can authorize an exact removed-and-repaired temporary candidate while keeping
+execution `not-executed`. None of these interfaces promotes scientific
+authority, and no canonical production destination, materialization, removal
+policy, or authorization receipt currently exists.
 
 ## Semantic Lane
 
@@ -75,7 +78,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-source-removal-authorization`
+`r3-physical-extraction-source-removal-execution`
 
 ## R3 Physical Extraction Inventory Semantic Lane
 
@@ -121,6 +124,29 @@ Negative-Witness: incomplete approval, missing or altered destination markers, s
 Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_MATERIALIZATION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_materialization_gate.sh
 Integration-Target: codex/physical-extraction-inventory-r3-20260717, then origin/main after the R3 inventory stack lands
 Authoritative-Only-If: R0-R2, R2.5, R2.6, the R3 inventory gate, and the R3 materialization gate pass on one source snapshot; acceptance proves the interface behavior but not a canonical production migration without a separately approved production policy and receipt
+```
+
+## R3 Source-Removal Authorization Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-SOURCE-REMOVAL-AUTHORIZATION-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: planned scientific-package and research roots may become removable only after exact materialization, review, repair, and post-removal evidence without converting location or gate success into scientific authority
+Transformation: reconstruct one removed-and-repaired candidate in an external temporary copy, run policy-bound post-removal gates, reverify the untouched original, and emit authorized-not-executed evidence
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact planned scope produced one exact temporary candidate whose declared repairs and post-removal commands passed while the original source snapshot remained unchanged
+Claims-Forbidden: actual or canonical source deletion, unlisted-path authority, production migration, reviewer independence, remote repository creation or push, transferred ownership or maintainership, publication, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the materialization remains fully verifiable; review labels identify distinct local evidence records only; post-removal commands and expected outputs are explicitly approved by policy
+Write-Set: tools/science_boundary/source_removal_authorizer.py; schemas/sounio.physical-extraction-source-removal-{policy,authorization}.v1.schema.json; scripts/ci/physical_extraction_source_removal_authorization_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_MATERIALIZATION.md,PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: science-rings.tsv; docs/ecosystem/science-physical-extraction-ownership.tsv; tools/science_boundary/{physical_extraction_inventory.py,physical_extraction_materializer.py}; schemas/sounio.physical-extraction-{inventory,destination-policy,materialization}.v1.schema.json
+Positive-Witness: an exact two-unit fixture scope produces identical authorized-not-executed receipts across distinct temporary workspace roots and round-trip verification while all original roots remain present
+Negative-Witness: stale materialization or destination content, incomplete or forged scope, missing or duplicate review evidence, invalid repair identity, failing or mutating gates, unsafe workspace, occupied output, source mutation, and forged or rehashed authorization all refuse
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_SOURCE_REMOVAL_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_source_removal_authorization_gate.sh
+Integration-Target: codex/physical-extraction-materialization-r3-20260717, then origin/main after the R3 materialization stack lands
+Authoritative-Only-If: R0-R2, R2.5, R2.6, R3 inventory, R3 materialization, and source-removal authorization gates pass on one archived source snapshot with one current-source raw Madaros witness; canonical execution additionally requires a separate human-approved execution interface
 ```
 
 ## R2.5 Semantic Lane
