@@ -1,1 +1,0 @@
-../../../docs/contributor-guide/STYLE_GUIDE.md
