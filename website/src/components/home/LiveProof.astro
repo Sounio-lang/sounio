@@ -1,0 +1,150 @@
+---
+import { getLocalizedPath, type Locale } from '../../lib/i18n';
+import Eyebrow from '../ui/Eyebrow.astro';
+import CodePanel from '../ui/CodePanel.astro';
+import ClaimChip from '../ui/ClaimChip.astro';
+import Button from '../ui/Button.astro';
+import Container from '../ui/Container.astro';
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+
+const source = `fn main() -> i32 with IO {
+    let k: Knowledge<f64> = measure(9.81, uncertainty: 0.01)
+    let c: Contest<f64>   = lift_knowledge(k)
+    let r: Robust<f64>    = prove_robust(c, proof: "gravity_validated")
+    let v: Validated<f64> = validate_manifest(r)
+    print("Full epistemic chain complete")
+    0
+}`;
+
+const content = {
+  en: {
+    eyebrow: 'Proof, not promise · live',
+    heading: 'This page can prove it.',
+    body: 'Every claim on this site is backed by an artifact — so we put the compiler where the claims are. The full epistemic chain below compiles and runs against the real Sounio compiler, in your browser, on your machine. Press run.',
+    run: 'Run it',
+    running: 'Compiling & running…',
+    rerun: 'Run again',
+    precomputed: 'pre-computed',
+    live: 'compiled & ran in your browser',
+    unavailable: 'WASM runtime unavailable — showing pre-computed result',
+    learnMore: 'How the epistemic chain works',
+  },
+  pt: {
+    eyebrow: 'Prova, não promessa · ao vivo',
+    heading: 'Esta página pode provar.',
+    body: 'Cada afirmação neste site é lastreada por um artefato — então colocamos o compilador onde estão as afirmações. A cadeia epistêmica completa abaixo compila e executa no compilador Sounio real, no seu navegador, na sua máquina. Aperte executar.',
+    run: 'Executar',
+    running: 'Compilando e executando…',
+    rerun: 'Executar de novo',
+    precomputed: 'pré-computado',
+    live: 'compilado e executado no seu navegador',
+    unavailable: 'Runtime WASM indisponível — mostrando resultado pré-computado',
+    learnMore: 'Como funciona a cadeia epistêmica',
+  },
+};
+
+const d = locale === 'pt' ? content.pt : content.en;
+---
+
+<section class="relative overflow-hidden py-[clamp(3.5rem,7vw,6rem)]">
+  <div
+    class="pointer-events-none absolute inset-0 bg-[radial-gradient(720px_360px_at_85%_30%,color-mix(in_srgb,var(--color-accent-teal)_7%,transparent),transparent_65%)]"
+    aria-hidden="true"
+  >
+  </div>
+  <Container class="relative grid items-center gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
+    <div class="grid gap-5">
+      <Eyebrow tone="teal">{d.eyebrow}</Eyebrow>
+      <h2 class="font-[var(--font-display)] text-[clamp(2rem,4.2vw,3.2rem)] leading-[1.06] font-medium text-balance">
+        {d.heading}
+      </h2>
+      <p class="max-w-[52ch] text-[1rem] leading-[1.7] text-[var(--color-ink-2)]">{d.body}</p>
+      <div>
+        <Button href={getLocalizedPath('/learn/epistemic/knowledge', locale)} variant="subtle">{d.learnMore} →</Button>
+      </div>
+    </div>
+
+    <div class="live-proof grid gap-3" data-source={source}>
+      <div class="flex items-center justify-between gap-3">
+        <span id="lp-chip-pre"><ClaimChip status="provisional" label={d.precomputed} /></span>
+        <span id="lp-chip-live" class="hidden"><ClaimChip status="artifact" label={d.live} /></span>
+      </div>
+      <CodePanel code={source} lang="rust" filename="epistemic_chain.sio" copy={false} />
+      <div class="flex items-center gap-3">
+        <Button size="sm" class="lp-run">{d.run}</Button>
+        <span class="lp-status font-mono text-[0.75rem] tracking-[0.06em] text-[var(--color-ink-3)]" aria-live="polite"></span>
+      </div>
+      <pre
+        class="lp-output min-h-[3.4rem] rounded-[var(--radius-lg)] border border-[var(--glass-border)] bg-[var(--color-code-surface)] p-4 font-mono text-[0.82rem] leading-[1.6] text-[var(--color-code-ink)] whitespace-pre-wrap"
+      >{`$ souc run epistemic_chain.sio\nFull epistemic chain complete\n⇒ 0`}</pre>
+      <span class="lp-unavailable hidden font-mono text-[0.72rem] text-[var(--color-accent-orange)]">{d.unavailable}</span>
+    </div>
+  </Container>
+</section>
+
+<script is:inline define:vars={{ runLabel: d.run, runningLabel: d.running, rerunLabel: d.rerun }}>
+  function initLiveProof() {
+    const root = document.querySelector('.live-proof');
+    if (!root || root.dataset.mounted) return;
+    root.dataset.mounted = 'true';
+
+    const btn = root.querySelector('.lp-run');
+    const status = root.querySelector('.lp-status');
+    const output = root.querySelector('.lp-output');
+    const chipPre = root.querySelector('#lp-chip-pre');
+    const chipLive = root.querySelector('#lp-chip-live');
+    const unavailable = root.querySelector('.lp-unavailable');
+    const source = root.getAttribute('data-source') || '';
+
+    let api = null;
+    let loading = null;
+
+    async function loadWasm() {
+      if (api) return api;
+      if (!loading) {
+        loading = (async () => {
+          const mod = await import('/wasm/sounio_compiler.js');
+          await mod.default('/wasm/sounio_compiler_bg.wasm');
+          api = { run: mod.run };
+          return api;
+        })();
+      }
+      return loading;
+    }
+
+    btn?.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = runningLabel;
+      status.textContent = '';
+      try {
+        const wasm = await loadWasm();
+        const raw = wasm.run(source);
+        const result = JSON.parse(raw);
+        const diags = (result.diagnostics || [])
+          .map((x) => `${String(x.severity).toUpperCase()}${x.line ? ` [${x.line}:${x.column ?? 1}]` : ''}: ${x.message}`)
+          .join('\n');
+        let text = '$ souc run epistemic_chain.sio\n';
+        if (diags) text += diags + '\n';
+        if (result.output) text += result.output + '\n';
+        if (result.returnValue != null) text += `⇒ ${result.returnValue}`;
+        output.textContent = text;
+        chipPre?.classList.add('hidden');
+        chipLive?.classList.remove('hidden');
+        unavailable?.classList.add('hidden');
+      } catch (err) {
+        unavailable?.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = rerunLabel;
+      }
+    });
+  }
+
+  initLiveProof();
+  document.addEventListener('astro:page-load', initLiveProof);
+</script>
