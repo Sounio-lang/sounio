@@ -254,6 +254,34 @@ value equals 11, and every returned-value mismatch produces one of `1..15`.
 This avoids depending on an unrelated historical optimized
 conditional-control-flow path while still executing the transformed function.
 
+PR #1046 CI run `29552524219`, job `87798137029`, built source SHA
+`394934a4e7c2a7d84b2c222743e66608cc1c5aac`. Artifact `8396343656`
+contained a 98,756,167-byte Madaros ELF with SHA-256
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`.
+The downloaded ELF passed the inherited strict authority gate:
+
+```text
+compiler_path=internal-smoke+default-o native_v2_reachability=single-and-merged
+compiler_sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+source_sha=394934a4e7c2a7d84b2c222743e66608cc1c5aac merge_ready=1
+```
+
+The source-to-IR gate then compiled and executed all five runtime controls with
+the same ELF and no fallback. Its exact audit receipts distinguished the
+positive single-module and imported-leaf applications from the non-dominating
+control and loop refusal:
+
+```text
+single:   transactions=1 applications=1 cross_block_applications=1 transaction_ontology_parameter_links=1 application_ontology_parameter_links=1 last_ontology_class_hash=7199034902620903764 combined=15
+imported: transactions=1 applications=1 cross_block_applications=1 transaction_ontology_parameter_links=1 application_ontology_parameter_links=1 last_ontology_class_hash=7199034902620903764 combined=15
+nondom:   transactions=0 applications=0 transaction_ontology_parameter_links=0
+loop:     transactions=1 authorizations=0 applications=0 refusals=1 refusal_reason_mask=524288 transaction_ontology_parameter_links=1 application_ontology_parameter_links=0 last_ontology_class_hash=7199034902620903764
+```
+
+The gate also rejected the unrelated ontology observation during type checking
+and returned `runtime_parity=5`, `ontology_cannot_authorize_loop=1`, and
+`merge_ready=1`.
+
 ## D7 Boundary
 
 The psychiatric-regime D7 work motivates occurrence-bound authority and the
@@ -464,13 +492,13 @@ Authoritative-Only-If: the source and compiler SHAs are recorded, the inherited 
 ## Integration Receipt
 
 ```text
-Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated same-block and forward-DAG production transactions, focused default native-v2 single/imported reachability, and an audit-only source ontology identity link
+Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated same-block and forward-DAG production transactions, focused default native-v2 single/imported reachability, and a current-source-validated audit-only source ontology identity link
 Concept-Status-Before: unregistered
 Concept-Status-After: hypothesis
 Distinctions-Added: observed receipt != compiler authority; ontology obligation != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; explicit control-use model != flow authority; forward-DAG path-exclusion dominance != a general dominator tree; compiler-internal cross-block witness != source-level cross-block reachability; internal probe != default-path reachability; focused reachability != compiler-wide preservation
 Distinctions-Preserved: parenthesization != formatting; compile success != runtime parity; formal model != empirical or clinical claim
 Distinctions-Erased: none
-Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 and #1013 current-source builds and inherited optimizer/default-path evidence; local source preflight and ontology rejection; pending source-to-IR current-source build and strict ontology-parameter-linked runtime receipts
+Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 and #1013 current-source builds and inherited optimizer/default-path evidence; PR #1046 run 29552524219 job 87798137029 artifact 8396343656; strict current-source authority and source-to-IR gates at source 394934a4e7c2a7d84b2c222743e66608cc1c5aac with compiler SHA-256 6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88; five runtime controls, unrelated ontology rejection, imported-leaf link merge, and loop reason-19 refusal all passed without fallback
 Fallback-Path: none
 Legacy-Kept: legacy Add/Mul Block L path retained outside the new claim
 Conflicting-Lanes: none; issue #854 and IrFunction/SOIR capacity stacks remain read-only and are no longer prerequisites for the focused smoke
