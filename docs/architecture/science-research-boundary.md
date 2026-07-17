@@ -293,3 +293,13 @@ materializes two approved fixture units while retaining one core unit and
 leaving one unresolved unit blocked. A production witness for the canonical
 five planned targets remains absent because no production destination policy
 has been approved.
+
+The composed current-source materialization witness is Slurm job `6478` on
+`gpuorangefs-r770-proxmox`: the same Madaros ELF passed all 178 R0-R2, 65 R2.5,
+82 R2.6, 141 R3 inventory, and 167 materialization assertions. The deterministic
+fixture receipt covers two approved units and three files, reports
+`copied-and-verified`, and keeps source removal `not-authorized`. The first job
+attempt, `6477`, placed R2.5 temporary promotion state on OrangeFS and received
+`EINVAL` from a directory `fsync`; job `6478` corrected the harness to use
+node-local temporary storage while retaining the exact source archive,
+compiler, gate, and OrangeFS evidence logs.

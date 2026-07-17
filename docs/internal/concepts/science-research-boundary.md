@@ -251,6 +251,29 @@ Remaining-Blockers: none for the R3 inventory boundary; stdlib classification, a
 Next-Semantic-Interface: r3-physical-extraction-materialization
 ```
 
+## R3 Physical Extraction Materialization Integration Receipt
+
+```text
+Semantic-Outcome: executable approved-destination exact-copy and verification boundary for R3 planned units
+Concept-Status-Before: executable R0-R3 ownership and exact-file inventory with materialization explicitly not executed
+Concept-Status-After: executable R0-R3 local materialization interface; canonical production extraction and source removal remain not executed
+Distinctions-Added: destination approval versus destination label; local byte-copy completion versus remote repository state; materialization receipt versus source-removal authority
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; location versus scientific authority; file identity versus independent replay; local transfer versus ownership or publication
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of ceb242832cac525f1619dbb6935ab9a82924ebdb, 339608500 bytes, sha256=1d3a814a916d06daf34ed8c6c0e89052bef9e392630c1abfd49266646fc06cef
+Evidence-Compiler: unchanged source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6478 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:40, MaxRSS=1422308K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, R3 inventory 141 assertions, and R3 materialization 167 assertions all PASS
+Evidence-Materialization: receipt identity=61efbfb32b4dc74e8bea2bed82d67ff564580f73ad4eb5b8a194da94fc3ae950; policy identity=25f37fcf3b00d4842ff4d2b64960b49d5cf50374aa65e327cbfa2322e367020a; units=2 files=3 bytes=66 status=copied-and-verified source-removal=not-authorized
+Supporting-Gates: physical_extraction_materialization_gate.py -> PASS 167; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh plus selftest -> PASS; check_docs_consistency.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: Slurm job 6477 put R2.5 temporary promotion state on OrangeFS and failed with EINVAL during directory fsync after R0-R2 passed; job 6478 used node-local temporary storage with the exact same source archive, compiler, and gate and passed, so no implementation fallback was used
+Fallback-Path: none authorized; incomplete approval, unsafe or occupied destinations, any source or destination mismatch, or forged/rehashed inputs refuse
+Legacy-Kept: all canonical source roots remain in place; no production destination policy or materialization receipt was created; stdlib remains blocked-classification; R2.5 bundles, R2.6 attestations, and R3 inventories remain unchanged
+Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIENCE-RESEARCH-BOUNDARY when the materialization lane opened; no compiler, IR, stdlib, package, example, or self-hosted source file was edited
+LLM-Offload: xai/grok-4.3 review completed with six documented scope/code-reading disagreements and no accepted bug; raw=/tmp/llm-offload-h5t453/
+Remaining-Blockers: none for the executable local materialization interface; real destination approval and provisioning are prerequisites for canonical migration, and any source removal requires the separate authorization interface
+Next-Semantic-Interface: r3-physical-extraction-source-removal-authorization
+```
+
 ## Closed Blockers
 
 ```text
