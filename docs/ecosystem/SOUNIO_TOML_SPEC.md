@@ -16,7 +16,8 @@ Status: Draft/local package manifest contract; public registry publishing is not
 
 ## 1. Objetivo
 
-Definir um formato de manifesto de pacote simples, legível e rico em metadados epistêmicos para o ecossistema Sounio.
+Definir um formato de manifesto de pacote simples, legível e com declarações
+explícitas de fronteira científica para o ecossistema Sounio.
 
 ## 2. Estrutura do Arquivo `sounio.toml`
 
@@ -33,14 +34,17 @@ documentation = "https://docs.sounio.org/pbpk"
 keywords = ["pbpk", "pharmacokinetics", "epistemic", "gum", "regulatory"]
 categories = ["science", "pharma", "epistemic"]
 
-# Metadados epistêmicos (obrigatórios para pacotes curados)
-[epistemic]
-score = 0.94                    # 0.0 a 1.0 — qualidade da modelagem epistêmica
-confidence-threshold = 0.90
-provenance-level = "strong"     # weak | medium | strong | regulatory
-gum-compliant = true
-regulatory-ready = true
-validation-coverage = 0.87
+# Declaração de fronteira científica
+[science]
+schema = "sounio.science-manifest.v1"
+ring = "scientific-package"
+evidence-status = "passes-gate"
+context-of-use = "PBPK research software for a declared model version"
+visibility = "public"
+allowed-claim-classes = ["compile", "runtime", "validated_research"]
+evidence-refs = ["gate:pbpk-package-gate", "review:model-version-0.4.2"]
+next-gate = "package-boundary-receipt"
+review-state = "draft"
 
 [dependencies]
 epistemic-core = "0.5"
@@ -55,6 +59,9 @@ crate-type = ["lib", "cdylib"]   # para bindings Python
 [[example]]
 name = "brain_plasma_tac"
 path = "examples/brain_plasma_tac.sio"
+maturity = "implemented"
+context-of-use = "PBPK research software for a declared model version"
+evidence-refs = ["source:examples/brain_plasma_tac.sio", "gate:pbpk-package-gate"]
 
 [[test]]
 name = "epistemic_pbpk_e2e"
@@ -66,15 +73,28 @@ path = "tests/test_pbpk_epistemic.sio"
 - `package.name`
 - `package.version` (seguir SemVer)
 - `package.description`
-- `epistemic.score`
-- `epistemic.provenance-level`
+- `science.schema`, quando houver declaração científica
+- `science.ring`
+- `science.evidence-status`
+- `science.context-of-use`
+- `science.visibility`
+- `science.allowed-claim-classes`
+- `science.evidence-refs`
 
-## 4. Níveis de Proveniência
+## 4. Rings e evidência
 
-- `weak`: apenas `Knowledge<T>` básico
-- `medium`: propagação GUM + provenance básico
-- `strong`: confidence gates + ledger completo
-- `regulatory`: strong + testes de validação regulatória + paper trail
+Os rings conclusivos são `pl-core`, `scientific-package` e `research`.
+`scientific-package-candidate`, `mixed-unresolved` e `unclassified` são
+auditáveis, mas não produzem `OK`.
+
+`evidence-status` descreve o testemunho mais forte realmente alcançado. Não é
+um score e não autoriza classes de claim. Claims dependem de um
+`sounio.claim-contract.v1` separado e de contexto de uso compatível.
+
+O parser legado de `[epistemic]` permanece apenas para leitura compatível e
+emite `W-SRB-LEGACY-001`. `score`, `regulatory-ready`, `provenance-level`,
+`gum-compliant` e `validation-coverage` não influenciam rings, claims,
+promoção ou release, e não são traduzidos automaticamente.
 
 ## 5. CLI Integration
 
@@ -93,20 +113,21 @@ tools/sounio-pkg/sounio-pkg test
 
 Um registry público futuro armazenaria:
 - Hash do pacote
-- Epistemic score (calculado + revisado por humanos)
 - Lista de dependências resolvidas
+- Declaração de ring e receipt de fronteira, quando aplicável
 - Artefatos: `.sio-pkg`, `.whl` (para Python), `.tar.gz` (source)
 
 ## 7. Próximos Passos
 
-1. Implementar parser de `sounio.toml` em `self-hosted/compiler/pkg/`
-2. Criar comando `souc pkg init`
-3. Desenvolver `sounio-py` bindings
-4. Lançar registry MVP em `registry.sounio.org`
+1. Completar o inventário de rings do `stdlib`
+2. Integrar receipts opt-in aos gates de package/release
+3. Especificar registry attestation antes de habilitar publicação
+4. Desenvolver `sounio-py` bindings sem ampliar autoridade científica
 
 ---
 
-**Esta especificação é o fundamento do ecossistema Sounio.**
-Ela combina simplicidade (como Cargo.toml) com metadados epistêmicos únicos.
+**Esta especificação é o contrato local do ecossistema Sounio.**
+Ela combina um manifesto simples com fronteiras e claims explicitamente
+separados de scores escalares.
 
 **Status:** Draft — aberto a refinamento pela comunidade; sem registry pública lançada.

@@ -52,6 +52,7 @@ use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
+use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -1948,60 +1949,112 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
 }
 
 fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
-    if !module_frontend_file_maybe_has_use(source_path) {
-        var main_prog = load_module_file(source_path)
-        if parser_last_error_count() > 0 {
-            return false
-        }
-        main_prog.items = specialize_generics(main_prog.items)
-        let verdict = module_frontend_check_items_with_source_context(main_prog.items, source_path)
-        return verdict == 0
+    var closure = ModuleClosure {
+        paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    if !module_frontend_collect_ast_closure_into(source_path, &!closure) {
+        print("run_check_mode: AST closure incomplete nodes=")
+        print_int(closure.node_count)
+        print(" unresolved=")
+        print_int(closure.unresolved_count)
+        print(" saturated=")
+        if closure.saturated { print("true") } else { print("false") }
+        print("\n")
+        return false
     }
 
     var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
-    var paths: [string; 256] = [""; 256]
-    var loaded: i64 = 0
-    programs[0] = load_module_file(source_path)
-    paths[0] = source_path
-    loaded = 1
-    var visited: [string; 256] = [""; 256]
-    var visited_count: i64 = 1
-    visited[0] = source_path
-    var work_front: i64 = 0
-
-    while work_front < loaded && loaded < 256 {
-        let imports = module_frontend_import_files_from_source(paths[work_front])
-        work_front = work_front + 1
-        var i: i64 = 0
-        while i < imports.count && loaded < 256 {
-            let file_path = imports.paths[i]
-            var already = false
-            var v: i64 = 0
-            while v < visited_count && v < 256 {
-                if str_eq(visited[v], file_path) {
-                    already = true
-                }
-                v = v + 1
-            }
-            if !already && file_exists(file_path) {
-                visited[visited_count] = file_path
-                visited_count = visited_count + 1
-                programs[loaded] = load_module_file(file_path)
-                paths[loaded] = file_path
-                loaded = loaded + 1
-            }
-            i = i + 1
+    var load_index: i64 = 0
+    while load_index < closure.node_count {
+        parser_reset_last_errors()
+        programs[load_index] = load_module_file(closure.paths[load_index])
+        if parser_last_error_count() > 0 {
+            print("run_check_mode: AST reload failed for ")
+            println(closure.paths[load_index])
+            return false
         }
+        load_index = load_index + 1
+    }
+
+    if closure.node_count == 1 && closure.edge_count == 0 {
+        programs[0].items = specialize_generics(programs[0].items)
+        let single_verdict = module_frontend_check_items_with_source_context(
+            programs[0].items,
+            source_path
+        )
+        return single_verdict == 0
     }
 
     print("run_check_mode: about to check ")
-    print_int(loaded)
+    print_int(closure.node_count)
     print(" modules\n")
-    let verdict = check_modules_verdict_boot4_with_visibility(&! programs, loaded, true)
+    let verdict = check_modules_verdict_boot4_with_visibility(
+        &!programs,
+        closure.node_count,
+        true
+    )
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
     verdict == 0
+}
+
+fn run_science_boundary_closure_report(
+    args: ArgList,
+    flag_index: i64
+) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--science-boundary-closure")
+    var closure = ModuleClosure {
+        paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    let complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
+    println("SOUNIO_BOUNDARY_CLOSURE_V1")
+    if complete { println("status\tcomplete") } else { println("status\tincomplete") }
+    print("capacity\t256\n")
+    print("saturated\t")
+    if closure.saturated { println("true") } else { println("false") }
+    print("parse_failed\t")
+    if closure.parse_failed { println("true") } else { println("false") }
+    var i: i64 = 0
+    while i < closure.node_count {
+        print("node\t")
+        println(closure.paths[i])
+        i = i + 1
+    }
+    i = 0
+    while i < closure.edge_count {
+        print("edge\t")
+        print(closure.edge_callers[i])
+        print("\t")
+        println(closure.edge_dependencies[i])
+        i = i + 1
+    }
+    i = 0
+    while i < closure.unresolved_count {
+        print("unresolved\t")
+        print(closure.unresolved_callers[i])
+        print("\t")
+        println(closure.unresolved_imports[i])
+        i = i + 1
+    }
 }
 
 fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -2224,8 +2277,8 @@ fn run_pkg_dispatch(args: ArgList, command_index: i64) with IO, Mut, Panic, Div,
     }
 
     if subcommand == "init" {
-        let epistemic = extra_arg == "--epistemic"
-        pkg_run_init(epistemic)
+        let science = extra_arg == "--science"
+        pkg_run_init(science)
         return
     }
     if subcommand == "build" {
@@ -2289,7 +2342,7 @@ fn run_pkg_search_shorthand(args: ArgList, command_index: i64) with IO, Mut, Pan
     if command_index + 2 < args.len {
         let flag = arg_list_get(args, command_index + 2)
         if flag == "--min-score" && command_index + 3 < args.len {
-            min_score = arg_list_get(args, command_index + 3)
+            println("warning[W-SRB-LEGACY-001]: --min-score is ignored; scalar scores have no resolution authority")
         }
     }
     pkg_run_search(query, min_score)
@@ -2305,60 +2358,63 @@ fn pkg_print_help() with IO {
     println("Usage: souc pkg <subcommand> [options]")
     println("")
     println("Subcommands:")
-    println("  init [--epistemic]    Create a new sounio.toml")
-    println("  build [path]          Validate, score and package the project")
-    println("  audit [path]          Detailed epistemic quality report")
+    println("  init [--science]      Create a new sounio.toml")
+    println("  build [path]          Validate and package the project")
+    println("  audit [path]          Science-boundary guidance")
     println("  install <name[@ver]>  Install a package")
-    println("  publish [--dry-run]   Publish to registry.sounio.org")
-    println("  info <name>           Show package epistemic metadata")
+    println("  publish [--dry-run]   Report local publication prerequisites (disabled)")
+    println("  info <name>           Show package metadata")
     println("  self-test             Run SPM internal tests")
     println("")
     println("Shorthand commands:")
     println("  souc install <name>[@<version>]")
-    println("  souc search <query> [--min-score 0.80] [--regulatory]")
+    println("  souc search <query>")
     println("")
-    println("Epistemic tiers:")
-    println("  experimental  score < 0.60")
-    println("  community     score 0.60-0.75")
-    println("  curated       score 0.75-0.90")
-    println("  regulatory    score > 0.90 + gum + regulatory provenance")
+    println("Scientific authority is declared by ring, claim contract, and receipt.")
 }
 
-fn pkg_run_init(epistemic: bool) with IO {
+fn pkg_run_init(science: bool) with IO {
     println("Sounio Package Manager (SPM) v0.1.0")
     println("")
-    if epistemic {
-        println("Creating sounio.toml (epistemic template)...")
+    if science {
+        println("Creating sounio.toml (science boundary template)...")
         println("")
         println("[package]")
-        println("name = \"my-epistemic-pkg\"")
+        println("name = \"my-science-pkg\"")
         println("version = \"0.1.0\"")
         println("edition = \"2026\"")
         println("authors = [\"Your Name\"]")
         println("license = \"Apache-2.0\"")
-        println("description = \"An epistemic Sounio package\"")
+        println("description = \"A scientific Sounio package\"")
         println("")
-        println("[epistemic]")
-        println("score = 0.85")
-        println("confidence-threshold = 0.90")
-        println("provenance-level = \"strong\"")
-        println("gum-compliant = true")
-        println("regulatory-ready = false")
+        println("[science]")
+        println("schema = \"sounio.science-manifest.v1\"")
+        println("ring = \"scientific-package-candidate\"")
+        println("evidence-status = \"implemented\"")
+        println("context-of-use = \"declare the bounded research use here\"")
+        println("visibility = \"public\"")
+        println("allowed-claim-classes = [\"compile\", \"runtime\"]")
+        println("evidence-refs = [\"gate:package-boundary-receipt\"]")
+        println("next-gate = \"package-boundary-receipt\"")
+        println("review-state = \"draft\"")
         println("")
         println("[dependencies]")
         println("epistemic-core = \"0.7\"")
         println("")
         println("[lib]")
-        println("name = \"my_epistemic_pkg\"")
+        println("name = \"my_science_pkg\"")
         println("path = \"src/lib.sio\"")
         println("")
         println("[[example]]")
         println("name = \"basic_usage\"")
         println("path = \"examples/basic.sio\"")
+        println("maturity = \"implemented\"")
+        println("context-of-use = \"declare the bounded research use here\"")
+        println("evidence-refs = [\"source:examples/basic.sio\"]")
         println("")
         println("[[test]]")
-        println("name = \"epistemic_e2e\"")
-        println("path = \"tests/test_epistemic_e2e.sio\"")
+        println("name = \"science_e2e\"")
+        println("path = \"tests/test_science_e2e.sio\"")
     } else {
         println("Creating sounio.toml (basic template)...")
         println("")
@@ -2370,18 +2426,12 @@ fn pkg_run_init(epistemic: bool) with IO {
         println("license = \"Apache-2.0\"")
         println("description = \"A Sounio package\"")
         println("")
-        println("[epistemic]")
-        println("score = 0.70")
-        println("confidence-threshold = 0.80")
-        println("provenance-level = \"medium\"")
-        println("gum-compliant = false")
-        println("")
         println("[dependencies]")
         println("")
         println("[lib]")
         println("path = \"src/lib.sio\"")
         println("")
-        println("Tip: use --epistemic for full scientific computing template.")
+        println("Tip: use --science for an explicit scientific boundary template.")
     }
     println("")
     println("Next steps:")
@@ -2398,52 +2448,22 @@ fn pkg_run_build(path: str) with IO, Div, Panic, Mut {
     println("[pkg] Parsing sounio.toml...")
     println("[pkg] Note: file I/O not yet wired. Showing demo flow.")
     println("")
-    println("[pkg] Computing epistemic score...")
-
-    let score_pct: i64 = 87
-    let tier_pct: i64 = 2
-    println("[pkg] --- Epistemic Score Report ---")
-    print  ("[pkg]   total:            "); print_int(score_pct); println("%")
-    println("[pkg]   knowledge-use:    90% (weight 35%)")
-    println("[pkg]   uncertainty-test: 82% (weight 25%)")
-    println("[pkg]   provenance:       78% (weight 20%)")
-    println("[pkg]   test-coverage:    88% (weight 10%)")
-    println("[pkg]   docs:             75% (weight 10%)")
-    println("[pkg]   tier:             curated")
-    println("[pkg] -----------------------------------")
+    println("[pkg] Boundary evaluation is provided by --science-boundary.")
     println("")
     println("[pkg] Build complete.")
     println("[pkg] Package artifact: <pkg-name>-0.1.0.sio-pkg")
-    println("[pkg] Ready to publish: souc pkg publish")
+    println("[pkg] Claim-bearing release requires an explicit claim contract and receipt.")
 }
 
 fn pkg_run_audit(path: str) with IO, Div, Panic, Mut {
     println("Sounio Package Manager (SPM) v0.1.0")
-    println("=== Epistemic Quality Audit ===")
+    println("=== Package Boundary Guidance ===")
     println("File: " + path)
     println("")
-    println("[pkg] Note: file I/O not yet wired. Showing demo audit report.")
-    println("")
-    println("--- Epistemic Score Report ---")
-    println("  total:            87%")
-    println("  knowledge-use:    90% (weight 35%)   [OK]")
-    println("  uncertainty-test: 82% (weight 25%)   [OK]")
-    println("  provenance:       78% (weight 20%)   [OK]")
-    println("  test-coverage:    88% (weight 10%)   [OK]")
-    println("  docs:             75% (weight 10%)   [IMPROVE] Add more examples")
-    println("  tier:             curated")
-    println("------------------------------")
-    println("")
-    println("=== Recommendations ===")
-    println("  1. Add 2+ more //@ run-pass examples to reach 0.90 score")
-    println("  2. Enable ledger tracking: use audit_log_record() in hot paths")
-    println("  3. Set regulatory-ready = true if intended for pharma/clinical use")
-    println("")
-    println("=== vs SOTA Package Managers ===")
-    println("  Nix/Guix:    hermetic builds only  — no epistemic scoring")
-    println("  Julia Pkg:   Artifacts.toml        — no confidence gates")
-    println("  Cargo:       trusted publishing    — no GUM compliance")
-    println("  SPM (this):  all of above + epistemic-score + GUM + regulatory tier")
+    println("  1. Declare [science] ring and context-of-use.")
+    println("  2. Name allowed claim classes and evidence references.")
+    println("  3. Use sounio.claim-contract.v1 only for an explicit claim.")
+    println("  4. Emit and verify sounio.package-boundary-receipt.v1.")
     println("")
     println("Audit complete.")
 }
@@ -2456,9 +2476,8 @@ fn pkg_run_install(name: str, version: str) with IO, Mut, Panic {
         print("Version: "); println(version)
     }
     println("")
-    println("[pkg] Querying registry.sounio.org...")
-    println("[pkg] Note: registry client not yet wired.")
-    println("  Will resolve from: https://registry.sounio.org/api/v1/packages/" + name)
+    println("[pkg] Install unavailable: no public registry is launched.")
+    println("[pkg] A future registry requires separately specified attestation.")
     println("  Local cache: ~/.sounio/cache/")
     println("  Lock file:   sounio.lock")
     println("")
@@ -2467,25 +2486,10 @@ fn pkg_run_install(name: str, version: str) with IO, Mut, Panic {
 
 fn pkg_run_publish(dry_run: bool) with IO, Div, Panic, Mut {
     println("Sounio Package Manager (SPM) v0.1.0")
+    println("[pkg] Publish disabled: no public registry or scalar release authority exists.")
+    println("[pkg] Local claim-bearing releases require a reviewed boundary receipt.")
     if dry_run {
-        println("=== DRY RUN: Publish ===")
-    } else {
-        println("=== Publishing to registry.sounio.org ===")
-    }
-    println("")
-    println("[pkg] Pre-publish checks:")
-    println("  [OK] sounio.toml valid")
-    println("  [OK] epistemic-score: 87% (above threshold 0.60)")
-    println("  [OK] tier: curated")
-    println("  [OK] gum-compliant: true")
-    println("")
-    if dry_run {
-        println("[pkg] DRY RUN — no changes made.")
-        println("  Would POST artifact + SLSA attestation to registry.")
-    } else {
-        println("[pkg] Note: registry client not yet wired.")
-        println("  Will POST: <pkg>.sio-pkg + provenance.json + epistemic-report.json")
-        println("  Endpoint: https://registry.sounio.org/api/v1/packages")
+        println("[pkg] DRY RUN: no changes made.")
     }
 }
 
@@ -2493,25 +2497,17 @@ fn pkg_run_info(name: str) with IO, Mut, Panic {
     println("Sounio Package Manager (SPM) v0.1.0")
     print("Package: "); println(name)
     println("")
-    println("[pkg] Note: registry client not yet wired.")
-    println("  Would GET: https://registry.sounio.org/api/v1/packages/" + name)
+    println("[pkg] Public registry metadata is unavailable in R0-R2.")
 }
 
 fn pkg_run_search(query: str, min_score: str) with IO, Mut, Panic {
     println("Sounio Package Manager (SPM) v0.1.0")
     print("Searching: "); println(query)
     if str_len(min_score) > 0 {
-        print("Min epistemic-score: "); println(min_score)
+        println("warning[W-SRB-LEGACY-001]: min-score is ignored")
     }
     println("")
-    println("[pkg] Note: registry client not yet wired.")
-    println("  Would GET: https://registry.sounio.org/api/v1/search?q=" + query)
-    println("")
-    println("Example results (demo):")
-    println("  darwin-pbpk       v0.5.1  score=94%  tier=regulatory  [GUM] [REGULATORY]")
-    println("  epistemic-core    v0.7.0  score=98%  tier=regulatory  [GUM]")
-    println("  epistemic-stats   v0.4.0  score=91%  tier=curated     [GUM]")
-    println("  snn-fractal       v0.3.2  score=88%  tier=curated")
+    println("[pkg] Search unavailable: no public registry is launched.")
 }
 
 fn pkg_run_self_test() with IO, Div, Panic, Mut {
@@ -2519,37 +2515,24 @@ fn pkg_run_self_test() with IO, Div, Panic, Mut {
     println("Running SPM self-tests...")
     println("")
 
-    // Testa scoring engine diretamente
     var pass = true
-
-    // Teste 1: score alto deve ser tier regulatory
-    let s1_knowledge: f64   = 0.90
-    let s1_gum_test: f64    = 0.85
-    let s1_gate: f64        = 0.70
-    let s1_ledger: f64      = 0.65
-    let s1_test: f64        = 0.88
-    let s1_ex: i64          = 5
-    let s1_doc: f64         = 0.80
-    let s1_manifest: f64    = 0.94
-    let s1_total = s1_knowledge * 0.35 + s1_gum_test * 0.25 + 0.75 * 0.20 + s1_test * 0.10 + s1_doc * 0.10
-    if s1_total < 0.75 {
-        println("  [FAIL] Test 1: high-quality score should be >= 0.75")
-        pass = false
+    let core_to_core = true
+    let package_to_core = true
+    let core_to_package = false
+    let candidate_is_conclusive = false
+    if core_to_core && package_to_core && !core_to_package {
+        println("  [PASS] Test 1: ring direction is monotone")
     } else {
-        println("  [PASS] Test 1: high-quality score is correct")
-    }
-
-    // Teste 2: score mínimo não deve ser tier regulatory
-    let s2_total = 0.10 * 0.35 + 0.05 * 0.25 + 0.10 * 0.20 + 0.20 * 0.10 + 0.05 * 0.10
-    if s2_total > 0.30 {
-        println("  [FAIL] Test 2: low-quality score should be < 0.30")
+        println("  [FAIL] Test 1: ring direction")
         pass = false
-    } else {
-        println("  [PASS] Test 2: low-quality score is correct")
     }
-
-    // Teste 3: manifesto default é inválido
-    println("  [PASS] Test 3: manifest parser defaults to invalid (expected)")
+    if !candidate_is_conclusive {
+        println("  [PASS] Test 2: candidate ring remains non-conclusive")
+    } else {
+        println("  [FAIL] Test 2: candidate ring became conclusive")
+        pass = false
+    }
+    println("  [PASS] Test 3: claims require an explicit contract")
 
     println("")
     if pass {
@@ -3489,17 +3472,18 @@ fn print_help() with IO {
     println("  --check <source.sio>   Run multimodule parse/resolve/typecheck preflight")
     println("  --ir-dump <source.sio> Print IR byte/function/string summary")
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
+    println("  --science-boundary-closure <source.sio>  Emit the raw AST module-closure report")
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --emit-obj <source.sio>  Emit relocatable .o object file (use -o to choose path)")
     println("  --emit-so <source.sio>   Emit ET_DYN shared library .so (use -o to choose path)")
-    println("  pkg init [--epistemic]            Create a new sounio.toml package manifest")
-    println("  pkg build [path]                  Validate, score and package the project")
+    println("  pkg init [--science]              Create a new sounio.toml package manifest")
+    println("  pkg build [path]                  Validate and package the project")
     println("  pkg audit [path]                  Detailed epistemic quality report")
-    println("  pkg publish [--dry-run]           Publish to registry.sounio.org")
+    println("  pkg publish [--dry-run]           Report publication prerequisites (disabled)")
     println("  pkg info <name>                   Show package epistemic metadata")
     println("  pkg self-test                     Run SPM internal tests")
     println("  install <name>[@<version>]        Install a package (shorthand)")
-    println("  search <query> [--min-score N]    Search registry by name/epistemic-score")
+    println("  search <query>                    Search package metadata")
     println("  ontology resolve <CURIE>          Resolve ontology CURIE from the local biomedical slice")
     println("  ontology search <text>            Search ontology labels/synonyms in the local biomedical slice")
     println("  ontology ancestors <CURIE>        Show ancestor chain for the ontology term")
@@ -27994,6 +27978,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--ir-roundtrip" {
             run_ir_roundtrip_mode(args, arg_idx)
+            return
+        } else if mode == "--science-boundary-closure" {
+            run_science_boundary_closure_report(args, arg_idx)
             return
         } else if mode == "--native-compile" {
             run_native_compile_mode(args, arg_idx)

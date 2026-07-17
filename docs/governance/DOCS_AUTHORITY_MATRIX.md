@@ -42,6 +42,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.mir-research-strategy | historical | docs/architecture/MIR_RESEARCH_STRATEGY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.module-closure-truth | repo_only | docs/architecture/module-closure-truth.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.phase2-hir-generation | repo_only | docs/architecture/PHASE2_HIR_GENERATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.science-research-boundary | repo_only | docs/architecture/science-research-boundary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.scientific-core | repo_only | docs/architecture/scientific-core.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.second-order-compilation | repo_only | docs/architecture/second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.semantic-contracts | repo_only | docs/architecture/semantic-contracts.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -424,6 +425,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.science-research-boundary | repo_only | docs/internal/concepts/science-research-boundary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.second-order-compilation | repo_only | docs/internal/concepts/second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.semantic-lane-contract | repo_only | docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.zero-provenance | repo_only | docs/internal/concepts/zero-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

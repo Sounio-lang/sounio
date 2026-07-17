@@ -52,6 +52,12 @@ if ! RAW_MADAROS="$(_resolve_modular_elf)"; then
 fi
 
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
+SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.py"
+SCIENCE_BOUNDARY_MODE="auto"
+SCIENCE_MANIFEST=""
+SCIENCE_CLAIM_CONTRACT=""
+SCIENCE_BOUNDARY_RECEIPT=""
+SCIENCE_BOUNDARY_ARGS=()
 
 # Madaros rebuilt after IR_MAX_INSTRS=512 uses compiler frames that can exceed
 # the default 8 MB thread stack. Lift the limit so the compiler does not segfault
@@ -91,6 +97,13 @@ GPU build options:
   --gpu-binary-format <fmt>             raw GPU format/mode selector
   --gpu-precision <f32|f64>             compatibility alias for GPU mode
 
+Science boundary options:
+  --science-boundary off|advisory|strict
+                                      select the R0-R2 boundary mode
+  --science-manifest <path>            use an explicit science-rings.tsv or sounio.toml
+  --claim-contract <path>              bind a sounio.claim-contract.v1
+  --emit-boundary-receipt <path>       write a deterministic boundary receipt
+
 Environment:
   SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
   MADAROS_RAW_BIN=<path>       override raw ELF
@@ -111,6 +124,184 @@ version() {
   local out
   out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
   echo "$out" | head -n 1
+}
+
+_parse_science_boundary_options() {
+  SCIENCE_BOUNDARY_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)
+        SCIENCE_BOUNDARY_ARGS+=("$@")
+        return 0
+        ;;
+      --science-boundary)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --science-boundary requires off, advisory, or strict" >&2
+          return 2
+        fi
+        SCIENCE_BOUNDARY_MODE="$2"
+        shift 2
+        ;;
+      --science-boundary=*)
+        SCIENCE_BOUNDARY_MODE="${1#*=}"
+        shift
+        ;;
+      --science-manifest)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --science-manifest requires a path" >&2
+          return 2
+        fi
+        SCIENCE_MANIFEST="$2"
+        shift 2
+        ;;
+      --science-manifest=*)
+        SCIENCE_MANIFEST="${1#*=}"
+        shift
+        ;;
+      --claim-contract)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --claim-contract requires a path" >&2
+          return 2
+        fi
+        SCIENCE_CLAIM_CONTRACT="$2"
+        shift 2
+        ;;
+      --claim-contract=*)
+        SCIENCE_CLAIM_CONTRACT="${1#*=}"
+        shift
+        ;;
+      --emit-boundary-receipt)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --emit-boundary-receipt requires a path" >&2
+          return 2
+        fi
+        SCIENCE_BOUNDARY_RECEIPT="$2"
+        shift 2
+        ;;
+      --emit-boundary-receipt=*)
+        SCIENCE_BOUNDARY_RECEIPT="${1#*=}"
+        shift
+        ;;
+      *)
+        SCIENCE_BOUNDARY_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+  case "$SCIENCE_BOUNDARY_MODE" in
+    auto|off|advisory|strict) ;;
+    *)
+      echo "error: madaros: invalid --science-boundary mode: $SCIENCE_BOUNDARY_MODE" >&2
+      return 2
+      ;;
+  esac
+}
+
+_science_engine_identity() {
+  "$RAW_MADAROS" --version 2>/dev/null | head -n 1
+}
+
+_science_raw_closure_supported() {
+  grep -aqF -- '--science-boundary-closure' "$RAW_MADAROS"
+}
+
+_science_raw_closure_report() {
+  local src="$1"
+  local report="$2"
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --science-boundary-closure "$src" ) >"$report"
+}
+
+_science_evaluate() {
+  local src="$1"
+  local receipt="${2:-}"
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "off" && -z "$receipt" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$SCIENCE_BOUNDARY_TOOL" ]]; then
+    echo "error[E-SRB-000]: science boundary attestor is unavailable: $SCIENCE_BOUNDARY_TOOL" >&2
+    return 2
+  fi
+  local command=(
+    python3 "$SCIENCE_BOUNDARY_TOOL" evaluate
+    --source "$src"
+    --mode "$SCIENCE_BOUNDARY_MODE"
+    --compiler "$RAW_MADAROS"
+    --engine-identity "$(_science_engine_identity)"
+  )
+  local closure_report=""
+  # Auto mode still needs the raw collector: the attestor may discover an
+  # ancestor science-rings.tsv or [science] table after option parsing.
+  if [[ "$SCIENCE_BOUNDARY_MODE" != "off" ]] && _science_raw_closure_supported; then
+    closure_report="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-closure.XXXXXX.tsv")"
+    if _science_raw_closure_report "$src" "$closure_report"; then
+      command+=(--closure-report "$closure_report")
+    else
+      rm -f "$closure_report"
+      closure_report=""
+    fi
+  fi
+  if [[ -n "$SCIENCE_MANIFEST" ]]; then
+    command+=(--manifest "$SCIENCE_MANIFEST")
+  fi
+  if [[ -n "$SCIENCE_CLAIM_CONTRACT" ]]; then
+    command+=(--claim-contract "$SCIENCE_CLAIM_CONTRACT")
+  fi
+  if [[ -n "$receipt" ]]; then
+    command+=(--receipt "$receipt")
+  fi
+  local attestor_rc=0
+  if "${command[@]}"; then
+    attestor_rc=0
+  else
+    attestor_rc=$?
+  fi
+  rm -f "$closure_report"
+  return "$attestor_rc"
+}
+
+_science_finalize() {
+  local preflight_receipt="$1"
+  local src="$2"
+  local elf="$3"
+  local artifact_label="$4"
+  local receipt="$5"
+  local command=(
+    python3 "$SCIENCE_BOUNDARY_TOOL" finalize
+    --preflight-receipt "$preflight_receipt"
+    --source "$src"
+    --compiler "$RAW_MADAROS"
+    --elf "$elf"
+    --artifact-label "$artifact_label"
+    --receipt "$receipt"
+  )
+  if [[ -n "$SCIENCE_MANIFEST" ]]; then
+    command+=(--manifest "$SCIENCE_MANIFEST")
+  fi
+  if [[ -n "$SCIENCE_CLAIM_CONTRACT" ]]; then
+    command+=(--claim-contract "$SCIENCE_CLAIM_CONTRACT")
+  fi
+  "${command[@]}"
+}
+
+_science_check_preflight() {
+  local src="$1"
+  local receipt="$SCIENCE_BOUNDARY_RECEIPT"
+  local temporary_receipt=""
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && -z "$receipt" ]]; then
+    temporary_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-check.XXXXXX.json")"
+    receipt="$temporary_receipt"
+  fi
+  set +e
+  _science_evaluate "$src" "$receipt"
+  local boundary_rc=$?
+  set -e
+  if [[ -n "$temporary_receipt" ]]; then
+    rm -f "$temporary_receipt"
+  fi
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && "$boundary_rc" -ne 0 ]]; then
+    return 1
+  fi
+  return 0
 }
 
 find_project_root() {
@@ -308,18 +499,9 @@ _parse_build_options() {
   esac
 }
 
-_build_source() {
+_compile_source_to_artifact() {
   local src="$1"
-  shift
-  _check_source_arg "$src"
-  if [[ ! -s "$src" ]]; then
-    echo "error: madaros build: source is empty: $src" >&2
-    return 1
-  fi
-  _parse_build_options "$@"
-  local out="$BUILD_OUT"
-  mkdir -p "$(dirname "$out")"
-  rm -f "$out"
+  local out="$2"
   if [[ "$BUILD_BACKEND" == "gpu" ]]; then
     local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
     if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
@@ -342,6 +524,90 @@ _build_source() {
   chmod +x "$out"
 }
 
+_build_source() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  if [[ ! -s "$src" ]]; then
+    echo "error: madaros build: source is empty: $src" >&2
+    return 1
+  fi
+  _parse_build_options "$@"
+  local out="$BUILD_OUT"
+  local receipt="$SCIENCE_BOUNDARY_RECEIPT"
+  local preflight_receipt=""
+  local temporary_preflight=""
+  mkdir -p "$(dirname "$out")"
+  rm -f "$out"
+
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && -z "$receipt" ]]; then
+    receipt="${out}.boundary.json"
+  fi
+  if [[ -n "$receipt" && "$(realpath -m "$receipt")" == "$(realpath -m "$out")" ]]; then
+    echo "error[E-SRB-000]: boundary receipt path must differ from compiler output" >&2
+    rm -f "$out"
+    return 2
+  fi
+  if [[ -n "$receipt" ]]; then
+    mkdir -p "$(dirname "$receipt")"
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      rm -f "$receipt"
+    fi
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    temporary_preflight="$preflight_receipt"
+  elif [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    temporary_preflight="$preflight_receipt"
+  fi
+
+  set +e
+  _science_evaluate "$src" "$preflight_receipt"
+  local boundary_rc=$?
+  set -e
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && "$boundary_rc" -ne 0 ]]; then
+    rm -f "$temporary_preflight" "$out"
+    return 1
+  fi
+
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+    local temp_out
+    local temp_receipt
+    temp_out="$(mktemp "$(dirname "$out")/.srb-$(basename "$out").XXXXXX")"
+    rm -f "$temp_out"
+    if ! _compile_source_to_artifact "$src" "$temp_out"; then
+      rm -f "$temp_out" "$temporary_preflight" "$out"
+      return 1
+    fi
+    temp_receipt="$(mktemp "$(dirname "$receipt")/.srb-$(basename "$receipt").XXXXXX")"
+    rm -f "$temp_receipt"
+    if ! _science_finalize "$preflight_receipt" "$src" "$temp_out" "$out" "$temp_receipt"; then
+      rm -f "$temp_out" "$temp_receipt" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    if ! mv -f "$temp_receipt" "$receipt"; then
+      rm -f "$temp_out" "$temp_receipt" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    if ! mv -f "$temp_out" "$out"; then
+      rm -f "$temp_out" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    rm -f "$temporary_preflight"
+    return 0
+  fi
+
+  if ! _compile_source_to_artifact "$src" "$out"; then
+    rm -f "$temporary_preflight"
+    return 1
+  fi
+  if [[ -n "$receipt" && -n "$preflight_receipt" ]]; then
+    if ! _science_finalize "$preflight_receipt" "$src" "$out" "$out" "$receipt"; then
+      echo "warning[W-SRB-RECEIPT-001]: advisory receipt finalization failed" >&2
+    fi
+  fi
+  rm -f "$temporary_preflight"
+}
+
 _run_source() {
   local src="$1"
   shift
@@ -354,6 +620,13 @@ _run_source() {
   rm -rf "$tmp_dir"
   return "$rc"
 }
+
+# Parse science-boundary options before the stable subcommand surface. Options
+# are accepted anywhere before `--` and never reach the raw compiler.
+if ! _parse_science_boundary_options "$@"; then
+  exit 2
+fi
+set -- "${SCIENCE_BOUNDARY_ARGS[@]}"
 
 # Parse subcommands.
 if [[ $# -eq 0 ]]; then
@@ -377,6 +650,9 @@ case "$1" in
     fi
     if [[ -n "$candidate" ]]; then
       shift
+    fi
+    if ! _science_check_preflight "$src"; then
+      exit 1
     fi
     _run_raw_check "$src" "$@"
     ;;
@@ -422,8 +698,19 @@ case "$1" in
     ;;
   *)
     if [[ "$1" == "--check" && $# -ge 2 ]]; then
+      if ! _science_check_preflight "$2"; then
+        exit 1
+      fi
       _run_raw_check "$2" "${@:3}"
       exit $?
+    fi
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      case "$1" in
+        --native-v2-*|*.sio)
+          echo "error[E-SRB-000]: strict science boundary cannot attest raw compiler pass-through; use 'madaros build'" >&2
+          exit 1
+          ;;
+      esac
     fi
     # Pass everything through to the raw ELF unchanged (guarded).
     ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$@" )
