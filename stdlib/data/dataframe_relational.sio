@@ -214,3 +214,105 @@ pub fn df_join_outer(left: &DataFrame, right: &DataFrame, left_key: i64, right_k
     }
     out
 }
+
+// Local Newton sqrt (keeps the data module self-contained).
+fn gb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = if x > 1.0 { x } else { 1.0 }
+    var i: i64 = 0
+    while i < 50 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+/// Group by `key_col` and take the minimum of `val_col`. Returns [key, min(val)].
+pub fn df_groupby_min(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v < m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the maximum of `val_col`. Returns [key, max(val)].
+pub fn df_groupby_max(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v > m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the sample standard deviation of `val_col` (dividing by n-1, matching
+/// df_col_std; a group of fewer than 2 rows yields 0). Returns [key, std(val)].
+pub fn df_groupby_std(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        // pass 1: mean
+        var s: f64 = 0.0
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col); cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var sd: f64 = 0.0
+        if cnt >= 2.0 {
+            let mean = s / cnt
+            var ss: f64 = 0.0
+            r = 0
+            while r < df_nrows(df) {
+                if df_get(df, r, key_col) == key {
+                    let d = df_get(df, r, val_col) - mean
+                    ss = ss + d * d
+                }
+                r = r + 1
+            }
+            sd = gb_sqrt(ss / (cnt - 1.0))
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = sd
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
