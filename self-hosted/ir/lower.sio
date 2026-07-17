@@ -1249,6 +1249,7 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.param_count = bss_off
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
+                                    bss_slot.return_struct_name = lower_opt_type_named_name(&head.type_alias_ty)
                                     let init_val = ast_lookup_global_var_init(name)
                                     if init_val != 0 {
                                         bss_slot.returns_float = 1
@@ -1686,6 +1687,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.param_count = bss_mod.bss_total_size
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
+                                        bss_slot.return_struct_name = lower_opt_type_named_name(&item.type_alias_ty)
                                         let init_val = ast_lookup_global_var_init(name)
                                         if init_val != 0 {
                                             bss_slot.returns_float = 1
@@ -1800,6 +1802,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.param_count = module.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
+                                bss_slot.return_struct_name = lower_opt_type_named_name(&item.type_alias_ty)
                                 let init_val = ast_lookup_global_var_init(name)
                                 if init_val != 0 {
                                     bss_slot.returns_float = 1
@@ -1934,6 +1937,26 @@ fn lowerer_bind_local_mut(
         (*lo).locals = locals_box
     } else {
         lowerer_mark_error(lo)
+    }
+}
+
+// *mut analogue of bind_local_scalar_kind. Mutable lowering paths update a
+// summary-owned Lowerer through a pointer, so returning a copied Lowerer can
+// silently lose scalar metadata on the active path.
+fn lowerer_mark_local_scalar_kind_mut(
+    lo: &! Lowerer,
+    name: Name,
+    kind: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).scalar_kind[i as usize] = kind
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
     }
 }
 
@@ -2141,7 +2164,9 @@ fn lowerer_lower_fn_params_mut(
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 if lower_type_expr_is_f64(&(*list).head.ty) {
-                    (*lo) = (*lo).bind_local_scalar_kind((*list).head.name, 2)
+                    lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 2)
+                } else if lower_type_expr_is_i64(&(*list).head.ty) {
+                    lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 1)
                 }
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
@@ -4758,6 +4783,9 @@ impl Lowerer {
                 if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
                     lowerer_mark_local_array_elem_float_mut(&! lo, g.name)
                 }
+                if lower_name_is_i64_type(g.return_struct_name) {
+                    lowerer_mark_local_scalar_kind_mut(&! lo, g.name, 1)
+                }
             }
             i = i + 1
         }
@@ -5518,8 +5546,24 @@ impl Lowerer {
             if lower_binary_op_is_compare((*e).bin_op) {
                 return 1
             }
+            if self.expr_result_is_string_ref(e) {
+                return 3
+            }
             if self.expr_result_is_float_ref(e) {
                 return 2
+            }
+            match (*e).left {
+                Some(left) => {
+                    match (*e).right {
+                        Some(right) => {
+                            if self.expr_result_scalar_kind_ref(&(*left)) == 1 && self.expr_result_scalar_kind_ref(&(*right)) == 1 {
+                                return 1
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
             }
         }
         if self.expr_result_is_float_ref(e) {
@@ -6411,7 +6455,7 @@ impl Lowerer {
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
                         locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
-                        locals.scalar_kind[idx as usize] = if lower_type_expr_is_f64(&(*list).head.ty) { 2 } else { 0 }
+                        locals.scalar_kind[idx as usize] = if lower_type_expr_is_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_i64(&(*list).head.ty) { 1 } else { 0 }
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
