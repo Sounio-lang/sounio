@@ -157,6 +157,9 @@ run_test "propagate_epistemic_exp" tests/run-pass/propagate_epistemic_exp.sio "P
 run_test "propagate_epistemic_ln" tests/run-pass/propagate_epistemic_ln.sio "PROPAGATE_EPISTEMIC_LN_OK"
 run_test "propagate_epistemic_pow" tests/run-pass/propagate_epistemic_pow.sio "PROPAGATE_EPISTEMIC_POW_OK"
 
+# Test: extern "C" math declarations retain intrinsic lowering.
+run_test "extern_c_math_intrinsics" tests/run-pass/extern_c_math_intrinsics.sio "EXTERN_C_MATH_INTRINSICS_OK"
+
 # Test: struct + impl method
 cat > /tmp/gate_t2.sio << 'EOF'
 struct P { x: i64, y: i64 }
@@ -226,6 +229,11 @@ run_cross_compile_test \
     self-hosted/compiler/native_read64_smoke.sio \
     aarch64-macos \
     "Mach-O 64-bit arm64"
+run_cross_compile_test \
+    "extern_c_math_intrinsics_aarch64_linux" \
+    tests/run-pass/extern_c_math_intrinsics.sio \
+    aarch64-linux \
+    "ARM aarch64"
 
 # Test: error reporting (compile-time warning)
 cat > /tmp/gate_t8.sio << 'EOF'
