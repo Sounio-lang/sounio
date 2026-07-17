@@ -331,7 +331,7 @@ attempt, `6477`, placed R2.5 temporary promotion state on OrangeFS and received
 node-local temporary storage while retaining the exact source archive,
 compiler, gate, and OrangeFS evidence logs.
 
-The focused source-removal authorization gate adds 526 checks for exact
+The focused source-removal authorization gate adds 527 checks for exact
 materialization binding, complete removal scope, distinct review records,
 byte-bound repairs, deterministic candidate receipts, source preservation,
 post-removal command evidence, candidate mutation refusal, and forged or

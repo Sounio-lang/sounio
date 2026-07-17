@@ -19,6 +19,7 @@ import physical_extraction_materialization_gate as material_gate  # noqa: E402
 
 
 AUTHORIZER = ROOT / "tools" / "science_boundary" / "source_removal_authorizer.py"
+COMPOSED_GATE = ROOT / "scripts" / "ci" / "physical_extraction_source_removal_authorization_gate.sh"
 POLICY_SCHEMA = ROOT / "schemas" / "sounio.physical-extraction-source-removal-policy.v1.schema.json"
 RECEIPT_SCHEMA = ROOT / "schemas" / "sounio.physical-extraction-source-removal-authorization.v1.schema.json"
 POLICY_LIMITATIONS = [
@@ -288,6 +289,12 @@ def assert_static_contracts() -> None:
         check(token in source, f"authorizer lacks contract token {token}")
     check("shutil.rmtree(repo_root" not in source, "authorizer contains direct source-root removal")
     check("os.unlink(repo_root" not in source, "authorizer contains direct source-root unlink")
+    composed = COMPOSED_GATE.read_text(encoding="utf-8")
+    check(
+        'export SOUNIO_PHYSICAL_EXTRACTION_MATERIALIZATION_MADAROS_BIN="$SOUNIO_PHYSICAL_EXTRACTION_SOURCE_REMOVAL_MADAROS_BIN"'
+        in composed,
+        "composed gate does not forward the current-source Madaros to materialization",
+    )
 
 
 def main() -> int:
