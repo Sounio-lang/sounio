@@ -53,6 +53,7 @@ fi
 
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
 SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.py"
+SCIENCE_PACKAGE_RELEASE_TOOL="$ROOT_DIR/tools/science_boundary/package_release.py"
 SCIENCE_BOUNDARY_MODE="auto"
 SCIENCE_MANIFEST=""
 SCIENCE_CLAIM_CONTRACT=""
@@ -103,6 +104,14 @@ Science boundary options:
   --science-manifest <path>            use an explicit science-rings.tsv or sounio.toml
   --claim-contract <path>              bind a sounio.claim-contract.v1
   --emit-boundary-receipt <path>       write a deterministic boundary receipt
+
+Strict package release:
+  madaros pkg build [project] --science-boundary strict --claim-contract <path>
+                                      atomically emit a verified .sio-release bundle
+  madaros pkg build ... --release-bundle <path>
+                                      select the final release bundle directory
+  madaros pkg verify <bundle> [--root <project>]
+                                      revalidate bundle, source, policy, compiler, and ELF
 
 Environment:
   SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
@@ -195,6 +204,16 @@ _parse_science_boundary_options() {
       return 2
       ;;
   esac
+}
+
+_args_have_release_bundle() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --release-bundle|--release-bundle=*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 _science_engine_identity() {
@@ -580,7 +599,7 @@ _build_source() {
     fi
     temp_receipt="$(mktemp "$(dirname "$receipt")/.srb-$(basename "$receipt").XXXXXX")"
     rm -f "$temp_receipt"
-    if ! _science_finalize "$preflight_receipt" "$src" "$temp_out" "$out" "$temp_receipt"; then
+    if ! _science_finalize "$preflight_receipt" "$src" "$temp_out" "${SOUNIO_SCIENCE_ARTIFACT_LABEL:-$out}" "$temp_receipt"; then
       rm -f "$temp_out" "$temp_receipt" "$temporary_preflight" "$out" "$receipt"
       return 1
     fi
@@ -601,7 +620,7 @@ _build_source() {
     return 1
   fi
   if [[ -n "$receipt" && -n "$preflight_receipt" ]]; then
-    if ! _science_finalize "$preflight_receipt" "$src" "$out" "$out" "$receipt"; then
+    if ! _science_finalize "$preflight_receipt" "$src" "$out" "${SOUNIO_SCIENCE_ARTIFACT_LABEL:-$out}" "$receipt"; then
       echo "warning[W-SRB-RECEIPT-001]: advisory receipt finalization failed" >&2
     fi
   fi
@@ -692,6 +711,55 @@ case "$1" in
       shift
     fi
     _run_source "$src" "$@"
+    ;;
+  pkg)
+    shift
+    pkg_subcommand="${1:-}"
+    if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" != "strict" ]] && _args_have_release_bundle "$@"; then
+      echo "error[E-SRB-RELEASE-002]: --release-bundle requires --science-boundary strict" >&2
+      echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=release_bundle_without_strict_mode" >&2
+      exit 1
+    fi
+    if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      shift
+      if [[ -z "$SCIENCE_CLAIM_CONTRACT" ]]; then
+        echo "error[E-SRB-RELEASE-002]: strict package release requires --claim-contract <path>" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=missing_claim_contract" >&2
+        exit 1
+      fi
+      if [[ -n "$SCIENCE_BOUNDARY_RECEIPT" ]]; then
+        echo "error[E-SRB-RELEASE-002]: pkg build strict owns its receipt path inside the release bundle" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=external_receipt_path" >&2
+        exit 1
+      fi
+      if [[ ! -x "$SCIENCE_PACKAGE_RELEASE_TOOL" ]]; then
+        echo "error[E-SRB-RELEASE-001]: package release tool is unavailable: $SCIENCE_PACKAGE_RELEASE_TOOL" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=release_tool_unavailable" >&2
+        exit 1
+      fi
+      release_command=(
+        python3 "$SCIENCE_PACKAGE_RELEASE_TOOL" build
+        --launcher "$0"
+        --compiler "$RAW_MADAROS"
+        --claim-contract "$SCIENCE_CLAIM_CONTRACT"
+      )
+      if [[ -n "$SCIENCE_MANIFEST" ]]; then
+        release_command+=(--manifest "$SCIENCE_MANIFEST")
+      fi
+      exec "${release_command[@]}" "$@"
+    fi
+    if [[ "$pkg_subcommand" == "verify" ]]; then
+      shift
+      bundle="${1:-}"
+      if [[ -z "$bundle" || "$bundle" == -* ]]; then
+        echo "error[E-SRB-RELEASE-001]: pkg verify requires <bundle>" >&2
+        exit 2
+      fi
+      shift
+      exec python3 "$SCIENCE_PACKAGE_RELEASE_TOOL" verify \
+        --bundle "$bundle" --compiler "$RAW_MADAROS" "$@"
+    fi
+    ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" pkg "$@" )
     ;;
   -h|--help|help)
     usage

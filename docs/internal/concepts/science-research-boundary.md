@@ -32,11 +32,16 @@ validated research        != clinical validation
 
 Status: `executable`
 
-The R0-R2 host attestor and compiler integration are executable. The named gate
+The R0-R2 host attestor, compiler integration, and R2.5 package release boundary
+are executable. The named gates
 proves pass, refuse, `UNKNOWN`, deterministic receipt identity, source
 sensitivity, evidence and receipt tamper refusal, absence of a final ELF after
 strict refusal, and a real transitive raw-AST import witness. The current-source
 Madaros was built through the canonical source-tracking bootstrap path on Slurm.
+
+R2.5 adds no new scientific claim class. It makes the existing receipt a
+promotion prerequisite for one local, opt-in release bundle and preserves the
+identity-versus-assurance distinction.
 
 ## Semantic Lane
 
@@ -63,7 +68,30 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`package-boundary-receipt`
+`registry-attestation-spec`
+
+## R2.5 Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R2.5-RELEASE-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: research remains unrestricted while a claim-bearing local package release requires explicit authorization and content identity
+Transformation: make package-boundary-receipt an atomic promotion boundary for opt-in local release bundles
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one local bundle exactly binds an OK receipt, claim contract, compiler, sources, policy, and native artifact
+Claims-Forbidden: scientific truth, clinical validity, ClinicalAuthority, ClinicalRelease, public registry status, remote signature authority, attested execution, independent replay, or R3 physical extraction
+Assumptions: the package has one resolvable native entrypoint and its sounio.toml is the release policy root
+Write-Set: tools/science_boundary/package_release.py; schemas/sounio.package-release-bundle.v1.schema.json; bin/{madaros,souc}; scripts/ci/package_boundary_release_gate.{py,sh}; docs/ecosystem/{CURATED_PACKAGES.md,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md,curated-package-release-inventory.tsv}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv
+Read-Set: tools/science_boundary/attestor.py; schemas/sounio.{claim-contract,package-boundary-receipt}.v1.schema.json; package manifests; science-rings.tsv
+Positive-Witness: strict package build emits a deterministic runnable bundle that passes full round-trip verification
+Negative-Witness: UNKNOWN, unauthorized claim, tamper, mutation, missing claim, and occupied destination refuse without promoting or overwriting a final bundle
+Acceptance-Gate: SOUNIO_PACKAGE_BOUNDARY_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/package_boundary_release_gate.sh
+Integration-Target: origin/main after review
+Authoritative-Only-If: both the 178-assertion R0-R2 gate and the R2.5 gate pass with the same current-source raw Madaros AST collector
+```
 
 ## Initial Integration Receipt
 
