@@ -495,3 +495,12 @@ the policy identity is
 and the expected commit is `789611457cc681226baa2885391d7bbbd29a5fa7`.
 These are disposable fixture identities. No Sounio production policy, commit,
 ref update, source removal, or execution receipt was created.
+
+The composed current-source execution witness is Slurm job `6613` on
+`gpuorangefs-r770-proxmox`. Commit `002d5f227`, archive
+`16a7cfdddd120cbd47a0b471506126fe3724fd6b1e9e27b772ce9ab73245c642`,
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed the complete prior stack and all 81 execution checks in 53 seconds with
+`MaxRSS=1390324K`. The run used Git 2.43.0 and node-local disposable workspaces;
+no implementation fallback ran and no Sounio canonical ref or source changed.

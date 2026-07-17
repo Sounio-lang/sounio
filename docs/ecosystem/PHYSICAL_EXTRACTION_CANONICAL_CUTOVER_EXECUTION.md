@@ -224,6 +224,24 @@ The composed shell gate first runs R0-R2, R2.5, R2.6, inventory,
 materialization, source-removal authorization, local execution, and canonical
 cutover approval gates with one current-source Madaros witness.
 
+The composed current-source witness is Slurm job `6613` on
+`gpuorangefs-r770-proxmox`. Commit
+`002d5f2277da8f9510b37f8e4d0ac8e9e994a06f`, compressed source archive
+`16a7cfdddd120cbd47a0b471506126fe3724fd6b1e9e27b772ce9ab73245c642`
+(339676469 bytes), current-source Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`,
+and Git 2.43.0 passed 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167
+materialization, 527 authorization, 164 local execution, 172 cutover approval,
+and 81 cutover execution checks in 53 seconds with `MaxRSS=1390324K`.
+Stdout is 3065 bytes with SHA-256
+`06e16b40fd59d757c734e289388202afc1b55a3e786505839c302e41f3d25a53`;
+stderr is empty with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The immutable inputs, extraction, transaction, fixture repositories, bare
+remotes, and logs used node-local `/tmp` because OrangeFS was full. No
+implementation fallback ran, and the only changed refs and removed roots were
+inside the disposable fixtures created by the gate.
+
 ## Canonical Repository Status
 
 No `canonical-production` cutover approval or execution policy was created for

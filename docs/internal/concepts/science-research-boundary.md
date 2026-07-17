@@ -446,6 +446,30 @@ Remaining-Blockers: none for the executable approval-only interface; actual cano
 Next-Semantic-Interface: r3-physical-extraction-canonical-cutover-execution
 ```
 
+## R3 Canonical Cutover Execution Integration Receipt
+
+```text
+Semantic-Outcome: executable policy-bound Git cutover, exact leased publication, rollback, and post-execution verification boundary for one approved disposable R3 repository set
+Concept-Status-Before: executable R0-R3 canonical-cutover approval interface with canonical execution explicitly not performed
+Concept-Status-After: executable R0-R3 canonical-cutover execution interface proven in disposable fixtures; Sounio canonical production cutover remains neither authorized nor executed
+Distinctions-Added: approval receipt versus execution policy; pre-bound Git transition versus live ref update; published commit versus promoted execution receipt; disposable-fixture execution versus canonical-production permission
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; repository location versus scientific authority; deterministic identity versus independent signature or replay; operator label versus human or organizational authority; verified ordinary rollback versus distributed crash atomicity
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 002d5f2277da8f9510b37f8e4d0ac8e9e994a06f, gzip size 339676469 bytes, sha256=16a7cfdddd120cbd47a0b471506126fe3724fd6b1e9e27b772ce9ab73245c642
+Evidence-Compiler: unchanged current-source Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6613 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:53, MaxRSS=1390324K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, inventory 141 assertions, materialization 167 assertions, authorization 527 assertions, local execution 164 assertions, canonical-cutover approval 172 assertions, and canonical-cutover execution 81 assertions all PASS
+Evidence-Execution: execution identity=f7ea56e8028f1a21f6f23afd316bfb93e6a27416067442fdf0da63f28e064d21; policy identity=e55de2ce7f6d82e57c7408cb1fc95948deb7fdc2c36da611ce6ebba1455a406c; approval identity=15e8b3ad7b0b01a95c5a3ad717176d8901f5941740d9c9c52680a70e293074a9; expected fixture commit=789611457cc681226baa2885391d7bbbd29a5fa7; context=disposable-fixture status=executed-and-verified source-removal=executed assurance=identity-plus-git-remote-ref-and-published-commit
+Evidence-Logs: focused gate sha256=6d1413e16083ea98787dd92cb8a6bfa5ba8612e3d0135a3611e04a5853e29a4e; stdout size=3065 bytes sha256=06e16b40fd59d757c734e289388202afc1b55a3e786505839c302e41f3d25a53; stderr empty sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Supporting-Gates: physical_extraction_canonical_cutover_execution_gate.py -> PASS 81; sounio_package_support_gate.sh -> PASS; Draft 2020-12 policy and receipt instance validation -> PASS; check_docs_registry.sh plus five negative selftests -> PASS; check_docs_consistency.sh -> PASS; semantic_coordination_gate.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: one immutable archive and current-source Madaros were copied to node-local /tmp because OrangeFS was full; the composed gate forwarded the same compiler through the complete stack and used Git 2.43.0 for standalone fixture repositories and local bare remotes
+Fallback-Path: no implementation fallback authorized or used; invalid context, stale or dirty state, changed evidence, wrong confirmations or commit plan, occupied output, mutating gates, receipt race, ref drift, failed exact recovery, changed destination, reintroduced source, or forged/rehashed receipt refuses
+Legacy-Kept: every Sounio canonical scientific-package and research source root remains present; no canonical-production approval, execution policy, destination repository set, human execution decision, production ref update, or execution receipt was created; every earlier R2.5, R2.6, and R3 interface remains unchanged
+Conflicting-Lanes: semantic scanner reported zero exact path collisions before the execution lane was validated; no compiler, IR, stdlib, package, example, self-hosted, or canonical scientific source file was edited
+LLM-Offload: xai/grok-4.3 reviewed executor, gate, receipt schema, and contract; two gate-maintainability improvements were incorporated and remaining scope or code-reading disagreements were logged; DeepSeek was attempted and returned Insufficient Balance; raw=/tmp/llm-offload-nKnrWX/,/tmp/llm-offload-4NnXUv/,/tmp/llm-offload-89FG0U/,/tmp/llm-offload-RL7Rbi/,/tmp/llm-offload-O2rztG/
+Remaining-Blockers: none for the executable disposable-fixture interface; any Sounio production cutover still requires a separately authored canonical-production evidence set and execution policy, real destination repositories and recovery plan, and an explicit human decision
+Next-Semantic-Interface: r3-physical-extraction-canonical-production-policy-and-human-decision
+```
+
 ## Closed Blockers
 
 ```text
