@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXPLICIT_SOUC="${SOUNIO_ORDERED_PATH_COMPILER_BIN:-}"
 SOUC="${EXPLICIT_SOUC:-$ROOT_DIR/bin/souc}"
 EXPECTED_COMPILER_SHA256="${SOUNIO_ORDERED_PATH_EXPECTED_COMPILER_SHA256:-}"
+EXPECTED_SOURCE_SHA="${SOUNIO_ORDERED_PATH_EXPECTED_SOURCE_SHA:-}"
 REQUIRE_COMPILER="${SOUNIO_ORDERED_PATH_REQUIRE_COMPILER:-0}"
 KEEP_WORK="${SOUNIO_ORDERED_PATH_KEEP:-0}"
 IR_MODEL="$ROOT_DIR/self-hosted/ir/ir.sio"
@@ -69,7 +70,7 @@ require_text '^pub fn ir_ontology_parameter_link_class_name_at' "$IR_MODEL"
 require_text 'audit-only accessors' "$IR_MODEL"
 require_text 'checker_apply_ir_ontology_parameter_links_from_items' "$CHECKER_BRIDGE"
 require_text 'Concept-ID: `SOUNIO-ORDERED-PATH-PROVENANCE`' "$CONCEPT"
-require_text '^SOUNIO-ORDERED-PATH-PROVENANCE[[:space:]]+hypothesis[[:space:]]' "$REGISTRY"
+require_text '^SOUNIO-ORDERED-PATH-PROVENANCE[[:space:]]+executable[[:space:]]' "$REGISTRY"
 require_text '^SOUNIO-ORDERED-PATH-PROVENANCE[[:space:]]+self-hosted/ir/ir.sio[[:space:]]+ordered-signature-identity$' "$BINDINGS"
 
 single_cleanup_line="$(rg -n 'let cleanup_receipt = opt_cleanup_module_inplace\(&! \(\*module_box\)\)' "$FRONTEND" | cut -d: -f1)"
@@ -149,6 +150,10 @@ fi
   fail "strict mode requires a lowercase 64-hex SOUNIO_ORDERED_PATH_EXPECTED_COMPILER_SHA256"
 [[ "$compiler_sha256" == "$EXPECTED_COMPILER_SHA256" ]] ||
   fail "compiler SHA-256 mismatch: expected=$EXPECTED_COMPILER_SHA256 actual=$compiler_sha256"
+[[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  fail "strict mode requires a lowercase 40-hex SOUNIO_ORDERED_PATH_EXPECTED_SOURCE_SHA"
+[[ "$source_sha" == "$EXPECTED_SOURCE_SHA" ]] ||
+  fail "source Git SHA mismatch: expected=$EXPECTED_SOURCE_SHA actual=$source_sha"
 [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]] ||
   fail "strict mode requires a clean tracked source worktree"
 

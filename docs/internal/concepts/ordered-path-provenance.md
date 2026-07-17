@@ -11,9 +11,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-ORDERED-PATH-PROVENANCE`
 
-Status: hypothesis. Promotion requires a strict current-source gate recording
-both the single-module and imported/merged native-v2 traces. The source type
-witnesses and local Madaros preflight are executable independently of that claim.
+Status: executable for the bounded fixture described here. Promotion was based
+on the strict current-source receipt from source commit `5db068512f55fa832ea190e71a2498dc5cbc1f6f`
+and Madaros SHA-256 `32ea8cc250b70f0ac632fe8084f537e3f6179d85200f704d1d4da8367b315997`:
+two source checks, four nominal category rejections, exact single-module and
+imported runtime outputs, two exact 26-link traces, and `fallback=0` produced
+`merge_ready=1`. Executable status is limited to that synthetic, bounded
+source-to-IR witness; it is not a compiler-wide preservation theorem.
 
 ## Founder Intent
 
@@ -140,7 +144,7 @@ Write-Set: self-hosted/ir/ir.sio; self-hosted/compiler/module_frontend.sio; test
 Read-Set: self-hosted/check/mod.sio; self-hosted/ir/opt_cleanup.sio; scripts/lib/resolve_souc.sh; bin/souc
 Positive-Witness: exact bitwise scalar collision at 877; same fixed later context 7 yields AB=874, BA=879, left=5, right=866; exact source parameter triples and distinct OrderABReceipt/OrderBAReceipt classes survive single and imported optimized paths
 Negative-Witness: four compile-fail category boundaries for AB/BA state, left/right grouping state, order/nonassociativity witness, and observation/functional state
-Acceptance-Gate: strict ordered_path_provenance_source_ir_gate.sh with a current-source Foundry compiler and expected SHA-256
+Acceptance-Gate: strict ordered_path_provenance_source_ir_gate.sh with an expected source Git SHA and a current-source Foundry compiler at the expected SHA-256
 Integration-Target: default native-v2 single-module and imported/merged optimized source paths
-Authoritative-Only-If: the source and compiler SHAs are recorded, both ELF witnesses return zero with exact output, all four category rejections hold, and no fallback occurs
+Authoritative-Only-If: the source and compiler SHAs match explicit expected values, both ELF witnesses return zero with exact output, all four category rejections hold, and no fallback occurs
 ```
