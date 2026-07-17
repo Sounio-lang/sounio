@@ -240,35 +240,38 @@ fn gpu_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
 // Emit the oct_batch_mul staging: thread 0 builds L(a) (row-major f16) at shared[0] and stages
 // H (col-major f16) at shared[512], from octonion pointer paR (a[8], f64) and batch pointer pHR
 // (H[16*8], f64). L[k][j] = σ(k⊕j,j,3)·a[k⊕j] for k,j<8 (else 0); sH[b*16+r] = H[b*8+r] for r<8.
-fn gpu_emit_oct_batch_stage(paR: string, pHR: string) -> string with Mut, Panic, Div, Alloc {
+// Stage L(a) + H into the shared f16 buffers for a Cayley-Dickson algebra of dimension `dim`
+// (octonion 8/bits=3, sedenion 16/bits=4). The wmma tile is always 16×16, so shared strides stay
+// 16; octonion uses the top-left 8×8 with the rest zero-filled, sedenion fills all 16×16.
+fn gpu_emit_cd_batch_stage(paR: string, pHR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
     // thread-0 guard, then zero-fill both 512-byte shared halves (512 u16 total)
     var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $STGDONE;\n"
     t = str_concat(t, "    mov.u16 %rs1, 0;\n    mov.u32 %r2, 0;\n    mov.u32 %r3, shared_array;\n$STGZ:\n")
     t = str_concat(t, "    add.u32 %r4, %r3, %r2;\n    st.shared.u16 [%r4], %rs1;\n")
     t = str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, 1024;\n    @%p1 bra $STGZ;\n")
-    // build L(a): 8x8 in 16x16
+    // build L(a): dim×dim in 16×16, L[k][j] = σ(k⊕j,j,bits)·a[k⊕j]
     var k: i64 = 0
-    while k < 8 {
+    while k < dim {
         var j: i64 = 0
-        while j < 8 {
+        while j < dim {
             let i = k ^ j
             t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), paR)
             t = str_concat(str_concat(t, "+"), i64_to_string(i * 8))
             t = str_concat(t, "];\n")
-            if gpu_cd_sigma(i, j, 3) < 0 { t = str_concat(t, "    neg.f64 %fd0, %fd0;\n") }
+            if gpu_cd_sigma(i, j, bits) < 0 { t = str_concat(t, "    neg.f64 %fd0, %fd0;\n") }
             t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
             t = str_concat(str_concat(t, i64_to_string((k * 16 + j) * 2)), "], %rs0;\n")
             j = j + 1
         }
         k = k + 1
     }
-    // stage H col-major: sH[b*16+r] = H[b*8+r], at shared offset 512
+    // stage H col-major: sH[b*16+r] = H[b*dim+r], at shared offset 512
     var b: i64 = 0
     while b < 16 {
         var r: i64 = 0
-        while r < 8 {
+        while r < dim {
             t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), pHR)
-            t = str_concat(str_concat(t, "+"), i64_to_string((b * 8 + r) * 8))
+            t = str_concat(str_concat(t, "+"), i64_to_string((b * dim + r) * 8))
             t = str_concat(t, "];\n    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
             t = str_concat(str_concat(t, i64_to_string(512 + (b * 16 + r) * 2)), "], %rs0;\n")
             r = r + 1
@@ -605,8 +608,11 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         }
 
         GpuOpcode::GpuOctBatchStage => {
-            // Build L(a) + stage H into the shared f16 buffers (thread 0).
-            ptx_push_str(buf, gpu_emit_oct_batch_stage(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg)))
+            // Build L(a) + stage H into the shared f16 buffers (thread 0). op.rhs_imm = algebra
+            // dimension (8 octonion / 16 sedenion); bits = 3 or 4.
+            let dim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let bits = if dim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_cd_batch_stage(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), dim, bits))
         }
 
         GpuOpcode::GpuWmmaTile => {
