@@ -163,6 +163,27 @@ fn checker_to_ir_ontologies(checker: &Checker) -> IrOntologyTable with Mut, Pani
         i = i + 1
     }
     out.property_count = if checker.ontology_kernel.properties.count > 32 { 32 } else { checker.ontology_kernel.properties.count }
+
+    // Preserve source signature identity after type erasure. This remains
+    // audit metadata: ontology-typed parameters can request evidence but do
+    // not authorize optimizer rewrites.
+    var sig_i: i64 = 0
+    while sig_i < (*checker.fn_sigs).count && out.parameter_link_count < 128 {
+        let sig = fn_sig_table_get(checker.fn_sigs, sig_i)
+        var param_i: i64 = 0
+        while param_i < sig.param_count && out.parameter_link_count < 128 {
+            let param = fn_param_list_get(sig.params, param_i)
+            let ontology_id = param.ty.ontology_id
+            if ontology_id >= 0 && ontology_id < checker.ontologies.count {
+                let cls = checker.ontologies.entries[ontology_id as usize]
+                if cls.is_valid {
+                    ir_ontology_table_record_parameter_link(&! out, sig.name, param_i, cls.name)
+                }
+            }
+            param_i = param_i + 1
+        }
+        sig_i = sig_i + 1
+    }
     out
 }
 
@@ -284,6 +305,21 @@ pub fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mu
         (*module).functions[i].hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
         i = i + 1
     }
+}
+
+// The caller must have completed its authoritative single- or multi-module
+// typecheck first. This collection-only replay exports compact source metadata
+// after lowering without making a second checker verdict authoritative.
+pub fn checker_apply_ir_ontology_parameter_links_from_items(
+    items: &Option<Box<ItemList>>,
+    module: &! IrModule,
+) with Mut, Panic, Div, Alloc, IO {
+    var checker = checker_new()
+    checker = checker.collect_items(*items)
+    let collected = checker_to_ir_ontologies(&checker)
+    // Preserve any semantic ontology table already installed by the
+    // authoritative checker. This replay exports only audit identities.
+    (*module).ontologies = ir_merge_ontology_parameter_links((*module).ontologies, collected)
 }
 
 fn check_program_ok(prog: Program) -> bool with Mut, Panic, Div, Alloc, IO {

@@ -39,6 +39,10 @@ let OCP_REBRACKET_TRACKED_REG_LIMIT: i64 = 256
 // remains fail-closed until its fixed proof storage and gate are reviewed.
 let OCP_REBRACKET_CFG_CAPACITY: i64 = 2048
 
+// Machine-readable trace schema. This versions the textual audit protocol,
+// not the private authority or a serialized IR ABI.
+pub let OCP_CLEANUP_RECEIPT_SCHEMA_VERSION: i64 = 1
+
 // Compiler-internal authority for one exact bitwise reassociation.
 //
 // The authority is deliberately private, non-serializable, and never returned
@@ -74,6 +78,8 @@ struct OcpExactBitwiseRebracketAudit {
     application_count: i64,
     refusal_count: i64,
     reason_code: i64,
+    // 0=none/refusal, 1=same linear region, 2=dominated forward CFG.
+    scope_key: i64,
     outer_instr_index: i64,
     operator_key: i64,
     combined_const_value: i64,
@@ -107,6 +113,15 @@ pub struct OcpCleanupModuleReceipt {
     pub exact_bitwise_authorization_count: i64,
     pub exact_bitwise_application_count: i64,
     pub exact_bitwise_refusal_count: i64,
+    pub exact_bitwise_same_region_application_count: i64,
+    pub exact_bitwise_cross_block_application_count: i64,
+    // Bit N records at least one refusal with reason code N.
+    pub exact_bitwise_refusal_reason_mask: i64,
+    // Source ontology-parameter links are identity evidence only. They can accompany a
+    // transaction or application but cannot authorize either one.
+    pub exact_bitwise_transaction_ontology_parameter_link_count: i64,
+    pub exact_bitwise_application_ontology_parameter_link_count: i64,
+    pub last_transaction_ontology_class_hash: i64,
     // Application bits: 0=AND, 1=OR, 2=XOR.
     pub exact_bitwise_operator_mask: i64,
     pub last_application_function_index: i64,
@@ -118,6 +133,9 @@ struct OcpExactBitwiseRebracketPassAudit {
     authorization_count: i64,
     application_count: i64,
     refusal_count: i64,
+    same_region_application_count: i64,
+    cross_block_application_count: i64,
+    refusal_reason_mask: i64,
     operator_mask: i64,
     last_outer_instr_index: i64,
     last_combined_const_value: i64,
@@ -130,6 +148,9 @@ fn ocp_empty_exact_bitwise_rebracket_pass_audit() -> OcpExactBitwiseRebracketPas
         authorization_count: 0,
         application_count: 0,
         refusal_count: 0,
+        same_region_application_count: 0,
+        cross_block_application_count: 0,
+        refusal_reason_mask: 0,
         operator_mask: 0,
         last_outer_instr_index: -1,
         last_combined_const_value: 0,
@@ -146,7 +167,16 @@ fn ocp_record_exact_bitwise_rebracket_audit(
     (*aggregate).application_count = (*aggregate).application_count + audit.application_count
     (*aggregate).refusal_count = (*aggregate).refusal_count + audit.refusal_count
     (*aggregate).diagnostic_fingerprint = (*aggregate).diagnostic_fingerprint ^ audit.diagnostic_fingerprint
+    if audit.refusal_count == 1 && audit.reason_code > 0 && audit.reason_code < 63 {
+        (*aggregate).refusal_reason_mask = (*aggregate).refusal_reason_mask | (1 << audit.reason_code)
+    }
     if audit.application_count == 1 {
+        if audit.scope_key == 1 {
+            (*aggregate).same_region_application_count = (*aggregate).same_region_application_count + 1
+        }
+        if audit.scope_key == 2 {
+            (*aggregate).cross_block_application_count = (*aggregate).cross_block_application_count + 1
+        }
         if audit.operator_key == 3 { (*aggregate).operator_mask = (*aggregate).operator_mask | 1 }
         if audit.operator_key == 4 { (*aggregate).operator_mask = (*aggregate).operator_mask | 2 }
         if audit.operator_key == 5 { (*aggregate).operator_mask = (*aggregate).operator_mask | 4 }
@@ -217,6 +247,7 @@ fn ocp_rebracket_empty_audit(reason_code: i64) -> OcpExactBitwiseRebracketAudit 
         application_count: 0,
         refusal_count: 1,
         reason_code: reason_code,
+        scope_key: 0,
         outer_instr_index: -1,
         operator_key: 0,
         combined_const_value: 0,
@@ -896,6 +927,9 @@ fn ocp_apply_exact_bitwise_rebracket_authority(
     let source_tree_fingerprint = occurrence_fingerprint ^ inner_const_def.imm_i64 ^
         outer_const_def.imm_i64
     let target_tree_fingerprint = occurrence_fingerprint ^ combined_value ^ 104729
+    let inner_block = ocp_rebracket_flow_inner_block(expected_flow.path_binding)
+    let outer_block = ocp_rebracket_flow_outer_block(expected_flow.path_binding)
+    let scope_key = if inner_block == outer_block { 1 } else { 2 }
     func.instrs[expected.outer_const_def_index as usize] = ir_load_imm(
         expected.outer_const_reg,
         combined_value,
@@ -911,6 +945,7 @@ fn ocp_apply_exact_bitwise_rebracket_authority(
         application_count: 1,
         refusal_count: 0,
         reason_code: 0,
+        scope_key: scope_key,
         outer_instr_index: expected.outer_instr_index,
         operator_key: expected.operator_key,
         combined_const_value: combined_value,
@@ -8975,14 +9010,37 @@ fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Mut, Div, Panic {
     var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
     var last_application_function_index: i64 = -1
+    var transaction_ontology_parameter_link_count: i64 = 0
+    var application_ontology_parameter_link_count: i64 = 0
+    var last_transaction_ontology_class_hash: i64 = 0
     var fi: i64 = 0
     while fi < (*module).fn_count {
+        let transactions_before = audit.transaction_count
         let applications_before = audit.application_count
+        let function_name = (*module).functions[fi as usize].name
         (*module).functions[fi as usize] = opt_cleanup_function_with_algebras_and_audit(
             (*module).functions[fi as usize],
             (*module).algebras,
             &! audit,
         )
+        // Audit links are keyed by the lowered function name. Cleanup is not a
+        // symbol-renaming pass, so fail loudly if that invariant ever changes.
+        assert(ir_name_eq(function_name, (*module).functions[fi as usize].name))
+        let transaction_delta = audit.transaction_count - transactions_before
+        let application_delta = audit.application_count - applications_before
+        if transaction_delta > 0 {
+            let link_count = ir_ontology_parameter_link_count_for_function(&(*module).ontologies, function_name)
+            transaction_ontology_parameter_link_count = transaction_ontology_parameter_link_count + link_count * transaction_delta
+            if link_count > 0 {
+                last_transaction_ontology_class_hash = ir_ontology_parameter_last_class_hash_for_function(
+                    &(*module).ontologies,
+                    function_name,
+                )
+            }
+            if application_delta > 0 {
+                application_ontology_parameter_link_count = application_ontology_parameter_link_count + link_count * application_delta
+            }
+        }
         if audit.application_count > applications_before {
             last_application_function_index = fi
         }
@@ -8994,6 +9052,12 @@ pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceip
         exact_bitwise_authorization_count: audit.authorization_count,
         exact_bitwise_application_count: audit.application_count,
         exact_bitwise_refusal_count: audit.refusal_count,
+        exact_bitwise_same_region_application_count: audit.same_region_application_count,
+        exact_bitwise_cross_block_application_count: audit.cross_block_application_count,
+        exact_bitwise_refusal_reason_mask: audit.refusal_reason_mask,
+        exact_bitwise_transaction_ontology_parameter_link_count: transaction_ontology_parameter_link_count,
+        exact_bitwise_application_ontology_parameter_link_count: application_ontology_parameter_link_count,
+        last_transaction_ontology_class_hash: last_transaction_ontology_class_hash,
         exact_bitwise_operator_mask: audit.operator_mask,
         last_application_function_index: last_application_function_index,
         last_combined_const_value: audit.last_combined_const_value,
@@ -9023,6 +9087,12 @@ pub fn ocp_exact_bitwise_rebracket_pipeline_probe() -> OcpCleanupModuleReceipt w
         exact_bitwise_authorization_count: audit.authorization_count,
         exact_bitwise_application_count: audit.application_count,
         exact_bitwise_refusal_count: audit.refusal_count,
+        exact_bitwise_same_region_application_count: audit.same_region_application_count,
+        exact_bitwise_cross_block_application_count: audit.cross_block_application_count,
+        exact_bitwise_refusal_reason_mask: audit.refusal_reason_mask,
+        exact_bitwise_transaction_ontology_parameter_link_count: 0,
+        exact_bitwise_application_ontology_parameter_link_count: 0,
+        last_transaction_ontology_class_hash: 0,
         exact_bitwise_operator_mask: audit.operator_mask,
         last_application_function_index: if audit.application_count == 1 { 0 } else { -1 },
         last_combined_const_value: audit.last_combined_const_value,
