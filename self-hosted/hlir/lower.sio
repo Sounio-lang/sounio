@@ -35,6 +35,7 @@ let HLIR_TYPE_CODE_U32: i64 = 8
 let HLIR_TYPE_CODE_U64: i64 = 9
 let HLIR_TYPE_CODE_F32: i64 = 10
 let HLIR_TYPE_CODE_F64: i64 = 11
+let HLIR_TYPE_CODE_OCTONION: i64 = 12
 
 pub fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
     if n < 0 {
@@ -101,6 +102,12 @@ pub struct HlirLowerState {
     in_function: bool,
     // Current function name (for diagnostics)
     current_func_name: HlirName,
+    // Octonion value model (GPU first-class `a * h`): an octonion value is a repr
+    // value-id whose 8 f64 components live in 8 separate value-ids. oct_keys[k] holds
+    // the repr id, oct_comps[k*8 + c] holds component c's value-id.
+    oct_keys: [i64; 128],
+    oct_comps: [i64; 1024],
+    oct_count: i64,
 }
 
 struct HlirExprListResult {
@@ -128,7 +135,150 @@ pub fn hlir_lower_state_new() -> HlirLowerState {
         error_count: 0,
         in_function: false,
         current_func_name: hlir_empty_name(),
+        oct_keys: [0 - 1; 128],
+        oct_comps: [0; 1024],
+        oct_count: 0,
     }
+}
+
+// --- Octonion value model helpers (GPU first-class `a * h`) ---
+
+// cd_sigma sign for octonion basis product e_i·e_j = σ(i,j)·e_{i⊕j} (bits=3, Convention X).
+fn hlir_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return hlir_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return hlir_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return hlir_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - hlir_oct_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - hlir_oct_cd_sigma(0, a_lo, bits - 1) }
+    hlir_oct_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Record 8 component value-ids under a fresh repr id; return (state, repr).
+fn hlir_oct_record(state: HlirLowerState, comps: [i64; 8]) -> (HlirLowerState, i64) with Mut, Panic {
+    var s = state
+    let fresh = hlir_builder_fresh_value(s.builder)
+    s.builder = fresh.0
+    let repr = fresh.1
+    if s.oct_count < 128 {
+        let k = s.oct_count
+        s.oct_keys[k as usize] = repr
+        var c: i64 = 0
+        while c < 8 {
+            s.oct_comps[(k * 8 + c) as usize] = comps[c as usize]
+            c = c + 1
+        }
+        s.oct_count = s.oct_count + 1
+    }
+    (s, repr)
+}
+
+// Is value_id a recorded octonion repr?
+fn hlir_oct_is(state: HlirLowerState, value_id: i64) -> bool {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == value_id { return true }
+        k = k + 1
+    }
+    false
+}
+
+// Fetch the 8 component value-ids for an octonion repr (or all -1 if unknown).
+fn hlir_oct_lookup(state: HlirLowerState, repr: i64) -> [i64; 8] {
+    var out: [i64; 8] = [0 - 1; 8]
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr {
+            var c: i64 = 0
+            while c < 8 {
+                out[c as usize] = state.oct_comps[(k * 8 + c) as usize]
+                c = c + 1
+            }
+            return out
+        }
+        k = k + 1
+    }
+    out
+}
+
+// Load 8 f64 components from an octonion pointer value into a fresh octonion repr.
+fn hlir_oct_load(state: HlirLowerState, ptr_val: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+    var s = state
+    var comps: [i64; 8] = [0 - 1; 8]
+    var c: i64 = 0
+    while c < 8 {
+        let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
+        s = idx_pair.0
+        let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
+        s = gep_pair.0
+        let load_pair = hlir_lower_load(s, gep_pair.1, hlir_type_f64())
+        s = load_pair.0
+        comps[c as usize] = load_pair.1
+        c = c + 1
+    }
+    hlir_oct_record(s, comps)
+}
+
+// Octonion multiply: r[i⊕j] += σ(i,j)·a[i]·b[j]. Returns a fresh octonion repr.
+fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+    var s = state
+    let a = hlir_oct_lookup(s, a_repr)
+    let b = hlir_oct_lookup(s, b_repr)
+    var r: [i64; 8] = [0 - 1; 8]
+    var z: i64 = 0
+    while z < 8 {
+        let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
+        s = zp.0
+        r[z as usize] = zp.1
+        z = z + 1
+    }
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let m = i ^ j
+            let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
+            s = mulp.0
+            var t = mulp.1
+            if hlir_oct_cd_sigma(i, j, 3) < 0 {
+                let zp2 = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
+                s = zp2.0
+                let negp = hlir_lower_binary(s, HLIR_BIN_FSUB, zp2.1, t, hlir_type_f64())
+                s = negp.0
+                t = negp.1
+            }
+            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, r[m as usize], t, hlir_type_f64())
+            s = addp.0
+            r[m as usize] = addp.1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    hlir_oct_record(s, r)
+}
+
+// Store an octonion repr's 8 components through an octonion pointer value.
+fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+    var s = state
+    let comps = hlir_oct_lookup(s, repr)
+    var c: i64 = 0
+    while c < 8 {
+        let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
+        s = idx_pair.0
+        let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
+        s = gep_pair.0
+        s = hlir_lower_store(s, gep_pair.1, comps[c as usize])
+        c = c + 1
+    }
+    s
 }
 
 // ============================================================================
@@ -1773,6 +1923,7 @@ fn hlir_type_code_from_type(ty: HlirType) -> i64 {
     if ty.kind == HlirTypeKind::HlirTypeU64 { return HLIR_TYPE_CODE_U64 }
     if ty.kind == HlirTypeKind::HlirTypeF32 { return HLIR_TYPE_CODE_F32 }
     if ty.kind == HlirTypeKind::HlirTypeF64 { return HLIR_TYPE_CODE_F64 }
+    if ty.kind == HlirTypeKind::HlirTypeOctonion { return HLIR_TYPE_CODE_OCTONION }
     HLIR_TYPE_CODE_NONE
 }
 
@@ -1788,6 +1939,7 @@ fn hlir_type_from_code(code: i64) -> HlirType {
     if code == HLIR_TYPE_CODE_U64 { return hlir_type_u64() }
     if code == HLIR_TYPE_CODE_F32 { return hlir_type_f32() }
     if code == HLIR_TYPE_CODE_F64 { return hlir_type_f64() }
+    if code == HLIR_TYPE_CODE_OCTONION { return hlir_type_octonion() }
     hlir_type_void()
 }
 
@@ -1846,6 +1998,18 @@ pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc 
         if tname == "f64" { return hlir_type_f64() }
         if tname == "bool" { return hlir_type_bool() }
         if tname == "unit" { return hlir_type_void() }
+        // First-class hypercomplex: Hyper<Octonion, f64> → HlirTypeOctonion (8× f64).
+        // (a `&Hyper<Octonion,f64>` param then becomes ptr-with-octonion-element via the
+        // TypeReference branch below, so the GPU lowering can recognize `*pa` / `a*h`.)
+        if tname == "Hyper" {
+            match ty.type_args {
+                Some(args) => {
+                    let alg_name = hlir_ast_path_head_to_string((*args).head.path)
+                    if alg_name == "Octonion" { return hlir_type_octonion() }
+                }
+                None => {}
+            }
+        }
     }
     if ty.kind == TypeExprKind::TypeArray {
         match ty.inner {
@@ -2198,6 +2362,13 @@ pub fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with
                 let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
                 s = rhs_pair.0
                 let rhs_val = rhs_pair.1
+                // Store an octonion through a pointer: `*pout = ah` where pout:&!Hyper<Octonion,f64>
+                // and ah is an octonion repr → write its 8 f64 components.
+                if target_expr.kind == ExprKind::ExprUnary && target_expr.un_op == UnaryOp::OpDeref && hlir_oct_is(s, rhs_val) {
+                    let dptr_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = dptr_pair.0
+                    return hlir_oct_store(s, dptr_pair.1, rhs_val)
+                }
                 hlir_lower_assign_target(s, target_expr, rhs_val)
             },
             None => hlir_lower_report_error(s),
@@ -2266,6 +2437,11 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
         let rhs_val = rhs_pair.1
+        // First-class octonion multiply: both operands are recorded octonion reprs → expand
+        // r[i⊕j] += σ(i,j)·a[i]·b[j] over the 8 components (Convention X / cd_sigma).
+        if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
+            return hlir_oct_mul(s, lhs_val, rhs_val)
+        }
         let lhs_ty = hlir_lower_value_type(s, lhs_val)
         let rhs_ty = hlir_lower_value_type(s, rhs_val)
         let op = hlir_ast_binary_to_hlir_typed(expr.bin_op, lhs_ty, rhs_ty)
@@ -2276,6 +2452,17 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprUnary {
         let src_pair = hlir_lower_expr_opt(s, expr.left)
         s = src_pair.0
+        // Deref of an octonion pointer (`*pa` where pa: &Hyper<Octonion,f64>) → load the 8
+        // f64 components into a fresh octonion repr instead of a scalar deref.
+        if expr.un_op == UnaryOp::OpDeref {
+            let ptr_ty = hlir_lower_value_type(s, src_pair.1)
+            if ptr_ty.kind == HlirTypeKind::HlirTypePtr {
+                let elem = hlir_type_element_or_void(ptr_ty)
+                if elem.kind == HlirTypeKind::HlirTypeOctonion {
+                    return hlir_oct_load(s, src_pair.1)
+                }
+            }
+        }
         let op = hlir_ast_unary_to_hlir(expr.un_op)
         return hlir_lower_unary(s, op, src_pair.1, hlir_type_i64())
     }
