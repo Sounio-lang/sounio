@@ -94,21 +94,21 @@ export default function LiveCodeBlock({
   }, [code, runCode]);
 
   return (
-    <div className="my-6 rounded-lg overflow-hidden border border-white/10 bg-[#1e1e1e]">
+    <div className="my-6 rounded-lg overflow-hidden border border-[var(--color-line)] bg-[var(--color-code-surface)]">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] border-b border-white/10">
+      <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-surface-base)] border-b border-[var(--color-line)]">
         <div className="flex items-center gap-3">
-          <span className="text-white/60 text-sm font-mono">{title || `example.${language}`}</span>
-          <span className="px-2 py-0.5 text-xs bg-white/10 text-white/60 rounded">{language}</span>
+          <span className="text-[var(--color-ink-3)] text-sm font-mono">{title || `example.${language}`}</span>
+          <span className="px-2 py-0.5 text-xs bg-[var(--color-surface-frost)] text-[var(--color-ink-3)] rounded">{language}</span>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={copyCode}
-            className="p-1.5 text-white/60 hover:text-white hover:bg-white/10 rounded transition-colors"
+            className="p-1.5 text-[var(--color-ink-3)] hover:text-[var(--color-ink-1)] hover:bg-[var(--color-surface-frost)] rounded transition-colors"
             title="Copy code"
           >
             {copied ? (
-              <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4 text-[var(--color-accent-green)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             ) : (
@@ -119,7 +119,7 @@ export default function LiveCodeBlock({
           </button>
           <button
             onClick={resetCode}
-            className="p-1.5 text-white/60 hover:text-white hover:bg-white/10 rounded transition-colors"
+            className="p-1.5 text-[var(--color-ink-3)] hover:text-[var(--color-ink-1)] hover:bg-[var(--color-surface-frost)] rounded transition-colors"
             title="Reset code"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -129,7 +129,7 @@ export default function LiveCodeBlock({
           <button
             onClick={runCode}
             disabled={isRunning}
-            className="flex items-center gap-1.5 px-3 py-1 bg-green-500 hover:bg-green-600 disabled:bg-green-500/50 text-white text-sm font-medium rounded transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1 bg-[var(--color-accent-green)] hover:bg-[color-mix(in_srgb,var(--color-accent-green)_85%,black)] disabled:bg-[var(--color-accent-green)]/50 text-[var(--color-ink-1)] text-sm font-medium rounded transition-colors"
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -146,22 +146,22 @@ export default function LiveCodeBlock({
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="w-full min-h-[150px] p-4 bg-[#1e1e1e] text-[#d4d4d4] font-mono text-sm leading-relaxed resize-none focus:outline-none"
+          className="w-full min-h-[150px] p-4 bg-[var(--color-code-surface)] text-[var(--color-code-ink)] font-mono text-sm leading-relaxed resize-none focus:outline-none"
           spellCheck={false}
           placeholder="Enter your code here..."
         />
-        <div className="absolute bottom-2 right-2 text-xs text-white/30">
+        <div className="absolute bottom-2 right-2 text-xs text-[var(--color-ink-3)]">
           Ctrl+Enter to run
         </div>
       </div>
 
       {/* Output panel */}
       {output && (
-        <div className="border-t border-white/10">
-          <div className="px-4 py-1.5 text-xs text-white/40 bg-black/20 border-b border-white/5">
+        <div className="border-t border-[var(--color-line)]">
+          <div className="px-4 py-1.5 text-xs text-[var(--color-ink-3)] bg-[var(--color-surface-base)]/20 border-b border-[var(--color-line)]/50">
             Output
           </div>
-          <pre className="p-4 text-sm font-mono text-green-400 overflow-x-auto max-h-48">
+          <pre className="p-4 text-sm font-mono text-[var(--color-accent-green)] overflow-x-auto max-h-48">
             {output}
           </pre>
         </div>

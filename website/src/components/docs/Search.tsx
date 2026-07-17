@@ -187,14 +187,14 @@ export default function Search({ locale, strings }: Props) {
         void ensurePagefind();
         setIsOpen(true);
       }}
-      className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-text-muted)] bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded-lg hover:border-[var(--color-gold-500)] transition-colors"
+      className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-ink-2)] bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded-lg hover:border-[var(--color-accent-gold)] transition-colors"
       aria-label="Open search"
     >
       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
       </svg>
       <span className="hidden sm:inline">{strings.button}</span>
-      <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] rounded">⌘K</kbd>
+      <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-xs bg-[var(--color-surface-base)] border border-[var(--color-line)] rounded">⌘K</kbd>
     </button>
   );
 
@@ -214,8 +214,8 @@ export default function Search({ locale, strings }: Props) {
       >
         <div className="glass glass-elevated w-full max-w-2xl rounded-xl border border-[var(--glass-border)] overflow-hidden">
           {/* Search input */}
-          <div className="flex items-center gap-3 p-4 border-b border-[var(--color-border)]">
-            <svg className="w-5 h-5 text-[var(--color-text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="flex items-center gap-3 p-4 border-b border-[var(--color-line)]">
+            <svg className="w-5 h-5 text-[var(--color-ink-2)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
             <input
@@ -224,22 +224,22 @@ export default function Search({ locale, strings }: Props) {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={strings.placeholder}
-              className="flex-1 bg-transparent text-lg text-[var(--color-text)] placeholder-[var(--color-text-muted)] focus:outline-none"
+              className="flex-1 bg-transparent text-lg text-[var(--color-ink-1)] placeholder-[var(--color-ink-2)] focus:outline-none"
               aria-label="Search input"
             />
             <button
               onClick={closeModal}
-              className="p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+              className="p-1 text-[var(--color-ink-2)] hover:text-[var(--color-ink-1)] transition-colors"
               aria-label="Close search"
             >
-              <kbd className="px-1.5 py-0.5 text-xs bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded">Esc</kbd>
+              <kbd className="px-1.5 py-0.5 text-xs bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded">Esc</kbd>
             </button>
           </div>
 
           {/* Results area */}
           <div className="max-h-[60vh] overflow-y-auto">
             {loading ? (
-              <div className="flex items-center justify-center py-12 text-[var(--color-text-muted)]">
+              <div className="flex items-center justify-center py-12 text-[var(--color-ink-2)]">
                 <svg className="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
@@ -253,12 +253,12 @@ export default function Search({ locale, strings }: Props) {
                     <li key={index}>
                       <a
                         href={result.url}
-                        className="block px-4 py-3 hover:bg-[var(--color-bg-alt)] transition-colors"
+                        className="block px-4 py-3 hover:bg-[var(--color-surface-raise)] transition-colors"
                         onClick={closeModal}
                       >
-                        <h3 className="font-medium text-[var(--color-text)] mb-1">{result.title}</h3>
+                        <h3 className="font-medium text-[var(--color-ink-1)] mb-1">{result.title}</h3>
                         <p
-                          className="text-sm text-[var(--color-text-muted)] line-clamp-2 [&_mark]:bg-[var(--color-gold-500)]/30 [&_mark]:text-[var(--color-text)] [&_mark]:rounded"
+                          className="text-sm text-[var(--color-ink-2)] line-clamp-2 [&_mark]:bg-[var(--color-accent-gold)]/30 [&_mark]:text-[var(--color-ink-1)] [&_mark]:rounded"
                           dangerouslySetInnerHTML={{ __html: result.excerpt }}
                         />
                       </a>
@@ -266,7 +266,7 @@ export default function Search({ locale, strings }: Props) {
                   ))}
                 </ul>
               ) : (
-                <div className="py-12 text-center text-[var(--color-text-muted)]">
+                <div className="py-12 text-center text-[var(--color-ink-2)]">
                   <svg className="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -277,7 +277,7 @@ export default function Search({ locale, strings }: Props) {
                 </div>
               )
             ) : (
-              <div className="py-12 text-center text-[var(--color-text-muted)]">
+              <div className="py-12 text-center text-[var(--color-ink-2)]">
                 <p>{strings.startTyping}</p>
                 <p className="text-sm mt-1">{strings.startTypingHint}</p>
               </div>
@@ -285,14 +285,14 @@ export default function Search({ locale, strings }: Props) {
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--color-border)] text-xs text-[var(--color-text-muted)]">
+          <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--color-line)] text-xs text-[var(--color-ink-2)]">
             <div className="flex items-center gap-4">
               <span className="flex items-center gap-1">
-                <kbd className="px-1 py-0.5 bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded">↵</kbd>
+                <kbd className="px-1 py-0.5 bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded">↵</kbd>
                 {strings.toSelect}
               </span>
               <span className="flex items-center gap-1">
-                <kbd className="px-1 py-0.5 bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded">↑↓</kbd>
+                <kbd className="px-1 py-0.5 bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded">↑↓</kbd>
                 {strings.toNavigate}
               </span>
             </div>
