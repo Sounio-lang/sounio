@@ -349,6 +349,30 @@ Remaining-Blockers: none for the executable authorization-only interface; real d
 Next-Semantic-Interface: r3-physical-extraction-source-removal-execution
 ```
 
+## R3 Source-Removal Execution Integration Receipt
+
+```text
+Semantic-Outcome: executable policy-bound removal, repair, rollback, and post-execution verification boundary for one exact explicitly marked local R3 tree
+Concept-Status-Before: executable R0-R3 source-removal authorization interface with execution explicitly not performed
+Concept-Status-After: executable R0-R3 local source-removal execution interface; canonical production cutover remains not approved or executed
+Distinctions-Added: authorization versus execution policy; pre-commit failure versus promoted receipt; execution gate versus isolated verification gate; disposable local root versus canonical source tree
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; location versus scientific authority; deterministic identity versus independent replay; local operator label versus organizational authority
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 9ab7d49a1e7d24e6baf456a7e7a490f438958e35, 339644024 bytes, sha256=31df0a309a7fac2cf7703bda5931f093b216137c9072cccd9aa5033465313323
+Evidence-Compiler: unchanged source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6558 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:45, MaxRSS=1422288K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, R3 inventory 141 assertions, R3 materialization 167 assertions, source-removal authorization 527 assertions, and source-removal execution 164 assertions all PASS
+Evidence-Execution: execution identity=682791965ae6f553f87faf3a77fea395af71c804dfd42ca76c073ea828b803ba; policy identity=913a5d53e4b1a5061216b00c9d8a8810534004d5888b2cf8b0cbd21cf177955b; authorization identity=ccd1d6e24d573879b85ea031c3755371700da70c3e3fb83b9a2679c9747f1fa3; units=2 files=3 status=executed-and-verified source-removal=executed assurance=identity-only
+Evidence-Logs: gate sha256=fc72bc6f1a8eb5992491766f7fb7b8d034cc7a8d2c3faec1e3146e673225ee41; stdout sha256=8a80922806fb8281309047574da9a9d017faa383c3f09a32b9d46c6827514d3b; stderr empty sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Supporting-Gates: physical_extraction_source_removal_execution_gate.py -> PASS 164; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh plus selftest -> PASS; check_docs_consistency.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: the execution Madaros variable forwarded into the complete authorization stack; Slurm extraction, promotion, transaction, candidate, and verification workspaces used node-local /tmp while immutable inputs and durable logs remained on OrangeFS
+Fallback-Path: none authorized or used; invalid identity or confirmation, occupied or destination-contained receipt, locked or stale root, failing or mutating execution gate, mutated verification copy, rollback mismatch, or forged/rehashed receipt refuses
+Legacy-Kept: all canonical scientific-package and research source roots remain present; no production destination, materialization, removal, authorization, execution policy, or execution receipt was created; all earlier R2.5, R2.6, inventory, materialization, and authorization interfaces remain unchanged
+Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIENCE-RESEARCH-BOUNDARY; no compiler, IR, stdlib, package, example, self-hosted, or canonical scientific source file was edited
+LLM-Offload: xai/grok-4.3 reviewed executor, adversarial gate, schemas, and docs in three bounded inputs and found no BLOCKER or MAJOR issue; raw=/tmp/llm-offload-sWBX3O/,/tmp/llm-offload-zSzogY/,/tmp/llm-offload-UgMEQv/
+Remaining-Blockers: none for the executable policy-bound local interface; a real canonical root, real destination state, production repairs and gates, operator approval, and recovery procedure remain prerequisites for canonical cutover
+Next-Semantic-Interface: r3-physical-extraction-canonical-cutover-approval
+```
+
 ## Closed Blockers
 
 ```text

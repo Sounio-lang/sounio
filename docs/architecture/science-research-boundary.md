@@ -383,3 +383,14 @@ ordinary-failure rollback, isolated verification-gate mutation, occupied output
 preservation, post-execution verification, and forged or rehashed policy and
 receipt refusal. It executes planned units only inside disposable fixture
 roots. No canonical source root is an execution target.
+
+The composed current-source execution witness is Slurm job `6558` on
+`gpuorangefs-r770-proxmox`: archive
+`31df0a309a7fac2cf7703bda5931f093b216137c9072cccd9aa5033465313323`
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed all 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167 materialization,
+527 authorization, and 164 execution checks in 45 seconds with
+`MaxRSS=1422288K`. The final execution receipt identity matches the local
+witness. All real removal occurred only in disposable node-local fixture roots;
+no implementation fallback ran and no canonical source root changed.

@@ -173,6 +173,17 @@ exact rollback after an execution-only gate mutation. Its composed shell gate
 first passes R0-R2, R2.5, R2.6, inventory, materialization and authorization
 against the same source and current-source Madaros witness.
 
+The current composed fixture witness is Slurm job `6558` on
+`gpuorangefs-r770-proxmox`. One archived source snapshot and one current-source
+Madaros passed 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167 materialization,
+527 authorization, and 164 execution checks in 45 seconds. The execution
+identity is
+`682791965ae6f553f87faf3a77fea395af71c804dfd42ca76c073ea828b803ba`;
+the policy identity is
+`913a5d53e4b1a5061216b00c9d8a8810534004d5888b2cf8b0cbd21cf177955b`.
+These are deterministic disposable-fixture identities, not a canonical
+cutover approval or receipt.
+
 ## Canonical Repository Status
 
 No production execution-root marker, operator approval, execution policy or
