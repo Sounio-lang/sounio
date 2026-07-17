@@ -10,7 +10,7 @@ use ir::ir::*
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
-use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata}
+use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
@@ -30,6 +30,19 @@ fn module_frontend_rebracket_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1")
 }
 
+fn module_frontend_items_have_ontology(items: &Option<Box<ItemList>>) -> bool with Alloc {
+    match *items {
+        Some(list) => {
+            if (*list).head.kind == ItemKind::ItemOntology {
+                true
+            } else {
+                module_frontend_items_have_ontology(&(*list).tail)
+            }
+        }
+        None => false,
+    }
+}
+
 fn module_frontend_print_rebracket_receipt(
     phase: string,
     receipt: OcpCleanupModuleReceipt,
@@ -37,6 +50,8 @@ fn module_frontend_print_rebracket_receipt(
     if !module_frontend_rebracket_trace_enabled() { return }
     print("[rebracket-native-v2] phase=")
     print(phase)
+    print(" schema=")
+    print(io_trace_i64_string(OCP_CLEANUP_RECEIPT_SCHEMA_VERSION))
     print(" optimize=1 functions=")
     print(io_trace_i64_string(receipt.function_count))
     print(" transactions=")
@@ -47,6 +62,18 @@ fn module_frontend_print_rebracket_receipt(
     print(io_trace_i64_string(receipt.exact_bitwise_application_count))
     print(" refusals=")
     print(io_trace_i64_string(receipt.exact_bitwise_refusal_count))
+    print(" same_region_applications=")
+    print(io_trace_i64_string(receipt.exact_bitwise_same_region_application_count))
+    print(" cross_block_applications=")
+    print(io_trace_i64_string(receipt.exact_bitwise_cross_block_application_count))
+    print(" refusal_reason_mask=")
+    print(io_trace_i64_string(receipt.exact_bitwise_refusal_reason_mask))
+    print(" transaction_ontology_parameter_links=")
+    print(io_trace_i64_string(receipt.exact_bitwise_transaction_ontology_parameter_link_count))
+    print(" application_ontology_parameter_links=")
+    print(io_trace_i64_string(receipt.exact_bitwise_application_ontology_parameter_link_count))
+    print(" last_ontology_class_hash=")
+    print(io_trace_i64_string(receipt.last_transaction_ontology_class_hash))
     print(" operator_mask=")
     print(io_trace_i64_string(receipt.exact_bitwise_operator_mask))
     print(" last_function=")
@@ -60,9 +87,11 @@ fn module_frontend_print_rebracket_disabled(phase: string, function_count: i64) 
     if !module_frontend_rebracket_trace_enabled() { return }
     print("[rebracket-native-v2] phase=")
     print(phase)
+    print(" schema=")
+    print(io_trace_i64_string(OCP_CLEANUP_RECEIPT_SCHEMA_VERSION))
     print(" optimize=0 functions=")
     print(io_trace_i64_string(function_count))
-    print(" transactions=0 authorizations=0 applications=0 refusals=0 operator_mask=0 last_function=-1 combined=0\n")
+    print(" transactions=0 authorizations=0 applications=0 refusals=0 same_region_applications=0 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=0 last_function=-1 combined=0\n")
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
@@ -1005,6 +1034,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
     merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
+    merged.ontologies = ir_merge_ontology_parameter_links(merged.ontologies, src.ontologies)
 
     merged
 }
@@ -4140,6 +4170,10 @@ fn module_frontend_lower_program_box_traced(
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
+    if module_frontend_items_have_ontology(&program.items) {
+        checker_apply_ir_ontology_parameter_links_from_items(&program.items, &! (*body_result.module))
+    }
+
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
     trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
@@ -4279,6 +4313,10 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
         return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+
+    if module_frontend_items_have_ontology(items) {
+        checker_apply_ir_ontology_parameter_links_from_items(items, &! (*body_result.module))
     }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
@@ -4623,6 +4661,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         }
                         (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
                         (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
+                        (*acc_box).ontologies = ir_merge_ontology_parameter_links((*acc_box).ontologies, (*dep_box).ontologies)
                         // Every field copied into acc_box above (functions incl.
                         // instrs, string_table entries, epistemic, algebras) is a
                         // plain value copy with no Box field except IrInstr.call_args
