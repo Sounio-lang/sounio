@@ -191,10 +191,15 @@ execution receipt exists for the canonical Sounio repository. All canonical
 scientific-package and research source roots remain present. The executable
 fixture is not permission to remove them.
 
-## Next Interface
+## Downstream Interfaces
 
 `r3-physical-extraction-canonical-cutover-approval` now binds exact source and
 destination Git worktrees and remote branch refs, reviewed repairs and gates,
 operator evidence, and a recovery procedure while rehearsing only on a
-disposable copy. Its receipt remains `approved-not-executed`; the next separate
-interface is `r3-physical-extraction-canonical-cutover-execution`.
+disposable copy. Its receipt remains `approved-not-executed`.
+
+`r3-physical-extraction-canonical-cutover-execution` now consumes that approval
+plus a separate policy that pre-binds the exact Git tree and commit. It performs
+real file removal and local/remote ref updates only in disposable acceptance
+fixtures. Neither interface creates production evidence or executes the Sounio
+canonical repository.

@@ -50,10 +50,13 @@ R2.6 binds that bundle to a local catalog policy without publication. R3 binds
 the declared roots to an exact-file ownership plan, permits a separately
 approved local copy whose receipt keeps source removal `not-authorized`, and
 can authorize an exact removed-and-repaired temporary candidate while keeping
-execution `not-executed`. None of these interfaces promotes scientific
-authority, and no canonical production destination, materialization, removal
-policy, authorization receipt, production execution policy, or canonical
-execution receipt currently exists.
+execution `not-executed`. A separate Git-bound executor can consume that
+approval, pre-bind an exact commit, remove/repair the bound tree, and publish an
+exact leased ref update. Its acceptance evidence exists only for disposable
+fixtures. None of these interfaces promotes scientific authority, and no
+canonical production destination, materialization, removal policy,
+authorization receipt, approval, execution policy, or execution receipt
+currently exists.
 
 ## Semantic Lane
 
@@ -80,7 +83,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-canonical-cutover-execution`
+`r3-physical-extraction-canonical-production-policy-and-human-decision`
 
 ## R3 Physical Extraction Inventory Semantic Lane
 
@@ -195,6 +198,29 @@ Negative-Witness: stale source binding, dirty worktree, changed branch, HEAD, re
 Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_cutover_approval_gate.sh
 Integration-Target: codex/physical-extraction-source-removal-execution-r3-20260717, then origin/main after the execution stack lands
 Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover approval gate pass on one archived source snapshot with one current-source Madaros; canonical production execution still requires a separate production policy, human decision, and execution interface
+```
+
+## R3 Canonical Cutover Execution Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-CUTOVER-EXECUTION-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: physical separation may become canonical only through an exact reversible evidence chain without turning repository location, Git publication, or successful removal into scientific authority
+Transformation: consume one reconstructed cutover approval plus a separately authored execution policy, pre-bind the exact Git tree and commit, execute approved removal/repair/gates, publish the exact remote ref under lease, and promote a deterministic receipt after complete post-state verification
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact disposable Git repository transition removed the approved roots, created and published the pre-bound commit, preserved destinations, and emitted a verified execution receipt
+Claims-Forbidden: Sounio canonical production cutover from fixture evidence, production permission without a canonical-production policy and human decision, hosting administration or namespace ownership, transferred maintainership, human identity or organizational authority, distributed crash atomicity, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the full approval remains reconstructable before mutation; source and destination repositories are standalone and clean; local and remote pre-cutover refs are equal and quiescent; the remote accepts an exact leased update and, before receipt promotion failure, an exact leased rollback; v1 Git object IDs are 40-hex SHA-1
+Write-Set: tools/science_boundary/canonical_cutover_executor.py; schemas/sounio.physical-extraction-canonical-cutover-execution{-policy,}.v1.schema.json; scripts/ci/physical_extraction_canonical_cutover_execution_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md,PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md,PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: tools/science_boundary/{physical_extraction_inventory.py,physical_extraction_materializer.py,source_removal_authorizer.py,source_removal_executor.py,canonical_cutover_authorizer.py}; schemas/sounio.physical-extraction-*.v1.schema.json; science-rings.tsv; physical extraction ownership policy
+Positive-Witness: two equivalent disposable standalone source/destination repository sets produce identical policies, approval receipts, planned Git trees/commits, executed local and remote refs, and final execution receipts while all destination repositories remain unchanged
+Negative-Witness: invalid context, stale or dirty Git state, changed evidence, incorrect CLI confirmation, wrong planned commit, occupied output, canonical-only gate mutation, receipt race after remote push, reintroduced source, changed destination, remote drift, mutating verification, and forged or rehashed receipt all refuse; pre-receipt failures restore the exact old local/remote refs and source tree
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_cutover_execution_gate.sh
+Integration-Target: codex/physical-extraction-canonical-cutover-approval-r3-20260717, then origin/main after the approval stack lands
+Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover execution gate pass on one archived source snapshot with one current-source Madaros; Sounio production execution additionally requires a separately authored canonical-production evidence set and explicit human decision
 ```
 
 ## R2.5 Semantic Lane
