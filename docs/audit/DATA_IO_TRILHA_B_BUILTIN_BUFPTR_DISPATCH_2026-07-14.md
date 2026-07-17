@@ -21,17 +21,33 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 >   `(path:*u8, buf:*u8, max_len)->i64` shape the codegen comment claims, and NOT a `[i8;N]` byte
 >   array (the repro's shape). `read_file(path)` and `file_size(path)` on a `string` **succeed**
 >   (Madaros reads every source file this way).
-> - **The one REAL defect** (different from what is dispatched below): the value returned by
->   `read_file` (an mmap-backed "string") is **unusable in a standalone Madaros-compiled program** —
->   every access crashes (`raw[i]`, `str_len(raw)`, `str_char_at(raw,i)` all SIGSEGV), even though
->   `frd_open`'s identical `raw[i]` idiom works **inside** the Madaros compiler binary. So the string
->   representation / runtime of `read_file`'s result differs standalone vs in-compiler. This is the
->   blocker for file readers; it needs FRESH localization (result-string representation, not `&buf`
->   arg marshalling). See the 2026-07-17 investigation continuing this lane.
+> - **The one REAL defect — ROOT-CAUSED and FIXED 2026-07-17** (commit on branch
+>   `fix/native-builtin-local-array-marshalling`). The native-v2 `emit_builtin_read_file`
+>   (`self-hosted/native/codegen_x86_linux.sio`) implemented a **different 3-arg** function
+>   `read_file(path,buf,max_len)->i64(bytes_read)` and returned an **integer**, while the contract is
+>   1-arg `read_file(path:string)->string` returning a **pointer to a freshly-mmap'd buffer**. So 1-arg
+>   callers dereferenced a non-pointer → SIGSEGV on `raw[i]`/`str_len`/`str_char_at`. It worked
+>   in-compiler only because Madaros's own read_file is emitted by a DIFFERENT emitter (the lean_single
+>   seed's 16 MiB cached-mmap read_file / the bootstrap chain), not by this native-v2 path — so the fix
+>   is native-v2-user-programs-only and cannot touch the bootstrap/self-host. **Fix:** rewrote
+>   `emit_builtin_read_file` to mirror `bootstrap_v0.sio:15028-15087` byte-for-byte (mmap→open→read→
+>   close→return buffer ptr). **Verified:** `read_file`+`str_len`+`str_char_at` byte-exact over a
+>   multi-line CSV; `str_from_bytes(buf,n)` intact; 0/40 run-pass compile regressions.
+>
+> **⚠️ READER LANDMINE:** `raw[i]` (array-index syntax) on `read_file`'s string result **still
+> SIGSEGVs** — a SEPARATE, unfixed string-index-operator bug. `frd_open` uses the `raw[i]` form and it
+> works *in-compiler*, so the idiomatic-looking form is exactly the trap. **File readers MUST use
+> `str_char_at(s,i)` + `str_len(s)`, never `raw[i]`,** until the string-index bug is fixed.
+>
+> **Remaining siblings (NOT fixed; separate items):** (1) `write_file` — identical 3-arg body in the
+> same file, same defect. (2) The `self-hosted/native/codegen.sio` old-backend copy of
+> `emit_builtin_read_file` (reachable via wide/render drivers, not the default path). (3) The `raw[i]`
+> string-index-operator crash above. (4) `file_size`/`read_file` fail on some ABSOLUTE paths but work
+> on relative ones (path-length or cwd resolution — unconfirmed).
 >
 > Net: the "`&local_array` into builtin" root cause below is not the bug. `str_from_bytes`/`file_size`
-> work; `read_file` returns but its result is inaccessible standalone. Everything below is retained as
-> the original (incorrect) dispatch record.
+> work; `read_file` is now FIXED (native-v2 user path). Everything below is retained as the original
+> (incorrect) dispatch record.
 
 **Date:** 2026-07-14
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine)
