@@ -692,6 +692,16 @@ def main() -> int:
         check(source_final == source_before, "adversarial gate did not restore source fixture")
         run(verify_command(repo, rings, ownership, inventory, policy, destinations_a, receipt_a))
 
+    print(
+        "PHYSICAL_EXTRACTION_MATERIALIZATION_WITNESS "
+        f"receipt_identity={receipt_payload['materialization_identity_sha256']} "
+        f"policy_identity={policy_payload['policy_identity_sha256']} "
+        f"units={receipt_payload['summary']['materialized_unit_count']} "
+        f"files={receipt_payload['summary']['file_count']} "
+        f"bytes={receipt_payload['summary']['total_bytes']} "
+        f"status={receipt_payload['materialization_status']} "
+        f"source_removal={receipt_payload['source_removal_status']}"
+    )
     print(f"PHYSICAL_EXTRACTION_MATERIALIZATION_GATE_PASS assertions={TESTS}")
     return 0
 
