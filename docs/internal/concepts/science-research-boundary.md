@@ -300,6 +300,30 @@ Remaining-Blockers: none for the executable local materialization interface; rea
 Next-Semantic-Interface: r3-physical-extraction-source-removal-authorization
 ```
 
+## R3 Source-Removal Authorization Integration Receipt
+
+```text
+Semantic-Outcome: executable authorization-only boundary for an exact removed, repaired, and gate-passing R3 temporary candidate
+Concept-Status-Before: executable R0-R3 local materialization interface with source removal not authorized
+Concept-Status-After: executable R0-R3 source-removal authorization interface; canonical production extraction and removal remain not executed
+Distinctions-Added: candidate removal versus original-source deletion; distinct review records versus reviewer independence; authorization versus execution
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; location versus scientific authority; file identity versus independent replay; local evidence versus ownership or publication
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 4435ee73c7eac2a0742cb8522c34ec9a4bfe6bfe, 339627188 bytes, sha256=6b9253d534f7211f9728374fe8b264213506a6c1bd7b251d9967dc29228c6a44
+Evidence-Compiler: unchanged source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6527 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:42, MaxRSS=1422484K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, R3 inventory 141 assertions, R3 materialization 167 assertions, and source-removal authorization 527 assertions all PASS
+Evidence-Authorization: authorization identity=84f864551bcbb2265006fab62d7a19895c3deb59163a1967d380c0e027a90a28; policy identity=efb3071bb11d220a25e4e279bd54323a8db406a1a324191486fe6001100f80a0; scope identity=879ad3a7b3508335154f657907373800963ba05bbcd250adfb62f9e75cd07c2c; units=2 files=3 status=authorized-not-executed execution=not-executed
+Evidence-Logs: gate sha256=ecbab58b65d92f19c8f8899732c0f5d44b122371fbd7ff48e6e45941eb4543f4; stdout sha256=f7a4369225b7ce882acce35969e81918094de84c567eaaa743da3ab7b628f83c; stderr empty sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Supporting-Gates: physical_extraction_source_removal_authorization_gate.py -> PASS 527; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh plus selftest -> PASS; check_docs_consistency.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: the source-removal Madaros variable is statically required to forward into the materialization stack; Slurm extraction, promotion, and candidate workspaces used node-local /tmp while durable inputs and logs remained on OrangeFS
+Fallback-Path: none authorized or used; any stale materialization, incomplete review or scope, invalid repair, failing or mutating post-removal gate, source mutation, or forged/rehashed receipt refuses
+Legacy-Kept: all canonical source roots remain in place; no production destination, materialization, removal policy, or authorization receipt was created; stdlib remains blocked-classification; all R2.5, R2.6, inventory, and materialization interfaces remain unchanged
+Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIENCE-RESEARCH-BOUNDARY; no compiler, IR, stdlib, package, example, or self-hosted source file was edited
+LLM-Offload: xai/grok-4.3 review found no BLOCKER, MAJOR, or MINOR issue in the authorization-only implementation and contract; raw=/tmp/llm-offload-cfWgYf/
+Remaining-Blockers: none for the executable authorization-only interface; real destination approval and materialization, approved production repairs and post-removal gates, and explicit human permission are prerequisites for any canonical execution
+Next-Semantic-Interface: r3-physical-extraction-source-removal-execution
+```
+
 ## Closed Blockers
 
 ```text

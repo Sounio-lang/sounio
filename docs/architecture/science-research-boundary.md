@@ -338,3 +338,12 @@ post-removal command evidence, candidate mutation refusal, and forged or
 rehashed policy and authorization refusal. It authorizes two fixture units and
 three fixture files as `authorized-not-executed`; all original fixture roots
 remain present. No production policy or canonical authorization exists.
+
+The composed current-source authorization witness is Slurm job `6527` on
+`gpuorangefs-r770-proxmox`: one archived source snapshot and the unchanged
+source-fresh Madaros passed all 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory,
+167 materialization, and 527 authorization checks in 42 seconds. The final
+fixture receipt identities match the local witness, reports
+`authorized-not-executed` and `not-executed`, and leaves every original source
+root present. Node-local temporary storage was used for every promotion and
+candidate workspace; no fallback implementation path ran.

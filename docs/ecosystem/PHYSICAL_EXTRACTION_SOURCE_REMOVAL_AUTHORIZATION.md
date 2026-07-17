@@ -142,6 +142,16 @@ composed shell gate first executes R0-R2, R2.5, R2.6, inventory and
 materialization acceptance against the same archived source and current-source
 Madaros witness.
 
+The current composed fixture witness is Slurm job `6527` on
+`gpuorangefs-r770-proxmox`. It passed 178 R0-R2, 65 R2.5, 82 R2.6, 141
+inventory, 167 materialization, and 527 authorization checks using one
+archived source snapshot and one current-source Madaros. The authorization
+identity is
+`84f864551bcbb2265006fab62d7a19895c3deb59163a1967d380c0e027a90a28`;
+the policy identity is
+`efb3071bb11d220a25e4e279bd54323a8db406a1a324191486fe6001100f80a0`.
+These are deterministic fixture identities, not production approvals.
+
 ## Canonical Repository Status
 
 The repository contains no approved production destination policy,
