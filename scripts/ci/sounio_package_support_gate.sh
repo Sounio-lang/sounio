@@ -86,6 +86,11 @@ required = {
         "unsigned-local-policy-evaluation",
         "publication-status = \"disabled\"",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md": [
+        "Status: executable R3 ownership and file-identity inventory; physical extraction is not executed.",
+        "physical-extraction-planning-snapshot",
+        "r3-physical-extraction-materialization",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -119,6 +124,7 @@ for rel, needles in required.items():
 for rel in [
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md",
     "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -162,5 +168,6 @@ run_step pkg-manifest-fixture run_compiled_fixture tests/run-pass/pkg_manifest_p
 run_step pkg-registry-fixture run_compiled_fixture tests/run-pass/pkg_registry_basic.sio 'pkg_registry_basic: ALL PASS'
 run_step sounio-pkg-smoke run_sounio_pkg_smoke
 run_step public-package-wording check_public_package_wording
+run_step physical-extraction-inventory python3 "$ROOT_DIR/scripts/ci/physical_extraction_inventory_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'

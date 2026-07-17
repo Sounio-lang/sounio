@@ -9,14 +9,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 # Science and Research Boundary
 
-Status: executable R0-R2 boundary with an R2.5 local package-release boundary
-and an R2.6 local registry-attestation policy contract; physical extraction R3
-is deferred. Promotion is bound to the transitive raw-AST witness in
+Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
+an R2.6 local registry-attestation policy contract, and an R3 physical
+extraction inventory; physical materialization remains deferred. Promotion is
+bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
 `scripts/ci/registry_attestation_spec_gate.sh`, and a current-source Madaros.
 R3 means moving scientific-package and research sources into separately owned
-repositories or distributions; R2.6 moves no source file and launches no
+repositories or distributions. The current R3 inventory binds proposed
+ownership and exact file identity but moves no source file. R2.6 launches no
 registry service.
 
 The enforced dependency direction is:
@@ -133,6 +135,27 @@ registry status, upload, namespace ownership, issuer identity, remote
 signature, independent replay, scientific truth, or clinical authority. The
 complete contract is `docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md`.
 
+## R3 Physical Extraction Inventory
+
+`tools/science_boundary/physical_extraction_inventory.py` binds every root in
+`science-rings.tsv` to exactly one row in
+`docs/ecosystem/science-physical-extraction-ownership.tsv`. It recursively
+records every regular file, byte size, SHA-256 digest, per-unit tree identity,
+and the root's proposed ownership disposition.
+
+The v1 rules retain `pl-core` in the root repository, plan separately named
+distributions for conclusive `scientific-package` and `research` roots, and
+block candidate or unresolved roots without assigning a destination. Roots
+must be repository-relative and non-overlapping; symbolic links and incomplete
+coverage refuse.
+
+Every emitted artifact has type `physical-extraction-planning-snapshot`,
+status `not-executed`, and `identity-only` assurance. It proves neither source
+movement nor destination existence or ownership transfer. Full materialization
+is the separate `r3-physical-extraction-materialization` interface. The
+complete inventory contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -198,8 +221,8 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
 contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
-release bundle, and deterministic R2.6 local registry-policy attestation are
-implemented.
+release bundle, deterministic R2.6 local registry-policy attestation, and R3
+physical extraction inventory are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -215,3 +238,10 @@ The composed current-source acceptance witness is Slurm job `6394`: the same
 Madaros ELF passed all 178 R0-R2 assertions, 65 R2.5 assertions, and 82 R2.6
 assertions. This establishes the named software boundary only; it does not
 promote any package or claim to a stronger evidence class.
+
+The focused R3 gate adds 141 assertions for exact ring and ownership coverage,
+deterministic file identity, retained/planned/blocked dispositions, occupied
+output preservation, source mutation detection, and forged or rehashed
+inventory refusal. Its current repository witness covers seven ownership units
+and more than 3,000 regular files while keeping extraction status
+`not-executed`.

@@ -32,9 +32,10 @@ validated research        != clinical validation
 
 Status: `executable`
 
-The R0-R2 host attestor, compiler integration, and R2.5 package release boundary
-are executable. The named gates
-proves pass, refuse, `UNKNOWN`, deterministic receipt identity, source
+The R0-R2 host attestor, compiler integration, R2.5 package release boundary,
+R2.6 local registry attestation, and R3 physical extraction inventory are
+executable. The named gates
+prove pass, refuse, `UNKNOWN`, deterministic receipt identity, source
 sensitivity, evidence and receipt tamper refusal, absence of a final ELF after
 strict refusal, and a real transitive raw-AST import witness. The current-source
 Madaros was built through the canonical source-tracking bootstrap path on Slurm.
@@ -42,6 +43,10 @@ Madaros was built through the canonical source-tracking bootstrap path on Slurm.
 R2.5 adds no new scientific claim class. It makes the existing receipt a
 promotion prerequisite for one local, opt-in release bundle and preserves the
 identity-versus-assurance distinction.
+
+R2.6 binds that bundle to a local catalog policy without publication. R3 binds
+the declared roots to an exact-file ownership plan while keeping extraction
+status `not-executed`; neither interface promotes scientific authority.
 
 ## Semantic Lane
 
@@ -68,7 +73,30 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-inventory`
+`r3-physical-extraction-materialization`
+
+## R3 Physical Extraction Inventory Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-PHYSICAL-EXTRACTION-INVENTORY-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: scientific-package and research sources acquire explicit future ownership without allowing repository location, catalog membership, or file identity to become scientific authority
+Transformation: bind every science-rings.tsv root to one explicit retain, extract, or blocked disposition and one deterministic exact-file snapshot
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that the current repository snapshot has exact ownership-plan coverage and content identity for every declared science ring root
+Claims-Forbidden: completed source movement, target repository existence, transferred ownership, public publication, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: source roots are repository-relative non-overlapping directories; extraction snapshots contain regular files only and refuse symbolic links
+Write-Set: tools/science_boundary/physical_extraction_inventory.py; schemas/sounio.physical-extraction-inventory.v1.schema.json; scripts/ci/physical_extraction_inventory_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_INVENTORY.md,science-physical-extraction-ownership.tsv,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: science-rings.tsv; tools/science_boundary/{attestor.py,package_release.py,registry_attestation.py}; schemas/sounio.registry-attestation.v1.schema.json; package manifests
+Positive-Witness: exact ring coverage emits a deterministic identity-only snapshot whose file inventory round-trips against the same repository and ownership policy
+Negative-Witness: missing, duplicate, overlapping, escaping, symlinked, ring-mismatched, disposition-invalid, mutated, added, deleted, forged, or rehashed inputs refuse
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_inventory_gate.sh
+Integration-Target: codex/registry-attestation-r26-20260717, then origin/main after the R2.6 stack lands
+Authoritative-Only-If: R0-R2, R2.5, R2.6, and the R3 inventory gate pass on one source snapshot, with the first three using the same current-source raw Madaros AST collector
+```
 
 ## R2.5 Semantic Lane
 
