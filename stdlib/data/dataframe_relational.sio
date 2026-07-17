@@ -133,3 +133,84 @@ pub fn df_join_inner(left: &DataFrame, right: &DataFrame, left_key: i64, right_k
     }
     out
 }
+
+// True if `key` appears in column `col` of `df`.
+fn df_col_contains(df: &DataFrame, col: i64, key: f64) -> bool with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        if df_get(df, r, col) == key { return true }
+        r = r + 1
+    }
+    false
+}
+
+/// Left (outer) join: every left row appears at least once. Matching right rows contribute their
+/// columns (all right columns except the right key); a left row with no match gets 0.0 in those
+/// columns. Result layout is identical to df_join_inner: left.ncols + right.ncols - 1 columns.
+/// (0.0 is the "missing" fill — the DataFrame has no separate null.)
+pub fn df_join_left(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_new(lc + rc - 1)
+    var lr: i64 = 0
+    while lr < df_nrows(left) {
+        let lk = df_get(left, lr, left_key)
+        var matched: i64 = 0
+        var rr: i64 = 0
+        while rr < df_nrows(right) {
+            if df_get(right, rr, right_key) == lk {
+                matched = 1
+                var row: [f64; 64] = [0.0; 64]
+                var col: i64 = 0
+                var c: i64 = 0
+                while c < lc && col < 64 { row[col as usize] = df_get(left, lr, c); col = col + 1; c = c + 1 }
+                c = 0
+                while c < rc && col < 64 {
+                    if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                    c = c + 1
+                }
+                df_add_row(&!out, &row)
+            }
+            rr = rr + 1
+        }
+        if matched == 0 {
+            // left columns preserved; the (rc - 1) right columns stay 0.0
+            var row: [f64; 64] = [0.0; 64]
+            var c: i64 = 0
+            while c < lc && c < 64 { row[c as usize] = df_get(left, lr, c); c = c + 1 }
+            df_add_row(&!out, &row)
+        }
+        lr = lr + 1
+    }
+    out
+}
+
+/// Full outer join: the left join, plus one row for every right key absent from the left. Those
+/// right-only rows carry the right key in the left-key column, 0.0 in the other left columns, and
+/// the right row's values in the right columns. Same layout as df_join_inner/df_join_left.
+pub fn df_join_outer(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_join_left(left, right, left_key, right_key)
+    var rr: i64 = 0
+    while rr < df_nrows(right) {
+        let rk = df_get(right, rr, right_key)
+        if !df_col_contains(left, left_key, rk) {
+            var row: [f64; 64] = [0.0; 64]
+            row[left_key as usize] = rk            // carry the key into the left-key column
+            var col: i64 = lc
+            var c: i64 = 0
+            while c < rc && col < 64 {
+                if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                c = c + 1
+            }
+            df_add_row(&!out, &row)
+        }
+        rr = rr + 1
+    }
+    out
+}

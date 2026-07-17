@@ -1,0 +1,44 @@
+// Run-proof for stdlib data::dataframe_relational left/outer joins.
+//   left [id,val]:  (1,10)(2,20)(3,30)
+//   right [id,tag]: (1,100)(3,300)(4,400)
+// inner -> 2 rows (id1,id3); left -> 3 rows (id2 unmatched, tag filled 0.0); outer -> 4 rows
+// (adds id4, present only on the right). lean_single engine.
+use data::dataframe::*
+use data::dataframe_relational::*
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn add2(df: &!DataFrame, a: f64, b: f64) with Mut, Div, Panic { var r: [f64; 64] = [0.0; 64]; r[0]=a; r[1]=b; df_add_row(df, &r) }
+// return the value at (id-row, col) by searching column 0 for `id`; -999 if absent
+fn at_id(df: &DataFrame, id: f64, col: i64) -> f64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < df_nrows(df) { if df_get(df, r, 0) == id { return df_get(df, r, col) } r = r + 1 }
+    0.0 - 999.0
+}
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var L = df_new(2); add2(&!L,1.0,10.0); add2(&!L,2.0,20.0); add2(&!L,3.0,30.0)
+    var R = df_new(2); add2(&!R,1.0,100.0); add2(&!R,3.0,300.0); add2(&!R,4.0,400.0)
+    // inner: only matching keys
+    let inj = df_join_inner(&L, &R, 0, 0)
+    if df_nrows(&inj) != 2 { print("FAIL inner_rows\n"); return 1 }
+    // left: every left row present; id2 has no right match -> tag = 0.0
+    let lj = df_join_left(&L, &R, 0, 0)
+    if df_nrows(&lj) != 3 || df_ncols(&lj) != 3 { print("FAIL left_shape\n"); return 2 }
+    if ae(at_id(&lj, 1.0, 2), 100.0) >= 1.0e-9 { print("FAIL left_id1_tag\n"); return 3 }
+    if ae(at_id(&lj, 2.0, 1), 20.0) >= 1.0e-9 { print("FAIL left_id2_val\n"); return 4 }
+    if ae(at_id(&lj, 2.0, 2), 0.0) >= 1.0e-9 { print("FAIL left_id2_fill\n"); return 5 }   // no right -> 0
+    if ae(at_id(&lj, 3.0, 2), 300.0) >= 1.0e-9 { print("FAIL left_id3_tag\n"); return 6 }
+    // right-only key is NOT in a left join
+    if at_id(&lj, 4.0, 0) > (0.0 - 998.0) { print("FAIL left_no_id4\n"); return 7 }
+    // outer: left join plus right-only rows
+    let oj = df_join_outer(&L, &R, 0, 0)
+    if df_nrows(&oj) != 4 { print("FAIL outer_rows\n"); return 8 }
+    if ae(at_id(&oj, 2.0, 2), 0.0) >= 1.0e-9 { print("FAIL outer_id2_fill\n"); return 9 }   // left-only fill
+    if ae(at_id(&oj, 4.0, 1), 0.0) >= 1.0e-9 { print("FAIL outer_id4_left_fill\n"); return 10 } // right-only: left cols 0
+    if ae(at_id(&oj, 4.0, 2), 400.0) >= 1.0e-9 { print("FAIL outer_id4_tag\n"); return 11 }     // right values carried
+    if ae(at_id(&oj, 4.0, 0), 4.0) >= 1.0e-9 { print("FAIL outer_id4_key\n"); return 12 }       // key preserved
+    // left join keeps every left key (one-to-many): left key 1 matching 2 right rows -> 2 output rows
+    var R2 = df_new(2); add2(&!R2,1.0,100.0); add2(&!R2,1.0,101.0)
+    let lm = df_join_left(&L, &R2, 0, 0)
+    if df_nrows(&lm) != 4 { print("FAIL left_multi\n"); return 13 }   // id1x2 + id2 + id3
+    print("DATAFRAME_OUTER_JOINS_STDLIB_OK\n")
+    return 0
+}
