@@ -176,6 +176,27 @@ refusal. It explicitly refuses `approved` proposals and `authorized` mappings.
 
 The composed shell gate runs the complete R0-R3 cutover execution stack first.
 
+The composed current-source witness is Slurm job `6615` on
+`gpuorangefs-r770-proxmox`. Commit
+`4dc8749a7be001ab0f9d80e5723fc292078c1527`, compressed source archive
+`484fde3c4881905d60fbf601d8d42a7ba5d389cb6392b9657022c2267a791ede`
+(339700729 bytes), current-source Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`,
+and Git 2.43.0 passed 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167
+materialization, 527 authorization, 164 local execution, 172 cutover approval,
+81 cutover execution, and 90 production-gap checks in 55 seconds with
+`MaxRSS=1390896K`. Stdout is 3580 bytes with SHA-256
+`94b7da4b7222ed882248dcdf5557348de1a025dc248b623de732ac521a1624ee`;
+stderr is empty with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The immutable archive, compiler, extraction, transaction, fixture repositories,
+bare remotes, and logs used node-local `/tmp`. The new compiler environment
+variable was forwarded into the complete prior stack, so every compiler-bound
+gate used the same Madaros witness. No implementation fallback ran, no real
+repository catalog was consumed by the Slurm fixture gate, and no canonical
+source or remote ref changed.
+
 ## Remaining Decision Boundary
 
 This assessment closes no permission-bearing prerequisite. The next interface
