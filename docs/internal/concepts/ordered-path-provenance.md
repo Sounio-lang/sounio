@@ -2,9 +2,9 @@
 topic_id: repo.docs.internal.concepts.ordered-path-provenance
 authority: repo_only
 audience: users
-last_validated: 2026-07-17
-validated_by: Codex
-source_of_truth: docs/internal/concepts/registry.tsv#SOUNIO-ORDERED-PATH-PROVENANCE
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.ordered-path-provenance
 -->
 
 # Ordered Path Provenance
