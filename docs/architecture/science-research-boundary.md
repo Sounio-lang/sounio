@@ -12,8 +12,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
 an R2.6 local registry-attestation policy contract, and R3 physical extraction
 inventory, local exact-copy materialization, temporary-copy source-removal
-authorization, and policy-bound local source-removal execution interfaces;
-canonical repository cutover remains not executed. Promotion is
+authorization, policy-bound local source-removal execution, and exact Git-state
+canonical-cutover approval interfaces; canonical repository cutover remains
+not executed. Promotion is
 bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
@@ -240,6 +241,33 @@ roots. No production execution policy or receipt exists for the canonical
 Sounio repository, so its source roots remain unchanged. The complete contract
 is `docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md`.
 
+## R3 Canonical Cutover Approval
+
+`tools/science_boundary/canonical_cutover_authorizer.py` reconstructs the full
+source-removal authorization while the original source remains present and
+consumes a separate exact cutover policy. The policy binds the authorization,
+materialization, inventory, pre/post trees, removal scope, repair and gate sets,
+the clean canonical Git worktree, and one clean content-exact destination Git
+worktree for every materialized unit. Each Git binding includes repository ID,
+branch, local `HEAD`, configured remote URL, and the branch object ID observed
+through `git ls-remote`.
+
+The authorizer also binds a retained canonical marker, destination-owner
+evidence, operator confirmations, and a structured recovery plan. It rehearses
+the exact removals, repairs and gates on a disposable full-file copy, restores
+that copy from a full backup, and revalidates every source, policy, evidence,
+Git and remote-ref binding before promoting the receipt while holding the
+canonical-root lock. It never removes a canonical source file.
+
+The deterministic receipt reports `approved-not-executed`, cutover execution
+`not-executed`, source removal `not-executed`, and
+`identity-plus-git-remote-ref` assurance. A `disposable-fixture` receipt is not
+production approval; Git remote-ref observation does not prove hosting
+administration, ownership or organizational authority. No production cutover
+policy or receipt exists for the canonical Sounio repository. The complete
+contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -307,8 +335,8 @@ The host attestor, CLI flags, ternary policy, deterministic receipt, claim
 contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
 release bundle, deterministic R2.6 local registry-policy attestation, R3
 physical extraction inventory, R3 local materialization, R3 temporary-copy
-source-removal authorization, and R3 policy-bound local source-removal
-execution interfaces are implemented.
+source-removal authorization, R3 policy-bound local source-removal execution,
+and R3 Git-state canonical-cutover approval interfaces are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable

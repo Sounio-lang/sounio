@@ -80,7 +80,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-canonical-cutover-approval`
+`r3-physical-extraction-canonical-cutover-execution`
 
 ## R3 Physical Extraction Inventory Semantic Lane
 
@@ -172,6 +172,29 @@ Negative-Witness: stale authorization or materialization, wrong policy binding, 
 Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_source_removal_execution_gate.sh
 Integration-Target: codex/physical-extraction-source-removal-auth-r3-20260717, then origin/main after the authorization stack lands
 Authoritative-Only-If: R0-R2, R2.5, R2.6, inventory, materialization, authorization, and execution gates pass on one archived snapshot with one current-source Madaros; canonical cutover additionally requires a separate production approval and real destination evidence
+```
+
+## R3 Canonical Cutover Approval Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-CUTOVER-APPROVAL-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: a canonical scientific-package or research cutover may proceed only after exact source, destination, repair, gate, operator, and recovery evidence is bound without converting repository location or Git state into scientific authority
+Transformation: reconstruct the complete authorization, bind clean canonical and destination Git worktrees plus observed remote branch refs, rehearse removal/repair/gates/restoration on a disposable copy, and promote an approved-not-executed receipt while the canonical-root lock remains held
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact Git-bound fixture repository set was approved but not executed after a complete disposable cutover and restoration rehearsal
+Claims-Forbidden: canonical cutover execution, source removal, production approval from fixture evidence, hosting administration or namespace ownership, transferred maintainership, human identity or organizational authority, crash-atomic multi-file execution, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the complete authorization remains reconstructable; each bound worktree is clean; local HEAD equals the exact observed remote branch ref; the v1 Git repositories use 40-hex SHA-1 object IDs; nonparticipating writers remain quiesced
+Write-Set: tools/science_boundary/canonical_cutover_authorizer.py; schemas/sounio.physical-extraction-canonical-cutover-{policy,approval}.v1.schema.json; scripts/ci/physical_extraction_canonical_cutover_approval_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md,PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/{registry,bindings}.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: tools/science_boundary/{physical_extraction_inventory.py,physical_extraction_materializer.py,source_removal_authorizer.py,source_removal_executor.py}; schemas/sounio.physical-extraction-{inventory,destination-policy,materialization,source-removal-policy,source-removal-authorization,source-removal-execution-policy,source-removal-execution}.v1.schema.json; science-rings.tsv; physical extraction ownership policy
+Positive-Witness: two equivalent disposable source and destination Git repository sets bind identical local and remote branch object IDs, pass complete cutover and restoration rehearsals, and emit byte-identical approved-not-executed receipts while every source root remains present
+Negative-Witness: stale source binding, dirty worktree, changed branch, HEAD, remote URL or remote branch ref, missing or extra destination, destination content mismatch, duplicated repository or owner evidence, changed marker or recovery plan, incorrect CLI confirmation, occupied output, mutating rehearsal gate, and forged or rehashed receipt all refuse without changing source or destinations
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_cutover_approval_gate.sh
+Integration-Target: codex/physical-extraction-source-removal-execution-r3-20260717, then origin/main after the execution stack lands
+Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover approval gate pass on one archived source snapshot with one current-source Madaros; canonical production execution still requires a separate production policy, human decision, and execution interface
 ```
 
 ## R2.5 Semantic Lane

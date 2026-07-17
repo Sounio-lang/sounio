@@ -106,6 +106,11 @@ required = {
         "execution_status = executed-and-verified",
         "source_removal_status = executed",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md": [
+        "Status: executable R3 Git-state and rehearsal approval interface; canonical repository cutover is not executed.",
+        "canonical_cutover_approval_status = approved-not-executed",
+        "canonical_cutover_execution_status = not-executed",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -143,6 +148,7 @@ for rel in [
     "docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -192,5 +198,7 @@ run_step physical-extraction-source-removal-authorization \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_authorization_gate.py"
 run_step physical-extraction-source-removal-execution \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_execution_gate.py"
+run_step physical-extraction-canonical-cutover-approval \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_approval_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'
