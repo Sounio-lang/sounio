@@ -157,7 +157,9 @@ append_native_algebra_probes() {
     "fn hmma_emit_sed_associator_kernel" \
     ".visible .entry sounio_sed_associator" \
     "fn hmma_emit_ossm_oct_step_kernel" \
-    ".visible .entry sounio_ossm_oct_step"
+    ".visible .entry sounio_ossm_oct_step" \
+    "fn hmma_emit_ossm_oct_cell_kernel" \
+    ".visible .entry sounio_ossm_oct_cell"
 
   append_source_probe \
     "native_ossm_ptx_emitter" \
