@@ -1,0 +1,75 @@
+//! Feature scaling of DataFrame columns: min-max normalization, z-score standardization, and
+//! min-max scaling to an arbitrary range.
+//!
+//! Each verb scales every column independently. Functional: the input is unchanged and column names
+//! are preserved. Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name, df_col_min, df_col_max, df_col_mean, df_col_std}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+/// Min-max scale every column to [lo, hi]. A constant column (max == min) maps to `lo`.
+pub fn df_scale(df: &DataFrame, lo: f64, hi: f64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var mn: [f64; 64] = [0.0; 64]
+    var span: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 {
+        let lo0 = df_col_min(df, c)
+        mn[c as usize] = lo0
+        span[c as usize] = df_col_max(df, c) - lo0
+        c = c + 1
+    }
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var k: i64 = 0
+        while k < nc && k < 64 {
+            let s = span[k as usize]
+            if s != 0.0 { row[k as usize] = lo + (hi - lo) * (df_get(df, r, k) - mn[k as usize]) / s } else { row[k as usize] = lo }
+            k = k + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Min-max normalize every column to [0, 1].
+pub fn df_normalize(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    df_scale(df, 0.0, 1.0)
+}
+
+/// Z-score standardize every column: (v - mean) / std (sample std, n-1). A zero-std column maps to 0.
+pub fn df_standardize(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var mean: [f64; 64] = [0.0; 64]
+    var sd: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 {
+        mean[c as usize] = df_col_mean(df, c)
+        sd[c as usize] = df_col_std(df, c)
+        c = c + 1
+    }
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var k: i64 = 0
+        while k < nc && k < 64 {
+            let s = sd[k as usize]
+            if s != 0.0 { row[k as usize] = (df_get(df, r, k) - mean[k as usize]) / s } else { row[k as usize] = 0.0 }
+            k = k + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
