@@ -11,15 +11,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
 an R2.6 local registry-attestation policy contract, and an R3 physical
-extraction inventory; physical materialization remains deferred. Promotion is
+extraction inventory plus local exact-copy materialization interface; canonical
+repository extraction remains not executed. Promotion is
 bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
 `scripts/ci/registry_attestation_spec_gate.sh`, and a current-source Madaros.
 R3 means moving scientific-package and research sources into separately owned
-repositories or distributions. The current R3 inventory binds proposed
-ownership and exact file identity but moves no source file. R2.6 launches no
-registry service.
+repositories or distributions. The inventory binds proposed ownership and
+exact file identity. The materializer can copy approved units to preexisting
+local destinations and verify them, but the canonical repository has no
+approved production destination policy or materialization receipt and moves no
+source file. R2.6 launches no registry service.
 
 The enforced dependency direction is:
 
@@ -151,10 +154,38 @@ coverage refuse.
 
 Every emitted artifact has type `physical-extraction-planning-snapshot`,
 status `not-executed`, and `identity-only` assurance. It proves neither source
-movement nor destination existence or ownership transfer. Full materialization
-is the separate `r3-physical-extraction-materialization` interface. The
-complete inventory contract is
+movement nor destination existence or ownership transfer. Those claims require
+the separate materialization interface. The complete inventory contract is
 `docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md`.
+
+## R3 Physical Extraction Materialization
+
+`tools/science_boundary/physical_extraction_materializer.py` consumes a fully
+reverified inventory and an explicit
+`sounio.physical-extraction-destination-policy.v1`. Every planned target must
+have a unique approved policy row, repository-local approval evidence bound by
+size and SHA-256, and a preexisting local destination carrying an exact marker
+bound to the same inventory.
+
+The tool stages every regular-file copy and verifies its byte identity before
+promoting any final content path. Unit promotion uses same-filesystem directory
+renames; the deterministic receipt is promoted last. Verification reconstructs
+the source inventory, policy bindings, markers, exact destination trees, and
+receipt. Source or destination mutation, incomplete approval, symlinks,
+occupied output, malformed inputs, and forged or rehashed receipts refuse.
+
+The materialization receipt has type `verified-local-exact-copy`, status
+`copied-and-verified`, `identity-only` assurance, and source-removal status
+`not-authorized`. It proves local byte-copy identity only. It does not establish
+a remote repository, commit or push, ownership transfer, publication,
+independent replay, scientific truth, or clinical authority. Multiple unit
+renames cannot be crash-atomic as one filesystem transaction; a valid final
+receipt is required to accept the complete operation.
+
+No approved production destination policy or receipt currently exists for the
+canonical Sounio roots, so this executable interface does not claim that the
+repository migration occurred. The complete contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md`.
 
 ## Declarations
 
@@ -221,8 +252,9 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
 contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
-release bundle, deterministic R2.6 local registry-policy attestation, and R3
-physical extraction inventory are implemented.
+release bundle, deterministic R2.6 local registry-policy attestation, R3
+physical extraction inventory, and R3 local materialization interface are
+implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -252,3 +284,12 @@ The composed current-source R3 acceptance witness is Slurm job `6434` on
 regular files across seven ownership units and verifies with extraction status
 `not-executed`. This is evidence for the inventory boundary only, not physical
 materialization or ownership transfer.
+
+The focused materialization gate adds 167 assertions for exact approval
+coverage, destination-marker binding, deterministic receipts across physical
+roots, source preservation, occupied-output preservation, and source,
+destination, policy, inventory, marker, and receipt tamper refusal. It
+materializes two approved fixture units while retaining one core unit and
+leaving one unresolved unit blocked. A production witness for the canonical
+five planned targets remains absent because no production destination policy
+has been approved.
