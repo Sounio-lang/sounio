@@ -111,9 +111,15 @@ grep -Fq 'pub fn ir_module_arena_v2_soir_emit_empty_v5(' "$BRIDGE" || fail bridg
 grep -Fq 'soir_writer_preflight_scalar_empty_module_v5' "$BRIDGE" || fail writer_preflight_not_delegated
 grep -Fq 'soir_writer_emit_scalar_empty_module_v5' "$BRIDGE" || fail writer_emit_not_delegated
 
+dependency_pattern='use (parser|ir::ir)|\b(IrModule|IrInstr|TyF128|TyF256|numeric_payload)\b'
 set +e
-rg -n 'use (parser|ir::ir)|\b(IrModule|IrInstr|TyF128|TyF256|numeric_payload)\b' \
-  "$ARENA" "$WRITER" "$BRIDGE" >"$TMP/dependency-leak.log" 2>&1
+if command -v rg >/dev/null 2>&1; then
+  rg -n "$dependency_pattern" "$ARENA" "$WRITER" "$BRIDGE" \
+    >"$TMP/dependency-leak.log" 2>&1
+else
+  grep -En "$dependency_pattern" "$ARENA" "$WRITER" "$BRIDGE" \
+    >"$TMP/dependency-leak.log" 2>&1
+fi
 dependency_scan_rc=$?
 set -e
 if [[ "$dependency_scan_rc" -eq 0 ]]; then
@@ -175,19 +181,27 @@ done
 
 run_manifest_precision_identity_check() {
   local shim_dir="$TMP/manifest-tool-shim"
-  local shim="$shim_dir/git"
+  local git_shim="$shim_dir/git"
+  local rg_shim="$shim_dir/rg"
   mkdir -p "$shim_dir"
   # The canonical structural precision gate uses Git once, only to print a
   # source identity. Bind that receipt to the pinned manifest and reject every
-  # other Git operation; all descriptor and containment checks run unchanged.
+  # other Git operation. Its one rg call receives a strict grep-backed adapter;
+  # all descriptor and containment checks run unchanged.
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
     printf '%s\n' 'if [[ "$#" -eq 2 && "$1" == "rev-parse" && "$2" == "HEAD" ]]; then'
     printf '  printf '\''%%s\\n'\'' '\''manifest:%s'\''\n' "$CONTENT_MANIFEST_SHA256"
     printf '%s\n' '  exit 0' 'fi'
     printf '%s\n' 'echo "manifest provenance adapter rejected unsupported git command" >&2' 'exit 64'
-  } >"$shim"
-  chmod +x "$shim"
+  } >"$git_shim"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf '%s\n' 'if [[ "${1:-}" != "-n" || "$#" -lt 3 ]]; then'
+    printf '%s\n' '  echo "manifest search adapter rejected unsupported rg arguments" >&2' '  exit 64' 'fi'
+    printf '%s\n' 'shift' 'exec grep -REn -- "$@"'
+  } >"$rg_shim"
+  chmod +x "$git_shim" "$rg_shim"
   PATH="$shim_dir:$PATH" \
     bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
     >"$TMP/precision-identity.log" 2>&1 || {
