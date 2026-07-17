@@ -2894,3 +2894,21 @@ Verdict: "NO MATHEMATICAL CONTENT TO REVIEW" (engineering change; IEEE-754 non-a
 - ar1 = **PASS**: Yule-Walker φ̂=lag-1 autocorr, c=μ(1−φ), forecast=c+φ·x_last, resid_sd over n−1 residuals; {1..5}→φ=0.4, forecast 3.8 verified.
 - Theme: time-series smoothing & forecasting — the actionable complement to the serial-dependence diagnostics (runs/durbin_watson/autocorr). All single-pass recurrences, scalar returns, derivable, #852-safe. Suite runner: 88 modules + 7 demos ALL GREEN under lean_single.
 - Raw review dirs: `/tmp/llm-offload-Xz9JAt/`, `/tmp/llm-offload-KGiEVt/`, `/tmp/llm-offload-KNJO6S/`.
+
+## 2026-07-17 — review: website landing copy (external-facing)
+- Target: `website/src/i18n/en.json` landing strings + `website/src/pages/index.astro` hero/CTA copy.
+- Provider: xAI/Grok 4.3. DeepSeek returned an API error and was not logged.
+- High-priority findings:
+  - Hero CTAs overloaded (4 CTAs); recommend primary "Install Now" + secondary "Try in Playground", move "Read the Manifesto" lower.
+  - "GUM" acronym unexplained on first use; expand to "Guide to the Expression of Uncertainty in Measurement (GUM)".
+  - Final CTA "Enter the language." too cryptic; suggest "Begin computing at the horizon of certainty." or clearer phrasing.
+- Medium-priority findings:
+  - Jargon density in Features (ISO 17025, 21 CFR Part 11, FAIR, PK/PD, Kretikos) needs one-line glosses or a dedicated Compliance section.
+  - Comparison section underdeveloped; either expand differentiators or remove.
+  - Epistemic Stages overlap heavily with Features; consider merging or making Stages more narrative.
+- Low-priority findings:
+  - Terminology consistency: "Knowledge<T>" introduced once then abandoned; use more or drop angle-bracket notation after first mention.
+  - Tone micro-issue: "Clone the repo. Run the self-hosted compiler." is slightly casual for the monument voice; suggest more formal phrasing.
+- Overall: strong conceptual alignment with "Epistemic Monument" voice; main risks are information density and CTA fragmentation.
+- No copy changes were applied in this commit; findings are advisory for a future copy pass.
+- Raw review dir: `/tmp/llm-offload-ffxALV/`.
