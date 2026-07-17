@@ -245,3 +245,10 @@ output preservation, source mutation detection, and forged or rehashed
 inventory refusal. Its current repository witness covers seven ownership units
 and more than 3,000 regular files while keeping extraction status
 `not-executed`.
+
+The composed current-source R3 acceptance witness is Slurm job `6434` on
+`gpuorangefs-r770-proxmox`: the same Madaros ELF passed all 178 R0-R2, 65 R2.5,
+82 R2.6, and 141 R3 assertions. The emitted repository snapshot contains 3,277
+regular files across seven ownership units and verifies with extraction status
+`not-executed`. This is evidence for the inventory boundary only, not physical
+materialization or ownership transfer.

@@ -204,6 +204,28 @@ Remaining-Blockers: none for R2.6; hosted publication, namespace/issuer authorit
 Next-Semantic-Interface: r3-physical-extraction-inventory
 ```
 
+## R3 Physical Extraction Inventory Integration Receipt
+
+```text
+Semantic-Outcome: executable deterministic ownership and exact-file inventory for every science-rings.tsv root
+Concept-Status-Before: executable R0-R2 plus R2.5 release and R2.6 local registry attestation; physical extraction ownership inventory pending
+Concept-Status-After: executable R0-R3 inventory boundary with physical materialization explicitly not executed
+Distinctions-Added: source root versus future destination; extraction plan versus completed transfer; repository file identity versus scientific authority
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; catalog policy match versus publication; claim authorization versus claim truth; identity versus independent replay
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of f2e5a7f7b6f7c57929a7fdda2ba7ce5904a3b6ac, 339588982 bytes, sha256=bb5ae9a1db43bce90b00ae49b513621ffd3bd0986e067cfb4d5e6260b10037ac
+Evidence-Compiler: unchanged source-fresh Madaros, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6434 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:33, MaxRSS=1286488K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, and R3 141 assertions all PASS
+Evidence-Inventory: file sha256=be939c881942fda319d815065a11fc8a1efc7749f092481570609442466a1a2f; identity sha256=7c26219994df2364b8599586437588060d16587883d0e48bb9583c412126e91e; units=7 files=3277 bytes=53701973 retained=1 planned=5 blocked=1 status=not-executed
+Supporting-Gates: physical_extraction_inventory_gate.py -> PASS 141; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh -> PASS; check_docs_consistency.sh -> PASS
+Fallback-Path: none authorized; incomplete coverage, invalid disposition, non-regular content, mutation, occupied output, or forged/rehashed inventory refuses
+Legacy-Kept: every inventoried source remains in place; stdlib remains blocked-classification; R2.5 bundles and R2.6 attestations remain unchanged; registry publication remains disabled
+Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIENCE-RESEARCH-BOUNDARY; no compiler, IR, stdlib, package, example, or self-hosted source file was edited by R3
+LLM-Offload: xai/grok-4.3 review -> PASS with no requested-severity issue; raw=/tmp/llm-offload-9v40Di/
+Remaining-Blockers: none for the R3 inventory boundary; stdlib classification, approved destination existence, exact copy verification, and source-removal authorization are prerequisites for the separate materialization interface
+Next-Semantic-Interface: r3-physical-extraction-materialization
+```
+
 ## Closed Blockers
 
 ```text
