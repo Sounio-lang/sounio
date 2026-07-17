@@ -9,6 +9,30 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 
 # Data & Science I/O — Trilha B dispatch: `&local_array` mis-lowered into builtin calls
 
+> ⚠️ **CORRECTION (2026-07-17) — this dispatch's Defect 1 is MISDIAGNOSED. Do not fix as written.**
+> Re-verified on current `main` (Madaros v0.80.0), tree clean, no `self-hosted/` changes kept:
+> - **`str_from_bytes` is NOT broken.** The canonical call shape `str_from_bytes(buf, n)` works
+>   (used by 54 `self-hosted/` files incl. `main.sio`; baseline prints `hi`). The repro below used
+>   `str_from_bytes(&buf, n)` — the **wrong shape**: `&buf` passes the slot address, `buf` passes the
+>   array handle the builtin expects. A codegen "fix" that adds a deref for `&buf` **breaks the
+>   canonical `buf` shape** (verified: it made `str_from_bytes(buf,n)` SIGSEGV) and would break
+>   Madaros self-compilation. Reverted.
+> - **`read_file` is `read_file(path: string) -> string`** (per LSP + all 54 callers), NOT the
+>   `(path:*u8, buf:*u8, max_len)->i64` shape the codegen comment claims, and NOT a `[i8;N]` byte
+>   array (the repro's shape). `read_file(path)` and `file_size(path)` on a `string` **succeed**
+>   (Madaros reads every source file this way).
+> - **The one REAL defect** (different from what is dispatched below): the value returned by
+>   `read_file` (an mmap-backed "string") is **unusable in a standalone Madaros-compiled program** —
+>   every access crashes (`raw[i]`, `str_len(raw)`, `str_char_at(raw,i)` all SIGSEGV), even though
+>   `frd_open`'s identical `raw[i]` idiom works **inside** the Madaros compiler binary. So the string
+>   representation / runtime of `read_file`'s result differs standalone vs in-compiler. This is the
+>   blocker for file readers; it needs FRESH localization (result-string representation, not `&buf`
+>   arg marshalling). See the 2026-07-17 investigation continuing this lane.
+>
+> Net: the "`&local_array` into builtin" root cause below is not the bug. `str_from_bytes`/`file_size`
+> work; `read_file` returns but its result is inaccessible standalone. Everything below is retained as
+> the original (incorrect) dispatch record.
+
 **Date:** 2026-07-14
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine)
 **Owner:** CODEX-2 (`self-hosted/` — native codegen, builtin argument marshalling)
