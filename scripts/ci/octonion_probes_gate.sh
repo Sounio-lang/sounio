@@ -8,7 +8,7 @@
 #   ossm_recover     — associator-recovery positive control: octonion reaches 987 permil
 #   rk4_correlated   — CorrelatedValue sd matches Monte-Carlo truth (3.279153) vs independent
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
