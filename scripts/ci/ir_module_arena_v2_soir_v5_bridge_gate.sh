@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+BASE="${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-5a8ae321dbb78b2b8fcd405457c619d1821aadf5}"
+SOUC="${SOUC_BIN:-$ROOT/bin/madaros}"
+ARENA="self-hosted/ir/arena_v2_shadow.sio"
+WRITER="self-hosted/ir/soir_writer.sio"
+BRIDGE="self-hosted/ir/arena_v2_soir_bridge.sio"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/sounio-ir-module-arena-v2-soir-v5.XXXXXX")"
+
+cleanup() {
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_FAIL reason=%s\n' "$1" >&2
+  exit 1
+}
+
+for file in "$ARENA" "$WRITER" "$BRIDGE"; do
+  [[ -f "$file" ]] || fail "missing_${file//\//_}"
+done
+[[ -x "$SOUC" ]] || fail compiler_missing
+git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
+
+grep -Fq 'pub let SOIR_WRITER_SCALAR_EMPTY_V5_SIZE: i64 = 320' "$WRITER" || fail writer_size_contract_missing
+grep -Fq 'pub fn soir_writer_preflight_scalar_empty_module_v5(' "$WRITER" || fail writer_preflight_missing
+grep -Fq 'pub fn soir_writer_emit_scalar_empty_module_v5(' "$WRITER" || fail writer_emit_missing
+grep -Fq 'pub struct IrModuleArenaV2ModuleId {' "$ARENA" || fail module_id_missing
+grep -Fq 'pub let IR_MODULE_ARENA_V2_MODULE_CAPACITY: i64 = 2' "$ARENA" || fail module_capacity_not_two
+grep -Fq 'pub struct IrModuleArenaV2SoirPlanId {' "$BRIDGE" || fail plan_id_missing
+grep -Fq 'pub let IR_MODULE_ARENA_V2_SOIR_PLAN_CAPACITY: i64 = 2' "$BRIDGE" || fail plan_capacity_not_two
+grep -Fq 'pub fn ir_module_arena_v2_soir_preflight_empty_v5(' "$BRIDGE" || fail bridge_preflight_missing
+grep -Fq 'pub fn ir_module_arena_v2_soir_emit_empty_v5(' "$BRIDGE" || fail bridge_emit_missing
+grep -Fq 'soir_writer_preflight_scalar_empty_module_v5' "$BRIDGE" || fail writer_preflight_not_delegated
+grep -Fq 'soir_writer_emit_scalar_empty_module_v5' "$BRIDGE" || fail writer_emit_not_delegated
+
+set +e
+rg -n 'use (parser|ir::ir)|\b(IrModule|IrInstr|TyF128|TyF256|numeric_payload)\b' \
+  "$ARENA" "$WRITER" "$BRIDGE" >"$TMP/dependency-leak.log" 2>&1
+dependency_scan_rc=$?
+set -e
+if [[ "$dependency_scan_rc" -eq 0 ]]; then
+  cat "$TMP/dependency-leak.log" >&2
+  fail shadow_dependency_expanded
+fi
+if [[ "$dependency_scan_rc" -ne 1 ]]; then
+  cat "$TMP/dependency-leak.log" >&2
+  fail dependency_scan_error
+fi
+if grep -Eq '(out_buf|buf):[[:space:]]*\[i8;[[:space:]]*131072\]' "$BRIDGE"; then
+  fail buffer_passed_by_value
+fi
+if grep -Eq '^pub var IR_MODULE_ARENA_V2_SOIR_PLAN_' "$BRIDGE"; then
+  fail plan_columns_public
+fi
+
+PROTECTED=(
+  self-hosted/check/check.sio
+  self-hosted/compiler/main.sio
+  self-hosted/compiler/module_frontend.sio
+  self-hosted/ir/lower.sio
+  self-hosted/ir/ir.sio
+  self-hosted/ir/serialize.sio
+  self-hosted/ir/mod.sio
+  self-hosted/ir/numeric_payload.sio
+  self-hosted/ir/numeric_payload_wire.sio
+  self-hosted/compiler/f128_f256_format_descriptor_probe.sio
+  self-hosted/compiler/f128_f256_numeric_payload_probe.sio
+  self-hosted/compiler/f128_f256_numeric_wire_probe.sio
+  scripts/ci/madaros_f128_f256_format_identity_gate.sh
+  scripts/ci/madaros_f128_f256_numeric_payload_gate.sh
+  scripts/ci/madaros_f128_f256_numeric_wire_gate.sh
+)
+for protected in "${PROTECTED[@]}"; do
+  [[ -e "$protected" ]] || continue
+  git diff --quiet "$BASE" -- "$protected" || fail "protected_surface_changed_${protected//\//_}"
+  [[ -z "$(git status --short -- "$protected")" ]] || fail "protected_surface_dirty_${protected//\//_}"
+done
+
+if git status --porcelain --untracked-files=all | cut -c4- | grep -Eiq '(^|/)contest'; then
+  fail contest_surface_dirty
+fi
+
+for default_surface in \
+  self-hosted/ir/serialize.sio \
+  self-hosted/ir/mod.sio \
+  self-hosted/ir/lower.sio \
+  self-hosted/check/check.sio \
+  self-hosted/compiler/main.sio \
+  self-hosted/compiler/module_frontend.sio; do
+  [[ -f "$default_surface" ]] || continue
+  if grep -Eq 'arena_v2_(shadow|soir_bridge)|ir::soir_writer' "$default_surface"; then
+    fail "shadow_imported_by_${default_surface//\//_}"
+  fi
+done
+
+bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
+  >"$TMP/precision-identity.log" 2>&1 || {
+    cat "$TMP/precision-identity.log" >&2
+    fail precision_identity_regression
+  }
+
+for source in "$WRITER" "$ARENA" "$BRIDGE"; do
+  "$SOUC" check "$source" >"$TMP/$(basename "$source").check.log" 2>&1 || {
+    cat "$TMP/$(basename "$source").check.log" >&2
+    fail "source_check_${source//\//_}"
+  }
+done
+
+compose_and_run() {
+  local witness="$1"
+  local marker="$2"
+  local name composite elf log
+  name="$(basename "$witness" .sio)"
+  composite="$TMP/$name.sio"
+  elf="$TMP/$name.elf"
+  log="$TMP/$name.log"
+
+  {
+    printf 'module ir::%s_gate\n\n' "$name"
+    sed '/^module ir::soir_writer$/d' "$WRITER"
+    sed '/^module ir::arena_v2_shadow$/d' "$ARENA"
+    sed -e '/^module ir::arena_v2_soir_bridge$/d' \
+        -e '/^use ir::arena_v2_shadow::\*$/d' \
+        -e '/^use ir::soir_writer::\*$/d' "$BRIDGE"
+    sed -e '/^use ir::arena_v2_shadow::\*$/d' \
+        -e '/^use ir::soir_writer::\*$/d' \
+        -e '/^use ir::arena_v2_soir_bridge::\*$/d' "$witness"
+  } >"$composite"
+
+  "$SOUC" check "$composite" >"$log" 2>&1 || {
+    cat "$log" >&2
+    fail "composite_check_$name"
+  }
+  "$SOUC" --native-v2-compile "$composite" -o "$elf" >>"$log" 2>&1 || {
+    cat "$log" >&2
+    fail "composite_build_$name"
+  }
+  chmod +x "$elf"
+  "$elf" >"$TMP/$name.out" 2>&1 || {
+    cat "$TMP/$name.out" >&2
+    fail "composite_runtime_$name"
+  }
+  grep -Fxq "$marker" "$TMP/$name.out" || {
+    cat "$TMP/$name.out" >&2
+    fail "marker_missing_$name"
+  }
+}
+
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_CANONICAL_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_invalid_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_INVALID_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_stale_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_STALE_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_reuse_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_REUSE_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_cross_arena_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_CROSS_ARENA_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_MUTATION_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_sequence_probe.sio IR_MODULE_ARENA_V2_SOIR_V5_SEQUENCE_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.sio IR_MODULE_ARENA_V2_SOIR_V5_MUTATION_PREFLIGHT_PASS
+compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_plan_lifecycle_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_PLAN_LIFECYCLE_PASS
+
+grep -Fq 'SEQUENCE_AFTER_STALE status=-20' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail stale_sequence_receipt_missing
+grep -Fq 'SEQUENCE_AFTER_REUSE status=-22' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail reuse_sequence_receipt_missing
+grep -Fq 'canary=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail sequence_canary_receipt_missing
+grep -Fq 'MUTATION_PREFLIGHT status=-21 bss=8 id_live=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.out" || fail mutation_preflight_receipt_missing
+
+if [[ "$(git rev-parse HEAD)" != "$BASE" ]]; then
+  git diff --name-only "$BASE" HEAD | sort >"$TMP/write-set.actual"
+  printf '%s\n' \
+    scripts/ci/ir_module_arena_v2_soir_v5_bridge_gate.sh \
+    self-hosted/ir/arena_v2_shadow.sio \
+    self-hosted/ir/arena_v2_soir_bridge.sio \
+    self-hosted/ir/soir_writer.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_cross_arena_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_invalid_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_plan_lifecycle_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_reuse_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_sequence_probe.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_stale_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio \
+    | sort >"$TMP/write-set.expected"
+  diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
+    >"$TMP/write-set.diff" 2>&1 || {
+      cat "$TMP/write-set.diff" >&2
+      fail write_set_expanded
+    }
+fi
+
+compiler_sha256="$(sha256sum "$SOUC" | awk '{print $1}')"
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=preserved'
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_PLAN storage=private_scalar_columns capacity=2 identity=slot,generation binding=arena,module_slot,module_generation,mutation_epoch,start,capacity,required,end,version'
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_EMIT deterministic=pass wire=v5_empty_320 capacity_below=reject capacity_exact=pass no_partial_write=pass origin=zero_only'
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_IDS invalid=reject stale=reject reuse=reject cross_arena=reject mutation_after_preflight=reject mutation_repreflight=pass'
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_DIFFERENTIAL mode=shadow_canonical_not_differential byte_parity=not_claimed legacy=default'
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s\n' "$SOUC" "$compiler_sha256" "$BASE"
