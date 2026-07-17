@@ -210,3 +210,8 @@ refusal without a final bundle, exact-inventory enforcement, and component
 tamper detection. The R2.6 gate adds 82 assertions for policy matching,
 deterministic attestation identity, output promotion, full input revalidation,
 and forged or rehashed attestation refusal.
+
+The composed current-source acceptance witness is Slurm job `6394`: the same
+Madaros ELF passed all 178 R0-R2 assertions, 65 R2.5 assertions, and 82 R2.6
+assertions. This establishes the named software boundary only; it does not
+promote any package or claim to a stronger evidence class.

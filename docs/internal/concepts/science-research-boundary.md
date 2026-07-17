@@ -155,6 +155,27 @@ Remaining-Blockers: none for the local R2.5 boundary; public registry and remote
 Next-Semantic-Interface: registry-attestation-spec
 ```
 
+## R2.6 Integration Receipt
+
+```text
+Semantic-Outcome: executable deterministic local registry-policy attestation for verified R2.5 bundles
+Concept-Status-Before: executable R0-R2 boundary plus R2.5 local package release; registry attestation unspecified
+Concept-Status-After: executable R0-R2 plus R2.5 release and R2.6 unsigned local policy-attestation boundary
+Distinctions-Added: bundle identity versus catalog policy match; local policy match versus publication; attestation identity versus issuer identity
+Distinctions-Preserved: compilation versus scientific validity; claim authorization versus claim truth; provenance versus assurance; local release versus public registry status
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 028ae28d85e3260cf603b1b77b6c7fb645eaf1ab, sha256=d12cfe296a12e22eef1cb3e162c58d2d80a9a957436d58362161ba66bb35f000
+Evidence-Compiler: unchanged R2.5 source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6394 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:30; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions all PASS
+Supporting-Gates: registry_attestation_spec_gate.py -> PASS 82; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh -> PASS; check_docs_consistency.sh -> PASS
+Fallback-Path: none authorized; any R2.5 verification failure, policy mismatch, malformed input, or forged attestation refuses
+Legacy-Kept: R2.5 bundles remain unchanged and scripts/dev/registry_serve.py continues returning 501 for publication
+Conflicting-Lanes: none reported for SOUNIO-SCIENCE-RESEARCH-BOUNDARY when the R2.6 lane opened
+LLM-Offload: xai/grok-4.3 review; predicate-derived check recording, rehashed claim/compiler binding adversaries, and source-root wording addressed; raw=/tmp/llm-offload-6VaZiR/
+Remaining-Blockers: none for R2.6; hosted publication, namespace/issuer authority, remote signatures, independent replay, and physical extraction remain separate future interfaces
+Next-Semantic-Interface: r3-physical-extraction-inventory
+```
+
 ## Closed Blockers
 
 ```text
