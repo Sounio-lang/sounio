@@ -481,7 +481,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     }
 
     i = 0
-    while i < (*summary.module).fn_count && i < 1024 {
+    while i < (*summary.module).fn_count && i < IR_MAX_FUNCS {
         let sm_strat = (*summary.module).functions[i as usize].compile_strategy
         var func = ir_empty_function()
         func.name = (*summary.module).functions[i as usize].name
@@ -564,7 +564,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     }
 
     i = 0
-    while i < summary.module.fn_count && i < 1024 {
+    while i < summary.module.fn_count && i < IR_MAX_FUNCS {
         var func = ir_empty_function()
         func.name = summary.module.functions[i as usize].name
         func.param_count = summary.module.functions[i as usize].param_count
@@ -2270,8 +2270,6 @@ fn lowerer_lower_fn_item_mut(
         print_int((*(*lo).current_func).param_count)
         print("\n")
     }
-
-    (*lo) = (*lo).preload_bss_globals_as_locals()
 
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
@@ -4731,39 +4729,6 @@ impl Lowerer {
         0
     }
 
-    fn preload_bss_globals_as_locals(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        var i: i64 = 0
-        while i < lo.module.fn_count && i < 2048 {
-            let g = lo.module.functions[i as usize]
-            if g.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
-                let pair = lo.fresh_reg()
-                lo = pair.0
-                let reg = pair.1
-                if g.bss_size > 8 {
-                    lo = lo.emit(ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
-                } else {
-                    lo = lo.emit(ir_load_global(reg, g.param_count, g.name))
-                }
-                lowerer_bind_local_mut(&! lo, g.name, reg, false)
-                lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
-                let global_elem_kind = lower_global_type_table_lookup(&(*lo.global_types), i)
-                if lower_aggregate_diag_enabled() {
-                    print("lower_agg: global name=")
-                    print(str_from_bytes(g.name.buf, g.name.len))
-                    print(" elem_kind=")
-                    print_int(global_elem_kind)
-                    print("\n")
-                }
-                if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
-                    lowerer_mark_local_array_elem_float_mut(&! lo, g.name)
-                }
-            }
-            i = i + 1
-        }
-        lo
-    }
-
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
     // fn_id >= 0 if found, -1 if not a known function.
     fn lookup_fn_by_name(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -6859,7 +6824,6 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
-        lo = lo.preload_bss_globals_as_locals()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -9886,6 +9850,9 @@ impl Lowerer {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                        }
+                        if lower_global_type_table_lookup(&(*lo3.global_types), fn_id) == LOWER_GLOBAL_ELEM_F64 {
+                            lo3 = lo3.bind_reg_array_elem_float(ref_reg)
                         }
                         (lo3, ref_reg)
                     } else {
