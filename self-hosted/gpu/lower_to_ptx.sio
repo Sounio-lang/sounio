@@ -10,8 +10,13 @@ use gpu::ptx::*
 pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
-    // 1. Emit header (.version, .target, .address_size)
-    buf = ptx_emit_header(buf)
+    // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
+    // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
+    if gpu_has_wmma_tile(kernel) {
+        buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+    } else {
+        buf = ptx_emit_header(buf)
+    }
     // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
     // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
     // The function only emits cosmetic PTX comment lines; skip it for correctness.
@@ -111,20 +116,35 @@ fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mu
 }
 
 // Emit register declarations based on kernel.max_reg_*
+// Does this kernel contain a compound wmma tile op? (drives fragment reg decls.)
+fn gpu_has_wmma_tile(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuWmmaTile { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
 
     out = ptx_push_str(out, "{\n")
 
-    // .reg .pred %p<N>
-    if kernel.max_reg_pred > 0 {
+    let stage = gpu_has_oct_stage(kernel)
+
+    // .reg .pred %p<N> — the staging loop needs at least %p<2>.
+    var pred_count = kernel.max_reg_pred
+    if stage && pred_count < 2 { pred_count = 2 }
+    if pred_count > 0 {
         out = ptx_push_str(out, "    .reg .pred %p<")
-        out = gpu_push_i64(out, kernel.max_reg_pred)
+        out = gpu_push_i64(out, pred_count)
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .b32 %r<N> — covers both u32 and i32 (signedness is in opcode, not register)
-    let b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
+    // .reg .b32 %r<N> — covers both u32 and i32. The staging loop needs %r1..%r4.
+    var b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
+    if stage && b32_count < 8 { b32_count = 8 }
     if b32_count > 0 {
         out = ptx_push_str(out, "    .reg .b32 %r<")
         out = gpu_push_i64(out, b32_count)
@@ -150,15 +170,113 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .f64 %fd<N>
-    if kernel.max_reg_f64 > 0 {
+    // .reg .f64 %fd<N> — the staging loop needs %fd0.
+    var f64_count = kernel.max_reg_f64
+    if stage && f64_count < 2 { f64_count = 2 }
+    if f64_count > 0 {
         out = ptx_push_str(out, "    .reg .f64 %fd<")
-        out = gpu_push_i64(out, kernel.max_reg_f64)
+        out = gpu_push_i64(out, f64_count)
         out = ptx_push_str(out, ">;\n")
+    }
+
+    // Tensor-core m16n16k16 fragment registers (8 each): matrix_a/matrix_b packed f16 in .b32,
+    // accumulator/D in .f32. Declared only when the kernel emits a wmma tile.
+    if gpu_has_wmma_tile(kernel) {
+        out = ptx_push_str(out, "    .reg .b32 %wa<8>;\n")
+        out = ptx_push_str(out, "    .reg .b32 %wb<8>;\n")
+        out = ptx_push_str(out, "    .reg .f32 %wd<8>;\n")
+    }
+
+    // oct_batch_mul staging scratch: b16 registers for the f16 conversion (%rs0 value, %rs1 zero).
+    if stage {
+        out = ptx_push_str(out, "    .reg .b16 %rs<2>;\n")
     }
 
     out = ptx_push_str(out, "\n")
     out
+}
+
+// Emit a fragment register group {%<pfx>0, ..., %<pfx>7}.
+fn gpu_wmma_frag8(pfx: string) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < 8 {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, pfx), i64_to_string(i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+
+// Does this kernel contain the oct-batch staging op?
+fn gpu_has_oct_stage(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchStage { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Cayley-Dickson sign σ(a,b) for e_a·e_b = σ·e_{a⊕b} (bits levels, Convention X).
+fn gpu_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return gpu_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return gpu_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return gpu_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - gpu_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - gpu_cd_sigma(0, a_lo, bits - 1) }
+    gpu_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Emit the oct_batch_mul staging: thread 0 builds L(a) (row-major f16) at shared[0] and stages
+// H (col-major f16) at shared[512], from octonion pointer paR (a[8], f64) and batch pointer pHR
+// (H[16*8], f64). L[k][j] = σ(k⊕j,j,3)·a[k⊕j] for k,j<8 (else 0); sH[b*16+r] = H[b*8+r] for r<8.
+fn gpu_emit_oct_batch_stage(paR: string, pHR: string) -> string with Mut, Panic, Div, Alloc {
+    // thread-0 guard, then zero-fill both 512-byte shared halves (512 u16 total)
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $STGDONE;\n"
+    t = str_concat(t, "    mov.u16 %rs1, 0;\n    mov.u32 %r2, 0;\n    mov.u32 %r3, shared_array;\n$STGZ:\n")
+    t = str_concat(t, "    add.u32 %r4, %r3, %r2;\n    st.shared.u16 [%r4], %rs1;\n")
+    t = str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, 1024;\n    @%p1 bra $STGZ;\n")
+    // build L(a): 8x8 in 16x16
+    var k: i64 = 0
+    while k < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), paR)
+            t = str_concat(str_concat(t, "+"), i64_to_string(i * 8))
+            t = str_concat(t, "];\n")
+            if gpu_cd_sigma(i, j, 3) < 0 { t = str_concat(t, "    neg.f64 %fd0, %fd0;\n") }
+            t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
+            t = str_concat(str_concat(t, i64_to_string((k * 16 + j) * 2)), "], %rs0;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    // stage H col-major: sH[b*16+r] = H[b*8+r], at shared offset 512
+    var b: i64 = 0
+    while b < 16 {
+        var r: i64 = 0
+        while r < 8 {
+            t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), pHR)
+            t = str_concat(str_concat(t, "+"), i64_to_string((b * 8 + r) * 8))
+            t = str_concat(t, "];\n    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
+            t = str_concat(str_concat(t, i64_to_string(512 + (b * 16 + r) * 2)), "], %rs0;\n")
+            r = r + 1
+        }
+        b = b + 1
+    }
+    t = str_concat(t, "$STGDONE:\n    bar.sync 0;\n")
+    t
 }
 
 // Lower all operations in sequence
@@ -484,6 +602,56 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         GpuOpcode::GpuBarrierSync => {
             // bar.sync 0
             ptx_push_barrier_sync(buf)
+        }
+
+        GpuOpcode::GpuOctBatchStage => {
+            // Build L(a) + stage H into the shared f16 buffers (thread 0).
+            ptx_push_str(buf, gpu_emit_oct_batch_stage(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg)))
+        }
+
+        GpuOpcode::GpuWmmaTile => {
+            // Compound m16n16k16 tensor-core tile: D = A·B where A (row-major f16) is at shared
+            // byte-offset lhs_reg, B (col-major f16) at shared byte-offset rhs_reg, and D
+            // (row-major f32) is stored to the global address register addr_reg. Leading dim =
+            // rhs_imm. Fragment groups %wa/%wb/%wd are declared by gpu_emit_reg_decls.
+            // Build the whole tile as ONE string via str_concat. NOTE: i64_to_string returns a
+            // shared static buffer in the Madaros binary, so a held `let ldm = i64_to_string(...)`
+            // is clobbered by later i64_to_string calls (e.g. the zero-init loop). Inline every
+            // numeric conversion so str_concat consumes it before the next call. frag8 results are
+            // safe because they are already fully-copied strings.
+            // frag8 / gpu_reg_u64 return fresh str_concat-built strings (safe to hold). But
+            // gpu_shared_addr_str (via ptx_to_string) and i64_to_string return shared static
+            // buffers, so they are INLINED at each use — consumed immediately by str_concat before
+            // the next shared-buffer call can clobber them.
+            let fa = gpu_wmma_frag8("%wa")
+            let fb = gpu_wmma_frag8("%wb")
+            let fd = gpu_wmma_frag8("%wd")
+            let dReg = gpu_reg_u64(op.addr_reg)
+            var t = ""
+            var zi: i64 = 0
+            while zi < 8 {
+                t = str_concat(str_concat(t, "    mov.f32 %wd"), i64_to_string(zi))
+                t = str_concat(t, ", 0f00000000;\n")
+                zi = zi + 1
+            }
+            t = str_concat(t, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fa), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.lhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fb), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.rhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, fa), ", ")
+            t = str_concat(str_concat(t, fb), ", ")
+            t = str_concat(str_concat(t, fd), ";\n")
+            t = str_concat(t, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [")
+            t = str_concat(str_concat(t, dReg), "], ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            ptx_push_str(buf, t)
         }
 
         GpuOpcode::GpuShflDown => {
