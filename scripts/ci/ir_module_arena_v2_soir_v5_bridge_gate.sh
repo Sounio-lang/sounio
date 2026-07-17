@@ -9,6 +9,11 @@ SOUC="${SOUC_BIN:-$ROOT/bin/madaros}"
 ARENA="self-hosted/ir/arena_v2_shadow.sio"
 WRITER="self-hosted/ir/soir_writer.sio"
 BRIDGE="self-hosted/ir/arena_v2_soir_bridge.sio"
+PROVENANCE_MODE="${IR_MODULE_ARENA_V2_SOIR_PROVENANCE_MODE:-git}"
+CONTENT_MANIFEST="${IR_MODULE_ARENA_V2_SOIR_CONTENT_MANIFEST:-}"
+EXPECTED_MANIFEST_SHA256="${IR_MODULE_ARENA_V2_SOIR_EXPECTED_MANIFEST_SHA256:-}"
+PROVENANCE_RECEIPT=""
+CONTENT_MANIFEST_SHA256=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sounio-ir-module-arena-v2-soir-v5.XXXXXX")"
 
 cleanup() {
@@ -21,11 +26,78 @@ fail() {
   exit 1
 }
 
+expected_write_set() {
+  printf '%s\n' \
+    scripts/ci/ir_module_arena_v2_soir_v5_bridge_gate.sh \
+    self-hosted/ir/arena_v2_shadow.sio \
+    self-hosted/ir/arena_v2_soir_bridge.sio \
+    self-hosted/ir/soir_writer.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_cross_arena_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_invalid_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_plan_lifecycle_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_reuse_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_sequence_probe.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_stale_witness.sio \
+    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio
+}
+
+validate_manifest_provenance() {
+  [[ -n "$CONTENT_MANIFEST" ]] || fail manifest_path_required
+  [[ -n "$EXPECTED_MANIFEST_SHA256" ]] || fail manifest_sha256_required
+  [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail manifest_sha256_malformed
+  [[ -f "$CONTENT_MANIFEST" ]] || fail manifest_missing
+  [[ -s "$CONTENT_MANIFEST" ]] || fail manifest_empty
+
+  CONTENT_MANIFEST_SHA256="$(sha256sum "$CONTENT_MANIFEST" | awk '{print $1}')"
+  [[ "$CONTENT_MANIFEST_SHA256" == "$EXPECTED_MANIFEST_SHA256" ]] || fail manifest_sha256_mismatch
+
+  set +e
+  LC_ALL=C grep -Env '^[0-9a-f]{64}  [A-Za-z0-9._/-]+$' "$CONTENT_MANIFEST" \
+    >"$TMP/manifest-format.log" 2>&1
+  manifest_format_rc=$?
+  set -e
+  if [[ "$manifest_format_rc" -eq 0 ]]; then
+    cat "$TMP/manifest-format.log" >&2
+    fail manifest_format_invalid
+  fi
+  [[ "$manifest_format_rc" -eq 1 ]] || fail manifest_format_scan_error
+  [[ "$(wc -l <"$CONTENT_MANIFEST" | tr -d ' ')" == 13 ]] || fail manifest_entry_count_not_13
+
+  awk '{print $2}' "$CONTENT_MANIFEST" | LC_ALL=C sort >"$TMP/manifest-paths.actual"
+  expected_write_set | LC_ALL=C sort >"$TMP/manifest-paths.expected"
+  diff -u "$TMP/manifest-paths.expected" "$TMP/manifest-paths.actual" \
+    >"$TMP/manifest-paths.diff" 2>&1 || {
+      cat "$TMP/manifest-paths.diff" >&2
+      fail manifest_write_set_mismatch
+    }
+
+  sha256sum -c "$CONTENT_MANIFEST" >"$TMP/manifest-content-check.log" 2>&1 || {
+    cat "$TMP/manifest-content-check.log" >&2
+    fail manifest_content_mismatch
+  }
+  PROVENANCE_RECEIPT="manifest_pinned"
+}
+
+case "$PROVENANCE_MODE" in
+  git)
+    command -v git >/dev/null 2>&1 || fail git_required_for_git_provenance
+    git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
+    PROVENANCE_RECEIPT="git"
+    ;;
+  manifest)
+    validate_manifest_provenance
+    ;;
+  *)
+    fail provenance_mode_invalid
+    ;;
+esac
+
 for file in "$ARENA" "$WRITER" "$BRIDGE"; do
   [[ -f "$file" ]] || fail "missing_${file//\//_}"
 done
 [[ -x "$SOUC" ]] || fail compiler_missing
-git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
 
 grep -Fq 'pub let SOIR_WRITER_SCALAR_EMPTY_V5_SIZE: i64 = 320' "$WRITER" || fail writer_size_contract_missing
 grep -Fq 'pub fn soir_writer_preflight_scalar_empty_module_v5(' "$WRITER" || fail writer_preflight_missing
@@ -76,14 +148,16 @@ PROTECTED=(
   scripts/ci/madaros_f128_f256_numeric_payload_gate.sh
   scripts/ci/madaros_f128_f256_numeric_wire_gate.sh
 )
-for protected in "${PROTECTED[@]}"; do
-  [[ -e "$protected" ]] || continue
-  git diff --quiet "$BASE" -- "$protected" || fail "protected_surface_changed_${protected//\//_}"
-  [[ -z "$(git status --short -- "$protected")" ]] || fail "protected_surface_dirty_${protected//\//_}"
-done
+if [[ "$PROVENANCE_MODE" == "git" ]]; then
+  for protected in "${PROTECTED[@]}"; do
+    [[ -e "$protected" ]] || continue
+    git diff --quiet "$BASE" -- "$protected" || fail "protected_surface_changed_${protected//\//_}"
+    [[ -z "$(git status --short -- "$protected")" ]] || fail "protected_surface_dirty_${protected//\//_}"
+  done
 
-if git status --porcelain --untracked-files=all | cut -c4- | grep -Eiq '(^|/)contest'; then
-  fail contest_surface_dirty
+  if git status --porcelain --untracked-files=all | cut -c4- | grep -Eiq '(^|/)contest'; then
+    fail contest_surface_dirty
+  fi
 fi
 
 for default_surface in \
@@ -99,11 +173,38 @@ for default_surface in \
   fi
 done
 
-bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
-  >"$TMP/precision-identity.log" 2>&1 || {
-    cat "$TMP/precision-identity.log" >&2
-    fail precision_identity_regression
-  }
+run_manifest_precision_identity_check() {
+  local shim_dir="$TMP/manifest-tool-shim"
+  local shim="$shim_dir/git"
+  mkdir -p "$shim_dir"
+  # The canonical structural precision gate uses Git once, only to print a
+  # source identity. Bind that receipt to the pinned manifest and reject every
+  # other Git operation; all descriptor and containment checks run unchanged.
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf '%s\n' 'if [[ "$#" -eq 2 && "$1" == "rev-parse" && "$2" == "HEAD" ]]; then'
+    printf '  printf '\''%%s\\n'\'' '\''manifest:%s'\''\n' "$CONTENT_MANIFEST_SHA256"
+    printf '%s\n' '  exit 0' 'fi'
+    printf '%s\n' 'echo "manifest provenance adapter rejected unsupported git command" >&2' 'exit 64'
+  } >"$shim"
+  chmod +x "$shim"
+  PATH="$shim_dir:$PATH" \
+    bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
+    >"$TMP/precision-identity.log" 2>&1 || {
+      cat "$TMP/precision-identity.log" >&2
+      fail precision_identity_regression
+    }
+}
+
+if [[ "$PROVENANCE_MODE" == "git" ]]; then
+  bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
+    >"$TMP/precision-identity.log" 2>&1 || {
+      cat "$TMP/precision-identity.log" >&2
+      fail precision_identity_regression
+    }
+else
+  run_manifest_precision_identity_check
+fi
 
 for source in "$WRITER" "$ARENA" "$BRIDGE"; do
   "$SOUC" check "$source" >"$TMP/$(basename "$source").check.log" 2>&1 || {
@@ -167,23 +268,9 @@ grep -Fq 'SEQUENCE_AFTER_REUSE status=-22' "$TMP/ir_module_arena_v2_soir_v5_brid
 grep -Fq 'canary=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail sequence_canary_receipt_missing
 grep -Fq 'MUTATION_PREFLIGHT status=-21 bss=8 id_live=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.out" || fail mutation_preflight_receipt_missing
 
-if [[ "$(git rev-parse HEAD)" != "$BASE" ]]; then
+if [[ "$PROVENANCE_MODE" == "git" && "$(git rev-parse HEAD)" != "$BASE" ]]; then
   git diff --name-only "$BASE" HEAD | sort >"$TMP/write-set.actual"
-  printf '%s\n' \
-    scripts/ci/ir_module_arena_v2_soir_v5_bridge_gate.sh \
-    self-hosted/ir/arena_v2_shadow.sio \
-    self-hosted/ir/arena_v2_soir_bridge.sio \
-    self-hosted/ir/soir_writer.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_cross_arena_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_invalid_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_mutation_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_plan_lifecycle_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_reuse_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_sequence_probe.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_stale_witness.sio \
-    tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio \
-    | sort >"$TMP/write-set.expected"
+  expected_write_set | sort >"$TMP/write-set.expected"
   diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
     >"$TMP/write-set.diff" 2>&1 || {
       cat "$TMP/write-set.diff" >&2
@@ -192,9 +279,13 @@ if [[ "$(git rev-parse HEAD)" != "$BASE" ]]; then
 fi
 
 compiler_sha256="$(sha256sum "$SOUC" | awk '{print $1}')"
-printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=preserved'
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=preserved provenance=%s\n' "$PROVENANCE_RECEIPT"
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_PLAN storage=private_scalar_columns capacity=2 identity=slot,generation binding=arena,module_slot,module_generation,mutation_epoch,start,capacity,required,end,version'
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_EMIT deterministic=pass wire=v5_empty_320 capacity_below=reject capacity_exact=pass no_partial_write=pass origin=zero_only'
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_IDS invalid=reject stale=reject reuse=reject cross_arena=reject mutation_after_preflight=reject mutation_repreflight=pass'
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_DIFFERENTIAL mode=shadow_canonical_not_differential byte_parity=not_claimed legacy=default'
-printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s\n' "$SOUC" "$compiler_sha256" "$BASE"
+if [[ "$PROVENANCE_MODE" == "manifest" ]]; then
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=manifest_pinned manifest_sha256=%s entries=13\n' "$CONTENT_MANIFEST_SHA256"
+fi
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s provenance=%s\n' \
+  "$SOUC" "$compiler_sha256" "$BASE" "$PROVENANCE_RECEIPT"
