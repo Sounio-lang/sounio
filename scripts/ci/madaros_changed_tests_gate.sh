@@ -52,9 +52,11 @@ if [[ "$SELECT_ONLY" == "1" ]]; then
   exit 0
 fi
 
-# This gate is wired to the Linux current-source CI job. Darwin's common
-# 65532 KiB ceiling is intentionally not normalized into this Linux contract.
-stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-65536}"
+# This gate is wired to the Linux current-source CI job. Current-source
+# lowering can exceed a 64 MiB stack; match the canonical compiler gate's
+# 1 GiB Linux soft limit. Darwin's lower ceiling is intentionally not
+# normalized into this Linux contract.
+stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-1048576}"
 [[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] \
   || fail "invalid_stack_kb"
 

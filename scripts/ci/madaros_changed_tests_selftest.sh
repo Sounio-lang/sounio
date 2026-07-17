@@ -40,11 +40,10 @@ fi
 skip="$(
   (
     ulimit -S -s 8192
-    SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB=65536 \
-      "$GATE" -- docs/internal/coordination/CI_WATCH_CONTRACT.md
+    "$GATE" -- docs/internal/coordination/CI_WATCH_CONTRACT.md
   )
 )"
-grep -Eq '^MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=65536 soft_before_kb=8192 hard_before_kb=(unlimited|[0-9]+) soft_after_kb=65536 hard_after_kb=(unlimited|[0-9]+)$' \
+grep -Eq '^MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=1048576 soft_before_kb=8192 hard_before_kb=(unlimited|[0-9]+) soft_after_kb=1048576 hard_after_kb=(unlimited|[0-9]+)$' \
   <<<"$skip"
 grep -Fxq 'MADAROS_CHANGED_TESTS_SKIP reason=no_changed_requires_madaros_tests' <<<"$skip"
 grep -Fxq 'MADAROS_CHANGED_TESTS_SKIP reason=no_changed_requires_madaros_tests' \
@@ -111,7 +110,6 @@ raised_stack="$(
   (
     ulimit -S -s 8192
     SOUNIO_MADAROS_CHANGED_TESTS_BIN=/bin/true \
-    SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB=65536 \
       "$GATE" -- tests/run-pass/array_repeat_i8_binding.sio
   ) 2>&1
 )"
@@ -122,7 +120,7 @@ if [[ "$raised_stack_rc" == "0" ]]; then
   exit 1
 fi
 raised_stack_receipt="$(grep -F 'MADAROS_CHANGED_TESTS_STACK status=ready' <<<"$raised_stack")"
-ready_stack_pattern='^MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=65536 soft_before_kb=8192 hard_before_kb=(unlimited|[0-9]+) soft_after_kb=65536 hard_after_kb=(unlimited|[0-9]+)$'
+ready_stack_pattern='^MADAROS_CHANGED_TESTS_STACK status=ready scope=linux_ci requested_kb=1048576 soft_before_kb=8192 hard_before_kb=(unlimited|[0-9]+) soft_after_kb=1048576 hard_after_kb=(unlimited|[0-9]+)$'
 if [[ ! "$raised_stack_receipt" =~ $ready_stack_pattern ]]; then
   echo 'madaros-changed-tests: stack raise receipt is malformed' >&2
   exit 1
@@ -133,7 +131,7 @@ if [[ "$raised_hard_before" != "$raised_hard_after" ]]; then
   echo 'madaros-changed-tests: stack raise changed the hard limit' >&2
   exit 1
 fi
-if [[ "$raised_hard_before" != "unlimited" ]] && ((raised_hard_before < 65536)); then
+if [[ "$raised_hard_before" != "unlimited" ]] && ((raised_hard_before < 1048576)); then
   echo 'madaros-changed-tests: stack raise passed below the finite hard limit' >&2
   exit 1
 fi
@@ -146,7 +144,6 @@ hard_limited_stack="$(
     ulimit -S -s 8192
     ulimit -H -s 8192
     SOUNIO_MADAROS_CHANGED_TESTS_BIN=/bin/true \
-    SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB=65536 \
       "$GATE" -- tests/run-pass/array_repeat_i8_binding.sio
   ) 2>&1
 )"
@@ -156,7 +153,7 @@ if [[ "$hard_limited_stack_rc" == "0" ]]; then
   echo 'madaros-changed-tests: accepted a stack target above the hard limit' >&2
   exit 1
 fi
-grep -Fq 'MADAROS_CHANGED_TESTS_STACK status=blocked scope=linux_ci requested_kb=65536 soft_before_kb=8192 hard_before_kb=8192' \
+grep -Fq 'MADAROS_CHANGED_TESTS_STACK status=blocked scope=linux_ci requested_kb=1048576 soft_before_kb=8192 hard_before_kb=8192' \
   <<<"$hard_limited_stack"
 grep -Fxq 'MADAROS_CHANGED_TESTS_FAIL reason=stack_hard_limit_too_low' \
   < <(tail -n 1 <<<"$hard_limited_stack")
