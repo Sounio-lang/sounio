@@ -10,8 +10,13 @@ use gpu::ptx::*
 pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
-    // 1. Emit header (.version, .target, .address_size)
-    buf = ptx_emit_header(buf)
+    // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
+    // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
+    if gpu_has_wmma_tile(kernel) {
+        buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+    } else {
+        buf = ptx_emit_header(buf)
+    }
     // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
     // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
     // The function only emits cosmetic PTX comment lines; skip it for correctness.
@@ -111,6 +116,16 @@ fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mu
 }
 
 // Emit register declarations based on kernel.max_reg_*
+// Does this kernel contain a compound wmma tile op? (drives fragment reg decls.)
+fn gpu_has_wmma_tile(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuWmmaTile { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
 
@@ -157,8 +172,28 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
         out = ptx_push_str(out, ">;\n")
     }
 
+    // Tensor-core m16n16k16 fragment registers (8 each): matrix_a/matrix_b packed f16 in .b32,
+    // accumulator/D in .f32. Declared only when the kernel emits a wmma tile.
+    if gpu_has_wmma_tile(kernel) {
+        out = ptx_push_str(out, "    .reg .b32 %wa<8>;\n")
+        out = ptx_push_str(out, "    .reg .b32 %wb<8>;\n")
+        out = ptx_push_str(out, "    .reg .f32 %wd<8>;\n")
+    }
+
     out = ptx_push_str(out, "\n")
     out
+}
+
+// Emit a fragment register group {%<pfx>0, ..., %<pfx>7}.
+fn gpu_wmma_frag8(pfx: string) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < 8 {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, pfx), i64_to_string(i))
+        i = i + 1
+    }
+    str_concat(s, "}")
 }
 
 // Lower all operations in sequence
@@ -484,6 +519,59 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         GpuOpcode::GpuBarrierSync => {
             // bar.sync 0
             ptx_push_barrier_sync(buf)
+        }
+
+        GpuOpcode::GpuWmmaTile => {
+            // Compound m16n16k16 tensor-core tile: D = A·B where A (row-major f16) is at the
+            // shared address in lhs_reg, B (col-major f16) at rhs_reg, and D (row-major f32) is
+            // stored to the global address in addr_reg. Leading dim = rhs_imm. Fragment groups
+            // %wa/%wb/%wd are declared by gpu_emit_reg_decls when a tile is present.
+            let sA = gpu_reg_u32(op.lhs_reg)
+            let sB = gpu_reg_u32(op.rhs_reg)
+            let dOut = gpu_reg_u64(op.addr_reg)
+            let ldm = i64_to_string(op.rhs_imm)
+            let fa = gpu_wmma_frag8("%wa")
+            let fb = gpu_wmma_frag8("%wb")
+            let fd = gpu_wmma_frag8("%wd")
+            var w = buf
+            var zi: i64 = 0
+            while zi < 8 {
+                w = ptx_push_str(w, "    mov.f32 %wd")
+                w = ptx_push_str(w, i64_to_string(zi))
+                w = ptx_push_str(w, ", 0f00000000;\n")
+                zi = zi + 1
+            }
+            w = ptx_push_str(w, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+            w = ptx_push_str(w, fa)
+            w = ptx_push_str(w, ", [")
+            w = ptx_push_str(w, sA)
+            w = ptx_push_str(w, "], ")
+            w = ptx_push_str(w, ldm)
+            w = ptx_push_str(w, ";\n")
+            w = ptx_push_str(w, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+            w = ptx_push_str(w, fb)
+            w = ptx_push_str(w, ", [")
+            w = ptx_push_str(w, sB)
+            w = ptx_push_str(w, "], ")
+            w = ptx_push_str(w, ldm)
+            w = ptx_push_str(w, ";\n")
+            w = ptx_push_str(w, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+            w = ptx_push_str(w, fd)
+            w = ptx_push_str(w, ", ")
+            w = ptx_push_str(w, fa)
+            w = ptx_push_str(w, ", ")
+            w = ptx_push_str(w, fb)
+            w = ptx_push_str(w, ", ")
+            w = ptx_push_str(w, fd)
+            w = ptx_push_str(w, ";\n")
+            w = ptx_push_str(w, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [")
+            w = ptx_push_str(w, dOut)
+            w = ptx_push_str(w, "], ")
+            w = ptx_push_str(w, fd)
+            w = ptx_push_str(w, ", ")
+            w = ptx_push_str(w, ldm)
+            w = ptx_push_str(w, ";\n")
+            w
         }
 
         GpuOpcode::GpuShflDown => {
