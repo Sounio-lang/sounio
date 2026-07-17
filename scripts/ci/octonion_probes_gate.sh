@@ -7,6 +7,9 @@
 #   ossm_separation  — representational separation O-SSM(oct) - H-SSM(assoc) = 500 permil
 #   ossm_recover     — associator-recovery positive control: octonion reaches 987 permil
 #   rk4_correlated   — CorrelatedValue sd matches Monte-Carlo truth (3.279153) vs independent
+# NOTE: the exact-value sentinels below (e.g. `cc     987`, `sd = 3.279153`) are reproducible
+# because CI runs the SAME committed lean_single ELF this was pinned against; if souc is ever
+# rebuilt these two are the first that could drift — re-pin them from a fresh run if so.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
