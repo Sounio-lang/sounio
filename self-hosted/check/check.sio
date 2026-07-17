@@ -1257,6 +1257,40 @@ fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExp
     }
 }
 
+fn checker_lower_model_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(args) => {
+            match (*args).tail {
+                Some(rest) => {
+                    match (*rest).tail {
+                        None => {
+                            let input_ty = checker_lower_type_expr_mut(c, (*args).head)
+                            let output_ty = checker_lower_type_expr_mut(c, (*rest).head)
+                            if input_ty.kind == TypeKind::TyError || output_ty.kind == TypeKind::TyError {
+                                ty_error()
+                            } else {
+                                ty_model(input_ty, output_ty)
+                            }
+                        }
+                        Some(_) => {
+                            checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+                            ty_error()
+                        }
+                    }
+                }
+                None => {
+                    checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+                    ty_error()
+                }
+            }
+        }
+        None => {
+            checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+            ty_error()
+        }
+    }
+}
+
 // In-place TypeNamed lowering, with Box<T> carrying its element type as `inner`.
 // The in-place spine otherwise drops type_args for named types, so a declared
 // `Box<T>` parameter lost T and `*b` reported E005. Here Box<T> lowers to
@@ -1510,8 +1544,9 @@ fn checker_lower_contest_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList>
                                     }
                                     let family_info = (*c).model_families.get(family_ty.epistemic_meta_id)
                                     var info = contest_info_from_family_signature(family_info, policy_ty.epistemic_meta_id)
-                                    info = contest_info_attach_span(info, span)
-                                    info = contest_info_attach_family_id(info, family_ty.epistemic_meta_id)
+                                    info.span_start = span.start
+                                    info.span_end = span.end
+                                    info.family_id = family_ty.epistemic_meta_id
                                     let add_result = (*c).contests.add(info)
                                     (*c).contests = add_result.0
                                     ty_contest(inner_ty, add_result.1)
@@ -1814,6 +1849,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeInfer => ty_unknown()
         TypeExprKind::TypeSelfUpper => (*c).current_impl_type
         TypeExprKind::TypeKnowledge => checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        TypeExprKind::TypeModel => checker_lower_model_type_mut(c, te.type_args, te.span)
         TypeExprKind::TypePolicy => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_policy(inner_ty, -1) }
@@ -1882,10 +1918,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_deferred(inner_ty, -1) }
         }
-        TypeExprKind::TypeContest => {
-            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
-            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_contest(inner_ty, -1) }
-        }
+        TypeExprKind::TypeContest => checker_lower_contest_type_mut(c, te.type_args, te.span)
         TypeExprKind::TypeRobust => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_robust(inner_ty, -1, -1, -1) }
@@ -1958,7 +1991,8 @@ fn checker_check_contest_expr_expected_mut(c: *mut Checker, e: Expr, expected_co
         return ty_error()
     }
     var info = contest_info_from_expr_models(e.args)
-    info = contest_info_attach_span(info, e.span)
+    info.span_start = e.span.start
+    info.span_end = e.span.end
     if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < (*c).contests.count {
         let expected_info = (*c).contests.get(expected_contest_ty.epistemic_meta_id)
         info.family_id = expected_info.family_id
@@ -3386,6 +3420,100 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
     }
 }
 
+fn checker_collect_models_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<ModelsDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(md) => {
+            var info = empty_model_family_info()
+            var cursor = (*md).models
+            var valid = true
+            while true {
+                match cursor {
+                    Some(list) => {
+                        let model_name = checker_copy_string_list_tail_to_name((*list).head.segments)
+                        let model_ty = (*c).env.lookup(model_name)
+                        if model_ty.kind != TypeKind::TyModel {
+                            checker_report_error_at_inplace(c, (*md).span, 63, 0, 0, 0)
+                            valid = false
+                            break
+                        }
+                        let input_ty = model_input_ty(model_ty)
+                        let output_ty = model_output_ty(model_ty)
+                        if info.model_count == 0 {
+                            info.input_ty = input_ty
+                            info.output_ty = output_ty
+                        } else if !types_compatible(info.input_ty, input_ty) || !types_compatible(info.output_ty, output_ty) {
+                            checker_report_error_at_inplace(c, (*md).span, 63, 0, 0, 0)
+                            valid = false
+                            break
+                        }
+                        if info.model_count >= 16 {
+                            checker_report_error_at_inplace(c, (*md).span, 63, 0, 0, 0)
+                            valid = false
+                            break
+                        }
+                        info.model_names[info.model_count as usize] = model_name
+                        info.model_count = info.model_count + 1
+                        cursor = (*list).tail
+                    }
+                    None => break
+                }
+            }
+            if !valid {
+                return
+            }
+            let family_id = (*c).model_families.count
+            if family_id >= 8 {
+                checker_report_error_at_inplace(c, (*md).span, 63, 0, 0, 0)
+                return
+            }
+            info.name = name
+            (*c).model_families.entries[family_id as usize] = info
+            (*c).model_families.count = family_id + 1
+            (*c).env = (*c).env.bind(name, ty_model_family(info.input_ty, info.output_ty, family_id), false)
+            checker_const_int_bind_unknown_inplace(c, name)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_policy_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<PolicyDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pd) => {
+            match (*pd).requirements {
+                Some(_) => {
+                    checker_report_error_at_inplace(c, (*pd).span, 63, 0, 0, 0)
+                    return
+                }
+                None => {}
+            }
+            let target_ty = checker_lower_type_expr_mut(c, (*pd).target_type)
+            if target_ty.kind == TypeKind::TyError {
+                return
+            }
+            let policy_id = (*c).policies.count
+            if policy_id >= 16 {
+                checker_report_error_at_inplace(c, (*pd).span, 63, 0, 0, 0)
+                return
+            }
+            let info = PolicyInfo {
+                name: name,
+                target_ty: target_ty,
+                level_name: (*pd).level_name,
+                scope_name: (*pd).scope_name,
+                level_id: robustness_level_id_from_name((*pd).level_name),
+                scope_id: robustness_scope_id_from_name((*pd).scope_name),
+                requirements: None,
+                requirement_count: 0,
+            }
+            (*c).policies.entries[policy_id as usize] = info
+            (*c).policies.count = policy_id + 1
+            (*c).env = (*c).env.bind(name, ty_policy(target_ty, policy_id), false)
+            checker_const_int_bind_unknown_inplace(c, name)
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     // Dispatch via explicit `if item.kind == ItemKind::X`, NOT `match item.kind`: bin/souc
     // miscompiles a `match <enum-field>` inside a *mut fn (discriminant-0 → wildcard;
@@ -3413,6 +3541,10 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_impl_item_bridge(c, item.impl_def)
     } else if item.kind == ItemKind::ItemTypeAlias {
         checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
+    } else if item.kind == ItemKind::ItemModels {
+        checker_collect_models_def_inplace(c, item.name, item.models_def)
+    } else if item.kind == ItemKind::ItemPolicy {
+        checker_collect_policy_def_inplace(c, item.name, item.policy_def)
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
@@ -3441,6 +3573,20 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
                 }
             } else {
                 let alias_ty = checker_lower_type_expr_mut(c, te)
+                if alias_ty.kind == TypeKind::TyModel {
+                    let model_id = (*c).models.count
+                    if model_id >= 16 {
+                        checker_report_error_at_inplace(c, te.span, 63, 0, 0, 0)
+                        return
+                    }
+                    let info = ModelInfo {
+                        name: name,
+                        input_ty: model_input_ty(alias_ty),
+                        output_ty: model_output_ty(alias_ty),
+                    }
+                    (*c).models.entries[model_id as usize] = info
+                    (*c).models.count = model_id + 1
+                }
                 (*c).env = (*c).env.bind(name, alias_ty, false)
                 checker_const_int_bind_unknown_inplace(c, name)
             }
@@ -7324,6 +7470,20 @@ fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr
                 } else {
                     path_ty
                 }
+            } else if (*e).kind == ExprKind::ExprContest && ann_ty.kind == TypeKind::TyContest {
+                // The ref-safe helper currently owns the identifier-subject
+                // slice. Preserve the legacy checker for richer subjects until
+                // their recursive expression checking is ported in-place.
+                match (*e).left {
+                    Some(subject) => {
+                        if (*subject).kind == ExprKind::ExprIdent {
+                            checker_check_contest_expr_expected_mut(c, *e, ann_ty)
+                        } else {
+                            checker_check_binding_init_expr_bridge(c, opt, ann_ty)
+                        }
+                    }
+                    None => checker_check_binding_init_expr_bridge(c, opt, ann_ty)
+                }
             } else if checker_binding_init_is_special(*e, ann_ty) {
                 checker_check_binding_init_expr_bridge(c, opt, ann_ty)
             } else {
@@ -8112,26 +8272,22 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
     }
     i = 0
     while i < ep.contest_count {
-        let info = checker.contests.get(i)
-        ep.contests[i as usize] = IrContestInfo {
-            id: i,
-            span_start: info.span_start,
-            span_end: info.span_end,
-            audit_id: info.audit_id,
-            family_id: info.family_id,
-            policy_id: info.policy_id,
-            model_names: [Name { buf: [0 as i8; 128], len: 0 }; 16],
-            model_count: info.model_count,
-            metric_known: info.metric_known,
-            metric_values: info.metric_values,
-            mechanistic_report_id: info.mechanistic_report_id,
-            posterior_weights_id: info.posterior_weights_id,
-            counterexample_id: info.counterexample_id,
-            provenance_bundle_id: info.provenance_bundle_id,
-        }
+        ep.contests[i as usize].id = i
+        ep.contests[i as usize].span_start = checker.contests.entries[i as usize].span_start
+        ep.contests[i as usize].span_end = checker.contests.entries[i as usize].span_end
+        ep.contests[i as usize].audit_id = checker.contests.entries[i as usize].audit_id
+        ep.contests[i as usize].family_id = checker.contests.entries[i as usize].family_id
+        ep.contests[i as usize].policy_id = checker.contests.entries[i as usize].policy_id
+        ep.contests[i as usize].model_count = checker.contests.entries[i as usize].model_count
+        ep.contests[i as usize].metric_known = checker.contests.entries[i as usize].metric_known
+        ep.contests[i as usize].metric_values = checker.contests.entries[i as usize].metric_values
+        ep.contests[i as usize].mechanistic_report_id = checker.contests.entries[i as usize].mechanistic_report_id
+        ep.contests[i as usize].posterior_weights_id = checker.contests.entries[i as usize].posterior_weights_id
+        ep.contests[i as usize].counterexample_id = checker.contests.entries[i as usize].counterexample_id
+        ep.contests[i as usize].provenance_bundle_id = checker.contests.entries[i as usize].provenance_bundle_id
         var mn3: i64 = 0
         while mn3 < 16 {
-            ep.contests[i as usize].model_names[mn3 as usize] = info.model_names[mn3 as usize]
+            ep.contests[i as usize].model_names[mn3 as usize] = checker.contests.entries[i as usize].model_names[mn3 as usize]
             mn3 = mn3 + 1
         }
         i = i + 1
