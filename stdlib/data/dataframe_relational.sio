@@ -1,0 +1,135 @@
+//! Relational DataFrame verbs: group-by aggregation and inner join.
+//!
+//! Built entirely on the public `data::dataframe` accessors (df_new/df_get/df_add_row/
+//! df_nrows/df_ncols), so they compose with the rest of the DataFrame surface and the
+//! CSV-file hub. Keys are matched by exact f64 equality (intended for integer-encoded
+//! categories, e.g. ids 1.0, 2.0, 3.0).
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols}
+
+// Find `key` among seen[0..n); returns its index or -1.
+fn find_key(seen: &[f64; 1024], n: i64, key: f64) -> i64 {
+    var i: i64 = 0
+    while i < n {
+        if seen[i as usize] == key { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Collect the distinct values of `col` into `out`, returning how many there are.
+fn distinct_keys(df: &DataFrame, col: i64, out: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        let k = df_get(df, r, col)
+        if find_key(out, n, k) < 0 && n < 1024 {
+            out[n as usize] = k
+            n = n + 1
+        }
+        r = r + 1
+    }
+    n
+}
+
+/// Group by `key_col` and sum `val_col`. Returns a 2-column DataFrame [key, sum(val)],
+/// one row per distinct key (in first-seen order).
+pub fn df_groupby_sum(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var s: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col) }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = s
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and average `val_col`. Returns [key, mean(val)].
+pub fn df_groupby_mean(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var s: f64 = 0.0
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col); cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key
+        row[1] = if cnt > 0.0 { s / cnt } else { 0.0 }
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and count rows per key. Returns [key, count].
+pub fn df_groupby_count(df: &DataFrame, key_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = cnt
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Inner join `left` and `right` on left[left_key] == right[right_key]. Each matching pair emits a
+/// row of all left columns followed by all right columns except the right key. The result therefore
+/// has left.ncols + right.ncols - 1 columns (capped at 64).
+pub fn df_join_inner(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_new(lc + rc - 1)
+    var lr: i64 = 0
+    while lr < df_nrows(left) {
+        let lk = df_get(left, lr, left_key)
+        var rr: i64 = 0
+        while rr < df_nrows(right) {
+            if df_get(right, rr, right_key) == lk {
+                var row: [f64; 64] = [0.0; 64]
+                var col: i64 = 0
+                var c: i64 = 0
+                while c < lc && col < 64 { row[col as usize] = df_get(left, lr, c); col = col + 1; c = c + 1 }
+                c = 0
+                while c < rc && col < 64 {
+                    if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                    c = c + 1
+                }
+                df_add_row(&!out, &row)
+            }
+            rr = rr + 1
+        }
+        lr = lr + 1
+    }
+    out
+}
