@@ -1,10 +1,25 @@
+<!-- docs:meta
+topic_id: repo.docs.research.dyadic-non-reduction-spec-2026-07-14
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.dyadic-non-reduction-spec-2026-07-14
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Dyadic Non-Reduction: An Executable Relational-State Contract
 
 Date: 2026-07-14
 
-Status: research specification and falsifiable hypothesis. No executable,
-empirical, psychological, biological, diagnostic, therapeutic, legal, moral,
-or clinical claim is established by this document.
+Status: D0 has a reviewed executable bounded synthetic implementation whose
+focused gate passes. No empirical,
+psychological, biological, diagnostic, therapeutic, legal, moral, or clinical
+claim is established by this document or its fixtures.
 
 Proposed concept ID: `SOUNIO-DYADIC-NONREDUCTION`.
 
@@ -676,6 +691,49 @@ claim.
 
 ## 17. D0 Acceptance Gates
 
+### Current executable evidence
+
+The implementation keeps the reusable type surface separate from the native
+executor and from the independent oracle:
+
+- `stdlib/epistemic/dyadic_non_reduction.sio` defines the exact receipt API and
+  the one-way boundaries between collision, bounded ambiguity, non-reduction,
+  identity, mechanism, suffering, consent, and clinical action;
+- `tests/run-pass/clinical_dyadic_non_reduction_witness.sio` checks that the
+  public API composes through a real module import;
+- `tests/run-pass/clinical_dyadic_non_reduction_native_witness.sio` executes
+  W0-W4 natively as a scalarized single module;
+- `scripts/research/dyadic_non_reduction_oracle.py` independently exhausts all
+  39 preset words through horizon 3 and solves the bounded adaptive recurrence;
+- nine compile-fail fixtures reject the predeclared authority confusions;
+- `scripts/ci/dyadic_non_reduction_gate.sh` binds these checks to canonical
+  `bin/souc` resolving to Madaros, with no fallback.
+
+The current exact result is:
+
+```text
+common current relational projection = 500/1000
+common probe                         = A
+future projections                   = 400/1000 and 600/1000
+unreduced signed cross difference    = -200000 / 1000000
+reduced signed difference            = -1/5
+adaptive worst-case cost             = 2
+first preset separator               = A,B,C at cost 3
+```
+
+The W4 rival is decisive about scope. Promoting the predictive mode into an
+expanded current relational state reproduces every bounded output and restores
+a finite Markov representation. D0 therefore supports participant-product
+non-reduction for this fixture, while positively refusing unbounded-history
+irreducibility.
+
+The imported multi-module witness remains a `check-only` conformance fixture in
+the suite. Current Madaros also executes it through the full-IR route after the
+compact modular emitter declines the program; that explicit internal fallback
+is useful compatibility evidence but is not the strict runtime receipt. The
+independent single-module native executor remains the canonical no-fallback
+runtime evidence.
+
 ### Specification gate
 
 - [x] The claim is finite, synthetic, and falsifiable.
@@ -689,20 +747,20 @@ claim.
 
 ### Executable D0 gate
 
-- [ ] D0-W0 produces an exact collision-and-reveal witness.
-- [ ] D0-W1 preserves ambiguity for a factorable null family.
-- [ ] D0-W2 passes candidate, history-ID, and enumeration permutations.
-- [ ] D0-W3 distinguishes incomplete search from bounded ambiguity.
-- [ ] D0-W4 reports the results of context and relational-state expansion.
-- [ ] Every compared path receives the same typed input payload and schedule.
-- [ ] The observation schema excludes candidate and history identifiers.
-- [ ] Every exact product is authorized before multiplication inside `i64`.
-- [ ] An independent oracle agrees on every bounded partition and cost.
-- [ ] Every negative fixture fails with the intended type mismatch.
-- [ ] The focused gate passes through canonical `bin/souc` and Madaros with no
+- [x] D0-W0 produces an exact collision-and-reveal witness.
+- [x] D0-W1 preserves ambiguity for a factorable null family.
+- [x] D0-W2 passes candidate, history-ID, and enumeration permutations.
+- [x] D0-W3 distinguishes incomplete search from bounded ambiguity.
+- [x] D0-W4 reports the results of context and relational-state expansion.
+- [x] Every compared path receives the same typed input payload and schedule.
+- [x] The observation schema excludes candidate and history identifiers.
+- [x] Every exact product is authorized before multiplication inside `i64`.
+- [x] An independent oracle agrees on every bounded partition and cost.
+- [x] Every negative fixture fails with the intended type mismatch.
+- [x] The focused gate passes through canonical `bin/souc` and Madaros with no
       compiler fallback.
-- [ ] No compiler, native DSL, clinical stdlib, or legacy fixture is modified.
-- [ ] Math and external/clinical reviews are logged without PHI.
+- [x] No compiler, native DSL, clinical stdlib, or legacy fixture is modified.
+- [x] Math and external/clinical reviews are logged without PHI.
 
 ## 18. Phase Boundaries
 
@@ -739,18 +797,18 @@ Semantic-Lane-ID: research-dyadic-nonreduction-d0-20260714
 Owner: Codex implementation lane under founder direction
 Concept-IDs: proposed SOUNIO-DYADIC-NONREDUCTION; SOUNIO-NONASSOCIATIVE-ORDER; SOUNIO-EPISTEMIC-NUMERIC-VALUE; SOUNIO-PHYSICAL-OBSERVATION
 Intent-Preserved: same participant projections must not silently erase predictive relational history; evidence must not silently become moral or clinical authority
-Transformation: specify a finite exact multi-run witness for relational-history non-reduction under common inputs
-Types-Changed: none in specification phase; future experimental dyadic state, trace, partition, ambiguity, and non-reduction receipts
-Effects-Changed: none in specification phase; future Observe, Perturb, Authority, Harm, and Revoke effects remain proposals
+Transformation: execute a finite exact multi-run witness for relational-history non-reduction under common inputs and test state-expansion rivals
+Types-Changed: exact synthetic participant, relational-state, retained-history, context, common-input, transition, collision, separation, bounded-ambiguity, incomplete-search, factorable-null, state-expansion-rival, and non-reduction receipts; boundary-only identity, mechanism, suffering, consent, action, minimality, and leaking-schema types
+Effects-Changed: none; Observe, Perturb, Authority, Harm, and Revoke effects remain later proposals
 IR-Changed: none
-Claims-Introduced: none executable in specification phase; D0 defines the bounded claim a future gate may establish
+Claims-Introduced: bounded synthetic participant-product non-reduction for the frozen four-history family; bounded adaptive cost 2 and preset cost 3; finite Markov relational-state expansion restores factorability
 Claims-Forbidden: universal relational irreducibility; metaphysical shared mind; real therapeutic alliance; subjective suffering; machine consciousness; consent; causality; diagnosis; prognosis; treatment; legal or clinical authority
 Assumptions: finite declared candidate family; common deterministic transition rule; explicit context; exact observation schema; finite common-input alphabet; bounded arithmetic
-Write-Set: docs/research/dyadic_non_reduction_spec_2026-07-14.md; .claude/llm_offload_log.md
+Write-Set: stdlib/epistemic/dyadic_non_reduction.sio; tests/run-pass/clinical_dyadic_non_reduction_witness.sio; tests/run-pass/clinical_dyadic_non_reduction_native_witness.sio; scripts/research/dyadic_non_reduction_oracle.py; scripts/ci/dyadic_non_reduction_gate.sh; nine tests/compile-fail/clinical_*dyadic*.sio boundary fixtures; docs/research/dyadic_non_reduction_spec_2026-07-14.md; .claude/llm_offload_log.md
 Read-Set: FOUNDER_INTENT.md; semantic concept contracts; associator transport and tomography specification; focused literature baselines
-Positive-Witness: future D0-W0 exact collision and reveal plus D0-W3 bounded adaptive separation
-Negative-Witness: future product-state, identity, global-equivalence, causal, suffering, consent, and clinical-authority refusals
-Acceptance-Gate: future scripts/ci/dyadic_non_reduction_gate.sh
+Positive-Witness: D0-W0 exact collision and reveal; D0-W1 factorable null; D0-W2 relabeling controls; D0-W3 bounded adaptive separation and incomplete search; D0-W4 context and Markov-state rivals
+Negative-Witness: participant-pair, identity, global-equivalence, causal, suffering, consent, clinical-authority, minimality, and leaking-schema refusals
+Acceptance-Gate: scripts/ci/dyadic_non_reduction_gate.sh
 Integration-Target: research/psychiatric-regime-contest-20260712 or successor research branch
 Authoritative-Only-If: every executable D0 checkbox passes through canonical Madaros without fallback and independent review agrees on arithmetic and claim boundaries
 ```
