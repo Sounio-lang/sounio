@@ -1,0 +1,34 @@
+// Run-proof for the CSV export side (write a table to disk): build a table, write it with
+// csv_write_file (serialize -> [i8] -> write_file builtin), read it back with read_file +
+// csv_parse_string, and confirm the round-trip preserves every value. Uses a repo-relative temp
+// path (the gate runs from the repo root and removes it afterwards). lean_single engine.
+use csv::parser::*
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // build a source table by parsing a known CSV: 1.5,2,3 / 4,5,6
+    var t = csv_table_new()
+    var src: [u8; 4096] = [0; 4096]
+    let s: [i64; 12] = [49,46,53,44,50,44,51,10,52,44,53,10]  // "1.5,2,3\n4,5\n"? build below
+    var i: i64 = 0
+    // "1.5,2,3\n4,5,6\n"
+    let bytes: [i64; 14] = [49,46,53,44,50,44,51,10,52,44,53,44,54,10]
+    while i < 14 { src[i as usize] = bytes[i as usize] as u8; i = i + 1 }
+    if csv_parse(&src, 14, &!t, 44 as u8) != 0 { print("FAIL parse\n"); return 1 }
+    if t.n_rows != 2 || t.n_cols != 3 { print("FAIL shape\n"); return 2 }
+    // export to disk in one call
+    let n = csv_write_file(&t, "tests/stdlib/data/csv_export_roundtrip.tmp", 44 as u8)
+    if n <= 0 { print("FAIL write\n"); return 3 }
+    // read it back and re-parse
+    let back = read_file("tests/stdlib/data/csv_export_roundtrip.tmp")
+    if str_len(back) <= 0 { print("FAIL readback\n"); return 4 }
+    var t2 = csv_table_new()
+    if csv_parse_string(back, &!t2, 44 as u8) != 0 { print("FAIL reparse\n"); return 5 }
+    // the written file round-trips to the same shape and values
+    if t2.n_rows != 2 || t2.n_cols != 3 { print("FAIL rt_shape\n"); return 6 }
+    if ae(csv_table_get(&t2, 0, 0), 1.5) >= 1.0e-9 { print("FAIL rt00\n"); return 7 }
+    if ae(csv_table_get(&t2, 0, 2), 3.0) >= 1.0e-9 { print("FAIL rt02\n"); return 8 }
+    if ae(csv_table_get(&t2, 1, 2), 6.0) >= 1.0e-9 { print("FAIL rt12\n"); return 9 }
+    if ae(csv_col_sum(&t2, 0), 5.5) >= 1.0e-9 { print("FAIL rt_sum\n"); return 10 }   // 1.5+4
+    print("CSV_EXPORT_STDLIB_OK\n")
+    return 0
+}
