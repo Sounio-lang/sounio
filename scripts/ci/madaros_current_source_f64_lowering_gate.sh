@@ -42,4 +42,9 @@ SOUNIO_MADAROS_GLOBAL_F64_GATE_DIR="$WORK/global" \
 SOUNIO_MADAROS_GLOBAL_F64_GATE_KEEP=1 \
   bash "$ROOT_DIR/scripts/ci/madaros_global_f64_scratch_gate.sh"
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference and global f64 lowering gates"
+SOUNIO_MADAROS_GLOBAL_CAPACITY_GATE_BIN="$MADAROS_ELF" \
+SOUNIO_MADAROS_GLOBAL_CAPACITY_GATE_DIR="$WORK/global-capacity" \
+SOUNIO_MADAROS_GLOBAL_CAPACITY_GATE_KEEP=1 \
+  bash "$ROOT_DIR/scripts/ci/madaros_global_capacity_gate.sh"
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, and global capacity gates"
