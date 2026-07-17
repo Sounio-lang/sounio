@@ -4146,15 +4146,58 @@ fn module_frontend_count_bss_global_slots(items: &Option<Box<ItemList>>) -> i64 
     count
 }
 
+fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let items = (*programs)[i as usize].items
+        count = count + module_frontend_count_lowered_ir_slots(&items)
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_count_loaded_bss_global_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let items = (*programs)[i as usize].items
+        count = count + module_frontend_count_bss_global_slots(&items)
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slots: i64) -> string with Mut, Panic, Div, Alloc {
+    if bss_slots > IR_MAX_FUNCS {
+        return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(IR_MAX_FUNCS) + " slots)"
+    }
+    if total_slots - bss_slots > IR_MAX_FUNCS {
+        return "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(IR_MAX_FUNCS) + " slots)"
+    }
+    "too many lowered items: combined globals and functions exceed shared IR module capacity (max " + io_trace_i64_string(IR_MAX_FUNCS) + " slots)"
+}
+
 fn module_frontend_ir_slot_capacity_exceeded(items: &Option<Box<ItemList>>) -> bool with Alloc {
     module_frontend_count_lowered_ir_slots(items) > IR_MAX_FUNCS
 }
 
 fn module_frontend_ir_slot_capacity_error(items: &Option<Box<ItemList>>) -> string with Mut, Panic, Div, Alloc {
-    if module_frontend_count_bss_global_slots(items) > 0 {
-        return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(IR_MAX_FUNCS) + " slots)"
-    }
-    "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(IR_MAX_FUNCS) + " slots)"
+    module_frontend_ir_slot_capacity_error_from_counts(
+        module_frontend_count_lowered_ir_slots(items),
+        module_frontend_count_bss_global_slots(items)
+    )
+}
+
+fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc {
+    module_frontend_count_loaded_ir_slots(programs, loaded) > IR_MAX_FUNCS
+}
+
+fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc {
+    module_frontend_ir_slot_capacity_error_from_counts(
+        module_frontend_count_loaded_ir_slots(programs, loaded),
+        module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    )
 }
 
 fn module_frontend_lower_program_counts_traced(
@@ -4562,6 +4605,10 @@ fn module_frontend_lower_programs_array_direct_box(
 
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
+    if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
+    }
     print("lower_array: seed_begin\n")
     let seed_items = (*programs)[0].items
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
