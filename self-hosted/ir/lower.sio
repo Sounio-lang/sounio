@@ -132,6 +132,7 @@ fn empty_lower_loop_labels() -> LowerLoopLabels {
 }
 
 let LOWER_GLOBAL_ELEM_F64: i64 = 2
+let LOWER_GLOBAL_SCALAR_F64: i64 = 3
 
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
@@ -1785,7 +1786,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             }
                         }
                         _ => {
-                            let bss_fid = module.fn_count
+                            var bss_mod = module
+                            let bss_fid = bss_mod.fn_count
                             if bss_fid < IR_MAX_FUNCS {
                                 global_types = lower_global_type_table_record(
                                     global_types,
@@ -1797,7 +1799,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 var bss_slot = ir_empty_function()
                                 bss_slot.name = name
                                 bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
-                                bss_slot.param_count = module.bss_total_size
+                                bss_slot.param_count = bss_mod.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                 let init_val = ast_lookup_global_var_init(name)
@@ -1805,10 +1807,11 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                     bss_slot.returns_float = 1
                                     bss_slot.prof_counter_id = init_val
                                 }
-                                module.functions[bss_fid as usize] = bss_slot
-                                module.fn_count = bss_fid + 1
-                                module.bss_total_size = module.bss_total_size + aligned_size
+                                bss_mod.functions[bss_fid as usize] = bss_slot
+                                bss_mod.fn_count = bss_fid + 1
+                                bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
                             }
+                            module = bss_mod
                         }
                     }
                 } else if kind == ItemKind::ItemStruct {
@@ -1970,6 +1973,23 @@ fn lowerer_mark_local_array_elem_float_mut(
     while i >= 0 {
         if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
             (*locals_box).array_elem_float[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+fn lowerer_mark_local_scalar_kind_mut(
+    lo: &! Lowerer,
+    name: Name,
+    kind: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).scalar_kind[i as usize] = kind
             (*lo).locals = locals_box
             return
         }
@@ -2498,6 +2518,7 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
 fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *ty_opt {
         Some(ty) => {
+            if lower_type_expr_is_f64(&(*ty)) { return LOWER_GLOBAL_SCALAR_F64 }
             if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
             0
         }
@@ -4755,7 +4776,10 @@ impl Lowerer {
                     print_int(global_elem_kind)
                     print("\n")
                 }
-                if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
+                if global_elem_kind == LOWER_GLOBAL_SCALAR_F64 {
+                    lo = lo.emit(ir_mark_float_reg(reg))
+                    lowerer_mark_local_scalar_kind_mut(&! lo, g.name, 2)
+                } else if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
                     lowerer_mark_local_array_elem_float_mut(&! lo, g.name)
                 }
             }
@@ -9869,6 +9893,21 @@ impl Lowerer {
                     print("error: capturing closure cannot be used as a value (escaping closures are not yet supported); only a direct call of the closure is allowed\n")
                     let loe = self.report_fatal_lowering_error()
                     return (loe, 0)
+                }
+                // Scalar BSS bindings are loaded in each function only to retain
+                // global metadata for stores. A callee can update the backing
+                // slot, so reads must reload it instead of using that stale
+                // per-function snapshot. Aggregate bindings remain base pointers.
+                if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
+                    let bss_off = self.lookup_local_global_bss_offset(e.name)
+                    let pair = self.fresh_reg()
+                    let lo = pair.0
+                    let reg = pair.1
+                    let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
+                    if self.lookup_local_scalar_kind(e.name) == 2 {
+                        return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                    }
+                    return (lo2, reg)
                 }
                 (self, src)
             } else {
