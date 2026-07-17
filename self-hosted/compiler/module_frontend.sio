@@ -30,6 +30,10 @@ fn module_frontend_rebracket_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1")
 }
 
+fn module_frontend_ordered_path_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1")
+}
+
 fn module_frontend_items_have_ontology(items: &Option<Box<ItemList>>) -> bool with Alloc {
     match *items {
         Some(list) => {
@@ -92,6 +96,48 @@ fn module_frontend_print_rebracket_disabled(phase: string, function_count: i64) 
     print(" optimize=0 functions=")
     print(io_trace_i64_string(function_count))
     print(" transactions=0 authorizations=0 applications=0 refusals=0 same_region_applications=0 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=0 last_function=-1 combined=0\n")
+}
+
+fn module_frontend_print_ordered_path_receipt(
+    phase: string,
+    optimize: bool,
+    module: &IrModule,
+) with IO, Mut, Panic, Div {
+    if !module_frontend_ordered_path_trace_enabled() { return }
+    let link_total = ir_ontology_parameter_link_total(&(*module).ontologies)
+    let bounded = ir_ontology_parameter_link_count_is_bounded(&(*module).ontologies)
+    print("[ordered-path-native-v2] phase=")
+    print(phase)
+    print(" schema=1 optimize=")
+    print(if optimize { "1" } else { "0" })
+    print(" functions=")
+    print(io_trace_i64_string((*module).fn_count))
+    print(" links=")
+    print(io_trace_i64_string(link_total))
+    print(" bounded=")
+    print(if bounded { "1" } else { "0" })
+    print(" authority=0\n")
+
+    if !bounded { return }
+
+    var link_index: i64 = 0
+    while link_index < link_total {
+        if ir_ontology_parameter_link_is_valid_at(&(*module).ontologies, link_index) {
+            let function_name = ir_ontology_parameter_link_function_name_at(&(*module).ontologies, link_index)
+            let parameter_index = ir_ontology_parameter_link_parameter_index_at(&(*module).ontologies, link_index)
+            let class_name = ir_ontology_parameter_link_class_name_at(&(*module).ontologies, link_index)
+            print("[ordered-path-link] phase=")
+            print(phase)
+            print(" schema=1 function=")
+            print(str_from_bytes(function_name.buf, function_name.len))
+            print(" parameter=")
+            print(io_trace_i64_string(parameter_index))
+            print(" class=")
+            print(str_from_bytes(class_name.buf, class_name.len))
+            print(" authority=0\n")
+        }
+        link_index = link_index + 1
+    }
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
@@ -5053,6 +5099,9 @@ pub fn module_frontend_compile_imported_to_file(
         } else {
             module_frontend_print_rebracket_disabled("single-disabled", fn_count)
         }
+        // Cleanup is the final mutable IR pass on this route; codegen receives
+        // only an immutable module reference after this audit snapshot.
+        module_frontend_print_ordered_path_receipt("single-final", optimize, &(*module_box))
         parser_reset_last_errors()
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
@@ -5104,6 +5153,9 @@ pub fn module_frontend_compile_imported_to_file(
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
+    // Finalization and cleanup are complete; codegen receives an immutable
+    // module reference after this audit snapshot.
+    module_frontend_print_ordered_path_receipt("merged-final", optimize, &merged_module)
     parser_reset_last_errors()
     let target_spec = native_resolve_target("native", "auto", false)
     let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)
