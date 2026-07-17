@@ -14,7 +14,9 @@ Concept-ID: `SOUNIO-REBRACKETING-AUTHORITY`
 Status: hypothesis. The scalar protocol, the production cleanup pipeline, and
 the focused default native-v2 `-O` paths are executable under the strict
 hash-bound gate. The executable claim covers one single-module witness and one
-imported/merged witness; it is not compiler-wide semantic preservation.
+imported/merged witness. A stacked extension adds a compiler-internal forward-
+CFG diamond witness, but it is not source-level cross-block reachability or
+compiler-wide semantic preservation.
 
 ## Founder Intent
 
@@ -58,8 +60,10 @@ The production mutation point is Block L of
    (`label`, `jump`, conditional branch, return, and sret return), while refusing
    calls, phi lists, packed/wide registers, explicit float IR, and
    metadata-carried register operands;
-7. derives a private two-word same-linear-region/use certificate requiring both
-   constant definitions and both binops to have the same lexical block start;
+7. derives a private two-word flow/use certificate: same-block candidates keep
+   the uninterrupted-region proof, while cross-block candidates require local
+   constant definitions, a canonical forward acyclic CFG, and an inner block
+   that dominates the outer block;
 8. requires the `c2` register to have exactly one modeled consumer across the
    whole function;
 9. seals the six-word occurrence and two-word certificate as one private
@@ -91,8 +95,10 @@ about all Sounio backends. Their exact counts are gate tripwires: record growth
 must force an explicit review rather than silently changing the transport shape.
 
 Certificate refusal is encoded inside the private two-word value: an invalid
-certificate has `inner_const_def_index = -1` and a negative block-start word
-whose magnitude is the refusal reason. This avoids transporting a second
+certificate has `inner_const_def_index = -1` and a negative path-binding word
+whose magnitude is the refusal reason. A valid path binding exactly packs the
+inner and outer block-start indices as `inner * IR_MAX_INSTRS + outer`, without
+a collision-prone hash. This avoids transporting a second
 heterogeneous three-tuple through the current bootstrap. The private issuer
 asserts nonnegative indices, so a refusal-shaped value cannot become authority.
 
@@ -105,7 +111,10 @@ authority surface.
 
 The 256-register admission limit is named in the implementation and mirrors the
 existing fixed register-indexed tables in cleanup passes A2/B. It is a boundary
-of this pass, not an asserted global compiler limit.
+of this pass, not an asserted global compiler limit. The forward reachability
+witness likewise names a 2048-instruction local capacity matching the current
+`IrFunction` array. If the global IR capacity grows, this authority remains
+fail-closed until its fixed proof storage and gate are deliberately revised.
 
 ## Evidence Layers
 
@@ -116,15 +125,16 @@ of this pass, not an asserted global compiler limit.
   epoch, and a diagnostic-hash collision across distinct scopes.
 - Adjacent two-module fixtures require exact E175 and E176 diagnostics for the
   private issuer and private authority constructor.
-- The production probe adds call-bearing, packed-register, cross-region, and
-  explicit-float-IR refusal witnesses plus a positive same-region candidate in a
-  function with a later parameter-consuming branch/label, for 15 focused cases, four applications,
-  and eleven unchanged refusals. A dedicated compiler mode calls that probe from
-  inside the built Madaros binary.
-- A cleanup-pipeline probe passes an AND chain through the real pass-A1/Block-L
-  ordering and requires exactly one recorded transaction, authorization, and
-  application. This prevents an earlier optimizer block from silently consuming
-  the same source shape before the authority transaction.
+- The production probe adds malformed, non-dominating, backward-edge, base-kill,
+  and phi-bearing CFG refusals plus one positive dominated forward diamond. With
+  the same-region and operand-model cases, it executes 21 focused cases, five
+  applications, and sixteen unchanged refusals. A dedicated compiler mode calls
+  that probe from inside the built Madaros binary.
+- A cleanup-pipeline probe passes a cross-block AND diamond through the real
+  pass-A1/Block-L ordering and requires exactly one recorded transaction,
+  authorization, and application. This prevents an earlier optimizer block from
+  silently consuming the shape and proves that the transaction is reachable
+  through the production pass, not only through its direct helper.
 - The default native-v2 executable layer requires an exact disabled receipt and
   correct runtime result without `-O`; with `-O`, it requires exactly one
   application and the same runtime result for both a single module and an
@@ -135,14 +145,20 @@ of this pass, not an asserted global compiler limit.
 
 The use scan remains whole-function and fail-closed. One unsupported operand
 encoding still refuses bitwise rebracketing for that function, even outside the
-local window. Canonical control instructions are no longer unsupported: their
-register uses are explicit and counted globally. Separately, the certificate
-requires the two constant definitions and two binops to share one lexical block
-token, where labels start blocks and every jump, branch, or return ends one. A
-pass-level precheck avoids repeating a known unsupported-use refusal for every
-candidate, while the transaction still repeats the live use scan and local
-certificate derivation before mutation. It does not route legacy Add/Mul through
-the new transaction.
+local window. Canonical control instructions are explicit and counted globally.
+Same-block candidates retain the original uninterrupted-region certificate.
+For a cross-block candidate, each constant definition must be local to its
+binop, all labels and targets must be unique and present, every CFG edge must go
+strictly forward, the outer block must be entry-reachable, and removing the
+inner block must make the outer block unreachable. Because block-start indices
+are then a topological order, the path-exclusion scan is exact for this admitted
+DAG. The capture scan also refuses every lexical write to the base, constants,
+or intermediate result between the two binops; conservatively checking all such
+writes, including unreachable or mutually exclusive ones, supplies the no-kill
+fact needed by this narrow cross-block rewrite. A pass-level precheck avoids
+repeating a known unsupported-use refusal for every candidate, while the
+transaction repeats the live use scan and certificate derivation before
+mutation. Legacy Add/Mul never enters the new transaction.
 
 The E175/E176 fixtures are minimal language-level privacy controls, not imports
 of the production optimizer module. Static source anchors inspect the real
@@ -240,12 +256,20 @@ The design is informed by, but does not claim the guarantees of:
   PLDI 2021, <https://web.ist.utl.pt/nuno.lopes/pubs.php?id=alive2-pldi21>.
 - Xavier Leroy, "Formal Verification of a Realistic Compiler," CACM 2009,
   <https://doi.org/10.1145/1538788.1538814>.
+- Keith D. Cooper, Timothy J. Harvey, and Ken Kennedy, "A Simple, Fast
+  Dominance Algorithm," 2001, <https://www.cs.rice.edu/~keith/EMBED/dom.pdf>.
+- Ron Cytron et al., "Efficiently Computing Static Single Assignment Form and
+  the Control Dependence Graph," TOPLAS 1991,
+  <https://doi.org/10.1145/115372.115320>.
 
 The nearest analogy is per-transformation validation: authority is derived for
 one live rewrite rather than inferred from a global optimizer flag. Unlike PCC,
 this slice carries no machine-checkable proof term. Unlike Alive2, it performs
 no SMT refinement proof. Unlike CompCert, it provides no compiler-wide semantic
-preservation theorem.
+preservation theorem. The current forward-DAG slice does not implement the
+general iterative dominator or SSA algorithms from Cooper-Harvey-Kennedy or
+Cytron et al.; its exact path-exclusion test is valid only because every admitted
+edge follows lexical block order.
 
 ## Claims Introduced
 
@@ -255,12 +279,16 @@ Only after the strict gate passes may this lane claim:
   through a private occurrence-bound transaction.
 - The transaction refuses replayed structure, a wrong occurrence, swapped
   operands, arithmetic operators, float markers, shared `c2` constants, a stale
-  operator window, call-bearing IR, packed/implicit register encodings, a
-  candidate crossing a lexical block boundary, and explicit float IR in its
-  focused witness.
-- A canonical parameter-consuming branch/label after an otherwise certified local tree no longer
-  suppresses the transaction; moving that boundary between the inner and outer
-  trees produces reason `15` and leaves the candidate unchanged.
+  operator window, call-bearing IR, packed/implicit register encodings,
+  non-dominating joins, malformed labels or targets, backward edges, intervening
+  base writes, phi-bearing IR, and explicit float IR in its focused witnesses.
+- A canonical parameter-consuming branch/label after an otherwise certified
+  local tree no longer suppresses the transaction.
+- One compiler-internal forward diamond is admitted when the inner block
+  dominates the joined outer block and the exact no-kill/use obligations hold.
+  The negative witnesses leave the candidate structurally unchanged and expose
+  distinct refusal reasons for malformed CFG, non-dominance, backedges,
+  intervening writes, and unsupported phi operands.
 - Default native-v2 `-O` reaches the transaction once for the focused
   single-module witness and once after imported-module finalization, with both
   optimized executables preserving the witness result.
@@ -276,8 +304,13 @@ Only after the strict gate passes may this lane claim:
 - Cryptographic unforgeability.
 - Coverage of source shapes other than the two focused native-v2 witnesses, of
   all optimization pipelines, or of compiler-wide runtime behavior.
-- Cross-block dominance, reaching-definition, loop, phi-edge, or arbitrary CFG
-  authority. The certificate is a same-linear-region proof, not a dominator tree.
+- Loop, backedge, phi-edge, irreducible, or arbitrary-CFG authority. The
+  certificate recognizes only same-block regions and canonical forward DAGs;
+  it is not a reusable dominator tree or a general SSA reaching-definition
+  analysis.
+- Source-level cross-block reachability or a default native-v2 cross-block
+  witness. The executable native-v2 witnesses remain the focused same-block
+  shapes inherited from PR #1001.
 - A claim that Add/Mul legacy reassociation now satisfies this authority model.
 - Merge readiness while the strict gate reports a blocked production smoke.
 
@@ -336,21 +369,21 @@ Next-Action: preserve the focused claim boundary; broaden only with new typed do
 ## Semantic Lane Declaration
 
 ```text
-Semantic-Lane-ID: rebracketing-authority-compiler-v0
+Semantic-Lane-ID: rebracketing-authority-forward-cfg-v1
 Owner: Codex coordinated compiler lane
 Concept-IDs: SOUNIO-REBRACKETING-AUTHORITY; SOUNIO-NONASSOCIATIVE-ORDER
 Intent-Preserved: parenthesization changes only under exact local authority; nonassociative and uncertain regimes remain ordered
 Transformation: route one ordered i64 AND/OR/XOR constant-chain rewrite through private capture, revalidation, and mutation
-Types-Changed: private optimizer occurrence, same-linear-region/use certificate, authority, and transaction audit; public compact probe and module audit receipts
+Types-Changed: private optimizer occurrence, exact flow/use certificate with an injective inner/outer block binding, authority, and transaction audit; public compact probe and module audit receipts
 Effects-Changed: none
 IR-Changed: no new opcode or field; existing Block L mutation is gated
-Claims-Introduced: focused exact-bitwise transaction exercised by the strict current-source internal smoke and reached once by each of the single-module and imported/merged default native-v2 -O witnesses
-Claims-Forbidden: formal proof, float/GUM/clinical authority, D7 receipt consumption, coverage beyond the focused native-v2 witnesses, compiler-wide preservation, cryptographic sealing
-Assumptions: the admitted candidate region is integer-only and uninterrupted by labels or terminators; both constants have live local IrLoadImm definitions; c2 has one globally modeled use; every instruction uses an admitted scalar or explicit control encoding; calls, phi lists, explicit float IR, packed or implicit operands, and cross-block candidates cause conservative refusal
+Claims-Introduced: focused exact-bitwise transaction exercised by the strict current-source internal smoke; one compiler-internal dominated forward diamond reaches the production cleanup pipeline; inherited same-block single-module and imported/merged default native-v2 -O witnesses remain executable
+Claims-Forbidden: formal proof, float/GUM/clinical authority, D7 receipt consumption, source-level cross-block reachability, loops, phi-edge or arbitrary CFG authority, compiler-wide preservation, cryptographic sealing
+Assumptions: the carrier is integer-only; both constants have local live IrLoadImm definitions; c2 has one globally modeled use; every instruction uses an admitted scalar or explicit control encoding; cross-block candidates require unique present labels, strict forward edges, entry reachability, exact path-exclusion dominance, and no lexical conflicting write; calls, phi lists, explicit float IR, packed or implicit operands, and all backedges cause conservative refusal
 Write-Set: self-hosted/ir/opt_cleanup.sio; self-hosted/ir/rebracket_authority_self_test_runner.sio; self-hosted/compiler/main.sio; tests/compiler/rebracket_authority_*; scripts/ci/exact_bitwise_rebracket_authority_gate.sh; docs/internal/concepts/rebracketing-authority.md; docs/internal/concepts/registry.tsv
 Read-Set: self-hosted/ir/ir.sio; self-hosted/ir/egraph.sio; self-hosted/check/*; scripts/ci/no_false_float_axioms.sh; tests/compiler/madaros_visibility_context/*
-Positive-Witness: scalar kernel AND/OR/XOR masks; production probe application mask 7; same-region application with later parameter-consuming branch/label; cleanup-pipeline AND application with later control; default native-v2 single and imported/merged AND runtime witnesses
-Negative-Witness: scalar refusal matrix; exact E175/E176 fixtures; production refusal mask 2047 including call-bearing, packed-register, cross-region reason 15, and explicit-float IR
+Positive-Witness: scalar kernel AND/OR/XOR masks; production probe application mask 7; same-region application with later parameter-consuming branch/label; dominated cross-block OR diamond; cleanup-pipeline cross-block AND diamond; inherited default native-v2 single and imported/merged same-block AND runtime witnesses
+Negative-Witness: scalar refusal matrix; exact E175/E176 fixtures; production refusal mask 65535 including call-bearing, packed-register, explicit-float, non-dominating reason 21, backedge reason 19, duplicate-label reason 17, missing-target reason 18, base-kill reason 10, and phi reason 14 witnesses
 Acceptance-Gate: strict exact_bitwise_rebracket_authority_gate.sh with a current-source Foundry compiler
 Integration-Target: current-source Madaros optimizer and focused default native-v2 -O reachability
 Authoritative-Only-If: the narrow internal-transaction and focused default-path claims use a recorded clean source SHA and explicit compiler hash with no fallback; any broader reachability claim requires a new executable gate
@@ -359,15 +392,15 @@ Authoritative-Only-If: the narrow internal-transaction and focused default-path 
 ## Integration Receipt
 
 ```text
-Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated production transaction, and focused default native-v2 single/imported reachability
+Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated same-block and forward-DAG production transactions, and focused same-block default native-v2 single/imported reachability
 Concept-Status-Before: unregistered
 Concept-Status-After: hypothesis
-Distinctions-Added: observed receipt != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; explicit control-use model != cross-block authority; same-linear-region certificate != general dominance; internal probe != default-path reachability; focused reachability != compiler-wide preservation
+Distinctions-Added: observed receipt != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; explicit control-use model != flow authority; forward-DAG path-exclusion dominance != a general dominator tree; compiler-internal cross-block witness != source-level cross-block reachability; internal probe != default-path reachability; focused reachability != compiler-wide preservation
 Distinctions-Preserved: parenthesization != formatting; compile success != runtime parity; formal model != empirical or clinical claim
 Distinctions-Erased: none
-Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 current-source builds; strict hash-bound internal/pipeline smoke; no-opt control; single-module and imported/merged default native-v2 -O receipts and runtime executions
+Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 current-source builds and inherited same-block runtime evidence; pending stacked-lane current-source build and strict 21-case internal/cross-block-pipeline smoke
 Fallback-Path: none
 Legacy-Kept: legacy Add/Mul Block L path retained outside the new claim
 Conflicting-Lanes: none; issue #854 and IrFunction/SOIR capacity stacks remain read-only and are no longer prerequisites for the focused smoke
-Next-Semantic-Interface: source ontology obligation -> validated CFG plus reaching-definition certificate -> same-linear-region/use certificate -> occurrence authority -> native-v2 receipt
+Next-Semantic-Interface: source ontology obligation -> source-to-IR cross-block lowering witness -> loop/phi-capable dominance and reaching-definition certificate -> occurrence authority -> native-v2 receipt
 ```
