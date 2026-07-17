@@ -12,12 +12,9 @@ export default function ThemeToggle() {
     const stored = localStorage.getItem('theme') as Theme | null;
     if (stored === 'light' || stored === 'dark' || stored === 'system') {
       setTheme(stored);
-      return;
     }
-
-    // Dark-first default when no user preference exists.
-    setTheme('dark');
-    localStorage.setItem('theme', 'dark');
+    // No stored preference: keep the implicit dark default without
+    // persisting it — the 'system' path must stay reachable.
   }, []);
 
   useEffect(() => {
@@ -29,7 +26,6 @@ export default function ThemeToggle() {
 
     root.classList.remove('dark', 'light');
     root.classList.add(resolvedTheme);
-    localStorage.setItem('theme', theme);
   }, [theme, mounted]);
 
   useEffect(() => {
@@ -50,6 +46,7 @@ export default function ThemeToggle() {
     const currentIndex = themes.indexOf(theme);
     const nextTheme = themes[(currentIndex + 1) % themes.length];
     setTheme(nextTheme);
+    localStorage.setItem('theme', nextTheme);
   };
 
   if (!mounted) {
