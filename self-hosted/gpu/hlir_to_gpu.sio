@@ -1741,6 +1741,30 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             k = gpu_kernel_append_op(k, stg)
             var tile = gpu_op_wmma_tile(0, 512, pout_reg, 16)
             k = gpu_kernel_append_op(k, tile)
+        } else if hlir_name_is_ossm_oct_step(cn) {
+            // O-SSM octonion linear step S = A⊗H + B·x on tensor cores.
+            // call_args = [pA, pB, px, pH, pout]. Stage L(A)+H → tile D=L(A)·H → post-add B·x.
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pA_reg = instr.call_args[0]
+            let pB_reg = instr.call_args[1]
+            let px_reg = instr.call_args[2]
+            let pH_reg = instr.call_args[3]
+            let po_reg = instr.call_args[4]
+            var stg = gpu_op_new()
+            stg.opcode = GpuOpcode::GpuOctBatchStage
+            stg.lhs_reg = pA_reg
+            stg.rhs_reg = pH_reg
+            stg.rhs_imm = 8
+            k = gpu_kernel_append_op(k, stg)
+            var tile = gpu_op_wmma_tile(0, 512, po_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
+            var pad = gpu_op_new()
+            pad.opcode = GpuOpcode::GpuOctPostAddBx
+            pad.lhs_reg = pB_reg
+            pad.rhs_reg = px_reg
+            pad.addr_reg = po_reg
+            pad.rhs_imm = 8
+            k = gpu_kernel_append_op(k, pad)
         }
         // Other calls: skip in MVP
     }
@@ -1758,6 +1782,16 @@ fn hlir_name_is_oct_batch_mul(n: HlirName) -> bool {
     n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
     n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
     n.buf[12] == 108 as i8
+}
+
+// "ossm_oct_step" (13 chars) — the O-SSM octonion linear recurrence step S = A⊗H + B·x on tensor
+// cores: ossm_oct_step(pA, pB, px, pH, pout).
+fn hlir_name_is_ossm_oct_step(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8
 }
 
 // "sed_batch_mul" (13 chars) — the batched sedenion multiply intrinsic (L(a)·H, dim=16, bits=4).

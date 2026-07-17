@@ -132,10 +132,12 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     out = ptx_push_str(out, "{\n")
 
     let stage = gpu_has_oct_stage(kernel)
+    let postadd = gpu_has_oct_postadd(kernel)
+    let stage_or_pa = stage || postadd
 
-    // .reg .pred %p<N> — the staging loop needs at least %p<2>.
+    // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
     var pred_count = kernel.max_reg_pred
-    if stage && pred_count < 2 { pred_count = 2 }
+    if stage_or_pa && pred_count < 2 { pred_count = 2 }
     if pred_count > 0 {
         out = ptx_push_str(out, "    .reg .pred %p<")
         out = gpu_push_i64(out, pred_count)
@@ -144,7 +146,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
 
     // .reg .b32 %r<N> — covers both u32 and i32. The staging loop needs %r1..%r4.
     var b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
-    if stage && b32_count < 8 { b32_count = 8 }
+    if stage_or_pa && b32_count < 8 { b32_count = 8 }
     if b32_count > 0 {
         out = ptx_push_str(out, "    .reg .b32 %r<")
         out = gpu_push_i64(out, b32_count)
@@ -163,16 +165,19 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
         out = ptx_emit_shared_decl(out, kernel.shared_bytes)
     }
 
-    // .reg .f32 %f<N>
-    if kernel.max_reg_f32 > 0 {
+    // .reg .f32 %f<N> — the O-SSM post-add needs %f1..%f3.
+    var f32_count = kernel.max_reg_f32
+    if postadd && f32_count < 4 { f32_count = 4 }
+    if f32_count > 0 {
         out = ptx_push_str(out, "    .reg .f32 %f<")
-        out = gpu_push_i64(out, kernel.max_reg_f32)
+        out = gpu_push_i64(out, f32_count)
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .f64 %fd<N> — the staging loop needs %fd0.
+    // .reg .f64 %fd<N> — the staging loop needs %fd0; the post-add needs %fd1..%fd2.
     var f64_count = kernel.max_reg_f64
     if stage && f64_count < 2 { f64_count = 2 }
+    if postadd && f64_count < 3 { f64_count = 3 }
     if f64_count > 0 {
         out = ptx_push_str(out, "    .reg .f64 %fd<")
         out = gpu_push_i64(out, f64_count)
@@ -279,6 +284,44 @@ fn gpu_emit_cd_batch_stage(paR: string, pHR: string, dim: i64, bits: i64) -> str
         b = b + 1
     }
     t = str_concat(t, "$STGDONE:\n    bar.sync 0;\n")
+    t
+}
+
+// Does this kernel contain the O-SSM B·x post-add op?
+fn gpu_has_oct_postadd(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctPostAddBx { return true }
+        i = i + 1
+    }
+    false
+}
+
+// O-SSM linear-recurrence post-add: after the tile writes S = L(A)·H (f32, row-major) to global,
+// thread 0 adds S[k][b] += B[k]·x[b] for k<dim, b<16. B/x are f64; the accumulate is in f32.
+fn gpu_emit_oct_postadd_bx(BR: string, xR: string, SR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    bar.sync 0;\n    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $PADONE;\n"
+    var k: i64 = 0
+    while k < dim {
+        // B[k] → %f1
+        t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), BR)
+        t = str_concat(str_concat(t, "+"), i64_to_string(k * 8))
+        t = str_concat(t, "];\n    cvt.rn.f32.f64 %f1, %fd1;\n")
+        var b: i64 = 0
+        while b < 16 {
+            t = str_concat(str_concat(t, "    ld.global.f64 %fd2, ["), xR)
+            t = str_concat(str_concat(t, "+"), i64_to_string(b * 8))
+            t = str_concat(t, "];\n    cvt.rn.f32.f64 %f2, %fd2;\n    ld.global.f32 %f3, [")
+            t = str_concat(str_concat(t, SR), "+")
+            t = str_concat(str_concat(t, i64_to_string((k * 16 + b) * 4)), "];\n")
+            t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n    st.global.f32 [")
+            t = str_concat(str_concat(t, SR), "+")
+            t = str_concat(str_concat(t, i64_to_string((k * 16 + b) * 4)), "], %f3;\n")
+            b = b + 1
+        }
+        k = k + 1
+    }
+    t = str_concat(t, "$PADONE:\n")
     t
 }
 
@@ -613,6 +656,12 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let dim = if op.rhs_imm == 16 { 16 } else { 8 }
             let bits = if dim == 16 { 4 } else { 3 }
             ptx_push_str(buf, gpu_emit_cd_batch_stage(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), dim, bits))
+        }
+
+        GpuOpcode::GpuOctPostAddBx => {
+            // O-SSM post-add S[k][b] += B[k]·x[b] on the f32 tile output (thread 0).
+            let dim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_postadd_bx(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), dim))
         }
 
         GpuOpcode::GpuWmmaTile => {
