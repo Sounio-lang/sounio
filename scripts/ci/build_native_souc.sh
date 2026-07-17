@@ -156,7 +156,17 @@ case "$HOST_PLATFORM" in
         ;;
 esac
 
+# The canonical lean_single fixed point is newer than the compatibility host
+# artifact on Linux x86_64. Prefer it for staged source bootstrap, while
+# preserving the host artifact as a fallback seed.
 SOURCE_BOOTSTRAP_SEEDS=("${HOST_PREBUILTS[@]}")
+case "$HOST_PLATFORM" in
+    Linux:x86_64|Linux:amd64)
+        if [[ -x "$ROOT_DIR/bin/souc-lean-single-x86_64" ]]; then
+            SOURCE_BOOTSTRAP_SEEDS=("$ROOT_DIR/bin/souc-lean-single-x86_64" "${SOURCE_BOOTSTRAP_SEEDS[@]}")
+        fi
+        ;;
+esac
 if [[ -n "$NATIVE_SEED_OVERRIDE" ]]; then
     SOURCE_BOOTSTRAP_SEEDS=("$NATIVE_SEED_OVERRIDE" "${SOURCE_BOOTSTRAP_SEEDS[@]}")
     echo "Using explicit source-bootstrap seed: $NATIVE_SEED_OVERRIDE"
