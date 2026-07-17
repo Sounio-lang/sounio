@@ -22,7 +22,7 @@ AB_REJECT="$ROOT_DIR/tests/compile-fail/ordered_path_ab_cannot_replace_ba.sio"
 GROUPING_REJECT="$ROOT_DIR/tests/compile-fail/ordered_path_left_cannot_replace_right.sio"
 CATEGORY_REJECT="$ROOT_DIR/tests/compile-fail/ordered_path_order_witness_cannot_replace_nonassociativity.sio"
 OBSERVATION_REJECT="$ROOT_DIR/tests/compile-fail/ordered_path_occupancy_cannot_replace_state.sio"
-EXPECTED_RUNTIME='ORDERED_PATH_OK occupancy=800 input=333 immediate=1133 later_ab=1140 later_ba=1147 later_left=1154 later_right=1161'
+EXPECTED_RUNTIME='ORDERED_PATH_OK occupancy=800 input=333 immediate=877 later_ab=874 later_ba=879 later_left=5 later_right=866'
 
 fail() {
   echo "[ordered-path-source-ir] FAIL: $*" >&2
@@ -92,8 +92,9 @@ require_text 'fn left_grouped_abc' "$POSITIVE"
 require_text 'grouping: LeftGrouping' "$POSITIVE"
 require_text 'fn right_grouped_abc' "$POSITIVE"
 require_text 'grouping: RightGrouping' "$POSITIVE"
-require_text 'immediate_ab != 1133' "$POSITIVE"
-require_text 'later_left != 1154' "$POSITIVE"
+require_text 'let mismatch =' "$POSITIVE"
+require_text '\(immediate_ab \^ 877\)' "$POSITIVE"
+require_text '\(later_left \^ 5\)' "$POSITIVE"
 require_text '^use ordered_path_provenance_imported_leaf::' "$IMPORTED_MAIN"
 require_text 'pub fn imported_ordered_path_run' "$IMPORTED_LEAF"
 
@@ -268,4 +269,4 @@ require_text 'module_native_driver: -O selects finalized full IR cleanup path' "
 require_trace_matrix imported merged-final
 run_elf imported
 
-echo "[ordered-path-source-ir] PASS: source_preflight=2 category_rejections=4 exact_immediate_collision=1133 order_links=AB,BA grouping_links=left,right state_links=8 single_runtime=1 imported_runtime=1 fallback=0 compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=1"
+echo "[ordered-path-source-ir] PASS: source_preflight=2 category_rejections=4 exact_immediate_collision=877 order_links=AB,BA grouping_links=left,right state_links=8 single_runtime=1 imported_runtime=1 fallback=0 compiler_sha256=$compiler_sha256 source_sha=$source_sha merge_ready=1"

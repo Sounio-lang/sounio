@@ -48,8 +48,8 @@ whole-path order receipts, observations, grouping receipts, and functional
 states. `OrderABReceipt` and `OrderBAReceipt` accompany the exact positional
 sequences `A,B` and `B,A`; neither representation substitutes for the other.
 Both orderings and both groupings deliberately collide at the immediate scalar
-projection. Their state types remain distinct, and the same later input can be
-routed through state-specific continuations that diverge.
+projection. Their state types remain distinct, and the same fixed synthetic
+later context `7` is encoded in state-specific continuations that diverge.
 
 The compiler already exports every checked ontology-typed parameter as the
 audit-only triple:
@@ -81,6 +81,15 @@ establishes only the exact scalar collision and later divergence. It is not used
 as evidence that the provenance metadata survived; the trace matrix supplies
 that independent observation.
 
+The optimized runtime witness stays inside the compiler's admitted exact-bitwise
+slice. It returns a branchless certificate formed by OR-ing each observed versus
+expected XOR delta; the certificate is zero exactly when all eight scalar checks
+match. The generic current-source `-O` failures that motivated this bounded form
+are tracked separately in [issue #1070](https://github.com/Sounio-lang/sounio/issues/1070).
+That issue covers ontology-free arithmetic crashes and scalar call/guard
+miscompilations. This lane uses no silent fallback and makes no claim that those
+broader compiler paths are correct.
+
 Ontology return types are enforced by the source checker. In this first slice,
 the resulting state identity re-enters the IR as the typed parameter of its
 projector and continuation. Direct ontology-result metadata is a separate future
@@ -95,7 +104,7 @@ The focused claim fails if any of the following occurs:
 - an occupancy observation is accepted as a functional state.
 - order sensitivity is accepted as a nonassociativity witness.
 - the immediate scalar projections do not collide exactly.
-- a shared later input does not distinguish the typed continuations.
+- the shared fixed later context does not distinguish the typed continuations.
 - the `A,B` and `B,A` parameter triples or their distinct order receipts become
   equal or disappear after cleanup.
 - the identical `A,B,C` leaf sequence or the distinct grouping receipt disappears
@@ -129,7 +138,7 @@ Claims-Forbidden: clinical meaning, inferred causality, ontology-derived optimiz
 Assumptions: ontology parameter links are collected only after authoritative typecheck; parameter indices retain source signature order; merge deduplicates only exact function/index/class triples; typed projectors and continuations make result-state identity visible as a later signature input
 Write-Set: self-hosted/ir/ir.sio; self-hosted/compiler/module_frontend.sio; tests/compiler/ordered_path_provenance_*; tests/compile-fail/ordered_path_*; scripts/ci/ordered_path_provenance_source_ir_gate.sh; docs/internal/concepts/ordered-path-provenance.md; docs/internal/concepts/registry.tsv; docs/internal/concepts/bindings.tsv
 Read-Set: self-hosted/check/mod.sio; self-hosted/ir/opt_cleanup.sio; scripts/lib/resolve_souc.sh; bin/souc
-Positive-Witness: exact scalar collision at 1133; same later input 7 yields AB=1140, BA=1147, left=1154, right=1161; exact source parameter triples and distinct OrderABReceipt/OrderBAReceipt classes survive single and imported optimized paths
+Positive-Witness: exact bitwise scalar collision at 877; same fixed later context 7 yields AB=874, BA=879, left=5, right=866; exact source parameter triples and distinct OrderABReceipt/OrderBAReceipt classes survive single and imported optimized paths
 Negative-Witness: four compile-fail category boundaries for AB/BA state, left/right grouping state, order/nonassociativity witness, and observation/functional state
 Acceptance-Gate: strict ordered_path_provenance_source_ir_gate.sh with a current-source Foundry compiler and expected SHA-256
 Integration-Target: default native-v2 single-module and imported/merged optimized source paths
