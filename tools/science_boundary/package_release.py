@@ -411,6 +411,7 @@ def build_command(args: argparse.Namespace) -> int:
 
         environment = os.environ.copy()
         environment["MADAROS_RAW_BIN"] = str(compiler)
+        environment["SOUNIO_INTERNAL_PACKAGE_RELEASE"] = "1"
         environment["SOUNIO_SCIENCE_ARTIFACT_LABEL"] = artifact_rel
         result = subprocess.run(
             [

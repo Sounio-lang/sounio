@@ -180,5 +180,6 @@ loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
 strict ELFs, deterministic receipts, refusal/`UNKNOWN`, tamper detection, and
 absence of a final ELF after strict refusal. The R2.5 gate composes those 178
-assertions with bundle determinism, round-trip verification, refusal without a
-final bundle, exact-inventory enforcement, and component tamper detection.
+assertions with 65 assertions for bundle determinism, round-trip verification,
+refusal without a final bundle, exact-inventory enforcement, and component
+tamper detection.

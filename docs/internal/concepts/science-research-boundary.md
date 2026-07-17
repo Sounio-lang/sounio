@@ -84,7 +84,7 @@ IR-Changed: none
 Claims-Introduced: a named gate can establish that one local bundle exactly binds an OK receipt, claim contract, compiler, sources, policy, and native artifact
 Claims-Forbidden: scientific truth, clinical validity, ClinicalAuthority, ClinicalRelease, public registry status, remote signature authority, attested execution, independent replay, or R3 physical extraction
 Assumptions: the package has one resolvable native entrypoint and its sounio.toml is the release policy root
-Write-Set: tools/science_boundary/package_release.py; schemas/sounio.package-release-bundle.v1.schema.json; bin/{madaros,souc}; scripts/ci/package_boundary_release_gate.{py,sh}; docs/ecosystem/{CURATED_PACKAGES.md,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md,curated-package-release-inventory.tsv}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv
+Write-Set: tools/science_boundary/package_release.py; schemas/sounio.package-release-bundle.v1.schema.json; bin/{madaros,souc}; scripts/ci/package_boundary_release_gate.{py,sh}; docs/ecosystem/{CURATED_PACKAGES.md,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md,curated-package-release-inventory.tsv}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; .claude/llm_offload_log.md
 Read-Set: tools/science_boundary/attestor.py; schemas/sounio.{claim-contract,package-boundary-receipt}.v1.schema.json; package manifests; science-rings.tsv
 Positive-Witness: strict package build emits a deterministic runnable bundle that passes full round-trip verification
 Negative-Witness: UNKNOWN, unauthorized claim, tamper, mutation, missing claim, and occupied destination refuse without promoting or overwriting a final bundle
@@ -107,6 +107,29 @@ Fallback-Path: host syntax closure is advisory-only and always yields UNKNOWN wi
 Legacy-Kept: [epistemic] parser retained for compatibility with W-SRB-LEGACY-001 and zero claim authority
 Conflicting-Lanes: none in the declared write-set at lane creation
 Next-Semantic-Interface: package-boundary-receipt
+```
+
+## R2.5 Integration Receipt
+
+```text
+Semantic-Outcome: executable atomic boundary for opt-in local package release bundles
+Concept-Status-Before: executable R0-R2 boundary with package-boundary-receipt pending
+Concept-Status-After: executable R0-R2 plus R2.5 release promotion boundary
+Distinctions-Added: receipt finalization versus bundle promotion; bundle identity versus registry attestation
+Distinctions-Preserved: compilation versus scientific validity; claim authorization versus claim truth; local release versus publication; identity versus independent replay
+Distinctions-Erased: none
+Compiler-Source-Snapshot: git archive from 03674dd3a4e3fed160016cfd2da4640ce704f360 over current compiler/build inputs, sha256=85d92d49ae89e3f8bbe3095792a0de49ef640437af3bde240d3cac8d2e07ab7f
+Evidence-Build: Slurm job 6299 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:03:11; source-tracking build emitted 98756167-byte Madaros sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Closure: SOUNIO_BOUNDARY_CLOSURE_V1 status=complete nodes=main.sio|greet.sio edge=main.sio->greet.sio saturated=false parse_failed=false
+Evidence-Run: SOUNIO_PACKAGE_BOUNDARY_MADAROS_BIN=<source-fresh-elf> bash scripts/ci/package_boundary_release_gate.sh -> SOUNIO_SCIENCE_BOUNDARY_GATE_PASS (178 assertions) and SOUNIO_PACKAGE_BOUNDARY_RELEASE_GATE_PASS (65 assertions)
+Supporting-Gate: bash scripts/ci/sounio_package_support_gate.sh -> SOUNIO_PACKAGE_SUPPORT_GATE_PASS
+Fallback-Path: none authorized; stale Madaros or host syntax closure yields UNKNOWN/refusal and no final bundle
+Legacy-Kept: non-strict pkg build and [epistemic] compatibility remain unchanged; neither gains release authority
+Curated-Inventory: five Phase 1 candidates inventoried; zero inferred release-eligible
+Conflicting-Lanes: upstream rebracketing registry update preserved during rebase; no overlapping compiler/IR files edited by R2.5
+LLM-Offload: xai/grok-4.3 review; package claim preflight and internal artifact-label scope addressed; fsync and schema-scope false positives documented in .claude/llm_offload_log.md
+Remaining-Blockers: none for the local R2.5 boundary; public registry and remote attestation remain deliberately unspecified
+Next-Semantic-Interface: registry-attestation-spec
 ```
 
 ## Closed Blockers
