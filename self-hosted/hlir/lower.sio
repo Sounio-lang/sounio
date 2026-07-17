@@ -36,6 +36,7 @@ let HLIR_TYPE_CODE_U64: i64 = 9
 let HLIR_TYPE_CODE_F32: i64 = 10
 let HLIR_TYPE_CODE_F64: i64 = 11
 let HLIR_TYPE_CODE_OCTONION: i64 = 12
+let HLIR_TYPE_CODE_SEDENION: i64 = 13
 
 pub fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
     if n < 0 {
@@ -106,7 +107,8 @@ pub struct HlirLowerState {
     // value-id whose 8 f64 components live in 8 separate value-ids. oct_keys[k] holds
     // the repr id, oct_comps[k*8 + c] holds component c's value-id.
     oct_keys: [i64; 128],
-    oct_comps: [i64; 1024],
+    oct_comps: [i64; 2048],
+    oct_dims: [i64; 128],
     oct_count: i64,
 }
 
@@ -136,7 +138,8 @@ pub fn hlir_lower_state_new() -> HlirLowerState {
         in_function: false,
         current_func_name: hlir_empty_name(),
         oct_keys: [0 - 1; 128],
-        oct_comps: [0; 1024],
+        oct_comps: [0; 2048],
+        oct_dims: [0; 128],
         oct_count: 0,
     }
 }
@@ -162,8 +165,9 @@ fn hlir_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
     hlir_oct_cd_sigma(b_lo, a_lo, bits - 1)
 }
 
-// Record 8 component value-ids under a fresh repr id; return (state, repr).
-fn hlir_oct_record(state: HlirLowerState, comps: [i64; 8]) -> (HlirLowerState, i64) with Mut, Panic {
+// Record `dim` component value-ids (dim ∈ {8,16}) under a fresh repr id; return (state, repr).
+// Storage stride is 16 (max = sedenion); octonions use the first 8 slots.
+fn hlir_oct_record(state: HlirLowerState, comps: [i64; 16], dim: i64) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let fresh = hlir_builder_fresh_value(s.builder)
     s.builder = fresh.0
@@ -171,9 +175,10 @@ fn hlir_oct_record(state: HlirLowerState, comps: [i64; 8]) -> (HlirLowerState, i
     if s.oct_count < 128 {
         let k = s.oct_count
         s.oct_keys[k as usize] = repr
+        s.oct_dims[k as usize] = dim
         var c: i64 = 0
-        while c < 8 {
-            s.oct_comps[(k * 8 + c) as usize] = comps[c as usize]
+        while c < dim {
+            s.oct_comps[(k * 16 + c) as usize] = comps[c as usize]
             c = c + 1
         }
         s.oct_count = s.oct_count + 1
@@ -181,7 +186,7 @@ fn hlir_oct_record(state: HlirLowerState, comps: [i64; 8]) -> (HlirLowerState, i
     (s, repr)
 }
 
-// Is value_id a recorded octonion repr?
+// Is value_id a recorded hypercomplex repr?
 fn hlir_oct_is(state: HlirLowerState, value_id: i64) -> bool {
     var k: i64 = 0
     while k < state.oct_count {
@@ -191,15 +196,25 @@ fn hlir_oct_is(state: HlirLowerState, value_id: i64) -> bool {
     false
 }
 
-// Fetch the 8 component value-ids for an octonion repr (or all -1 if unknown).
-fn hlir_oct_lookup(state: HlirLowerState, repr: i64) -> [i64; 8] {
-    var out: [i64; 8] = [0 - 1; 8]
+// Component dimension of a recorded repr (8 = octonion, 16 = sedenion; -1 if unknown).
+fn hlir_oct_dim(state: HlirLowerState, repr: i64) -> i64 {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr { return state.oct_dims[k as usize] }
+        k = k + 1
+    }
+    0 - 1
+}
+
+// Fetch up to 16 component value-ids for a repr (unused tail is -1).
+fn hlir_oct_lookup(state: HlirLowerState, repr: i64) -> [i64; 16] {
+    var out: [i64; 16] = [0 - 1; 16]
     var k: i64 = 0
     while k < state.oct_count {
         if state.oct_keys[k as usize] == repr {
             var c: i64 = 0
-            while c < 8 {
-                out[c as usize] = state.oct_comps[(k * 8 + c) as usize]
+            while c < 16 {
+                out[c as usize] = state.oct_comps[(k * 16 + c) as usize]
                 c = c + 1
             }
             return out
@@ -209,12 +224,12 @@ fn hlir_oct_lookup(state: HlirLowerState, repr: i64) -> [i64; 8] {
     out
 }
 
-// Load 8 f64 components from an octonion pointer value into a fresh octonion repr.
-fn hlir_oct_load(state: HlirLowerState, ptr_val: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+// Load `dim` f64 components from a hypercomplex pointer value into a fresh repr.
+fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
-    var comps: [i64; 8] = [0 - 1; 8]
+    var comps: [i64; 16] = [0 - 1; 16]
     var c: i64 = 0
-    while c < 8 {
+    while c < dim {
         let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
         s = idx_pair.0
         let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
@@ -224,31 +239,32 @@ fn hlir_oct_load(state: HlirLowerState, ptr_val: i64) -> (HlirLowerState, i64) w
         comps[c as usize] = load_pair.1
         c = c + 1
     }
-    hlir_oct_record(s, comps)
+    hlir_oct_record(s, comps, dim)
 }
 
-// Octonion multiply: r[i⊕j] += σ(i,j)·a[i]·b[j]. Returns a fresh octonion repr.
-fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+// Cayley-Dickson multiply: r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over `dim` components
+// (dim=8/bits=3 octonion, dim=16/bits=4 sedenion). Returns a fresh repr.
+fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
     let a = hlir_oct_lookup(s, a_repr)
     let b = hlir_oct_lookup(s, b_repr)
-    var r: [i64; 8] = [0 - 1; 8]
+    var r: [i64; 16] = [0 - 1; 16]
     var z: i64 = 0
-    while z < 8 {
+    while z < dim {
         let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
         s = zp.0
         r[z as usize] = zp.1
         z = z + 1
     }
     var i: i64 = 0
-    while i < 8 {
+    while i < dim {
         var j: i64 = 0
-        while j < 8 {
+        while j < dim {
             let m = i ^ j
             let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
             s = mulp.0
             var t = mulp.1
-            if hlir_oct_cd_sigma(i, j, 3) < 0 {
+            if hlir_oct_cd_sigma(i, j, bits) < 0 {
                 let zp2 = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
                 s = zp2.0
                 let negp = hlir_lower_binary(s, HLIR_BIN_FSUB, zp2.1, t, hlir_type_f64())
@@ -262,15 +278,16 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64) -> (HlirLowerSt
         }
         i = i + 1
     }
-    hlir_oct_record(s, r)
+    hlir_oct_record(s, r, dim)
 }
 
-// Store an octonion repr's 8 components through an octonion pointer value.
+// Store a repr's `dim` components through a hypercomplex pointer value.
 fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     let comps = hlir_oct_lookup(s, repr)
+    let dim = hlir_oct_dim(s, repr)
     var c: i64 = 0
-    while c < 8 {
+    while c < dim {
         let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
         s = idx_pair.0
         let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
@@ -1924,6 +1941,7 @@ fn hlir_type_code_from_type(ty: HlirType) -> i64 {
     if ty.kind == HlirTypeKind::HlirTypeF32 { return HLIR_TYPE_CODE_F32 }
     if ty.kind == HlirTypeKind::HlirTypeF64 { return HLIR_TYPE_CODE_F64 }
     if ty.kind == HlirTypeKind::HlirTypeOctonion { return HLIR_TYPE_CODE_OCTONION }
+    if ty.kind == HlirTypeKind::HlirTypeSedenion { return HLIR_TYPE_CODE_SEDENION }
     HLIR_TYPE_CODE_NONE
 }
 
@@ -1940,6 +1958,7 @@ fn hlir_type_from_code(code: i64) -> HlirType {
     if code == HLIR_TYPE_CODE_F32 { return hlir_type_f32() }
     if code == HLIR_TYPE_CODE_F64 { return hlir_type_f64() }
     if code == HLIR_TYPE_CODE_OCTONION { return hlir_type_octonion() }
+    if code == HLIR_TYPE_CODE_SEDENION { return hlir_type_sedenion() }
     hlir_type_void()
 }
 
@@ -2006,6 +2025,7 @@ pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc 
                 Some(args) => {
                     let alg_name = hlir_ast_path_head_to_string((*args).head.path)
                     if alg_name == "Octonion" { return hlir_type_octonion() }
+                    if alg_name == "Sedenion" { return hlir_type_sedenion() }
                 }
                 None => {}
             }
@@ -2437,10 +2457,13 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
         let rhs_val = rhs_pair.1
-        // First-class octonion multiply: both operands are recorded octonion reprs → expand
-        // r[i⊕j] += σ(i,j)·a[i]·b[j] over the 8 components (Convention X / cd_sigma).
+        // First-class hypercomplex multiply: both operands are recorded reprs → expand
+        // r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over the components (Convention X / cd_sigma).
+        // dim/bits come from the operands: octonion (8,3) or sedenion (16,4).
         if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
-            return hlir_oct_mul(s, lhs_val, rhs_val)
+            let dim = hlir_oct_dim(s, lhs_val)
+            let bits = if dim == 16 { 4 } else { 3 }
+            return hlir_oct_mul(s, lhs_val, rhs_val, dim, bits)
         }
         let lhs_ty = hlir_lower_value_type(s, lhs_val)
         let rhs_ty = hlir_lower_value_type(s, rhs_val)
@@ -2452,14 +2475,17 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     if expr.kind == ExprKind::ExprUnary {
         let src_pair = hlir_lower_expr_opt(s, expr.left)
         s = src_pair.0
-        // Deref of an octonion pointer (`*pa` where pa: &Hyper<Octonion,f64>) → load the 8
-        // f64 components into a fresh octonion repr instead of a scalar deref.
+        // Deref of a hypercomplex pointer (`*pa` where pa: &Hyper<Octonion|Sedenion,f64>) →
+        // load the 8/16 f64 components into a fresh repr instead of a scalar deref.
         if expr.un_op == UnaryOp::OpDeref {
             let ptr_ty = hlir_lower_value_type(s, src_pair.1)
             if ptr_ty.kind == HlirTypeKind::HlirTypePtr {
                 let elem = hlir_type_element_or_void(ptr_ty)
                 if elem.kind == HlirTypeKind::HlirTypeOctonion {
-                    return hlir_oct_load(s, src_pair.1)
+                    return hlir_oct_load(s, src_pair.1, 8)
+                }
+                if elem.kind == HlirTypeKind::HlirTypeSedenion {
+                    return hlir_oct_load(s, src_pair.1, 16)
                 }
             }
         }
