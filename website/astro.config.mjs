@@ -5,11 +5,16 @@ import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
+import { unified } from '@astrojs/markdown-remark';
 import remarkSioAsRust from './src/remark/remark-sio-as-rust.mjs';
 
 // https://astro.build/config
 export default defineConfig({
   site: 'https://www.souniolang.org',
+
+  // Astro v7 defaults to 'jsx' whitespace stripping; keep v6 HTML-aware
+  // compression for behavior parity during the redesign lane.
+  compressHTML: true,
 
   integrations: [
     react(),
@@ -27,17 +32,17 @@ export default defineConfig({
         },
       },
     }),
-    mdx({
-      remarkPlugins: [remarkSioAsRust],
-      syntaxHighlight: 'shiki',
-      shikiConfig: {
-        theme: 'github-dark',
-      },
-    }),
+    // MDX inherits markdown.processor (remark-sio-as-rust + shiki) from the
+    // top-level markdown config.
+    mdx(),
   ],
 
   markdown: {
-    remarkPlugins: [remarkSioAsRust],
+    // Astro v7 defaults to the Sätteri processor; stay on the unified
+    // remark/rehype pipeline so remark-sio-as-rust keeps working.
+    processor: unified({
+      remarkPlugins: [remarkSioAsRust],
+    }),
     syntaxHighlight: 'shiki',
     shikiConfig: {
       theme: 'github-dark',
