@@ -151,9 +151,10 @@ converter maturidade de implementação em autoridade científica ou regulatóri
 3. Criar `sounio-py` com binding mínimo de `Knowledge`
 4. Manter o gate R2.6 de registry attestation local com publicação desabilitada
 5. Manter inventário, materialização, autorização, execução local, aprovação
-   Git/rehearsal e execução Git R3; a execução canônica está provada apenas em
-   fixtures e a origem oficial exige política `canonical-production`, destinos
-   reais e decisão humana explícita antes de qualquer remoção
+   Git/rehearsal, execução Git R3 e assessment de gaps de produção; a execução
+   canônica está provada apenas em fixtures, os cinco targets ainda não têm
+   mapeamento aprovado e a origem oficial exige política `canonical-production`,
+   destinos reais e decisão humana explícita antes de qualquer remoção
 
 ---
 

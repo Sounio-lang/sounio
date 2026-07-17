@@ -223,6 +223,29 @@ Integration-Target: codex/physical-extraction-canonical-cutover-approval-r3-2026
 Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover execution gate pass on one archived source snapshot with one current-source Madaros; Sounio production execution additionally requires a separately authored canonical-production evidence set and explicit human decision
 ```
 
+## R3 Canonical Production Gap Assessment Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-PRODUCTION-GAP-ASSESSMENT-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: progress toward physical separation must expose missing production prerequisites without allowing repository availability, access labels, proposals, or continuation commands to become cutover permission or scientific authority
+Transformation: rebuild the exact R3 inventory, compare one local Git worktree with a supplied point-in-time repository catalog, optionally validate a complete proposed-not-approved target mapping, and emit a deterministic non-authorizing gap assessment
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish which repository and evidence prerequisites are observed or missing for one exact snapshot while fixing execution authority to none and execution status to not-executed
+Claims-Forbidden: production mapping approval, destination-owner consent, repository creation, materialization, source removal, Git ref update, canonical production approval, human decision, hosting administration or namespace ownership, transferred maintainership, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the supplied catalog is a point-in-time metadata observation rather than live hosting attestation; target mappings are never inferred by name; the canonical repository and every extract-planned target remain explicit
+Write-Set: tools/science_boundary/canonical_production_gap_assessor.py; schemas/sounio.physical-extraction-canonical-production-{repository-catalog,mapping-proposal,gap-assessment}.v1.schema.json; scripts/ci/physical_extraction_canonical_production_gap_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md,PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: science-rings.tsv; docs/ecosystem/science-physical-extraction-ownership.tsv; tools/science_boundary/{physical_extraction_inventory.py,canonical_cutover_authorizer.py,canonical_cutover_executor.py}; schemas/sounio.physical-extraction-*.v1.schema.json; supplied repository catalog and optional mapping proposal
+Positive-Witness: equivalent standalone fixture roots produce byte-identical assessments both without a proposal and with all repositories observed; the latter stops at production-evidence-and-human-decision-required with execution authority none
+Negative-Witness: invalid, stale, duplicate, unsorted, incomplete, approved, authorized, reused, archived, missing, dirty, mutated, occupied, forged, or rehashed catalog, proposal, source, and assessment states refuse or remain explicit prerequisite gaps without mutating any repository or ref
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_production_gap_gate.sh
+Integration-Target: codex/physical-extraction-canonical-cutover-execution-r3-20260717, then origin/main after the execution stack lands
+Authoritative-Only-If: the complete R0-R3 stack and focused gap gate pass on one archived source snapshot with one current-source Madaros; a point-in-time real catalog assessment may identify gaps but cannot grant permission or substitute for the still-pending canonical-production policy and explicit human decision
+```
+
 ## R2.5 Semantic Lane
 
 ```text

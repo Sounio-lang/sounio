@@ -504,3 +504,13 @@ and Madaros
 passed the complete prior stack and all 81 execution checks in 53 seconds with
 `MaxRSS=1390324K`. The run used Git 2.43.0 and node-local disposable workspaces;
 no implementation fallback ran and no Sounio canonical ref or source changed.
+
+The canonical-production gap assessor then separates observable repository
+prerequisites from permission. Its v1 schema fixes execution authority to
+`none` and execution status to `not-executed`; even a complete fixture mapping
+can reach only `production-evidence-and-human-decision-required`. The current
+Sounio observation binds five planned targets, zero mappings, zero observed
+mapped destinations, and eight missing prerequisites under assessment identity
+`0fe82728ea24520af7792d4b5cf45c6c20e62c47a09138d0c4b81207e998e816`.
+It does not infer that `sounio-examples` is the planned research distribution,
+and it records that the reviewed stack is not yet the cataloged `main` head.
