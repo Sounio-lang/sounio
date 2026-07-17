@@ -197,6 +197,26 @@ its policy identity is
 `b12ae97b10691cc7ef8b77c3ec03b620304b8be4be8414f2af40f0d3ae6da6be`.
 These identify a disposable Git fixture, not the canonical Sounio repository.
 
+The composed current-source witness is Slurm job `6602` on
+`gpuorangefs-r770-proxmox`. Commit
+`851c9eba290294135c4921ae9b2475ade889ab79`, compressed source archive
+`c9556d94e8c50ef200cb6fcb9ea60fbc26a45e091a8de4960718fb140e0c9273`
+and current-source Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167 materialization,
+527 authorization, 164 local execution and 172 cutover approval checks in 44
+seconds with `MaxRSS=1389440K`. Stdout SHA-256 is
+`a8985fd6e21bd47428f109b6f61895c4108371417e8c191d9c9d67378c0b15f6`;
+stderr is empty.
+
+The source, compiler, fixture workspaces and logs used node-local `/tmp`
+because OrangeFS was full. Job `6600` stopped before all gates because the
+worker image lacked `/usr/bin/time`; job `6601` passed the complete earlier
+stack and stopped before this focused gate because the worker image lacked
+Git. Job `6602` used the same immutable archive and compiler after provisioning
+Git 2.43.0 in that ephemeral worker and passed. Neither earlier failure entered
+the cutover approval tool or required an implementation fallback.
+
 ## Canonical Repository Status
 
 No `canonical-production` cutover policy or approval receipt was created for
