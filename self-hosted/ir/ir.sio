@@ -815,11 +815,23 @@ pub struct IrOntologyPropertyInfo {
     range_class_idx: i64,
 }
 
+// Audit-only link from a checked source signature to its lowered function.
+// The optimizer may report this identity, but it must never treat it as
+// authority for a transformation.
+pub struct IrOntologyParameterLink {
+    function_name: Name,
+    parameter_index: i64,
+    class_name: Name,
+    is_valid: bool,
+}
+
 pub struct IrOntologyTable {
     entries: [IrOntologyClassInfo; 64],
     count: i64,
     properties: [IrOntologyPropertyInfo; 32],
     property_count: i64,
+    parameter_links: [IrOntologyParameterLink; 128],
+    parameter_link_count: i64,
 }
 
 fn ir_empty_ontology_class_info() -> IrOntologyClassInfo {
@@ -841,13 +853,174 @@ fn ir_empty_ontology_property_info() -> IrOntologyPropertyInfo {
     }
 }
 
+fn ir_empty_ontology_parameter_link() -> IrOntologyParameterLink {
+    IrOntologyParameterLink {
+        function_name: ir_empty_name(),
+        parameter_index: -1,
+        class_name: ir_empty_name(),
+        is_valid: false,
+    }
+}
+
 fn ir_empty_ontology_table() -> IrOntologyTable {
     IrOntologyTable {
         entries: [ir_empty_ontology_class_info(); 64],
         count: 0,
         properties: [ir_empty_ontology_property_info(); 32],
         property_count: 0,
+        parameter_links: [ir_empty_ontology_parameter_link(); 128],
+        parameter_link_count: 0,
     }
+}
+
+pub fn ir_ontology_table_record_parameter_link(
+    table: &! IrOntologyTable,
+    function_name: Name,
+    parameter_index: i64,
+    class_name: Name,
+) -> bool with Mut, Panic, Div {
+    if (*table).parameter_link_count >= 128 {
+        return false
+    }
+    let index = (*table).parameter_link_count
+    (*table).parameter_links[index as usize] = IrOntologyParameterLink {
+        function_name: function_name,
+        parameter_index: parameter_index,
+        class_name: class_name,
+        is_valid: true,
+    }
+    (*table).parameter_link_count = index + 1
+    true
+}
+
+pub fn ir_ontology_parameter_link_count_for_function(
+    table: &IrOntologyTable,
+    function_name: Name,
+) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < (*table).parameter_link_count && i < 128 {
+        let link = (*table).parameter_links[i as usize]
+        if link.is_valid && ir_name_eq(link.function_name, function_name) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+pub fn ir_ontology_parameter_last_class_hash_for_function(
+    table: &IrOntologyTable,
+    function_name: Name,
+) -> i64 with Mut, Panic, Div {
+    var class_hash: i64 = 0
+    var i: i64 = 0
+    while i < (*table).parameter_link_count && i < 128 {
+        let link = (*table).parameter_links[i as usize]
+        if link.is_valid && ir_name_eq(link.function_name, function_name) {
+            class_hash = bss_name_hash(link.class_name)
+        }
+        i = i + 1
+    }
+    class_hash
+}
+
+// Bounded, audit-only accessors used by source-to-IR provenance traces. These
+// expose checked signature identity after type erasure; they grant no optimizer
+// or code-generation authority.
+pub fn ir_ontology_parameter_link_total(table: &IrOntologyTable) -> i64 {
+    let total = (*table).parameter_link_count
+    if total < 0 {
+        0
+    } else if total > 128 {
+        128
+    } else {
+        total
+    }
+}
+
+pub fn ir_ontology_parameter_link_count_is_bounded(table: &IrOntologyTable) -> bool {
+    (*table).parameter_link_count >= 0 && (*table).parameter_link_count <= 128
+}
+
+pub fn ir_ontology_parameter_link_is_valid_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> bool with Panic, Div {
+    let total = ir_ontology_parameter_link_total(table)
+    if index < 0 || index >= total {
+        false
+    } else {
+        (*table).parameter_links[index as usize].is_valid
+    }
+}
+
+pub fn ir_ontology_parameter_link_function_name_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> Name with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        ir_empty_name()
+    } else {
+        (*table).parameter_links[index as usize].function_name
+    }
+}
+
+pub fn ir_ontology_parameter_link_parameter_index_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> i64 with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        -1
+    } else {
+        (*table).parameter_links[index as usize].parameter_index
+    }
+}
+
+pub fn ir_ontology_parameter_link_class_name_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> Name with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        ir_empty_name()
+    } else {
+        (*table).parameter_links[index as usize].class_name
+    }
+}
+
+pub fn ir_merge_ontology_parameter_links(
+    dst: IrOntologyTable,
+    src: IrOntologyTable,
+) -> IrOntologyTable with Mut, Panic, Div {
+    // This helper composes only audit links. The destination's semantic class
+    // and property tables remain authoritative and are intentionally retained.
+    var merged = dst
+    var si: i64 = 0
+    while si < src.parameter_link_count && si < 128 && merged.parameter_link_count < 128 {
+        let candidate = src.parameter_links[si as usize]
+        if candidate.is_valid {
+            var exists = false
+            var di: i64 = 0
+            while di < merged.parameter_link_count {
+                let current = merged.parameter_links[di as usize]
+                if current.is_valid &&
+                   current.parameter_index == candidate.parameter_index &&
+                   ir_name_eq(current.function_name, candidate.function_name) &&
+                   ir_name_eq(current.class_name, candidate.class_name) {
+                    exists = true
+                    di = merged.parameter_link_count
+                } else {
+                    di = di + 1
+                }
+            }
+            if !exists {
+                merged.parameter_links[merged.parameter_link_count as usize] = candidate
+                merged.parameter_link_count = merged.parameter_link_count + 1
+            }
+        }
+        si = si + 1
+    }
+    merged
 }
 
 // Extended with grade tracking — first IR to carry grade as first-class attribute.

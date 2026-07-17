@@ -10,7 +10,7 @@ use ir::ir::*
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
-use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata}
+use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
@@ -30,6 +30,23 @@ fn module_frontend_rebracket_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1")
 }
 
+fn module_frontend_ordered_path_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1")
+}
+
+fn module_frontend_items_have_ontology(items: &Option<Box<ItemList>>) -> bool with Alloc {
+    match *items {
+        Some(list) => {
+            if (*list).head.kind == ItemKind::ItemOntology {
+                true
+            } else {
+                module_frontend_items_have_ontology(&(*list).tail)
+            }
+        }
+        None => false,
+    }
+}
+
 fn module_frontend_print_rebracket_receipt(
     phase: string,
     receipt: OcpCleanupModuleReceipt,
@@ -37,6 +54,8 @@ fn module_frontend_print_rebracket_receipt(
     if !module_frontend_rebracket_trace_enabled() { return }
     print("[rebracket-native-v2] phase=")
     print(phase)
+    print(" schema=")
+    print(io_trace_i64_string(OCP_CLEANUP_RECEIPT_SCHEMA_VERSION))
     print(" optimize=1 functions=")
     print(io_trace_i64_string(receipt.function_count))
     print(" transactions=")
@@ -47,6 +66,18 @@ fn module_frontend_print_rebracket_receipt(
     print(io_trace_i64_string(receipt.exact_bitwise_application_count))
     print(" refusals=")
     print(io_trace_i64_string(receipt.exact_bitwise_refusal_count))
+    print(" same_region_applications=")
+    print(io_trace_i64_string(receipt.exact_bitwise_same_region_application_count))
+    print(" cross_block_applications=")
+    print(io_trace_i64_string(receipt.exact_bitwise_cross_block_application_count))
+    print(" refusal_reason_mask=")
+    print(io_trace_i64_string(receipt.exact_bitwise_refusal_reason_mask))
+    print(" transaction_ontology_parameter_links=")
+    print(io_trace_i64_string(receipt.exact_bitwise_transaction_ontology_parameter_link_count))
+    print(" application_ontology_parameter_links=")
+    print(io_trace_i64_string(receipt.exact_bitwise_application_ontology_parameter_link_count))
+    print(" last_ontology_class_hash=")
+    print(io_trace_i64_string(receipt.last_transaction_ontology_class_hash))
     print(" operator_mask=")
     print(io_trace_i64_string(receipt.exact_bitwise_operator_mask))
     print(" last_function=")
@@ -60,9 +91,53 @@ fn module_frontend_print_rebracket_disabled(phase: string, function_count: i64) 
     if !module_frontend_rebracket_trace_enabled() { return }
     print("[rebracket-native-v2] phase=")
     print(phase)
+    print(" schema=")
+    print(io_trace_i64_string(OCP_CLEANUP_RECEIPT_SCHEMA_VERSION))
     print(" optimize=0 functions=")
     print(io_trace_i64_string(function_count))
-    print(" transactions=0 authorizations=0 applications=0 refusals=0 operator_mask=0 last_function=-1 combined=0\n")
+    print(" transactions=0 authorizations=0 applications=0 refusals=0 same_region_applications=0 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=0 last_function=-1 combined=0\n")
+}
+
+fn module_frontend_print_ordered_path_receipt(
+    phase: string,
+    optimize: bool,
+    module: &IrModule,
+) with IO, Mut, Panic, Div {
+    if !module_frontend_ordered_path_trace_enabled() { return }
+    let link_total = ir_ontology_parameter_link_total(&(*module).ontologies)
+    let bounded = ir_ontology_parameter_link_count_is_bounded(&(*module).ontologies)
+    print("[ordered-path-native-v2] phase=")
+    print(phase)
+    print(" schema=1 optimize=")
+    print(if optimize { "1" } else { "0" })
+    print(" functions=")
+    print(io_trace_i64_string((*module).fn_count))
+    print(" links=")
+    print(io_trace_i64_string(link_total))
+    print(" bounded=")
+    print(if bounded { "1" } else { "0" })
+    print(" authority=0\n")
+
+    if !bounded { return }
+
+    var link_index: i64 = 0
+    while link_index < link_total {
+        if ir_ontology_parameter_link_is_valid_at(&(*module).ontologies, link_index) {
+            let function_name = ir_ontology_parameter_link_function_name_at(&(*module).ontologies, link_index)
+            let parameter_index = ir_ontology_parameter_link_parameter_index_at(&(*module).ontologies, link_index)
+            let class_name = ir_ontology_parameter_link_class_name_at(&(*module).ontologies, link_index)
+            print("[ordered-path-link] phase=")
+            print(phase)
+            print(" schema=1 function=")
+            print(str_from_bytes(function_name.buf, function_name.len))
+            print(" parameter=")
+            print(io_trace_i64_string(parameter_index))
+            print(" class=")
+            print(str_from_bytes(class_name.buf, class_name.len))
+            print(" authority=0\n")
+        }
+        link_index = link_index + 1
+    }
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
@@ -1005,6 +1080,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
     merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
+    merged.ontologies = ir_merge_ontology_parameter_links(merged.ontologies, src.ontologies)
 
     merged
 }
@@ -4242,8 +4318,9 @@ fn module_frontend_lower_program_counts_traced(
     true
 }
 
-fn module_frontend_lower_program_box_traced(
+fn module_frontend_lower_program_box_traced_with_epistemic(
     program: &Program,
+    epistemic: &IrEpistemicSection,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
@@ -4254,8 +4331,7 @@ fn module_frontend_lower_program_box_traced(
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(&program.items))
     }
-    var epistemic = ir_empty_epistemic_section()
-    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, &epistemic)
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -4269,7 +4345,7 @@ fn module_frontend_lower_program_box_traced(
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         program,
         &summary_val,
-        &epistemic
+        epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if module_frontend_lower_trace_enabled() {
@@ -4282,6 +4358,10 @@ fn module_frontend_lower_program_box_traced(
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
+    if module_frontend_items_have_ontology(&program.items) {
+        checker_apply_ir_ontology_parameter_links_from_items(&program.items, &! (*body_result.module))
+    }
+
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
     trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
@@ -4289,6 +4369,15 @@ fn module_frontend_lower_program_box_traced(
     trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
     trace.last_stage = "lower_bodies_done"
     module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
+}
+
+fn module_frontend_lower_program_box_traced(
+    program: &Program,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    var epistemic = ir_empty_epistemic_section()
+    module_frontend_lower_program_box_traced_with_epistemic(program, &epistemic, module_index, trace)
 }
 
 fn module_frontend_lower_program_items_box_traced(
@@ -4433,6 +4522,10 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
         return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+
+    if module_frontend_items_have_ontology(items) {
+        checker_apply_ir_ontology_parameter_links_from_items(items, &! (*body_result.module))
     }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
@@ -4781,6 +4874,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         }
                         (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
                         (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
+                        (*acc_box).ontologies = ir_merge_ontology_parameter_links((*acc_box).ontologies, (*dep_box).ontologies)
                         // Every field copied into acc_box above (functions incl.
                         // instrs, string_table entries, epistemic, algebras) is a
                         // plain value copy with no Box field except IrInstr.call_args
@@ -4878,9 +4972,19 @@ pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimodu
         trace.last_stage = "typecheck_error"
         return module_frontend_lower_box_error("type_check_failed")
     }
+    var epistemic = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(program, &!epistemic) {
+        trace.last_stage = "epistemic_export_error"
+        return module_frontend_lower_box_error("epistemic_export_failed")
+    }
+    if module_frontend_lower_trace_enabled() {
+        print("module_frontend_lower: epistemic_contest_count ")
+        print_int(epistemic.contest_count)
+        print("\n")
+    }
     trace.typechecked_modules = 1
     trace.last_stage = "lower_single"
-    let lowered = module_frontend_lower_program_box_traced(&program, 0, trace)
+    let lowered = module_frontend_lower_program_box_traced_with_epistemic(&program, &epistemic, 0, trace)
     if !lowered.ok {
         return lowered
     }
@@ -5172,6 +5276,9 @@ pub fn module_frontend_compile_imported_to_file(
         } else {
             module_frontend_print_rebracket_disabled("single-disabled", fn_count)
         }
+        // Cleanup is the final mutable IR pass on this route; codegen receives
+        // only an immutable module reference after this audit snapshot.
+        module_frontend_print_ordered_path_receipt("single-final", optimize, &(*module_box))
         parser_reset_last_errors()
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
@@ -5223,6 +5330,9 @@ pub fn module_frontend_compile_imported_to_file(
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
+    // Finalization and cleanup are complete; codegen receives an immutable
+    // module reference after this audit snapshot.
+    module_frontend_print_ordered_path_receipt("merged-final", optimize, &merged_module)
     parser_reset_last_errors()
     let target_spec = native_resolve_target("native", "auto", false)
     let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)

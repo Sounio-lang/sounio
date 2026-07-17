@@ -127,9 +127,22 @@ require_text '^pub fn opt_cleanup_module_inplace\(module: &! IrModule\)' "$OPT"
 require_text '^pub fn ocp_exact_bitwise_rebracket_pipeline_probe\(\)' "$OPT"
 require_text 'ocp_record_exact_bitwise_rebracket_audit\(exact_bitwise_audit, la_txn\)' "$OPT"
 require_text 'exact_bitwise_application_count: audit\.application_count' "$OPT"
+require_text 'exact_bitwise_same_region_application_count: audit\.same_region_application_count' "$OPT"
+require_text 'exact_bitwise_cross_block_application_count: audit\.cross_block_application_count' "$OPT"
+require_text 'exact_bitwise_transaction_ontology_parameter_link_count: transaction_ontology_parameter_link_count' "$OPT"
+require_text 'exact_bitwise_application_ontology_parameter_link_count: application_ontology_parameter_link_count' "$OPT"
+require_text 'last_transaction_ontology_class_hash: last_transaction_ontology_class_hash' "$OPT"
+require_text 'OCP_CLEANUP_RECEIPT_SCHEMA_VERSION: i64 = 1' "$OPT"
+require_text 'exact_bitwise_refusal_reason_mask: audit\.refusal_reason_mask' "$OPT"
 require_text '^fn run_exact_bitwise_rebracket_authority_smoke\(\)' "$MAIN"
 require_text 'let receipt = ocp_exact_bitwise_rebracket_authority_probe\(\)' "$MAIN"
 require_text 'receipt\.boundary_claim_mask != 49' "$MAIN"
+require_text 'pipeline\.exact_bitwise_same_region_application_count != 0' "$MAIN"
+require_text 'pipeline\.exact_bitwise_cross_block_application_count != 1' "$MAIN"
+require_text 'pipeline\.exact_bitwise_transaction_ontology_parameter_link_count != 0' "$MAIN"
+require_text 'pipeline\.exact_bitwise_application_ontology_parameter_link_count != 0' "$MAIN"
+require_text 'pipeline\.last_transaction_ontology_class_hash != 0' "$MAIN"
+require_text 'pipeline\.exact_bitwise_refusal_reason_mask != 0' "$MAIN"
 require_text 'mode == "--rebracket-authority-smoke"' "$MAIN"
 require_text '\[rebracket-compiler\] PROBE: cases=' "$MAIN"
 require_text '\[rebracket-compiler\] PASS: cases=21 applications=5 unchanged_refusals=16 pipeline=1' "$MAIN"
@@ -148,9 +161,9 @@ receipt_fields="$(count_struct_i64_fields OcpExactBitwiseRebracketProbeReceipt)"
 module_receipt_fields="$(count_struct_i64_fields OcpCleanupModuleReceipt)"
 [[ "$occurrence_fields" == 6 ]] || fail "authority occurrence must remain 6 i64 fields, got $occurrence_fields"
 [[ "$flow_certificate_fields" == 2 ]] || fail "flow certificate must remain 2 i64 fields, got $flow_certificate_fields"
-[[ "$audit_fields" == 8 ]] || fail "authority audit must remain 8 i64 fields, got $audit_fields"
+[[ "$audit_fields" == 9 ]] || fail "authority audit must remain 9 i64 fields, got $audit_fields"
 [[ "$receipt_fields" == 5 ]] || fail "probe receipt must remain 5 i64 fields, got $receipt_fields"
-[[ "$module_receipt_fields" == 8 ]] || fail "module cleanup receipt must remain 8 i64 fields, got $module_receipt_fields"
+[[ "$module_receipt_fields" == 14 ]] || fail "module cleanup receipt must remain 14 i64 fields, got $module_receipt_fields"
 # These compact record counts are compatibility tripwires, not inferred ABIs:
 # changing one, or reintroducing a heterogeneous capture-result tuple, must
 # force an explicit gate review instead of passing silently.
@@ -371,7 +384,7 @@ if [[ "$REQUIRE_COMPILER" == 1 ]]; then
       cat "$noopt_log" >&2
       fail "default native-v2 no-opt control failed to compile"
     }
-  rg -q '^\[rebracket-native-v2\] phase=single-disabled optimize=0 functions=[0-9]+ transactions=0 authorizations=0 applications=0 refusals=0 operator_mask=0 last_function=-1 combined=0$' \
+  rg -q '^\[rebracket-native-v2\] phase=single-disabled schema=1 optimize=0 functions=[0-9]+ transactions=0 authorizations=0 applications=0 refusals=0 same_region_applications=0 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=0 last_function=-1 combined=0$' \
     "$noopt_log" || {
       cat "$noopt_log" >&2
       fail "no-opt control omitted its exact disabled receipt"
@@ -386,7 +399,7 @@ if [[ "$REQUIRE_COMPILER" == 1 ]]; then
       cat "$optimized_log" >&2
       fail "default native-v2 -O witness failed to compile"
     }
-  rg -q '^\[rebracket-native-v2\] phase=single-post-resolve optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
+  rg -q '^\[rebracket-native-v2\] phase=single-post-resolve schema=1 optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 same_region_applications=1 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
     "$optimized_log" || {
       cat "$optimized_log" >&2
       fail "default native-v2 -O witness omitted its exact application receipt"
@@ -406,7 +419,7 @@ if [[ "$REQUIRE_COMPILER" == 1 ]]; then
       fail "merged native-v2 -O witness failed to compile"
     }
   require_text 'module_native_driver: -O selects finalized full IR cleanup path' "$imported_log"
-  rg -q '^\[rebracket-native-v2\] phase=merged-post-finalize optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
+  rg -q '^\[rebracket-native-v2\] phase=merged-post-finalize schema=1 optimize=1 functions=[0-9]+ transactions=1 authorizations=1 applications=1 refusals=0 same_region_applications=1 cross_block_applications=0 refusal_reason_mask=0 transaction_ontology_parameter_links=0 application_ontology_parameter_links=0 last_ontology_class_hash=0 operator_mask=1 last_function=[0-9]+ combined=15$' \
     "$imported_log" || {
       cat "$imported_log" >&2
       fail "merged native-v2 -O witness omitted its exact application receipt"

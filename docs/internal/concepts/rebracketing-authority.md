@@ -11,12 +11,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-REBRACKETING-AUTHORITY`
 
-Status: hypothesis. The scalar protocol, the production cleanup pipeline, and
-the focused default native-v2 `-O` paths are executable under the strict
-hash-bound gate. The executable claim covers one single-module witness and one
-imported/merged witness. A stacked extension adds a compiler-internal forward-
-CFG diamond witness, but it is not source-level cross-block reachability or
-compiler-wide semantic preservation.
+Status: hypothesis. The scalar protocol, production cleanup pipeline, focused
+same-block default native-v2 paths, and compiler-internal forward-CFG diamond
+are executable under strict hash-bound gates. The source-to-IR extension adds
+focused single-module and imported/merged forward-diamond witnesses, a
+non-dominating join-copy control, a loop/backedge refusal, and an audit-only
+link from checked ontology-typed source parameters to lowered functions. It
+remains a bounded source-shape claim, not compiler-wide semantic preservation.
 
 ## Founder Intent
 
@@ -85,7 +86,8 @@ reference, not by a function-name hash. Audit fingerprints are computed only
 after the structural check; they are diagnostic and cannot authorize mutation.
 
 The six-word occurrence, two-word flow certificate, eight-word sealed authority,
-eight-word transaction audit, five-word probe receipt, and eight-word module receipt are deliberately at or below the aggregate boundary
+nine-word transaction audit, five-word probe receipt, and fourteen-word module
+receipt are deliberately at or below the aggregate boundary
 exercised by the current compiler artifact. The module receipt is public audit
 evidence only; it contains no private occurrence capability and cannot authorize
 a mutation. The local investigation observed silent corruption when large model
@@ -93,6 +95,8 @@ records and nested instruction aggregates crossed that artifact's by-value
 path. This observation motivates compact transport; it is not a general theorem
 about all Sounio backends. Their exact counts are gate tripwires: record growth
 must force an explicit review rather than silently changing the transport shape.
+The machine-readable native-v2 trace additionally declares `schema=1`; changing
+the text protocol requires an explicit schema and gate update.
 
 Certificate refusal is encoded inside the private two-word value: an invalid
 certificate has `inner_const_def_index = -1` and a negative path-binding word
@@ -118,7 +122,8 @@ fail-closed until its fixed proof storage and gate are deliberately revised.
 
 ## Evidence Layers
 
-`scripts/ci/exact_bitwise_rebracket_authority_gate.sh` separates five layers:
+`scripts/ci/exact_bitwise_rebracket_authority_gate.sh` and
+`scripts/ci/exact_bitwise_rebracket_source_ir_gate.sh` separate seven layers:
 
 - The scalar Sounio kernel executes 11 protocol cases: valid AND/OR/XOR, replay, wrong
   occurrence, swapped tree, arithmetic, float marker, shared constant, stale
@@ -139,6 +144,16 @@ fail-closed until its fixed proof storage and gate are deliberately revised.
   correct runtime result without `-O`; with `-O`, it requires exactly one
   application and the same runtime result for both a single module and an
   imported/merged module.
+- The source-to-IR layer distinguishes same-region applications, cross-block
+  applications, refusal reasons, and source ontology-parameter links in public
+  audit evidence. It requires one cross-block application for both focused
+  source routes, zero transactions for a non-dominating if-expression lowered
+  through a join register, and one reason-19 refusal for a source function
+  containing a backedge. The applied diamond and refused loop carry the same
+  ontology class identity, so the ontology parameter can request evidence but
+  cannot manufacture CFG authority. The receipt establishes only same-function
+  adjacency; it does not claim that the erased parameter is a dataflow input to
+  the rewritten expression.
 - Static source anchors bind that protocol to Block L, the one-use and
   operand-encoding checks, float refusal, private declarations, compact records,
   the pass-A1 handoff, optimization-intent routing, and the exact operator set.
@@ -176,6 +191,7 @@ Local classification is intentionally not merge authority:
 
 ```bash
 bash scripts/ci/exact_bitwise_rebracket_authority_gate.sh
+bash scripts/ci/exact_bitwise_rebracket_source_ir_gate.sh
 ```
 
 The strict acceptance path must execute the internal production smoke and the
@@ -186,6 +202,11 @@ SOUNIO_REBRACKET_COMPILER_BIN=/path/to/current-source-madaros \
 SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256=<sha256-of-that-elf> \
 SOUNIO_REBRACKET_REQUIRE_COMPILER=1 \
 bash scripts/ci/exact_bitwise_rebracket_authority_gate.sh
+
+SOUNIO_REBRACKET_COMPILER_BIN=/path/to/current-source-madaros \
+SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256=<sha256-of-that-elf> \
+SOUNIO_REBRACKET_REQUIRE_COMPILER=1 \
+bash scripts/ci/exact_bitwise_rebracket_source_ir_gate.sh
 ```
 
 The strict form requires an explicit raw ELF, its expected SHA-256, and a clean
@@ -233,6 +254,34 @@ value equals 11, and every returned-value mismatch produces one of `1..15`.
 This avoids depending on an unrelated historical optimized
 conditional-control-flow path while still executing the transformed function.
 
+PR #1046 CI run `29552524219`, job `87798137029`, built source SHA
+`394934a4e7c2a7d84b2c222743e66608cc1c5aac`. Artifact `8396343656`
+contained a 98,756,167-byte Madaros ELF with SHA-256
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`.
+The downloaded ELF passed the inherited strict authority gate:
+
+```text
+compiler_path=internal-smoke+default-o native_v2_reachability=single-and-merged
+compiler_sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+source_sha=394934a4e7c2a7d84b2c222743e66608cc1c5aac merge_ready=1
+```
+
+The source-to-IR gate then compiled and executed all five runtime controls with
+the same ELF and no fallback. Its exact audit receipts distinguished the
+positive single-module and imported-leaf applications from the non-dominating
+control and loop refusal:
+
+```text
+single:   transactions=1 applications=1 cross_block_applications=1 transaction_ontology_parameter_links=1 application_ontology_parameter_links=1 last_ontology_class_hash=7199034902620903764 combined=15
+imported: transactions=1 applications=1 cross_block_applications=1 transaction_ontology_parameter_links=1 application_ontology_parameter_links=1 last_ontology_class_hash=7199034902620903764 combined=15
+nondom:   transactions=0 applications=0 transaction_ontology_parameter_links=0
+loop:     transactions=1 authorizations=0 applications=0 refusals=1 refusal_reason_mask=524288 transaction_ontology_parameter_links=1 application_ontology_parameter_links=0 last_ontology_class_hash=7199034902620903764
+```
+
+The gate also rejected the unrelated ontology observation during type checking
+and returned `runtime_parity=5`, `ontology_cannot_authorize_loop=1`, and
+`merge_ready=1`.
+
 ## D7 Boundary
 
 The psychiatric-regime D7 work motivates occurrence-bound authority and the
@@ -240,9 +289,24 @@ distinction between observational receipts and functional state. Its runtime
 receipts are public model evidence, not compiler capabilities. This compiler
 slice imports and consumes none of them.
 
-An eventual source-level ontology may describe rebracketing obligations and
-transport them into IR. Until that interface exists, D7 and this compiler
-transaction are adjacent evidence lanes, not one end-to-end proof.
+The source fixtures now declare `ExactBitwiseRebracketObligation` as a subclass
+of `CompilerSemanticObligation` and use it in the optimized function signature.
+The checker accepts that subsumption and rejects a
+`ReceptorOccupancyObservation` in its place. A collection-only replay after the
+authoritative typecheck preserves only the function, parameter position, and
+class name as audit links in `IrOntologyTable`; it does not overwrite any
+semantic class/property table. The cleanup receipt reports only a parameter-link
+count and class hash. Cleanup asserts that the lowered function name remains
+stable before making that lookup; a future symbol-renaming pass therefore fails
+loudly instead of silently dropping the link. The modular witness places both
+the ontology declaration and transformed function in the imported leaf, so its
+receipt exercises link transport across the actual module merge. Link merge is
+idempotent on `(function_name, parameter_index, class_name)`. This is a
+function-level identity bridge, not a dataflow or authority bridge: the loop
+witness carries the same ontology identity and is still refused by the CFG
+certificate. D7 receipts remain adjacent observational evidence and are queried
+only after the authority-owned cleanup decision; they never participate in
+authority derivation or the mutation decision.
 
 ## Literature Compass
 
@@ -292,6 +356,18 @@ Only after the strict gate passes may this lane claim:
 - Default native-v2 `-O` reaches the transaction once for the focused
   single-module witness and once after imported-module finalization, with both
   optimized executables preserving the witness result.
+- Focused single-module and imported-leaf source diamonds each produce one
+  cross-block application and preserve the executable result. The public
+  receipt records zero same-region applications and one checked
+  ontology-parameter link for those runs. In the modular witness, both the link
+  and transformed function originate in the imported leaf.
+- A branch-local definition that does not dominate its join is lowered through
+  a join register and produces no candidate transaction. A separate source
+  function containing a loop produces one unchanged reason-19 refusal even
+  though its transaction carries the same ontology class identity as the
+  admitted diamond.
+- An unrelated `ReceptorOccupancyObservation` cannot discharge the compiler
+  semantic obligation in the focused compile-fail witness.
 - Public audit evidence cannot be consumed as mutation authority.
 
 ## Claims Forbidden
@@ -302,15 +378,16 @@ Only after the strict gate passes may this lane claim:
 - Authorization from a D7 runtime receipt, PET observation, ontology label, or
   diagnostic fingerprint.
 - Cryptographic unforgeability.
-- Coverage of source shapes other than the two focused native-v2 witnesses, of
+- Coverage of source shapes other than the focused same-block, forward-diamond,
+  join-copy, and loop-refusal witnesses, of
   all optimization pipelines, or of compiler-wide runtime behavior.
 - Loop, backedge, phi-edge, irreducible, or arbitrary-CFG authority. The
   certificate recognizes only same-block regions and canonical forward DAGs;
   it is not a reusable dominator tree or a general SSA reaching-definition
   analysis.
-- Source-level cross-block reachability or a default native-v2 cross-block
-  witness. The executable native-v2 witnesses remain the focused same-block
-  shapes inherited from PR #1001.
+- General source-level cross-block reachability. The executable claim is limited
+  to the exact single-module and imported/merged forward-diamond fixtures bound
+  by the source-to-IR gate.
 - A claim that Add/Mul legacy reassociation now satisfies this authority model.
 - Merge readiness while the strict gate reports a blocked production smoke.
 
@@ -389,18 +466,41 @@ Integration-Target: current-source Madaros optimizer and focused default native-
 Authoritative-Only-If: the narrow internal-transaction and focused default-path claims use a recorded clean source SHA and explicit compiler hash with no fallback; any broader reachability claim requires a new executable gate
 ```
 
+## Source-To-IR Semantic Lane Declaration
+
+```text
+Semantic-Lane-ID: rebracketing-authority-source-ir-v1
+Owner: Codex source-to-IR compiler lane
+Concept-IDs: SOUNIO-REBRACKETING-AUTHORITY; SOUNIO-NONASSOCIATIVE-ORDER
+Intent-Preserved: source parenthesization changes only when lowering preserves a candidate whose live IR receives exact local authority
+Transformation: expose same-region applications, cross-block applications, refusal reasons, and checked source ontology-parameter links in audit-only cleanup receipts; bind focused source programs to those receipts and native runtime parity
+Types-Changed: OcpExactBitwiseRebracketAudit gains a private scope key; IrOntologyTable gains bounded function/parameter/class identity links; OcpCleanupModuleReceipt gains same-region count, cross-block count, refusal-reason mask, transaction/application ontology-parameter-link counts, and the last ontology class hash
+Effects-Changed: none
+IR-Changed: no opcode or executable instruction changes; audit-only ontology signature links are retained in IrOntologyTable and merged by the modular frontend
+Claims-Introduced: focused single-module and imported-leaf source diamonds reach exactly one dominated cross-block transaction with one same-function ontology-parameter link; the imported receipt proves that link survives modular merge; a non-dominating source join forms no false candidate; a source loop candidate carries the same ontology identity and is refused as reason 19; an unrelated observation cannot discharge the obligation type
+Claims-Forbidden: general source-to-native preservation, arbitrary source control flow, loop or phi authority, float/GUM/clinical reassociation, ontology-derived authority, compiler-wide reachability
+Assumptions: the existing forward-DAG certificate remains unchanged; cleanup preserves the lowered function name and asserts that invariant before the audit lookup; receipt counters are evidence and cannot authorize mutation; the focused if-expression lowering uses explicit branch, copy, jump, and label instructions
+Write-Set: self-hosted/ir/ir.sio; self-hosted/ir/opt_cleanup.sio; self-hosted/check/mod.sio; self-hosted/compiler/main.sio; self-hosted/compiler/module_frontend.sio; tests/compiler/rebracket_authority_*; scripts/ci/exact_bitwise_rebracket_authority_gate.sh; scripts/ci/exact_bitwise_rebracket_source_ir_gate.sh; docs/internal/concepts/rebracketing-authority.md; docs/internal/concepts/registry.tsv; docs/internal/concepts/bindings.tsv
+Read-Set: self-hosted/ir/lower.sio; self-hosted/compiler/module_native_driver.sio; scripts/lib/resolve_souc.sh; bin/souc
+Positive-Witness: rebracket_authority_cross_block_source.sio and the function defined in rebracket_authority_cross_block_imported_leaf.sio each require one cross-block application, one transaction/application ontology-parameter link with the ExactBitwiseRebracketObligation class hash, combined constant 15, and runtime exit zero
+Negative-Witness: rebracket_authority_nondominating_source.sio requires zero transactions after join-copy lowering; rebracket_authority_loop_refusal_source.sio requires one ontology-parameter-linked refusal with reason-mask bit 19 and runtime exit zero without executing the historical loop body; rebracket_authority_unrelated_ontology_obligation.sio must fail type checking
+Acceptance-Gate: strict exact_bitwise_rebracket_source_ir_gate.sh with a current-source Foundry compiler and expected SHA-256
+Integration-Target: default native-v2 single-module and imported/merged optimized source paths
+Authoritative-Only-If: the source and compiler SHAs are recorded, the inherited authority gate reports merge_ready=1, all five runtime controls return zero, and no fallback occurs
+```
+
 ## Integration Receipt
 
 ```text
-Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated same-block and forward-DAG production transactions, and focused same-block default native-v2 single/imported reachability
+Semantic-Outcome: implementation-shaped hypothesis with executable scalar protocol, fresh-build-gated same-block and forward-DAG production transactions, focused default native-v2 single/imported reachability, and a current-source-validated audit-only source ontology identity link
 Concept-Status-Before: unregistered
 Concept-Status-After: hypothesis
-Distinctions-Added: observed receipt != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; explicit control-use model != flow authority; forward-DAG path-exclusion dominance != a general dominator tree; compiler-internal cross-block witness != source-level cross-block reachability; internal probe != default-path reachability; focused reachability != compiler-wide preservation
+Distinctions-Added: observed receipt != compiler authority; ontology obligation != compiler authority; diagnostic hash != scope identity; algebraic law != rewrite permission; explicit control-use model != flow authority; forward-DAG path-exclusion dominance != a general dominator tree; compiler-internal cross-block witness != source-level cross-block reachability; internal probe != default-path reachability; focused reachability != compiler-wide preservation
 Distinctions-Preserved: parenthesization != formatting; compile success != runtime parity; formal model != empirical or clinical claim
 Distinctions-Erased: none
-Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 current-source builds and inherited same-block runtime evidence; pending stacked-lane current-source build and strict 21-case internal/cross-block-pipeline smoke
+Evidence-Run: local 11-case kernel; exact E175/E176 controls; no-false-float guard; prebuilt-no-smoke classifier; PR #1001 and #1013 current-source builds and inherited optimizer/default-path evidence; PR #1046 run 29552524219 job 87798137029 artifact 8396343656; strict current-source authority and source-to-IR gates at source 394934a4e7c2a7d84b2c222743e66608cc1c5aac with compiler SHA-256 6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88; five runtime controls, unrelated ontology rejection, imported-leaf link merge, and loop reason-19 refusal all passed without fallback
 Fallback-Path: none
 Legacy-Kept: legacy Add/Mul Block L path retained outside the new claim
 Conflicting-Lanes: none; issue #854 and IrFunction/SOIR capacity stacks remain read-only and are no longer prerequisites for the focused smoke
-Next-Semantic-Interface: source ontology obligation -> source-to-IR cross-block lowering witness -> loop/phi-capable dominance and reaching-definition certificate -> occurrence authority -> native-v2 receipt
+Next-Semantic-Interface: loop/phi-capable dominance and reaching-definition certificate -> occurrence authority -> native-v2 receipt
 ```

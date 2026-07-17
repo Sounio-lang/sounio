@@ -214,3 +214,260 @@ pub fn df_join_outer(left: &DataFrame, right: &DataFrame, left_key: i64, right_k
     }
     out
 }
+
+// Local Newton sqrt (keeps the data module self-contained).
+fn gb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = if x > 1.0 { x } else { 1.0 }
+    var i: i64 = 0
+    while i < 50 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+/// Group by `key_col` and take the minimum of `val_col`. Returns [key, min(val)].
+pub fn df_groupby_min(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v < m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the maximum of `val_col`. Returns [key, max(val)].
+pub fn df_groupby_max(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v > m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the sample standard deviation of `val_col` (dividing by n-1, matching
+/// df_col_std; a group of fewer than 2 rows yields 0). Returns [key, std(val)].
+pub fn df_groupby_std(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        // pass 1: mean
+        var s: f64 = 0.0
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col); cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var sd: f64 = 0.0
+        if cnt >= 2.0 {
+            let mean = s / cnt
+            var ss: f64 = 0.0
+            r = 0
+            while r < df_nrows(df) {
+                if df_get(df, r, key_col) == key {
+                    let d = df_get(df, r, val_col) - mean
+                    ss = ss + d * d
+                }
+                r = r + 1
+            }
+            sd = gb_sqrt(ss / (cnt - 1.0))
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = sd
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+// Sort a scratch array a[0..n) ascending in place (insertion sort; n <= 1024).
+fn gb_sort_vals(a: &![f64; 1024], n: i64) {
+    var i: i64 = 1
+    while i < n && i < 1024 {
+        let cur = a[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 && a[j as usize] > cur {
+            a[(j + 1) as usize] = a[j as usize]
+            j = j - 1
+        }
+        a[(j + 1) as usize] = cur
+        i = i + 1
+    }
+}
+
+/// Group by `key_col` and take the median of `val_col`. Returns [key, median(val)]. For an even
+/// group size the median is the average of the two central values; an empty group yields 0.
+pub fn df_groupby_median(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                buf[cnt as usize] = df_get(df, r, val_col)
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        gb_sort_vals(&!buf, cnt)
+        var med: f64 = 0.0
+        if cnt > 0 {
+            if cnt % 2 == 1 {
+                med = buf[(cnt / 2) as usize]
+            } else {
+                med = 0.5 * (buf[(cnt / 2 - 1) as usize] + buf[(cnt / 2) as usize])
+            }
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = med
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+// p-th percentile (0..100) of a sorted array a[0..n) by linear interpolation (numpy/pandas default).
+fn gb_percentile(a: &[f64; 1024], n: i64, p: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    if n == 1 { return a[0] }
+    let rank = (p / 100.0) * ((n - 1) as f64)
+    var lo: i64 = rank as i64
+    if lo < 0 { lo = 0 }
+    if lo >= n - 1 { return a[(n - 1) as usize] }
+    let frac = rank - (lo as f64)
+    a[lo as usize] + frac * (a[(lo + 1) as usize] - a[lo as usize])
+}
+
+/// Group by `key_col` and take the p-th percentile (0..100) of `val_col`, using linear interpolation
+/// between order statistics (the numpy/pandas default). Returns [key, percentile]. p=50 equals the
+/// median; an empty group yields 0.
+pub fn df_groupby_percentile(df: &DataFrame, key_col: i64, val_col: i64, p: f64) -> DataFrame
+    with Mut, Div, Panic
+{
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                buf[cnt as usize] = df_get(df, r, val_col)
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        gb_sort_vals(&!buf, cnt)
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key
+        row[1] = gb_percentile(&buf, cnt, p)
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the 90th percentile of `val_col` (convenience over
+/// df_groupby_percentile).
+pub fn df_groupby_p90(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    df_groupby_percentile(df, key_col, val_col, 90.0)
+}
+
+/// Group by `key_col` and compute several aggregates of `val_col` in one pass. Returns an 8-column
+/// DataFrame with, per distinct key:
+///   [0]=key  [1]=count  [2]=sum  [3]=mean  [4]=min  [5]=max  [6]=sample std (n-1)  [7]=median
+/// (std is 0 for a group of fewer than 2 rows.) Equivalent to the individual df_groupby_* verbs but
+/// grouped once.
+pub fn df_groupby_agg(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(8)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var sum: f64 = 0.0
+        var mn: f64 = 0.0
+        var mx: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                let v = df_get(df, r, val_col)
+                if cnt == 0 { mn = v; mx = v } else { if v < mn { mn = v } if v > mx { mx = v } }
+                sum = sum + v
+                buf[cnt as usize] = v
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        let cf = cnt as f64
+        let mean = if cnt > 0 { sum / cf } else { 0.0 }
+        // sample std
+        var std: f64 = 0.0
+        if cnt >= 2 {
+            var ss: f64 = 0.0
+            var k: i64 = 0
+            while k < cnt { let d = buf[k as usize] - mean; ss = ss + d * d; k = k + 1 }
+            std = gb_sqrt(ss / (cf - 1.0))
+        }
+        // median (sorts buf in place)
+        gb_sort_vals(&!buf, cnt)
+        var med: f64 = 0.0
+        if cnt > 0 {
+            if cnt % 2 == 1 { med = buf[(cnt / 2) as usize] }
+            else { med = 0.5 * (buf[(cnt / 2 - 1) as usize] + buf[(cnt / 2) as usize]) }
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = cf; row[2] = sum; row[3] = mean
+        row[4] = mn;  row[5] = mx; row[6] = std; row[7] = med
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}

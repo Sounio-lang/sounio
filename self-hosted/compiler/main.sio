@@ -693,6 +693,91 @@ fn run_probe_ir_opt_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic
     panic("probe_ir_opt_strategy failed")
 }
 
+// A/B witness for the wide MultiModuleIrResult return boundary. Keep the
+// legacy probe above intact while the boxed front-half path proves causality.
+fn run_probe_ir_opt_strategy_boxed(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_ir_opt_strategy_boxed: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_ir_opt_strategy_boxed: begin")
+    print("probe_ir_opt_strategy_boxed: source=")
+    print(source_path)
+    print("\n")
+    var trace = empty_load_multimodule_ir_trace()
+    let lower_result = bridge_lower_single_module_box(source_path, &! trace)
+    let parse_errors = parser_last_error_count()
+    if lower_result.ok && parse_errors == 0 {
+        match lower_result.module {
+            Some(module_box) => {
+                println("probe_ir_opt_strategy_boxed: ok")
+                print("probe_ir_opt_strategy_boxed: functions=")
+                print_int((*module_box).fn_count)
+                print("\n")
+                var fi: i64 = 0
+                while fi < (*module_box).fn_count {
+                    let func = (*module_box).functions[fi as usize]
+                    print("probe_ir_opt_strategy_boxed: fn=")
+                    compiler_manifest_print_name(func.name)
+                    print(" strategy=")
+                    print(ir_strategy_name(func.compile_strategy))
+                    if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
+                        let transformed = ir_opt_apply_strategy(func)
+                        let dispatch_label = ir_opt_max_label(func) + 1
+                        let instr_label = dispatch_label + 1
+                        let merge_label = dispatch_label + 2
+                        print(" transformed_instrs=")
+                        print_int(func.instr_count)
+                        print("->")
+                        print_int(transformed.instr_count)
+                        print(" labels=")
+                        print_int(func.label_count)
+                        print("->")
+                        print_int(transformed.label_count)
+                        print(" merge_result_vreg=")
+                        print_int(ir_opt_find_return_vreg(func))
+                        print(" dispatch_label=")
+                        print_int(dispatch_label)
+                        print(" instr_label=")
+                        print_int(instr_label)
+                        print(" merge_label=")
+                        print_int(merge_label)
+                    }
+                    var ii: i64 = 0
+                    while ii < func.instr_count {
+                        let instr = func.instrs[ii as usize]
+                        if instr.op == IrOpcode::IrContest {
+                            print(" ir_contest_index=")
+                            print_int(ii)
+                            print(" ir_contest_label_id=")
+                            print_int(instr.label_id)
+                            print(" ir_contest_model_count=")
+                            print_int(instr.imm_i64)
+                        }
+                        ii = ii + 1
+                    }
+                    print("\n")
+                    fi = fi + 1
+                }
+                return
+            }
+            None => {
+                panic("probe_ir_opt_strategy_boxed: missing boxed module")
+            }
+        }
+    }
+    println("probe_ir_opt_strategy_boxed: fail")
+    if str_len(lower_result.error_msg) > 0 {
+        print("probe_ir_opt_strategy_boxed: error=")
+        print(lower_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_ir_opt_strategy_boxed: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_ir_opt_strategy_boxed failed")
+}
+
 fn run_probe_frontend(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 1 >= args.len {
         panic("probe_frontend: missing source file argument")
@@ -2627,6 +2712,12 @@ fn run_exact_bitwise_rebracket_authority_smoke() with IO, Mut, Panic, Div {
         " pipeline_authorizations=" + int_to_string(pipeline.exact_bitwise_authorization_count) +
         " pipeline_applications=" + int_to_string(pipeline.exact_bitwise_application_count) +
         " pipeline_refusals=" + int_to_string(pipeline.exact_bitwise_refusal_count) +
+        " pipeline_same_region_applications=" + int_to_string(pipeline.exact_bitwise_same_region_application_count) +
+        " pipeline_cross_block_applications=" + int_to_string(pipeline.exact_bitwise_cross_block_application_count) +
+        " pipeline_refusal_reason_mask=" + int_to_string(pipeline.exact_bitwise_refusal_reason_mask) +
+        " pipeline_transaction_ontology_parameter_links=" + int_to_string(pipeline.exact_bitwise_transaction_ontology_parameter_link_count) +
+        " pipeline_application_ontology_parameter_links=" + int_to_string(pipeline.exact_bitwise_application_ontology_parameter_link_count) +
+        " pipeline_last_ontology_class_hash=" + int_to_string(pipeline.last_transaction_ontology_class_hash) +
         " pipeline_operator_mask=" + int_to_string(pipeline.exact_bitwise_operator_mask) +
         " pipeline_last_function=" + int_to_string(pipeline.last_application_function_index) +
         " pipeline_last_const=" + int_to_string(pipeline.last_combined_const_value))
@@ -2650,6 +2741,12 @@ fn run_exact_bitwise_rebracket_authority_smoke() with IO, Mut, Panic, Div {
         pipeline.exact_bitwise_authorization_count != 1 ||
         pipeline.exact_bitwise_application_count != 1 ||
         pipeline.exact_bitwise_refusal_count != 0 ||
+        pipeline.exact_bitwise_same_region_application_count != 0 ||
+        pipeline.exact_bitwise_cross_block_application_count != 1 ||
+        pipeline.exact_bitwise_refusal_reason_mask != 0 ||
+        pipeline.exact_bitwise_transaction_ontology_parameter_link_count != 0 ||
+        pipeline.exact_bitwise_application_ontology_parameter_link_count != 0 ||
+        pipeline.last_transaction_ontology_class_hash != 0 ||
         pipeline.exact_bitwise_operator_mask != 1 ||
         pipeline.last_application_function_index != 0 ||
         pipeline.last_combined_const_value != 15 {
@@ -28155,6 +28252,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-ir-callsite" || starts_with(mode, "--probe-ir-call") {
             run_probe_ir_callsite(args, arg_idx)
+            return
+        } else if mode == "--probe-ir-opt-strategy-boxed" {
+            run_probe_ir_opt_strategy_boxed(args, arg_idx)
             return
         } else if mode == "--probe-ir-opt-strategy" || starts_with(mode, "--probe-ir-opt") {
             run_probe_ir_opt_strategy(args, arg_idx)
