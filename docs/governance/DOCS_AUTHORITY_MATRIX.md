@@ -319,6 +319,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.pkg-manager-sota-position | repo_only | docs/ecosystem/PKG_MANAGER_SOTA_POSITION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.registry-architecture | repo_only | docs/ecosystem/REGISTRY_ARCHITECTURE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.registry-attestation-spec | repo_only | docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.sounio-toml-spec | repo_only | docs/ecosystem/SOUNIO_TOML_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.exact-core | repo_only | docs/EXACT_CORE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.faq | repo_only | docs/FAQ.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

@@ -81,6 +81,11 @@ required = {
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md": [
         "Status: design reference only; not launched as a public registry.",
     ],
+    "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md": [
+        "Status: executable R2.6 local policy contract; public registry publishing is disabled.",
+        "unsigned-local-policy-evaluation",
+        "publication-status = \"disabled\"",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -113,6 +118,7 @@ for rel, needles in required.items():
 
 for rel in [
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md",
+    "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",

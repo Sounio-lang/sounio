@@ -145,13 +145,17 @@ método, validade dos dados ou verdade científica.
 - **A4:** Roadmap detalhado com esforço (`docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md`)
 - **Curated Packages:** Lista inicial + critérios (`docs/ecosystem/CURATED_PACKAGES.md`)
 - **Registry Architecture:** Design técnico completo (`docs/ecosystem/REGISTRY_ARCHITECTURE.md`)
+- **Registry Attestation R2.6:** policy local executável, determinística e
+  identity-only (`docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md`)
 
 **Pendente:**
-- especificar registry attestation, assinatura remota e replay independente
+- especificar identidade de issuer/namespace, assinatura remota e replay independente
 - integrar publicação somente depois desses gates e de revisão própria
 
 ---
 
 O registry local em `scripts/dev/registry_serve.py` é deliberadamente
-read-only para publicação. R0-R2 não cria registry público, trusted publishing,
-assinatura remota, `ClinicalAuthority` ou `ClinicalRelease`.
+read-only para publicação. R2.6 especifica somente uma avaliação local de
+policy com `publication-status = "disabled"`; não cria registry público,
+trusted publishing, assinatura remota, `ClinicalAuthority` ou
+`ClinicalRelease`.
