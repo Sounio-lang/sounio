@@ -1,0 +1,226 @@
+//@ run-pass
+// Scalarized native executor for policy-observation associator D6.
+
+struct Carrier {
+    operator_id: i64,
+    family_id: i64,
+    protocol_id: i64,
+    budget_capacity: i64,
+    first_position: i64,
+    last_position: i64,
+    leaf_count: i64,
+    origin_mask: i64,
+    flat_fingerprint: i64,
+    tree_fingerprint: i64,
+    has_policy: bool,
+    has_boundary: bool,
+    has_probe: bool,
+    probe_status: i64,
+    survivor_mask: i64,
+    burden: i64,
+    evidence_count: i64,
+    evidence_fingerprint: i64,
+    last_provenance: i64,
+    committed_without_policy: bool,
+    withheld_with_policy: bool,
+}
+
+fn d6_native_bool(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn flat_factor(count: i64) -> i64 with Panic {
+    assert(count == 1 || count == 2)
+    if count == 1 { 101 } else { 10201 }
+}
+
+fn evidence_factor(count: i64) -> i64 with Panic {
+    assert(count >= 0 && count <= 1)
+    if count == 0 { 1 } else { 31 }
+}
+
+fn origin_overlap(left_mask: i64, right_mask: i64) -> i64 {
+    left_mask % 2 * (right_mask % 2) +
+        ((left_mask / 2) % 2) * ((right_mask / 2) % 2) +
+        ((left_mask / 4) % 2) * ((right_mask / 4) % 2)
+}
+
+fn carriers_composable(left: Carrier, right: Carrier) -> bool {
+    left.operator_id == right.operator_id &&
+        left.family_id == right.family_id &&
+        left.protocol_id == right.protocol_id &&
+        left.budget_capacity == right.budget_capacity &&
+        left.last_position + 1 == right.first_position &&
+        origin_overlap(left.origin_mask, right.origin_mask) == 0
+}
+
+fn policy_atom() -> Carrier {
+    Carrier {
+        operator_id: 9601, family_id: 520, protocol_id: 8400,
+        budget_capacity: 7,
+        first_position: 1, last_position: 1, leaf_count: 1,
+        origin_mask: 1, flat_fingerprint: 9101, tree_fingerprint: 9101,
+        has_policy: true, has_boundary: false, has_probe: false,
+        probe_status: 0, survivor_mask: 3, burden: 3,
+        evidence_count: 1, evidence_fingerprint: 8101,
+        last_provenance: 8101, committed_without_policy: false,
+        withheld_with_policy: false,
+    }
+}
+
+fn boundary_atom() -> Carrier {
+    Carrier {
+        operator_id: 9601, family_id: 520, protocol_id: 8400,
+        budget_capacity: 7,
+        first_position: 2, last_position: 2, leaf_count: 1,
+        origin_mask: 2, flat_fingerprint: 9102, tree_fingerprint: 9102,
+        has_policy: false, has_boundary: true, has_probe: false,
+        probe_status: 0, survivor_mask: 3, burden: 0,
+        evidence_count: 0, evidence_fingerprint: 0,
+        last_provenance: 0, committed_without_policy: false,
+        withheld_with_policy: false,
+    }
+}
+
+fn probe_atom() -> Carrier {
+    Carrier {
+        operator_id: 9601, family_id: 520, protocol_id: 8400,
+        budget_capacity: 7,
+        first_position: 3, last_position: 3, leaf_count: 1,
+        origin_mask: 4, flat_fingerprint: 9103, tree_fingerprint: 9103,
+        has_policy: false, has_boundary: false, has_probe: true,
+        probe_status: 1, survivor_mask: 3, burden: 0,
+        evidence_count: 0, evidence_fingerprint: 0,
+        last_provenance: 0, committed_without_policy: false,
+        withheld_with_policy: false,
+    }
+}
+
+fn compose(left: Carrier, right: Carrier) -> Carrier with Panic {
+    assert(carriers_composable(left, right))
+    let boundary_applies = left.has_boundary && right.probe_status == 1
+    let execute_now = boundary_applies && !left.has_policy
+    let withhold_now = boundary_applies && left.has_policy
+    let committed_before = left.probe_status == 3 || right.probe_status == 3
+    let withheld_before = left.probe_status == 2 || right.probe_status == 2
+    let has_probe = left.has_probe || right.has_probe
+    let status = if committed_before {
+        3
+    } else if withheld_before {
+        2
+    } else if execute_now {
+        3
+    } else if withhold_now {
+        2
+    } else if has_probe {
+        1
+    } else {
+        0
+    }
+    let before_count = left.evidence_count + right.evidence_count
+    let before_fingerprint = left.evidence_fingerprint *
+        evidence_factor(right.evidence_count) + right.evidence_fingerprint
+    Carrier {
+        operator_id: left.operator_id,
+        family_id: left.family_id,
+        protocol_id: left.protocol_id,
+        budget_capacity: left.budget_capacity,
+        first_position: left.first_position,
+        last_position: right.last_position,
+        leaf_count: left.leaf_count + right.leaf_count,
+        origin_mask: left.origin_mask + right.origin_mask,
+        flat_fingerprint: left.flat_fingerprint * flat_factor(right.leaf_count) +
+            right.flat_fingerprint,
+        tree_fingerprint: left.tree_fingerprint * 31 + right.tree_fingerprint,
+        has_policy: left.has_policy || right.has_policy,
+        has_boundary: left.has_boundary || right.has_boundary,
+        has_probe: has_probe,
+        probe_status: status,
+        survivor_mask: if status == 3 { 2 } else { 3 },
+        burden: left.burden + right.burden + d6_native_bool(execute_now) * 4,
+        evidence_count: before_count + d6_native_bool(execute_now),
+        evidence_fingerprint: if execute_now {
+            before_fingerprint * 31 + 8103
+        } else {
+            before_fingerprint
+        },
+        last_provenance: if execute_now {
+            8103
+        } else if right.evidence_count > 0 {
+            right.last_provenance
+        } else {
+            left.last_provenance
+        },
+        committed_without_policy: left.committed_without_policy ||
+            right.committed_without_policy || execute_now,
+        withheld_with_policy: left.withheld_with_policy ||
+            right.withheld_with_policy || withhold_now,
+    }
+}
+
+fn flat_three(first: i64, second: i64, third: i64) -> i64 {
+    (first * 101 + second) * 101 + third
+}
+
+fn main() with Panic {
+    let a = policy_atom()
+    let b = boundary_atom()
+    let c = probe_atom()
+    assert(carriers_composable(a, b))
+    assert(carriers_composable(b, c))
+    assert(!carriers_composable(a, c))
+    assert(!carriers_composable(c, b))
+    let ab = compose(a, b)
+    assert(carriers_composable(ab, c))
+    let left = compose(ab, c)
+    let bc = compose(b, c)
+    assert(carriers_composable(a, bc))
+    let right = compose(a, bc)
+
+    assert(left.operator_id == 9601 && right.operator_id == 9601)
+    assert(left.family_id == 520 && right.family_id == 520)
+    assert(left.protocol_id == 8400 && right.protocol_id == 8400)
+    assert(left.budget_capacity == 7 && right.budget_capacity == 7)
+    assert(left.origin_mask == 7 && right.origin_mask == 7)
+    assert(left.flat_fingerprint == 93767706)
+    assert(right.flat_fingerprint == 93767706)
+    assert(left.tree_fingerprint == 9037326)
+    assert(right.tree_fingerprint == 573396)
+    assert(left.probe_status == 2 && left.withheld_with_policy)
+    assert(!left.committed_without_policy)
+    assert(right.probe_status == 3 && right.committed_without_policy)
+    assert(!right.withheld_with_policy)
+    assert(left.survivor_mask == 3 && right.survivor_mask == 2)
+    assert(left.burden == 3 && right.burden == 7)
+    assert(left.evidence_count == 1 && right.evidence_count == 2)
+    assert(left.evidence_fingerprint == 8101)
+    assert(right.evidence_fingerprint == 259234)
+    assert(bc.last_provenance == 8103 && right.last_provenance == 8103)
+
+    let p0 = flat_three(9101, 9102, 9103)
+    let p1 = flat_three(9101, 9103, 9102)
+    let p2 = flat_three(9102, 9101, 9103)
+    let p3 = flat_three(9102, 9103, 9101)
+    let p4 = flat_three(9103, 9101, 9102)
+    let p5 = flat_three(9103, 9102, 9101)
+    assert(p0 == 93767706 && p1 == 93767806)
+    assert(p2 == 93777806 && p3 == 93778006)
+    assert(p4 == 93788006 && p5 == 93788106)
+    assert(p5 < 9223372036854775807)
+
+    let status_diff = d6_native_bool(left.probe_status != right.probe_status)
+    let mask_diff = 2 * d6_native_bool(left.survivor_mask != right.survivor_mask)
+    let burden_diff = 4 * d6_native_bool(left.burden != right.burden)
+    let evidence_diff = 8 * d6_native_bool(
+        left.evidence_count != right.evidence_count,
+    )
+    let difference_bitset = status_diff + mask_diff + burden_diff + evidence_diff
+    assert(difference_bitset == 15)
+
+    println("D6-W0 atoms=policy,boundary,probe ids=9101,9102,9103 flat_fp=93767706")
+    println("D6-W1 left=((a*b)*c) target=withheld mask=3 burden=3 evidence_fp=8101 tree_fp=9037326")
+    println("D6-W2 right=(a*(b*c)) target=8 mask=2 burden=7 evidence_fp=259234 tree_fp=573396")
+    println("D6-W3 same_operands=true same_operator=9601 both_defined=true difference_bitset=15")
+    println("D6-W4 committed_before_policy=true committed_after_policy=true retroactive_erasure=false")
+    println("D6-W5 flat_control=equal label_orders=6 checksum_collisions=0 grouping_state=distinct irreducible_memory=false")
+    println("D6-W6 scope=partial invalid_pairs=2 total_magma=false causal=false empirical=false clinical=false")
+    println("PROOF-CARRYING POLICY-OBSERVATION ASSOCIATOR D6 PASS")
+}
