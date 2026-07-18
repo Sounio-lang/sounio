@@ -12,6 +12,7 @@ ARENA="self-hosted/ir/arena_v2_shadow.sio"
 WRITER="self-hosted/ir/soir_writer.sio"
 BRIDGE="self-hosted/ir/arena_v2_soir_bridge.sio"
 PROVENANCE_MODE="${IR_MODULE_ARENA_V2_SOIR_PROVENANCE_MODE:-git}"
+GIT_SCOPE="${IR_MODULE_ARENA_V2_SOIR_GIT_SCOPE:-current_tree}"
 CONTENT_MANIFEST="${IR_MODULE_ARENA_V2_SOIR_CONTENT_MANIFEST:-}"
 EXPECTED_MANIFEST_SHA256="${IR_MODULE_ARENA_V2_SOIR_EXPECTED_MANIFEST_SHA256:-}"
 RUNTIME_TIMEOUT_SECONDS="${IR_MODULE_ARENA_V2_SOIR_RUNTIME_TIMEOUT_SECONDS:-15}"
@@ -24,6 +25,8 @@ BASE_RECEIPT="not_checked_manifest_scope"
 PRECISION_RECEIPT="not_checked_manifest_scope"
 LEGACY_RECEIPT="not_checked_manifest_scope"
 LANE_CONTENT_SHA256=""
+GIT_SCOPE_RECEIPT="not_applicable_manifest"
+EXACT_WRITE_SET_RECEIPT="not_checked_manifest_scope"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sounio-ir-module-arena-v2-soir-v5.XXXXXX")"
 
 cleanup() {
@@ -131,30 +134,51 @@ validate_git_provenance() {
   local -a expected_paths
   local dirty_paths
 
-  [[ "$REQUESTED_BASE" == "$PINNED_BASE" ]] || fail base_override_rejected
-  git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
   HEAD_SHA="$(git rev-parse HEAD)"
   TREE_SHA="$(git rev-parse 'HEAD^{tree}')"
-  [[ "$HEAD_SHA" != "$BASE" ]] || fail head_equals_pinned_base
-  git merge-base --is-ancestor "$BASE" "$HEAD_SHA" || fail pinned_base_not_ancestor
-
-  git diff --name-only "$BASE" "$HEAD_SHA" | LC_ALL=C sort >"$TMP/write-set.actual"
-  expected_write_set | LC_ALL=C sort >"$TMP/write-set.expected"
-  diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
-    >"$TMP/write-set.diff" 2>&1 || {
-      cat "$TMP/write-set.diff" >&2
-      fail write_set_expanded
-    }
 
   mapfile -t expected_paths < <(expected_write_set)
+  for expected_path in "${expected_paths[@]}"; do
+    git ls-files --error-unmatch -- "$expected_path" >/dev/null 2>&1 \
+      || fail expected_write_set_path_untracked
+  done
   dirty_paths="$(git status --porcelain --untracked-files=all -- "${expected_paths[@]}")"
   if [[ -n "$dirty_paths" ]]; then
     printf '%s\n' "$dirty_paths" >&2
     fail expected_write_set_dirty
   fi
 
-  PROVENANCE_RECEIPT="git_head_tree_bound"
-  BASE_RECEIPT="$BASE"
+  case "$GIT_SCOPE" in
+    current_tree)
+      [[ -z "${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-}" ]] || fail base_not_applicable_current_tree
+      PROVENANCE_RECEIPT="git_head_tree_bound_current_tree"
+      BASE_RECEIPT="not_checked_current_tree"
+      GIT_SCOPE_RECEIPT="current_tree"
+      EXACT_WRITE_SET_RECEIPT="not_checked_current_tree"
+      ;;
+    publication)
+      [[ "$REQUESTED_BASE" == "$PINNED_BASE" ]] || fail base_override_rejected
+      git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
+      [[ "$HEAD_SHA" != "$BASE" ]] || fail head_equals_pinned_base
+      git merge-base --is-ancestor "$BASE" "$HEAD_SHA" || fail pinned_base_not_ancestor
+
+      git diff --name-only "$BASE" "$HEAD_SHA" | LC_ALL=C sort >"$TMP/write-set.actual"
+      expected_write_set | LC_ALL=C sort >"$TMP/write-set.expected"
+      diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
+        >"$TMP/write-set.diff" 2>&1 || {
+          cat "$TMP/write-set.diff" >&2
+          fail write_set_expanded
+        }
+
+      PROVENANCE_RECEIPT="git_head_tree_bound_publication"
+      BASE_RECEIPT="$BASE"
+      GIT_SCOPE_RECEIPT="publication_branch_exact"
+      EXACT_WRITE_SET_RECEIPT="pass"
+      ;;
+    *)
+      fail git_scope_invalid
+      ;;
+  esac
 }
 
 validate_manifest_provenance() {
@@ -274,7 +298,9 @@ PROTECTED=(
 if [[ "$PROVENANCE_MODE" == "git" ]]; then
   for protected in "${PROTECTED[@]}"; do
     [[ -e "$protected" ]] || continue
-    git diff --quiet "$BASE" -- "$protected" || fail "protected_surface_changed_${protected//\//_}"
+    if [[ "$GIT_SCOPE" == "publication" ]]; then
+      git diff --quiet "$BASE" -- "$protected" || fail "protected_surface_changed_${protected//\//_}"
+    fi
     [[ -z "$(git status --short -- "$protected")" ]] || fail "protected_surface_dirty_${protected//\//_}"
   done
 
@@ -395,8 +421,8 @@ printf 'IR_MODULE_ARENA_V2_SOIR_V5_DIFFERENTIAL mode=shadow_canonical_not_differ
 if [[ "$PROVENANCE_MODE" == "manifest" ]]; then
   printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=manifest_pinned_lane_content manifest_sha256=%s entries=13 scope=lane_content_only protected_surfaces=not_checked\n' "$CONTENT_MANIFEST_SHA256"
 else
-  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=git_head_tree_bound base=%s head=%s tree=%s exact_write_set=pass expected_paths_clean=pass\n' \
-    "$BASE" "$HEAD_SHA" "$TREE_SHA"
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=%s scope=%s base=%s head=%s tree=%s exact_write_set=%s expected_paths_clean=pass\n' \
+    "$PROVENANCE_RECEIPT" "$GIT_SCOPE_RECEIPT" "$BASE_RECEIPT" "$HEAD_SHA" "$TREE_SHA" "$EXACT_WRITE_SET_RECEIPT"
 fi
-printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s head=%s tree=%s lane_content_sha256=%s provenance=%s\n' \
-  "$SOUC" "$compiler_sha256" "$BASE_RECEIPT" "$HEAD_SHA" "$TREE_SHA" "$LANE_CONTENT_SHA256" "$PROVENANCE_RECEIPT"
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s head=%s tree=%s lane_content_sha256=%s provenance=%s scope=%s exact_write_set=%s\n' \
+  "$SOUC" "$compiler_sha256" "$BASE_RECEIPT" "$HEAD_SHA" "$TREE_SHA" "$LANE_CONTENT_SHA256" "$PROVENANCE_RECEIPT" "$GIT_SCOPE_RECEIPT" "$EXACT_WRITE_SET_RECEIPT"
