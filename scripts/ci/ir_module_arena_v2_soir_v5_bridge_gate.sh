@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-BASE="${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-5a8ae321dbb78b2b8fcd405457c619d1821aadf5}"
+BASE="${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-a505fe5b3d66565236653f5dff203bc7fbad7076}"
 SOUC="${SOUC_BIN:-$ROOT/bin/madaros}"
 ARENA="self-hosted/ir/arena_v2_shadow.sio"
 WRITER="self-hosted/ir/soir_writer.sio"
