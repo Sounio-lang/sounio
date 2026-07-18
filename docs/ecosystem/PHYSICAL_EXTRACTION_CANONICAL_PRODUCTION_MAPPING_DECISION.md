@@ -153,11 +153,26 @@ explicit action for each of these governed targets:
 | `packages/sounio-units` | `distribution:sounio-units` |
 | `examples` | `distribution:sounio-research-examples` |
 
-At `2026-07-18T02:42:17Z`, the issue remained open with no response comments.
-Therefore no Sounio production mapping decision record, receipt, or proposal
-has been authored. The observed public `sounio-examples` repository remains
-only a candidate that a human may explicitly select or reject; this tool does
-not infer that choice.
+At `2026-07-18T16:57:25Z`, `agourakis82` posted a complete response on issue
+[#1122](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5012124187).
+It requests four new public repositories (`epistemic-core`, `sounio-formats`,
+`sounio-io-primitives`, and `sounio-units`) and explicitly selects the observed
+public `sounio-examples` repository for `distribution:sounio-research-examples`.
+
+The source response is 2647 bytes with SHA-256
+`f2e01687686dfa09df5acf173e67aa9c9d73fe22988302a72926e5d16c39408b`.
+The deterministic transcription has identity
+`246cd09179f1b0a49aebb2d87d65d33f48dbdd68d17df76d245d34bca7a034de`.
+Process and verify modes independently reconstructed receipt identity
+`f74837d7d0ae83c6ba3d8d13a317c6024d0aab5c83bfda1069aa4b97f42567b3`
+with status `destination-repository-creation-required`, proposal output
+`not-emitted`, and execution authority `none`.
+
+The catalog, source response, decision, receipt, and their exact bindings are
+preserved under
+`artifacts/r3/canonical-production/20260718T165725Z/`. Issue comment
+[`5012139001`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5012139001)
+records the same processing result. No repository was created or modified.
 
 ## Acceptance Gate
 
@@ -207,9 +222,9 @@ implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
-The executable processor closes the transcription-to-proposal preparation gap,
-not the human decision itself. A response on issue #1122 is still required.
-Depending on that response, the next state is ownership-policy review,
-repository provisioning plus reobservation, or review of a non-approved mapping
-proposal. Production materialization evidence, recovery policy, approval,
-explicit cutover decision, and execution remain later and separate interfaces.
+The executable processor has recorded the human selection without emitting a
+mapping proposal. The next state is separately authorized provisioning of the
+four requested repositories, followed by a fresh organization catalog and
+canonical `main` observation and a complete reconfirmation of all five targets.
+Production materialization evidence, recovery policy, approval, explicit
+cutover decision, and execution remain later and separate interfaces.
