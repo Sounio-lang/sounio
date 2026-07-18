@@ -40,6 +40,13 @@ pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, All
         buf = ptx_push_str(buf, gpu_emit_cell_sign_table(vdim, vbits))
         buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(vdim, vbits))
     }
+    // BPTT backward-step tables: same as the VJP (ossm_Lsgn for L(A)ᵀ, ossm_absgn for da).
+    if gpu_has_oct_bwd(kernel) {
+        let wdim = gpu_bwd_dim(kernel)
+        let wbits = if wdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(wdim, wbits))
+        buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(wdim, wbits))
+    }
     // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
     // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
     // The function only emits cosmetic PTX comment lines; skip it for correctness.
@@ -144,7 +151,7 @@ fn gpu_has_wmma_tile(kernel: GpuKernelIr) -> bool {
     var i: i64 = 0
     while i < kernel.op_count {
         let oc = kernel.ops[i as usize].opcode
-        if oc == GpuOpcode::GpuWmmaTile || oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur || oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctVjp { return true }
+        if oc == GpuOpcode::GpuWmmaTile || oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur || oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctVjp || oc == GpuOpcode::GpuOctBwd { return true }
         i = i + 1
     }
     false
@@ -157,8 +164,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
 
     let stage = gpu_has_oct_stage(kernel)
     let postadd = gpu_has_oct_postadd(kernel)
-    // The associator and the VJP need the same register classes as the cell (runtime L-build / accum).
-    let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_vjp(kernel)
+    // The associator, VJP and BPTT-backward need the same register classes as the cell.
+    let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel)
     let stage_or_pa = stage || postadd || cell
 
     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
@@ -737,6 +744,77 @@ fn gpu_emit_vjp_da_accum(pHR: string, pdDR: string, pdaR: string, dim: i64) -> s
     t
 }
 
+// ── One BPTT backward step: dHprev = L(A)ᵀ·dHt (D-layout) + dA += da(Hprev, dHt) in-place ─────────
+// Like the VJP but the recurrent gradient dHprev is written in D-layout (dHprev[k*16+b] = sS[k*16+b],
+// so it chains directly as the previous step's dHt) and dA is ACCUMULATED (no zeroing) so summing
+// across timesteps is just repeated launches. Phase-split; short literals; small stack frames.
+fn gpu_emit_oct_bwd(paR: string, pHprevR: string, pdHtR: string, pdHprevR: string, pdaR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // tile: build L(A)ᵀ into sL, stage dHt col-major into sH, tile → sS = L(A)ᵀ·dHt
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BW0;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(6, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(paR, dim, bits, 40))
+    t = str_concat(t, gpu_emit_vjp_dstage(pdHtR, dim))
+    t = str_concat(t, "$BW0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: store dHprev (sS → pdHprev D-layout f64) + accumulate dA in-place
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BW1;\n")
+    t = str_concat(t, gpu_emit_bwd_store_dhprev(pdHprevR, dim))
+    t = str_concat(t, gpu_emit_bwd_da_accum(pHprevR, pdHtR, pdaR, dim))
+    t = str_concat(t, "$BW1:\n")
+    t
+}
+
+// thread 0: store the tile output sS@1024 (row-major f32) to pdHprev in D-layout f64 directly
+// (dHprev[idx] = sS[idx], idx 0..dim*16) — no transpose, so it chains as the next step's dHt.
+fn gpu_emit_bwd_store_dhprev(pdHprevR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$BST:\n"
+    t = str_concat(t, "    mul.lo.u32 %r8, %r5, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd0, %f1;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdHprevR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $BST;\n")
+    t
+}
+
+// thread 0: dA[p] += Σ_{k,b} σ(p,k⊕p)·Hprev[k⊕p,b]·dHt[k,b], accumulated IN-PLACE (no zeroing — the
+// harness zeroes dA once before the backward loop, then sums across timesteps via repeated launches).
+fn gpu_emit_bwd_da_accum(pHR: string, pdDR: string, pdaR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    let psh = if dim == 16 { 8 } else { 7 }
+    let remmask = dim * 16 - 1
+    var t = "    mov.u32 %r5, 0;\n$BDA:\n"
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(psh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r10, %r5, "), i64_to_string(remmask))
+    t = str_concat(t, ";\n    shr.u32 %r8, %r10, 4;\n    and.b32 %r9, %r10, 15;\n")
+    t = str_concat(t, "    xor.b32 %r7, %r8, %r6;\n")
+    // Hprev[b*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r9, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    // dHt[k*16+b]
+    t = str_concat(t, "    mad.lo.u32 %r10, %r8, 16, %r9;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pdDR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // sign absgn[p*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_absgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // dA[p] +=
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pdaR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    add.f64 %fd1, %fd1, %fd0;\n    st.global.f64 [%rd7], %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $BDA;\n")
+    t
+}
+
 // Build L(m) (row-major f16, σ(k⊕j,j,bits)·m[k⊕j], dim×dim in the 16×16 tile) into sL[shared_array]
 // from the f64 pointer mR, via a RUNTIME loop reading the ossm_Lsgn sign table (so the sedenion
 // dim=16 build — 256 entries — stays under the 64 KB PtxBuf). `tag` makes the loop label unique.
@@ -888,6 +966,29 @@ fn gpu_vjp_dim(kernel: GpuKernelIr) -> i64 {
     var i: i64 = 0
     while i < kernel.op_count {
         if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctVjp {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the BPTT backward-step op?
+fn gpu_has_oct_bwd(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwd { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the BPTT backward-step op (8 octonion / 16 sedenion), for the module-scope sign tables.
+fn gpu_bwd_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwd {
             if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
             return 8
         }
@@ -1321,6 +1422,13 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let vdim = if op.rhs_imm == 16 { 16 } else { 8 }
             let vbits = if vdim == 16 { 4 } else { 3 }
             ptx_push_str(buf, gpu_emit_oct_vjp(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), vdim, vbits))
+        }
+
+        GpuOpcode::GpuOctBwd => {
+            // BPTT backward step. Pointers: pA=lhs, pHprev=rhs, pdHt=addr, pdHprev=src, pdA=shared_addr.
+            let wdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let wbits = if wdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_bwd(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), wdim, wbits))
         }
 
         GpuOpcode::GpuWmmaTile => {
