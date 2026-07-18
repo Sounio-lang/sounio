@@ -157,7 +157,12 @@ The catalog file SHA-256 is
 `ea3285fb3f788f547de5cf4de55930a399f034f21e11763e25e7b46a2460b8c7`;
 the assessment file SHA-256 is
 `5d61566bff517177d2088b6e327f4d67dbbc14cdc1aaa02d0369ab24762fbcb3`.
-No mapping proposal or human decision record was authored.
+No mapping proposal or human decision record was authored. Issue
+[#1122](https://github.com/Sounio-lang/sounio/issues/1122) now requests the
+five explicit target actions. The non-authorizing processor documented in
+`PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md` can validate a
+reviewed transcription after a response exists; it does not supply that
+response or infer a repository by name.
 
 ## Acceptance Gate
 
@@ -199,7 +204,9 @@ source or remote ref changed.
 
 ## Remaining Decision Boundary
 
-This assessment closes no permission-bearing prerequisite. The next interface
+This assessment closes no permission-bearing prerequisite. The deterministic
+mapping-selection processor closes only the future transcription-to-proposal
+preparation step; issue #1122 still has no response. The next semantic interface
 remains `r3-physical-extraction-canonical-production-policy-and-human-decision`.
 It requires a reviewed mapping choice, provisioned and materialized destination
 repositories, a new clean canonical default-branch snapshot, production

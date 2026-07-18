@@ -85,6 +85,29 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 `r3-physical-extraction-canonical-production-policy-and-human-decision`
 
+## R3 Canonical Production Mapping Decision Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-PRODUCTION-MAPPING-DECISION-20260718
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: an explicit human repository selection may prepare a reviewable proposal without becoming repository-creation permission, production approval, cutover authority, or scientific authority
+Transformation: validate a reviewed transcription against the exact governed targets, point-in-time catalog, and clean canonical Git observation; classify reuse, creation request, and target revision; emit a proposed-not-approved mapping only when every target reuses one exact available observed repository
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact transcribed mapping selection is complete for proposal review, requires destination provisioning and reconfirmation, or requires ownership-policy revision while keeping execution authority none
+Claims-Forbidden: authenticated responder identity, organizational authority, inferred mapping by repository name, repository creation or modification, destination-owner consent, materialization, source removal, Git ref update, canonical production approval, cutover approval or execution, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the linked response is independently reviewed before transcription; supplied catalog metadata is a point-in-time observation; a catalog or canonical-source change invalidates the selection binding; issue #1122 has no response at the time of this lane
+Write-Set: tools/science_boundary/canonical_production_mapping_decision_processor.py; schemas/sounio.physical-extraction-canonical-production-mapping-decision{,-receipt}.v1.schema.json; scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md,PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md,ECOSYSTEM_ROADMAP_2026.md}; docs/internal/concepts/science-research-boundary.md; generated docs governance artifacts; .claude/llm_offload_log.md
+Read-Set: FOUNDER_INTENT.md; AGENTS.md; science-rings.tsv; docs/ecosystem/science-physical-extraction-ownership.tsv; tools/science_boundary/{physical_extraction_inventory.py,canonical_production_gap_assessor.py}; canonical production catalog and a separately reviewed human response transcription
+Positive-Witness: equivalent standalone fixture roots emit byte-identical all-reuse decision receipts and proposed-not-approved mappings; the existing production-gap assessor consumes the mapping and still reports production-evidence-and-human-decision-required with execution authority none
+Negative-Witness: missing, extra, duplicate, unsorted, stale, unavailable, action-inconsistent, colliding, occupied, changed, forged, or rehashed selection, catalog, source, receipt, and proposal states refuse without changing source files, repositories, or refs
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.sh
+Integration-Target: codex/physical-extraction-canonical-production-readiness-r3-20260717, then origin/main after the prior stack lands
+Authoritative-Only-If: the complete prior R0-R3 stack and focused mapping-decision gate pass on one archived source snapshot with one current-source Madaros; processing a real response additionally requires an exact reviewed transcription and fresh bound catalog/canonical observation
+```
+
 ## R3 Physical Extraction Inventory Semantic Lane
 
 ```text
@@ -515,6 +538,30 @@ Legacy-Kept: all canonical sources and repositories remain unchanged; no mapping
 Conflicting-Lanes: semantic scanner reported zero exact path collisions and only this isolated lane dirty; no compiler, IR, stdlib, package, example, self-hosted, or canonical scientific source file was edited
 LLM-Offload: xai/grok-4.3 review found no requested-severity issue; a follow-up produced three documented code-reading disagreements converted into explicit gate assertions; DeepSeek returned Insufficient Balance and Gemini/OpenRouter returned HTTP 402 insufficient credits; raw=/tmp/llm-offload-4Gzpnd/,/tmp/llm-offload-388Iwt/,/tmp/llm-offload-xFvI69/
 Remaining-Blockers: none for the executable gap-assessment interface; production prerequisites remain intentionally absent and are an explicit permission boundary rather than an implementation Blocker-ID
+Next-Semantic-Interface: r3-physical-extraction-canonical-production-policy-and-human-decision
+```
+
+## R3 Canonical Production Mapping Decision Integration Receipt
+
+```text
+Semantic-Outcome: executable deterministic non-authorizing processing of one reviewed human mapping-selection transcription into explicit revision, provisioning, or proposal-review state
+Concept-Status-Before: executable canonical-production gap assessment with five unmapped Sounio targets and no human mapping response
+Concept-Status-After: executable mapping-selection processor and verifier; issue #1122 still has no response, so no real decision record, receipt, mapping proposal, repository operation, or cutover exists
+Distinctions-Added: mapping-selection provenance versus authenticated human authority; request-new classification versus repository-creation permission; complete reuse selection versus proposed-not-approved mapping; mapping selection versus later explicit cutover decision
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; repository location versus scientific authority; deterministic identity versus independent signature or replay; fixture proof versus production evidence; point-in-time catalog observation versus hosting attestation
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of aa0e50c6af32f55819d16191735344da5bd1c840, gzip size 339734094 bytes, sha256=ad22c9eca1dd6458a97f55f9063e6f346f70b2cf00470e910ac1a0261a925868
+Evidence-Compiler: unchanged current-source Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm srun job 6635 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:01:00; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, inventory 141 assertions, materialization 167 assertions, authorization 527 assertions, local execution 164 assertions, cutover approval 172 assertions, cutover execution 81 assertions, production-gap 90 assertions, and mapping-decision 204 assertions all PASS; MaxRSS unavailable because Slurm accounting was unreachable
+Evidence-Fixture: decision identity=84778c0c29dbe9f0f84b488a62b16144140bd6ca2013d15fa89193f019bb5a2d; receipt identity=d633e64f62830efa1f691d5563a50ee4613a765482435ed87cfdf8e551873870; proposal identity=a2d18f6d70ed83f2e4f714fb41df103bbfdd2cfc0a96298b0cea49feebfa0af0; targets=2 status=proposal-input-complete proposal=proposed-not-approved authority=none
+Evidence-Logs: stdout size=4109 bytes sha256=8eedbc7c041abf4c2087fab4843eb1b637d366dc1aee4bdb36f5e33dc1ab4f73; stderr contains only two srun allocation messages, size=92 bytes sha256=37b49d592edaf7aecf7611b86b0d178381e60d6e6434e071fa06ebc5ebe44e5e; streamed payload size=438497280 bytes sha256=877fff07323908461ea2eb813c68ef4ce73861c1e95c501dea347b2381091fc7
+Supporting-Gates: physical_extraction_canonical_production_mapping_decision_gate.py -> PASS 204; composed mapping-decision shell -> PASS complete R0-R3 stack; AJV Draft 2020-12 schema compile plus reuse/request/revise instance validation -> PASS; check_docs_registry.sh plus five negative selftests -> PASS; check_docs_consistency.sh -> PASS; semantic_coordination_gate.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: batch job 6629 failed before gates because its inherited /tmp workdir was absent; jobs 6631 and 6633 were stopped before shell startup by cluster batch environment retrieval failure; synchronous Slurm srun job 6635 streamed the exact archive and compiler through stdin and used node-local extraction, fixtures, remotes, home, and temporary files
+Fallback-Path: srun was the explicit harness-routing fallback for unavailable sbatch startup; no implementation fallback, production repository fallback, or authority fallback was authorized or used
+Legacy-Kept: every canonical scientific-package and research source remains present; all repositories and refs remain unchanged; the existing catalog, gap assessor, proposal schema, fixture cutover interfaces, and earlier R2.5, R2.6, and R3 paths remain intact
+Conflicting-Lanes: semantic coordination gate passed; the scanner reported this isolated lane plus unrelated historical compiler worktrees, with no exact collision on the mapping-decision write set and no runtime alert
+LLM-Offload: xai/grok-4.3 found and caused removal of one unused subprocess import/catch; follow-up had no major finding; external review preserved the three-state and no-authority boundary; DeepSeek returned Insufficient Balance and Gemini/OpenRouter returned HTTP 402; raw=/tmp/llm-offload-I2t9BK/,/tmp/llm-offload-RZUIyn/,/tmp/llm-offload-FXc28Z/,/tmp/llm-offload-XL3qBP/
+Remaining-Blockers: none for the executable non-authorizing processor; issue #1122 has no human response, which is an intentional permission boundary rather than an implementation Blocker-ID
 Next-Semantic-Interface: r3-physical-extraction-canonical-production-policy-and-human-decision
 ```
 
