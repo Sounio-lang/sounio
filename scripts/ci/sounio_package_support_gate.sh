@@ -101,6 +101,31 @@ required = {
         "authorization_status = authorized-not-executed",
         "source_removal_execution_status = not-executed",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md": [
+        "Status: executable R3 policy-bound local execution interface; canonical repository cutover is not executed.",
+        "execution_status = executed-and-verified",
+        "source_removal_status = executed",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md": [
+        "Status: executable R3 Git-state and rehearsal approval interface; canonical repository cutover is not executed.",
+        "canonical_cutover_approval_status = approved-not-executed",
+        "canonical_cutover_execution_status = not-executed",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md": [
+        "Status: executable R3 policy-bound canonical Git cutover interface; exercised only in disposable fixtures for this repository.",
+        "canonical_cutover_approval_status = consumed",
+        "canonical_cutover_execution_status = executed-and-verified",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md": [
+        "Status: executable R3 non-authorizing prerequisite observation; production policy, approval, human decision, and execution remain absent.",
+        "execution_authority = none",
+        "canonical_cutover_execution_status = not-executed",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md": [
+        "Status: executable R3 non-authorizing mapping-selection processing; repository creation, production approval, and cutover execution remain absent.",
+        "execution_authority = none",
+        "proposal_status = proposed-not-approved",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -137,6 +162,11 @@ for rel in [
     "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -184,5 +214,15 @@ run_step physical-extraction-inventory python3 "$ROOT_DIR/scripts/ci/physical_ex
 run_step physical-extraction-materialization python3 "$ROOT_DIR/scripts/ci/physical_extraction_materialization_gate.py"
 run_step physical-extraction-source-removal-authorization \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_authorization_gate.py"
+run_step physical-extraction-source-removal-execution \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_execution_gate.py"
+run_step physical-extraction-canonical-cutover-approval \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_approval_gate.py"
+run_step physical-extraction-canonical-cutover-execution \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_execution_gate.py"
+run_step physical-extraction-canonical-production-gap \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
+run_step physical-extraction-canonical-production-mapping-decision \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'
