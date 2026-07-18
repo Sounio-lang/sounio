@@ -1651,11 +1651,14 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         addr.dst_ty = GpuType::GpuU64
         k = gpu_kernel_append_op(k, addr)
     } else if op_kind == HLIR_OP_CONST {
-        // Emit constant as immediate load into a virtual register
+        // Emit constant as immediate load into a virtual register. lhs_reg = -1 marks a
+        // PURE immediate (no base register) so the renderer emits `mov dst, imm` rather than
+        // `add dst, %reg0, imm` — reg 0 is the first kernel param, NOT a zero register, so the
+        // add form silently corrupts every integer constant (e.g. array/GEP indices).
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
-        op.lhs_reg = 0
+        op.lhs_reg = 0 - 1
         op.rhs_imm = instr.constant.int_val
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
         k = gpu_kernel_append_op(k, op)
@@ -1720,6 +1723,89 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
             k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
+        } else if hlir_name_is_oct_batch_mul(cn) || hlir_name_is_sed_batch_mul(cn) {
+            // Batched hypercomplex multiply → tensor-core tile. call_args = [pa, pH, pout].
+            // The stage op builds L(a) (row-major f16) at shared[0] and H (col-major f16) at
+            // shared[512]; the tile writes D = L(a)·H (row-major f32) to pout. Octonion uses the
+            // top-left 8×8 (stage dim=8); sedenion fills the full 16×16 (dim=16).
+            let dim = if hlir_name_is_sed_batch_mul(cn) { 16 } else { 8 }
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pa_reg = instr.call_args[0]
+            let pH_reg = instr.call_args[1]
+            let pout_reg = instr.call_args[2]
+            var stg = gpu_op_new()
+            stg.opcode = GpuOpcode::GpuOctBatchStage
+            stg.lhs_reg = pa_reg
+            stg.rhs_reg = pH_reg
+            stg.rhs_imm = dim
+            k = gpu_kernel_append_op(k, stg)
+            var tile = gpu_op_wmma_tile(0, 512, pout_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
+        } else if hlir_name_is_ossm_oct_step(cn) {
+            // O-SSM octonion linear step S = A⊗H + B·x on tensor cores.
+            // call_args = [pA, pB, px, pH, pout]. Stage L(A)+H → tile D=L(A)·H → post-add B·x.
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pA_reg = instr.call_args[0]
+            let pB_reg = instr.call_args[1]
+            let px_reg = instr.call_args[2]
+            let pH_reg = instr.call_args[3]
+            let po_reg = instr.call_args[4]
+            var stg = gpu_op_new()
+            stg.opcode = GpuOpcode::GpuOctBatchStage
+            stg.lhs_reg = pA_reg
+            stg.rhs_reg = pH_reg
+            stg.rhs_imm = 8
+            k = gpu_kernel_append_op(k, stg)
+            var tile = gpu_op_wmma_tile(0, 512, po_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
+            var pad = gpu_op_new()
+            pad.opcode = GpuOpcode::GpuOctPostAddBx
+            pad.lhs_reg = pB_reg
+            pad.rhs_reg = px_reg
+            pad.addr_reg = po_reg
+            pad.rhs_imm = 8
+            k = gpu_kernel_append_op(k, pad)
+        } else if hlir_name_is_ossm_oct_cell(cn) || hlir_name_is_ossm_sed_cell(cn) {
+            // Full O-SSM cell: y = Re(C⊗sigmoid(A⊗H + B·x)). call_args = [pA,pB,px,pC,pH,py].
+            // Octonion dim=8; sedenion dim=16. Two shared tiles + sigmoid + Re → one GpuOctCell.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var cell = gpu_op_new()
+            cell.opcode = GpuOpcode::GpuOctCell
+            cell.rhs_imm = if hlir_name_is_ossm_sed_cell(cn) { 16 } else { 8 }
+            cell.lhs_reg = instr.call_args[0]
+            cell.rhs_reg = instr.call_args[1]
+            cell.addr_reg = instr.call_args[2]
+            cell.src_reg = instr.call_args[3]
+            cell.shared_addr = instr.call_args[4]
+            cell.compare_reg = instr.call_args[5]
+            k = gpu_kernel_append_op(k, cell)
+        } else if hlir_name_is_ossm_oct_recur(cn) || hlir_name_is_ossm_sed_recur(cn) {
+            // O-SSM recurrence over T. call_args = [pA,pB,px,pC,pH,py,T]. Octonion dim=8, sedenion 16.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var rec = gpu_op_new()
+            rec.opcode = GpuOpcode::GpuOctRecur
+            rec.rhs_imm = if hlir_name_is_ossm_sed_recur(cn) { 16 } else { 8 }
+            rec.lhs_reg = instr.call_args[0]
+            rec.rhs_reg = instr.call_args[1]
+            rec.addr_reg = instr.call_args[2]
+            rec.src_reg = instr.call_args[3]
+            rec.shared_addr = instr.call_args[4]
+            rec.compare_reg = instr.call_args[5]
+            rec.byte_offset = instr.call_args[6]
+            k = gpu_kernel_append_op(k, rec)
+        } else if hlir_name_is_oct_assoc(cn) || hlir_name_is_sed_assoc(cn) {
+            // Batched hypercomplex associator [a,b,H] = (a⊗b)⊗H − a⊗(b⊗H) on tensor cores.
+            // call_args = [pa, pb, pH, pout]. Three tiles (L(b)·H, L(a)·q, L(a⊗b)·H) + subtract →
+            // one GpuOctAssoc. Octonion dim=8; sedenion dim=16. Needs sL+sH+sS+sR = 3072 shared bytes.
+            if k.shared_bytes < 3072 { k.shared_bytes = 3072 }
+            var asc = gpu_op_new()
+            asc.opcode = GpuOpcode::GpuOctAssoc
+            asc.rhs_imm = if hlir_name_is_sed_assoc(cn) { 16 } else { 8 }
+            asc.lhs_reg = instr.call_args[0]
+            asc.rhs_reg = instr.call_args[1]
+            asc.addr_reg = instr.call_args[2]
+            asc.src_reg = instr.call_args[3]
+            k = gpu_kernel_append_op(k, asc)
         }
         // Other calls: skip in MVP
     }
@@ -1729,6 +1815,88 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
 }
 
 // Check if an HlirName starts with "gpu_thread_id" (13 chars).
+// "oct_batch_mul" (13 chars) — the batched octonion multiply intrinsic that lowers to a
+// tensor-core tile: oct_batch_mul(pa, pH, pout) computes L(a)·H for a 16-state batch.
+fn hlir_name_is_oct_batch_mul(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_oct_step" (13 chars) — the O-SSM octonion linear recurrence step S = A⊗H + B·x on tensor
+// cores: ossm_oct_step(pA, pB, px, pH, pout).
+fn hlir_name_is_ossm_oct_step(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "ossm_sed_cell" (13 chars) — full O-SSM sedenion cell (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_cell(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 108 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_sed_recur" (14 chars) — O-SSM sedenion recurrence over T (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_recur(n: HlirName) -> bool {
+    if n.len != 14 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 99 as i8 &&
+    n.buf[12] == 117 as i8 && n.buf[13] == 114 as i8
+}
+
+// "ossm_oct_cell" (13 chars) — the full O-SSM octonion cell: y = Re(C⊗sigmoid(A⊗H + B·x)).
+fn hlir_name_is_ossm_oct_cell(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 108 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_oct_recur" (14 chars) — the O-SSM octonion recurrence over T timesteps.
+fn hlir_name_is_ossm_oct_recur(n: HlirName) -> bool {
+    if n.len != 14 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 99 as i8 &&
+    n.buf[12] == 117 as i8 && n.buf[13] == 114 as i8
+}
+
+// "sed_batch_mul" (13 chars) — the batched sedenion multiply intrinsic (L(a)·H, dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "oct_assoc" (9 chars) — the batched octonion associator intrinsic: oct_assoc(pa,pb,pH,pout)
+// computes [a,b,H_b] = (a⊗b)⊗H_b − a⊗(b⊗H_b) for a 16-state batch on tensor cores (dim=8, bits=3).
+fn hlir_name_is_oct_assoc(n: HlirName) -> bool {
+    if n.len != 9 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8
+}
+
+// "sed_assoc" (9 chars) — the batched sedenion associator intrinsic (dim=16, bits=4).
+fn hlir_name_is_sed_assoc(n: HlirName) -> bool {
+    if n.len != 9 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8
+}
+
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
     if n.len < 13 { return false }
     // "gpu_thread_id" = g(103) p(112) u(117) _(95) t(116) h(104) r(114) e(101) a(97) d(100) _(95) i(105) d(100)

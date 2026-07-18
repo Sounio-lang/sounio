@@ -132,6 +132,7 @@ fn empty_lower_loop_labels() -> LowerLoopLabels {
 }
 
 let LOWER_GLOBAL_ELEM_F64: i64 = 2
+let LOWER_GLOBAL_SCALAR_F64: i64 = 3
 
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
@@ -145,8 +146,45 @@ fn empty_lower_global_type_table() -> LowerGlobalTypeTable {
     }
 }
 
+// Compiler-owned, bounded read index for Contest metadata. This is the first
+// replacement for reading the wide IrEpistemicSection through its legacy
+// nested aggregate representation.
+struct LowerEpistemicContestIndex {
+    qualified: bool,
+    contest_count: i64,
+    span_starts: [i64; 64],
+    span_ends: [i64; 64],
+}
+
+fn empty_lower_epistemic_contest_index() -> LowerEpistemicContestIndex {
+    LowerEpistemicContestIndex {
+        qualified: false,
+        contest_count: 0,
+        span_starts: [-1; 64],
+        span_ends: [-1; 64],
+    }
+}
+
+fn lower_epistemic_contest_index_from_ref(epistemic: &IrEpistemicSection) -> Box<LowerEpistemicContestIndex> with Alloc, Mut, Panic, Div {
+    let count = (*epistemic).contest_count
+    if count < 0 || count > IR_MAX_EPI_CONTESTS {
+        panic("lowerer: invalid frontend epistemic contest_count")
+    }
+    let index = Box::new(empty_lower_epistemic_contest_index())
+    (*index).qualified = true
+    (*index).contest_count = count
+    var i: i64 = 0
+    while i < count {
+        (*index).span_starts[i as usize] = (*epistemic).contests[i as usize].span_start
+        (*index).span_ends[i as usize] = (*epistemic).contests[i as usize].span_end
+        i = i + 1
+    }
+    index
+}
+
 struct Lowerer {
     module: Box<IrModule>,
+    epistemic_contests: Box<LowerEpistemicContestIndex>,
     current_fn: i64,
     current_func: Box<IrFunction>,
     current_func_loaded: bool,
@@ -286,6 +324,7 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
 fn lowerer_new() -> Lowerer with Alloc {
     Lowerer {
         module: Box::new(ir_empty_module()),
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
         current_fn: IR_INVALID_FN,
         current_func: Box::new(ir_empty_function()),
         current_func_loaded: false,
@@ -313,9 +352,15 @@ fn lowerer_new() -> Lowerer with Alloc {
     }
 }
 
-fn lowerer_new_with_epistemic(epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
+fn lowerer_new_with_epistemic(epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     var lo = lowerer_new()
     (*lo.module).epistemic = (*epistemic)
+    lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_INDEX_BIND constructor=initial contest_count=")
+        print_int((*lo.epistemic_contests).contest_count)
+        print("\n")
+    }
     // Sprint 116: pre-register Knowledge<f64> layout
     lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
@@ -424,6 +469,67 @@ fn lowerer_find_hyper_expr_id_for_span_ref(lo: &Lowerer, span: Span) -> i64 with
     -1
 }
 
+// Metadata-sensitive lowering reads the compiler-owned bounded index. An
+// unqualified index is the explicit legacy/flat path, never implicit proof of
+// metadata absence.
+fn lowerer_find_contest_id_for_span_index_ref(lo: &Lowerer, span: Span) -> i64 with Mut, Panic, Div, IO {
+    if !(*(*lo).epistemic_contests).qualified {
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_LOOKUP_RESULT contest_id=-1 source=unqualified\n")
+        }
+        return -1
+    }
+
+    let contest_count = (*(*lo).epistemic_contests).contest_count
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_LOOKUP_ENTER contest_count=")
+        print_int(contest_count)
+        print("\n")
+    }
+    if contest_count < 0 || contest_count > IR_MAX_EPI_CONTESTS {
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_INDEX_INVALID contest_count=")
+            print_int(contest_count)
+            print(" max=")
+            print_int(IR_MAX_EPI_CONTESTS)
+            print("\n")
+        }
+        panic("lowerer: invalid frontend epistemic contest_count")
+    }
+
+    var i: i64 = 0
+    while i < contest_count {
+        let span_start = (*(*lo).epistemic_contests).span_starts[i as usize]
+        let span_end = (*(*lo).epistemic_contests).span_ends[i as usize]
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_LOOKUP_CANDIDATE contest_id=")
+            print_int(i)
+            print(" span_start=")
+            print_int(span_start)
+            print(" span_end=")
+            print_int(span_end)
+            print("\n")
+        }
+        if lower_span_matches_metadata((*lo).probe_mode, span, span_start, span_end) {
+            if lower_live_diag_enabled() {
+                print("CONTEST_IR_LOOKUP_RESULT contest_id=")
+                print_int(i)
+                print(" contest_count=")
+                print_int(contest_count)
+                print("\n")
+            }
+            return i
+        }
+        i = i + 1
+    }
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_LOOKUP_RESULT contest_id=-1 contest_count=")
+        print_int(contest_count)
+        print("\n")
+    }
+    -1
+}
+
 fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*(*lo).module).fn_count {
@@ -481,7 +587,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     }
 
     i = 0
-    while i < (*summary.module).fn_count && i < 1024 {
+    while i < (*summary.module).fn_count && i < IR_MAX_FUNCS {
         let sm_strat = (*summary.module).functions[i as usize].compile_strategy
         var func = ir_empty_function()
         func.name = (*summary.module).functions[i as usize].name
@@ -539,9 +645,15 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     lo
 }
 
-fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
+fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     var lo = lowerer_new()
     (*lo.module).epistemic = (*epistemic)
+    lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_INDEX_BIND constructor=summary contest_count=")
+        print_int((*lo.epistemic_contests).contest_count)
+        print("\n")
+    }
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
     lo.probe_mode = summary.probe_mode
@@ -564,7 +676,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     }
 
     i = 0
-    while i < summary.module.fn_count && i < 1024 {
+    while i < summary.module.fn_count && i < IR_MAX_FUNCS {
         var func = ir_empty_function()
         func.name = summary.module.functions[i as usize].name
         func.param_count = summary.module.functions[i as usize].param_count
@@ -1785,7 +1897,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             }
                         }
                         _ => {
-                            let bss_fid = module.fn_count
+                            var bss_mod = module
+                            let bss_fid = bss_mod.fn_count
                             if bss_fid < IR_MAX_FUNCS {
                                 global_types = lower_global_type_table_record(
                                     global_types,
@@ -1797,7 +1910,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 var bss_slot = ir_empty_function()
                                 bss_slot.name = name
                                 bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
-                                bss_slot.param_count = module.bss_total_size
+                                bss_slot.param_count = bss_mod.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                 let init_val = ast_lookup_global_var_init(name)
@@ -1805,10 +1918,11 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                     bss_slot.returns_float = 1
                                     bss_slot.prof_counter_id = init_val
                                 }
-                                module.functions[bss_fid as usize] = bss_slot
-                                module.fn_count = bss_fid + 1
-                                module.bss_total_size = module.bss_total_size + aligned_size
+                                bss_mod.functions[bss_fid as usize] = bss_slot
+                                bss_mod.fn_count = bss_fid + 1
+                                bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
                             }
+                            module = bss_mod
                         }
                     }
                 } else if kind == ItemKind::ItemStruct {
@@ -1970,6 +2084,23 @@ fn lowerer_mark_local_array_elem_float_mut(
     while i >= 0 {
         if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
             (*locals_box).array_elem_float[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+fn lowerer_mark_local_scalar_kind_mut(
+    lo: &! Lowerer,
+    name: Name,
+    kind: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).scalar_kind[i as usize] = kind
             (*lo).locals = locals_box
             return
         }
@@ -2271,8 +2402,6 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    (*lo) = (*lo).preload_bss_globals_as_locals()
-
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
     let result_reg = bpair.1
@@ -2498,6 +2627,7 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
 fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *ty_opt {
         Some(ty) => {
+            if lower_type_expr_is_f64(&(*ty)) { return LOWER_GLOBAL_SCALAR_F64 }
             if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
             0
         }
@@ -3222,6 +3352,8 @@ impl Lowerer {
         start == span.start && end == span.end
     }
 
+    // Legacy differential oracle. Metadata-sensitive paths must use the
+    // compiler-owned bounded index instead of copying this wide aggregate.
     fn find_contest_id_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
         while i < self.module.epistemic.contest_count {
@@ -4729,39 +4861,6 @@ impl Lowerer {
             i = i - 1
         }
         0
-    }
-
-    fn preload_bss_globals_as_locals(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        var i: i64 = 0
-        while i < lo.module.fn_count && i < 2048 {
-            let g = lo.module.functions[i as usize]
-            if g.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
-                let pair = lo.fresh_reg()
-                lo = pair.0
-                let reg = pair.1
-                if g.bss_size > 8 {
-                    lo = lo.emit(ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
-                } else {
-                    lo = lo.emit(ir_load_global(reg, g.param_count, g.name))
-                }
-                lowerer_bind_local_mut(&! lo, g.name, reg, false)
-                lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
-                let global_elem_kind = lower_global_type_table_lookup(&(*lo.global_types), i)
-                if lower_aggregate_diag_enabled() {
-                    print("lower_agg: global name=")
-                    print(str_from_bytes(g.name.buf, g.name.len))
-                    print(" elem_kind=")
-                    print_int(global_elem_kind)
-                    print("\n")
-                }
-                if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
-                    lowerer_mark_local_array_elem_float_mut(&! lo, g.name)
-                }
-            }
-            i = i + 1
-        }
-        lo
     }
 
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
@@ -6859,7 +6958,6 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
-        lo = lo.preload_bss_globals_as_locals()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -9779,8 +9877,31 @@ impl Lowerer {
         let dst_pair = lo1.fresh_reg()
         let lo2 = dst_pair.0
         let dst_reg = dst_pair.1
-        let contest_id = lo2.find_contest_id_for_span(e.span)
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_LOOKUP_CALL qualified=")
+            if (*lo2.epistemic_contests).qualified { print("1") } else { print("0") }
+            print(" contest_count=")
+            print_int((*lo2.epistemic_contests).contest_count)
+            print(" span_start=")
+            print_int(e.span.start)
+            print(" span_end=")
+            print_int(e.span.end)
+            print("\n")
+        }
+        let contest_id = lowerer_find_contest_id_for_span_index_ref(&lo2, e.span)
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_LOOKUP_CALL_RESULT contest_id=")
+            print_int(contest_id)
+            print("\n")
+        }
         let lo3 = lo2.emit(ir_contest(dst_reg, subject_reg, model_count, contest_id))
+        if lower_live_diag_enabled() {
+            print("CONTEST_IR_EMIT opcode=IrContest contest_id=")
+            print_int(contest_id)
+            print(" dst_reg=")
+            print_int(dst_reg)
+            print("\n")
+        }
         (lo3, dst_reg)
     }
 
@@ -9870,6 +9991,21 @@ impl Lowerer {
                     let loe = self.report_fatal_lowering_error()
                     return (loe, 0)
                 }
+                // Scalar BSS bindings are loaded in each function only to retain
+                // global metadata for stores. A callee can update the backing
+                // slot, so reads must reload it instead of using that stale
+                // per-function snapshot. Aggregate bindings remain base pointers.
+                if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
+                    let bss_off = self.lookup_local_global_bss_offset(e.name)
+                    let pair = self.fresh_reg()
+                    let lo = pair.0
+                    let reg = pair.1
+                    let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
+                    if self.lookup_local_scalar_kind(e.name) == 2 {
+                        return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                    }
+                    return (lo2, reg)
+                }
                 (self, src)
             } else {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
@@ -9886,6 +10022,14 @@ impl Lowerer {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                        }
+                        // BSS metadata is applied only when the global is used;
+                        // eagerly loading every global can exhaust main's IR budget.
+                        let global_elem_kind = lower_global_type_table_lookup(&(*lo3.global_types), fn_id)
+                        if global_elem_kind == LOWER_GLOBAL_SCALAR_F64 {
+                            lo3 = lo3.emit(ir_mark_float_reg(ref_reg))
+                        } else if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
+                            lo3 = lo3.bind_reg_array_elem_float(ref_reg)
                         }
                         (lo3, ref_reg)
                     } else {
@@ -10459,7 +10603,22 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
 
     i = 0
     while i < module.fn_count {
-        ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! module.functions[i as usize], &! stats)
+        var has_call = false
+        var instr_i: i64 = 0
+        let instr_count = module.functions[i as usize].instr_count
+        while instr_i < instr_count {
+            if module.functions[i as usize].instrs[instr_i as usize].op == IrOpcode::IrCall {
+                has_call = true
+                instr_i = instr_count
+            } else {
+                instr_i = instr_i + 1
+            }
+        }
+        if has_call {
+            var func = module.functions[i as usize]
+            ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! func, &! stats)
+            module.functions[i as usize] = func
+        }
         i = i + 1
     }
     stats

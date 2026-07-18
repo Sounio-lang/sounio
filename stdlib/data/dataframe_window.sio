@@ -1,0 +1,106 @@
+//! Row-window operations over each column: shift, first difference, percent change, and rolling
+//! mean / sum.
+//!
+//! Where a result is undefined for the leading rows (before enough history exists) the cell is set to
+//! the library missing sentinel 0.0, matching pandas' NaN-for-warmup with min_periods = window.
+//! Functional: the input is unchanged and column names are preserved. Self-contained: uses only the
+//! public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+/// Shift every column down by `k` rows: cell (r, c) becomes the old (r-k, c); the top `k` rows are
+/// filled with 0.0 (pandas shift). `k <= 0` returns a copy.
+pub fn df_shift(df: &DataFrame, k: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            if r - k >= 0 { row[c as usize] = df_get(df, r - k, c) } else { row[c as usize] = 0.0 }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// First difference down each column: cell (r, c) = value(r) - value(r-1); row 0 is 0.0 (pandas diff).
+pub fn df_diff(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            if r >= 1 { row[c as usize] = df_get(df, r, c) - df_get(df, r - 1, c) } else { row[c as usize] = 0.0 }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Percent change down each column: (value(r) - value(r-1)) / value(r-1); row 0 is 0.0; a zero
+/// denominator yields 0.0 (pandas pct_change).
+pub fn df_pct_change(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            if r >= 1 {
+                let prev = df_get(df, r - 1, c)
+                if prev != 0.0 { row[c as usize] = (df_get(df, r, c) - prev) / prev } else { row[c as usize] = 0.0 }
+            } else { row[c as usize] = 0.0 }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+// op: 0 mean, 1 sum. Rolling window of width w; first w-1 rows -> 0.0 (min_periods = w).
+fn rolling(df: &DataFrame, w: i64, op: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            if r + 1 >= w && w > 0 {
+                var acc = 0.0
+                var j = r - w + 1
+                while j <= r { acc = acc + df_get(df, j, c); j = j + 1 }
+                if op == 1 { row[c as usize] = acc } else { row[c as usize] = acc / (w as f64) }
+            } else { row[c as usize] = 0.0 }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Rolling mean over a window of `w` rows per column; the first `w-1` rows are 0.0 (min_periods = w).
+pub fn df_rolling_mean(df: &DataFrame, w: i64) -> DataFrame with Mut, Div, Panic { rolling(df, w, 0) }
+/// Rolling sum over a window of `w` rows per column; the first `w-1` rows are 0.0 (min_periods = w).
+pub fn df_rolling_sum(df: &DataFrame, w: i64) -> DataFrame with Mut, Div, Panic { rolling(df, w, 1) }

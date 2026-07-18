@@ -1,0 +1,74 @@
+//! Expanding-window aggregates down each column (pandas expanding): the aggregate over all rows seen
+//! so far, from the first row through the current one.
+//!
+//! Unlike a fixed rolling window, the window grows: cell (r, c) reduces rows 0..=r. df_expanding_mean
+//! and df_expanding_std (sample std, n-1; the first row is 0.0) are provided alongside the running
+//! sum/min/max already covered by data::dataframe_cumulative. Functional: the input is unchanged and
+//! column names are preserved. Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+fn e_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+/// Expanding mean: cell (r, c) is the mean of column c over rows 0..=r.
+pub fn df_expanding_mean(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var sum: [f64; 64] = [0.0; 64]
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            sum[c as usize] = sum[c as usize] + df_get(df, r, c)
+            row[c as usize] = sum[c as usize] / ((r + 1) as f64)
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Expanding sample standard deviation (n-1): cell (r, c) is the std of column c over rows 0..=r.
+/// Row 0 is 0.0 (a single point has no sample std).
+pub fn df_expanding_std(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            let n = r + 1
+            if n < 2 { row[c as usize] = 0.0 } else {
+                var sum = 0.0
+                var k: i64 = 0
+                while k <= r { sum = sum + df_get(df, k, c); k = k + 1 }
+                let m = sum / (n as f64)
+                var ss = 0.0
+                var j: i64 = 0
+                while j <= r { let d = df_get(df, j, c) - m; ss = ss + d * d; j = j + 1 }
+                row[c as usize] = e_sqrt(ss / ((n - 1) as f64))
+            }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
