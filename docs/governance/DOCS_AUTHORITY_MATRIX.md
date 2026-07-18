@@ -427,6 +427,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.nonassociative-order | repo_only | docs/internal/concepts/nonassociative-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.path-conditioned-partial-identification | repo_only | docs/internal/concepts/path-conditioned-partial-identification.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.policy-observation-associator | repo_only | docs/internal/concepts/policy-observation-associator.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.policy-state-feedback | repo_only | docs/internal/concepts/policy-state-feedback.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -745,6 +746,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-endogenous-observability-d4-2026-07-15 | historical | docs/research/proof_carrying_endogenous_observability_d4_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-epistemic-contest-d2-2026-07-14 | historical | docs/research/proof_carrying_epistemic_contest_d2_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.proof-carrying-path-conditioned-identification-d8-2026-07-18 | historical | docs/research/proof_carrying_path_conditioned_identification_d8_2026-07-18.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-policy-observation-associator-d6-2026-07-15 | historical | docs/research/proof_carrying_policy_observation_associator_d6_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-policy-state-feedback-d5-2026-07-15 | historical | docs/research/proof_carrying_policy_state_feedback_d5_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-rebracketing-protocol-d7-2026-07-15 | historical | docs/research/proof_carrying_rebracketing_protocol_d7_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
