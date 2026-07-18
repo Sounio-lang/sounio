@@ -1,0 +1,111 @@
+//! Exact rational arithmetic and exact column reductions — analytics with ZERO floating-point error,
+//! the thing a float64 engine like pandas structurally cannot do.
+//!
+//! A value is an exact fraction `Rat { num, den }` kept in lowest terms with a positive denominator.
+//! `1/10 + 2/10` is exactly `3/10` here, whereas IEEE-754 `0.1 + 0.2` is `0.30000000000000004`.
+//! Column reductions (`ratcol_sum`, `ratcol_mean`) fold over parallel numerator/denominator `[i64]`
+//! arrays and return an exact `Rat` — an exact running total / average for money, tallies, and any
+//! quantity where rounding must not accumulate.
+//!
+//! Numerators and denominators are i64, so this is exact within the i64 range; a long chain of
+//! unreduced operations can overflow (the reduction after every op keeps terms small in practice).
+//! Unbounded exact arithmetic over BigInt/ℚ is the separate exact-algebra lane. Self-contained; no
+//! compiler changes.
+
+pub struct Rat {
+    num: i64,
+    den: i64,
+}
+
+fn iabs(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn gcd(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = iabs(a)
+    var y = iabs(b)
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    x
+}
+
+/// Construct the exact fraction num/den in lowest terms, with the sign carried on the numerator and a
+/// positive denominator. A zero denominator is treated as 1 (defensive; callers should not pass 0).
+pub fn rat_make(num: i64, den: i64) -> Rat with Mut, Div, Panic {
+    var n = num
+    var d = den
+    if d == 0 { d = 1 }
+    if d < 0 { n = 0 - n; d = 0 - d }
+    let g = gcd(n, d)
+    if g > 1 { n = n / g; d = d / g }
+    if g == 0 { return Rat { num: 0, den: 1 } }   // n and d both 0 -> 0/1
+    Rat { num: n, den: d }
+}
+
+/// An integer as a rational (n/1).
+pub fn rat_from_int(n: i64) -> Rat { Rat { num: n, den: 1 } }
+
+pub fn rat_num(r: Rat) -> i64 { r.num }
+pub fn rat_den(r: Rat) -> i64 { r.den }
+
+/// Exact sum a + b, reduced.
+pub fn rat_add(a: Rat, b: Rat) -> Rat with Mut, Div, Panic {
+    rat_make(a.num * b.den + b.num * a.den, a.den * b.den)
+}
+/// Exact difference a - b, reduced.
+pub fn rat_sub(a: Rat, b: Rat) -> Rat with Mut, Div, Panic {
+    rat_make(a.num * b.den - b.num * a.den, a.den * b.den)
+}
+/// Exact product a * b, reduced.
+pub fn rat_mul(a: Rat, b: Rat) -> Rat with Mut, Div, Panic {
+    rat_make(a.num * b.num, a.den * b.den)
+}
+/// Exact quotient a / b, reduced (b must be non-zero).
+pub fn rat_div(a: Rat, b: Rat) -> Rat with Mut, Div, Panic {
+    rat_make(a.num * b.den, a.den * b.num)
+}
+
+/// Exact equality. Both operands are kept reduced with a positive denominator, so equality is a
+/// field-wise comparison.
+pub fn rat_eq(a: Rat, b: Rat) -> bool { a.num == b.num && a.den == b.den }
+
+/// True if `r` equals the fraction num/den (num/den need not be in lowest terms).
+pub fn rat_is(r: Rat, num: i64, den: i64) -> bool with Mut, Div, Panic {
+    let m = rat_make(num, den)
+    r.num == m.num && r.den == m.den
+}
+
+/// Sign of a - b: -1, 0, or 1 (exact, via cross-multiplication with positive denominators).
+pub fn rat_cmp(a: Rat, b: Rat) -> i64 {
+    let l = a.num * b.den
+    let r = b.num * a.den
+    if l < r { return 0 - 1 }
+    if l > r { return 1 }
+    0
+}
+
+/// Nearest f64 to the exact value (for display / interop only — the exact value lives in the Rat).
+pub fn rat_to_f64(r: Rat) -> f64 with Div, Panic {
+    (r.num as f64) / (r.den as f64)
+}
+
+/// Exact sum of the first `n` fractions given as parallel numerator/denominator arrays. Returns a
+/// reduced Rat — an exact running total with no rounding.
+pub fn ratcol_sum(num: &[i64; 1024], den: &[i64; 1024], n: i64) -> Rat with Mut, Div, Panic {
+    var acc = Rat { num: 0, den: 1 }
+    var i: i64 = 0
+    while i < n && i < 1024 {
+        let term = rat_make(num[i as usize], den[i as usize])
+        acc = rat_add(acc, term)
+        i = i + 1
+    }
+    acc
+}
+
+/// Exact mean of the first `n` fractions (the exact sum divided by n). Returns a reduced Rat.
+pub fn ratcol_mean(num: &[i64; 1024], den: &[i64; 1024], n: i64) -> Rat with Mut, Div, Panic {
+    if n <= 0 { return Rat { num: 0, den: 1 } }
+    let s = ratcol_sum(num, den, n)
+    rat_make(s.num, s.den * n)
+}

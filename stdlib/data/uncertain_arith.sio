@@ -1,0 +1,94 @@
+//! Uncertainty-propagating column arithmetic — build a DERIVED measurement column from measured ones
+//! with correct error propagation. A scientist computing density = mass / volume, or a corrected
+//! reading = raw − blank, needs the result's uncertainty, not just its value; pandas column arithmetic
+//! (`df["a"] * df["b"]`) silently discards it. This module propagates it via the tested
+//! `epistemic::gum` engine (ISO GUM: variances add for ±, relative variances add for ×/÷).
+//!
+//! A measurement column is a value column paired with a standard-uncertainty column (same frame or
+//! different frames). `ucol_derive` produces a new two-column frame `[value, u]` — the derived
+//! quantity and its propagated standard uncertainty, row by row.
+//!
+//! Implementation note (lean_single codegen): the GUM per-cell propagation is done FIRST into small
+//! `[f64; 1024]` result arrays (`uca_collect`), and only afterwards is the output DataFrame allocated
+//! and filled with no GUM call in scope — a GUM struct-by-value call while a by-value DataFrame local
+//! is live on the same frame segfaults under the current backend (same constraint as
+//! `data::uncertain_groupby`). Self-contained on public `data::dataframe` + `epistemic::gum`; no
+//! compiler changes.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_nrows, df_add_row, df_set_col_name}
+use epistemic::gum::{GUMResult, gum_simple, gum_add, gum_sub, gum_mul, gum_div, gum_value, gum_std_u}
+
+fn ua_min(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+
+// Apply op to two measurements: 0 add, 1 sub, 2 mul, 3 div.
+fn uca_op(a: GUMResult, b: GUMResult, op: i64) -> GUMResult with Mut, Div, Panic {
+    if op == 0 { return gum_add(a, b) }
+    if op == 1 { return gum_sub(a, b) }
+    if op == 2 { return gum_mul(a, b) }
+    gum_div(a, b)
+}
+
+// Phase 1: fill outv/outu with the per-row derived value and propagated uncertainty. Returns the row
+// count. No DataFrame local exists here, so the GUM struct-by-value calls are safe.
+fn uca_collect(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64, op: i64,
+               outv: &![f64; 1024], outu: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    let n = ua_min(df_nrows(a), df_nrows(b))
+    var r: i64 = 0
+    while r < n && r < 1024 {
+        let ma = gum_simple(df_get(a, r, av), df_get(a, r, au))
+        let mb = gum_simple(df_get(b, r, bv), df_get(b, r, bu))
+        let res = uca_op(ma, mb, op)
+        outv[r as usize] = gum_value(res)
+        outu[r as usize] = gum_std_u(res)
+        r = r + 1
+    }
+    n
+}
+
+/// Derive a new measurement column from two measurement columns by an arithmetic op (0 add, 1 sub,
+/// 2 mul, 3 div), propagating uncertainty per ISO GUM. `a`/`b` are frames with a value column and a
+/// standard-uncertainty column each (they may be the same frame). Returns a two-column frame
+/// `[value, u]` (column-name ids 0 and 1), one row per input row (over the shorter frame).
+pub fn ucol_derive(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64, op: i64) -> DataFrame with Mut, Div, Panic {
+    var outv: [f64; 1024] = [0.0; 1024]
+    var outu: [f64; 1024] = [0.0; 1024]
+    let n = uca_collect(a, av, au, b, bv, bu, op, &!outv, &!outu)
+    // Phase 2: allocate + fill; no GUM call in scope.
+    var out = df_new(2)
+    df_set_col_name(&!out, 0, 0)   // value
+    df_set_col_name(&!out, 1, 1)   // u
+    var r: i64 = 0
+    while r < n {
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = outv[r as usize]
+        row[1] = outu[r as usize]
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Convenience wrappers for the four operations (a OP b), each a value+uncertainty column pair.
+pub fn ucol_add(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64) -> DataFrame with Mut, Div, Panic { ucol_derive(a, av, au, b, bv, bu, 0) }
+pub fn ucol_sub(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64) -> DataFrame with Mut, Div, Panic { ucol_derive(a, av, au, b, bv, bu, 1) }
+pub fn ucol_mul(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64) -> DataFrame with Mut, Div, Panic { ucol_derive(a, av, au, b, bv, bu, 2) }
+pub fn ucol_div(a: &DataFrame, av: i64, au: i64, b: &DataFrame, bv: i64, bu: i64) -> DataFrame with Mut, Div, Panic { ucol_derive(a, av, au, b, bv, bu, 3) }
+
+/// Scale a measurement column by an exact constant `k` (no uncertainty of its own): value → k·value,
+/// u → |k|·u. Returns a two-column frame `[value, u]`.
+pub fn ucol_scale(a: &DataFrame, av: i64, au: i64, k: f64) -> DataFrame with Mut, Div, Panic {
+    var ak = k
+    if ak < 0.0 { ak = 0.0 - ak }
+    var out = df_new(2)
+    df_set_col_name(&!out, 0, 0)
+    df_set_col_name(&!out, 1, 1)
+    var r: i64 = 0
+    while r < df_nrows(a) {
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = df_get(a, r, av) * k
+        row[1] = df_get(a, r, au) * ak
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}

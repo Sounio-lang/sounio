@@ -56,6 +56,29 @@ run_witness() {
 
 run_witness "$SOURCE" 'PASS global_f64_scratch_add' "$WORK/run.log" 'global f64 scratch witness'
 
+SCALAR_SOURCE="$WORK/global_f64_scalar.sio"
+cat >"$SCALAR_SOURCE" <<'SOUNIO'
+//@ run-pass
+//@ expect-stdout: PASS global_f64_scalar
+
+var LEFT_SCALAR: f64 = 0.0
+var RIGHT_SCALAR: f64 = 0.0
+
+fn main() -> i32 with IO, Mut {
+    LEFT_SCALAR = 0.0 - 1.0
+    RIGHT_SCALAR = 1.0
+    if LEFT_SCALAR + RIGHT_SCALAR != 0.0 { return 1 }
+    println("PASS global_f64_scalar")
+    0
+}
+SOUNIO
+
+run_witness \
+  "$SCALAR_SOURCE" \
+  'PASS global_f64_scalar' \
+  "$WORK/scalar.log" \
+  'global f64 scalar witness'
+
 BOUNDARY_SOURCE="$WORK/global_f64_after_256_globals.sio"
 {
   printf '%s\n' '//@ run-pass'
@@ -83,4 +106,4 @@ run_witness \
   "$WORK/boundary.log" \
   'global f64 after 256 globals witness'
 
-echo "[madaros-global-f64] PASS: Madaros ELF preserves global f64-array element typing past the previous 256-entry metadata boundary"
+echo "[madaros-global-f64] PASS: Madaros ELF preserves global f64 scalar and array-element typing past the previous 256-entry metadata boundary"
