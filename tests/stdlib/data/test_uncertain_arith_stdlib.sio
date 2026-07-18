@@ -1,0 +1,35 @@
+// Run-proof for stdlib data::uncertain_arith — uncertainty-propagating derived columns (ISO GUM:
+// variances add for +/-, relative variances add for */÷). lean_single engine.
+use data::dataframe::*
+use data::uncertain_arith::*
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+// row = [Av, Au, Bv, Bu]
+fn r4(df: &!DataFrame, a: f64, b: f64, c: f64, d: f64) with Mut, Div, Panic { var r: [f64;64]=[0.0;64]; r[0]=a;r[1]=b;r[2]=c;r[3]=d; df_add_row(df,&r) }
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var d = df_new(4)
+    r4(&!d, 10.0, 0.3, 5.0, 0.4)   // r0: add 15±0.5, sub 5±0.5
+    r4(&!d, 10.0, 1.0, 10.0, 0.0)  // r1: mul 100±10
+    r4(&!d, 10.0, 1.0, 2.0, 0.0)   // r2: div 5±0.5
+    r4(&!d, 3.0, 0.3, 4.0, 0.4)    // r3: mul 12 ± 1.697056
+    // ADD: variances add -> u = sqrt(0.09+0.16) = 0.5
+    let add = ucol_add(&d, 0, 1, &d, 2, 3)
+    if ae(df_get(&add,0,0),15.0) >= 1.0e-9 || ae(df_get(&add,0,1),0.5) >= 1.0e-9 { print("FAIL add\n"); return 1 }
+    if df_get_col_name(&add,0) != 0 || df_get_col_name(&add,1) != 1 { print("FAIL names\n"); return 2 }
+    // SUB: same combined u
+    let sub = ucol_sub(&d, 0, 1, &d, 2, 3)
+    if ae(df_get(&sub,0,0),5.0) >= 1.0e-9 || ae(df_get(&sub,0,1),0.5) >= 1.0e-9 { print("FAIL sub\n"); return 3 }
+    // MUL: relative variances add. r1 (10±1)*(10±0) -> 100 ± 10 ; r3 (3±0.3)*(4±0.4) -> 12 ± sqrt(0.02)*12
+    let mul = ucol_mul(&d, 0, 1, &d, 2, 3)
+    if ae(df_get(&mul,1,0),100.0) >= 1.0e-9 || ae(df_get(&mul,1,1),10.0) >= 1.0e-6 { print("FAIL mul_exact\n"); return 4 }
+    if ae(df_get(&mul,3,0),12.0) >= 1.0e-9 || ae(df_get(&mul,3,1),1.6970563) >= 1.0e-4 { print("FAIL mul_both\n"); return 5 }
+    // DIV: r2 (10±1)/(2±0) -> 5 ± 0.5
+    let dv = ucol_div(&d, 0, 1, &d, 2, 3)
+    if ae(df_get(&dv,2,0),5.0) >= 1.0e-9 || ae(df_get(&dv,2,1),0.5) >= 1.0e-6 { print("FAIL div\n"); return 6 }
+    // SCALE: (10±0.3)*2 -> 20 ± 0.6
+    let sc = ucol_scale(&d, 0, 1, 2.0)
+    if ae(df_get(&sc,0,0),20.0) >= 1.0e-9 || ae(df_get(&sc,0,1),0.6) >= 1.0e-9 { print("FAIL scale\n"); return 7 }
+    // input untouched
+    if df_nrows(&d) != 4 { print("FAIL immutable\n"); return 8 }
+    print("UNCERTAIN_ARITH_STDLIB_OK\n")
+    return 0
+}

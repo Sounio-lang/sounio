@@ -103,6 +103,29 @@ pub enum GpuOpcode {
     // Phase 5: Tensor core
     GpuWmma,            // Warp matrix multiply-accumulate
     GpuMma,             // Matrix multiply-accumulate
+    GpuWmmaTile,        // Compound m16n16k16 tile: load.a(shared)+load.b(shared,col)+mma+store.d(global)
+    //   lhs_reg = sA shared-addr reg (row-major f16), rhs_reg = sH shared-addr reg (col-major f16),
+    //   addr_reg = D global-addr reg (row-major f32), rhs_imm = leading dim (16).
+    GpuOctBatchStage,   // Compound staging for oct_batch_mul: thread 0 builds L(a) (σ·a[k⊕j], row-major
+    //   f16) at shared[0..512] and stages H (col-major f16) at shared[512..1024], from the octonion
+    //   pointer in lhs_reg (a[8]) and the batch pointer in rhs_reg (H[16*8]). bar.sync at the end.
+    GpuOctPostAddBx,    // O-SSM post-add: thread 0 adds S[k][b] += B[k]·x[b] to the f32 tile output.
+    //   lhs_reg = B pointer (B[dim] f64), rhs_reg = x pointer (x[16] f64), addr_reg = S/out global
+    //   f32 pointer (16×16 row-major), rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctCell,         // Full O-SSM octonion cell (one timestep): y = Re(C⊗sigmoid(A⊗h_prev + B·x)).
+    //   Two wmma tiles (L(A)·H, L(C)·h) in shared + cubic sigmoid + Re. Pointers carried in the op's
+    //   cell_* fields (pA,pB,px,pC,pH in lhs/rhs/addr/src/shared_addr; pY in compare_reg).
+    GpuOctRecur,        // O-SSM recurrence over T timesteps: for t<T, h_t=sigmoid(A⊗h_{t-1}+B·x_t),
+    //   y_t=Re(C⊗h_t). H persists in shared across steps; x_t/y_t indexed by t. Same pointer fields as
+    //   GpuOctCell plus the timestep count register in byte_offset (px/py sized T×16).
+    GpuOctAssoc,        // Batched hypercomplex associator [a,b,H] = (a⊗b)⊗H − a⊗(b⊗H) over a 16-state
+    //   batch. THREE m16n16k16 tiles: q=L(b)·H, r=L(a)·q, p=L(a⊗b)·H, then out=p−r. a⊗b is formed
+    //   into a global scratch (ossm_ab) via the σ(i,j) table (ossm_absgn). Pointers pa,pb,pH,pout in
+    //   lhs_reg/rhs_reg/addr_reg/src_reg; rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctVjp,          // Backward / VJP of the batched multiply D = L(a)·H over a 16-state batch:
+    //   given upstream dD, compute dH = L(a)ᵀ·dD (ONE tensor-core tile with L(a) transposed) and
+    //   da[p] = Σ_{k,b} σ(p,k⊕p)·H[k⊕p,b]·dD[k,b] (runtime accumulation). Pointers pa,pH,pdD,pdH,pda
+    //   in lhs_reg/rhs_reg/addr_reg/src_reg/shared_addr; rhs_imm = dim (8 octonion / 16 sedenion).
     GpuTmaLoad,         // Tensor memory access load (sm_90+)
     GpuTmaStore,        // Tensor memory access store (sm_90+)
 
@@ -481,6 +504,18 @@ pub fn gpu_op_new() -> GpuOp {
         scope: 0,
         cg_size: 0,
     }
+}
+
+// Construct a compound m16n16k16 tensor-core tile op. sA/sB are u32 shared-address registers
+// (A row-major f16, B col-major f16); dOut is the u64 global-address register for D (row-major f32).
+pub fn gpu_op_wmma_tile(sA_reg: i64, sB_reg: i64, d_out_reg: i64, ldm: i64) -> GpuOp {
+    var op = gpu_op_new()
+    op.opcode = GpuOpcode::GpuWmmaTile
+    op.lhs_reg = sA_reg
+    op.rhs_reg = sB_reg
+    op.addr_reg = d_out_reg
+    op.rhs_imm = ldm
+    op
 }
 
 pub fn gpu_target_vendor_to_string(vendor: GpuTargetVendor) -> string {

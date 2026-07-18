@@ -1,0 +1,62 @@
+//! Apply a scalar transform to a DataFrame column.
+//!
+//! Sounio can't pass a function across modules, so the transform is selected by an op code with a
+//! scalar operand -- covering the common element-wise operations. Functional: returns a new
+//! DataFrame, the input is unchanged. Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols}
+
+// Apply op(v, operand):
+//   0 = add, 1 = subtract, 2 = multiply, 3 = divide (by 0 -> 0),
+//   4 = abs (operand ignored), 5 = min(v, operand) [clamp above], 6 = max(v, operand) [clamp below].
+fn apply_op(v: f64, op: i64, operand: f64) -> f64 with Mut, Div, Panic {
+    if op == 0 { return v + operand }
+    if op == 1 { return v - operand }
+    if op == 2 { return v * operand }
+    if op == 3 { if operand != 0.0 { return v / operand } return 0.0 }
+    if op == 4 { if v < 0.0 { return 0.0 - v } return v }
+    if op == 5 { if v > operand { return operand } return v }
+    if op == 6 { if v < operand { return operand } return v }
+    v
+}
+
+/// Return a copy of `df` with a scalar transform applied element-wise to column `col`. `op` selects
+/// the operation (0 add, 1 sub, 2 mul, 3 div, 4 abs, 5 min/clamp-above, 6 max/clamp-below) and
+/// `operand` is its scalar argument (ignored for abs). Other columns and all row structure are
+/// preserved; the input is unchanged.
+pub fn df_apply(df: &DataFrame, col: i64, op: i64, operand: f64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            var v = df_get(df, r, c)
+            if c == col { v = apply_op(v, op, operand) }
+            row[c as usize] = v
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Like df_apply but transforms EVERY column (element-wise over the whole frame).
+pub fn df_apply_all(df: &DataFrame, op: i64, operand: f64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            row[c as usize] = apply_op(df_get(df, r, c), op, operand)
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}

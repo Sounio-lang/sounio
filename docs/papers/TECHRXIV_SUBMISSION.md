@@ -15,6 +15,23 @@ Upload at: https://www.techrxiv.org/submit
 
 ## Paper A
 
+> ⚠️ **CORRECTION NOTICE — DO NOT SUBMIT THIS ABSTRACT AS-IS (2026-07-16).**
+> The quantitative O-SSM results in the abstract below were computed on an octonion
+> multiplication table that carried a sign error in the `e2·e5` product
+> (`-a2*b5+a5*b2` instead of `+a2*b5-a5*b2`). That table **fails alternativity and
+> composition** — it is *not* the octonion algebra (nor any composition algebra), so the
+> non-associative claims it produced are table artifacts, not octonion results.
+> Specifically affected: "O-SSM wins 12" (of 15), "sorting 69.5% → 72.5% / diagonal at
+> chance 32.5%", "ListOps 26% vs 15%", "Morse 44.5% vs 14%". On the corrected algebra the
+> two paper-cited benchmarks that actually use an octonion table do **not** show these
+> wins (`multihead_unit_oct`: sorting-like octonion ≈32.8% vs diagonal ≈54.0% — reversed;
+> `listops`: octonion 13.0% = H-SSM 13.0% vs diagonal 20.5%). This matches the repo's own
+> corrected record (NeuroDyn A/B re-audit NEGATIVE, ABIDE associator null, `zd_bptt`
+> ZD-advantage → +0.00pp).
+> **Corpus fix: PR #1024. Corrected framing to write up: representational-capacity claim
+> (cf. PR #907), not an ML-benchmark-win claim.** The author must revise the abstract
+> before submission — this notice deliberately does not rewrite it.
+
 **PDF**: `docs/papers/paper_a_ossm.pdf` (11 pages, 239KB)
 
 **Title**: Non-Associative State Space Models: Octonion Dynamics for Path-Dependent Sequence Modeling

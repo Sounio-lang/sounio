@@ -1,0 +1,198 @@
+//! Uncertainty-aware group-by — the relational GROUP BY of `data::dataframe` composed with the rigorous
+//! ISO GUM uncertainty engine (`epistemic::gum`). Where pandas `df.groupby(key)[val].mean()` returns a
+//! bare number per group, `ugroupby_mean_type_a` returns, per DISTINCT key, the group mean together with
+//! a metrologically correct Type A (statistical) uncertainty: the combined standard uncertainty u_c,
+//! the expanded uncertainty U95, and the effective degrees of freedom. This is "GROUP BY that reports
+//! mean ± U per group" — a capability pandas structurally lacks.
+//!
+//! For each group the within-group sample standard deviation s (n−1 denominator, ISO GUM §4.2) is fed
+//! to `gum_type_a(s, n_group)` and combined (with a zero Type-B term, so the combined result is exactly
+//! the Type A one with its degrees of freedom preserved) into a `GUMResult`. Groups of size 1 have s=0,
+//! u_c=0, and — by convention here — dof=1 (there is no scatter estimate, so no div-by-zero and the dof
+//! column reports 1 rather than the engine's ∞ sentinel for a zero-variance combine).
+//!
+//! Output schema: one row per distinct key, sorted ascending by key, with columns
+//!   [0]=key  [1]=mean  [2]=u_c  [3]=U95  [4]=dof
+//! named via `df_set_col_name` with integer ids 0..4.
+//!
+//! Read-only over the input DataFrame. Self-contained apart from the public `data::dataframe` and
+//! `epistemic::gum` APIs; no compiler changes.
+//!
+//! Implementation note (codegen constraint, lean_single): the per-group GUM propagation is done FIRST,
+//! into small `[f64; 1024]` result columns (`ug_collect`), and only afterwards is the 512 KB output
+//! DataFrame allocated and filled with no GUM calls in scope. Making a GUM struct-by-value call while a
+//! by-value `DataFrame` local is live on the same frame segfaults under the current Madaros backend;
+//! this staging keeps the two apart.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_nrows, df_add_row, df_set_col_name}
+use epistemic::gum::{GUMResult, GUMComponent, gum_type_a, gum_type_b, gum_combine2, gum_value, gum_std_u, gum_u95, gum_dof, gum_report}
+
+fn ug_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+/// Number of rows in `vals` whose key column equals `key`.
+fn ug_group_count(vals: &DataFrame, key_col: i64, key: f64) -> i64 with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var cnt: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        if df_get(vals, r, key_col) == key { cnt = cnt + 1 }
+        r = r + 1
+    }
+    cnt
+}
+
+/// The Type A GUM result (mean and its statistical uncertainty) for the sub-population of `vals` whose
+/// key column equals `key`. Two-pass: group mean, then the within-group sample std s (n−1), then
+/// `gum_type_a(s, n_group)` combined with a zero Type-B term so the combined result equals the Type A
+/// one, degrees of freedom preserved (n_group−1).
+fn ug_group_result(vals: &DataFrame, key_col: i64, val_col: i64, key: f64) -> GUMResult with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var cnt: i64 = 0
+    var sum = 0.0
+    var r: i64 = 0
+    while r < n {
+        if df_get(vals, r, key_col) == key {
+            sum = sum + df_get(vals, r, val_col)
+            cnt = cnt + 1
+        }
+        r = r + 1
+    }
+    var mean = 0.0
+    if cnt > 0 { mean = sum / (cnt as f64) }
+    var ssq = 0.0
+    r = 0
+    while r < n {
+        if df_get(vals, r, key_col) == key {
+            let d = df_get(vals, r, val_col) - mean
+            ssq = ssq + d * d
+        }
+        r = r + 1
+    }
+    var s = 0.0
+    if cnt > 1 { s = ug_sqrt(ssq / ((cnt - 1) as f64)) }
+    let a = gum_type_a(s, cnt)      // u = s/√n, dof = n−1 (dof=1 for n≤1)
+    let z = gum_type_b(0.0)         // no Type-B term: combined = Type A
+    gum_combine2(mean, a, z)
+}
+
+/// Phase 1: collect the DISTINCT keys of `key_col` (sorted ascending) and, per group, the GUM Type A
+/// mean/u_c/U95/dof into the parallel `[f64; 1024]` output columns. Returns the number of distinct keys.
+/// Kept free of any by-value DataFrame local so the GUM struct-by-value calls stay off a large frame.
+fn ug_collect(vals: &DataFrame, key_col: i64, val_col: i64,
+              keys: &![f64; 1024], means: &![f64; 1024], ucs: &![f64; 1024],
+              u95s: &![f64; 1024], dofs: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var nkeys: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        let k = df_get(vals, r, key_col)
+        var found = false
+        var j: i64 = 0
+        while j < nkeys { if keys[j] == k { found = true } j = j + 1 }
+        if !found {
+            if nkeys < 1024 { keys[nkeys] = k; nkeys = nkeys + 1 }
+        }
+        r = r + 1
+    }
+    // sort distinct keys ascending (selection sort)
+    var a: i64 = 0
+    while a < nkeys {
+        var mini = a
+        var b = a + 1
+        while b < nkeys { if keys[b] < keys[mini] { mini = b } b = b + 1 }
+        let tmp = keys[a]; keys[a] = keys[mini]; keys[mini] = tmp
+        a = a + 1
+    }
+    // per-group Type A GUM stats
+    var g: i64 = 0
+    while g < nkeys {
+        let cnt = ug_group_count(vals, key_col, keys[g])
+        let res = ug_group_result(vals, key_col, val_col, keys[g])
+        means[g] = gum_value(res)
+        ucs[g] = gum_std_u(res)
+        u95s[g] = gum_u95(res)
+        var dof = gum_dof(res)
+        // A zero-variance combine (u_c=0) returns the engine's ∞ sentinel for dof. Report the
+        // metrologically correct value instead: n-1 for a real n>1 group that happens to have no
+        // scatter, and 1 for a singleton (no scatter estimate exists at all).
+        if ucs[g] == 0.0 {
+            if cnt <= 1 { dof = 1.0 } else { dof = (cnt - 1) as f64 }
+        }
+        dofs[g] = dof
+        g = g + 1
+    }
+    nkeys
+}
+
+/// Uncertainty-aware GROUP BY. Returns one row per DISTINCT value of `key_col` (sorted ascending),
+/// with columns [key, mean, u_c, U95, dof]. Each group's mean and Type A uncertainty are computed via
+/// the GUM engine. Groups of size 1 report u_c=0, U95=0, dof=1 (no div-by-zero). This is the metrology
+/// pandas cannot express: `groupby` that reports mean ± U per group.
+pub fn ugroupby_mean_type_a(vals: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys:  [f64; 1024] = [0.0; 1024]
+    var means: [f64; 1024] = [0.0; 1024]
+    var ucs:   [f64; 1024] = [0.0; 1024]
+    var u95s:  [f64; 1024] = [0.0; 1024]
+    var dofs:  [f64; 1024] = [0.0; 1024]
+    // Phase 1: all GUM work, off the DataFrame frame.
+    let nk = ug_collect(vals, key_col, val_col, &!keys, &!means, &!ucs, &!u95s, &!dofs)
+    // Phase 2: materialize the output DataFrame — no GUM calls in scope.
+    var out = df_new(5)
+    df_set_col_name(&!out, 0, 0)   // key
+    df_set_col_name(&!out, 1, 1)   // mean
+    df_set_col_name(&!out, 2, 2)   // u_c
+    df_set_col_name(&!out, 3, 3)   // U95
+    df_set_col_name(&!out, 4, 4)   // dof
+    var g: i64 = 0
+    while g < nk {
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = keys[g]
+        row[1] = means[g]
+        row[2] = ucs[g]
+        row[3] = u95s[g]
+        row[4] = dofs[g]
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Human-readable metrology report: one `gum_report` line per distinct key (sorted ascending), each
+/// showing the group mean ± U95 with its coverage factor and effective degrees of freedom. Uses only
+/// small stack arrays (no by-value DataFrame local), so the GUM calls are safe.
+pub fn ugroupby_report(vals: &DataFrame, key_col: i64, val_col: i64) with IO, Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var keys: [f64; 1024] = [0.0; 1024]
+    var nkeys: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        let k = df_get(vals, r, key_col)
+        var found = false
+        var j: i64 = 0
+        while j < nkeys { if keys[j] == k { found = true } j = j + 1 }
+        if !found {
+            if nkeys < 1024 { keys[nkeys] = k; nkeys = nkeys + 1 }
+        }
+        r = r + 1
+    }
+    var a: i64 = 0
+    while a < nkeys {
+        var mini = a
+        var b = a + 1
+        while b < nkeys { if keys[b] < keys[mini] { mini = b } b = b + 1 }
+        let tmp = keys[a]; keys[a] = keys[mini]; keys[mini] = tmp
+        a = a + 1
+    }
+    var g: i64 = 0
+    while g < nkeys {
+        let res = ug_group_result(vals, key_col, val_col, keys[g])
+        gum_report("group mean", "unit", res)
+        g = g + 1
+    }
+}
