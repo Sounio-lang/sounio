@@ -291,3 +291,25 @@ No compiler file was edited during this investigation — this is a forensic han
   not move the threshold.
 - GPU/K-AXI codegen, EISA — unrelated backend surfaces.
 </dispatch_md>
+
+
+---
+
+## EMPIRICAL CONFIRMATION — 2026-07-18 (correction: live observable is a CRASH, not a silent wrong value)
+
+A follow-up experiment (single-file, one `fn main`, an UNROLLED chain of ~N distinct `let vK = v(K-1) + K` bindings — a loop would reuse temps, so unrolling is essential — with oracle = closed form N(N+1)/2) **confirms the 512-vreg ceiling as a live, deterministic wall**, but corrects the observable:
+
+| N | oracle | DEFAULT (madaros) | lean_single |
+|---|---|---|---|
+| 338 | exit 42 | **42 (ok)** | 42 (ok) |
+| 340 | exit 221 | **139 (SIGSEGV)** | 221 (ok) |
+| 512 | exit 79 | **139 (SIGSEGV)** | 79 (ok) |
+| 700 | exit 101 | **139 (SIGSEGV)** | 101 (ok) |
+
+**Sharp boundary: N=338 clean+correct → N=340 crash.** madaros/native_v2 only; **lean_single is immune** (correct to N>1000). The exit-code shape (result returned via `(vN % 250)+1`, no strings) rules out string/pointer confounds — it is value-path register pressure.
+
+**Correction to the framing above:** the reproducible observable at the 512 crossing is a **deterministic SIGSEGV (exit 139), not a clean-exit wrong value.** The silent-zero (`xor rax,rax` for vreg≥512 load) and dropped-store primitives **do exist in source** (`lower_ir.sio` load ~87-90 / store ~110-112, `regalloc.sio` RA_MAX_INTERVALS=512), but they are **coupled** to UNGUARDED `while v < reg_count { ... vreg_to_preg[v] ... }` loops that read the fixed `[i64;512]` preg-mask arrays **out of bounds** once reg_count>512 (`frame.sio:103`, `codegen_x86_linux.sio:5276`, `codegen.sio:3456`). Those OOB reads corrupt the callee-saved push/pop mask → prologue/epilogue imbalance → SIGSEGV, which fires at the **same** threshold and **masks** the clean silent-miscompile path. The bignat CALIBRATION NOTE's historically-observed "corrupted digits with clean exit" is the *other* face of the same 512 ceiling — reachable only when the OOB mask reads happen to land on benign memory (adjacent `vreg_spill_slots` = -1); generic arithmetic chains crash instead.
+
+**Net for the fix:** this is *good news for debuggability* — there is a **deterministic, minimally-bracketed crash repro** (N=340), not just an intermittent silent corruption. The four fixed-512 sites plus the unguarded `while v < reg_count` OOB reads over the `[512]` arrays are the concrete targets. Fix ask unchanged and strengthened: (1) bounds-guard / loud-fail every `[512]` access and the `while v < reg_count` loops (turns crash *and* silent paths into a clear diagnostic), then (2) raise/eliminate the 512 ceiling (dynamic sizing). Acceptance: the N=340 chain compiles+runs correctly under the default engine, and bignat/bigrat selftests scale to ~10x op-count without oracle babysitting.
+
+Repro generator (`gen3.py`): emits `fn main` with N chained `let vK=v(K-1)+K` returning `(vN%250)+1`; `./bin/souc compile chain.sio -o out && ./out; echo $?` → 139 for N≥340, correct under `SOUNIO_SOUC_ENGINE=lean_single`.
