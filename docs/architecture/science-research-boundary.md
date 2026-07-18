@@ -11,9 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
 an R2.6 local registry-attestation policy contract, and R3 physical extraction
-inventory, local exact-copy materialization, and temporary-copy source-removal
-authorization interfaces; canonical repository extraction remains not
-executed. Promotion is
+inventory, local exact-copy materialization, temporary-copy source-removal
+authorization, and policy-bound local source-removal execution interfaces;
+canonical repository cutover remains not executed. Promotion is
 bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
@@ -23,8 +23,8 @@ repositories or distributions. The inventory binds proposed ownership and
 exact file identity. The materializer can copy approved units to preexisting
 local destinations and verify them, but the canonical repository has no
 approved production destination policy, materialization receipt, removal
-policy, or authorization receipt and moves no source file. R2.6 launches no
-registry service.
+policy, authorization receipt, execution policy, or execution receipt and
+moves no source file. R2.6 launches no registry service.
 
 The enforced dependency direction is:
 
@@ -214,6 +214,32 @@ independent replay, scientific truth, or clinical authority. The authorizer
 contains no canonical removal operation. The full contract is
 `docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md`.
 
+## R3 Source-Removal Execution
+
+`tools/science_boundary/source_removal_executor.py` consumes an authorization
+that is fully reconstructable before mutation plus a separate execution policy
+bound to the exact authorization, materialization, inventory, pre-execution
+tree, post-execution tree, removal scope, retained root marker, and operator
+approval evidence. Four exact CLI confirmations repeat the authorization,
+scope, policy, and pre-execution tree identities.
+
+Before modifying the bound root, the tool locks its directory inode, creates
+and verifies a full regular-file backup in an external same-filesystem
+transaction workspace, and checks the root again. It then removes only
+authorized roots, applies only authorized repair bytes, reruns the authorized
+gates, verifies the complete resulting tree and materialized copies, and
+promotes the execution receipt last. Ordinary failure before receipt promotion
+restores and verifies the exact pre-execution file tree. Post-execution
+verification gates run only on a disposable copy. Crash atomicity across
+multiple filesystem operations is not claimed.
+
+The deterministic receipt has type `policy-bound-local-source-removal`, status
+`executed-and-verified`, source-removal status `executed`, and `identity-only`
+assurance. The focused gate performs real removal only in disposable fixture
+roots. No production execution policy or receipt exists for the canonical
+Sounio repository, so its source roots remain unchanged. The complete contract
+is `docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -280,8 +306,9 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
 contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
 release bundle, deterministic R2.6 local registry-policy attestation, R3
-physical extraction inventory, R3 local materialization, and R3 temporary-copy
-source-removal authorization interfaces are implemented.
+physical extraction inventory, R3 local materialization, R3 temporary-copy
+source-removal authorization, and R3 policy-bound local source-removal
+execution interfaces are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -347,3 +374,23 @@ fixture receipt identities match the local witness, reports
 `authorized-not-executed` and `not-executed`, and leaves every original source
 root present. Node-local temporary storage was used for every promotion and
 candidate workspace; no fallback implementation path ran.
+
+The focused execution gate adds checks for exact authorization replay,
+execution-policy binding, explicit CLI confirmations, deterministic receipts
+across equivalent roots, exact planned-root removal, retained and blocked-root
+preservation, repair and gate evidence, root-inode serialization,
+ordinary-failure rollback, isolated verification-gate mutation, occupied output
+preservation, post-execution verification, and forged or rehashed policy and
+receipt refusal. It executes planned units only inside disposable fixture
+roots. No canonical source root is an execution target.
+
+The composed current-source execution witness is Slurm job `6558` on
+`gpuorangefs-r770-proxmox`: archive
+`31df0a309a7fac2cf7703bda5931f093b216137c9072cccd9aa5033465313323`
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed all 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167 materialization,
+527 authorization, and 164 execution checks in 45 seconds with
+`MaxRSS=1422288K`. The final execution receipt identity matches the local
+witness. All real removal occurred only in disposable node-local fixture roots;
+no implementation fallback ran and no canonical source root changed.

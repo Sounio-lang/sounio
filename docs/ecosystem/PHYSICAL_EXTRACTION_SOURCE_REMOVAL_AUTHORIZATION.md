@@ -162,7 +162,9 @@ canonical migration.
 
 ## Next Interface
 
-`r3-physical-extraction-source-removal-execution` must consume an exact valid
-authorization, require explicit human permission for the canonical operation,
-perform only the bound repair and removal set, and verify the resulting
-repository without widening any software or scientific claim.
+`r3-physical-extraction-source-removal-execution` now consumes an exact valid
+authorization, a separate execution policy, retained approval evidence and
+four exact CLI confirmations. It performs only the bound repair and removal
+set in the explicitly marked local root and verifies the resulting repository.
+The canonical repository still has no production execution policy. Its next
+interface is `r3-physical-extraction-canonical-cutover-approval`.

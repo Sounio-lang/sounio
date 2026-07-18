@@ -3143,6 +3143,12 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 |---|---|---|---|---|---|
 | 2026-07-17 | xai/Grok 4.3 | review | source_removal_authorizer.py; source-removal policy and authorization schemas; focused adversarial gate; physical extraction authorization docs | PASS_NO_REQUESTED_SEVERITY_ISSUES | Reviewed correctness, determinism, fail-closed bindings, implementation source preservation, receipt atomicity, schema/contract alignment, and adversarial coverage. The review was explicitly scoped away from cybersecurity or threat-model work and found no BLOCKER, MAJOR, or MINOR issue. Raw: `/tmp/llm-offload-cfWgYf/`. |
 
+## 2026-07-17 - source-removal execution interface review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-17 | xai/Grok 4.3 | review | source_removal_executor.py; execution policy and receipt schemas; focused and composed execution gates; physical extraction execution docs | PASS_NO_REQUESTED_SEVERITY_ISSUES | Reviewed the scientific-repository lifecycle contract in three bounded parts: source-loss and rollback behavior, root-inode serialization, receipt commit point, disposable post-execution verification, deterministic evidence, adversarial coverage, schema/runtime alignment, and canonical/scientific claim limits. All three reviews returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. Two earlier whole-diff attempts never reached the provider because the local curl wrapper exceeded `ARG_MAX`; the successful bounded inputs covered the complete diff. Raw: `/tmp/llm-offload-sWBX3O/`, `/tmp/llm-offload-zSzogY/`, `/tmp/llm-offload-UgMEQv/`. |
+
 ## 2026-07-17 - ordered-path provenance math review
 
 | Date | Provider | Task | Target | Outcome | Note |
