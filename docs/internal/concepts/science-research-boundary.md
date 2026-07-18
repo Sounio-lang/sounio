@@ -50,10 +50,13 @@ R2.6 binds that bundle to a local catalog policy without publication. R3 binds
 the declared roots to an exact-file ownership plan, permits a separately
 approved local copy whose receipt keeps source removal `not-authorized`, and
 can authorize an exact removed-and-repaired temporary candidate while keeping
-execution `not-executed`. None of these interfaces promotes scientific
-authority, and no canonical production destination, materialization, removal
-policy, authorization receipt, production execution policy, or canonical
-execution receipt currently exists.
+execution `not-executed`. A separate Git-bound executor can consume that
+approval, pre-bind an exact commit, remove/repair the bound tree, and publish an
+exact leased ref update. Its acceptance evidence exists only for disposable
+fixtures. None of these interfaces promotes scientific authority, and no
+canonical production destination, materialization, removal policy,
+authorization receipt, approval, execution policy, or execution receipt
+currently exists.
 
 ## Semantic Lane
 
@@ -80,7 +83,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-canonical-cutover-execution`
+`r3-physical-extraction-canonical-production-policy-and-human-decision`
 
 ## R3 Physical Extraction Inventory Semantic Lane
 
@@ -195,6 +198,29 @@ Negative-Witness: stale source binding, dirty worktree, changed branch, HEAD, re
 Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_cutover_approval_gate.sh
 Integration-Target: codex/physical-extraction-source-removal-execution-r3-20260717, then origin/main after the execution stack lands
 Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover approval gate pass on one archived source snapshot with one current-source Madaros; canonical production execution still requires a separate production policy, human decision, and execution interface
+```
+
+## R3 Canonical Cutover Execution Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-CUTOVER-EXECUTION-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: physical separation may become canonical only through an exact reversible evidence chain without turning repository location, Git publication, or successful removal into scientific authority
+Transformation: consume one reconstructed cutover approval plus a separately authored execution policy, pre-bind the exact Git tree and commit, execute approved removal/repair/gates, publish the exact remote ref under lease, and promote a deterministic receipt after complete post-state verification
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact disposable Git repository transition removed the approved roots, created and published the pre-bound commit, preserved destinations, and emitted a verified execution receipt
+Claims-Forbidden: Sounio canonical production cutover from fixture evidence, production permission without a canonical-production policy and human decision, hosting administration or namespace ownership, transferred maintainership, human identity or organizational authority, distributed crash atomicity, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the full approval remains reconstructable before mutation; source and destination repositories are standalone and clean; local and remote pre-cutover refs are equal and quiescent; the remote accepts an exact leased update and, before receipt promotion failure, an exact leased rollback; v1 Git object IDs are 40-hex SHA-1
+Write-Set: tools/science_boundary/canonical_cutover_executor.py; schemas/sounio.physical-extraction-canonical-cutover-execution{-policy,}.v1.schema.json; scripts/ci/physical_extraction_canonical_cutover_execution_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md,PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md,PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: tools/science_boundary/{physical_extraction_inventory.py,physical_extraction_materializer.py,source_removal_authorizer.py,source_removal_executor.py,canonical_cutover_authorizer.py}; schemas/sounio.physical-extraction-*.v1.schema.json; science-rings.tsv; physical extraction ownership policy
+Positive-Witness: two equivalent disposable standalone source/destination repository sets produce identical policies, approval receipts, planned Git trees/commits, executed local and remote refs, and final execution receipts while all destination repositories remain unchanged
+Negative-Witness: invalid context, stale or dirty Git state, changed evidence, incorrect CLI confirmation, wrong planned commit, occupied output, canonical-only gate mutation, receipt race after remote push, reintroduced source, changed destination, remote drift, mutating verification, and forged or rehashed receipt all refuse; pre-receipt failures restore the exact old local/remote refs and source tree
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_cutover_execution_gate.sh
+Integration-Target: codex/physical-extraction-canonical-cutover-approval-r3-20260717, then origin/main after the approval stack lands
+Authoritative-Only-If: the complete R0-R3 stack and focused canonical-cutover execution gate pass on one archived source snapshot with one current-source Madaros; Sounio production execution additionally requires a separately authored canonical-production evidence set and explicit human decision
 ```
 
 ## R2.5 Semantic Lane
@@ -418,6 +444,30 @@ Conflicting-Lanes: semantic scanner reported zero exact path collisions; the pre
 LLM-Offload: xai/grok-4.3 reviewed authorizer, gate, schemas and docs in four bounded inputs; standalone worktree enforcement and explicit receipt recording of matched CLI confirmations were incorporated, and remaining scope/code-reading disagreements were logged; raw=/tmp/llm-offload-VLRc5v/,/tmp/llm-offload-YLJKjj/,/tmp/llm-offload-OqEQb7/,/tmp/llm-offload-tlTAuZ/
 Remaining-Blockers: none for the executable approval-only interface; actual canonical execution still requires a separately authored canonical-production policy and evidence set, an explicit human decision, and the r3-physical-extraction-canonical-cutover-execution interface
 Next-Semantic-Interface: r3-physical-extraction-canonical-cutover-execution
+```
+
+## R3 Canonical Cutover Execution Integration Receipt
+
+```text
+Semantic-Outcome: executable policy-bound Git cutover, exact leased publication, rollback, and post-execution verification boundary for one approved disposable R3 repository set
+Concept-Status-Before: executable R0-R3 canonical-cutover approval interface with canonical execution explicitly not performed
+Concept-Status-After: executable R0-R3 canonical-cutover execution interface proven in disposable fixtures; Sounio canonical production cutover remains neither authorized nor executed
+Distinctions-Added: approval receipt versus execution policy; pre-bound Git transition versus live ref update; published commit versus promoted execution receipt; disposable-fixture execution versus canonical-production permission
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; repository location versus scientific authority; deterministic identity versus independent signature or replay; operator label versus human or organizational authority; verified ordinary rollback versus distributed crash atomicity
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 002d5f2277da8f9510b37f8e4d0ac8e9e994a06f, gzip size 339676469 bytes, sha256=16a7cfdddd120cbd47a0b471506126fe3724fd6b1e9e27b772ce9ab73245c642
+Evidence-Compiler: unchanged current-source Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6613 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:53, MaxRSS=1390324K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, inventory 141 assertions, materialization 167 assertions, authorization 527 assertions, local execution 164 assertions, canonical-cutover approval 172 assertions, and canonical-cutover execution 81 assertions all PASS
+Evidence-Execution: execution identity=f7ea56e8028f1a21f6f23afd316bfb93e6a27416067442fdf0da63f28e064d21; policy identity=e55de2ce7f6d82e57c7408cb1fc95948deb7fdc2c36da611ce6ebba1455a406c; approval identity=15e8b3ad7b0b01a95c5a3ad717176d8901f5941740d9c9c52680a70e293074a9; expected fixture commit=789611457cc681226baa2885391d7bbbd29a5fa7; context=disposable-fixture status=executed-and-verified source-removal=executed assurance=identity-plus-git-remote-ref-and-published-commit
+Evidence-Logs: focused gate sha256=6d1413e16083ea98787dd92cb8a6bfa5ba8612e3d0135a3611e04a5853e29a4e; stdout size=3065 bytes sha256=06e16b40fd59d757c734e289388202afc1b55a3e786505839c302e41f3d25a53; stderr empty sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Supporting-Gates: physical_extraction_canonical_cutover_execution_gate.py -> PASS 81; sounio_package_support_gate.sh -> PASS; Draft 2020-12 policy and receipt instance validation -> PASS; check_docs_registry.sh plus five negative selftests -> PASS; check_docs_consistency.sh -> PASS; semantic_coordination_gate.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: one immutable archive and current-source Madaros were copied to node-local /tmp because OrangeFS was full; the composed gate forwarded the same compiler through the complete stack and used Git 2.43.0 for standalone fixture repositories and local bare remotes
+Fallback-Path: no implementation fallback authorized or used; invalid context, stale or dirty state, changed evidence, wrong confirmations or commit plan, occupied output, mutating gates, receipt race, ref drift, failed exact recovery, changed destination, reintroduced source, or forged/rehashed receipt refuses
+Legacy-Kept: every Sounio canonical scientific-package and research source root remains present; no canonical-production approval, execution policy, destination repository set, human execution decision, production ref update, or execution receipt was created; every earlier R2.5, R2.6, and R3 interface remains unchanged
+Conflicting-Lanes: semantic scanner reported zero exact path collisions before the execution lane was validated; no compiler, IR, stdlib, package, example, self-hosted, or canonical scientific source file was edited
+LLM-Offload: xai/grok-4.3 reviewed executor, gate, receipt schema, and contract; two gate-maintainability improvements were incorporated and remaining scope or code-reading disagreements were logged; DeepSeek was attempted and returned Insufficient Balance; raw=/tmp/llm-offload-nKnrWX/,/tmp/llm-offload-4NnXUv/,/tmp/llm-offload-89FG0U/,/tmp/llm-offload-RL7Rbi/,/tmp/llm-offload-O2rztG/
+Remaining-Blockers: none for the executable disposable-fixture interface; any Sounio production cutover still requires a separately authored canonical-production evidence set and execution policy, real destination repositories and recovery plan, and an explicit human decision
+Next-Semantic-Interface: r3-physical-extraction-canonical-production-policy-and-human-decision
 ```
 
 ## Closed Blockers
