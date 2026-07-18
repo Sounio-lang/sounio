@@ -1,0 +1,67 @@
+//! Interval arithmetic for worst-case bound propagation — the deterministic complement to the
+//! statistical uncertainty lane (epistemic::gum). Where GUM answers "what is the probable spread of
+//! this result", interval arithmetic answers "what are the GUARANTEED worst-case bounds": given each
+//! input constrained to a range [lo, hi] (a tolerance, a spec band, a rounded reading), it propagates
+//! an interval that is guaranteed to contain the true result. This is tolerance stack-up and robust-
+//! design analysis — pandas has no notion of it.
+//!
+//! An `Interval` is [lo, hi] with lo <= hi. Arithmetic follows the standard interval rules (Moore):
+//! addition/subtraction combine endpoints; multiplication takes the min/max of the four endpoint
+//! products; division requires the divisor to exclude zero. Endpoints are f64 (the interval ALGEBRA is
+//! exact; f64 rounding of the endpoints themselves is not outward-directed, so for a certified FP
+//! enclosure use exact rational endpoints — data::bigrat — as a future extension). Self-contained; no
+//! compiler changes.
+
+pub struct Interval { lo: f64, hi: f64 }
+
+fn fmin(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn fmax(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn fabs(a: f64) -> f64 { if a < 0.0 { 0.0 - a } else { a } }
+
+/// An interval [lo, hi] (endpoints are ordered defensively).
+pub fn iv(lo: f64, hi: f64) -> Interval { if lo <= hi { Interval { lo: lo, hi: hi } } else { Interval { lo: hi, hi: lo } } }
+/// A degenerate (point) interval [x, x].
+pub fn iv_point(x: f64) -> Interval { Interval { lo: x, hi: x } }
+/// The interval center ± half-width: [c - h, c + h].
+pub fn iv_pm(c: f64, h: f64) -> Interval { let a = fabs(h); Interval { lo: c - a, hi: c + a } }
+
+pub fn iv_lo(a: Interval) -> f64 { a.lo }
+pub fn iv_hi(a: Interval) -> f64 { a.hi }
+pub fn iv_mid(a: Interval) -> f64 with Div, Panic { 0.5 * (a.lo + a.hi) }
+pub fn iv_width(a: Interval) -> f64 { a.hi - a.lo }
+pub fn iv_rad(a: Interval) -> f64 with Div, Panic { 0.5 * (a.hi - a.lo) }
+
+/// [a.lo + b.lo, a.hi + b.hi].
+pub fn iv_add(a: Interval, b: Interval) -> Interval { Interval { lo: a.lo + b.lo, hi: a.hi + b.hi } }
+/// [a.lo - b.hi, a.hi - b.lo].
+pub fn iv_sub(a: Interval, b: Interval) -> Interval { Interval { lo: a.lo - b.hi, hi: a.hi - b.lo } }
+/// [min of the four endpoint products, max of them].
+pub fn iv_mul(a: Interval, b: Interval) -> Interval {
+    let p1 = a.lo * b.lo
+    let p2 = a.lo * b.hi
+    let p3 = a.hi * b.lo
+    let p4 = a.hi * b.hi
+    Interval { lo: fmin(fmin(p1, p2), fmin(p3, p4)), hi: fmax(fmax(p1, p2), fmax(p3, p4)) }
+}
+/// Scale by an exact scalar k (k may be negative; endpoints swap accordingly).
+pub fn iv_scale(a: Interval, k: f64) -> Interval {
+    let x = a.lo * k
+    let y = a.hi * k
+    Interval { lo: fmin(x, y), hi: fmax(x, y) }
+}
+
+/// True if b excludes zero (b.lo > 0 or b.hi < 0), i.e. division by b is defined.
+pub fn iv_divisible(b: Interval) -> bool { b.lo > 0.0 || b.hi < 0.0 }
+/// a / b, requires b to exclude zero (iv_divisible). If b contains zero, returns a point 0 defensively
+/// (callers should check iv_divisible first).
+pub fn iv_div(a: Interval, b: Interval) -> Interval with Div, Panic {
+    if !iv_divisible(b) { return Interval { lo: 0.0, hi: 0.0 } }
+    iv_mul(a, Interval { lo: 1.0 / b.hi, hi: 1.0 / b.lo })
+}
+
+/// True if x lies within [lo, hi].
+pub fn iv_contains(a: Interval, x: f64) -> bool { a.lo <= x && x <= a.hi }
+/// True if the two intervals overlap.
+pub fn iv_overlaps(a: Interval, b: Interval) -> bool { a.lo <= b.hi && b.lo <= a.hi }
+/// The convex hull [min lo, max hi] of the two intervals.
+pub fn iv_hull(a: Interval, b: Interval) -> Interval { Interval { lo: fmin(a.lo, b.lo), hi: fmax(a.hi, b.hi) } }
