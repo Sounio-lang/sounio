@@ -85,6 +85,29 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 `r3-physical-extraction-canonical-production-policy-and-human-decision`
 
+## R3 Canonical Production Mapping Decision Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-CANONICAL-PRODUCTION-MAPPING-DECISION-20260718
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: an explicit human repository selection may prepare a reviewable proposal without becoming repository-creation permission, production approval, cutover authority, or scientific authority
+Transformation: validate a reviewed transcription against the exact governed targets, point-in-time catalog, and clean canonical Git observation; classify reuse, creation request, and target revision; emit a proposed-not-approved mapping only when every target reuses one exact available observed repository
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact transcribed mapping selection is complete for proposal review, requires destination provisioning and reconfirmation, or requires ownership-policy revision while keeping execution authority none
+Claims-Forbidden: authenticated responder identity, organizational authority, inferred mapping by repository name, repository creation or modification, destination-owner consent, materialization, source removal, Git ref update, canonical production approval, cutover approval or execution, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: the linked response is independently reviewed before transcription; supplied catalog metadata is a point-in-time observation; a catalog or canonical-source change invalidates the selection binding; issue #1122 has no response at the time of this lane
+Write-Set: tools/science_boundary/canonical_production_mapping_decision_processor.py; schemas/sounio.physical-extraction-canonical-production-mapping-decision{,-receipt}.v1.schema.json; scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md,PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md,ECOSYSTEM_ROADMAP_2026.md}; docs/internal/concepts/science-research-boundary.md; generated docs governance artifacts; .claude/llm_offload_log.md
+Read-Set: FOUNDER_INTENT.md; AGENTS.md; science-rings.tsv; docs/ecosystem/science-physical-extraction-ownership.tsv; tools/science_boundary/{physical_extraction_inventory.py,canonical_production_gap_assessor.py}; canonical production catalog and a separately reviewed human response transcription
+Positive-Witness: equivalent standalone fixture roots emit byte-identical all-reuse decision receipts and proposed-not-approved mappings; the existing production-gap assessor consumes the mapping and still reports production-evidence-and-human-decision-required with execution authority none
+Negative-Witness: missing, extra, duplicate, unsorted, stale, unavailable, action-inconsistent, colliding, occupied, changed, forged, or rehashed selection, catalog, source, receipt, and proposal states refuse without changing source files, repositories, or refs
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.sh
+Integration-Target: codex/physical-extraction-canonical-production-readiness-r3-20260717, then origin/main after the prior stack lands
+Authoritative-Only-If: the complete prior R0-R3 stack and focused mapping-decision gate pass on one archived source snapshot with one current-source Madaros; processing a real response additionally requires an exact reviewed transcription and fresh bound catalog/canonical observation
+```
+
 ## R3 Physical Extraction Inventory Semantic Lane
 
 ```text
