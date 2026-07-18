@@ -201,7 +201,7 @@ VBF/WH/ZH treated as exact (M_W/M_Z uncertainty sub-percent and sub-dominant to 
 
 **The PL-novel contribution.** In exact QFT, unstable particles (Z, W, H, top) have no asymptotic states. Their propagators carry a complex denominator D(s) = (s−M²) + iMΓ. Functions that compute amplitudes via these propagators must declare `with NonUnitary` in their signatures — or the compiler rejects them. This propagates all the way up the call chain.
 
-**This is a genuine language extension.** `NonUnitary` (bit 22, value 4194304) was added directly to the running Sounio compiler by patching `ety_parse_effect_name` in `$PATCHED_SRC`, adding the call-site enforcement check, closure propagation, and display name — then rebuilding the binary from self-hosted Sounio source. `NonUnitary` is now a first-class effect alongside IO, Mut, Panic, Div, Alloc, Observe, GPU, ZD, Approx, Causal, NaturalityG2, Sampling.
+**This is a genuine language extension.** `NonUnitary` (bit 22, value 4194304) was added directly to the running Sounio compiler by patching `ety_parse_effect_name` in the self-hosted compiler source, adding the call-site enforcement check, closure propagation, and display name — then rebuilding the binary from self-hosted Sounio source. `NonUnitary` is now a first-class effect alongside IO, Mut, Panic, Div, Alloc, Observe, GPU, ZD, Approx, Causal, NaturalityG2, Sampling.
 
 **No other physics library in any language has compile-time effect enforcement for non-unitarity.**
 
@@ -225,7 +225,7 @@ VBF/WH/ZH treated as exact (M_W/M_Z uncertainty sub-percent and sub-dominant to 
 - Z peak σ ≈ 2×10⁻⁶ GeV⁻² (correct order of magnitude)
 - `nu_exact()` works without `with NonUnitary` (explicit non-unitary accounting path)
 
-**Compiler change summary** (`$PATCHED_SRC`, 4 edits, self-hosted rebuild):
+**Compiler change summary** (self-hosted compiler source, 4 edits, self-hosted rebuild):
 1. `ety_parse_effect_name`: "NonUnitary" (length 10) → 4194304
 2. Effect call-site check: callee `& 4194304` → require caller `& 4194304`
 3. Closure propagation: NonUnitary propagates into enclosing closures

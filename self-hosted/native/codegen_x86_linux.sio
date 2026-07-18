@@ -3946,49 +3946,55 @@ fn emit_builtin_str_char_at_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // M5: File I/O builtins
 // ============================================================================
 
-// read_file(path: *u8, buf: *u8, max_len: i64) -> i64 (bytes read)
-// Uses sys_open, sys_read, sys_close
+// read_file(path: string) -> string  (1-arg): mmap a 1 MiB buffer, open/read/close,
+// return the buffer POINTER (rax). Byte-for-byte mirror of the bootstrap emitter
+// self-hosted/bootstrap/bootstrap_v0.sio:15028-15087 — the form the running compiler
+// (and all 54 self-hosted callers + the LSP contract) uses. The previous native-v2 body
+// implemented a DIFFERENT 3-arg read_file(path,buf,max_len)->bytes_read and returned an
+// INTEGER, so 1-arg callers dereferenced a non-pointer -> SIGSEGV on raw[i]/str_len/
+// str_char_at. (The only 3-arg caller, examples/cognitive_ossm/run_ossm_native_reference.sio,
+// self-documents that it does not native-compile, so no working native 3-arg contract exists.)
+// NUL-termination relies on anonymous-mmap zero-fill: OK for text/CSV < 1 MiB with no embedded
+// NUL; larger/binary files are a known limit. The mmap is intentionally leaked (matches the
+// bootstrap reference). Linux x86-64 only (raw syscalls), per CLAUDE.md.
 fn emit_builtin_read_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 32)
-
-    // Save args: rdi=path, rsi=buf, rdx=max_len
-    // Store buf and max_len on stack for later
-    c.code = emit_store_reg_rbp_disp32(c.code, -8, 6)    // [rbp-8] = rsi (buf)
-    c.code = emit_store_reg_rbp_disp32(c.code, -16, 2)   // [rbp-16] = rdx (max_len)
-
-    // open(path, O_RDONLY=0, 0)
-    // rdi already = path
-    c.code = emit_mov_rax_rdi(c.code)                    // rax = path for Win64
-    c = emit_open_syscall_for_target(c, c.target_os_id, 0, 0)
-
-    // Save fd/handle
-    c.code = emit_store_rax_rbp_disp32(c.code, -24)      // [rbp-24] = fd
-
-    // read(fd, buf, max_len)
-    c.code = emit_mov_rdi_rax(c.code)                    // rdi = fd
-    c.code = emit_load_rbp_disp32_rax(c.code, -8)        // rax = buf
-    c.code = emit_mov_rsi_rax(c.code)                    // rsi = buf
-    c.code = emit_load_rbp_disp32_rax(c.code, -16)       // rax = max_len
-    c.code = emit_mov_rdx_rax(c.code)                    // rdx = max_len
-    c = emit_read_syscall_for_target(c, c.target_os_id)
-
-    // Save bytes_read
-    c.code = emit_store_rax_rbp_disp32(c.code, -32)      // [rbp-32] = bytes_read
-
-    // close(fd)
-    c.code = emit_load_rbp_disp32_rax(c.code, -24)       // rax = fd
-    c.code = emit_mov_rdi_rax(c.code)                    // rdi = fd
-    c = emit_close_syscall_for_target(c, c.target_os_id)
-
-    // Return bytes_read
-    c.code = emit_load_rbp_disp32_rax(c.code, -32)
-
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    var b = c.code
+    b = emit_byte(b, 0x55)                                                       // push rbp
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0xe5)       // mov rbp,rsp
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x83); b = emit_byte(b, 0xec); b = emit_byte(b, 0x20)  // sub rsp,32
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x7d); b = emit_byte(b, 0xf8)  // mov [rbp-8],rdi (path)
+    // sys_mmap(NULL, 1 MiB, PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANONYMOUS=0x22, -1, 0)
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xff)                               // xor edi,edi
+    b = emit_byte(b, 0xbe); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x10); b = emit_byte(b, 0x00)  // mov esi,1048576
+    b = emit_byte(b, 0xba); b = emit_byte(b, 0x03); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00)  // mov edx,3
+    b = emit_byte(b, 0x41); b = emit_byte(b, 0xba); b = emit_byte(b, 0x22); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00)  // mov r10d,0x22
+    b = emit_byte(b, 0x41); b = emit_byte(b, 0xb8); b = emit_byte(b, 0xff); b = emit_byte(b, 0xff); b = emit_byte(b, 0xff); b = emit_byte(b, 0xff)  // mov r8d,-1
+    b = emit_byte(b, 0x45); b = emit_byte(b, 0x31); b = emit_byte(b, 0xc9)       // xor r9d,r9d
+    b = emit_byte(b, 0xb8); b = emit_byte(b, 0x09); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00)  // mov eax,9 (mmap)
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x05)                               // syscall
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x45); b = emit_byte(b, 0xf0)  // mov [rbp-16],rax (buf ptr)
+    // sys_open(path, O_RDONLY=0, 0)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x7d); b = emit_byte(b, 0xf8)  // mov rdi,[rbp-8]
+    b = emit_byte(b, 0xb8); b = emit_byte(b, 0x02); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00)  // mov eax,2 (open)
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xf6)                               // xor esi,esi
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xd2)                               // xor edx,edx
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x05)                               // syscall
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x45); b = emit_byte(b, 0xe8)  // mov [rbp-24],rax (fd)
+    // sys_read(fd, buf, 1 MiB)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0xc7)       // mov rdi,rax (fd)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x75); b = emit_byte(b, 0xf0)  // mov rsi,[rbp-16] (buf)
+    b = emit_byte(b, 0xba); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x10); b = emit_byte(b, 0x00)  // mov edx,1048576
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xc0)                               // xor eax,eax (read)
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x05)                               // syscall
+    // sys_close(fd)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x7d); b = emit_byte(b, 0xe8)  // mov rdi,[rbp-24] (fd)
+    b = emit_byte(b, 0xb8); b = emit_byte(b, 0x03); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00); b = emit_byte(b, 0x00)  // mov eax,3 (close)
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x05)                               // syscall
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x45); b = emit_byte(b, 0xf0)  // mov rax,[rbp-16] (return buf ptr)
+    b = emit_byte(b, 0xc9)                                                       // leave
+    b = emit_byte(b, 0xc3)                                                       // ret
+    c.code = b
     c
 }
 
@@ -5289,7 +5295,7 @@ fn native_compiler_set_fn_offset(nc: &! NativeCompiler, fn_index: i64, offset: i
 }
 
 fn native_compiler_add_symbol_name_ref(nc: &! NativeCompiler, fn_index: i64, name: &Name) with Mut, Panic, Div {
-    if fn_index >= 0 && fn_index < 1024 {
+    if fn_index >= 0 && fn_index < IR_MAX_FUNCS {
         (*nc).symbols.name_offsets[fn_index as usize] = (*nc).symbols.strtab_len
         var ni = 0
         while ni < (*name).len && (*nc).symbols.strtab_len < 32767 {
@@ -5297,7 +5303,7 @@ fn native_compiler_add_symbol_name_ref(nc: &! NativeCompiler, fn_index: i64, nam
             (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
             ni = ni + 1
         }
-        if (*nc).symbols.strtab_len < 2048 {
+        if (*nc).symbols.strtab_len < 32767 {
             (*nc).symbols.strtab[(*nc).symbols.strtab_len as usize] = 0
             (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
         }
@@ -5305,7 +5311,7 @@ fn native_compiler_add_symbol_name_ref(nc: &! NativeCompiler, fn_index: i64, nam
 }
 
 fn native_compiler_add_symbol_func_ref(nc: &! NativeCompiler, fn_index: i64, func: &IrFunction) with Mut, Panic, Div {
-    if fn_index >= 0 && fn_index < 1024 {
+    if fn_index >= 0 && fn_index < IR_MAX_FUNCS {
         (*nc).symbols.name_offsets[fn_index as usize] = (*nc).symbols.strtab_len
         var ni = 0
         while ni < (*func).name.len && (*nc).symbols.strtab_len < 32767 {
@@ -5313,7 +5319,7 @@ fn native_compiler_add_symbol_func_ref(nc: &! NativeCompiler, fn_index: i64, fun
             (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
             ni = ni + 1
         }
-        if (*nc).symbols.strtab_len < 2048 {
+        if (*nc).symbols.strtab_len < 32767 {
             (*nc).symbols.strtab[(*nc).symbols.strtab_len as usize] = 0
             (*nc).symbols.strtab_len = (*nc).symbols.strtab_len + 1
         }

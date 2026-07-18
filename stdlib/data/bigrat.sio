@@ -1,0 +1,380 @@
+//! data::bigrat — UNBOUNDED exact rational arithmetic over arbitrary-precision BigInt. Zero
+//! floating-point error AND no i64 overflow: `data::exact` (i64 num/den) is exact only within the i64
+//! range; this holds numerators and denominators of arbitrary size, so a reduced denominator of 10^30
+//! is represented exactly. A `Rat` is `num/den` in lowest terms with `den > 0`.
+//!
+//! Built on the verified BigNat/BigInt core (base-1e9 limbs, LIMBS=64 → magnitudes to ~10^576),
+//! inlined here from the pattern in stdlib/math/bignat.sio and cross-checked digit-for-digit against
+//! a Python arbitrary-precision oracle (scripts/research/bigrat_oracle.py) — see the CALIBRATION NOTE
+//! below. bigrat_add/mul reduce via big_gcd after every op.
+//!
+//! CALIBRATION NOTE (souc v0.80.0): this compiler has a whole-program codegen capacity wall for
+//! struct-heavy BigInt-by-value code — past a shape-sensitive op-count it can SILENTLY EMIT WRONG
+//! VALUES with a clean exit (not just crash). Therefore "it compiled and printed a number" is NOT a
+//! correctness signal: the gate DIFFS every printed big value against the Python oracle, and callers
+//! that add many bigrat ops in one program must re-verify against the oracle. Cross-module import of
+//! these large structs is verified working at this compiler version (the older #637 SIGSEGV is fixed
+//! by #913); keep per-program op-count modest regardless.
+
+pub struct BigNat { limb: [i64; 64], len: i64 }
+pub struct BigInt { mag: BigNat, neg: bool }
+pub struct UnatDivRes { q: BigNat, r: BigNat }
+pub struct BigDivRes { q: BigInt, r: BigInt }
+
+pub fn unat_from_i64(x: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 64], len: 1 }
+    var v = x
+    var i = 0
+    while v > 0 && i < 64 {
+        b.limb[i as usize] = v - (v / 1000000000) * 1000000000
+        v = v / 1000000000
+        i = i + 1
+    }
+    if i == 0 { i = 1 }
+    b.len = i
+    b
+}
+
+pub fn unat_is_zero(a: BigNat) -> bool with Mut, Panic {
+    a.len == 1 && a.limb[0] == 0
+}
+
+pub fn unat_cmp(a: BigNat, b: BigNat) -> i64 with Mut, Panic {
+    var result = 0
+    if a.len > b.len { result = 1 }
+    if a.len < b.len { result = 0 - 1 }
+    if a.len == b.len {
+        var i = a.len - 1
+        var done = false
+        while i >= 0 && !done {
+            if a.limb[i as usize] > b.limb[i as usize] { result = 1; done = true }
+            if a.limb[i as usize] < b.limb[i as usize] { result = 0 - 1; done = true }
+            i = i - 1
+        }
+    }
+    result
+}
+
+pub fn unat_add(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 0 }
+    var carry = 0
+    var i = 0
+    var n = a.len
+    if b.len > n { n = b.len }
+    while i < n {
+        var av = 0
+        var bv = 0
+        if i < a.len { av = a.limb[i as usize] }
+        if i < b.len { bv = b.limb[i as usize] }
+        let s = av + bv + carry
+        r.limb[i as usize] = s - (s / 1000000000) * 1000000000
+        carry = s / 1000000000
+        i = i + 1
+    }
+    if carry > 0 { r.limb[i as usize] = carry; i = i + 1 }
+    r.len = i
+    r
+}
+
+pub fn unat_sub(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 0 }
+    var borrow = 0
+    var i = 0
+    while i < a.len {
+        var bv = 0
+        if i < b.len { bv = b.limb[i as usize] }
+        var d = a.limb[i as usize] - bv - borrow
+        borrow = 0
+        if d < 0 { d = d + 1000000000; borrow = 1 }
+        r.limb[i as usize] = d
+        i = i + 1
+    }
+    var l = a.len
+    while l > 1 && r.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    r.len = l
+    r
+}
+
+pub fn unat_mul_small(a: BigNat, m: i64) -> BigNat with Mut, Panic, Div {
+    var b = BigNat { limb: [0; 64], len: a.len }
+    var carry = 0
+    var i = 0
+    while i < a.len {
+        let prod = a.limb[i as usize] * m + carry
+        b.limb[i as usize] = prod - (prod / 1000000000) * 1000000000
+        carry = prod / 1000000000
+        i = i + 1
+    }
+    while carry > 0 && i < 64 {
+        b.limb[i as usize] = carry - (carry / 1000000000) * 1000000000
+        carry = carry / 1000000000
+        i = i + 1
+    }
+    b.len = i
+    b
+}
+
+pub fn unat_mul(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var r = BigNat { limb: [0; 64], len: 1 }
+    var i = 0
+    while i < a.len {
+        var carry = 0
+        var j = 0
+        while j < b.len {
+            let idx = i + j
+            let prod = a.limb[i as usize] * b.limb[j as usize] + r.limb[idx as usize] + carry
+            r.limb[idx as usize] = prod - (prod / 1000000000) * 1000000000
+            carry = prod / 1000000000
+            j = j + 1
+        }
+        var k = i + b.len
+        while carry > 0 {
+            let s = r.limb[k as usize] + carry
+            r.limb[k as usize] = s - (s / 1000000000) * 1000000000
+            carry = s / 1000000000
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var l = a.len + b.len
+    if l > 64 { l = 64 }
+    while l > 1 && r.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    r.len = l
+    r
+}
+
+pub fn unat_divmod(a: BigNat, b: BigNat) -> UnatDivRes with Mut, Panic, Div {
+    var q = BigNat { limb: [0; 64], len: a.len }
+    var rem = BigNat { limb: [0; 64], len: 1 }
+    var i = a.len - 1
+    while i >= 0 {
+        // inlined shift-in: rem = rem*BASE + a.limb[i]
+        var shifted = BigNat { limb: [0; 64], len: 0 }
+        var isz = unat_is_zero(rem)
+        if isz { shifted.limb[0] = a.limb[i as usize]; shifted.len = 1 }
+        if !isz {
+            shifted.limb[0] = a.limb[i as usize]
+            var si = 0
+            while si < rem.len { shifted.limb[(si + 1) as usize] = rem.limb[si as usize]; si = si + 1 }
+            shifted.len = rem.len + 1
+        }
+        rem = shifted
+        var lo = 0
+        var hi = 999999999
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2
+            let trial = unat_mul_small(b, mid)
+            if unat_cmp(trial, rem) <= 0 { lo = mid }
+            if unat_cmp(trial, rem) > 0 { hi = mid - 1 }
+        }
+        q.limb[i as usize] = lo
+        rem = unat_sub(rem, unat_mul_small(b, lo))
+        i = i - 1
+    }
+    var l = q.len
+    while l > 1 && q.limb[(l - 1) as usize] == 0 { l = l - 1 }
+    q.len = l
+    UnatDivRes { q: q, r: rem }
+}
+
+pub fn unat_gcd(a: BigNat, b: BigNat) -> BigNat with Mut, Panic, Div {
+    var x = a
+    var y = b
+    while !unat_is_zero(y) {
+        let dr = unat_divmod(x, y)
+        let nx = y
+        let ny = dr.r
+        x = nx
+        y = ny
+    }
+    x
+}
+
+pub fn unat_print_pad9(v: i64) with IO, Mut, Panic, Div {
+    var d = 100000000
+    while d > 0 {
+        print_int((v / d) - ((v / (d * 10)) * 10))
+        d = d / 10
+    }
+}
+
+pub fn unat_print(a: BigNat) with IO, Mut, Panic, Div {
+    print_int(a.limb[(a.len - 1) as usize])
+    var i = a.len - 2
+    while i >= 0 { unat_print_pad9(a.limb[i as usize]); i = i - 1 }
+}
+
+pub fn big_from_i64(x: i64) -> BigInt with Mut, Panic, Div {
+    var neg = false
+    var v = x
+    if v < 0 { neg = true; v = 0 - v }
+    BigInt { mag: unat_from_i64(v), neg: neg }
+}
+
+pub fn big_is_zero(a: BigInt) -> bool with Mut, Panic {
+    unat_is_zero(a.mag)
+}
+
+pub fn big_cmp(a: BigInt, b: BigInt) -> i64 with Mut, Panic {
+    var result = 0
+    let az = unat_is_zero(a.mag)
+    let bz = unat_is_zero(b.mag)
+    if az && bz { result = 0 }
+    if !(az && bz) {
+        if a.neg && !b.neg { result = 0 - 1 }
+        if !a.neg && b.neg { result = 1 }
+        if a.neg == b.neg {
+            let c = unat_cmp(a.mag, b.mag)
+            if a.neg { result = 0 - c }
+            if !a.neg { result = c }
+        }
+    }
+    result
+}
+
+pub fn big_eq(a: BigInt, b: BigInt) -> bool with Mut, Panic {
+    big_cmp(a, b) == 0
+}
+
+pub fn big_neg(a: BigInt) -> BigInt with Mut, Panic {
+    // NB: `var r = a; r.neg = !a.neg` ALIASES the caller's struct under souc v0.80.0 (struct value
+    // semantics are broken -- copy-then-mutate mutates the original in place). Build a FRESH literal.
+    if unat_is_zero(a.mag) { return BigInt { mag: a.mag, neg: false } }
+    BigInt { mag: a.mag, neg: !a.neg }
+}
+
+pub fn big_add(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    var r = BigInt { mag: a.mag, neg: false }
+    if a.neg == b.neg {
+        r.mag = unat_add(a.mag, b.mag)
+        r.neg = a.neg
+    }
+    if a.neg != b.neg {
+        let c = unat_cmp(a.mag, b.mag)
+        if c == 0 { r.mag = unat_from_i64(0); r.neg = false }
+        if c > 0 { r.mag = unat_sub(a.mag, b.mag); r.neg = a.neg }
+        if c < 0 { r.mag = unat_sub(b.mag, a.mag); r.neg = b.neg }
+    }
+    if unat_is_zero(r.mag) { r.neg = false }
+    r
+}
+
+pub fn big_sub(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    big_add(a, big_neg(b))
+}
+
+pub fn big_mul(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    var r = BigInt { mag: unat_mul(a.mag, b.mag), neg: (a.neg != b.neg) }
+    if unat_is_zero(r.mag) { r.neg = false }
+    r
+}
+
+pub fn big_divmod(a: BigInt, b: BigInt) -> BigDivRes with Mut, Panic, Div {
+    let dr = unat_divmod(a.mag, b.mag)
+    var q = BigInt { mag: dr.q, neg: (a.neg != b.neg) }
+    var r = BigInt { mag: dr.r, neg: a.neg }
+    if unat_is_zero(q.mag) { q.neg = false }
+    if unat_is_zero(r.mag) { r.neg = false }
+    BigDivRes { q: q, r: r }
+}
+
+pub fn big_gcd(a: BigInt, b: BigInt) -> BigInt with Mut, Panic, Div {
+    BigInt { mag: unat_gcd(a.mag, b.mag), neg: false }
+}
+
+pub fn big_print(a: BigInt) with IO, Mut, Panic, Div {
+    if a.neg { print("-") }
+    unat_print(a.mag)
+}
+
+pub fn big_pow10(n: i64) -> BigInt with Mut, Panic, Div {
+    var b = big_from_i64(1)
+    var c = 0
+    while c < n { b = big_mul(b, big_from_i64(10)); c = c + 1 }
+    b
+}
+
+
+pub struct BigRat { num: BigInt, den: BigInt }
+pub fn bigrat_make(num: BigInt, den: BigInt) -> BigRat with Mut, Panic, Div {
+    var n = num
+    var d = den
+    if d.neg { n = big_neg(n); d = big_neg(d) }
+    let g = big_gcd(n, d)
+    if big_is_zero(g) { return BigRat { num: big_from_i64(0), den: big_from_i64(1) } }
+    let nq = big_divmod(n, g)
+    let dq = big_divmod(d, g)
+    BigRat { num: nq.q, den: dq.q }
+}
+pub fn bigrat_add(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div {
+    let num = big_add(big_mul(a.num, b.den), big_mul(b.num, a.den))
+    bigrat_make(num, big_mul(a.den, b.den))
+}
+pub fn bigrat_mul(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div {
+    bigrat_make(big_mul(a.num, b.num), big_mul(a.den, b.den))
+}
+pub fn bigrat_eq(a: BigRat, b: BigRat) -> bool with Mut, Panic { big_eq(a.num, b.num) && big_eq(a.den, b.den) }
+pub fn bigrat_num(a: BigRat) -> BigInt { a.num }
+pub fn bigrat_den(a: BigRat) -> BigInt { a.den }
+
+/// Exact sum of `n` fractions given as parallel i64 numerator/denominator arrays, accumulated as an
+/// arbitrary-precision BigRat. Even when every input term fits in i64, the running total's denominator
+/// can grow past i64 (e.g. summing 1/p over distinct primes) — this holds it exactly. NB: each term is
+/// a struct-heavy BigInt-by-value add + gcd; keep `n` modest per program and re-verify the printed
+/// result against the oracle (see the module CALIBRATION NOTE — souc can silently miscompute past a
+/// shape-sensitive op-count).
+pub fn bigrat_col_sum(num: &[i64; 256], den: &[i64; 256], n: i64) -> BigRat with Mut, Panic, Div {
+    var acc = BigRat { num: big_from_i64(0), den: big_from_i64(1) }
+    var i: i64 = 0
+    while i < n && i < 256 {
+        acc = bigrat_add(acc, bigrat_make(big_from_i64(num[i as usize]), big_from_i64(den[i as usize])))
+        i = i + 1
+    }
+    acc
+}
+
+/// Exact difference a - b, reduced.
+pub fn bigrat_sub(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div {
+    bigrat_make(big_sub(big_mul(a.num, b.den), big_mul(b.num, a.den)), big_mul(a.den, b.den))
+}
+/// Exact quotient a / b, reduced (b must be non-zero). Sign is normalized onto the numerator.
+pub fn bigrat_div(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div {
+    bigrat_make(big_mul(a.num, b.den), big_mul(a.den, b.num))
+}
+/// Sign of a - b: -1, 0, or 1 (exact; denominators are positive so cross-multiplication preserves order).
+pub fn bigrat_cmp(a: BigRat, b: BigRat) -> i64 with Mut, Panic, Div {
+    big_cmp(big_mul(a.num, b.den), big_mul(b.num, a.den))
+}
+
+/// Parse an exact rational from a decimal string, e.g. "3.14" -> 157/50, "0.1" -> 1/10, "-2.5" -> -5/2,
+/// "100" -> 100/1. A float64 engine reads "0.1" as 0.1000000000000000055...; this reads it EXACTLY. All
+/// digits are accumulated into a BigInt and divided by 10^(number of fractional digits). Non-digit,
+/// non-sign, non-point characters are ignored. A leading '-' negates.
+pub fn bigrat_from_decimal(s: string) -> BigRat with Mut, Panic, Div {
+    let n = str_len(s)
+    var acc = big_from_i64(0)
+    var frac: i64 = 0
+    var seen_point = false
+    var neg = false
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(s, i)
+        if c == 45 { if i == 0 { neg = true } }          // '-'
+        else if c == 46 { seen_point = true }             // '.'
+        else if c >= 48 && c <= 57 {                      // '0'..'9'
+            acc = big_add(big_mul(acc, big_from_i64(10)), big_from_i64(c - 48))
+            if seen_point { frac = frac + 1 }
+        }
+        i = i + 1
+    }
+    if neg { acc = big_neg(acc) }
+    bigrat_make(acc, big_pow10(frac))
+}
+
+/// Exact mean of `n` fractions given as parallel i64 numerator/denominator arrays: the exact column sum
+/// divided by n (arbitrary precision). Returns a reduced BigRat.
+pub fn bigrat_col_mean(num: &[i64; 256], den: &[i64; 256], n: i64) -> BigRat with Mut, Panic, Div {
+    if n <= 0 { return BigRat { num: big_from_i64(0), den: big_from_i64(1) } }
+    let s = bigrat_col_sum(num, den, n)
+    bigrat_make(s.num, big_mul(s.den, big_from_i64(n)))
+}

@@ -1,0 +1,109 @@
+//! Metrology-grade outlier detection for a measurement column — Grubbs' test (ISO 5725 / NIST
+//! e-Handbook §1.3.5.17). The QC step that belongs BEFORE combining measurements: a single spurious
+//! reading badly biases a mean or a weighted combination, and neither "drop the max/min" nor a naive
+//! z-score is a defensible rule. Grubbs' test compares the most extreme point's standardized deviation
+//!   G = max_i |x_i − x̄| / s
+//! (s = sample standard deviation, n−1) against a critical value G_crit(n, α); the point is flagged as
+//! an outlier only if G > G_crit.
+//!
+//! Read-only apart from `filter_grubbs`, which returns a new frame with the flagged row removed.
+//! Self-contained on the public `data::dataframe` API; no compiler changes. Uses the α = 0.05
+//! two-sided critical-value table (NIST/Grubbs) for n = 3..30.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name, df_col_mean, df_col_std}
+
+fn o_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// The index of the most extreme point in column `col` (largest |x − mean|). Returns -1 for an empty
+/// column.
+pub fn grubbs_max_index(vals: &DataFrame, col: i64) -> i64 with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    if n <= 0 { return 0 - 1 }
+    let m = df_col_mean(vals, col)
+    var best: i64 = 0
+    var bestd = o_abs(df_get(vals, 0, col) - m)
+    var r: i64 = 1
+    while r < n {
+        let d = o_abs(df_get(vals, r, col) - m)
+        if d > bestd { bestd = d; best = r }
+        r = r + 1
+    }
+    best
+}
+
+/// The Grubbs statistic G = max|x − x̄| / s for column `col` (s = sample std, n−1). Returns 0 if s = 0
+/// or fewer than 3 points (the test is undefined).
+pub fn grubbs_statistic(vals: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    if n < 3 { return 0.0 }
+    let s = df_col_std(vals, col)
+    if s <= 0.0 { return 0.0 }
+    let m = df_col_mean(vals, col)
+    let i = grubbs_max_index(vals, col)
+    o_abs(df_get(vals, i, col) - m) / s
+}
+
+/// Critical value of Grubbs' test at α = 0.05 (two-sided), for sample size `n`. Table for n = 3..30
+/// (NIST/Grubbs); for n > 30 the n = 30 value is returned (conservative — slightly under-rejects for
+/// very large n); for n < 3 a large value is returned so nothing is ever flagged.
+pub fn grubbs_critical_05(n: i64) -> f64 {
+    if n < 3 { return 1.0e9 }
+    if n == 3 { return 1.153 }
+    if n == 4 { return 1.463 }
+    if n == 5 { return 1.672 }
+    if n == 6 { return 1.822 }
+    if n == 7 { return 1.938 }
+    if n == 8 { return 2.032 }
+    if n == 9 { return 2.110 }
+    if n == 10 { return 2.176 }
+    if n == 11 { return 2.234 }
+    if n == 12 { return 2.285 }
+    if n == 13 { return 2.331 }
+    if n == 14 { return 2.371 }
+    if n == 15 { return 2.409 }
+    if n == 16 { return 2.443 }
+    if n == 17 { return 2.475 }
+    if n == 18 { return 2.504 }
+    if n == 19 { return 2.532 }
+    if n == 20 { return 2.557 }
+    if n == 21 { return 2.580 }
+    if n == 22 { return 2.603 }
+    if n == 23 { return 2.624 }
+    if n == 24 { return 2.644 }
+    if n == 25 { return 2.663 }
+    if n == 26 { return 2.681 }
+    if n == 27 { return 2.698 }
+    if n == 28 { return 2.714 }
+    if n == 29 { return 2.730 }
+    2.745   // n >= 30 (conservative floor)
+}
+
+/// True if the most extreme point in column `col` is an outlier by Grubbs' test at α = 0.05.
+pub fn grubbs_is_outlier(vals: &DataFrame, col: i64) -> bool with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    if n < 3 { return false }
+    grubbs_statistic(vals, col) > grubbs_critical_05(n)
+}
+
+/// Return a copy of `vals` with the Grubbs-flagged extreme row removed (column `col`). If no point is
+/// flagged, the frame is copied unchanged. Column names are preserved. Removes at most one point per
+/// call (Grubbs is a single-outlier test; apply iteratively for more).
+pub fn filter_grubbs(vals: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(vals)
+    var out = df_new(nc)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(&!out, c, df_get_col_name(vals, c)); c = c + 1 }
+    var drop: i64 = 0 - 1
+    if grubbs_is_outlier(vals, col) { drop = grubbs_max_index(vals, col) }
+    var r: i64 = 0
+    while r < df_nrows(vals) {
+        if r != drop {
+            var row: [f64; 64] = [0.0; 64]
+            var k: i64 = 0
+            while k < nc && k < 64 { row[k as usize] = df_get(vals, r, k); k = k + 1 }
+            df_add_row(&!out, &row)
+        }
+        r = r + 1
+    }
+    out
+}

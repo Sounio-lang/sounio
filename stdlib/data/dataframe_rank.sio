@@ -1,0 +1,106 @@
+//! Rank the values in DataFrame columns (pandas rank).
+//!
+//! Ranks are 1-based and ascending (smallest value gets rank 1). Ties share the average of the ranks
+//! they span (pandas method="average"). df_rank ranks every column; df_rank_col ranks one column and
+//! returns a same-shape frame with only that column replaced by its ranks.
+//!
+//! Functional: the input is unchanged and column names are preserved. Self-contained: uses only the
+//! public data::dataframe accessors. Caps at 1024 rows.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+// Compute average-tie ascending ranks of column `col` into `rank` (indexed by original row).
+fn rank_col_into(df: &DataFrame, col: i64, rank: &![f64; 1024]) with Mut, Div, Panic {
+    let n = df_nrows(df)
+    // order[] = row indices sorted ascending by value (stable insertion sort)
+    var order: [i64; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < n && i < 1024 { order[i as usize] = i; i = i + 1 }
+    var a: i64 = 1
+    while a < n && a < 1024 {
+        let cur = order[a as usize]
+        let cv = df_get(df, cur, col)
+        var b = a - 1
+        var placed = false
+        while b >= 0 && !placed {
+            if df_get(df, order[b as usize], col) > cv { order[(b + 1) as usize] = order[b as usize]; b = b - 1 } else { placed = true }
+        }
+        order[(b + 1) as usize] = cur
+        a = a + 1
+    }
+    // walk sorted order, assign average rank to tie groups (ranks are 1-based positions)
+    var p: i64 = 0
+    while p < n {
+        var q = p
+        let vp = df_get(df, order[p as usize], col)
+        while q + 1 < n && df_get(df, order[(q + 1) as usize], col) == vp { q = q + 1 }
+        // positions p..q (0-based) -> ranks (p+1)..(q+1); average = (p+1 + q+1)/2
+        let avg = ((p + 1) + (q + 1)) as f64 / 2.0
+        var t = p
+        while t <= q { rank[order[t as usize] as usize] = avg; t = t + 1 }
+        p = q + 1
+    }
+}
+
+/// Return a same-shape frame where each column's values are replaced by their ascending ranks
+/// (1-based, ties averaged).
+pub fn df_rank(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    let nr = df_nrows(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var flat: [f64; 65536] = [0.0; 65536]
+    var c: i64 = 0
+    while c < nc && c < 64 {
+        var rk: [f64; 1024] = [0.0; 1024]
+        rank_col_into(df, c, &!rk)
+        var r: i64 = 0
+        while r < nr {
+            let idx = r * nc + c
+            if idx >= 0 && idx < 65536 { flat[idx as usize] = rk[r as usize] }
+            r = r + 1
+        }
+        c = c + 1
+    }
+    var rr: i64 = 0
+    while rr < nr {
+        var row: [f64; 64] = [0.0; 64]
+        var k: i64 = 0
+        while k < nc && k < 64 {
+            let idx = rr * nc + k
+            if idx >= 0 && idx < 65536 { row[k as usize] = flat[idx as usize] }
+            k = k + 1
+        }
+        df_add_row(&!out, &row)
+        rr = rr + 1
+    }
+    out
+}
+
+/// Return a copy of `df` with only column `col` replaced by its ascending ranks (1-based, ties
+/// averaged); other columns are unchanged.
+pub fn df_rank_col(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var rk: [f64; 1024] = [0.0; 1024]
+    rank_col_into(df, col, &!rk)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            if c == col { row[c as usize] = rk[r as usize] } else { row[c as usize] = df_get(df, r, c) }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
