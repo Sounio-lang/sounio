@@ -35,5 +35,12 @@ def col():
     for p in _first_primes(100): s += F(1, p)                                  # 220-digit denominator
     _emit("col_p100", s)
 
+
+def ext():
+    from fractions import Fraction as F
+    _emit("bigdec", F('0.123456789012345678901234567890'))   # 12345678901234567890123456789 / 10^29
+    _emit("colmean", (F(1,2)+F(1,3)+F(1,6)) / 3)              # 1 / 3
+
 if __name__ == "__main__":
-    (col if (len(sys.argv) > 1 and sys.argv[1] == "col") else base)()
+    g = sys.argv[1] if len(sys.argv) > 1 else "base"
+    {"base": base, "col": col, "ext": ext}[g]()
