@@ -55,7 +55,7 @@ def oct_mul(a: list[float], b: list[float]) -> list[float]:
         a0 * b4 + a4 * b0 - a1 * b5 + a5 * b1 - a2 * b6 + a6 * b2 - a3 * b7 + a7 * b3,
         a0 * b5 + a5 * b0 + a1 * b4 - a4 * b1 - a2 * b7 + a7 * b2 + a3 * b6 - a6 * b3,
         a0 * b6 + a6 * b0 + a1 * b7 - a7 * b1 + a2 * b4 - a4 * b2 - a3 * b5 + a5 * b3,
-        a0 * b7 + a7 * b0 - a1 * b6 + a6 * b1 - a2 * b5 + a5 * b2 + a3 * b4 - a4 * b3,
+        a0 * b7 + a7 * b0 - a1 * b6 + a6 * b1 + a2 * b5 - a5 * b2 + a3 * b4 - a4 * b3,
     ]
 
 

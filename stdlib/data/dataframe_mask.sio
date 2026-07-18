@@ -1,0 +1,66 @@
+//! Conditional replacement of DataFrame cells (pandas where / mask).
+//!
+//! A predicate on one column selects rows; df_where keeps a column's value where the predicate holds
+//! and substitutes `other` elsewhere, while df_mask does the opposite. The predicate operator is an
+//! op code: 0 >, 1 >=, 2 <, 3 <=, 4 ==, 5 !=, comparing the predicate column against `thresh`.
+//!
+//! Functional: the input is unchanged and column names are preserved. Self-contained: uses only the
+//! public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+fn pred(v: f64, op: i64, thresh: f64) -> bool {
+    if op == 0 { return v > thresh }
+    if op == 1 { return v >= thresh }
+    if op == 2 { return v < thresh }
+    if op == 3 { return v <= thresh }
+    if op == 4 { return v == thresh }
+    if op == 5 { return v != thresh }
+    false
+}
+
+// When `keep_on_true` is true this is where(); false is mask(). `target` is the column whose values
+// get conditionally replaced; the predicate is evaluated on column `pred_col`.
+fn apply_cond(df: &DataFrame, target: i64, pred_col: i64, op: i64, thresh: f64, other: f64, keep_on_true: bool) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        let hold = pred(df_get(df, r, pred_col), op, thresh)
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            var v = df_get(df, r, c)
+            if c == target {
+                // where: keep when predicate true, else other. mask: keep when false, else other.
+                var keep = hold
+                if !keep_on_true { keep = !hold }
+                if !keep { v = other }
+            }
+            row[c as usize] = v
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Keep column `target`'s value where the predicate on column `pred_col` holds; replace it with
+/// `other` where it does not (pandas where). Op: 0 >, 1 >=, 2 <, 3 <=, 4 ==, 5 !=.
+pub fn df_where(df: &DataFrame, target: i64, pred_col: i64, op: i64, thresh: f64, other: f64) -> DataFrame with Mut, Div, Panic {
+    apply_cond(df, target, pred_col, op, thresh, other, true)
+}
+
+/// Replace column `target`'s value with `other` where the predicate on column `pred_col` holds; keep
+/// it elsewhere (pandas mask -- the inverse of df_where). Op codes as in df_where.
+pub fn df_mask(df: &DataFrame, target: i64, pred_col: i64, op: i64, thresh: f64, other: f64) -> DataFrame with Mut, Div, Panic {
+    apply_cond(df, target, pred_col, op, thresh, other, false)
+}

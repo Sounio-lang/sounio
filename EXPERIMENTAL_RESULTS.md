@@ -1,5 +1,26 @@
 # Experimental Results Summary
 
+> ⚠️ **CORRECTION NOTICE (2026-07-16).** Every O-SSM number in this document that came from an
+> octonion or sedenion multiplication table was computed on a table with a sign error in the
+> `e2·e5` product (`-a2*b5+a5*b2` instead of `+a2*b5-a5*b2`). That table **fails alternativity
+> and composition** — it is *not* the octonions (and the 8-dim `zd_*` "zero-divisor" table is not
+> a division algebra), so any *positive* non-associativity result below is a table artifact, not
+> an octonion result. This document's **conclusions were already the honest negative** ("non-
+> associativity is decorative / a LIABILITY; the mechanism is cross-dim coupling, not octonion
+> algebra"), and those stand. What does **not** survive the corrected algebra are the residual
+> positive claims, individually flagged inline below:
+> - §"★★★★★ Trajectory Divergence … slight advantage" (the `triple_product` benchmark — BROKEN table).
+> - §"Fractal-G2 v2/v3 + Fano curriculum" (`+3.6pp`, `7× advantage`, `+2.1pp` — BROKEN table).
+> - §"ZD Deep Dive … ZD advantage +24.45pp" (the `zd_*` / `gate_vs_zd` suite — BROKEN 8-dim table;
+>   `zd_bptt` re-runs to +0.00pp on the corrected sedenion).
+>
+> Only two paper-cited benchmarks were **re-measured** on the corrected algebra (lean_single,
+> seeded; PR #1024): `multihead_unit_oct` — sorting-like octonion **32.8%** vs diagonal **54.0%**
+> (reversed), octonion only leads the associator probe (17.7% vs 7.6%); and `listops` (already a
+> valid isomorphic table) — octonion **13.0%** = H-SSM 13.0% vs diagonal 20.5%. Every other broken-
+> table number below is **not re-validated** — no corrected figure is asserted for it. Consistent
+> with A/B re-audit NEGATIVE, ABIDE associator null, and PR #907's representational-capacity reframe.
+
 ## Core Results (4 Tasks + Control)
 
 | Task | Condition | O-SSM | S4-DIAG | Naive-DIAG | H-SSM | Random | Notes |
@@ -199,6 +220,11 @@ Associator ||[A,h,x]|| = ||(A⊗h)⊗x - A⊗(h⊗x)|| computed per head, fed as
 
 ## ★★★★★ Trajectory Divergence: First Signal of Non-Associativity Value
 
+> ⚠️ **RETRACTED (2026-07-16):** this "first signal" ran on the broken `triple_product` octonion
+> table (non-alternative, not a composition algebra — see top notice). The 0.1096 < 0.1157
+> high-divergence MSE gap and the "slight advantage" conclusion are table artifacts and are **not
+> re-validated** on the corrected algebra. No corrected figure is asserted here.
+
 ### Domain Shift: Dynamical Systems, Not Classification
 
 **Key insight**: Non-associativity lives in trajectory divergence, not discrete classification.
@@ -260,10 +286,10 @@ This is the seed that needs GPU-scale compute to grow into a conclusive result.
 11. **Trajectory divergence** (O-SSM-Triple 0.1096 < H-SSM-Triple 0.1157 on high-div triples — first signal, 2 agents) ✓
 12. **Analytical BPTT** (exact Jacobian verified, but DESTROYS learning: 0.125 baseline. Non-assoc gradient landscape is adversarial) ✓
 13. **Riemannian BPTT** (manifold projection doesn't help — gradient direction is the problem, not constraint) ✓
-14. **Fractal-G2 v1** (G2-manifold A update → MeanAssocNorm=0.075 ALIVE, first signal) ✓
-15. **Fractal-G2 v2** (full Jacobian + analytical associator grad → +3.6pp over H-SSM, 3 seeds) ✓
-16. **Fractal-G2 v3 annealed** (λ=0.15→0.03 + 10 seeds → O-SSM NA=4.0±0.7%, best seed 8.7% > 6.25% random) ✓
-17. **★★★★★ Fractal-G2 v3 + Fano curriculum** (Sounio-unique: compiler knows Fano triples → H-SSM collapses to 0.2% NA while O-SSM retains 1.5% → 7× advantage ratio, +2.1pp overall gap) ✓
+14. **Fractal-G2 v1** (G2-manifold A update → MeanAssocNorm=0.075 ALIVE, first signal) ✓ ⚠️ **RETRACTED 2026-07-16 — broken octonion table (see top notice); not re-validated.**
+15. **Fractal-G2 v2** (full Jacobian + analytical associator grad → ~~+3.6pp over H-SSM, 3 seeds~~) ✓ ⚠️ **RETRACTED 2026-07-16 — the `+3.6pp` came from the broken octonion table; not re-validated.**
+16. **Fractal-G2 v3 annealed** (λ=0.15→0.03 + 10 seeds → ~~O-SSM NA=4.0±0.7%, best seed 8.7% > 6.25% random~~) ✓ ⚠️ **RETRACTED 2026-07-16 — broken octonion table; not re-validated.**
+17. **~~★★★★★ Fractal-G2 v3 + Fano curriculum~~** (~~compiler knows Fano triples → H-SSM collapses to 0.2% NA while O-SSM retains 1.5% → 7× advantage ratio, +2.1pp overall gap~~) ⚠️ **RETRACTED 2026-07-16 — the `7× advantage` and `+2.1pp` gap are artifacts of the broken octonion table (non-alternative, not a composition algebra). Not re-validated on the corrected algebra; no corrected figure asserted. This was the document's strongest positive non-associativity claim and it does not survive.**
 
 ## Paper Structure
 
@@ -342,6 +368,15 @@ S4-DIAG (HiPPO diagonal rotation) excels at **pattern matching with preserved ph
 ---
 
 ## ★★★ ZD Deep Dive: Gate vs Capacity vs Zero-Divisors (2026-04-29)
+
+> ⚠️ **RETRACTED (2026-07-16).** This entire section rests on an 8-dim `zd_*` / `gate_vs_zd`
+> "zero-divisor" table that carries the same broken `e2·e5` sign error. Two compounding problems:
+> (1) the table is non-alternative (not a composition algebra), and (2) **real octonions are a
+> division algebra with no zero divisors at all** — a broken non-alternative 8-dim table can
+> *manufacture* spurious zero-divisor behavior. So every "ZD advantage" figure here (including the
+> headline `+24.45pp`) is a table artifact. On the corrected sedenion, `zd_bptt` re-runs to a
+> +0.00pp ZD advantage. These results need re-derivation, and genuine zero divisors live in the
+> 16-dim sedenion algebra, not this 8-dim table. **Not re-validated; no corrected figure asserted.**
 
 ### Motivation
 
@@ -534,9 +569,9 @@ Output:  predict perm_bit[0] XOR fresh_pattern
 
 | Model | Accuracy (2000 test) |
 |-------|----------------------|
-| S-SSM-ZD (A=e3+e10, ZD-init) | **76.15%** |
+| S-SSM-ZD (A=e3+e10, ZD-init) | ~~**76.15%**~~ |
 | H-SSM (A=0.95×I, no ZD) | 51.70% |
-| **ZD advantage** | **+24.45pp** |
+| **ZD advantage** | ~~**+24.45pp**~~ ⚠️ **RETRACTED — broken table artifact (see section notice above); `zd_bptt` → +0.00pp on corrected sedenion** |
 
 **Structural ceiling**:
 - S-SSM-ZD: temp erased EXACTLY → fresh slot clean → 100% achievable
@@ -554,10 +589,12 @@ This is distinct from previous benchmarks (Token-Erase, Mode-Switch) where:
 - The training objective did not specifically exploit the structural separation
 - Output-only gradients could not align ERASE-token embeddings with the ZD complement
 
-**Conclusion**: ZD's hard-reset property creates a structural advantage that IS exploitable with
+**Conclusion**: ~~ZD's hard-reset property creates a structural advantage that IS exploitable with
 ZD-aligned embedding initialization + output-only training, as long as the task forces reuse
 of the same 4D subspace for both temp and fresh information. The 24.45pp gap is the cleanest
-empirical demonstration of ZD advantage to date.
+empirical demonstration of ZD advantage to date.~~ ⚠️ **RETRACTED 2026-07-16 — this conclusion is
+built on the broken 8-dim `zd_*` table (see section notice); the "zero divisors" it uses are
+spurious. Not re-validated; `zd_bptt` → +0.00pp on the corrected sedenion.**
 
 
 ---
