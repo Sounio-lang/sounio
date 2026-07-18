@@ -334,6 +334,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.data-access-credentials | repo_only | docs/governance/data_access_credentials.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.gpu.batched-hyper-syntax | repo_only | docs/gpu/BATCHED_HYPER_SYNTAX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.oct-wmma-validate.gb10-receipt-20260716 | repo_only | docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.check-sounio-guide | repo_only | docs/guide/CHECK_SOUNIO_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -431,6 +432,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.policy-state-feedback | repo_only | docs/internal/concepts/policy-state-feedback.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-inference | repo_only | docs/internal/concepts/proof-carrying-inference.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.proof-carrying-rebracketing-protocol | repo_only | docs/internal/concepts/proof-carrying-rebracketing-protocol.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.reflexive-inquiry | repo_only | docs/internal/concepts/reflexive-inquiry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -745,6 +747,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.proof-carrying-epistemic-contest-d2-2026-07-14 | historical | docs/research/proof_carrying_epistemic_contest_d2_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-policy-observation-associator-d6-2026-07-15 | historical | docs/research/proof_carrying_policy_observation_associator_d6_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-policy-state-feedback-d5-2026-07-15 | historical | docs/research/proof_carrying_policy_state_feedback_d5_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.proof-carrying-rebracketing-protocol-d7-2026-07-15 | historical | docs/research/proof_carrying_rebracketing_protocol_d7_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-reflexive-inquiry-d3-2026-07-15 | historical | docs/research/proof_carrying_reflexive_inquiry_d3_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-microkernel-suite-2026-06-23 | historical | docs/research/proof-checker-microkernel-suite-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -818,6 +821,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.plans.2026-07-14-special-gamma-vertical | repo_only | docs/superpowers/plans/2026-07-14-special-gamma-vertical.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof | repo_only | docs/superpowers/plans/2026-07-14-stats-validation-runproof.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-14-units-vertical | repo_only | docs/superpowers/plans/2026-07-14-units-vertical.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.plans.2026-07-17-csv-reader | repo_only | docs/superpowers/plans/2026-07-17-csv-reader.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-data-science-io-design | repo_only | docs/superpowers/specs/2026-07-13-data-science-io-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-epistemic-gum-hardening-design | repo_only | docs/superpowers/specs/2026-07-13-epistemic-gum-hardening-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-14-integrate-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-integrate-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -830,6 +834,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-14-stats-validation-runproof-design | repo_only | docs/superpowers/specs/2026-07-14-stats-validation-runproof-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-14-units-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-units-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-15-batched-verticals-index | repo_only | docs/superpowers/specs/2026-07-15-batched-verticals-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-17-csv-reader-design | repo_only | docs/superpowers/specs/2026-07-17-csv-reader-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.testing | repo_only | docs/TESTING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.theory.epistemic-monotonicity | repo_only | docs/theory/epistemic_monotonicity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
