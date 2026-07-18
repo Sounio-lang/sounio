@@ -9,9 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 # Science and Research Boundary
 
-Status: executable R0-R2 boundary; physical extraction R3 is deferred. The
-promotion is bound to the transitive raw-AST witness in
-`scripts/ci/science_boundary_gate.sh` and a current-source Madaros.
+Status: executable R0-R2 boundary with an R2.5 local package-release boundary;
+physical extraction R3 is deferred. Promotion is bound to the transitive
+raw-AST witness in `scripts/ci/science_boundary_gate.sh`, the package gate in
+`scripts/ci/package_boundary_release_gate.sh`, and a current-source Madaros.
 R3 means moving scientific-package and research sources into separately owned
 repositories or distributions; no source file is moved by this milestone.
 
@@ -59,6 +60,7 @@ The public `souc` and Madaros launchers accept:
 --science-manifest <path>
 --claim-contract <path>
 --emit-boundary-receipt <path>
+--release-bundle <path>
 ```
 
 Without a scientific declaration the effective mode is `off`. Discovery of a
@@ -76,6 +78,36 @@ before lowering. A stale raw ELF without the interface cannot silently fall
 back: the host syntax audit is recorded as non-authoritative and yields
 `UNKNOWN`. Rebuild with `make build-madaros` or point `MADAROS_RAW_BIN` at a
 current-source ELF before using strict mode.
+
+## R2.5 Package Release Bundle
+
+`souc pkg build <project> --science-boundary strict --claim-contract <path>`
+is the opt-in package release path. It requires the package's own
+`sounio.toml` as the policy root and emits a deterministic
+`sounio.package-release-bundle.v1` directory. The default destination is
+`target/release/<name>-<version>.sio-release`; `--release-bundle` can select a
+different final directory.
+
+The launcher first builds into a sibling staging directory. Promotion requires
+all of the following:
+
+1. strict receipt verdict `OK`;
+2. `madaros-raw-ast-v1` closure with no saturation or unresolved imports;
+3. a claim contract authorized by the root ring and bound to verified content;
+4. revalidated source, policy, claim, compiler, and native artifact hashes;
+5. an exact bundle inventory and a valid bundle identity hash.
+
+Only then is the staging directory renamed to its final path. Refusal,
+`UNKNOWN`, compilation failure, mutation, tamper, or an occupied destination
+leaves the requested final bundle absent and never overwrites an existing
+bundle. The bundle contains the native artifact, boundary receipt, exact claim
+contract copy, and `package-release.json`.
+
+`souc pkg verify <bundle> --root <project>` repeats the bundle checks and the
+full receipt verification. The original sources, policy, claim path, and
+compiler are required. The bundle deliberately does not claim environment
+capture, independent replay, registry publication, scientific truth, or
+clinical authority.
 
 ## Declarations
 
@@ -141,9 +173,13 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 ## Current Acceptance Status
 
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
-contract, legacy quarantine, and strict temporary-ELF flow are implemented.
+contract, legacy quarantine, strict temporary-ELF flow, and atomic R2.5 package
+release bundle are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
 strict ELFs, deterministic receipts, refusal/`UNKNOWN`, tamper detection, and
-absence of a final ELF after strict refusal.
+absence of a final ELF after strict refusal. The R2.5 gate composes those 178
+assertions with 65 assertions for bundle determinism, round-trip verification,
+refusal without a final bundle, exact-inventory enforcement, and component
+tamper detection.

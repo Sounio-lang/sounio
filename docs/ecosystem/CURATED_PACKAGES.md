@@ -28,6 +28,13 @@ Um pacote candidato a curadoria deve atender **todos** os critérios:
 
 ## Pacotes da Fase 1 (Q2-Q3 2026)
 
+O inventário executável e deliberadamente limitado desta fase está em
+`docs/ecosystem/curated-package-release-inventory.tsv`. Ele cobre apenas os
+cinco candidatos abaixo. Nenhuma linha está hoje marcada como
+`release-eligible`: presença no repositório, ring declarado ou aprovação de um
+gate genérico não substituem um claim contract específico do release e um
+bundle R2.5 verificado. O inventário não classifica implicitamente o `stdlib`.
+
 ### 1. `epistemic-core` (Fundação)
 
 **Descrição:** Tipos básicos, propagação GUM, `Knowledge<T>`, ledger, confidence gates.
@@ -124,6 +131,22 @@ Todo pacote curado deve ter:
 - Documentação gerada via `souniodoc`
 - Receipt de fronteira com verdict, hashes, engine e limitações
 - Testes passando no `stdlib_hyper_execution_gate.sh`
+
+## Release local R2.5
+
+Um candidato com entrypoint nativo, policy `[science]` revisada e claim
+contract explicitamente autorizado pode produzir um bundle local opt-in:
+
+```bash
+bin/souc pkg build . \
+  --science-boundary strict \
+  --claim-contract claim.toml
+bin/souc pkg verify target/release/<name>-<version>.sio-release --root .
+```
+
+O bundle contém artefato, receipt, cópia do claim contract e manifesto de
+bindings. A promoção é atômica e ocorre somente após revalidação. Isso não
+publica o pacote nem altera sua elegibilidade no inventário.
 
 ---
 
