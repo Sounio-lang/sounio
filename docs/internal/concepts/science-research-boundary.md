@@ -68,7 +68,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`registry-attestation-spec`
+`r3-physical-extraction-inventory`
 
 ## R2.5 Semantic Lane
 
@@ -91,6 +91,29 @@ Negative-Witness: UNKNOWN, unauthorized claim, tamper, mutation, missing claim, 
 Acceptance-Gate: SOUNIO_PACKAGE_BOUNDARY_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/package_boundary_release_gate.sh
 Integration-Target: origin/main after review
 Authoritative-Only-If: both the 178-assertion R0-R2 gate and the R2.5 gate pass with the same current-source raw Madaros AST collector
+```
+
+## R2.6 Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R2.6-REGISTRY-ATTESTATION-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: package discovery may advance without converting catalog presence, metadata, or a local policy decision into scientific authority
+Transformation: bind one fully verified R2.5 release bundle to one explicit local registry policy through a deterministic unsigned attestation
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that one exact R2.5 bundle matches one exact local catalog policy
+Claims-Forbidden: scientific truth, clinical validity, ClinicalAuthority, ClinicalRelease, public registry publication, namespace ownership, issuer identity, remote signature authority, attested execution, independent replay, or R3 physical extraction
+Assumptions: the original R2.5 bundle inputs remain available and registry policy v1 keeps publication disabled
+Write-Set: tools/science_boundary/registry_attestation.py; schemas/sounio.registry-attestation*.v1.schema.json; scripts/ci/registry_attestation_spec_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{REGISTRY_ATTESTATION_SPEC.md,registry-attestation-policy.example.toml,REGISTRY_ARCHITECTURE.md,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md}; docs/architecture/science-research-boundary.md; docs/internal/concepts/{science-research-boundary.md,registry.tsv}; docs/governance/topic-registry.v1.json; tools/registry/README.md; .claude/llm_offload_log.md
+Read-Set: tools/science_boundary/{attestor.py,package_release.py}; schemas/sounio.package-release-bundle.v1.schema.json; package manifests and claim contracts
+Positive-Witness: verified R2.5 bundle emits a deterministic POLICY_MATCH attestation that round-trips against the same sources, policies, and compiler
+Negative-Witness: denied ring, visibility, claim, malformed policy, mutated input, occupied output, and forged or rehashed attestation all refuse
+Acceptance-Gate: SOUNIO_REGISTRY_ATTESTATION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/registry_attestation_spec_gate.sh
+Integration-Target: codex/package-boundary-release-r25-20260717, then origin/main after R2.5 lands
+Authoritative-Only-If: the R0-R2, R2.5, and R2.6 gates pass with the same current-source raw Madaros AST collector
 ```
 
 ## Initial Integration Receipt
@@ -130,6 +153,27 @@ Conflicting-Lanes: upstream rebracketing registry update preserved during rebase
 LLM-Offload: xai/grok-4.3 review; package claim preflight and internal artifact-label scope addressed; fsync and schema-scope false positives documented in .claude/llm_offload_log.md
 Remaining-Blockers: none for the local R2.5 boundary; public registry and remote attestation remain deliberately unspecified
 Next-Semantic-Interface: registry-attestation-spec
+```
+
+## R2.6 Integration Receipt
+
+```text
+Semantic-Outcome: executable deterministic local registry-policy attestation for verified R2.5 bundles
+Concept-Status-Before: executable R0-R2 boundary plus R2.5 local package release; registry attestation unspecified
+Concept-Status-After: executable R0-R2 plus R2.5 release and R2.6 unsigned local policy-attestation boundary
+Distinctions-Added: bundle identity versus catalog policy match; local policy match versus publication; attestation identity versus issuer identity
+Distinctions-Preserved: compilation versus scientific validity; claim authorization versus claim truth; provenance versus assurance; local release versus public registry status
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of 028ae28d85e3260cf603b1b77b6c7fb645eaf1ab, sha256=d12cfe296a12e22eef1cb3e162c58d2d80a9a957436d58362161ba66bb35f000
+Evidence-Compiler: unchanged R2.5 source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6394 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:30; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions all PASS
+Supporting-Gates: registry_attestation_spec_gate.py -> PASS 82; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh -> PASS; check_docs_consistency.sh -> PASS
+Fallback-Path: none authorized; any R2.5 verification failure, policy mismatch, malformed input, or forged attestation refuses
+Legacy-Kept: R2.5 bundles remain unchanged and scripts/dev/registry_serve.py continues returning 501 for publication
+Conflicting-Lanes: none reported for SOUNIO-SCIENCE-RESEARCH-BOUNDARY when the R2.6 lane opened
+LLM-Offload: xai/grok-4.3 review; predicate-derived check recording, rehashed claim/compiler binding adversaries, and source-root wording addressed; raw=/tmp/llm-offload-6VaZiR/
+Remaining-Blockers: none for R2.6; hosted publication, namespace/issuer authority, remote signatures, independent replay, and physical extraction remain separate future interfaces
+Next-Semantic-Interface: r3-physical-extraction-inventory
 ```
 
 ## Closed Blockers

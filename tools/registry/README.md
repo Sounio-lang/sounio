@@ -11,6 +11,15 @@ The proposed Sounio Package Registry would provide:
 - **Authentication**: Secure API tokens for publishing
 - **Statistics**: Download counts and usage metrics
 
+## Executable Local Attestation Contract
+
+R2.6 defines a deterministic `unsigned-local-policy-evaluation` for verified
+R2.5 release bundles. See
+`docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md` and
+`tools/science_boundary/registry_attestation.py`. This local contract keeps
+`publication-status = "disabled"`; it does not launch this registry scaffold
+or enable its publishing examples.
+
 ## API Documentation
 
 The registry API is documented using OpenAPI 3.1. See `openapi.yaml` for the complete specification.

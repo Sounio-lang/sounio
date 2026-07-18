@@ -149,7 +149,8 @@ converter maturidade de implementação em autoridade científica ou regulatóri
 1. Fechar o inventário ring-by-ring do `stdlib`
 2. Manter a integração R2.5 de `package-boundary-receipt` nos releases opt-in
 3. Criar `sounio-py` com binding mínimo de `Knowledge`
-4. Especificar registry attestation antes de habilitar publicação
+4. Manter o gate R2.6 de registry attestation local com publicação desabilitada
+5. Preparar o inventário de ownership para a extração física R3
 
 ---
 

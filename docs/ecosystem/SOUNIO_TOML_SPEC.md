@@ -125,15 +125,18 @@ Um registry público futuro armazenaria:
 - Hash do pacote
 - Lista de dependências resolvidas
 - Declaração de ring e receipt de fronteira, quando aplicável
-- Artefatos locais verificáveis `.sio-release`; formatos futuros de registry
-  permanecem fora deste contrato
+- Artefatos locais verificáveis `.sio-release`
+- Attestations R2.6 `unsigned-local-policy-evaluation` para decisões locais de
+  catálogo; publicação, issuer identity e assinatura remota permanecem fora
+  deste contrato
 
 ## 7. Próximos Passos
 
 1. Completar o inventário de rings do `stdlib`
 2. Manter o gate R2.5 de receipts opt-in para package/release
-3. Especificar registry attestation antes de habilitar publicação
+3. Manter o gate R2.6 de registry attestation local sem habilitar publicação
 4. Desenvolver `sounio-py` bindings sem ampliar autoridade científica
+5. Preparar o inventário de ownership para a extração física R3
 
 ---
 

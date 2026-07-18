@@ -9,12 +9,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 # Science and Research Boundary
 
-Status: executable R0-R2 boundary with an R2.5 local package-release boundary;
-physical extraction R3 is deferred. Promotion is bound to the transitive
-raw-AST witness in `scripts/ci/science_boundary_gate.sh`, the package gate in
-`scripts/ci/package_boundary_release_gate.sh`, and a current-source Madaros.
+Status: executable R0-R2 boundary with an R2.5 local package-release boundary
+and an R2.6 local registry-attestation policy contract; physical extraction R3
+is deferred. Promotion is bound to the transitive raw-AST witness in
+`scripts/ci/science_boundary_gate.sh`, the package gate in
+`scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
+`scripts/ci/registry_attestation_spec_gate.sh`, and a current-source Madaros.
 R3 means moving scientific-package and research sources into separately owned
-repositories or distributions; no source file is moved by this milestone.
+repositories or distributions; R2.6 moves no source file and launches no
+registry service.
 
 The enforced dependency direction is:
 
@@ -109,6 +112,27 @@ compiler are required. The bundle deliberately does not claim environment
 capture, independent replay, registry publication, scientific truth, or
 clinical authority.
 
+## R2.6 Registry Attestation Policy
+
+`tools/science_boundary/registry_attestation.py` consumes a fully verified
+R2.5 bundle, its original verification inputs, and a separate
+`sounio.registry-attestation-policy.v1`. It emits a deterministic
+`sounio.registry-attestation.v1` only when the bundle's conclusive ring,
+visibility, requested claim class, identity-only assurance, strict mode, and
+`OK` verdict match the local policy.
+
+The attestation type is `unsigned-local-policy-evaluation`, its decision is
+`POLICY_MATCH`, its authority scope is `local-catalog-index`, and its
+publication status is `disabled`. Verification reconstructs the entire
+attestation from the bundle, source tree, package policy, compiler, and
+registry policy. A forged field remains invalid even if its JSON identity hash
+is recomputed.
+
+R2.6 binds a local catalog decision to exact content. It does not assert public
+registry status, upload, namespace ownership, issuer identity, remote
+signature, independent replay, scientific truth, or clinical authority. The
+complete contract is `docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -145,10 +169,10 @@ inferred from names, directories, scores, or package metadata. A GUM claim must
 name both `method` and `witness` evidence; legacy `gum-compliant` is never a
 substitute.
 
-Those hashes establish file identity, existence, and change detection only.
+Those hashes establish file identity, existence, policy matching, and change detection only.
 They do not establish that a dataset is genuine, a method is correct, a review
 is independent, or evidence supports scientific or clinical validity. External
-registry authority, remote signatures, attested execution, independent replay,
+hosted registry authority, remote signatures, attested execution, independent replay,
 `ClinicalAuthority`, and `ClinicalRelease` remain outside R0-R2.
 
 `sounio.package-boundary-receipt.v1` records the ternary verdict, mode, graph,
@@ -173,8 +197,9 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 ## Current Acceptance Status
 
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
-contract, legacy quarantine, strict temporary-ELF flow, and atomic R2.5 package
-release bundle are implemented.
+contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
+release bundle, and deterministic R2.6 local registry-policy attestation are
+implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -182,4 +207,11 @@ strict ELFs, deterministic receipts, refusal/`UNKNOWN`, tamper detection, and
 absence of a final ELF after strict refusal. The R2.5 gate composes those 178
 assertions with 65 assertions for bundle determinism, round-trip verification,
 refusal without a final bundle, exact-inventory enforcement, and component
-tamper detection.
+tamper detection. The R2.6 gate adds 82 assertions for policy matching,
+deterministic attestation identity, output promotion, full input revalidation,
+and forged or rehashed attestation refusal.
+
+The composed current-source acceptance witness is Slurm job `6394`: the same
+Madaros ELF passed all 178 R0-R2 assertions, 65 R2.5 assertions, and 82 R2.6
+assertions. This establishes the named software boundary only; it does not
+promote any package or claim to a stronger evidence class.
