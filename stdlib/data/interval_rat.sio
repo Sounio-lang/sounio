@@ -1,0 +1,56 @@
+//! CERTIFIED worst-case interval arithmetic — exact rational endpoints (data::bigrat) instead of f64.
+//! data::interval propagates worst-case bounds but its f64 endpoints round (so the enclosure is not
+//! certified against floating-point error); data::interval_rat uses arbitrary-precision RATIONAL
+//! endpoints, so every bound is exact and the enclosure is mathematically guaranteed — the flavour of
+//! interval arithmetic used in computer-assisted proofs and verified numerics. Reads decimal input
+//! exactly, too: an interval built from "0.1".."0.2" is [1/10, 1/5], not [0.1000...055, ...].
+//!
+//! An IntervalRat is [lo, hi] (lo <= hi) with BigRat endpoints. Moore's rules: add/sub combine
+//! endpoints; mul takes the min/max of the four endpoint products (compared exactly via bigrat_cmp).
+//! Self-contained on data::bigrat; no compiler changes. Each op is struct-heavy BigRat-by-value work
+//! kept to a modest, bounded set of call-sites — verify results against the oracle.
+
+use data::bigrat::*
+
+pub struct IntervalRat { lo: BigRat, hi: BigRat }
+
+fn br_min(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div { if bigrat_cmp(a, b) <= 0 { a } else { b } }
+fn br_max(a: BigRat, b: BigRat) -> BigRat with Mut, Panic, Div { if bigrat_cmp(a, b) >= 0 { a } else { b } }
+
+/// The interval [lo, hi] (endpoints ordered defensively).
+pub fn ivr_make(lo: BigRat, hi: BigRat) -> IntervalRat with Mut, Panic, Div {
+    if bigrat_cmp(lo, hi) <= 0 { IntervalRat { lo: lo, hi: hi } } else { IntervalRat { lo: hi, hi: lo } }
+}
+/// A point interval [x, x].
+pub fn ivr_point(x: BigRat) -> IntervalRat { IntervalRat { lo: x, hi: x } }
+/// A certified interval from two decimal strings, e.g. "0.1".."0.2" -> [1/10, 1/5] exactly.
+pub fn ivr_from_decimal(lo: string, hi: string) -> IntervalRat with Mut, Panic, Div {
+    ivr_make(bigrat_from_decimal(lo), bigrat_from_decimal(hi))
+}
+
+pub fn ivr_lo(a: IntervalRat) -> BigRat { a.lo }
+pub fn ivr_hi(a: IntervalRat) -> BigRat { a.hi }
+/// The exact width hi - lo.
+pub fn ivr_width(a: IntervalRat) -> BigRat with Mut, Panic, Div { bigrat_sub(a.hi, a.lo) }
+
+/// [a.lo + b.lo, a.hi + b.hi].
+pub fn ivr_add(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {
+    IntervalRat { lo: bigrat_add(a.lo, b.lo), hi: bigrat_add(a.hi, b.hi) }
+}
+/// [a.lo - b.hi, a.hi - b.lo].
+pub fn ivr_sub(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {
+    IntervalRat { lo: bigrat_sub(a.lo, b.hi), hi: bigrat_sub(a.hi, b.lo) }
+}
+/// [min of the four endpoint products, max of them] — compared exactly.
+pub fn ivr_mul(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {
+    let p1 = bigrat_mul(a.lo, b.lo)
+    let p2 = bigrat_mul(a.lo, b.hi)
+    let p3 = bigrat_mul(a.hi, b.lo)
+    let p4 = bigrat_mul(a.hi, b.hi)
+    IntervalRat { lo: br_min(br_min(p1, p2), br_min(p3, p4)), hi: br_max(br_max(p1, p2), br_max(p3, p4)) }
+}
+
+/// True if the point `x` lies within [lo, hi] (exact comparison).
+pub fn ivr_contains(a: IntervalRat, x: BigRat) -> bool with Mut, Panic, Div {
+    bigrat_cmp(a.lo, x) <= 0 && bigrat_cmp(x, a.hi) <= 0
+}
