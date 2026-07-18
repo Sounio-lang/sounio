@@ -13,8 +13,8 @@ Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
 an R2.6 local registry-attestation policy contract, and R3 physical extraction
 inventory, local exact-copy materialization, temporary-copy source-removal
 authorization, policy-bound local source-removal execution, and exact Git-state
-canonical-cutover approval interfaces; canonical repository cutover remains
-not executed. Promotion is
+canonical-cutover approval and execution interfaces; the Sounio canonical
+repository cutover remains not executed. Promotion is
 bound to the transitive raw-AST witness in
 `scripts/ci/science_boundary_gate.sh`, the package gate in
 `scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
@@ -268,6 +268,38 @@ policy or receipt exists for the canonical Sounio repository. The complete
 contract is
 `docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md`.
 
+## R3 Canonical Cutover Execution
+
+`tools/science_boundary/canonical_cutover_executor.py` consumes the complete
+approval plus a separately authored execution policy. The policy binds the
+approval bytes and identity, exact source/destination/recovery evidence,
+execution context, pre-cutover local and remote refs, deterministic commit
+metadata, expected post-cutover Git tree, and expected commit. Five new CLI
+confirmations repeat the approval, execution-policy, old-head, expected-commit,
+and execution-context values.
+
+Before mutation, the executor recomputes the planned Git tree and commit in an
+isolated bare object repository and alternate worktree/index. Under the
+canonical-root lock it creates a full regular-file-and-mode backup, reconstructs
+the complete approval again, applies only authorized removals and repairs, runs
+the exact gates, stages the receipt, advances the local ref with compare-and-
+swap, and publishes the exact commit with a lease on the exact old remote ref.
+It promotes the receipt only after local/remote refs, commit topology, complete
+regular-file tree, destination repositories, and retained evidence reverify.
+
+An ordinary pre-receipt failure observes the actual refs, rolls the remote back
+under an exact lease when necessary, restores the local ref/tree/modes/index,
+and verifies the pre-cutover Git state. The remote update and receipt promotion
+are not a distributed atomic transaction; crash recovery may require the bound
+manual procedure. The deterministic receipt reports approval `consumed`,
+cutover `executed-and-verified`, source removal `executed`, and
+`identity-plus-git-remote-ref-and-published-commit` assurance.
+
+The focused gate executes only disposable standalone repositories and local
+bare remotes. No `canonical-production` execution policy or receipt exists for
+Sounio, so every canonical source root remains present. The complete contract
+is `docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md`.
+
 ## Declarations
 
 The repository inventory is `science-rings.tsv`. Its columns are fixed by the
@@ -336,7 +368,8 @@ contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
 release bundle, deterministic R2.6 local registry-policy attestation, R3
 physical extraction inventory, R3 local materialization, R3 temporary-copy
 source-removal authorization, R3 policy-bound local source-removal execution,
-and R3 Git-state canonical-cutover approval interfaces are implemented.
+and R3 Git-state canonical-cutover approval and execution interfaces are
+implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
@@ -444,3 +477,51 @@ with `MaxRSS=1389440K`. Node-local temporary storage was used because OrangeFS
 was full; after two pre-gate worker-image dependency failures, the same archive
 and compiler passed with Git 2.43.0 provisioned in the ephemeral worker. No
 implementation fallback ran and no canonical source root changed.
+
+The focused canonical-cutover execution gate adds 81 assertions for exact
+approval replay, separate execution-policy and CLI confirmation binding,
+isolated recomputation of the expected Git tree and commit, deterministic
+execution receipts across equivalent roots, real root removal, local ref
+compare-and-swap, exact-lease remote publication, destination preservation,
+post-execution verification, stale/dirty/tampered-state refusal, canonical-only
+gate-mutation rollback, and exact remote/local/tree rollback when receipt
+promotion is raced after push. Its disposable receipt reports approval
+`consumed`, execution `executed-and-verified`, and source removal `executed`.
+
+The local fixture execution identity is
+`f7ea56e8028f1a21f6f23afd316bfb93e6a27416067442fdf0da63f28e064d21`;
+the policy identity is
+`e55de2ce7f6d82e57c7408cb1fc95948deb7fdc2c36da611ce6ebba1455a406c`;
+and the expected commit is `789611457cc681226baa2885391d7bbbd29a5fa7`.
+These are disposable fixture identities. No Sounio production policy, commit,
+ref update, source removal, or execution receipt was created.
+
+The composed current-source execution witness is Slurm job `6613` on
+`gpuorangefs-r770-proxmox`. Commit `002d5f227`, archive
+`16a7cfdddd120cbd47a0b471506126fe3724fd6b1e9e27b772ce9ab73245c642`,
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed the complete prior stack and all 81 execution checks in 53 seconds with
+`MaxRSS=1390324K`. The run used Git 2.43.0 and node-local disposable workspaces;
+no implementation fallback ran and no Sounio canonical ref or source changed.
+
+The canonical-production gap assessor then separates observable repository
+prerequisites from permission. Its v1 schema fixes execution authority to
+`none` and execution status to `not-executed`; even a complete fixture mapping
+can reach only `production-evidence-and-human-decision-required`. The current
+Sounio observation binds five planned targets, zero mappings, zero observed
+mapped destinations, and eight missing prerequisites under assessment identity
+`0fe82728ea24520af7792d4b5cf45c6c20e62c47a09138d0c4b81207e998e816`.
+It does not infer that `sounio-examples` is the planned research distribution,
+and it records that the reviewed stack is not yet the cataloged `main` head.
+
+The composed current-source gap witness is Slurm job `6615` on
+`gpuorangefs-r770-proxmox`. Commit `4dc8749a7`, archive
+`484fde3c4881905d60fbf601d8d42a7ba5d389cb6392b9657022c2267a791ede`,
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed the complete prior stack and all 90 gap checks in 55 seconds with
+`MaxRSS=1390896K`. The final fixture status remained
+`production-evidence-and-human-decision-required` with authority `none`; no
+implementation fallback, real catalog mutation, canonical source change, or
+remote ref update occurred.

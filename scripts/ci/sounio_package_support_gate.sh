@@ -111,6 +111,16 @@ required = {
         "canonical_cutover_approval_status = approved-not-executed",
         "canonical_cutover_execution_status = not-executed",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md": [
+        "Status: executable R3 policy-bound canonical Git cutover interface; exercised only in disposable fixtures for this repository.",
+        "canonical_cutover_approval_status = consumed",
+        "canonical_cutover_execution_status = executed-and-verified",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md": [
+        "Status: executable R3 non-authorizing prerequisite observation; production policy, approval, human decision, and execution remain absent.",
+        "execution_authority = none",
+        "canonical_cutover_execution_status = not-executed",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -149,6 +159,8 @@ for rel in [
     "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_EXECUTION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -200,5 +212,9 @@ run_step physical-extraction-source-removal-execution \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_execution_gate.py"
 run_step physical-extraction-canonical-cutover-approval \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_approval_gate.py"
+run_step physical-extraction-canonical-cutover-execution \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_execution_gate.py"
+run_step physical-extraction-canonical-production-gap \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'

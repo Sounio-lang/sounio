@@ -224,10 +224,15 @@ the Sounio repository. No production destination repository set, operator
 decision or recovery plan is asserted by the disposable fixture. Every
 canonical scientific-package and research source root remains present.
 
-## Next Interface
+## Downstream Interface
 
-`r3-physical-extraction-canonical-cutover-execution` must consume a valid
-`canonical-production` approval, revalidate every bound Git and source state,
-execute only the exact approved cutover under the bound recovery procedure,
-and emit a separate committed execution receipt. This approval interface is
-not that execution permission or operation.
+`r3-physical-extraction-canonical-cutover-execution` is implemented in
+`tools/science_boundary/canonical_cutover_executor.py`. It consumes this
+approval plus a separate execution policy, revalidates every bound Git and
+source state, pre-binds the exact Git tree and commit, and can execute the
+cutover under the bound recovery procedure. Its acceptance gate performs real
+removal and remote-ref updates only in disposable fixtures.
+
+This approval receipt is still not execution permission. Sounio has no
+`canonical-production` approval, execution policy, destination repository set,
+human execution decision, or canonical execution receipt.
