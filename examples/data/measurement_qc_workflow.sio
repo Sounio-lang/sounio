@@ -1,0 +1,49 @@
+// Capstone: an end-to-end measurement-QC workflow that composes the Sounio "measurement DataFrame"
+// lane — the pipeline a float64 engine like pandas cannot express. A lab takes replicate instrument
+// readings of a concentration (mg/L), each with a standard uncertainty, then:
+//   1. CLEAN   — Grubbs' test rejects a spurious reading (data::outliers)
+//   2. COMBINE — inverse-variance weighted mean -> best estimate ± U, with a reduced chi-square
+//                consistency check (data::uncertain_combine + epistemic::gum)
+//   3. DECIDE  — conformance vs a spec limit accounting for U (data::conformance, ISO 14253-1)
+// Readings (col0) with per-reading standard uncertainty (col1):
+//   9.8  10.1  9.9  10.0  15.0  10.2   (all ± 0.2)  -- the 15.0 is an instrument glitch (outlier)
+use data::dataframe::*
+use data::outliers::*
+use data::uncertain_combine::*
+use data::conformance::*
+use epistemic::gum::{GUMResult, gum_value, gum_u95, gum_report}
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn row2(df: &!DataFrame, v: f64, u: f64) with Mut, Div, Panic { var r: [f64;64]=[0.0;64]; r[0]=v; r[1]=u; df_add_row(df, &r) }
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var raw = df_new(2)
+    row2(&!raw, 9.8, 0.2); row2(&!raw, 10.1, 0.2); row2(&!raw, 9.9, 0.2)
+    row2(&!raw, 10.0, 0.2); row2(&!raw, 15.0, 0.2); row2(&!raw, 10.2, 0.2)
+    print("raw readings: n = "); print(df_nrows(&raw)); print("\n")
+
+    // 1. CLEAN — Grubbs' test flags and removes the glitch reading
+    let flagged = grubbs_is_outlier(&raw, 0)
+    print("Grubbs G = "); print(grubbs_statistic(&raw, 0)); print("  (crit(6) = 1.822)  outlier? ");
+    if flagged { print("yes\n") } else { print("no\n") }
+    let clean = filter_grubbs(&raw, 0)
+    print("after cleaning: n = "); print(df_nrows(&clean)); print("\n")
+    if df_nrows(&clean) != 5 { print("FAIL clean\n"); return 1 }
+
+    // 2. COMBINE — inverse-variance weighted mean + reduced chi-square consistency
+    let est = uframe_weighted_mean(&clean, 0, &clean, 1)
+    let chi = uframe_reduced_chi2(&clean, 0, &clean, 1)
+    gum_report("best estimate", "mg/L", est)
+    print("reduced chi-square = "); print(chi); print("  (consistent if ~1)\n")
+    if ae(gum_value(est), 10.0) >= 1.0e-9 { print("FAIL estimate\n"); return 2 }
+    if ae(chi, 0.625) >= 1.0e-9 { print("FAIL chi2\n"); return 3 }
+
+    // 3. DECIDE — conformance vs a one-sided upper spec limit, accounting for U
+    let d_ok = conf_upper(est, 10.5)     // value+U = 10.175 <= 10.5 -> PASS
+    let d_marginal = conf_upper(est, 10.1) // interval straddles 10.1 -> INDETERMINATE
+    print("spec <= 10.5 mg/L : "); if conf_is_pass(d_ok) { print("PASS\n") } else { print("not-pass\n") }
+    print("spec <= 10.1 mg/L : "); if conf_is_indeterminate(d_marginal) { print("INDETERMINATE\n") } else { print("decided\n") }
+    if d_ok != 2 { print("FAIL decide_pass\n"); return 4 }
+    if d_marginal != 1 { print("FAIL decide_indet\n"); return 5 }
+
+    print("MEASUREMENT_QC_WORKFLOW_OK\n")
+    return 0
+}
