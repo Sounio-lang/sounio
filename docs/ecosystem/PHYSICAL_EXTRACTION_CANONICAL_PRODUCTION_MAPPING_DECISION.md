@@ -176,8 +176,34 @@ execution authority `none` and the explicit cutover decision missing.
 
 The composed shell gate runs the complete production-gap stack first and
 forwards one current-source Madaros input through every compiler-bound gate.
-The 204-assertion focused result is local evidence until a new immutable Slurm
-witness is recorded.
+
+The composed current-source witness is Slurm job `6635` on
+`gpuorangefs-r770-proxmox`. Commit
+`aa0e50c6af32f55819d16191735344da5bd1c840`, compressed source archive
+`ad22c9eca1dd6458a97f55f9063e6f346f70b2cf00470e910ac1a0261a925868`
+(339734094 bytes), current-source Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`,
+and Git 2.43.0 passed 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory, 167
+materialization, 527 authorization, 164 local execution, 172 cutover approval,
+81 cutover execution, 90 production-gap, and 204 mapping-decision checks. The
+job completed with exit `0:0` in 60 seconds. Slurm accounting was unavailable,
+so no `MaxRSS` is claimed.
+
+Stdout is 4109 bytes with SHA-256
+`8eedbc7c041abf4c2087fab4843eb1b637d366dc1aee4bdb36f5e33dc1ab4f73`.
+Stderr contains only the two `srun` allocation messages, is 92 bytes, and has
+SHA-256
+`37b49d592edaf7aecf7611b86b0d178381e60d6e6434e071fa06ebc5ebe44e5e`.
+The streamed input payload is 438497280 bytes with SHA-256
+`877fff07323908461ea2eb813c68ef4ce73861c1e95c501dea347b2381091fc7`.
+
+Three batch attempts did not reach the gate: job `6629` inherited a missing
+`/tmp` workdir, while jobs `6631` and `6633` were stopped before shell startup
+by the cluster's batch environment retrieval failure. The successful witness
+used a synchronous Slurm `srun`, streamed the exact archive and compiler into a
+node-local root, and used node-local extraction, fixture repositories, remotes,
+home, and temporary files. This was a harness-routing fallback only; no
+implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
