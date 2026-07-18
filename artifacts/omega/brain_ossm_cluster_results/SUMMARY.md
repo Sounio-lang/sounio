@@ -1,5 +1,16 @@
 # Brain O-SSM Cluster Results Summary
 
+> ⚠️ **CORRECTION NOTICE (2026-07-16) — read before citing any "O-SSM advantage" below.**
+> These Slurm runs (job-52 / job-53, 2026-04-08) were executed with an octonion
+> multiplication table that had a sign error in `e2·e5` (`-a2*b5+a5*b2` instead of
+> `+a2*b5-a5*b2`). That table fails alternativity and composition — it is **not** the
+> octonion algebra — so any non-associativity numbers here (e.g. Fractal-G2 v3, the
+> "non-assoc gap", the "small overall O-SSM advantage" reading) are artifacts of the broken
+> table, not octonion results. The run-log figures are **left unchanged** as a historical
+> record; they have **not** been re-run on the corrected algebra and should not be treated
+> as current. The repo's corrected record is negative on non-associativity (A/B re-audit
+> NEGATIVE, ABIDE associator null, `zd_bptt` ZD-advantage → +0.00pp). Corpus fix: PR #1024.
+
 This directory contains two real Slurm runs copied from OrangeFS into the workspace:
 
 - Baseline multi-seed run: `job-52.log`
