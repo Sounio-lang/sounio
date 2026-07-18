@@ -136,7 +136,7 @@ Um registry público futuro armazenaria:
 2. Manter o gate R2.5 de receipts opt-in para package/release
 3. Manter o gate R2.6 de registry attestation local sem habilitar publicação
 4. Desenvolver `sounio-py` bindings sem ampliar autoridade científica
-5. Preparar o inventário de ownership para a extração física R3
+5. Manter o inventário executável de ownership R3; a materialização física permanece um gate separado
 
 ---
 

@@ -317,6 +317,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.visao-geral | repo_only | docs/dissertation/VISAO_GERAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.curated-packages | repo_only | docs/ecosystem/CURATED_PACKAGES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-inventory | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.pkg-manager-sota-position | repo_only | docs/ecosystem/PKG_MANAGER_SOTA_POSITION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.registry-architecture | repo_only | docs/ecosystem/REGISTRY_ARCHITECTURE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.registry-attestation-spec | repo_only | docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
