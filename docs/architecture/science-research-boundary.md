@@ -504,3 +504,24 @@ and Madaros
 passed the complete prior stack and all 81 execution checks in 53 seconds with
 `MaxRSS=1390324K`. The run used Git 2.43.0 and node-local disposable workspaces;
 no implementation fallback ran and no Sounio canonical ref or source changed.
+
+The canonical-production gap assessor then separates observable repository
+prerequisites from permission. Its v1 schema fixes execution authority to
+`none` and execution status to `not-executed`; even a complete fixture mapping
+can reach only `production-evidence-and-human-decision-required`. The current
+Sounio observation binds five planned targets, zero mappings, zero observed
+mapped destinations, and eight missing prerequisites under assessment identity
+`0fe82728ea24520af7792d4b5cf45c6c20e62c47a09138d0c4b81207e998e816`.
+It does not infer that `sounio-examples` is the planned research distribution,
+and it records that the reviewed stack is not yet the cataloged `main` head.
+
+The composed current-source gap witness is Slurm job `6615` on
+`gpuorangefs-r770-proxmox`. Commit `4dc8749a7`, archive
+`484fde3c4881905d60fbf601d8d42a7ba5d389cb6392b9657022c2267a791ede`,
+and Madaros
+`6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88`
+passed the complete prior stack and all 90 gap checks in 55 seconds with
+`MaxRSS=1390896K`. The final fixture status remained
+`production-evidence-and-human-decision-required` with authority `none`; no
+implementation fallback, real catalog mutation, canonical source change, or
+remote ref update occurred.

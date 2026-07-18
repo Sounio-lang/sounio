@@ -250,3 +250,8 @@ operator execution decision, or execution receipt is asserted. Every canonical
 scientific-package and research source root remains present. The remaining
 permission-bearing step is a separately authored production evidence set and
 an explicit human decision; this fixture interface is not that decision.
+
+The non-authorizing next step is documented in
+`PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md`. It observes the
+current repository catalog and exact planned targets without creating a mapping
+proposal, production policy, approval, decision, repository, or ref update.

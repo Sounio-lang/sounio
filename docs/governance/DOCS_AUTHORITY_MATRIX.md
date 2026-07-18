@@ -319,6 +319,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-cutover-approval | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_APPROVAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-cutover-execution | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-canonical-production-gap-assessment | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-inventory | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-materialization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-source-removal-authorization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
