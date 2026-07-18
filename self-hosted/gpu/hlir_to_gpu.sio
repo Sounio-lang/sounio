@@ -1806,6 +1806,19 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             asc.addr_reg = instr.call_args[2]
             asc.src_reg = instr.call_args[3]
             k = gpu_kernel_append_op(k, asc)
+        } else if hlir_name_is_oct_batch_vjp(cn) || hlir_name_is_sed_batch_vjp(cn) {
+            // Backward / VJP of D = L(a)·H. call_args = [pa, pH, pdD, pdH, pda]. One transposed tile
+            // (dH = L(a)ᵀ·dD) + a runtime da accumulation → one GpuOctVjp. Needs sL+sH+sS = 2048 bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var vjp = gpu_op_new()
+            vjp.opcode = GpuOpcode::GpuOctVjp
+            vjp.rhs_imm = if hlir_name_is_sed_batch_vjp(cn) { 16 } else { 8 }
+            vjp.lhs_reg = instr.call_args[0]
+            vjp.rhs_reg = instr.call_args[1]
+            vjp.addr_reg = instr.call_args[2]
+            vjp.src_reg = instr.call_args[3]
+            vjp.shared_addr = instr.call_args[4]
+            k = gpu_kernel_append_op(k, vjp)
         }
         // Other calls: skip in MVP
     }
@@ -1895,6 +1908,25 @@ fn hlir_name_is_sed_assoc(n: HlirName) -> bool {
     n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
     n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
     n.buf[8] == 99 as i8
+}
+
+// "oct_batch_vjp" (13 chars) — VJP/backward of the batched octonion multiply: given dD, computes
+// dH = L(a)ᵀ·dD and da[p] = Σ σ(p,k⊕p)·H·dD. oct_batch_vjp(pa,pH,pdD,pdH,pda) (dim=8, bits=3).
+fn hlir_name_is_oct_batch_vjp(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 118 as i8 && n.buf[11] == 106 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "sed_batch_vjp" (13 chars) — VJP/backward of the batched sedenion multiply (dim=16, bits=4).
+fn hlir_name_is_sed_batch_vjp(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 118 as i8 && n.buf[11] == 106 as i8 &&
+    n.buf[12] == 112 as i8
 }
 
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
