@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.gpu.batched-hyper-syntax
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.gpu.batched-hyper-syntax
+-->
+
 # Elegant batched hypercomplex GPU syntax (array-of-Hyper)
 
 The batched tensor-core intrinsics accept **first-class `Hyper<Algebra, f64>` values and arrays**
