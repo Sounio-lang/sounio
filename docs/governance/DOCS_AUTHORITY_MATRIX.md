@@ -396,6 +396,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.neurodyn-oct-mul-sign-fix-codex-handoff-2026-07-07 | repo_only | docs/handoff/neurodyn_oct_mul_sign_fix_codex_handoff_2026-07-07.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.pending-changes-triage-2026-07-11 | repo_only | docs/handoff/pending_changes_triage_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-512-vreg-wall-codex-dispatch-2026-07-18 | repo_only | docs/handoff/souc_512_vreg_wall_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.souc-decimal-literal-rounding-codex-dispatch-2026-07-18 | repo_only | docs/handoff/souc_decimal_literal_rounding_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-v0800-defects | repo_only | docs/handoff/souc_v0800_defects.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.zero-event-native-compile-privacy-2026-07-11 | repo_only | docs/handoff/zero_event_native_compile_privacy_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
