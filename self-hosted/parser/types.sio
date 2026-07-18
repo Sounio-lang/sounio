@@ -8,6 +8,19 @@ use lexer::token::*
 use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 use parser::exprs::{parse_expr_entry}
 
+fn type_path_structural_count(list: &StringList, remaining: i64) -> i64 with Mut {
+    if remaining <= 0 || (*list).head_len <= 0 || (*list).head_len > 128 {
+        return -1
+    }
+    match (*list).tail {
+        None => 1
+        Some(next) => {
+            let tail_count = type_path_structural_count(&(*next), remaining - 1)
+            if tail_count <= 0 { -1 } else { 1 + tail_count }
+        }
+    }
+}
+
 fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: Span) -> Parser with Mut, IO {
     if (*path).seg_count != 1 || (*path).segments.head_len != 4 { return mut_p }
     let buf = (*path).segments.head_buf
@@ -306,6 +319,51 @@ impl Parser {
     // ============================================================
     // Type path: Foo or Foo::Bar::Baz
     // ============================================================
+
+    fn parse_type_path_segments_into(
+        self,
+        out: &! StringList,
+    ) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let name = self.current_name()
+        (*out).head_len = name.len
+        var byte_i: i64 = 0
+        while byte_i < 128 {
+            (*out).head_buf[byte_i as usize] = name.buf[byte_i as usize]
+            byte_i = byte_i + 1
+        }
+        (*out).tail = None
+
+        var p = self.advance()
+        if parser_peek(p) == TokenKind::ColonColon {
+            let next_k = parser_peek_ahead(p, 1)
+            if next_k == TokenKind::Ident || tk_is_keyword(next_k) {
+                p = p.advance()
+                var next = Box::new(StringList {
+                    head_buf: [0; 128],
+                    head_len: 0,
+                    tail: None,
+                })
+                p = p.parse_type_path_segments_into(&!(*next))
+                (*out).tail = Some(next)
+            }
+        }
+        p
+    }
+
+    fn parse_type_path_into(self, out: &! AstPath) -> Parser with Mut, IO, Panic, Div, Alloc {
+        (*out).seg_count = 0
+        (*out).segments.head_len = 0
+        (*out).segments.tail = None
+        var p = self.parse_type_path_segments_into(&!(*out).segments)
+        let segment_count = type_path_structural_count(&(*out).segments, 64)
+        if segment_count <= 0 {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+        } else {
+            (*out).seg_count = segment_count
+        }
+        p
+    }
 
     fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div, Alloc {
         let name = self.current_name()
