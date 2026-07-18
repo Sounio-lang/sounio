@@ -4153,6 +4153,144 @@ fn module_frontend_count_fn_items(items: Option<Box<ItemList>>) -> i64 with Allo
     }
 }
 
+fn module_frontend_count_impl_method_slots(methods: &Option<Box<ItemList>>) -> i64 with Alloc {
+    var count: i64 = 0
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let method = (*list).head
+                if method.kind == ItemKind::ItemFn {
+                    match method.fn_def {
+                        Some(_) => { count = count + 1 }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            None => return count,
+        }
+    }
+    count
+}
+
+// Every top-level function and global gets one IrModule.functions slot. Impl
+// methods are preseeded into that same table under their mangled names.
+fn module_frontend_count_lowered_ir_slots(items: &Option<Box<ItemList>>) -> i64 with Alloc {
+    var count: i64 = 0
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    count = count + 1
+                } else if item.kind == ItemKind::ItemImpl {
+                    match item.impl_def {
+                        Some(impl_def) => {
+                            count = count + module_frontend_count_impl_method_slots(&(*impl_def).methods)
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            None => return count,
+        }
+    }
+    count
+}
+
+fn module_frontend_count_bss_global_slots(items: &Option<Box<ItemList>>) -> i64 with Alloc {
+    var count: i64 = 0
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    match item.fn_def {
+                        None => { count = count + 1 }
+                        Some(_) => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            None => return count,
+        }
+    }
+    count
+}
+
+fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let items = (*programs)[i as usize].items
+        count = count + module_frontend_count_lowered_ir_slots(&items)
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_count_loaded_bss_global_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let items = (*programs)[i as usize].items
+        count = count + module_frontend_count_bss_global_slots(&items)
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slots: i64, slot_limit: i64) -> string with Mut, Panic, Div, Alloc {
+    if bss_slots > BSS_MAX_GLOBALS {
+        return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(BSS_MAX_GLOBALS) + " slots)"
+    }
+    if total_slots - bss_slots > slot_limit {
+        return "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(slot_limit) + " slots)"
+    }
+    "too many lowered items: combined globals and functions exceed shared IR module capacity (max " + io_trace_i64_string(slot_limit) + " slots)"
+}
+
+fn module_frontend_ir_slot_capacity_exceeded(items: &Option<Box<ItemList>>) -> bool with Alloc {
+    let total_slots = module_frontend_count_lowered_ir_slots(items)
+    let bss_slots = module_frontend_count_bss_global_slots(items)
+    bss_slots > BSS_MAX_GLOBALS || total_slots > IR_MAX_FUNCS
+}
+
+fn module_frontend_ir_slot_capacity_error(items: &Option<Box<ItemList>>) -> string with Mut, Panic, Div, Alloc {
+    module_frontend_ir_slot_capacity_error_from_counts(
+        module_frontend_count_lowered_ir_slots(items),
+        module_frontend_count_bss_global_slots(items),
+        IR_MAX_FUNCS
+    )
+}
+
+fn module_frontend_loaded_ir_slot_limit(loaded: i64) -> i64 {
+    // Dependency summaries are materialized before their bodies replace the
+    // placeholders, so a merged module needs one transient IR slot of slack.
+    if loaded > 1 {
+        return IR_MAX_FUNCS - 1
+    }
+    IR_MAX_FUNCS
+}
+
+fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc {
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    bss_slots > BSS_MAX_GLOBALS || total_slots > module_frontend_loaded_ir_slot_limit(loaded)
+}
+
+fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc {
+    module_frontend_ir_slot_capacity_error_from_counts(
+        module_frontend_count_loaded_ir_slots(programs, loaded),
+        module_frontend_count_loaded_bss_global_slots(programs, loaded),
+        module_frontend_loaded_ir_slot_limit(loaded)
+    )
+}
+
 fn module_frontend_lower_program_counts_traced(
     program: Program,
     module_index: i64,
@@ -4189,6 +4327,10 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    if module_frontend_ir_slot_capacity_exceeded(&program.items) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(&program.items))
+    }
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
@@ -4246,6 +4388,10 @@ fn module_frontend_lower_program_items_box_traced(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    if module_frontend_ir_slot_capacity_exceeded(items) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(items))
+    }
     var epistemic = ir_empty_epistemic_section()
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
@@ -4294,6 +4440,10 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    if module_frontend_ir_slot_capacity_exceeded(&program.items) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(&program.items))
+    }
     var epistemic = ir_empty_epistemic_section()
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
@@ -4341,6 +4491,10 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    if module_frontend_ir_slot_capacity_exceeded(items) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(items))
+    }
     var epistemic = ir_empty_epistemic_section()
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &epistemic)
@@ -4559,6 +4713,10 @@ fn module_frontend_lower_programs_array_direct_box(
 
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
+    if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
+    }
     print("lower_array: seed_begin\n")
     let seed_items = (*programs)[0].items
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)

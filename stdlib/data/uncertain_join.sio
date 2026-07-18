@@ -1,0 +1,66 @@
+//! Uncertainty-aware join — fuse measurements of the same quantity that appear in TWO measurement
+//! tables. When two labs (or two methods, or two sensors) each measure the same keyed samples, the
+//! right way to reconcile them is not to pick one or average them, but to combine them by inverse-
+//! variance weighting: the measurement with the smaller uncertainty counts more, and the combined
+//! uncertainty is smaller than either input. pandas `merge` aligns the rows but leaves the fusion —
+//! and its error propagation — to the user.
+//!
+//! Each table is a value column paired with a standard-uncertainty column, keyed by a key column.
+//! `ujoin_combine` emits, for every key present in BOTH tables, one row [key, value, u] where
+//!   value = (v_a/u_a² + v_b/u_b²) / (1/u_a² + 1/u_b²),   u = 1 / √(1/u_a² + 1/u_b²)
+//! (the maximum-likelihood combination of two independent Gaussian measurements). Rows are emitted in
+//! the first table's order; keys present in only one table are dropped (inner join). Self-contained on
+//! the public data::dataframe API; no compiler changes.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_set_col_name}
+
+fn uj_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+// First row index in `b` whose key column equals `key`, or -1.
+fn uj_find(b: &DataFrame, bk: i64, key: f64) -> i64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < df_nrows(b) {
+        if df_get(b, r, bk) == key { return r }
+        r = r + 1
+    }
+    0 - 1
+}
+
+/// Inner join of two measurement tables, fusing each matched key's two measurements by inverse-
+/// variance weighting. `a`/`b` supply key/value/uncertainty column indices. Returns a 3-column frame
+/// [key, value, u] (column-name ids 0,1,2), one row per key found in both tables, in `a`'s order. A
+/// non-positive uncertainty on either side skips that key (an infinite weight is undefined).
+pub fn ujoin_combine(a: &DataFrame, ak: i64, av: i64, au: i64,
+                     b: &DataFrame, bk: i64, bv: i64, bu: i64) -> DataFrame with Mut, Div, Panic {
+    var out = df_new(3)
+    df_set_col_name(&!out, 0, 0)
+    df_set_col_name(&!out, 1, 1)
+    df_set_col_name(&!out, 2, 2)
+    var i: i64 = 0
+    while i < df_nrows(a) {
+        let key = df_get(a, i, ak)
+        let j = uj_find(b, bk, key)
+        if j >= 0 {
+            let ua = df_get(a, i, au)
+            let ub = df_get(b, j, bu)
+            if ua > 0.0 && ub > 0.0 {
+                let wa = 1.0 / (ua * ua)
+                let wb = 1.0 / (ub * ub)
+                let sw = wa + wb
+                var row: [f64; 64] = [0.0; 64]
+                row[0] = key
+                row[1] = (df_get(a, i, av) * wa + df_get(b, j, bv) * wb) / sw
+                row[2] = 1.0 / uj_sqrt(sw)
+                df_add_row(&!out, &row)
+            }
+        }
+        i = i + 1
+    }
+    out
+}
