@@ -159,7 +159,9 @@ append_native_algebra_probes() {
     "fn hmma_emit_ossm_oct_step_kernel" \
     ".visible .entry sounio_ossm_oct_step" \
     "fn hmma_emit_ossm_oct_cell_kernel" \
-    ".visible .entry sounio_ossm_oct_cell"
+    ".visible .entry sounio_ossm_oct_cell" \
+    "fn hmma_emit_sed_ssm_step_kernel" \
+    ".visible .entry sounio_sed_ssm_step"
 
   append_source_probe \
     "native_ossm_ptx_emitter" \

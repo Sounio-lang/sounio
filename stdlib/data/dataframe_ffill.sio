@@ -1,0 +1,90 @@
+//! Directional fill of missing values in a DataFrame: forward-fill and backward-fill.
+//!
+//! A missing cell is one equal to the sentinel (default 0.0, the library's missing marker). Forward
+//! fill carries the last non-missing value down each column; backward fill carries the next
+//! non-missing value up. Leading (ffill) or trailing (bfill) missing runs with no neighbor stay at
+//! the sentinel. Functional: the input is unchanged and column names are preserved. Self-contained:
+//! uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+/// Forward-fill: replace each `sentinel` cell with the most recent non-sentinel value above it in the
+/// same column. Leading sentinels (no value above) stay `sentinel`.
+pub fn df_ffill_with(df: &DataFrame, sentinel: f64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    let nr = df_nrows(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    // build column by column into a scratch matrix stored row-major via repeated passes
+    // last[c] = last seen non-sentinel value in column c; has[c] = whether we have one
+    var last: [f64; 64] = [0.0; 64]
+    var has: [i64; 64] = [0; 64]
+    var r: i64 = 0
+    while r < nr {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            let v = df_get(df, r, c)
+            if v != sentinel { last[c as usize] = v; has[c as usize] = 1; row[c as usize] = v }
+            else { if has[c as usize] == 1 { row[c as usize] = last[c as usize] } else { row[c as usize] = sentinel } }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}
+
+/// Forward-fill the library missing sentinel (0.0).
+pub fn df_ffill(df: &DataFrame) -> DataFrame with Mut, Div, Panic { df_ffill_with(df, 0.0) }
+
+/// Backward-fill: replace each `sentinel` cell with the nearest non-sentinel value below it in the
+/// same column. Trailing sentinels (no value below) stay `sentinel`.
+pub fn df_bfill_with(df: &DataFrame, sentinel: f64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    let nr = df_nrows(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    // next[c] = nearest non-sentinel value at or below the current row (computed bottom-up)
+    var nxt: [f64; 64] = [0.0; 64]
+    var has: [i64; 64] = [0; 64]
+    // fill a scratch by walking bottom to top; store into a row buffer array of size nr*nc is too big,
+    // so we do two passes: first compute filled values into a flat array.
+    var flat: [f64; 65536] = [0.0; 65536]
+    var r = nr - 1
+    while r >= 0 {
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            let v = df_get(df, r, c)
+            var fv = sentinel
+            if v != sentinel { nxt[c as usize] = v; has[c as usize] = 1; fv = v }
+            else { if has[c as usize] == 1 { fv = nxt[c as usize] } else { fv = sentinel } }
+            let idx = r * nc + c
+            if idx >= 0 && idx < 65536 { flat[idx as usize] = fv }
+            c = c + 1
+        }
+        r = r - 1
+    }
+    var rr: i64 = 0
+    while rr < nr {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            let idx = rr * nc + c
+            if idx >= 0 && idx < 65536 { row[c as usize] = flat[idx as usize] }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        rr = rr + 1
+    }
+    out
+}
+
+/// Backward-fill the library missing sentinel (0.0).
+pub fn df_bfill(df: &DataFrame) -> DataFrame with Mut, Div, Panic { df_bfill_with(df, 0.0) }

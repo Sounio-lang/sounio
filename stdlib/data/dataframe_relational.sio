@@ -417,3 +417,57 @@ pub fn df_groupby_percentile(df: &DataFrame, key_col: i64, val_col: i64, p: f64)
 pub fn df_groupby_p90(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
     df_groupby_percentile(df, key_col, val_col, 90.0)
 }
+
+/// Group by `key_col` and compute several aggregates of `val_col` in one pass. Returns an 8-column
+/// DataFrame with, per distinct key:
+///   [0]=key  [1]=count  [2]=sum  [3]=mean  [4]=min  [5]=max  [6]=sample std (n-1)  [7]=median
+/// (std is 0 for a group of fewer than 2 rows.) Equivalent to the individual df_groupby_* verbs but
+/// grouped once.
+pub fn df_groupby_agg(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(8)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var sum: f64 = 0.0
+        var mn: f64 = 0.0
+        var mx: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                let v = df_get(df, r, val_col)
+                if cnt == 0 { mn = v; mx = v } else { if v < mn { mn = v } if v > mx { mx = v } }
+                sum = sum + v
+                buf[cnt as usize] = v
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        let cf = cnt as f64
+        let mean = if cnt > 0 { sum / cf } else { 0.0 }
+        // sample std
+        var std: f64 = 0.0
+        if cnt >= 2 {
+            var ss: f64 = 0.0
+            var k: i64 = 0
+            while k < cnt { let d = buf[k as usize] - mean; ss = ss + d * d; k = k + 1 }
+            std = gb_sqrt(ss / (cf - 1.0))
+        }
+        // median (sorts buf in place)
+        gb_sort_vals(&!buf, cnt)
+        var med: f64 = 0.0
+        if cnt > 0 {
+            if cnt % 2 == 1 { med = buf[(cnt / 2) as usize] }
+            else { med = 0.5 * (buf[(cnt / 2 - 1) as usize] + buf[(cnt / 2) as usize]) }
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = cf; row[2] = sum; row[3] = mean
+        row[4] = mn;  row[5] = mx; row[6] = std; row[7] = med
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
