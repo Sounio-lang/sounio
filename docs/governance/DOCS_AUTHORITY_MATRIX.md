@@ -317,8 +317,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.visao-geral | repo_only | docs/dissertation/VISAO_GERAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.curated-packages | repo_only | docs/ecosystem/CURATED_PACKAGES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-inventory | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-materialization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-source-removal-authorization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.pkg-manager-sota-position | repo_only | docs/ecosystem/PKG_MANAGER_SOTA_POSITION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.registry-architecture | repo_only | docs/ecosystem/REGISTRY_ARCHITECTURE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.registry-attestation-spec | repo_only | docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.sounio-toml-spec | repo_only | docs/ecosystem/SOUNIO_TOML_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.exact-core | repo_only | docs/EXACT_CORE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.faq | repo_only | docs/FAQ.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -854,6 +858,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.tutorials.higher-order-functions | repo_only | docs/tutorials/higher_order_functions.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.tutorials.scientific-computing | repo_only | docs/tutorials/scientific_computing.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.validation-integration-summary | repo_only | docs/VALIDATION_INTEGRATION_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.vision.sounio-dataframe-overall-superiority-roadmap-2026-07-18 | repo_only | docs/vision/sounio_dataframe_overall_superiority_roadmap_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.website-features | repo_only | docs/WEBSITE_FEATURES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.cognitive-ossm.readme | repo_only | examples/cognitive_ossm/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.conversational-ossm.readme | repo_only | examples/conversational_ossm/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

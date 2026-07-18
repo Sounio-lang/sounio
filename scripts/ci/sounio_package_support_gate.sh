@@ -81,6 +81,26 @@ required = {
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md": [
         "Status: design reference only; not launched as a public registry.",
     ],
+    "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md": [
+        "Status: executable R2.6 local policy contract; public registry publishing is disabled.",
+        "unsigned-local-policy-evaluation",
+        "publication-status = \"disabled\"",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md": [
+        "Status: executable R3 ownership and file-identity inventory; physical extraction is not executed.",
+        "physical-extraction-planning-snapshot",
+        "r3-physical-extraction-materialization",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md": [
+        "Status: executable R3 local exact-copy boundary; canonical repository extraction is not executed.",
+        "materialization_status = copied-and-verified",
+        "source_removal_status = not-authorized",
+    ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md": [
+        "Status: executable R3 temporary-copy authorization boundary; canonical source removal is not executed.",
+        "authorization_status = authorized-not-executed",
+        "source_removal_execution_status = not-executed",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -113,6 +133,10 @@ for rel, needles in required.items():
 
 for rel in [
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md",
+    "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -156,5 +180,9 @@ run_step pkg-manifest-fixture run_compiled_fixture tests/run-pass/pkg_manifest_p
 run_step pkg-registry-fixture run_compiled_fixture tests/run-pass/pkg_registry_basic.sio 'pkg_registry_basic: ALL PASS'
 run_step sounio-pkg-smoke run_sounio_pkg_smoke
 run_step public-package-wording check_public_package_wording
+run_step physical-extraction-inventory python3 "$ROOT_DIR/scripts/ci/physical_extraction_inventory_gate.py"
+run_step physical-extraction-materialization python3 "$ROOT_DIR/scripts/ci/physical_extraction_materialization_gate.py"
+run_step physical-extraction-source-removal-authorization \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_authorization_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'

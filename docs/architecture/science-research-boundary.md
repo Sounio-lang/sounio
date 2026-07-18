@@ -9,11 +9,22 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.s
 
 # Science and Research Boundary
 
-Status: executable R0-R2 boundary; physical extraction R3 is deferred. The
-promotion is bound to the transitive raw-AST witness in
-`scripts/ci/science_boundary_gate.sh` and a current-source Madaros.
+Status: executable R0-R2 boundary with an R2.5 local package-release boundary,
+an R2.6 local registry-attestation policy contract, and R3 physical extraction
+inventory, local exact-copy materialization, and temporary-copy source-removal
+authorization interfaces; canonical repository extraction remains not
+executed. Promotion is
+bound to the transitive raw-AST witness in
+`scripts/ci/science_boundary_gate.sh`, the package gate in
+`scripts/ci/package_boundary_release_gate.sh`, the attestation gate in
+`scripts/ci/registry_attestation_spec_gate.sh`, and a current-source Madaros.
 R3 means moving scientific-package and research sources into separately owned
-repositories or distributions; no source file is moved by this milestone.
+repositories or distributions. The inventory binds proposed ownership and
+exact file identity. The materializer can copy approved units to preexisting
+local destinations and verify them, but the canonical repository has no
+approved production destination policy, materialization receipt, removal
+policy, or authorization receipt and moves no source file. R2.6 launches no
+registry service.
 
 The enforced dependency direction is:
 
@@ -59,6 +70,7 @@ The public `souc` and Madaros launchers accept:
 --science-manifest <path>
 --claim-contract <path>
 --emit-boundary-receipt <path>
+--release-bundle <path>
 ```
 
 Without a scientific declaration the effective mode is `off`. Discovery of a
@@ -76,6 +88,131 @@ before lowering. A stale raw ELF without the interface cannot silently fall
 back: the host syntax audit is recorded as non-authoritative and yields
 `UNKNOWN`. Rebuild with `make build-madaros` or point `MADAROS_RAW_BIN` at a
 current-source ELF before using strict mode.
+
+## R2.5 Package Release Bundle
+
+`souc pkg build <project> --science-boundary strict --claim-contract <path>`
+is the opt-in package release path. It requires the package's own
+`sounio.toml` as the policy root and emits a deterministic
+`sounio.package-release-bundle.v1` directory. The default destination is
+`target/release/<name>-<version>.sio-release`; `--release-bundle` can select a
+different final directory.
+
+The launcher first builds into a sibling staging directory. Promotion requires
+all of the following:
+
+1. strict receipt verdict `OK`;
+2. `madaros-raw-ast-v1` closure with no saturation or unresolved imports;
+3. a claim contract authorized by the root ring and bound to verified content;
+4. revalidated source, policy, claim, compiler, and native artifact hashes;
+5. an exact bundle inventory and a valid bundle identity hash.
+
+Only then is the staging directory renamed to its final path. Refusal,
+`UNKNOWN`, compilation failure, mutation, tamper, or an occupied destination
+leaves the requested final bundle absent and never overwrites an existing
+bundle. The bundle contains the native artifact, boundary receipt, exact claim
+contract copy, and `package-release.json`.
+
+`souc pkg verify <bundle> --root <project>` repeats the bundle checks and the
+full receipt verification. The original sources, policy, claim path, and
+compiler are required. The bundle deliberately does not claim environment
+capture, independent replay, registry publication, scientific truth, or
+clinical authority.
+
+## R2.6 Registry Attestation Policy
+
+`tools/science_boundary/registry_attestation.py` consumes a fully verified
+R2.5 bundle, its original verification inputs, and a separate
+`sounio.registry-attestation-policy.v1`. It emits a deterministic
+`sounio.registry-attestation.v1` only when the bundle's conclusive ring,
+visibility, requested claim class, identity-only assurance, strict mode, and
+`OK` verdict match the local policy.
+
+The attestation type is `unsigned-local-policy-evaluation`, its decision is
+`POLICY_MATCH`, its authority scope is `local-catalog-index`, and its
+publication status is `disabled`. Verification reconstructs the entire
+attestation from the bundle, source tree, package policy, compiler, and
+registry policy. A forged field remains invalid even if its JSON identity hash
+is recomputed.
+
+R2.6 binds a local catalog decision to exact content. It does not assert public
+registry status, upload, namespace ownership, issuer identity, remote
+signature, independent replay, scientific truth, or clinical authority. The
+complete contract is `docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md`.
+
+## R3 Physical Extraction Inventory
+
+`tools/science_boundary/physical_extraction_inventory.py` binds every root in
+`science-rings.tsv` to exactly one row in
+`docs/ecosystem/science-physical-extraction-ownership.tsv`. It recursively
+records every regular file, byte size, SHA-256 digest, per-unit tree identity,
+and the root's proposed ownership disposition.
+
+The v1 rules retain `pl-core` in the root repository, plan separately named
+distributions for conclusive `scientific-package` and `research` roots, and
+block candidate or unresolved roots without assigning a destination. Roots
+must be repository-relative and non-overlapping; symbolic links and incomplete
+coverage refuse.
+
+Every emitted artifact has type `physical-extraction-planning-snapshot`,
+status `not-executed`, and `identity-only` assurance. It proves neither source
+movement nor destination existence or ownership transfer. Those claims require
+the separate materialization interface. The complete inventory contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md`.
+
+## R3 Physical Extraction Materialization
+
+`tools/science_boundary/physical_extraction_materializer.py` consumes a fully
+reverified inventory and an explicit
+`sounio.physical-extraction-destination-policy.v1`. Every planned target must
+have a unique approved policy row, repository-local approval evidence bound by
+size and SHA-256, and a preexisting local destination carrying an exact marker
+bound to the same inventory.
+
+The tool stages every regular-file copy and verifies its byte identity before
+promoting any final content path. Unit promotion uses same-filesystem directory
+renames; the deterministic receipt is promoted last. Verification reconstructs
+the source inventory, policy bindings, markers, exact destination trees, and
+receipt. Source or destination mutation, incomplete approval, symlinks,
+occupied output, malformed inputs, and forged or rehashed receipts refuse.
+
+The materialization receipt has type `verified-local-exact-copy`, status
+`copied-and-verified`, `identity-only` assurance, and source-removal status
+`not-authorized`. It proves local byte-copy identity only. It does not establish
+a remote repository, commit or push, ownership transfer, publication,
+independent replay, scientific truth, or clinical authority. Multiple unit
+renames cannot be crash-atomic as one filesystem transaction; a valid final
+receipt is required to accept the complete operation.
+
+No approved production destination policy or receipt currently exists for the
+canonical Sounio roots, so this executable interface does not claim that the
+repository migration occurred. The complete contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md`.
+
+## R3 Source-Removal Authorization
+
+`tools/science_boundary/source_removal_authorizer.py` consumes a fully
+reverified materialization and one exact approved removal policy. The policy
+must bind the complete planned scope, at least two distinct review evidence
+records, one or more byte-exact repairs, and one or more post-removal gate
+commands with expected exit and output identities.
+
+The tool snapshots every regular source file into an external temporary copy,
+removes only the `extract-planned` roots from that copy, applies the declared
+repairs, and runs the gates directly from their argument vectors. The complete
+candidate must remain equal to the original snapshot minus the planned files
+plus the exact repairs. Original sources, inventory, materialization,
+destinations, policy and evidence are reverified before receipt promotion; the
+temporary candidate is then discarded.
+
+The deterministic receipt has type
+`verified-post-removal-candidate-authorization`, status
+`authorized-not-executed`, source execution status `not-executed`, and
+`identity-only` assurance. It does not prove reviewer independence, production
+migration, source deletion, remote repository state, ownership, publication,
+independent replay, scientific truth, or clinical authority. The authorizer
+contains no canonical removal operation. The full contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md`.
 
 ## Declarations
 
@@ -113,10 +250,10 @@ inferred from names, directories, scores, or package metadata. A GUM claim must
 name both `method` and `witness` evidence; legacy `gum-compliant` is never a
 substitute.
 
-Those hashes establish file identity, existence, and change detection only.
+Those hashes establish file identity, existence, policy matching, and change detection only.
 They do not establish that a dataset is genuine, a method is correct, a review
 is independent, or evidence supports scientific or clinical validity. External
-registry authority, remote signatures, attested execution, independent replay,
+hosted registry authority, remote signatures, attested execution, independent replay,
 `ClinicalAuthority`, and `ClinicalRelease` remain outside R0-R2.
 
 `sounio.package-boundary-receipt.v1` records the ternary verdict, mode, graph,
@@ -141,9 +278,72 @@ advisory inventory and always contributes `E-SRB-000`/`UNKNOWN`.
 ## Current Acceptance Status
 
 The host attestor, CLI flags, ternary policy, deterministic receipt, claim
-contract, legacy quarantine, and strict temporary-ELF flow are implemented.
+contract, legacy quarantine, strict temporary-ELF flow, atomic R2.5 package
+release bundle, deterministic R2.6 local registry-policy attestation, R3
+physical extraction inventory, R3 local materialization, and R3 temporary-copy
+source-removal authorization interfaces are implemented.
 The current-source raw collector follows the established per-node AST reload
 loop and resolves the real `hello_pkg` closure to `main.sio`, `greet.sio`, and
 their import edge. The named gate passes 178 assertions, including runnable
 strict ELFs, deterministic receipts, refusal/`UNKNOWN`, tamper detection, and
-absence of a final ELF after strict refusal.
+absence of a final ELF after strict refusal. The R2.5 gate composes those 178
+assertions with 65 assertions for bundle determinism, round-trip verification,
+refusal without a final bundle, exact-inventory enforcement, and component
+tamper detection. The R2.6 gate adds 82 assertions for policy matching,
+deterministic attestation identity, output promotion, full input revalidation,
+and forged or rehashed attestation refusal.
+
+The composed current-source acceptance witness is Slurm job `6394`: the same
+Madaros ELF passed all 178 R0-R2 assertions, 65 R2.5 assertions, and 82 R2.6
+assertions. This establishes the named software boundary only; it does not
+promote any package or claim to a stronger evidence class.
+
+The focused R3 gate adds 141 assertions for exact ring and ownership coverage,
+deterministic file identity, retained/planned/blocked dispositions, occupied
+output preservation, source mutation detection, and forged or rehashed
+inventory refusal. Its current repository witness covers seven ownership units
+and more than 3,000 regular files while keeping extraction status
+`not-executed`.
+
+The composed current-source R3 acceptance witness is Slurm job `6434` on
+`gpuorangefs-r770-proxmox`: the same Madaros ELF passed all 178 R0-R2, 65 R2.5,
+82 R2.6, and 141 R3 assertions. The emitted repository snapshot contains 3,277
+regular files across seven ownership units and verifies with extraction status
+`not-executed`. This is evidence for the inventory boundary only, not physical
+materialization or ownership transfer.
+
+The focused materialization gate adds 167 assertions for exact approval
+coverage, destination-marker binding, deterministic receipts across physical
+roots, source preservation, occupied-output preservation, and source,
+destination, policy, inventory, marker, and receipt tamper refusal. It
+materializes two approved fixture units while retaining one core unit and
+leaving one unresolved unit blocked. A production witness for the canonical
+five planned targets remains absent because no production destination policy
+has been approved.
+
+The composed current-source materialization witness is Slurm job `6478` on
+`gpuorangefs-r770-proxmox`: the same Madaros ELF passed all 178 R0-R2, 65 R2.5,
+82 R2.6, 141 R3 inventory, and 167 materialization assertions. The deterministic
+fixture receipt covers two approved units and three files, reports
+`copied-and-verified`, and keeps source removal `not-authorized`. The first job
+attempt, `6477`, placed R2.5 temporary promotion state on OrangeFS and received
+`EINVAL` from a directory `fsync`; job `6478` corrected the harness to use
+node-local temporary storage while retaining the exact source archive,
+compiler, gate, and OrangeFS evidence logs.
+
+The focused source-removal authorization gate adds 527 checks for exact
+materialization binding, complete removal scope, distinct review records,
+byte-bound repairs, deterministic candidate receipts, source preservation,
+post-removal command evidence, candidate mutation refusal, and forged or
+rehashed policy and authorization refusal. It authorizes two fixture units and
+three fixture files as `authorized-not-executed`; all original fixture roots
+remain present. No production policy or canonical authorization exists.
+
+The composed current-source authorization witness is Slurm job `6527` on
+`gpuorangefs-r770-proxmox`: one archived source snapshot and the unchanged
+source-fresh Madaros passed all 178 R0-R2, 65 R2.5, 82 R2.6, 141 inventory,
+167 materialization, and 527 authorization checks in 42 seconds. The final
+fixture receipt identities match the local witness, reports
+`authorized-not-executed` and `not-executed`, and leaves every original source
+root present. Node-local temporary storage was used for every promotion and
+candidate workspace; no fallback implementation path ran.

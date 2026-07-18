@@ -98,16 +98,26 @@ promoção ou release, e não são traduzidos automaticamente.
 
 ## 5. CLI Integration
 
-Os comandos abaixo descrevem a direção de design. A superfície suportada hoje é
-o wrapper local `tools/sounio-pkg/sounio-pkg` para `new`, `build`, `check` e
-`test`, junto com os imports locais gateados em `packages/*`.
+O wrapper local `tools/sounio-pkg/sounio-pkg` continua suportando `new`,
+`build`, `check` e `test`, junto com os imports locais gateados em
+`packages/*`. R2.5 acrescenta ao launcher público um release local opt-in:
 
 ```bash
 tools/sounio-pkg/sounio-pkg new my-package
 tools/sounio-pkg/sounio-pkg build
 tools/sounio-pkg/sounio-pkg check
 tools/sounio-pkg/sounio-pkg test
+bin/souc pkg build . --science-boundary strict --claim-contract claim.toml
+bin/souc pkg verify target/release/<name>-<version>.sio-release --root .
 ```
+
+`pkg build` em modo `strict` exige um claim contract local ao package root. Ele
+cria por padrão `<name>-<version>.sio-release` sob `target/release/`; uma saída
+alternativa pode ser escolhida com `--release-bundle`. O diretório final só é
+promovido depois de verdict `OK`, closure raw-AST completa e revalidação dos
+hashes de fonte, policy, claim, compilador e ELF. Falha, `REJECT`, `UNKNOWN` ou
+tamper deixam o bundle final ausente. O formato é
+`sounio.package-release-bundle.v1` e permanece `identity-only`.
 
 ## 6. Registry Metadata
 
@@ -115,14 +125,18 @@ Um registry público futuro armazenaria:
 - Hash do pacote
 - Lista de dependências resolvidas
 - Declaração de ring e receipt de fronteira, quando aplicável
-- Artefatos: `.sio-pkg`, `.whl` (para Python), `.tar.gz` (source)
+- Artefatos locais verificáveis `.sio-release`
+- Attestations R2.6 `unsigned-local-policy-evaluation` para decisões locais de
+  catálogo; publicação, issuer identity e assinatura remota permanecem fora
+  deste contrato
 
 ## 7. Próximos Passos
 
 1. Completar o inventário de rings do `stdlib`
-2. Integrar receipts opt-in aos gates de package/release
-3. Especificar registry attestation antes de habilitar publicação
+2. Manter o gate R2.5 de receipts opt-in para package/release
+3. Manter o gate R2.6 de registry attestation local sem habilitar publicação
 4. Desenvolver `sounio-py` bindings sem ampliar autoridade científica
+5. Manter o inventário e o materializador local R3; destinos reais e remoção da origem exigem aprovações separadas
 
 ---
 
