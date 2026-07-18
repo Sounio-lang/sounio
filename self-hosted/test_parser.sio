@@ -390,6 +390,45 @@ fn second_item_kind(prog: Program) -> ItemKind with Alloc {
     }
 }
 
+fn method_tail_is_empty(tail: Option<Box<ItemList>>) -> bool with Alloc {
+    match tail {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn method_tail_is_single_private(tail: Option<Box<ItemList>>) -> bool with Alloc {
+    match tail {
+        Some(rest) => !visibility_to_bool((*rest).head.visibility) && method_tail_is_empty((*rest).tail),
+        None => false,
+    }
+}
+
+fn method_list_is_public_then_private(methods: ItemList) -> bool with Alloc {
+    visibility_is_pub(methods.head.visibility) && method_tail_is_single_private(methods.tail)
+}
+
+fn impl_def_methods_are_public_then_private(impl_def: ImplDef) -> bool with Alloc {
+    match impl_def.methods {
+        Some(methods) => method_list_is_public_then_private(*methods),
+        None => false,
+    }
+}
+
+fn item_methods_are_public_then_private(item: Item) -> bool with Alloc {
+    match item.impl_def {
+        Some(impl_def) => impl_def_methods_are_public_then_private(*impl_def),
+        None => false,
+    }
+}
+
+fn first_impl_methods_are_public_then_private(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(items) => item_methods_are_public_then_private((*items).head),
+        None => false,
+    }
+}
+
 fn first_fn_has_ret(prog: Program) -> bool with Alloc {
     match prog.items {
         Some(list) => fndef_opt_has_ret((*list).head.fn_def),
@@ -963,6 +1002,75 @@ fn test_card_a_raw_pointer_types() -> bool with Mut, IO, Panic, Div, Alloc {
     parser_last_error_count() == 0
 }
 
+// T17: impl S { pub fn a() {} fn b() {} } preserves method visibility in the AST.
+fn test_impl_method_visibility() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105 as i8  // i
+    input[1] = 109 as i8  // m
+    input[2] = 112 as i8  // p
+    input[3] = 108 as i8  // l
+    input[4] = 32 as i8
+    input[5] = 83 as i8   // S
+    input[6] = 123 as i8  // {
+    input[7] = 112 as i8  // p
+    input[8] = 117 as i8  // u
+    input[9] = 98 as i8   // b
+    input[10] = 32 as i8
+    input[11] = 102 as i8 // f
+    input[12] = 110 as i8 // n
+    input[13] = 32 as i8
+    input[14] = 97 as i8  // a
+    input[15] = 40 as i8  // (
+    input[16] = 41 as i8  // )
+    input[17] = 123 as i8 // {
+    input[18] = 125 as i8 // }
+    input[19] = 102 as i8 // f
+    input[20] = 110 as i8 // n
+    input[21] = 32 as i8
+    input[22] = 98 as i8  // b
+    input[23] = 40 as i8  // (
+    input[24] = 41 as i8  // )
+    input[25] = 123 as i8 // {
+    input[26] = 125 as i8 // }
+    input[27] = 125 as i8 // }
+
+    let prog = parse_program_from_ascii(input, 28)
+    count_items(prog) == 1 &&
+    first_item_kind(prog) == ItemKind::ItemImpl &&
+    parser_last_error_count() == 0 &&
+    first_impl_methods_are_public_then_private(prog)
+}
+
+// T18: an incomplete pub method must not consume the impl's closing brace.
+fn test_incomplete_pub_impl_recovers_next_fn() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105 as i8  // i
+    input[1] = 109 as i8  // m
+    input[2] = 112 as i8  // p
+    input[3] = 108 as i8  // l
+    input[4] = 32 as i8
+    input[5] = 83 as i8   // S
+    input[6] = 123 as i8  // {
+    input[7] = 112 as i8  // p
+    input[8] = 117 as i8  // u
+    input[9] = 98 as i8   // b
+    input[10] = 125 as i8 // }
+    input[11] = 102 as i8 // f
+    input[12] = 110 as i8 // n
+    input[13] = 32 as i8
+    input[14] = 102 as i8 // f
+    input[15] = 40 as i8  // (
+    input[16] = 41 as i8  // )
+    input[17] = 123 as i8 // {
+    input[18] = 125 as i8 // }
+
+    let prog = parse_program_from_ascii(input, 19)
+    count_items(prog) == 2 &&
+    first_item_kind(prog) == ItemKind::ItemImpl &&
+    second_item_kind(prog) == ItemKind::ItemFn &&
+    parser_last_error_count() == 1
+}
+
 // ============================================================================
 // TEST RUNNER
 // ============================================================================
@@ -1018,6 +1126,12 @@ fn run_parser_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
 
     total = total + 1
     if test_card_a_raw_pointer_types() { passed = passed + 1 } else { print("FAIL: T16 card_a_raw_pointer_types\n") }
+
+    total = total + 1
+    if test_impl_method_visibility() { passed = passed + 1 } else { print("FAIL: T17 impl_method_visibility\n") }
+
+    total = total + 1
+    if test_incomplete_pub_impl_recovers_next_fn() { passed = passed + 1 } else { print("FAIL: T18 incomplete_pub_impl_recovers_next_fn\n") }
 
     if passed == total {
         print("ALL PARSER TESTS PASSED\n")
