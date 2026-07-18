@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-BASE="${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-4a63c2ba16b4aecf85759bf3f3a7ba9105c79986}"
+PINNED_BASE="4a63c2ba16b4aecf85759bf3f3a7ba9105c79986"
+REQUESTED_BASE="${IR_MODULE_ARENA_V2_SOIR_BASE_SHA:-$PINNED_BASE}"
+BASE="$PINNED_BASE"
 SOUC="${SOUC_BIN:-$ROOT/bin/madaros}"
 ARENA="self-hosted/ir/arena_v2_shadow.sio"
 WRITER="self-hosted/ir/soir_writer.sio"
@@ -13,9 +15,15 @@ PROVENANCE_MODE="${IR_MODULE_ARENA_V2_SOIR_PROVENANCE_MODE:-git}"
 CONTENT_MANIFEST="${IR_MODULE_ARENA_V2_SOIR_CONTENT_MANIFEST:-}"
 EXPECTED_MANIFEST_SHA256="${IR_MODULE_ARENA_V2_SOIR_EXPECTED_MANIFEST_SHA256:-}"
 RUNTIME_TIMEOUT_SECONDS="${IR_MODULE_ARENA_V2_SOIR_RUNTIME_TIMEOUT_SECONDS:-15}"
-TIMEOUT_SELFTEST="${IR_MODULE_ARENA_V2_SOIR_TIMEOUT_SELFTEST:-0}"
+TIMEOUT_SELFTEST="${IR_MODULE_ARENA_V2_SOIR_TIMEOUT_SELFTEST:-1}"
 PROVENANCE_RECEIPT=""
 CONTENT_MANIFEST_SHA256=""
+HEAD_SHA="not_available"
+TREE_SHA="not_available"
+BASE_RECEIPT="not_checked_manifest_scope"
+PRECISION_RECEIPT="not_checked_manifest_scope"
+LEGACY_RECEIPT="not_checked_manifest_scope"
+LANE_CONTENT_SHA256=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sounio-ir-module-arena-v2-soir-v5.XXXXXX")"
 
 cleanup() {
@@ -119,6 +127,36 @@ expected_write_set() {
     tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio
 }
 
+validate_git_provenance() {
+  local -a expected_paths
+  local dirty_paths
+
+  [[ "$REQUESTED_BASE" == "$PINNED_BASE" ]] || fail base_override_rejected
+  git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
+  HEAD_SHA="$(git rev-parse HEAD)"
+  TREE_SHA="$(git rev-parse 'HEAD^{tree}')"
+  [[ "$HEAD_SHA" != "$BASE" ]] || fail head_equals_pinned_base
+  git merge-base --is-ancestor "$BASE" "$HEAD_SHA" || fail pinned_base_not_ancestor
+
+  git diff --name-only "$BASE" "$HEAD_SHA" | LC_ALL=C sort >"$TMP/write-set.actual"
+  expected_write_set | LC_ALL=C sort >"$TMP/write-set.expected"
+  diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
+    >"$TMP/write-set.diff" 2>&1 || {
+      cat "$TMP/write-set.diff" >&2
+      fail write_set_expanded
+    }
+
+  mapfile -t expected_paths < <(expected_write_set)
+  dirty_paths="$(git status --porcelain --untracked-files=all -- "${expected_paths[@]}")"
+  if [[ -n "$dirty_paths" ]]; then
+    printf '%s\n' "$dirty_paths" >&2
+    fail expected_write_set_dirty
+  fi
+
+  PROVENANCE_RECEIPT="git_head_tree_bound"
+  BASE_RECEIPT="$BASE"
+}
+
 validate_manifest_provenance() {
   [[ -n "$CONTENT_MANIFEST" ]] || fail manifest_path_required
   [[ -n "$EXPECTED_MANIFEST_SHA256" ]] || fail manifest_sha256_required
@@ -153,14 +191,13 @@ validate_manifest_provenance() {
     cat "$TMP/manifest-content-check.log" >&2
     fail manifest_content_mismatch
   }
-  PROVENANCE_RECEIPT="manifest_pinned"
+  PROVENANCE_RECEIPT="manifest_pinned_lane_content"
 }
 
 case "$PROVENANCE_MODE" in
   git)
     command -v git >/dev/null 2>&1 || fail git_required_for_git_provenance
-    git cat-file -e "$BASE^{commit}" 2>/dev/null || fail base_sha_unavailable
-    PROVENANCE_RECEIPT="git"
+    validate_git_provenance
     ;;
   manifest)
     validate_manifest_provenance
@@ -176,7 +213,8 @@ done
 [[ -x "$SOUC" ]] || fail compiler_missing
 command -v timeout >/dev/null 2>&1 || fail timeout_command_missing
 [[ "$RUNTIME_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail runtime_timeout_invalid
-[[ "$TIMEOUT_SELFTEST" == "0" || "$TIMEOUT_SELFTEST" == "1" ]] || fail timeout_selftest_mode_invalid
+if (( RUNTIME_TIMEOUT_SECONDS > 60 )); then fail runtime_timeout_exceeds_cap_60; fi
+[[ "$TIMEOUT_SELFTEST" == "1" ]] || fail timeout_selftest_required
 
 grep -Fq 'pub let SOIR_WRITER_SCALAR_EMPTY_V5_SIZE: i64 = 320' "$WRITER" || fail writer_size_contract_missing
 grep -Fq 'pub fn soir_writer_preflight_scalar_empty_module_v5(' "$WRITER" || fail writer_preflight_missing
@@ -258,50 +296,17 @@ for default_surface in \
   fi
 done
 
-run_manifest_precision_identity_check() {
-  local shim_dir="$TMP/manifest-tool-shim"
-  local git_shim="$shim_dir/git"
-  local rg_shim="$shim_dir/rg"
-  mkdir -p "$shim_dir"
-  # The canonical structural precision gate uses Git once, only to print a
-  # source identity. Bind that receipt to the pinned manifest and reject every
-  # other Git operation. Its one rg call receives a strict grep-backed adapter;
-  # all descriptor and containment checks run unchanged.
-  {
-    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
-    printf '%s\n' 'if [[ "$#" -eq 2 && "$1" == "rev-parse" && "$2" == "HEAD" ]]; then'
-    printf '  printf '\''%%s\\n'\'' '\''manifest:%s'\''\n' "$CONTENT_MANIFEST_SHA256"
-    printf '%s\n' '  exit 0' 'fi'
-    printf '%s\n' 'echo "manifest provenance adapter rejected unsupported git command" >&2' 'exit 64'
-  } >"$git_shim"
-  {
-    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
-    printf '%s\n' 'if [[ "${1:-}" != "-n" || "$#" -lt 3 ]]; then'
-    printf '%s\n' '  echo "manifest search adapter rejected unsupported rg arguments" >&2' '  exit 64' 'fi'
-    printf '%s\n' 'shift' 'exec grep -REn -- "$@"'
-  } >"$rg_shim"
-  chmod +x "$git_shim" "$rg_shim"
-  PATH="$shim_dir:$PATH" \
-    bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
-    >"$TMP/precision-identity.log" 2>&1 || {
-      cat "$TMP/precision-identity.log" >&2
-      fail precision_identity_regression
-    }
-}
-
 if [[ "$PROVENANCE_MODE" == "git" ]]; then
   bash scripts/ci/madaros_f128_f256_format_identity_gate.sh --structural-only \
     >"$TMP/precision-identity.log" 2>&1 || {
       cat "$TMP/precision-identity.log" >&2
       fail precision_identity_regression
     }
-else
-  run_manifest_precision_identity_check
+  PRECISION_RECEIPT="preserved"
+  LEGACY_RECEIPT="default"
 fi
 
-if [[ "$TIMEOUT_SELFTEST" == "1" ]]; then
-  run_timeout_selftest
-fi
+run_timeout_selftest
 
 for source in "$WRITER" "$ARENA" "$BRIDGE"; do
   source_name="$(basename "$source" .sio)"
@@ -371,27 +376,27 @@ grep -Fq 'SEQUENCE_AFTER_STALE status=-20' "$TMP/ir_module_arena_v2_soir_v5_brid
 grep -Fq 'SEQUENCE_AFTER_REUSE status=-22' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail reuse_sequence_receipt_missing
 grep -Fq 'canary=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_sequence_probe.out" || fail sequence_canary_receipt_missing
 grep -Fq 'MUTATION_PREFLIGHT status=-21 bss=8 id_live=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_mutation_preflight_probe.out" || fail mutation_preflight_receipt_missing
+grep -Fq 'MODULE_OUTPUT_LIVE status=-8 live_count=1 id_live=1' "$TMP/ir_module_arena_v2_soir_v5_bridge_reuse_witness.out" || fail module_output_live_receipt_missing
 
-if [[ "$PROVENANCE_MODE" == "git" && "$(git rev-parse HEAD)" != "$BASE" ]]; then
-  git diff --name-only "$BASE" HEAD | sort >"$TMP/write-set.actual"
-  expected_write_set | sort >"$TMP/write-set.expected"
-  diff -u "$TMP/write-set.expected" "$TMP/write-set.actual" \
-    >"$TMP/write-set.diff" 2>&1 || {
-      cat "$TMP/write-set.diff" >&2
-      fail write_set_expanded
-    }
-fi
+while IFS= read -r lane_path; do
+  sha256sum "$lane_path"
+done < <(expected_write_set) >"$TMP/lane-content.sha256"
+LANE_CONTENT_SHA256="$(sha256sum "$TMP/lane-content.sha256" | awk '{print $1}')"
 
 compiler_sha256="$(sha256sum "$SOUC" | awk '{print $1}')"
-printf 'IR_MODULE_ARENA_V2_SOIR_V5_WATCHDOG runtime_timeout_seconds=%s kill_after_seconds=2 timeout_rc=124 fail_closed=enabled\n' \
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_WATCHDOG runtime_timeout_seconds=%s kill_after_seconds=2 timeout_rc=124 selftest=pass fail_closed=pass\n' \
   "$RUNTIME_TIMEOUT_SECONDS"
-printf 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=preserved provenance=%s\n' "$PROVENANCE_RECEIPT"
-printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_PLAN storage=private_scalar_columns capacity=2 identity=slot,generation binding=arena,module_slot,module_generation,mutation_epoch,start,capacity,required,end,version'
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=%s provenance=%s\n' \
+  "$PRECISION_RECEIPT" "$PROVENANCE_RECEIPT"
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_PLAN storage=module_owned_scalar_columns capacity=2 identity=slot,generation field_privacy=enforcement_not_claimed integrity=emit_revalidated binding=arena,module_slot,module_generation,mutation_epoch,start,capacity,required,end,version'
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_EMIT deterministic=pass wire=v5_empty_320 capacity_below=reject capacity_exact=pass no_partial_write=pass origin=zero_only'
-printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_IDS invalid=reject stale=reject reuse=reject cross_arena=reject mutation_after_preflight=reject mutation_repreflight=pass'
-printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_DIFFERENTIAL mode=shadow_canonical_not_differential byte_parity=not_claimed legacy=default'
+printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_IDS invalid=reject stale=reject reuse=reject module_output_live=reject cross_arena=reject mutation_after_preflight=reject mutation_repreflight=pass'
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_DIFFERENTIAL mode=shadow_canonical_not_differential byte_parity=not_claimed legacy=%s\n' "$LEGACY_RECEIPT"
 if [[ "$PROVENANCE_MODE" == "manifest" ]]; then
-  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=manifest_pinned manifest_sha256=%s entries=13\n' "$CONTENT_MANIFEST_SHA256"
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=manifest_pinned_lane_content manifest_sha256=%s entries=13 scope=lane_content_only protected_surfaces=not_checked\n' "$CONTENT_MANIFEST_SHA256"
+else
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROVENANCE provenance=git_head_tree_bound base=%s head=%s tree=%s exact_write_set=pass expected_paths_clean=pass\n' \
+    "$BASE" "$HEAD_SHA" "$TREE_SHA"
 fi
-printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s provenance=%s\n' \
-  "$SOUC" "$compiler_sha256" "$BASE" "$PROVENANCE_RECEIPT"
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_PASS compiler=%s compiler_sha256=%s base=%s head=%s tree=%s lane_content_sha256=%s provenance=%s\n' \
+  "$SOUC" "$compiler_sha256" "$BASE_RECEIPT" "$HEAD_SHA" "$TREE_SHA" "$LANE_CONTENT_SHA256" "$PROVENANCE_RECEIPT"
