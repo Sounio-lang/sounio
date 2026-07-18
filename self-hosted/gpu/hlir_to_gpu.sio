@@ -1819,6 +1819,19 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             vjp.src_reg = instr.call_args[3]
             vjp.shared_addr = instr.call_args[4]
             k = gpu_kernel_append_op(k, vjp)
+        } else if hlir_name_is_ossm_oct_bwd(cn) || hlir_name_is_ossm_sed_bwd(cn) {
+            // One BPTT backward step. call_args = [pA, pHprev, pdHt, pdHprev, pdA]. Transposed tile
+            // (dHprev = L(A)ᵀ·dHt, D-layout) + in-place dA accumulation → one GpuOctBwd. 2048 bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var bwd = gpu_op_new()
+            bwd.opcode = GpuOpcode::GpuOctBwd
+            bwd.rhs_imm = if hlir_name_is_ossm_sed_bwd(cn) { 16 } else { 8 }
+            bwd.lhs_reg = instr.call_args[0]
+            bwd.rhs_reg = instr.call_args[1]
+            bwd.addr_reg = instr.call_args[2]
+            bwd.src_reg = instr.call_args[3]
+            bwd.shared_addr = instr.call_args[4]
+            k = gpu_kernel_append_op(k, bwd)
         }
         // Other calls: skip in MVP
     }
@@ -1927,6 +1940,23 @@ fn hlir_name_is_sed_batch_vjp(n: HlirName) -> bool {
     n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
     n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 118 as i8 && n.buf[11] == 106 as i8 &&
     n.buf[12] == 112 as i8
+}
+
+// "ossm_oct_bwd" (12 chars) — one BPTT backward step (octonion): dHprev = L(A)ᵀ·dHt (D-layout) +
+// in-place dA accumulation. ossm_oct_bwd(pA, pHprev, pdHt, pdHprev, pdA) (dim=8, bits=3).
+fn hlir_name_is_ossm_oct_bwd(n: HlirName) -> bool {
+    if n.len != 12 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8
+}
+
+// "ossm_sed_bwd" (12 chars) — one BPTT backward step (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_bwd(n: HlirName) -> bool {
+    if n.len != 12 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8
 }
 
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
