@@ -12,6 +12,8 @@ BRIDGE="self-hosted/ir/arena_v2_soir_bridge.sio"
 PROVENANCE_MODE="${IR_MODULE_ARENA_V2_SOIR_PROVENANCE_MODE:-git}"
 CONTENT_MANIFEST="${IR_MODULE_ARENA_V2_SOIR_CONTENT_MANIFEST:-}"
 EXPECTED_MANIFEST_SHA256="${IR_MODULE_ARENA_V2_SOIR_EXPECTED_MANIFEST_SHA256:-}"
+RUNTIME_TIMEOUT_SECONDS="${IR_MODULE_ARENA_V2_SOIR_RUNTIME_TIMEOUT_SECONDS:-15}"
+TIMEOUT_SELFTEST="${IR_MODULE_ARENA_V2_SOIR_TIMEOUT_SELFTEST:-0}"
 PROVENANCE_RECEIPT=""
 CONTENT_MANIFEST_SHA256=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sounio-ir-module-arena-v2-soir-v5.XXXXXX")"
@@ -24,6 +26,80 @@ trap cleanup EXIT
 fail() {
   printf 'IR_MODULE_ARENA_V2_SOIR_V5_FAIL reason=%s\n' "$1" >&2
   exit 1
+}
+
+progress() {
+  printf 'IR_MODULE_ARENA_V2_SOIR_V5_PROGRESS stage=%s subject=%s status=%s\n' \
+    "$1" "$2" "$3" >&2
+}
+
+run_runtime_with_timeout() {
+  local elf="$1"
+  local out="$2"
+  local timeout_seconds="$3"
+  timeout --signal=TERM --kill-after=2s "${timeout_seconds}s" "$elf" >"$out" 2>&1
+}
+
+run_witness_runtime() {
+  local name="$1"
+  local elf="$2"
+  local out="$3"
+  local timeout_seconds="$4"
+  local runtime_rc
+
+  progress composite_runtime "$name" begin
+  set +e
+  run_runtime_with_timeout "$elf" "$out" "$timeout_seconds"
+  runtime_rc=$?
+  set -e
+  if [[ "$runtime_rc" -eq 124 ]]; then
+    progress composite_runtime "$name" timeout
+    cat "$out" >&2
+    fail "composite_runtime_timeout_$name"
+  fi
+  if [[ "$runtime_rc" -ne 0 ]]; then
+    progress composite_runtime "$name" fail
+    cat "$out" >&2
+    fail "composite_runtime_${name}_rc_${runtime_rc}"
+  fi
+  progress composite_runtime "$name" pass
+}
+
+run_timeout_selftest() {
+  local source="$TMP/runtime_timeout_selftest.sio"
+  local elf="$TMP/runtime_timeout_selftest.elf"
+  local build_log="$TMP/runtime_timeout_selftest.build.log"
+  local run_log="$TMP/runtime_timeout_selftest.out"
+  local classification_log="$TMP/runtime_timeout_selftest.classification.log"
+  local classification_rc
+
+  printf '%s\n' \
+    'module runtime_timeout_selftest' \
+    '' \
+    'fn main() -> i64 {' \
+    '    while true {}' \
+    '    0' \
+    '}' >"$source"
+
+  progress timeout_selftest forced_hang build_begin
+  "$SOUC" --native-v2-compile "$source" -o "$elf" >"$build_log" 2>&1 || {
+    cat "$build_log" >&2
+    fail timeout_selftest_build
+  }
+  chmod +x "$elf"
+  progress timeout_selftest forced_hang runtime_begin
+  set +e
+  (run_witness_runtime timeout_selftest "$elf" "$run_log" 1) \
+    >"$classification_log" 2>&1
+  classification_rc=$?
+  set -e
+  if [[ "$classification_rc" -ne 1 ]] ||
+     ! grep -Fxq 'IR_MODULE_ARENA_V2_SOIR_V5_FAIL reason=composite_runtime_timeout_timeout_selftest' "$classification_log"; then
+    cat "$classification_log" >&2
+    fail "timeout_selftest_classification_rc_${classification_rc}"
+  fi
+  progress timeout_selftest forced_hang timeout_classified
+  printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_TIMEOUT_SELFTEST forced_hang=timeout runtime_rc=124 fail_closed=pass seconds=1'
 }
 
 expected_write_set() {
@@ -98,6 +174,9 @@ for file in "$ARENA" "$WRITER" "$BRIDGE"; do
   [[ -f "$file" ]] || fail "missing_${file//\//_}"
 done
 [[ -x "$SOUC" ]] || fail compiler_missing
+command -v timeout >/dev/null 2>&1 || fail timeout_command_missing
+[[ "$RUNTIME_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail runtime_timeout_invalid
+[[ "$TIMEOUT_SELFTEST" == "0" || "$TIMEOUT_SELFTEST" == "1" ]] || fail timeout_selftest_mode_invalid
 
 grep -Fq 'pub let SOIR_WRITER_SCALAR_EMPTY_V5_SIZE: i64 = 320' "$WRITER" || fail writer_size_contract_missing
 grep -Fq 'pub fn soir_writer_preflight_scalar_empty_module_v5(' "$WRITER" || fail writer_preflight_missing
@@ -220,11 +299,18 @@ else
   run_manifest_precision_identity_check
 fi
 
+if [[ "$TIMEOUT_SELFTEST" == "1" ]]; then
+  run_timeout_selftest
+fi
+
 for source in "$WRITER" "$ARENA" "$BRIDGE"; do
+  source_name="$(basename "$source" .sio)"
+  progress source_check "$source_name" begin
   "$SOUC" check "$source" >"$TMP/$(basename "$source").check.log" 2>&1 || {
     cat "$TMP/$(basename "$source").check.log" >&2
     fail "source_check_${source//\//_}"
   }
+  progress source_check "$source_name" pass
 done
 
 compose_and_run() {
@@ -235,6 +321,8 @@ compose_and_run() {
   composite="$TMP/$name.sio"
   elf="$TMP/$name.elf"
   log="$TMP/$name.log"
+
+  progress composite "$name" begin
 
   {
     printf 'module ir::%s_gate\n\n' "$name"
@@ -248,23 +336,25 @@ compose_and_run() {
         -e '/^use ir::arena_v2_soir_bridge::\*$/d' "$witness"
   } >"$composite"
 
+  progress composite_check "$name" begin
   "$SOUC" check "$composite" >"$log" 2>&1 || {
     cat "$log" >&2
     fail "composite_check_$name"
   }
+  progress composite_check "$name" pass
+  progress composite_build "$name" begin
   "$SOUC" --native-v2-compile "$composite" -o "$elf" >>"$log" 2>&1 || {
     cat "$log" >&2
     fail "composite_build_$name"
   }
   chmod +x "$elf"
-  "$elf" >"$TMP/$name.out" 2>&1 || {
-    cat "$TMP/$name.out" >&2
-    fail "composite_runtime_$name"
-  }
+  progress composite_build "$name" pass
+  run_witness_runtime "$name" "$elf" "$TMP/$name.out" "$RUNTIME_TIMEOUT_SECONDS"
   grep -Fxq "$marker" "$TMP/$name.out" || {
     cat "$TMP/$name.out" >&2
     fail "marker_missing_$name"
   }
+  progress composite "$name" pass
 }
 
 compose_and_run tests/native-v2/ir_module_arena_v2_soir_v5_bridge_witness.sio IR_MODULE_ARENA_V2_SOIR_V5_CANONICAL_PASS
@@ -293,6 +383,8 @@ if [[ "$PROVENANCE_MODE" == "git" && "$(git rev-parse HEAD)" != "$BASE" ]]; then
 fi
 
 compiler_sha256="$(sha256sum "$SOUC" | awk '{print $1}')"
+printf 'IR_MODULE_ARENA_V2_SOIR_V5_WATCHDOG runtime_timeout_seconds=%s kill_after_seconds=2 timeout_rc=124 fail_closed=enabled\n' \
+  "$RUNTIME_TIMEOUT_SECONDS"
 printf 'IR_MODULE_ARENA_V2_SOIR_V5_CHECK source=pass composite_matrix=9/9 precision_identity=preserved provenance=%s\n' "$PROVENANCE_RECEIPT"
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_PLAN storage=private_scalar_columns capacity=2 identity=slot,generation binding=arena,module_slot,module_generation,mutation_epoch,start,capacity,required,end,version'
 printf '%s\n' 'IR_MODULE_ARENA_V2_SOIR_V5_EMIT deterministic=pass wire=v5_empty_320 capacity_below=reject capacity_exact=pass no_partial_write=pass origin=zero_only'
