@@ -160,7 +160,9 @@ approvals or perform a remote migration.
 
 ## Next Interface
 
-`r3-physical-extraction-source-removal-authorization` must require a valid
-materialization receipt, an independently reviewed deletion scope, repository
-and dependency repairs, and post-removal gates before any source file can be
-removed from the Sounio repository.
+`r3-physical-extraction-source-removal-authorization` now requires a valid
+materialization receipt, two distinct review evidence records, an exact removal
+scope, byte-bound repository repairs, and post-removal gates. It proves that
+scope only in a temporary copy and emits `authorized-not-executed`; it does not
+remove a Sounio source file. Actual removal remains the separate
+`r3-physical-extraction-source-removal-execution` interface.

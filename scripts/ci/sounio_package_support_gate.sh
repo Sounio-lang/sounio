@@ -96,6 +96,11 @@ required = {
         "materialization_status = copied-and-verified",
         "source_removal_status = not-authorized",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md": [
+        "Status: executable R3 temporary-copy authorization boundary; canonical source removal is not executed.",
+        "authorization_status = authorized-not-executed",
+        "source_removal_execution_status = not-executed",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -131,6 +136,7 @@ for rel in [
     "docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -176,5 +182,7 @@ run_step sounio-pkg-smoke run_sounio_pkg_smoke
 run_step public-package-wording check_public_package_wording
 run_step physical-extraction-inventory python3 "$ROOT_DIR/scripts/ci/physical_extraction_inventory_gate.py"
 run_step physical-extraction-materialization python3 "$ROOT_DIR/scripts/ci/physical_extraction_materialization_gate.py"
+run_step physical-extraction-source-removal-authorization \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_source_removal_authorization_gate.py"
 
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'
