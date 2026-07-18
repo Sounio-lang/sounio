@@ -62,11 +62,15 @@ int main(int c,char**v){
  if(c>4 && strcmp(v[4],"p1only")==0){printf("(p1only) backward-step validated; training loop skipped.\n");return 0;}
 
  // ── Part 2: BPTT training loop (loss must fall) ──────────────────────────────────────────────
- const int T=3, NITER=40; const double lr=0.03;
+ // Hyperparameters adapt to dim: dim=16 has ~2× the components, so L(A) row-sums (hence the
+ // recurrence's amplification) are larger — a smaller teacher scale + smaller lr keep it stable.
+ const int T=3, NITER=40;
+ const double lr = (DIM==16)?0.004:0.03;
+ const double asc = (DIM==16)?0.5:1.0, pert = (DIM==16)?0.05:0.12;
  double h0[256]={0}, x[3][16], As[16], Bs[16];        // As,Bs = teacher; h0,x fixed data
  for(int b=0;b<16;b++)for(int j=0;j<DIM;j++)h0[b*DIM+j]=0.1*((b%2)?-1:1)+0.02*j;
  for(int t=0;t<T;t++)for(int b=0;b<16;b++)x[t][b]=0.3*sin(0.7*t+0.4*b);
- for(int i=0;i<DIM;i++){As[i]=0.25*((i%2)?-1:1)+0.04*i; Bs[i]=0.15-0.03*i;}
+ for(int i=0;i<DIM;i++){As[i]=asc*(0.25*((i%2)?-1:1)+0.04*i); Bs[i]=asc*(0.15-0.03*i);}
  // teacher targets: run the forward kernel with (As,Bs) to get tgt[t] (D-layout f32→f64), and the
  // teacher's own state trajectory as the forward input at each step.
  double tgt[3][256]={{0}};
@@ -82,7 +86,7 @@ int main(int c,char**v){
   }
  }
  // student init = teacher + perturbation
- double A[16],Bp[16]; for(int i=0;i<DIM;i++){A[i]=As[i]+0.12*((i%2)?-1:1); Bp[i]=Bs[i]+0.10*((i%3)?1:-1);}
+ double A[16],Bp[16]; for(int i=0;i<DIM;i++){A[i]=As[i]+pert*((i%2)?-1:1); Bp[i]=Bs[i]+pert*0.83*((i%3)?1:-1);}
  double loss0=0,lossN=0;
  double Straj[3][256];           // f32→f64 forward outputs, per iter (for backward)
  double hst[4][256];             // state-major states h_0..h_T

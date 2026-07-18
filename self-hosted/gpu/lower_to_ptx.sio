@@ -190,7 +190,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .b64 %rd<N> — covers both u64 and i64. The O-SSM cell uses %rd7 as address scratch
     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
-    if cell && b64_count < 8 { b64_count = 8 }
+    // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
+    if (cell || postadd) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -337,28 +338,23 @@ fn gpu_has_oct_postadd(kernel: GpuKernelIr) -> bool {
 // O-SSM linear-recurrence post-add: after the tile writes S = L(A)·H (f32, row-major) to global,
 // thread 0 adds S[k][b] += B[k]·x[b] for k<dim, b<16. B/x are f64; the accumulate is in f32.
 fn gpu_emit_oct_postadd_bx(BR: string, xR: string, SR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    // Runtime loop over idx = k*16+b (k<dim, b<16): S[idx] += B[k]·x[b]. Runtime (not unrolled) so the
+    // sedenion step (dim=16 → 256 iterations) stays well under the 64 KB PtxBuf; short literals.
     var t = "    bar.sync 0;\n    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $PADONE;\n"
-    var k: i64 = 0
-    while k < dim {
-        // B[k] → %f1
-        t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), BR)
-        t = str_concat(str_concat(t, "+"), i64_to_string(k * 8))
-        t = str_concat(t, "];\n    cvt.rn.f32.f64 %f1, %fd1;\n")
-        var b: i64 = 0
-        while b < 16 {
-            t = str_concat(str_concat(t, "    ld.global.f64 %fd2, ["), xR)
-            t = str_concat(str_concat(t, "+"), i64_to_string(b * 8))
-            t = str_concat(t, "];\n    cvt.rn.f32.f64 %f2, %fd2;\n    ld.global.f32 %f3, [")
-            t = str_concat(str_concat(t, SR), "+")
-            t = str_concat(str_concat(t, i64_to_string((k * 16 + b) * 4)), "];\n")
-            t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n    st.global.f32 [")
-            t = str_concat(str_concat(t, SR), "+")
-            t = str_concat(str_concat(t, i64_to_string((k * 16 + b) * 4)), "], %f3;\n")
-            b = b + 1
-        }
-        k = k + 1
-    }
-    t = str_concat(t, "$PADONE:\n")
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$PAD:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    // B[k] → %f1
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), BR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    cvt.rn.f32.f64 %f1, %fd1;\n")
+    // x[b] → %f2
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), xR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    cvt.rn.f32.f64 %f2, %fd2;\n")
+    // S[idx] += B[k]·x[b]  (idx = k*16+b = %r5)
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n    add.s64 %rd7, "), SR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f32 %f3, [%rd7];\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n    st.global.f32 [%rd7], %f3;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $PAD;\n$PADONE:\n")
     t
 }
 
