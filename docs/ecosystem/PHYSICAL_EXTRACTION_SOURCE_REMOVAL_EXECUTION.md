@@ -193,8 +193,8 @@ fixture is not permission to remove them.
 
 ## Next Interface
 
-`r3-physical-extraction-canonical-cutover-approval` must bind real destination
-repositories or distributions, reviewed production repairs and gates, the
-exact canonical root, an operator decision, rollback and recovery procedures,
-and the publication or ownership state that remains deliberately outside this
-local execution receipt.
+`r3-physical-extraction-canonical-cutover-approval` now binds exact source and
+destination Git worktrees and remote branch refs, reviewed repairs and gates,
+operator evidence, and a recovery procedure while rehearsing only on a
+disposable copy. Its receipt remains `approved-not-executed`; the next separate
+interface is `r3-physical-extraction-canonical-cutover-execution`.

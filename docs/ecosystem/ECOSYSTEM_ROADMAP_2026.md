@@ -150,7 +150,9 @@ converter maturidade de implementação em autoridade científica ou regulatóri
 2. Manter a integração R2.5 de `package-boundary-receipt` nos releases opt-in
 3. Criar `sounio-py` com binding mínimo de `Knowledge`
 4. Manter o gate R2.6 de registry attestation local com publicação desabilitada
-5. Manter inventário, materialização, autorização e execução local R3; exigir cutover canônico separado antes de qualquer remoção na origem oficial
+5. Manter inventário, materialização, autorização, execução local e aprovação
+   Git/rehearsal R3; exigir execução canônica separada antes de qualquer remoção
+   na origem oficial
 
 ---
 
