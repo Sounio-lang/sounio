@@ -33,8 +33,8 @@ validated research        != clinical validation
 Status: `executable`
 
 The R0-R2 host attestor, compiler integration, R2.5 package release boundary,
-R2.6 local registry attestation, and R3 physical extraction inventory are
-executable. The named gates
+R2.6 local registry attestation, R3 physical extraction inventory, and R3
+local exact-copy materialization interface are executable. The named gates
 prove pass, refuse, `UNKNOWN`, deterministic receipt identity, source
 sensitivity, evidence and receipt tamper refusal, absence of a final ELF after
 strict refusal, and a real transitive raw-AST import witness. The current-source
@@ -45,8 +45,10 @@ promotion prerequisite for one local, opt-in release bundle and preserves the
 identity-versus-assurance distinction.
 
 R2.6 binds that bundle to a local catalog policy without publication. R3 binds
-the declared roots to an exact-file ownership plan while keeping extraction
-status `not-executed`; neither interface promotes scientific authority.
+the declared roots to an exact-file ownership plan, then permits a separately
+approved local copy whose receipt keeps source removal `not-authorized`.
+Neither interface promotes scientific authority, and no canonical production
+destination policy or materialization receipt currently exists.
 
 ## Semantic Lane
 
@@ -73,7 +75,7 @@ Authoritative-Only-If: the gate passes with a current-source raw Madaros that em
 
 ## Pending Interface
 
-`r3-physical-extraction-materialization`
+`r3-physical-extraction-source-removal-authorization`
 
 ## R3 Physical Extraction Inventory Semantic Lane
 
@@ -96,6 +98,29 @@ Negative-Witness: missing, duplicate, overlapping, escaping, symlinked, ring-mis
 Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_inventory_gate.sh
 Integration-Target: codex/registry-attestation-r26-20260717, then origin/main after the R2.6 stack lands
 Authoritative-Only-If: R0-R2, R2.5, R2.6, and the R3 inventory gate pass on one source snapshot, with the first three using the same current-source raw Madaros AST collector
+```
+
+## R3 Physical Extraction Materialization Semantic Lane
+
+```text
+Semantic-Lane-ID: SCIENCE-BOUNDARY-R3-PHYSICAL-EXTRACTION-MATERIALIZATION-20260717
+Owner: Codex
+Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: scientific packages and research artifacts can acquire independently verifiable physical copies without allowing location, copy success, or a destination label to become scientific authority
+Transformation: require one verified R3 inventory and one exact approved-destination policy before copying every planned regular-file byte into preexisting separate local destinations and emitting a deterministic verification receipt
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: a named gate can establish that approved local fixture destinations contain byte-identical copies of every extract-planned inventory unit while retained and blocked units remain outside the transfer
+Claims-Forbidden: canonical repository extraction, source deletion authority, remote repository creation or push, transferred ownership or maintainership, publication, independent replay, scientific truth, clinical validity, ClinicalAuthority, or ClinicalRelease
+Assumptions: destinations are preexisting direct children of one external local root on the same filesystem; the inventory intentionally covers regular-file bytes rather than uninventoried filesystem metadata
+Write-Set: tools/science_boundary/physical_extraction_materializer.py; schemas/sounio.physical-extraction-{destination-policy,materialization}.v1.schema.json; scripts/ci/physical_extraction_materialization_gate.{py,sh}; scripts/ci/sounio_package_support_gate.sh; docs/ecosystem/{PHYSICAL_EXTRACTION_INVENTORY.md,PHYSICAL_EXTRACTION_MATERIALIZATION.md,SOUNIO_TOML_SPEC.md,ECOSYSTEM_ROADMAP_2026.md}; docs/{architecture,internal/concepts}/science-research-boundary.md; docs/internal/concepts/registry.tsv; docs/governance/{topic-registry.v1.json,DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md}; .claude/llm_offload_log.md
+Read-Set: science-rings.tsv; docs/ecosystem/science-physical-extraction-ownership.tsv; tools/science_boundary/physical_extraction_inventory.py; schemas/sounio.physical-extraction-inventory.v1.schema.json
+Positive-Witness: two approved planned fixture units are staged, byte-verified, promoted, and round-trip verified with an identical receipt across two different physical destination roots while one core unit is retained and one candidate remains blocked
+Negative-Witness: incomplete approval, missing or altered destination markers, source mutation, destination mutation, symlinks, occupied outputs, policy or inventory mismatch, and forged or rehashed receipts refuse without authorizing source removal
+Acceptance-Gate: SOUNIO_PHYSICAL_EXTRACTION_MATERIALIZATION_MADAROS_BIN=<rebuilt-current-source-ELF> bash scripts/ci/physical_extraction_materialization_gate.sh
+Integration-Target: codex/physical-extraction-inventory-r3-20260717, then origin/main after the R3 inventory stack lands
+Authoritative-Only-If: R0-R2, R2.5, R2.6, the R3 inventory gate, and the R3 materialization gate pass on one source snapshot; acceptance proves the interface behavior but not a canonical production migration without a separately approved production policy and receipt
 ```
 
 ## R2.5 Semantic Lane
@@ -224,6 +249,29 @@ Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIE
 LLM-Offload: xai/grok-4.3 review -> PASS with no requested-severity issue; raw=/tmp/llm-offload-9v40Di/
 Remaining-Blockers: none for the R3 inventory boundary; stdlib classification, approved destination existence, exact copy verification, and source-removal authorization are prerequisites for the separate materialization interface
 Next-Semantic-Interface: r3-physical-extraction-materialization
+```
+
+## R3 Physical Extraction Materialization Integration Receipt
+
+```text
+Semantic-Outcome: executable approved-destination exact-copy and verification boundary for R3 planned units
+Concept-Status-Before: executable R0-R3 ownership and exact-file inventory with materialization explicitly not executed
+Concept-Status-After: executable R0-R3 local materialization interface; canonical production extraction and source removal remain not executed
+Distinctions-Added: destination approval versus destination label; local byte-copy completion versus remote repository state; materialization receipt versus source-removal authority
+Distinctions-Preserved: programming-language core versus scientific package versus research artifact; location versus scientific authority; file identity versus independent replay; local transfer versus ownership or publication
+Distinctions-Erased: none
+Evidence-Source-Snapshot: git archive of ceb242832cac525f1619dbb6935ab9a82924ebdb, 339608500 bytes, sha256=1d3a814a916d06daf34ed8c6c0e89052bef9e392630c1abfd49266646fc06cef
+Evidence-Compiler: unchanged source-fresh Madaros, 98756167 bytes, sha256=6ace9848e8333d959819dbce56b33318185000ae25542696d4aac84960b5bb88
+Evidence-Run: Slurm job 6478 on gpuorangefs-r770-proxmox -> COMPLETED 0:0 in 00:00:40, MaxRSS=1422308K; R0-R2 178 assertions, R2.5 65 assertions, R2.6 82 assertions, R3 inventory 141 assertions, and R3 materialization 167 assertions all PASS
+Evidence-Materialization: receipt identity=61efbfb32b4dc74e8bea2bed82d67ff564580f73ad4eb5b8a194da94fc3ae950; policy identity=25f37fcf3b00d4842ff4d2b64960b49d5cf50374aa65e327cbfa2322e367020a; units=2 files=3 bytes=66 status=copied-and-verified source-removal=not-authorized
+Supporting-Gates: physical_extraction_materialization_gate.py -> PASS 167; sounio_package_support_gate.sh -> PASS; check_docs_registry.sh plus selftest -> PASS; check_docs_consistency.sh -> PASS; check_offload_policy.sh -> PASS
+Harness-Routing: Slurm job 6477 put R2.5 temporary promotion state on OrangeFS and failed with EINVAL during directory fsync after R0-R2 passed; job 6478 used node-local temporary storage with the exact same source archive, compiler, and gate and passed, so no implementation fallback was used
+Fallback-Path: none authorized; incomplete approval, unsafe or occupied destinations, any source or destination mismatch, or forged/rehashed inputs refuse
+Legacy-Kept: all canonical source roots remain in place; no production destination policy or materialization receipt was created; stdlib remains blocked-classification; R2.5 bundles, R2.6 attestations, and R3 inventories remain unchanged
+Conflicting-Lanes: semantic scanner reported zero dirty bindings for SOUNIO-SCIENCE-RESEARCH-BOUNDARY when the materialization lane opened; no compiler, IR, stdlib, package, example, or self-hosted source file was edited
+LLM-Offload: xai/grok-4.3 review completed with six documented scope/code-reading disagreements and no accepted bug; raw=/tmp/llm-offload-h5t453/
+Remaining-Blockers: none for the executable local materialization interface; real destination approval and provisioning are prerequisites for canonical migration, and any source removal requires the separate authorization interface
+Next-Semantic-Interface: r3-physical-extraction-source-removal-authorization
 ```
 
 ## Closed Blockers

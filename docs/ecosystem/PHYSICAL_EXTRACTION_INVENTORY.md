@@ -116,10 +116,11 @@ The adversarial gate is
 `scripts/ci/physical_extraction_inventory_gate.py`. The composed shell gate
 also executes R0-R2, R2.5, and R2.6 before accepting this R3 inventory.
 
-## Next Interface
+## Materialization Interface
 
-`r3-physical-extraction-materialization` must consume one verified inventory,
-prove that an explicitly approved destination exists, copy the exact planned
-file set, verify destination identity, and only then consider removal from the
-source repository. None of those materialization claims are part of this
-interface.
+`r3-physical-extraction-materialization` consumes one verified inventory,
+requires explicitly approved preexisting local destinations, copies the exact
+planned regular-file bytes, and verifies destination identity. Its receipt
+keeps source removal `not-authorized`; none of those copy claims are implied by
+an inventory alone. The complete contract is
+`docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md`.
