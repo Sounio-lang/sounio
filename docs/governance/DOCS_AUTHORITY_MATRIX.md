@@ -839,6 +839,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.tutorials.higher-order-functions | repo_only | docs/tutorials/higher_order_functions.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.tutorials.scientific-computing | repo_only | docs/tutorials/scientific_computing.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.validation-integration-summary | repo_only | docs/VALIDATION_INTEGRATION_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.vision.sounio-dataframe-overall-superiority-roadmap-2026-07-18 | repo_only | docs/vision/sounio_dataframe_overall_superiority_roadmap_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.website-features | repo_only | docs/WEBSITE_FEATURES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.cognitive-ossm.readme | repo_only | examples/cognitive_ossm/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.conversational-ossm.readme | repo_only | examples/conversational_ossm/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
