@@ -224,10 +224,10 @@ records the result byte-identically, and the evidence is preserved under
 
 This operation did not materialize `sounio-examples`, remove source paths,
 repair manifest repository fields, create a team or branch rule, emit a mapping
-proposal, or approve production or cutover. While PR #1176 is unmerged, the
-public copies are deliberately bound to its remote source commit rather than to
-`origin/main`; any substantive PR rewrite requires a new binding before
-canonical use.
+proposal, or approve production or cutover. At that checkpoint, while PR #1176
+was unmerged, the public copies were deliberately bound to its remote source
+commit rather than to `origin/main`; any substantive PR rewrite required a new
+binding before canonical use.
 
 At `2026-07-19T03:50:45Z`, `agourakis82` explicitly reconfirmed all five
 destinations in issue comment
@@ -264,6 +264,36 @@ comment
 [`5014152829`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5014152829)
 records the result byte-identically. The complete evidence is preserved under
 `artifacts/r3/canonical-production/20260719T033958Z/`.
+
+PR #1176 subsequently merged into canonical `main` as
+`d380146ffeabd3d18e71182ac4c03132f0788cf2` at
+`2026-07-19T13:05:58Z`. Exact comparison of fresh destination clones against
+that merge found `sounio-formats`, `sounio-io-primitives`, and `sounio-units`
+already byte-identical. Only `epistemic-core/src/lib.sio` differed, in two
+comment lines that narrow unsupported claim wording. An ordinary fast-forward
+updated `epistemic-core/main` from `732b3fbf7ff1d596cf591124b475791fe5e1add9`
+to `3e7d49fb84c7b8c74b8fd4b1cc39660772d9c7d1`; no other destination or ref
+changed.
+
+Source inventory identity
+`022772f58a51cc4273d5f02043690398085e93b0b767c7e16b91e06d131a7014`
+and reconciliation receipt identity
+`1ceceb68ea56593770e94f94dfbf4433bdad827d3e90c02220c677603a1b300e`
+bind that operation. A fresh post-push clone reproduced the exact six-file
+source tree with SHA-256
+`5dcea277263dbb656b9c8cfa32ab8f8f148109e8f3a82cb76e33cd6fdd6fa114`.
+Issue comment
+[`5015935195`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5015935195)
+records the result byte-identically, and evidence is preserved under
+`artifacts/r3/canonical-production/20260719T133147Z/`.
+
+This reconciliation clears the PR #1176 source-binding dependency for the
+public package copies, but it does not rewrite the earlier proposal. The
+proposal remains bound to catalog identity
+`cef66e6c59e9b7f4b35a5d4dd0637bfd71865a93b049a8af6dd4471ade8ad55a`
+and its observed `epistemic-core` head `732b3fbf...`. The later operational
+catalog and destination head are evidence of point-in-time drift, not an
+implicit amendment, reconfirmation, or approval.
 
 ## Acceptance Gate
 
@@ -318,7 +348,8 @@ but the proposal is not an approval. The maintainer team and branch-rule
 evidence remain absent. Production materialization evidence supplied to the gap
 assessor, source-removal authorization, canonical-production approval, an
 execution policy, and an explicit human cutover decision remain missing and
-separate interfaces. PR #1176 remains unresolved, and the canonical repository
-continued to receive unrelated commits after the bound point-in-time catalog;
-no later head is silently substituted. Catalog or governed-source drift requires
-a new selection record before downstream use.
+separate interfaces. PR #1176 is merged and its public package source binding
+has been reconciled, but that operation advanced `epistemic-core/main` beyond
+the proposal's catalog-bound head. No later head is silently substituted.
+Catalog or governed-source drift requires a new selection record before
+downstream use.
