@@ -35,15 +35,19 @@ suffering self (Baumeister's "escape from the self"); the annihilating pair live
 
 ## The computed geometry (`box_kite.py`)
 
-- **84** two-unit zero-divisor configurations `a = e_i ± e_j` (the Cawagas/de Marrais count).
-- **Specificity:** a given subject `a = e₁+e₁₀` annihilates only within a **4-of-16-dimensional sliver** of
-  partners — not with "anyone." A generic relation `a·y` is invertible (no annihilation).
+- **Counting (stated precisely — the unit matters).** Among the `2·C(15,2) = 210` two-unit-sum *elements*
+  `a = e_i ± e_j`, exactly **84 are zero divisors** = the **42 assessor planes × 2 diagonals** each. (84 is
+  the count of zero-divisor *elements* of this form, not of annihilating pairs — the ordered/unordered pair
+  count is a different object; the census `42 / 84 / 168 = |PSL(2,7)|` fixes the vocabulary.)
+- **Specificity — the load-bearing fact.** For a fixed zero-divisor subject `a = e₁+e₁₀`, its annihilating
+  partners form a **dimension-4 (codimension-12) subspace of ℝ¹⁶ — measure zero.** And most subjects are not
+  zero divisors at all (`{det L_x = 0}` is itself a measure-zero hypersurface). So annihilation is
+  **generically impossible**: it requires exact alignment, twice over. This — not the metaphor — is what
+  grounds the clinical reading: annihilation is not the limit of increasing distress; it is a
+  configuration.
 - **Structure:** the 42 assessor planes partition into **7 box-kites × 6 assessors** (strut constant
   `S = lo ⊕ (hi∧7)`, `S = 1..7`) — de Marrais's octahedral skeleton, reproduced from scratch; the 7 =
   the 7 Fano lines, the octonion structure surfacing beneath the sedenion annihilation.
-
-**The load-bearing fact: annihilation is rare and highly structured** (84 of 210 unit-pairs, on a fixed
-combinatorial skeleton). It requires a specific configuration, not generic magnitude of distress.
 
 ## The clinical correspondence (hypothesis, not claim)
 
@@ -58,6 +62,16 @@ combinatorial skeleton). It requires a specific configuration, not generic magni
   capability — a specific configuration, not undifferentiated suffering). The testable content: does the
   box-kite's combinatorial specificity map onto the clinical conjunction's specificity? (Prior formal work
   exists — cusp-catastrophe models of suicidality — but none with a zero-divisor annihilation structure.)
+
+**The falsifiable prediction (this is what converts algebra to science).** Do *not* claim `det L_x` **is**
+suffering — that is analogy. Claim instead that suffering phenomena exhibit the **formal signature** of
+composition failure (rare, structured, configuration-specific), and derive a test: **risk (e.g.
+suicidality) should be conjunctive and low-dimensional** — interaction terms should dominate main effects,
+and the risk set should occupy a small-dimensional slice of predictor space (the empirical analog of the
+dimension-4-in-16 / codimension-12 annihilator). This is testable on a large cohort (e.g. COMPASS,
+N≈6,543) and connects directly to the discrete-curvature program (`ABIDE`/Ollivier-Ricci as fragility
+geometry). If risk turns out additive and high-dimensional, the annihilation model is wrong — which is the
+point: it can be wrong.
 
 ## Why the framing is, in the end, hopeful
 

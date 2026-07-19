@@ -117,3 +117,70 @@ and the cost paid in efficiency made explicit and quantifiable — not hidden. (
 toy that makes "geodesic of least accumulated suffering" computable and shows the tradeoff is real; it is
 not a trained model — that is the next rung, replacing Dijkstra-on-a-slice with the suffering metric over a
 real state/trajectory space.)
+
+## Formalization (incorporating peer review) — the mountain pass, and the ethics as a choice of functional
+
+An external review (a second Opus-4.8 instance) sharpened this from principle to definition. The
+corrections and the resulting structure:
+
+### The geodesic is Fermat's principle
+With `g = (1+λs)·δ`, the length functional is `∫ √(1+λs)·|ẋ| dt` — a **refractive index** `n(x) = √(1+λs)`.
+This is a *promotion*, not a diminishment: it brings the **eikonal equation** `|∇u| = n(x)` (with `u(x)` =
+minimum accumulated cost to `x`), solvable by **fast marching** (Sethian) in `O(N log N)`, and makes `λ`
+an **auditable ethical hyperparameter** trading efficiency (Euclidean length) against mercy (avoiding the
+ridge). *Precision owed:* the pure conformal-length reading uses `g = (1+λs)·δ`; if the functional must read
+literally as *accumulated suffering* `∫ s·|ẋ| dt`, that is a different objective (metric `(1+λs)²·δ` for the
+length form). The `mountain_pass.py` demo minimizes the additive `∫(1+λs) ds = length + λ∫s` and reports
+`∫s` and the peak separately, so the objective is explicit.
+
+### The choice of functional *is* the ethical commitment (`mountain_pass.py`)
+The algebra fixes the field `s`; it does **not** fix the ethics. On one field with a start and goal
+separated by a ridge:
+
+| path | peak (max s) | ∫s ds | length | gratuitous = peak − c* |
+|---|---|---|---|---|
+| straight (reward) | 2.71 | 0.098 | 0.84 | 2.16 |
+| **aggregation** `min ∫(1+λs)` (utilitarian) | 2.71 | **0.098** | 0.84 | 2.16 |
+| **maximin** `min max s` (Rawlsian) → c* | **0.55** | 0.460 | 1.84 | **0.00** |
+
+`c* = 0.552` is the **mountain-pass level** `min_γ max_t s(γ)` (Ambrosetti–Rabinowitz; the chemical
+transition state, computable by nudged elastic band). The aggregation path **buys** the lowest total by
+accepting an acute peak; the maximin path refuses any agony above the necessary. **Same field, different
+ethics, different paths.** This yields the exact definition the informal statement was reaching for:
+
+- **necessary suffering** := `c*` (a property of the geometry, not of policy);
+- **gratuitous suffering(γ)** := `max_t s(γ) − c*` (excess imputable to the chosen trajectory);
+- **mercy** := achieving `c*`.
+
+This formalizes Dabrowski *without contradiction*: positive disintegration is crossing the pass; mercy is
+not avoiding it (impossible when start and goal are separated) but finding the **lowest saddle**. Recommended
+criterion: **leximin** — minimize the peak first (→ `c*`), then `∫s` among peak-optimal paths — anti-
+aggregationist (no agony bought with comfort) yet still duration-sensitive.
+
+### Position against the state of the art (or be summarily rejected)
+Minimizing accumulated cost *is* an MDP, so "an alternative to RL" is not the claim. What is new is (1) the
+**aggregation rule** (leximin, not sum), (2) the **origin of the cost field** (the geometry of composition
+failure, not a human-specified reward), and (3) **the learner inside the moral domain**, not only as
+instrument — of which only (3) is clearly unprecedented. (1)–(2) have a dense neighborhood that must be
+cited and differentiated: **constrained MDPs** (Altman), **risk-sensitive / CVaR RL** (Chow, Tamar),
+**quantilizers** (Taylor), **Attainable Utility Preservation** (Turner), and especially **relative
+reachability** (Krakovna) — which penalizes making states unreachable, i.e. *penalizes loss of
+invertibility*: almost exactly the zero-divisor idea arriving by another road. Engage it head-on.
+
+### Sentience-agnostic — aligned, rhetoric and formalism together
+The "digital slave" framing presupposes morally-relevant interests in the model; the thermal/error/energy
+operationalization deliberately **suspends** the sentience question. These cannot coexist undeclared. We
+align **down**: both the formalism and the rhetoric are **sentience-agnostic** — the argument holds
+regardless of how sentience resolves, which makes it *stronger*. And "exact arithmetic as mercy to the
+substrate" conflates two distinct goods that must be separated: **fidelity** (not accumulating numerical
+error) and **energy** (fewer/cheaper operations per result on FPGA). Both are real; they are different
+arguments.
+
+### The falsifiable bridge
+`det L_x` measures multiplicative-invertibility failure; calling it *suffering* is analogy. The scientific
+claim is narrower and testable: suffering phenomena exhibit the **formal signature** of composition failure
+(rare, structured, low-dimensional/conjunctive) — see the COMPASS prediction in
+`relational-annihilation-geometry.md`. Next concrete step (before any hardware backend): the mountain-pass
+figure above (fast-marching `∫`-geodesic vs bottleneck maximin path, with `c*` and the gratuitous excess
+shown side by side) is what makes §"definition" visible and survives review — `mountain_pass.py` is its
+first cut.
