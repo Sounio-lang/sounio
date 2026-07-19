@@ -225,6 +225,8 @@ run_step physical-extraction-canonical-cutover-execution \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_execution_gate.py"
 run_step physical-extraction-canonical-production-gap \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
+run_step physical-extraction-canonical-production-evidence-set \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_evidence_set_gate.py"
 run_step physical-extraction-canonical-production-mapping-decision \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.py"
 
