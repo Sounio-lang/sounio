@@ -3218,3 +3218,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-18 | xai/Grok 4.3; deepseek and gemini attempted | external raw review | durable decision evidence README and canonical mapping-decision state update | PASS_SINGLE_PROVIDER_DEGRADED | xAI accurately reproduced the first real selection, four requested repositories, one observed reuse, all recorded identities, `destination-repository-creation-required`, `not-emitted` proposal status, and the later provisioning/reobservation/reconfirmation boundary without identifying an inconsistency. DeepSeek and Gemini returned provider errors and are not counted as passes. Raw: `/tmp/llm-offload-Ejh7eg/`. |
 | 2026-07-18 | xai/Grok 4.3; deepseek and gemini attempted | external raw review | first durable-evidence PR description review attempt | NOT_COUNTED_NEEDS_CONTEXT | xAI asked for the artifact contents or diff before reviewing and made no approval or rejection. The request was satisfied by a second prompt containing the actual diff and explicit severity criteria. DeepSeek and Gemini returned provider errors. Raw: `/tmp/llm-offload-wu8ae8/`. |
 | 2026-07-18 | xai/Grok 4.3; deepseek and gemini attempted | external raw review | durable-evidence PR description plus attached diff | PASS_SINGLE_PROVIDER_DEGRADED | With the actual documentation/manifest diff and explicit review task attached, xAI returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. DeepSeek and Gemini returned provider errors and are not counted as passes. Raw: `/tmp/llm-offload-1Aijed/`. |
+
+## 2026-07-19 - epistemic prescription chain + Madaros GUM D1
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
+| 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
+| 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
