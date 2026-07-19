@@ -2262,41 +2262,43 @@ fn module_frontend_closure_edge_index(
 }
 
 fn module_frontend_import_items_contain_name(
-    items: Option<Box<ImportItemList>>,
+    items: &Option<Box<ImportItemList>>,
     name: Name,
+    remaining: i64,
 ) -> bool with Mut, Panic, Div, Alloc {
-    var cursor = items
-    while true {
-        match cursor {
-            Some(node) => {
-                if name_eq((*node).head, name) {
-                    return true
-                }
-                cursor = (*node).tail
+    match *items {
+        Some(node) => {
+            if remaining <= 0 {
+                return false
             }
-            None => return false
+            if name_eq((*node).head, name) {
+                true
+            } else {
+                module_frontend_import_items_contain_name(&(*node).tail, name, remaining - 1)
+            }
         }
+        None => false
     }
-    false
 }
 
 fn module_frontend_variant_list_contains_name(
-    variants: Option<Box<VariantDefList>>,
+    variants: &Option<Box<VariantDefList>>,
     name: Name,
+    remaining: i64,
 ) -> bool with Mut, Panic, Div, Alloc {
-    var cursor = variants
-    while true {
-        match cursor {
-            Some(node) => {
-                if name_eq((*node).head.name, name) {
-                    return true
-                }
-                cursor = (*node).tail
+    match *variants {
+        Some(node) => {
+            if remaining <= 0 {
+                return false
             }
-            None => return false
+            if name_eq((*node).head.name, name) {
+                true
+            } else {
+                module_frontend_variant_list_contains_name(&(*node).tail, name, remaining - 1)
+            }
         }
+        None => false
     }
-    false
 }
 
 fn module_frontend_item_directly_exports_name(
@@ -2314,11 +2316,65 @@ fn module_frontend_item_directly_exports_name(
     }
     if (*item).kind == ItemKind::ItemEnum {
         match (*item).enum_def {
-            Some(enum_def) => return module_frontend_variant_list_contains_name((*enum_def).variants, name)
+            Some(enum_def) => return module_frontend_variant_list_contains_name(
+                &(*enum_def).variants,
+                name,
+                4096,
+            )
             None => {}
         }
     }
     false
+}
+
+fn module_frontend_module_exports_name_items(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    module_id: i64,
+    name: Name,
+    visited: &! [bool; 256],
+    items: &Option<Box<ItemList>>,
+    remaining: i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    match *items {
+        None => false
+        Some(node) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*node).head
+            if module_frontend_item_directly_exports_name(item, name) {
+                return true
+            }
+            if (*item).kind == ItemKind::ItemUse && visibility_ref_to_bool(&(*item).visibility) {
+                let requested_import = use_path_ref_to_string(&(*item).use_path)
+                let edge_index = module_frontend_closure_edge_index(closure, module_id, requested_import)
+                if edge_index >= 0 {
+                    let dependency_id = (*closure).edge_dependency_ids[edge_index]
+                    let reexports_name = (*item).use_glob ||
+                        module_frontend_import_items_contain_name(&(*item).use_items, name, 4096)
+                    if reexports_name && module_frontend_module_exports_name(
+                        closure,
+                        programs,
+                        dependency_id,
+                        name,
+                        visited,
+                    ) {
+                        return true
+                    }
+                }
+            }
+            module_frontend_module_exports_name_items(
+                closure,
+                programs,
+                module_id,
+                name,
+                visited,
+                &(*node).tail,
+                remaining - 1,
+            )
+        }
+    }
 }
 
 fn module_frontend_module_exports_name(
@@ -2335,39 +2391,16 @@ fn module_frontend_module_exports_name(
         return false
     }
     (*visited)[module_id] = true
-
-    var found = false
-    var cursor = (*programs)[module_id].items
-    while !found {
-        match cursor {
-            Some(node) => {
-                let item = &(*node).head
-                if module_frontend_item_directly_exports_name(item, name) {
-                    found = true
-                } else if (*item).kind == ItemKind::ItemUse && visibility_ref_to_bool(&(*item).visibility) {
-                    let requested_import = use_path_ref_to_string(&(*item).use_path)
-                    let edge_index = module_frontend_closure_edge_index(closure, module_id, requested_import)
-                    if edge_index >= 0 {
-                        let dependency_id = (*closure).edge_dependency_ids[edge_index]
-                        let reexports_name = (*item).use_glob ||
-                            module_frontend_import_items_contain_name((*item).use_items, name)
-                        if reexports_name && module_frontend_module_exports_name(
-                            closure,
-                            programs,
-                            dependency_id,
-                            name,
-                            visited,
-                        ) {
-                            found = true
-                        }
-                    }
-                }
-                cursor = (*node).tail
-            }
-            None => break
-        }
-    }
-
+    let program = &(*programs)[module_id]
+    let found = module_frontend_module_exports_name_items(
+        closure,
+        programs,
+        module_id,
+        name,
+        visited,
+        &(*program).items,
+        4096,
+    )
     (*visited)[module_id] = false
     found
 }
@@ -2392,23 +2425,44 @@ fn module_frontend_record_surface_error(
 // A facade-only module has authored imports but no named implementation item of
 // its own. This bounded vertical validates facade surfaces without redefining
 // the compiler's existing crate-private import semantics (#854).
+fn module_frontend_program_facade_scan(
+    items: &Option<Box<ItemList>>,
+    remaining: i64,
+    has_import: &!bool,
+    has_named_item: &!bool,
+) -> bool with Mut, Alloc {
+    match *items {
+        None => true
+        Some(node) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*node).head
+            if (*item).kind == ItemKind::ItemUse {
+                (*has_import) = true
+            } else if (*item).name.len > 0 {
+                (*has_named_item) = true
+            }
+            module_frontend_program_facade_scan(
+                &(*node).tail,
+                remaining - 1,
+                has_import,
+                has_named_item,
+            )
+        }
+    }
+}
+
 fn module_frontend_program_is_facade(program: &Program) -> bool with Alloc {
     var has_import = false
     var has_named_item = false
-    var cursor = (*program).items
-    while true {
-        match cursor {
-            Some(node) => {
-                let item = &(*node).head
-                if (*item).kind == ItemKind::ItemUse {
-                    has_import = true
-                } else if (*item).name.len > 0 {
-                    has_named_item = true
-                }
-                cursor = (*node).tail
-            }
-            None => break
-        }
+    if !module_frontend_program_facade_scan(
+        &(*program).items,
+        4096,
+        &!has_import,
+        &!has_named_item,
+    ) {
+        return false
     }
     has_import && !has_named_item
 }
@@ -2419,31 +2473,99 @@ fn module_frontend_validate_import_item_names(
     caller_id: i64,
     dependency_id: i64,
     requested_import: string,
-    items: Option<Box<ImportItemList>>,
-) with Mut, Panic, Div, Alloc {
-    var cursor = items
-    while true {
-        match cursor {
-            Some(node) => {
-                let name = (*node).head
-                var visited: [bool; 256] = [false; 256]
-                if !module_frontend_module_exports_name(
-                    &(*closure),
-                    programs,
-                    dependency_id,
-                    name,
-                    &!visited,
-                ) {
-                    module_frontend_record_surface_error(
-                        closure,
-                        (*closure).paths[caller_id],
-                        requested_import,
-                        name,
-                    )
-                }
-                cursor = (*node).tail
+    items: &Option<Box<ImportItemList>>,
+    remaining: i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    match *items {
+        None => true
+        Some(node) => {
+            if remaining <= 0 {
+                return false
             }
-            None => break
+            let name = (*node).head
+            var visited: [bool; 256] = [false; 256]
+            if !module_frontend_module_exports_name(
+                &(*closure),
+                programs,
+                dependency_id,
+                name,
+                &!visited,
+            ) {
+                module_frontend_record_surface_error(
+                    closure,
+                    (*closure).paths[caller_id],
+                    requested_import,
+                    name,
+                )
+            }
+            module_frontend_validate_import_item_names(
+                closure,
+                programs,
+                caller_id,
+                dependency_id,
+                requested_import,
+                &(*node).tail,
+                remaining - 1,
+            )
+        }
+    }
+}
+
+fn module_frontend_validate_import_surface_items(
+    closure: &!ModuleClosure,
+    programs: &! [Program; 256],
+    module_id: i64,
+    items: &Option<Box<ItemList>>,
+    remaining: i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    match *items {
+        None => true
+        Some(node) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*node).head
+            if (*item).kind == ItemKind::ItemUse {
+                let requested_import = use_path_ref_to_string(&(*item).use_path)
+                let edge_index = module_frontend_closure_edge_index(
+                    &(*closure),
+                    module_id,
+                    requested_import,
+                )
+                if edge_index >= 0 {
+                    let dependency_id = (*closure).edge_dependency_ids[edge_index]
+                    let caller_program = &(*programs)[module_id]
+                    let caller_is_facade = module_frontend_program_is_facade(caller_program)
+                    var dependency_is_facade = false
+                    if dependency_id >= 0 {
+                        let dependency_program = &(*programs)[dependency_id]
+                        dependency_is_facade = module_frontend_program_is_facade(dependency_program)
+                    }
+                    let validates_public_facade_edge = caller_is_facade &&
+                        visibility_ref_to_bool(&(*item).visibility)
+                    if dependency_id >= 0 &&
+                       (dependency_is_facade || validates_public_facade_edge) {
+                        if !module_frontend_validate_import_item_names(
+                            closure,
+                            programs,
+                            module_id,
+                            dependency_id,
+                            requested_import,
+                            &(*item).use_items,
+                            4096,
+                        ) {
+                            return false
+                        }
+                    }
+                }
+            }
+            module_frontend_validate_import_surface_items(
+                closure,
+                programs,
+                module_id,
+                &(*node).tail,
+                remaining - 1,
+            )
         }
     }
 }
@@ -2455,44 +2577,17 @@ fn module_frontend_validate_import_surfaces(
     (*closure).surface_error_count = 0
     var module_id: i64 = 0
     while module_id < (*closure).node_count {
-        var cursor = (*programs)[module_id].items
-        while true {
-            match cursor {
-                Some(node) => {
-                    let item = &(*node).head
-                    if (*item).kind == ItemKind::ItemUse {
-                        let requested_import = use_path_ref_to_string(&(*item).use_path)
-                        let edge_index = module_frontend_closure_edge_index(
-                            &(*closure),
-                            module_id,
-                            requested_import,
-                        )
-                        if edge_index >= 0 {
-                            let dependency_id = (*closure).edge_dependency_ids[edge_index]
-                            let caller_is_facade = module_frontend_program_is_facade(
-                                &(*programs)[module_id]
-                            )
-                            let dependency_is_facade = dependency_id >= 0 &&
-                                module_frontend_program_is_facade(&(*programs)[dependency_id])
-                            let validates_public_facade_edge = caller_is_facade &&
-                                visibility_ref_to_bool(&(*item).visibility)
-                            if dependency_id >= 0 &&
-                               (dependency_is_facade || validates_public_facade_edge) {
-                                module_frontend_validate_import_item_names(
-                                    closure,
-                                    programs,
-                                    module_id,
-                                    dependency_id,
-                                    requested_import,
-                                    (*item).use_items,
-                                )
-                            }
-                        }
-                    }
-                    cursor = (*node).tail
-                }
-                None => break
-            }
+        let program = &(*programs)[module_id]
+        if !module_frontend_validate_import_surface_items(
+            closure,
+            programs,
+            module_id,
+            &(*program).items,
+            4096,
+        ) {
+            (*closure).saturated = true
+            (*closure).parse_failed = true
+            return
         }
         module_id = module_id + 1
     }
@@ -2604,7 +2699,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     }
     // Closure topology and import-surface validity are independent evidence.
     // Callers must inspect surface_error_count before checking or lowering.
-    structurally_complete
+    structurally_complete && !(*out).saturated && !(*out).parse_failed
 }
 
 pub fn module_frontend_collect_ast_closure_into(
