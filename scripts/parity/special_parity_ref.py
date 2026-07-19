@@ -19,15 +19,27 @@ REF = {
 }
 
 def main():
+    # NOTE: tokenized over the whole stream, not split per-line. The Sounio
+    # `print_int` builtin emits a trailing newline after every integer it
+    # prints (confirmed empirically: `print_int(a); print(" "); print_int(b)`
+    # renders as "a\n b\n", not "a b"), so a single logical record like
+    # `erf 1 <a_bits> <val_bits>` lands across multiple physical lines.
+    # Whitespace (space or newline) is not semantically meaningful in this
+    # wire format, so tokenizing across line breaks is the correct fix, not
+    # a tolerance change.
     rows = {}
-    for line in sys.stdin:
-        line = line.strip()
-        if not line or line.startswith("#"): continue
-        parts = line.split()
-        if not parts or parts[0] not in REF: continue
-        fn = parts[0]; nargs = int(parts[1])
-        args  = [bits_to_f64(parts[2+i]) for i in range(nargs)]
-        value = bits_to_f64(parts[2+nargs])
+    tokens = [t for t in sys.stdin.read().split() if not t.startswith("#")]
+    idx = 0
+    n = len(tokens)
+    while idx < n:
+        fn = tokens[idx]
+        if fn not in REF:
+            idx += 1
+            continue
+        nargs = int(tokens[idx + 1])
+        args = [bits_to_f64(tokens[idx + 2 + i]) for i in range(nargs)]
+        value = bits_to_f64(tokens[idx + 2 + nargs])
+        idx += 2 + nargs + 1
         ref = float(REF[fn][0](*[mp.mpf(a) for a in args]))
         rel = abs(value - ref) / max(abs(ref), 1e-300)
         rows.setdefault(fn, []).append((args, value, ref, rel))
