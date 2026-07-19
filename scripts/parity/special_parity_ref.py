@@ -16,6 +16,9 @@ REF = {
     "erfinv":         (lambda x: mp.erfinv(x), 1e-2),
     "normal_cdf":     (lambda x: mp.ncdf(x), 1e-2),
     "normal_quantile":(lambda p: mp.sqrt(2)*mp.erfinv(2*p-1), 1e-2),
+    "gamma":  (lambda x: mp.gamma(x), 1e-2),
+    "lgamma": (lambda x: mp.loggamma(x), 1e-2),
+    "digamma":(lambda x: mp.digamma(x), 1e-2),
 }
 
 def main():
