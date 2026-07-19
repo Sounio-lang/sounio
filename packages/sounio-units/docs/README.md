@@ -1,6 +1,6 @@
 # sounio-units
 
-Canonical package for SI dimensional analysis and metrological calibration.
+Package facade for SI dimensional analysis and metrological calibration. The canonical implementations remain in `stdlib` for this release.
 
 ## Import
 

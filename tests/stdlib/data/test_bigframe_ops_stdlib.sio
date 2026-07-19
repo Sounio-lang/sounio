@@ -75,7 +75,268 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     print_int(n)
     print("\n")
     if pass == 1 {
-        print("BIGFRAME_OPS_GATE_OK\n")
+        var wf = bf_new(10, 16)
+    var wr: i64 = 0
+    while wr < 1000 { var wrow: [f64;64]=[0.0;64]; var wc: i64=0; while wc<10 { wrow[wc]=(wr*10+wc) as f64; wc=wc+1 } bf_push_row(&!wf,&wrow,10); wr=wr+1 }
+    let wfilt = bf_filter_gt(&wf, 0, 4995.0)
+    if bf_nrows(&wfilt) != 500 { print("FAIL wide_filter_n\n"); return 40 }
+    if bf_get(&wfilt, 0, 9) != 5009.0 { print("FAIL wide_filter_v\n"); return 41 }
+    var sf = bf_new(2, 16)
+    var si: i64 = 0
+    while si < 100 { var srow:[f64;64]=[0.0;64]; srow[0]=(si%2) as f64; srow[1]=si as f64; bf_push_row(&!sf,&srow,2); si=si+1 }
+    let sfilt = bf_filter_gt(&sf, 0, 0.5)
+    if bf_nrows(&sfilt) != 50 { print("FAIL scatter_n\n"); return 42 }
+    if bf_get(&sfilt, 0, 1) != 1.0 { print("FAIL scatter_v\n"); return 43 }
+    // SPARSE-key hash groupby: keys 0,1000,..,999000 (all >> the dense cap of 1023, which would drop them)
+    var hg = bf_new(2, 1024)
+    var hi: i64 = 0
+    while hi < 50000 { var hrow:[f64;64]=[0.0;64]; hrow[0]=((hi%1000)*1000) as f64; hrow[1]=1.0; bf_push_row(&!hg,&hrow,2); hi=hi+1 }
+    let hgr = bf_groupby_sum_hash(&hg, 0, 1)
+    if bf_nrows(&hgr) != 1000 { print("FAIL hash_groupby_n\n"); return 44 }   // 1000 distinct sparse keys
+    var htot = bf_col_sum(&hgr, 1)
+    if htot < 49999.5 || htot > 50000.5 { print("FAIL hash_groupby_total\n"); return 45 }  // 50000 rows total
+    // INNER HASH-JOIN at scale: left 100000 rows (key=i, lval=i*10), right 60000 rows
+    // (key=i, rval=i*2). Inner join on key drops left rows with key >= 60000 -> 60000 matches.
+    var jl = bf_new(2, 1024)
+    var jli: i64 = 0
+    while jli < 100000 { var jrow:[f64;64]=[0.0;64]; jrow[0]=jli as f64; jrow[1]=(jli*10) as f64; bf_push_row(&!jl,&jrow,2); jli=jli+1 }
+    var jr = bf_new(2, 1024)
+    var jrx: i64 = 0
+    while jrx < 60000 { var krow:[f64;64]=[0.0;64]; krow[0]=jrx as f64; krow[1]=(jrx*2) as f64; bf_push_row(&!jr,&krow,2); jrx=jrx+1 }
+    let jj = bf_join_inner(&jl, 0, &jr, 0)
+    if bf_nrows(&jj) != 60000 { print("FAIL join_n\n"); return 46 }   // inner join filters 100k -> 60k
+    if bf_ncols(&jj) != 3 { print("FAIL join_c\n"); return 47 }       // left 2 cols + right 1 non-key col
+    // Left probe order preserved: joined row 5000 == left row 5000 joined to right row 5000.
+    if bf_get(&jj, 5000, 0) != 5000.0 { print("FAIL join_key\n"); return 48 }
+    if bf_get(&jj, 5000, 1) != 50000.0 { print("FAIL join_lval\n"); return 49 }  // left  i*10
+    if bf_get(&jj, 5000, 2) != 10000.0 { print("FAIL join_rval\n"); return 50 }  // right i*2
+    // LEFT + OUTER join: left keys 0..99999 (lval=i*10); a NEW right keyed 50000..109999
+    // (rval=key*2). Overlap = keys 50000..99999 (50000 matches); left-only = 0..49999;
+    // right-only = 100000..109999 (10000). fill = -1.0 sentinel for unmatched cells.
+    var lo = bf_new(2, 1024)
+    var loi: i64 = 0
+    while loi < 100000 { var lrow:[f64;64]=[0.0;64]; lrow[0]=loi as f64; lrow[1]=(loi*10) as f64; bf_push_row(&!lo,&lrow,2); loi=loi+1 }
+    var ro = bf_new(2, 1024)
+    var roi: i64 = 0
+    while roi < 60000 { var rrow:[f64;64]=[0.0;64]; let rk=(roi+50000); rrow[0]=rk as f64; rrow[1]=(rk*2) as f64; bf_push_row(&!ro,&rrow,2); roi=roi+1 }
+    // LEFT join: all 100000 left rows kept.
+    let lj = bf_join_left(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&lj) != 100000 { print("FAIL left_n\n"); return 51 }
+    if bf_ncols(&lj) != 3 { print("FAIL left_c\n"); return 52 }
+    if bf_get(&lj, 0, 0) != 0.0 { print("FAIL left_k0\n"); return 53 }         // left row 0, key 0
+    if bf_get(&lj, 0, 2) != (0.0 - 1.0) { print("FAIL left_miss\n"); return 54 }  // no right key 0 -> fill
+    if bf_get(&lj, 60000, 1) != 600000.0 { print("FAIL left_lval\n"); return 55 } // left row 60000, lval
+    if bf_get(&lj, 60000, 2) != 120000.0 { print("FAIL left_rval\n"); return 56 } // matched right rval=key*2
+    // OUTER join: 100000 left + 10000 right-only = 110000.
+    let oj = bf_join_outer(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&oj) != 110000 { print("FAIL outer_n\n"); return 57 }
+    if bf_get(&oj, 0, 2) != (0.0 - 1.0) { print("FAIL outer_leftmiss\n"); return 58 }  // left-only row still filled
+    // right-only rows come after the 100000 left rows, in right-scan order.
+    // right rows 50000..59999 hold keys 100000..109999 -> first right-only = out row 100000.
+    if bf_get(&oj, 100000, 0) != 100000.0 { print("FAIL outer_rkey\n"); return 59 }   // key coalesced
+    if bf_get(&oj, 100000, 1) != (0.0 - 1.0) { print("FAIL outer_rleft\n"); return 60 } // left cols filled
+    if bf_get(&oj, 100000, 2) != 200000.0 { print("FAIL outer_rval\n"); return 61 }    // right rval=key*2
+    // SORT at scale: 1,000,000 rows, col0 = reverse key (n-1-i), col1 = original index i.
+    var sf = bf_new(2, 16)
+    var sfi: i64 = 0
+    while sfi < 1000000 { var srow2:[f64;64]=[0.0;64]; srow2[0]=(1000000-1-sfi) as f64; srow2[1]=sfi as f64; bf_push_row(&!sf,&srow2,2); sfi=sfi+1 }
+    let asc = bf_sort_by(&sf, 0, true)
+    if bf_nrows(&asc) != 1000000 { print("FAIL sort_n\n"); return 62 }
+    // fully ordered: zero inversions over 1M rows.
+    var invc: i64 = 0; var sj: i64 = 1
+    while sj < 1000000 { if bf_get(&asc, sj, 0) < bf_get(&asc, sj-1, 0) { invc = invc + 1 } sj = sj + 1 }
+    if invc != 0 { print("FAIL sort_inversions\n"); return 63 }
+    if bf_get(&asc, 0, 0) != 0.0 { print("FAIL sort_first\n"); return 64 }
+    if bf_get(&asc, 999999, 0) != 999999.0 { print("FAIL sort_last\n"); return 65 }
+    // permutation preserved: row with key 12345 carried original index 999999-12345.
+    if bf_get(&asc, 12345, 1) != 987654.0 { print("FAIL sort_perm\n"); return 66 }
+    let desc = bf_sort_by(&sf, 0, false)
+    if bf_get(&desc, 0, 0) != 999999.0 { print("FAIL sort_desc\n"); return 67 }
+    // STABILITY: 30 rows, key = i%3 (10 each), col1 = i. Stable asc sort keeps input order
+    // within a key -> the ten key==0 rows carry col1 = 0,3,6,...,27 in that order.
+    var stf = bf_new(2, 16)
+    var sti: i64 = 0
+    while sti < 30 { var strow:[f64;64]=[0.0;64]; strow[0]=(sti%3) as f64; strow[1]=sti as f64; bf_push_row(&!stf,&strow,2); sti=sti+1 }
+    let sts = bf_sort_by(&stf, 0, true)
+    if bf_get(&sts, 0, 1) != 0.0 { print("FAIL sort_stable0\n"); return 68 }   // first key==0 row = original 0
+    if bf_get(&sts, 1, 1) != 3.0 { print("FAIL sort_stable1\n"); return 69 }   // second = original 3 (order kept)
+    if bf_get(&sts, 9, 1) != 27.0 { print("FAIL sort_stable9\n"); return 70 }  // tenth key==0 row = original 27
+    if bf_get(&sts, 10, 0) != 1.0 { print("FAIL sort_stableblk\n"); return 71 } // block boundary: key 1 starts
+    // RADIX SORT — differentially verified against the trusted stable mergesort (both
+    // stable, so outputs must be byte-for-byte identical). Two data shapes:
+    //  (1) MIXED-SIGN, no ties: col0 = ((i*48271)%100000 - 50000)*0.5 (perm, range -25000..24999.5)
+    //      -> validates the f64->key transform for NEGATIVES.
+    //  (2) TIES-HEAVY: col0 = i%100 (1000 rows per key), col1 = i -> validates STABILITY
+    //      (equal-key rows must keep input order, exactly like the mergesort).
+    let RN: i64 = 100000
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < RN { var rr:[f64;64]=[0.0;64]; let s=((rfi*48271)%100000 - 50000); rr[0]=(s as f64)*0.5; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rx = bf_sort_radix(&rf, 0, true)
+    let mg = bf_sort_by(&rf, 0, true)
+    var rd: i64 = 0; var rj: i64 = 0
+    while rj < RN { if bf_get(&rx,rj,0) != bf_get(&mg,rj,0) { rd = rd + 1 } if bf_get(&rx,rj,1) != bf_get(&mg,rj,1) { rd = rd + 1 } rj = rj + 1 }
+    if rd != 0 { print("FAIL radix_vs_mergesort_mixedsign\n"); return 72 }
+    // radix output must also be fully ordered incl. across the sign boundary.
+    var rinv: i64 = 0; rj = 1
+    while rj < RN { if bf_get(&rx,rj,0) < bf_get(&rx,rj-1,0) { rinv = rinv + 1 } rj = rj + 1 }
+    if rinv != 0 { print("FAIL radix_inversions\n"); return 73 }
+    var tf = bf_new(2, 16)
+    var tfi: i64 = 0
+    while tfi < RN { var tr:[f64;64]=[0.0;64]; tr[0]=(tfi%100) as f64; tr[1]=tfi as f64; bf_push_row(&!tf,&tr,2); tfi=tfi+1 }
+    let trx = bf_sort_radix(&tf, 0, true)
+    let tmg = bf_sort_by(&tf, 0, true)
+    var td: i64 = 0; var tj: i64 = 0
+    while tj < RN { if bf_get(&trx,tj,0) != bf_get(&tmg,tj,0) { td = td + 1 } if bf_get(&trx,tj,1) != bf_get(&tmg,tj,1) { td = td + 1 } tj = tj + 1 }
+    if td != 0 { print("FAIL radix_stability_ties\n"); return 74 }  // stable tie-order matches mergesort
+    // descending + all-equal edge (diff-mask -> zero passes).
+    let rdesc = bf_sort_radix(&rf, 0, false)
+    if bf_get(&rdesc, 0, 0) < bf_get(&rdesc, RN-1, 0) { print("FAIL radix_desc\n"); return 75 }
+    var eqf = bf_new(1, 16); var eqi: i64 = 0
+    while eqi < 1000 { var er:[f64;64]=[0.0;64]; er[0]=7.0; bf_push_row(&!eqf,&er,1); eqi=eqi+1 }
+    let eqs = bf_sort_radix(&eqf, 0, true)
+    if bf_nrows(&eqs) != 1000 { print("FAIL radix_alleq_n\n"); return 76 }
+    if bf_get(&eqs, 0, 0) != 7.0 { print("FAIL radix_alleq_v\n"); return 77 }
+    // UNIQUE + DROP_DUPLICATES: 1,000,000 rows, col0 = i%1000 (1000 distinct, each 1000x),
+    // col1 = i. Key j first appears at i=j.
+    var uf = bf_new(2, 16)
+    var ufi: i64 = 0
+    while ufi < 1000000 { var ur:[f64;64]=[0.0;64]; ur[0]=(ufi%1000) as f64; ur[1]=ufi as f64; bf_push_row(&!uf,&ur,2); ufi=ufi+1 }
+    let uq = bf_unique(&uf, 0)
+    if bf_nrows(&uq) != 1000 { print("FAIL unique_n\n"); return 78 }
+    if bf_ncols(&uq) != 1 { print("FAIL unique_c\n"); return 79 }
+    if bf_get(&uq, 0, 0) != 0.0 { print("FAIL unique_first\n"); return 80 }    // first-seen order 0..999
+    if bf_get(&uq, 999, 0) != 999.0 { print("FAIL unique_last\n"); return 81 }
+    var usum = bf_col_sum(&uq, 0)
+    if usum < 499499.5 || usum > 499500.5 { print("FAIL unique_sum\n"); return 82 }  // 0+1+..+999
+    // all-distinct edge (table near full, output == input): unique(col1) == 1,000,000.
+    let uad = bf_unique(&uf, 1)
+    if bf_nrows(&uad) != 1000000 { print("FAIL unique_alldistinct\n"); return 83 }
+    let dd = bf_drop_duplicates(&uf, 0)
+    if bf_nrows(&dd) != 1000 { print("FAIL dropdup_n\n"); return 84 }
+    if bf_ncols(&dd) != 2 { print("FAIL dropdup_c\n"); return 85 }
+    // first-occurrence kept: survivors in input order, key j first seen at i=j -> payload j.
+    if bf_get(&dd, 0, 0) != 0.0 { print("FAIL dropdup_k0\n"); return 86 }
+    if bf_get(&dd, 0, 1) != 0.0 { print("FAIL dropdup_p0\n"); return 87 }
+    if bf_get(&dd, 500, 0) != 500.0 { print("FAIL dropdup_k500\n"); return 88 }
+    if bf_get(&dd, 500, 1) != 500.0 { print("FAIL dropdup_p500\n"); return 89 } // first (not last=999500)
+    // VALUE_COUNTS: 1,000,000 rows, SKEWED so values are NOT in count order:
+    //   value 3 x500000, value 1 x300000, value 4 x150000, value 2 x50000.
+    // Result must be sorted by COUNT DESCENDING -> rows [3,500000],[1,300000],[4,150000],[2,50000].
+    var vf = bf_new(1, 16)
+    var vfi: i64 = 0
+    while vfi < 1000000 {
+        var vv = 2.0
+        if vfi < 500000 { vv = 3.0 } else { if vfi < 800000 { vv = 1.0 } else { if vfi < 950000 { vv = 4.0 } else { vv = 2.0 } } }
+        var vr:[f64;64]=[0.0;64]; vr[0]=vv; bf_push_row(&!vf,&vr,1); vfi=vfi+1
+    }
+    let vc = bf_value_counts(&vf, 0)
+    if bf_nrows(&vc) != 4 { print("FAIL vc_n\n"); return 90 }
+    if bf_ncols(&vc) != 2 { print("FAIL vc_c\n"); return 91 }
+    // descending by count, values in count order (3,1,4,2), NOT value order.
+    if bf_get(&vc, 0, 0) != 3.0 || bf_get(&vc, 0, 1) != 500000.0 { print("FAIL vc_row0\n"); return 92 }
+    if bf_get(&vc, 1, 0) != 1.0 || bf_get(&vc, 1, 1) != 300000.0 { print("FAIL vc_row1\n"); return 93 }
+    if bf_get(&vc, 2, 0) != 4.0 || bf_get(&vc, 2, 1) != 150000.0 { print("FAIL vc_row2\n"); return 94 }
+    if bf_get(&vc, 3, 0) != 2.0 || bf_get(&vc, 3, 1) != 50000.0 { print("FAIL vc_row3\n"); return 95 }
+    // counts must be non-increasing and total to the row count.
+    if bf_get(&vc,1,1) > bf_get(&vc,0,1) || bf_get(&vc,2,1) > bf_get(&vc,1,1) || bf_get(&vc,3,1) > bf_get(&vc,2,1) { print("FAIL vc_desc\n"); return 96 }
+    var vtot = bf_col_sum(&vc, 1)
+    if vtot < 999999.5 || vtot > 1000000.5 { print("FAIL vc_total\n"); return 97 }
+    // CUMULATIVE ops: 1,000,000 rows, col0 = i, col1 = i%1000 (key), col2 = 1.0.
+    var cf = bf_new(3, 16)
+    var cfi: i64 = 0
+    while cfi < 1000000 { var cr:[f64;64]=[0.0;64]; cr[0]=cfi as f64; cr[1]=(cfi%1000) as f64; cr[2]=1.0; bf_push_row(&!cf,&cr,3); cfi=cfi+1 }
+    // cumsum(col0=i): out[k] = k*(k+1)/2. Exact in f64 up to n=1e6 (< 2^53).
+    let cs = bf_cumsum(&cf, 0)
+    if bf_nrows(&cs) != 1000000 { print("FAIL cumsum_n\n"); return 98 }
+    if bf_ncols(&cs) != 1 { print("FAIL cumsum_c\n"); return 99 }
+    if bf_get(&cs, 0, 0) != 0.0 { print("FAIL cumsum0\n"); return 100 }
+    if bf_get(&cs, 100, 0) != 5050.0 { print("FAIL cumsum100\n"); return 101 }        // 100*101/2
+    if bf_get(&cs, 999999, 0) != 499999500000.0 { print("FAIL cumsum_last\n"); return 102 } // 999999*1000000/2
+    // cumcount_by(key=col1=i%1000): out[i] = floor(i/1000) (# earlier rows with same key).
+    let cc = bf_cumcount_by(&cf, 1)
+    if bf_nrows(&cc) != 1000000 { print("FAIL cumcount_n\n"); return 103 }
+    if bf_get(&cc, 0, 0) != 0.0 { print("FAIL cumcount0\n"); return 104 }
+    if bf_get(&cc, 1000, 0) != 1.0 { print("FAIL cumcount1000\n"); return 105 }
+    if bf_get(&cc, 500500, 0) != 500.0 { print("FAIL cumcount500500\n"); return 106 }
+    if bf_get(&cc, 999999, 0) != 999.0 { print("FAIL cumcount_last\n"); return 107 }
+    // cumsum_by(key=col1, val=col2=1.0): out[i] = floor(i/1000)+1 (running count as sum of ones).
+    let cb = bf_cumsum_by(&cf, 1, 2)
+    if bf_get(&cb, 0, 0) != 1.0 { print("FAIL cumsumby0\n"); return 108 }
+    if bf_get(&cb, 1000, 0) != 2.0 { print("FAIL cumsumby1000\n"); return 109 }
+    if bf_get(&cb, 999000, 0) != 1000.0 { print("FAIL cumsumby999000\n"); return 110 } // 1000th of key 0
+    if bf_get(&cb, 999999, 0) != 1000.0 { print("FAIL cumsumby_last\n"); return 111 }  // 1000th of key 999
+    // CUMMAX / CUMMIN: reuse cf (col0=i%100, col1=i%1000 key, col2 unused here, col3=i).
+    // Add a strictly-decreasing column for cummin by rebuilding a small dedicated frame.
+    var xf = bf_new(3, 16)
+    var xfi: i64 = 0
+    while xfi < 1000000 { var xr:[f64;64]=[0.0;64]; xr[0]=(xfi%100) as f64; xr[1]=(1000000-xfi) as f64; xr[2]=xfi as f64; bf_push_row(&!xf,&xr,3); xfi=xfi+1 }
+    // cummax(col0=i%100): rises 0..99 then stays 99.
+    let cmx = bf_cummax(&xf, 0)
+    if bf_nrows(&cmx) != 1000000 { print("FAIL cummax_n\n"); return 112 }
+    if bf_get(&cmx, 50, 0) != 50.0 { print("FAIL cummax50\n"); return 113 }
+    if bf_get(&cmx, 99, 0) != 99.0 { print("FAIL cummax99\n"); return 114 }
+    if bf_get(&cmx, 100, 0) != 99.0 { print("FAIL cummax100\n"); return 115 }
+    if bf_get(&cmx, 999999, 0) != 99.0 { print("FAIL cummax_last\n"); return 116 }
+    // cummin(col1=1000000-i, strictly decreasing): out[i] = 1000000-i (new min each step).
+    let cmn = bf_cummin(&xf, 1)
+    if bf_get(&cmn, 0, 0) != 1000000.0 { print("FAIL cummin0\n"); return 117 }
+    if bf_get(&cmn, 500000, 0) != 500000.0 { print("FAIL cummin500000\n"); return 118 }
+    if bf_get(&cmn, 999999, 0) != 1.0 { print("FAIL cummin_last\n"); return 119 }
+    // grouped cummax/cummin over real groups: key = i%1000, val = i (val increases within each group,
+    // so per group max-so-far = current i, min = first occurrence = key).
+    var gf = bf_new(2, 16)
+    var gfi: i64 = 0
+    while gfi < 1000000 { var gr:[f64;64]=[0.0;64]; gr[0]=(gfi%1000) as f64; gr[1]=gfi as f64; bf_push_row(&!gf,&gr,2); gfi=gfi+1 }
+    let gmn = bf_cummin_by(&gf, 0, 1)   // min val in each key-group = first occurrence = key
+    if bf_nrows(&gmn) != 1000000 { print("FAIL cummin_by_n\n"); return 120 }
+    if bf_get(&gmn, 0, 0) != 0.0 { print("FAIL cummin_by0\n"); return 121 }
+    if bf_get(&gmn, 1500, 0) != 500.0 { print("FAIL cummin_by1500\n"); return 122 }   // key 500, first val 500
+    if bf_get(&gmn, 999999, 0) != 999.0 { print("FAIL cummin_by_last\n"); return 123 }
+    let gmxb = bf_cummax_by(&gf, 0, 1)  // max val in group so far = current i (val increasing in group)
+    if bf_get(&gmxb, 500500, 0) != 500500.0 { print("FAIL cummax_by_grp\n"); return 124 }
+    if bf_get(&gmxb, 999999, 0) != 999999.0 { print("FAIL cummax_by_grp_last\n"); return 125 }
+    // ROLLING WINDOW. fill = -1.0 sentinel for the first window-1 incomplete rows.
+    // (a) sum/mean over col0=1.0 (window 100): sum=100, mean=1.0 once the window fills.
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < 1000000 { var rr:[f64;64]=[0.0;64]; rr[0]=1.0; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rs = bf_rolling_sum(&rf, 0, 100, 0.0 - 1.0)
+    if bf_nrows(&rs) != 1000000 { print("FAIL rsum_n\n"); return 126 }
+    if bf_get(&rs, 98, 0) != (0.0 - 1.0) { print("FAIL rsum_fill\n"); return 127 }   // window not full yet
+    if bf_get(&rs, 99, 0) != 100.0 { print("FAIL rsum_full\n"); return 128 }
+    if bf_get(&rs, 999999, 0) != 100.0 { print("FAIL rsum_last\n"); return 129 }
+    // mean over col1=i (window 3): out[i] = ((i-2)+(i-1)+i)/3 = i-1 for i>=2.
+    let rm = bf_rolling_mean(&rf, 1, 3, 0.0 - 1.0)
+    if bf_get(&rm, 1, 0) != (0.0 - 1.0) { print("FAIL rmean_fill\n"); return 130 }
+    if bf_get(&rm, 2, 0) != 1.0 { print("FAIL rmean2\n"); return 131 }
+    if bf_get(&rm, 100, 0) != 99.0 { print("FAIL rmean100\n"); return 132 }
+    // (b) rolling max/min via monotonic deque, DIFFERENTIALLY verified against a naive
+    // O(n*w) scan over a 5000-row sawtooth (col = i%37, window 50) -> must be identical.
+    var wf2 = bf_new(1, 16)
+    var wfi: i64 = 0
+    while wfi < 5000 { var wr:[f64;64]=[0.0;64]; wr[0]=(wfi%37) as f64; bf_push_row(&!wf2,&wr,1); wfi=wfi+1 }
+    let rmax = bf_rolling_max(&wf2, 0, 50, 0.0 - 1.0)
+    let rmin = bf_rolling_min(&wf2, 0, 50, 0.0 - 1.0)
+    var rd: i64 = 0
+    var rj: i64 = 0
+    while rj < 5000 {
+        // naive window [rj-49, rj]
+        if rj >= 49 {
+            var mx = bf_get(&wf2, rj - 49, 0)
+            var mn = mx
+            var t: i64 = rj - 48
+            while t <= rj { let vv = bf_get(&wf2, t, 0); if vv > mx { mx = vv } if vv < mn { mn = vv } t = t + 1 }
+            if bf_get(&rmax, rj, 0) != mx { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != mn { rd = rd + 1 }
+        } else {
+            if bf_get(&rmax, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+        }
+        rj = rj + 1
+    }
+    if rd != 0 { print("FAIL rolling_maxmin_vs_naive\n"); return 133 }
+    print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
     }

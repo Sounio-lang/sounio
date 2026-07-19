@@ -9593,7 +9593,12 @@ fn emit_read_file() with Mut, Panic, Div {
 }
 
 fn emit_file_size() with Mut, Panic {
-    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
+    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48.
+    // A directory (st_mode S_IFDIR at offset 24) returns -1 so callers treat it
+    // like an unreadable/absent file: file_exists() == (file_size() >= 0) then
+    // reports false, and `--check <dir>` / `check <dir>` emit "could not read
+    // input file" instead of parsing an empty AST. (Returning st_size for a dir
+    // is a latent bug — a directory is never a valid source/import file.)
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
     em(0x48); em(0x81); em(0xec); em32(160)  // sub rsp, 160 (struct stat + padding)
     em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
@@ -9601,12 +9606,18 @@ fn emit_file_size() with Mut, Panic {
     em(0x0f); em(0x05)
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
     em(0x0f); em(0x88); let stat_fail = CL; em32(0)  // js stat_fail
+    // reject directories: (st_mode & S_IFMT) == S_IFDIR → -1
+    em(0x8b); em(0x44); em(0x24); em(24)  // mov eax, [rsp+24] (st_mode, 32-bit)
+    em(0x25); em32(0xF000)  // and eax, 0xF000 (S_IFMT)
+    em(0x3d); em32(0x4000)  // cmp eax, 0x4000 (S_IFDIR)
+    em(0x0f); em(0x84); let dir_fail = CL; em32(0)  // je stat_fail
     em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
     em(0xe9); let stat_done = CL; em32(0)
     let stat_fail_target = CL
     em(0x48); em(0xc7); em(0xc0); em32(-1)  // mov rax, -1 (missing/unreadable → sentinel)
     let stat_done_target = CL
     patch32(stat_fail, stat_fail_target)
+    patch32(dir_fail, stat_fail_target)
     patch32(stat_done, stat_done_target)
     em(0x48); em(0x81); em(0xc4); em32(160)  // add rsp, 160
 }
@@ -30617,10 +30628,19 @@ fn emit_file_size_a64() with Mut, Panic {
     }
     emit_syscall_a64()
     if TARGET_OS == 2 {
+        em32(0x79400BEA)  // ldrh w10, [sp, #4] (Darwin st_mode, offset 4, 16-bit)
         em32(0xF94033E9)  // ldr x9, [sp, #96] (Darwin syscall 339 stat layout)
     } else {
+        em32(0xB9401BEA)  // ldr w10, [sp, #24] (Linux st_mode, offset 24, 32-bit)
         em32(0xF9400000 | ((48/8) << 10) | (31 << 5) | 9)  // ldr x9, [sp, #48]
     }
+    // reject directories: (st_mode & S_IFMT) == S_IFDIR → x9 = -1 (mirror x86;
+    // callers treat a directory like an unreadable/absent file). Encodings
+    // verified byte-exact vs clang --target=aarch64.
+    em32(0x12140D4A)  // and w10, w10, #0xF000 (S_IFMT)
+    em32(0x7140115F)  // cmp w10, #0x4000 (S_IFDIR)
+    em32(0x54000041)  // b.ne +8 (skip movn if not a directory)
+    em32(0x92800009)  // movn x9, #0 → x9 = -1 (directory)
     em32(0x91000000 | (160 << 10) | (31 << 5) | 31)     // add sp, sp, #160
     em32(0xF84107E0)  // pop fd
     if TARGET_OS == 2 {
