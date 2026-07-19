@@ -1741,9 +1741,10 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             k = gpu_kernel_append_op(k, stg)
             var tile = gpu_op_wmma_tile(0, 512, pout_reg, 16)
             k = gpu_kernel_append_op(k, tile)
-        } else if hlir_name_is_ossm_oct_step(cn) {
-            // O-SSM octonion linear step S = A⊗H + B·x on tensor cores.
+        } else if hlir_name_is_ossm_oct_step(cn) || hlir_name_is_ossm_sed_step(cn) {
+            // O-SSM linear step S = A⊗H + B·x on tensor cores. Octonion dim=8; sedenion dim=16.
             // call_args = [pA, pB, px, pH, pout]. Stage L(A)+H → tile D=L(A)·H → post-add B·x.
+            let sdim = if hlir_name_is_ossm_sed_step(cn) { 16 } else { 8 }
             if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
             let pA_reg = instr.call_args[0]
             let pB_reg = instr.call_args[1]
@@ -1754,7 +1755,7 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             stg.opcode = GpuOpcode::GpuOctBatchStage
             stg.lhs_reg = pA_reg
             stg.rhs_reg = pH_reg
-            stg.rhs_imm = 8
+            stg.rhs_imm = sdim
             k = gpu_kernel_append_op(k, stg)
             var tile = gpu_op_wmma_tile(0, 512, po_reg, 16)
             k = gpu_kernel_append_op(k, tile)
@@ -1763,7 +1764,7 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             pad.lhs_reg = pB_reg
             pad.rhs_reg = px_reg
             pad.addr_reg = po_reg
-            pad.rhs_imm = 8
+            pad.rhs_imm = sdim
             k = gpu_kernel_append_op(k, pad)
         } else if hlir_name_is_ossm_oct_cell(cn) || hlir_name_is_ossm_sed_cell(cn) {
             // Full O-SSM cell: y = Re(C⊗sigmoid(A⊗H + B·x)). call_args = [pA,pB,px,pC,pH,py].
@@ -1832,6 +1833,20 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             bwd.src_reg = instr.call_args[3]
             bwd.shared_addr = instr.call_args[4]
             k = gpu_kernel_append_op(k, bwd)
+        } else if hlir_name_is_ossm_oct_bwd_nl(cn) || hlir_name_is_ossm_sed_bwd_nl(cn) {
+            // NONLINEAR BPTT backward step. call_args = [pA, pHprev, pdHt, pS, pdHprev, pdA]. Applies
+            // dS = dHt ⊙ σ'(S) then the backward multiply → one GpuOctBwdNl. Needs 2048 shared bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var bwn = gpu_op_new()
+            bwn.opcode = GpuOpcode::GpuOctBwdNl
+            bwn.rhs_imm = if hlir_name_is_ossm_sed_bwd_nl(cn) { 16 } else { 8 }
+            bwn.lhs_reg = instr.call_args[0]
+            bwn.rhs_reg = instr.call_args[1]
+            bwn.addr_reg = instr.call_args[2]
+            bwn.src_reg = instr.call_args[3]
+            bwn.shared_addr = instr.call_args[4]
+            bwn.compare_reg = instr.call_args[5]
+            k = gpu_kernel_append_op(k, bwn)
         }
         // Other calls: skip in MVP
     }
@@ -1857,6 +1872,15 @@ fn hlir_name_is_ossm_oct_step(n: HlirName) -> bool {
     if n.len != 13 { return false }
     n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
     n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "ossm_sed_step" (13 chars) — the O-SSM sedenion linear step S = A⊗H + B·x (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_step(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
     n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
     n.buf[12] == 112 as i8
 }
@@ -1957,6 +1981,25 @@ fn hlir_name_is_ossm_sed_bwd(n: HlirName) -> bool {
     n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
     n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
     n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8
+}
+
+// "ossm_oct_bwd_nl" (15 chars) — NONLINEAR BPTT backward step (octonion): dS=dHt⊙σ'(S) then the
+// backward multiply. ossm_oct_bwd_nl(pA, pHprev, pdHt, pS, pdHprev, pdA) (dim=8, bits=3).
+fn hlir_name_is_ossm_oct_bwd_nl(n: HlirName) -> bool {
+    if n.len != 15 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 95 as i8 && n.buf[13] == 110 as i8 && n.buf[14] == 108 as i8
+}
+
+// "ossm_sed_bwd_nl" (15 chars) — NONLINEAR BPTT backward step (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_bwd_nl(n: HlirName) -> bool {
+    if n.len != 15 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 95 as i8 && n.buf[13] == 110 as i8 && n.buf[14] == 108 as i8
 }
 
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {

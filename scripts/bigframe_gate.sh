@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# bigframe_gate.sh — run-proof gate for stdlib/data/bigframe.sio
+#
+# Compiles the heap-backed BigFrame run-proof under the lean_single engine
+# (heap works only there), RUNS it, and greps for the success token.
+# Emits BIGFRAME_GATE_OK on success (exit 0) or BIGFRAME_GATE_FAIL (exit 1).
+set -u
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT" || { echo "BIGFRAME_GATE_FAIL: cannot cd repo root"; exit 1; }
+
+SOUC="./bin/souc"
+SRC="tests/stdlib/data/test_bigframe_stdlib.sio"
+OUT="$(mktemp -d)/test_bigframe"
+
+export SOUNIO_STDLIB_PATH="$REPO_ROOT/stdlib"
+export SOUNIO_SOUC_ENGINE=lean_single
+
+if ! "$SOUC" compile "$SRC" -o "$OUT" > /dev/null 2>&1; then
+    echo "BIGFRAME_GATE_FAIL: compile failed"
+    exit 1
+fi
+chmod +x "$OUT"
+
+RUN_OUT="$("$OUT" 2>&1)"
+RC=$?
+echo "$RUN_OUT"
+
+if [ "$RC" -eq 0 ] && echo "$RUN_OUT" | grep -q "BIGFRAME_GATE_OK"; then
+    echo "BIGFRAME_GATE_OK"
+    exit 0
+fi
+
+echo "BIGFRAME_GATE_FAIL: token missing or nonzero exit (rc=$RC)"
+exit 1

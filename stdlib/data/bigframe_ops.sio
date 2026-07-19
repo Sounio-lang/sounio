@@ -1,0 +1,124 @@
+// stdlib/data/bigframe_ops.sio
+// Scale verbs over the heap-backed columnar BigFrame (stdlib/data/bigframe.sio).
+//
+// These are the two relational primitives that make a >>1024-row BigFrame useful
+// as a dataframe: a row filter and a hash-free integer groupby-sum. Both are O(n)
+// single passes, allocate their result on the heap via bf_new / bf_push_row, and
+// scale to the millions of rows a BigFrame holds. NATIVE + lean_single only (heap).
+//
+// Compile+run:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+
+use data::bigframe::*
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Distinct-key ceiling for bf_groupby_sum. Keys are treated as small integer
+// bucket ids in [0, this). A row whose key falls outside the range is dropped
+// from the group result (documented, not silently miscounted). 1024 keeps the
+// two accumulator arrays at 8 KB + 8 KB of stack.
+fn bf_groupby_max_keys() -> i64 { 1024 }
+
+// ============================================================================
+// FILTER
+// ============================================================================
+//
+// Return a NEW BigFrame containing exactly the rows of `src` for which
+// column `col` is strictly greater than `thresh`. Column count and column
+// order are preserved. The result is heap-allocated independently of `src`;
+// the caller owns it and must bf_free it.
+//
+// Single O(n_rows * n_cols) pass: for each qualifying row we copy every column
+// value into a stack row buffer and append it via bf_push_row (which grows the
+// result's column buffers 2x on demand).
+pub fn bf_filter_gt(src: &BigFrame, col: i64, thresh: f64) -> BigFrame with Alloc, Mut {
+    let nc = bf_ncols(src)
+    let nr = bf_nrows(src)
+
+    // Small starting capacity; bf_push_row auto-grows. cap>=1 keeps the first
+    // allocation a real heap_alloc (never a realloc on null).
+    var out = bf_new(nc, 16)
+
+    // Guard: an out-of-range column matches nothing -> empty frame.
+    if col < 0 { return out }
+    if col >= nc { return out }
+
+    var row: [f64; 64] = [0.0; 64]
+    var r: i64 = 0
+    while r < nr {
+        if bf_get(src, r, col) > thresh {
+            var c: i64 = 0
+            while c < nc {
+                row[c] = bf_get(src, r, c)
+                c = c + 1
+            }
+            bf_push_row(&!out, &row, nc)
+        }
+        r = r + 1
+    }
+    out
+}
+
+// ============================================================================
+// GROUPBY-SUM
+// ============================================================================
+//
+// Group `src` by integer bucket `key_col`, summing `val_col` within each group.
+// Returns a fresh 2-column BigFrame: col0 = key, col1 = sum(val) for that key.
+// Output rows are emitted in ascending key order.
+//
+// APPROACH (hash-free bounded accumulator, O(n)): the test keys are small
+// integers 0..K, so we key a fixed [f64; MAXK] sum accumulator and a parallel
+// [i64; MAXK] presence flag directly by (key_col value as i64). One linear pass
+// over the rows fills the accumulator; a second pass over the MAXK buckets emits
+// one output row per key that was actually seen. No hashing, no sorting, no
+// per-key allocation. Keys must land in [0, bf_groupby_max_keys()); rows whose
+// key is negative or >= the ceiling are dropped (documented cap, not a silent
+// miscount). For genuinely large / sparse key domains this would become an
+// open-addressing hash; for dense small-integer keys the direct-index table is
+// both simpler and strictly faster.
+pub fn bf_groupby_sum(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut {
+    let maxk = bf_groupby_max_keys()
+    var sums: [f64; 1024] = [0.0; 1024]
+    var seen: [i64; 1024] = [0; 1024]
+
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+
+    var out = bf_new(2, 16)
+
+    // Guard invalid columns -> empty group frame.
+    if key_col < 0 { return out }
+    if key_col >= nc { return out }
+    if val_col < 0 { return out }
+    if val_col >= nc { return out }
+
+    // Pass 1: accumulate.
+    var r: i64 = 0
+    while r < nr {
+        let kf = bf_get(src, r, key_col)
+        let k = kf as i64
+        if k >= 0 {
+            if k < maxk {
+                sums[k] = sums[k] + bf_get(src, r, val_col)
+                seen[k] = 1
+            }
+        }
+        r = r + 1
+    }
+
+    // Pass 2: emit one [key, sum] row per seen bucket, ascending key.
+    var row: [f64; 64] = [0.0; 64]
+    var k2: i64 = 0
+    while k2 < maxk {
+        if seen[k2] == 1 {
+            row[0] = k2 as f64
+            row[1] = sums[k2]
+            bf_push_row(&!out, &row, 2)
+        }
+        k2 = k2 + 1
+    }
+    out
+}

@@ -1,0 +1,83 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_OPS_GATE_OK
+// Run-proof for stdlib/data/bigframe_ops.sio — scale verbs over the heap-backed
+// columnar BigFrame. Builds a 1,000,000-row frame via a LOOP, then exercises
+// bf_filter_gt and bf_groupby_sum against oracle-exact answers.
+//
+//   col0[i] = i           (0 .. 999999)
+//   col1[i] = i % 10      (group key, each of 0..9 appears 100000 times)
+//   col2[i] = 1.0         (unit value, so sum per group == count)
+//
+// NATIVE + lean_single only (heap). Compile with:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < 0.0000001
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    let n: i64 = 1000000
+
+    // 3 columns; small starting capacity forces heavy heap_realloc growth.
+    var bf = bf_new(3, 16)
+
+    var row: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        let fi = i as f64
+        row[0] = fi
+        row[1] = (i % 10) as f64
+        row[2] = 1.0
+        bf_push_row(&!bf, &row, 3)
+        i = i + 1
+    }
+
+    var pass = 1
+
+    // Sanity: all 1,000,000 rows are present.
+    if bf_nrows(&bf) != n { pass = 0 }
+    if bf_ncols(&bf) != 3 { pass = 0 }
+
+    // (a) FILTER: col0 > 499999.5  -> rows i = 500000 .. 999999 = 500000 rows.
+    var filt = bf_filter_gt(&bf, 0, 499999.5)
+    if bf_nrows(&filt) != 500000 { pass = 0 }
+    if bf_ncols(&filt) != 3 { pass = 0 }
+    // Spot-check: min surviving col0 is 500000, and its key/value survived intact.
+    if !approx_eq(bf_get(&filt, 0, 0), 500000.0) { pass = 0 }
+    if !approx_eq(bf_get(&filt, 0, 2), 1.0) { pass = 0 }
+    // Filtered value column still sums to the row count.
+    if !approx_eq(bf_col_sum(&filt, 2), 500000.0) { pass = 0 }
+
+    // (b) GROUPBY-SUM: group by col1 (key), sum col2 (unit) -> 10 groups, each 100000.
+    var grp = bf_groupby_sum(&bf, 1, 2)
+    if bf_nrows(&grp) != 10 { pass = 0 }
+    if bf_ncols(&grp) != 2 { pass = 0 }
+
+    // Keys emitted ascending 0..9, each with sum == 100000.
+    var g: i64 = 0
+    while g < 10 {
+        if !approx_eq(bf_get(&grp, g, 0), g as f64) { pass = 0 }
+        if !approx_eq(bf_get(&grp, g, 1), 100000.0) { pass = 0 }
+        g = g + 1
+    }
+    // Total summed value across all groups == total rows.
+    if !approx_eq(bf_col_sum(&grp, 1), 1000000.0) { pass = 0 }
+
+    bf_free(&!grp)
+    bf_free(&!filt)
+    bf_free(&!bf)
+
+    print("rows_built=")
+    print_int(n)
+    print("\n")
+    if pass == 1 {
+        print("BIGFRAME_OPS_GATE_OK\n")
+    } else {
+        print("BIGFRAME_OPS_FAIL\n")
+    }
+    return 0
+}
