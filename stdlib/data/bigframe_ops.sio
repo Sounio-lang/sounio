@@ -57,38 +57,52 @@ pub fn bf_count_gt(src: &BigFrame, col: i64, thresh: f64) -> i64 with Mut, Div, 
 pub fn bf_filter_gt(src: &BigFrame, col: i64, thresh: f64) -> BigFrame with Alloc, Mut, Div, Panic {
     let nc = bf_ncols(src)
     let nr = bf_nrows(src)
-
     if col < 0 { return bf_new(nc, 1) }
     if col >= nc { return bf_new(nc, 1) }
-
-    // Pass 1: exact survivor count -> pre-size the output once (min 1 so the first alloc is a real
-    // heap_alloc, never a realloc on null).
     var cnt = bf_count_gt(src, col, thresh)
     if cnt < 1 { cnt = 1 }
     var out = bf_new(nc, cnt)
-
-    // Pass 2: COLUMN-MAJOR raw gather. For each column, a tight raw-pointer loop writes the surviving
-    // cells directly into the output column buffer via write_f64 -- no per-row bf_push_row, no stack
-    // row buffer, no per-cell accessor dispatch. The predicate is recomputed per column (cheap
-    // sequential reads of the key column); this is ~1.8x over the row-major push version. n_rows is
-    // set directly to the survivor count since we bypass bf_push_row.
     let kp = bf_col_ptr(src, col) as *mut f64
-    var c: i64 = 0
-    while c < nc {
-        let sp = bf_col_ptr(src, c) as *mut f64
-        let op = bf_col_ptr(&out, c) as *mut f64
+    // Adaptive gather (measured crossover ~6-8 columns):
+    //  NARROW (nc<8): column-major recompute -- predicate per column in a tight raw loop.
+    //  WIDE   (nc>=8): index-array -- build the survivor row-index list ONCE (heap f64), gather each
+    //                  column by index (predicate computed once, not nc times).
+    if nc >= 8 {
+        let idx = heap_alloc(cnt * 8) as *mut f64
         var w: i64 = 0
         var r: i64 = 0
         while r < nr {
-            if read_f64(kp, r) > thresh {
-                write_f64(op, w, read_f64(sp, r))
-                w = w + 1
-            }
+            if read_f64(kp, r) > thresh { write_f64(idx, w, r as f64); w = w + 1 }
             r = r + 1
         }
-        c = c + 1
+        var c: i64 = 0
+        while c < nc {
+            let sp = bf_col_ptr(src, c) as *mut f64
+            let op = bf_col_ptr(&out, c) as *mut f64
+            var j: i64 = 0
+            while j < w {
+                write_f64(op, j, read_f64(sp, read_f64(idx, j) as i64))
+                j = j + 1
+            }
+            c = c + 1
+        }
+        heap_free(idx as *mut i8)
+        out.n_rows = w
+    } else {
+        var c: i64 = 0
+        while c < nc {
+            let sp = bf_col_ptr(src, c) as *mut f64
+            let op = bf_col_ptr(&out, c) as *mut f64
+            var w: i64 = 0
+            var r: i64 = 0
+            while r < nr {
+                if read_f64(kp, r) > thresh { write_f64(op, w, read_f64(sp, r)); w = w + 1 }
+                r = r + 1
+            }
+            c = c + 1
+        }
+        out.n_rows = cnt
     }
-    out.n_rows = cnt
     out
 }
 
