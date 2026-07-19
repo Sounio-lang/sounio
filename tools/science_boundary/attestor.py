@@ -745,9 +745,16 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
             surface_status = fields[1]
         elif kind == "capacity" and len(fields) == 2:
             try:
-                closure.capacity = max(1, min(int(fields[1]), 4096))
+                reported_capacity = int(fields[1])
             except ValueError:
                 closure.parse_failures.append((source, f"invalid capacity on report line {line_number}"))
+            else:
+                if reported_capacity < 1 or reported_capacity > 4096:
+                    closure.parse_failures.append(
+                        (source, f"capacity {reported_capacity} is outside supported range 1..4096")
+                    )
+                else:
+                    closure.capacity = reported_capacity
         elif kind == "saturated" and len(fields) == 2:
             if fields[1] not in {"true", "false"}:
                 closure.parse_failures.append((source, f"invalid saturated state on report line {line_number}"))
@@ -819,6 +826,10 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
     if missing_singletons:
         closure.parse_failures.append(
             (source, f"raw AST closure report lacks required state: {','.join(sorted(missing_singletons))}")
+        )
+    if len(declared_nodes) > closure.capacity:
+        closure.parse_failures.append(
+            (source, f"raw AST node count {len(declared_nodes)} exceeds capacity {closure.capacity}")
         )
     if source.resolve() not in node_set:
         closure.parse_failures.append((source, "raw AST closure does not contain the root source"))

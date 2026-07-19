@@ -534,6 +534,102 @@ def assert_unknowns(root: Path) -> None:
         "duplicate state records lack causal diagnostics",
     )
 
+    full_capacity_report = write(
+        root / "forged-full-capacity-valid.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t2",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    full_capacity_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-full-capacity-valid.json",
+        full_capacity_report,
+        expected=0,
+    )
+    check(full_capacity_data["verdict"] == "OK", "full non-saturated capacity was rejected")
+
+    for invalid_capacity in (0, 4097):
+        invalid_capacity_report = write(
+            root / f"forged-capacity-{invalid_capacity}.closure.tsv",
+            "\n".join(
+                (
+                    "SOUNIO_BOUNDARY_CLOSURE_V1",
+                    "status\tcomplete",
+                    "surface_status\tvalid",
+                    f"capacity\t{invalid_capacity}",
+                    "saturated\tfalse",
+                    "parse_failed\tfalse",
+                    f"node\t{src}",
+                    "logical_node\t0\tcycle::host-audit",
+                    "",
+                )
+            ),
+        )
+        invalid_capacity_data = evaluate_with_report(
+            src,
+            cycle_manifest,
+            root / f"forged-capacity-{invalid_capacity}.json",
+            invalid_capacity_report,
+        )
+        check(invalid_capacity_data["verdict"] == "UNKNOWN", "out-of-range capacity became strict OK")
+        check(
+            any(
+                f"capacity {invalid_capacity} is outside supported range 1..4096" in item["message"]
+                for item in invalid_capacity_data["diagnostics"]
+            ),
+            "out-of-range capacity lacks causal diagnostic",
+        )
+
+    capacity_occupancy_report = write(
+        root / "forged-capacity-occupancy.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t1",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    capacity_occupancy_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-capacity-occupancy.json",
+        capacity_occupancy_report,
+    )
+    check(capacity_occupancy_data["verdict"] == "UNKNOWN", "closure above declared capacity became strict OK")
+    check(
+        any(
+            "raw AST node count 2 exceeds capacity 1" in item["message"]
+            for item in capacity_occupancy_data["diagnostics"]
+        ),
+        "capacity occupancy violation lacks causal diagnostic",
+    )
+
     duplicate_node_report = write(
         root / "forged-duplicate-node.closure.tsv",
         "\n".join(
