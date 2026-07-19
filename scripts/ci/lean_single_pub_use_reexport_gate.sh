@@ -160,20 +160,15 @@ if [[ "$CASE_RC" -ne 0 ]]; then
   selective_reexport=1
 fi
 
-# This is a separate known residual: private imports currently globalize public
-# declarations. It is reported in the receipt but does not substitute for the
-# selected public re-export contract above.
 private_import_isolated=0
 compile_case private "$ROOT_DIR/tests/compiler/pub_use_reexport/private_consumer.sio"
-if [[ "$CASE_RC" -eq 0 ]]; then
-  echo "[lean-single-pub-use] XFAIL BLK-20260713-lean-single-private-import-visibility: private use still globalizes a public leaf"
-elif semantic_unknown_rejection "$CASE_RC" "$WORK/private.compile.log" private_route_value; then
-  private_import_isolated=1
-  echo "[lean-single-pub-use] PASS: private use no longer re-exports its public leaf"
-else
+[[ "$CASE_RC" -ne 0 ]] || fail "private facade exposed its imported public leaf"
+semantic_unknown_rejection "$CASE_RC" "$WORK/private.compile.log" private_route_value || {
   cat "$WORK/private.compile.log" >&2
   fail "private-use witness failed for a reason other than route visibility"
-fi
+}
+private_import_isolated=1
+echo "[lean-single-pub-use] PASS: private use does not re-export its public leaf"
 
 echo "[lean-single-pub-use] receipt scope=named_function_reexports direct_import=PASS missing_symbol=REJECTED facade_forwarding=$facade_forwarding selective_reexport=$selective_reexport private_import_isolated=$private_import_isolated"
 
@@ -185,4 +180,8 @@ if [[ "$selective_reexport" -eq 0 ]]; then
   echo "[lean-single-pub-use] BLOCKED BLK-20260713-lean-single-import-visibility: forwarding exposes the whole leaf instead of the selected export" >&2
   exit 1
 fi
-echo "[lean-single-pub-use] PASS: named function facade forwarding is selective and missing symbols remain rejected"
+if [[ "$private_import_isolated" -eq 0 ]]; then
+  echo "[lean-single-pub-use] BLOCKED BLK-20260713-lean-single-private-import-visibility: private import escaped its facade" >&2
+  exit 1
+fi
+echo "[lean-single-pub-use] PASS: named function facade forwarding is selective; missing and private symbols remain rejected"

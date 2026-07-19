@@ -16,9 +16,23 @@ var IMP_LOADED: [i64; 2048] = [0; 2048]
 var IMP_LOADED_PATHS: [i8; 262144] = [0; 262144]
 var IMP_LOADED_OFFS: [i64; 2048] = [0; 2048]
 var IMP_LOADED_LENS: [i64; 2048] = [0; 2048]
+var IMP_LOADED_SRC_START: [i64; 2048] = [0; 2048]
+var IMP_LOADED_SRC_END: [i64; 2048] = [0; 2048]
 var IMP_PATHS_USED: i64 = 0
 var IMP_COUNT: i64 = 0
 var IMPORT_RESOLUTION_FAILED: i64 = 0
+// Braced named-import edges. Source/target are indices in IMP_LOADED; -1 is
+// the main source. These records keep facade forwarding selective without
+// changing the legacy flattened bundle used by the rest of lean_single.
+var IMP_NAMED_FROM: [i64; 16384] = [0; 16384]
+var IMP_NAMED_TO: [i64; 16384] = [0; 16384]
+var IMP_NAMED_NS: [i64; 16384] = [0; 16384]
+var IMP_NAMED_NE: [i64; 16384] = [0; 16384]
+var IMP_NAMED_PUBLIC: [i64; 16384] = [0; 16384]
+var IMP_NAMED_COUNT: i64 = 0
+var IMP_NAMED_SCRATCH_NS: [i64; 512] = [0; 512]
+var IMP_NAMED_SCRATCH_NE: [i64; 512] = [0; 512]
+var IMP_NAMED_SCRATCH_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
@@ -7449,10 +7463,59 @@ fn release_call_arg_borrows(from_n: i64) with Mut {
 }
 
 // ─── Function lookup ───
+fn imp_source_index_for_pos(pos: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < IMP_COUNT {
+        if pos >= IMP_LOADED_SRC_START[i as usize] && pos < IMP_LOADED_SRC_END[i as usize] {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// A braced named import in main constrains where that name may come from. The
+// defining function is visible either directly from the requested module or
+// through one matching public facade edge. Chained re-exports are intentionally
+// outside this narrow contract.
+fn fn_named_import_visible(fi: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
+    if MAIN_SRC_END <= 0 || ns >= MAIN_SRC_END { return true }
+    if FN_NS[fi as usize] < MAIN_SRC_END { return true }
+    let def_source = imp_source_index_for_pos(FN_NS[fi as usize])
+    if def_source < 0 { return true }
+
+    var has_main_binding: i64 = 0
+    var i: i64 = 0
+    while i < IMP_NAMED_COUNT {
+        if IMP_NAMED_FROM[i as usize] == -1 &&
+           name_eq(IMP_NAMED_NS[i as usize], IMP_NAMED_NE[i as usize], ns, ne) {
+            has_main_binding = 1
+            let requested_source = IMP_NAMED_TO[i as usize]
+            if requested_source == def_source { return true }
+
+            var j: i64 = 0
+            while j < IMP_NAMED_COUNT {
+                if IMP_NAMED_FROM[j as usize] == requested_source &&
+                   IMP_NAMED_TO[j as usize] == def_source &&
+                   IMP_NAMED_PUBLIC[j as usize] == 1 &&
+                   name_eq(IMP_NAMED_NS[j as usize], IMP_NAMED_NE[j as usize], ns, ne) {
+                    return true
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    if has_main_binding == 1 { return false }
+    return true
+}
+
 fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
-        if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
+        if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) {
+            if fn_named_import_visible(i, ns, ne) { return i }
+        }
         i = i + 1
     }
     return -1
@@ -37533,7 +37596,7 @@ fn imp_path_hash(len: i64) -> i64 with Panic, Mut {
     return h
 }
 
-fn imp_path_loaded(len: i64) -> i64 with Panic, Mut {
+fn imp_path_loaded_index(len: i64) -> i64 with Panic, Mut {
     let ph = imp_path_hash(len)
     var di: i64 = 0
     while di < IMP_COUNT {
@@ -37545,11 +37608,35 @@ fn imp_path_loaded(len: i64) -> i64 with Panic, Mut {
                 if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
                 mi = mi + 1
             }
-            if match_ok == 1 { return 1 }
+            if match_ok == 1 { return di }
         }
         di = di + 1
     }
-    0
+    return -1
+}
+
+fn imp_path_loaded(len: i64) -> i64 with Panic, Mut {
+    if imp_path_loaded_index(len) >= 0 { return 1 }
+    return 0
+}
+
+fn imp_register_named_bindings(from_source: i64, to_source: i64, is_public: i64) with IO, Mut, Panic {
+    var i: i64 = 0
+    while i < IMP_NAMED_SCRATCH_COUNT {
+        if IMP_NAMED_COUNT >= 16384 {
+            IMPORT_RESOLUTION_FAILED = 1
+            print("error: named import binding table full\n")
+            return
+        }
+        let bi = IMP_NAMED_COUNT
+        IMP_NAMED_FROM[bi as usize] = from_source
+        IMP_NAMED_TO[bi as usize] = to_source
+        IMP_NAMED_NS[bi as usize] = IMP_NAMED_SCRATCH_NS[i as usize]
+        IMP_NAMED_NE[bi as usize] = IMP_NAMED_SCRATCH_NE[i as usize]
+        IMP_NAMED_PUBLIC[bi as usize] = is_public
+        IMP_NAMED_COUNT = IMP_NAMED_COUNT + 1
+        i = i + 1
+    }
 }
 
 fn print_imp_path() with IO, Mut, Panic {
@@ -38058,12 +38145,27 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 continue
             }
         }
-        // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
+        // Check for "use " or the narrow supported "pub use ...::{...}"
+        // form at line start.
+        var use_is_public: i64 = 0
+        var is_use_line: i64 = 0
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
-            pos = pos + 4  // skip "use "
+            pos = pos + 4
+            is_use_line = 1
+        } else if pos + 7 < SRC_LEN &&
+                  sb(pos) == 112 && sb(pos+1) == 117 && sb(pos+2) == 98 && sb(pos+3) == 32 &&
+                  sb(pos+4) == 117 && sb(pos+5) == 115 && sb(pos+6) == 101 && sb(pos+7) == 32 {
+            pos = pos + 8
+            use_is_public = 1
+            is_use_line = 1
+        }
+        if is_use_line == 1 {
+            let use_from_source = imp_source_index_for_pos(pos)
+            IMP_NAMED_SCRATCH_COUNT = 0
             // Extract module path until newline, semicolon, or ::*
             var path_start: i64 = pos
             var path_end: i64 = pos
+            var is_braced_import: i64 = 0
             // Bug C: a glob (`::*`) or braced (`::{...}`) import unambiguously
             // marks where the file path ends. A bare named import
             // (`use pkg::mod::symbol`) has no such marker — `symbol` is
@@ -38082,8 +38184,58 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                     if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
                         path_end = pos
-                        // Skip ::{...} until }
-                        while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
+                        is_braced_import = 1
+                        // Keep exact source ranges for simple names. Whitespace
+                        // and line breaks are accepted; renames and globs are
+                        // deliberately not registered by this contract.
+                        var list_pos: i64 = pos + 3
+                        while list_pos < SRC_LEN && sb(list_pos) != 125 {
+                            while list_pos < SRC_LEN &&
+                                  (sb(list_pos) == 32 || sb(list_pos) == 9 || sb(list_pos) == 10 ||
+                                   sb(list_pos) == 13 || sb(list_pos) == 44) {
+                                list_pos = list_pos + 1
+                            }
+                            if list_pos >= SRC_LEN || sb(list_pos) == 125 { break }
+                            let item_start = list_pos
+                            var item_end = item_start
+                            while item_end < SRC_LEN && sb(item_end) != 44 && sb(item_end) != 125 {
+                                item_end = item_end + 1
+                            }
+                            var trimmed_end = item_end
+                            while trimmed_end > item_start &&
+                                  (sb(trimmed_end - 1) == 32 || sb(trimmed_end - 1) == 9 ||
+                                   sb(trimmed_end - 1) == 10 || sb(trimmed_end - 1) == 13) {
+                                trimmed_end = trimmed_end - 1
+                            }
+                            var ident_end = item_start
+                            while ident_end < trimmed_end {
+                                let ic = sb(ident_end)
+                                if (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) ||
+                                   (ic >= 48 && ic <= 57) || ic == 95 {
+                                    ident_end = ident_end + 1
+                                } else {
+                                    break
+                                }
+                            }
+                            var rest = ident_end
+                            while rest < trimmed_end && (sb(rest) == 32 || sb(rest) == 9 || sb(rest) == 10 || sb(rest) == 13) {
+                                rest = rest + 1
+                            }
+                            if ident_end > item_start && rest == trimmed_end {
+                                if IMP_NAMED_SCRATCH_COUNT >= 512 {
+                                    IMPORT_RESOLUTION_FAILED = 1
+                                    print("error: named import list too large\n")
+                                } else {
+                                    let ni = IMP_NAMED_SCRATCH_COUNT
+                                    IMP_NAMED_SCRATCH_NS[ni as usize] = item_start
+                                    IMP_NAMED_SCRATCH_NE[ni as usize] = ident_end
+                                    IMP_NAMED_SCRATCH_COUNT = IMP_NAMED_SCRATCH_COUNT + 1
+                                }
+                            }
+                            list_pos = item_end
+                            if list_pos < SRC_LEN && sb(list_pos) == 44 { list_pos = list_pos + 1 }
+                        }
+                        pos = list_pos
                         if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
                         is_named_import = 0
                         break
@@ -38113,6 +38265,14 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 }
                 pos = pos + 1
                 path_end = pos
+            }
+            // Preserve prior behavior for public globs, aliases, and bare
+            // imports. This issue only grants loading/forwarding to braced
+            // named lists.
+            if use_is_public == 1 && is_braced_import == 0 {
+                while pos < SRC_LEN && sb(pos) != 10 { pos = pos + 1 }
+                if pos < SRC_LEN { pos = pos + 1 }
+                continue
             }
             // Build filesystem path: convert :: to /
             var fp_len: i64 = 0
@@ -38629,9 +38789,12 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                             print("\n")
                         } else {
                             SRC_LEN = SRC_LEN + copy_len
-                            IMP_LOADED[IMP_COUNT as usize] = ph
-                            IMP_LOADED_OFFS[IMP_COUNT as usize] = IMP_PATHS_USED
-                            IMP_LOADED_LENS[IMP_COUNT as usize] = fp_len
+                            let loaded_i = IMP_COUNT
+                            IMP_LOADED[loaded_i as usize] = ph
+                            IMP_LOADED_OFFS[loaded_i as usize] = IMP_PATHS_USED
+                            IMP_LOADED_LENS[loaded_i as usize] = fp_len
+                            IMP_LOADED_SRC_START[loaded_i as usize] = prev_src_len + 1
+                            IMP_LOADED_SRC_END[loaded_i as usize] = SRC_LEN
                             var ri: i64 = 0
                             while ri < fp_len {
                                 IMP_LOADED_PATHS[(IMP_PATHS_USED + ri) as usize] = IMP_PATH[ri as usize]
@@ -38646,6 +38809,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                             print(" bytes\n")
                         }
                     }
+                }
+                let target_source = imp_path_loaded_index(fp_len)
+                if target_source >= 0 && IMP_NAMED_SCRATCH_COUNT > 0 {
+                    imp_register_named_bindings(use_from_source, target_source, use_is_public)
                 }
             }
         }
