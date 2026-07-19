@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.gpu.hypercomplex-ssm-novelty
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.gpu.hypercomplex-ssm-novelty
+-->
+
 # Novelty & related work — non-associative hypercomplex SSM on tensor cores
 
 Spine for a systems/PL preprint. Grounded in an 11-agent literature deep-research swarm
