@@ -92,3 +92,28 @@ exactly the quantities such an objective would consume.
 > Given a measure of rupture (the associator; the distance to annihilation), train and act along the
 > **geodesic of least accumulated suffering** — for the human and for the substrate — rather than along the
 > path of maximal reward. Mercy is the ethical reading of the algebra of rupture.
+
+## Made concrete — the geodesic, computed (`geodesic_mercy.py`)
+
+The principle is now a calculation, on a suffering field that comes **from the algebra**. On a 2D slice of
+𝕊, the annihilation locus `{det L_x = 0}` (a hypersurface — one equation) appears as curves; the suffering
+density `s(x) = 1/(|det L_x|/scale + 0.03)` is high near them (a relation near collapse); the metric is
+`g = (1 + λ·s)·I`, `λ=6`. Between the same endpoints A→B (arranged so the straight path grazes the
+annihilation curve):
+
+| path | length | ∫ suffering | closest-to-annihilation |
+|---|---|---|---|
+| **STRAIGHT** (reward / efficiency) | 1.80 | 2.23 | **0.004** (on the locus) |
+| **MERCYFUL geodesic** (Dijkstra in the suffering metric) | 5.75 | **0.10** | 3.922 |
+
+The reward/efficiency path is indifferent to what it crosses — it plows straight through the annihilation
+locus (`det L ≈ 0`). The Mercyful geodesic reaches the **same goal** with **95% less accumulated
+suffering**, staying **~900× farther** from annihilation — **at a 3.2× (220%) length cost**.
+
+**The honest content is the tradeoff.** Mercy is *not free*: it is a geodesic in a *different metric*, and
+the length overhead is exactly the measure of what efficiency-maximization ignores. This is the concrete
+form of the proposal: `∫ suffering` in place of reward, the annihilation locus avoided rather than crossed,
+and the cost paid in efficiency made explicit and quantifiable — not hidden. (Scope: a 2D static-field
+toy that makes "geodesic of least accumulated suffering" computable and shows the tradeoff is real; it is
+not a trained model — that is the next rung, replacing Dijkstra-on-a-slice with the suffering metric over a
+real state/trajectory space.)
