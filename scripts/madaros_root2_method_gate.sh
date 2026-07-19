@@ -67,6 +67,7 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
   "claims": [
     "same_module_self_ref_method_call",
     "same_module_associated_type_method",
+    "same_module_method_on_method_return",
     "multimodule_associated_type_method_import"
   ],
   "claims_not_made": [

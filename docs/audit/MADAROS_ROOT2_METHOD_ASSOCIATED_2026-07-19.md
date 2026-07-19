@@ -22,13 +22,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 | A. Path callee name | `E::of` lowered as bare `"E"` → body-less fn → **runtime SEGV** | `expr_to_callee_name_ref`: multi-segment Path → `ir_mangle_method_name(first, last)` = `E_of` |
 | B. `&self` value pass | `x.get()` with `self: &E` passed **value** not pointer → **runtime SEGV** | Track `IrFunction.first_param_is_ref`; auto-`OpRef` on non-ref receivers |
 
-Same-module method+associated now **PASS**. Residuals:
+Same-module method+associated (including get-after-add) now **PASS**.
 
-- Multi-module `x.method()` still **compile SEGV** at `lower_array: seed_begin`
-- Same-module chain `let s = a.add(&b); s.get()` still **compile SEGV** (method on
-  result of method); free helper `e_val(&s)` works
+| Bug | Fix |
+|---|---|
+| Path `E::of` → bare `"E"` | mangle `Type_method` |
+| `&self` value pass | `first_param_is_ref` + auto-`OpRef` |
+| `let s = a.add(&b)` lost type | bind struct type on **ExprMethodCall** lets |
 
-Free-function API remains the robust cross-module path.
+**Residual:** multi-module instance method (`x.get()` across `use`) still compile-SEGV
+at seed lower. Free-function / associated multi-module paths work.
 
 ## Evidence (rebuilt Madaros)
 
@@ -37,10 +40,9 @@ R1 free multi-module          OK
 R2 E::of multi-module         OK  (was runtime SEGV)
 R5 &self method same-module   OK  (was runtime SEGV)
 R6 associated same-module     OK  (was runtime SEGV)
+get after a.add(&b)           OK  (was compile SEGV)
 Epistemic::measured import    OK
-of+get+add (no get-after-add) OK
 multi-module e.val()          still compile SEGV (residual)
-get after method-return       still compile SEGV (residual)
 ```
 
 ## Gate
@@ -56,7 +58,6 @@ Requires current-source Madaros (`make build-madaros` / CI modular build).
 
 - Multi-module instance method call (`x.method()` across `use`)  
 - Enum ctor path / full Root 2 census closed  
-- Lean_single-only paths as sole witness  
 
 ## Priority next
 
