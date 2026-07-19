@@ -564,6 +564,7 @@ assert_full_ir_input_receipt_matches_closure() {
   local actual_edges="$WORK/$label.lowering.actual.edges"
 
   awk -F '\t' '
+    BEGIN { node_index = 0 }
     $1 == "node" { physical[node_index] = $2; node_index = node_index + 1 }
     $1 == "logical_node" {
       printf "module_frontend_full_ir: lower_node module_id=%s logical=%s physical=%s\n", $2, $3, physical[$2]
