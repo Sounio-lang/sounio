@@ -104,6 +104,203 @@ fn visibility_allows_access(vis: Visibility, defining_module: AstPath, current_m
     false
 }
 
+// Private access is an identity decision when both sides belong to a canonical
+// multi-module check. AstPath equality remains only for legacy entrypoints that
+// do not carry ModuleIds.
+fn visibility_allows_access_with_module_identity(
+    vis: Visibility,
+    defining_module: AstPath,
+    current_module: AstPath,
+    crate_root: AstPath,
+    defining_module_id: i64,
+    current_module_id: i64,
+) -> bool with Mut, Panic, Div {
+    if vis.kind == VISIBILITY_PRIVATE
+        && defining_module_id != CHECK_MODULE_ID_UNKNOWN
+        && current_module_id != CHECK_MODULE_ID_UNKNOWN {
+        return defining_module_id == current_module_id
+    }
+    visibility_allows_access(vis, defining_module, current_module, crate_root)
+}
+
+const METHOD_LOOKUP_MISSING: i64 = 0
+const METHOD_LOOKUP_FOUND: i64 = 1
+const METHOD_LOOKUP_PRIVATE: i64 = 2
+const METHOD_LOOKUP_AMBIGUOUS: i64 = 3
+
+struct MethodLookupResult {
+    status: i64,
+    sig_id: i64,
+}
+
+fn method_receiver_matches_semantic(sig_ty: TypeEntry, receiver_ty: TypeEntry) -> bool with Mut, Panic, Div {
+    if sig_ty.kind != receiver_ty.kind {
+        return false
+    }
+    if receiver_ty.kind != TypeKind::TyNamed {
+        return name_eq(sig_ty.name, receiver_ty.name)
+    }
+    if !name_eq(sig_ty.name, receiver_ty.name) {
+        return false
+    }
+    let receiver_module_id = ty_named_module_id(receiver_ty)
+    if receiver_module_id >= 0 {
+        let sig_module_id = ty_named_module_id(sig_ty)
+        return sig_module_id >= 0 && sig_module_id == receiver_module_id
+    }
+    true
+}
+
+fn method_sig_matches(
+    sig: FnSig,
+    receiver_ty: TypeEntry,
+    method_name: Name,
+    name_fallback: bool,
+) -> bool with Mut, Panic, Div {
+    if !sig.is_method || !name_eq(sig.name, method_name) {
+        return false
+    }
+    if name_fallback {
+        return receiver_ty.kind == TypeKind::TyNamed
+            && ty_named_module_id(receiver_ty) < 0
+            && name_eq(sig.self_type_name, receiver_ty.name)
+    }
+    method_receiver_matches_semantic(sig.self_type_entry, receiver_ty)
+}
+
+fn method_lookup_scan(
+    t: *mut FnSigTable,
+    receiver_ty: TypeEntry,
+    method_name: Name,
+    enforce_visibility: bool,
+    current_module: AstPath,
+    crate_root: AstPath,
+    current_module_id: i64,
+    name_fallback: bool,
+) -> MethodLookupResult with Mut, Panic, Div {
+    var found_sig_id: i64 = -1
+    var visible_count: i64 = 0
+    var inaccessible_count: i64 = 0
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) {
+            return MethodLookupResult { status: METHOD_LOOKUP_MISSING, sig_id: -1 }
+        }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            let sig = (*cur).entries[local as usize]
+            if method_sig_matches(sig, receiver_ty, method_name, name_fallback) {
+                let accessible = !enforce_visibility || visibility_allows_access_with_module_identity(
+                    sig.visibility,
+                    sig.defining_module,
+                    current_module,
+                    crate_root,
+                    sig.defining_module_id,
+                    current_module_id,
+                )
+                if accessible {
+                    visible_count = visible_count + 1
+                    if found_sig_id < 0 {
+                        found_sig_id = gi
+                    }
+                } else {
+                    inaccessible_count = inaccessible_count + 1
+                }
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+
+    if visible_count == 1 {
+        return MethodLookupResult { status: METHOD_LOOKUP_FOUND, sig_id: found_sig_id }
+    }
+    if visible_count > 1 {
+        return MethodLookupResult { status: METHOD_LOOKUP_AMBIGUOUS, sig_id: -1 }
+    }
+    if inaccessible_count > 0 {
+        return MethodLookupResult { status: METHOD_LOOKUP_PRIVATE, sig_id: -1 }
+    }
+    MethodLookupResult { status: METHOD_LOOKUP_MISSING, sig_id: -1 }
+}
+
+fn method_lookup_resolve(
+    t: *mut FnSigTable,
+    receiver_ty: TypeEntry,
+    method_name: Name,
+    enforce_visibility: bool,
+    current_module: AstPath,
+    crate_root: AstPath,
+    current_module_id: i64,
+) -> MethodLookupResult with Mut, Panic, Div {
+    if receiver_ty.kind == TypeKind::TyNamed
+        && ty_named_module_id(receiver_ty) < 0 {
+        // Unknown nominal identity has exactly one bounded authority universe:
+        // historical self_type_name matching. Do not mix it with a partial
+        // semantic scan whose candidate set may be incomplete.
+        return method_lookup_scan(
+            t, receiver_ty, method_name, enforce_visibility,
+            current_module, crate_root, current_module_id, true)
+    }
+    method_lookup_scan(
+        t, receiver_ty, method_name, enforce_visibility,
+        current_module, crate_root, current_module_id, false)
+}
+
+// A method body is not an invocation. Bind it to the exact declaration that
+// produced its signature, independent of receiver identity becoming more
+// precise between collection and body checking. Invocation lookup remains
+// receiver-strict and rejects duplicate visible call surfaces as ambiguous.
+fn method_definition_sig_id(
+    t: *mut FnSigTable,
+    method_name: Name,
+    visibility_kind: i64,
+    current_module: AstPath,
+    current_module_id: i64,
+    source_span_start: i64,
+) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) {
+            return -1
+        }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            let sig = (*cur).entries[local as usize]
+            let same_module = if current_module_id != CHECK_MODULE_ID_UNKNOWN
+                && sig.defining_module_id != CHECK_MODULE_ID_UNKNOWN {
+                sig.defining_module_id == current_module_id
+            } else {
+                ast_path_eq(sig.defining_module, current_module)
+            }
+            if sig.is_method
+                && same_module
+                && name_eq(sig.name, method_name)
+                && sig.visibility_kind == visibility_kind
+                && sig.source_span_start == source_span_start {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    -1
+}
+
+fn method_lookup_error_code(result: MethodLookupResult, missing_code: i64) -> i64 {
+    if result.status == METHOD_LOOKUP_PRIVATE {
+        return 175
+    }
+    if result.status == METHOD_LOOKUP_AMBIGUOUS {
+        return 219
+    }
+    missing_code
+}
+
 // ============================================================
 // Security limits
 // ============================================================
@@ -920,7 +1117,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         had_error: false,
         diag_emitted: false,
         current_module: empty_path(),
-        current_module_id: 0,
+        current_module_id: CHECK_MODULE_ID_UNKNOWN,
         crate_root: empty_path(),
         enforce_visibility: true,
         current_return_type: ty_unit(),
@@ -1017,7 +1214,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).had_error = false
     (*raw).diag_emitted = false
     (*raw).current_module = empty_path()
-    (*raw).current_module_id = 0
+    (*raw).current_module_id = CHECK_MODULE_ID_UNKNOWN
     (*raw).crate_root = empty_path()
     (*raw).enforce_visibility = true
     (*raw).current_return_type = ty_unit()
@@ -1194,6 +1391,51 @@ fn checker_exit_type_expr_mut(c: *mut Checker) with Mut {
     }
 }
 
+fn checker_nominal_module_id_from_tables(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    current_module_id: i64,
+    name: Name,
+) -> i64 with Mut, Panic, Div {
+    // This is intentionally table-backed, not a textual import claim. A nominal
+    // declaration collected later in the same module remains unknown until the
+    // checker grows a predeclaration/backpatch phase.
+    let local_struct = struct_table_find_in_module(structs, name, current_module_id)
+    let local_enum = enum_table_find_in_module(enums, name, current_module_id)
+    if local_struct >= 0 && local_enum < 0 {
+        return (*structs).entries[local_struct as usize].defining_module_id
+    }
+    if local_enum >= 0 && local_struct < 0 {
+        return (*enums).entries[local_enum as usize].defining_module_id
+    }
+    if local_struct >= 0 || local_enum >= 0 {
+        return CHECK_MODULE_ID_UNKNOWN
+    }
+
+    let unique_struct = struct_table_find_unique(structs, name)
+    let unique_enum = enum_table_find_unique(enums, name)
+    if unique_struct >= 0 && unique_enum < 0 {
+        return (*structs).entries[unique_struct as usize].defining_module_id
+    }
+    if unique_enum >= 0 && unique_struct < 0 {
+        return (*enums).entries[unique_enum as usize].defining_module_id
+    }
+    CHECK_MODULE_ID_UNKNOWN
+}
+
+fn checker_nominal_module_id_mut(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div {
+    checker_nominal_module_id_from_tables(
+        (*c).structs, (*c).enums, (*c).current_module_id, name)
+}
+
+fn checker_named_type_with_known_identity_mut(c: *mut Checker, name: Name) -> TypeEntry with Mut, Panic, Div {
+    let module_id = checker_nominal_module_id_mut(c, name)
+    if module_id >= 0 {
+        return ty_named_in_module(name, module_id)
+    }
+    ty_named(name)
+}
+
 fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry with Mut, Panic, Div, Alloc {
     let name = checker_copy_string_list_to_name(path.segments)
     if name_is_i8(name) {
@@ -1232,10 +1474,11 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else {
         let bound_ty = (*c).env.lookup(name)
-        if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
+        if (bound_ty.kind != TypeKind::TyError && bound_ty.kind != TypeKind::TyUnknown)
+            || bound_ty.ontology_id >= 0 {
             bound_ty
         } else {
-            ty_named(name)
+            checker_named_type_with_known_identity_mut(c, name)
         }
     }
 }
@@ -1609,7 +1852,14 @@ fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_te: TypeExpr, is_mut_r
     // inner_ty.name.buf[0..7] = first 8 chars of struct name (TypeEntry bytes 8-15 — SRET window).
     // Look up the struct table now (while the full Checker is accessible) and encode the index
     // in name.buf[0] so the field-access handler can find the struct without relying on name.len.
-    let struct_idx = struct_table_find_by_buf8((*c).structs, inner_ty.name.buf)
+    let struct_idx = if inner_ty.kind == TypeKind::TyNamed
+        && ty_named_module_id(inner_ty) >= 0 {
+        struct_table_find_for_type((*c).structs, inner_ty)
+    } else {
+        // Retain the narrow historical fallback for synthetic/legacy named
+        // values whose nominal identity is not yet available.
+        struct_table_find_by_buf8((*c).structs, inner_ty.name.buf)
+    }
     if is_mut_ref {
         ty_ref_mut_with_idx(inner_ty, struct_idx)
     } else {
@@ -1693,6 +1943,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         defining_module_id: 0,
         visibility: visibility_pub(),
         defining_module: empty_path(),
+        source_span_start: te.span.start,
     }
     let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
     if sig_id < 0 {
@@ -2905,7 +3156,7 @@ fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut,
 
 fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
     if ty.kind == TypeKind::TyNamed {
-        let idx = struct_table_find((*c).structs, ty.name)
+        let idx = struct_table_find_for_type((*c).structs, ty)
         if idx >= 0 {
             return (*(*c).structs).entries[idx].is_linear
         }
@@ -3085,6 +3336,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 defining_module_id: (*c).current_module_id,
                 visibility: visibility,
                 defining_module: defining_module,
+                source_span_start: (*fd).span.start,
             }
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
@@ -3877,18 +4129,16 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             let saved_effect_count = (*c).current_effect_count
             let saved_multitest_count = (*c).multitest_count
             let saved_multitest_corrected = (*c).multitest_corrected
-            // Resolve the method signature by the FULL impl-type ENTRY (kind + name),
-            // not by name alone. Imported types bound via `use` lower to ty_unknown()
-            // (empty name) and builtins (i64, ...) also carry an empty TypeEntry name,
-            // so two `impl Trait for {i64, ImportedType}` blocks both register their
-            // methods with an empty self_type_name. The name-only find_method then
-            // returned the FIRST empty-name match (e.g. the effect-empty `impl … for
-            // i64` er_add) when checking a DIFFERENT impl's body (e.g. `impl … for
-            // Rational` er_add, which carries `with Mut, Div, Panic`), leaving
-            // current_effects empty and firing a spurious E035 on the merged/imported
-            // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
-            // so each impl body sees ITS OWN declared effects.
-            let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
+            // Bind the body to its exact collected declaration so later receiver
+            // refinement and duplicate call surfaces cannot change its contract.
+            let sig_id = method_definition_sig_id(
+                (*c).fn_sigs,
+                (*fd).name,
+                item.visibility.kind,
+                (*c).current_module,
+                (*c).current_module_id,
+                (*fd).span.start,
+            )
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -4005,6 +4255,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 defining_module_id: (*c).current_module_id,
                 visibility: item.visibility,
                 defining_module: (*c).current_module,
+                source_span_start: (*fd).span.start,
             }
             let _added = fn_sig_table_add((*c).fn_sigs, sig)
         }
@@ -4079,7 +4330,7 @@ fn checker_type_byte_size_inplace(c: *mut Checker, ty: TypeEntry, depth: i64) ->
         if name_matches_str3(ty.name, 66, 111, 120) {
             return 8
         }
-        let sidx = struct_table_find((*c).structs, ty.name)
+        let sidx = struct_table_find_for_type((*c).structs, ty)
         if sidx >= 0 {
             let si = struct_table_get((*c).structs, sidx)
             return checker_fieldlist_byte_size_inplace(c, si.fields, depth + 1)
@@ -4705,7 +4956,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
             checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
         }
-        ty_named(first_name)
+        ty_named_in_module(ei.name, ei.defining_module_id)
     } else {
         // Could be a variant name directly (e.g. None, Some)
         let variant_enum_idx = if e.path.seg_count == 1 {
@@ -4721,7 +4972,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
                 checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
             }
-            ty_named(ei.name)
+            ty_named_in_module(ei.name, ei.defining_module_id)
         } else {
             // Look up in env as a regular binding; functions live in fn_sigs (not env), so
             // fall back to fn_sigs for a bare function reference before yielding ty_error.
@@ -4937,8 +5188,8 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     }
     var result = binary_result_type(e.bin_op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-        let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
-        let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, right_ty.name) >= 0
+        let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, left_ty) >= 0
+        let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, right_ty) >= 0
         if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
             result = ty_bool()
         }
@@ -5344,7 +5595,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     }
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
     if base_ty.kind == TypeKind::TyNamed {
-        let struct_idx = struct_table_find((*c).structs, base_ty.name)
+        let struct_idx = struct_table_find_for_type((*c).structs, base_ty)
         if struct_idx >= 0 {
             let si = struct_table_get((*c).structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
@@ -5667,7 +5918,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     // Mangled name (finalize 16683-16684).
                     let mangled = mangle_generic_name(&si_name, &args)
                     // Monomorphize if not already present (finalize 16687-16702).
-                    let existing_idx = struct_table_find((*c).structs, mangled)
+                    let existing_idx = struct_table_find_in_module(
+                        (*c).structs, mangled, si_defining_module_id)
                     if existing_idx < 0 {
                     let si_tp_buf = TypeParamBuf { names: si.type_param_names, count: si.type_param_count }
                     let mono_fields = monomorphize_fields(si_fields, si_tp_buf, &args)
@@ -5690,7 +5942,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     // Pass 2: validate fields against the monomorphized struct (finalize
                     // 16705-16709 → check_struct_field_inits 16715). Count check first (E046),
                     // then interleaved per-field lookup-then-check (E016), all via the *mut spine.
-                    let mono_idx = struct_table_find((*c).structs, mangled)
+                    let mono_idx = struct_table_find_in_module(
+                        (*c).structs, mangled, si_defining_module_id)
                     if mono_idx >= 0 {
                         let mono_si = struct_table_get((*c).structs, mono_idx)
                         let init_count = struct_field_list_count(e.fields)
@@ -5720,7 +5973,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             }
                         }
                     }
-                    ty_named(mangled)
+                    ty_named_in_module(mangled, si_defining_module_id)
                 }
             }
         } else {
@@ -5731,7 +5984,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             let init_count = struct_field_list_count(e.fields)
             if init_count != si.field_count {
                 checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
-                return ty_named(struct_name)
+                return ty_named_in_module(si.name, si.defining_module_id)
             }
             var cur = e.fields
             var done = false
@@ -5754,7 +6007,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     }
                 }
             }
-            ty_named(struct_name)
+            ty_named_in_module(si.name, si.defining_module_id)
         }
     } else {
         if name_eq(struct_name, make_name("Knowledge")) {
@@ -5804,7 +6057,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 let ev_init_count = struct_field_list_count(e.fields)
                 if ev_init_count != field_info_list_count(vfields) {
                     checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
-                    return ty_named(struct_name)
+                    return ty_named_in_module(ei.name, ei.defining_module_id)
                 }
                 var cur_ev = e.fields
                 var done_ev = false
@@ -5827,7 +6080,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         }
                     }
                 }
-                return ty_named(struct_name)
+                return ty_named_in_module(ei.name, ei.defining_module_id)
             }
         }
         // ---- Unknown struct (check_struct_lit else-branch 16626-16630 →
@@ -6008,6 +6261,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         defining_module_id: (*c).current_module_id,
         visibility: visibility_private(),
         defining_module: (*c).current_module,
+        source_span_start: e.span.start,
     }
     let sig_id = fn_sig_table_add((*c).fn_sigs, closure_sig)
     ty_fn(sig_id)
@@ -6087,7 +6341,10 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
-        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
+        let method_lookup = method_lookup_resolve(
+            (*c).fn_sigs, base_ty, e.name, (*c).enforce_visibility,
+            (*c).current_module, (*c).crate_root, (*c).current_module_id)
+        let sig_id = method_lookup.sig_id
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
@@ -6096,7 +6353,8 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
-            checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
+            checker_report_error_at_inplace(
+                c, e.span, method_lookup_error_code(method_lookup, 11), 0, 0, 0)
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
@@ -6120,7 +6378,10 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         // (empty name). The semantic lookup disambiguates on kind, so route the
         // call here exactly like the struct (TyNamed) branch. On lookup miss keep
         // the original E019 to preserve rejection of bogus primitive methods.
-        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
+        let method_lookup = method_lookup_resolve(
+            (*c).fn_sigs, base_ty, e.name, (*c).enforce_visibility,
+            (*c).current_module, (*c).crate_root, (*c).current_module_id)
+        let sig_id = method_lookup.sig_id
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
@@ -6129,7 +6390,8 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
-            checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
+            checker_report_error_at_inplace(
+                c, e.span, method_lookup_error_code(method_lookup, 19), 0, 0, 0)
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
@@ -6557,74 +6819,35 @@ fn checker_trace_import_stub_fn_resolution() with IO, Mut, Panic, Div {
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-    let vis_kind = sig.visibility_kind
-    if vis_kind == VISIBILITY_PUB {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_CRATE {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_SUPER {
-        return true
-    }
-    if vis_kind == VISIBILITY_PRIVATE {
-        if sig.defining_module_id == (*c).current_module_id {
-            return true
-        }
-    }
-    visibility_allows_access(
+    visibility_allows_access_with_module_identity(
         sig.visibility,
         sig.defining_module,
         (*c).current_module,
         (*c).crate_root,
+        sig.defining_module_id,
+        (*c).current_module_id,
     )
 }
 
 fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let vis_kind = (*(*c).structs).entries[struct_idx as usize].visibility_kind
-    if vis_kind == VISIBILITY_PUB {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_CRATE {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_SUPER {
-        return true
-    }
-    if vis_kind == VISIBILITY_PRIVATE {
-        if (*(*c).structs).entries[struct_idx as usize].defining_module_id == (*c).current_module_id {
-            return true
-        }
-    }
-    visibility_allows_access(
+    visibility_allows_access_with_module_identity(
         (*(*c).structs).entries[struct_idx as usize].visibility,
         (*(*c).structs).entries[struct_idx as usize].defining_module,
         (*c).current_module,
         (*c).crate_root,
+        (*(*c).structs).entries[struct_idx as usize].defining_module_id,
+        (*c).current_module_id,
     )
 }
 
 fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    let vis_kind = (*(*c).enums).entries[enum_idx as usize].visibility_kind
-    if vis_kind == VISIBILITY_PUB {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_CRATE {
-        return true
-    }
-    if vis_kind == VISIBILITY_PUB_SUPER {
-        return true
-    }
-    if vis_kind == VISIBILITY_PRIVATE {
-        if (*(*c).enums).entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
-            return true
-        }
-    }
-    visibility_allows_access(
+    visibility_allows_access_with_module_identity(
         (*(*c).enums).entries[enum_idx as usize].visibility,
         (*(*c).enums).entries[enum_idx as usize].defining_module,
         (*c).current_module,
         (*c).crate_root,
+        (*(*c).enums).entries[enum_idx as usize].defining_module_id,
+        (*c).current_module_id,
     )
 }
 
@@ -6858,7 +7081,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-            return ty_named(ei.name)
+            return ty_named_in_module(ei.name, ei.defining_module_id)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
@@ -7211,7 +7434,7 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
                 checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
             }
-            return ty_named(ei.name)
+            return ty_named_in_module(ei.name, ei.defining_module_id)
         }
         if env_has {
             return env_ty
@@ -7392,12 +7615,12 @@ fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFi
             Some(list) => {
                 var field_ty = ty_unknown()
                 if scrut_ty.kind == TypeKind::TyNamed {
-                    let struct_idx = struct_table_find((*c).structs, scrut_ty.name)
+                    let struct_idx = struct_table_find_for_type((*c).structs, scrut_ty)
                     if struct_idx >= 0 {
                         let si = struct_table_get((*c).structs, struct_idx)
                         field_ty = field_info_list_find(si.fields, (*list).head.name)
                     } else {
-                        let enum_idx = enum_table_find((*c).enums, scrut_ty.name)
+                        let enum_idx = enum_table_find_for_type((*c).enums, scrut_ty)
                         if enum_idx >= 0 {
                             let ei = enum_table_get((*c).enums, enum_idx)
                             field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
@@ -7570,8 +7793,8 @@ fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr
                 // via the *mut path handler — the by-value check_path_expr SRET-smashes once
                 // the enum is collected (the p7 latent crash on `let x: E = E::A`).
                 let path_ty = checker_check_path_expr_inplace(c, *e)
-                if path_ty.kind == TypeKind::TyNamed && name_eq(path_ty.name, ann_ty.name) {
-                    ann_ty
+                if path_ty.kind == TypeKind::TyNamed && types_compatible(path_ty, ann_ty) {
+                    ty_named_merge_known_identity(ann_ty, path_ty)
                 } else {
                     path_ty
                 }
@@ -7621,8 +7844,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
         // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
         // rule; this *mut fn has (*c).enums to detect enum-named types.
-        let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0
-        let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
+        let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, init_ty) >= 0
+        let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, ann_ty) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
         var init_context_ok = false
         match s.expr {
@@ -7651,7 +7874,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                 || ann_ty.kind == TypeKind::TyAlternativeOption) {
             bind_ty = init_ty
         } else {
-            bind_ty = ann_ty
+            bind_ty = ty_named_merge_known_identity(ann_ty, init_ty)
         }
     }
     // Validate refinement predicate on literal initializers
@@ -7712,7 +7935,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                 || ann_ty.kind == TypeKind::TyAlternativeOption) {
             bind_ty = init_ty
         } else {
-            bind_ty = ann_ty
+            bind_ty = ty_named_merge_known_identity(ann_ty, init_ty)
         }
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
@@ -7767,7 +7990,7 @@ fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with
         }
     }
     if ty.kind == TypeKind::TyNamed {
-        let sidx = struct_table_find((*c).structs, ty.name)
+        let sidx = struct_table_find_for_type((*c).structs, ty)
         if sidx >= 0 && sidx < (*(*c).structs).count {
             let si = struct_table_get((*c).structs, sidx)
             var cur = si.fields
@@ -11969,6 +12192,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 216 { print("infinite recursive type") }
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
+    else if code == 219 { print("method resolution is ambiguous for this receiver type") }
     else { print("unknown error") }
 }
 
@@ -12253,6 +12477,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 218 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
     }
+    else if code == 219 {
+        print("   |\n   = help: remove duplicate visible method implementations for this receiver\n")
+    }
     else {
         // No help available for unknown errors
     }
@@ -12290,6 +12517,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 10 {
         print("   = note: argument count must match the function's parameter list\n")
+    }
+    else if code == 219 {
+        print("   = note: inaccessible private methods are excluded before visible candidates are counted\n")
     }
     // Member access (11-16)
     else if code == 11 {
@@ -14444,8 +14674,8 @@ fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry
     let int_lit_narrow = (*c).last_literal_kind == 1
         && body_ty.kind == TypeKind::TyI64
         && is_integer_type(return_ty)
-    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, body_ty.name) >= 0
-    let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, return_ty.name) >= 0
+    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, body_ty) >= 0
+    let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find_for_type((*c).enums, return_ty) >= 0
     let enum_int_ok = (body_enum && is_numeric_type(return_ty)) || (is_numeric_type(body_ty) && ret_enum)
     int_lit_narrow || enum_int_ok
 }
@@ -14659,7 +14889,11 @@ impl Checker {
                     return (c, te)
                 }
 
-                let tmpl_idx = struct_table_find(self.structs, name)
+                var tmpl_idx = struct_table_find_in_module(
+                    self.structs, name, self.current_module_id)
+                if tmpl_idx < 0 {
+                    tmpl_idx = struct_table_find_unique(self.structs, name)
+                }
                 if tmpl_idx >= 0 {
                     let tmpl = struct_table_get(self.structs, tmpl_idx)
                     if tmpl.is_generic_template {
@@ -14680,9 +14914,11 @@ impl Checker {
                         let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
 
                         // Check if already monomorphized
-                        let existing_idx = struct_table_find(c.structs, mangled)
+                        let existing_idx = struct_table_find_in_module(
+                            c.structs, mangled, tmpl_defining_module_id)
                         if existing_idx >= 0 {
-                            (c, ty_named(mangled))
+                            let existing = struct_table_get(c.structs, existing_idx)
+                            (c, ty_named_in_module(mangled, existing.defining_module_id))
                         } else {
                             // Monomorphize: substitute type params in fields
                             let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &lowered_args)
@@ -14700,7 +14936,7 @@ impl Checker {
                             defining_module: tmpl_defining_module,
                             }
                             struct_table_add(c.structs, mono_info)
-                            (c, ty_named(mangled))
+                            (c, ty_named_in_module(mangled, tmpl_defining_module_id))
                         }
                     } else {
                         // Non-generic struct used with type args — fall through to named
@@ -14800,7 +15036,13 @@ impl Checker {
                     } else if bound_ty.kind != TypeKind::TyUnknown && bound_ty.kind != TypeKind::TyError && bound_ty.kind != TypeKind::TyNever {
                         (self, bound_ty)
                     } else {
-                        (self, ty_named(name))
+                        let module_id = checker_nominal_module_id_from_tables(
+                            self.structs, self.enums, self.current_module_id, name)
+                        if module_id >= 0 {
+                            (self, ty_named_in_module(name, module_id))
+                        } else {
+                            (self, ty_named(name))
+                        }
                     }
                 }
             }
@@ -14927,6 +15169,7 @@ impl Checker {
             defining_module_id: 0,
             visibility: visibility_pub(),
             defining_module: empty_path(),
+            source_span_start: te.span.start,
         }
         let sig_id = fn_sig_table_add(c.fn_sigs, sig)
         (c, ty_fn(sig_id))
@@ -17055,6 +17298,7 @@ impl Checker {
                     defining_module_id: c.current_module_id,
                     visibility: visibility,
                     defining_module: defining_module,
+                    source_span_start: (*fd).span.start,
                 }
                 let sig_id = fn_sig_table_add(c.fn_sigs, sig)
                 c.env = c.env.bind(name, ty_fn(sig_id), false)
@@ -18048,6 +18292,7 @@ impl Checker {
                     defining_module_id: c.current_module_id,
                     visibility: item.visibility,
                     defining_module: c.current_module,
+                    source_span_start: (*fd).span.start,
                 }
                 let _added = fn_sig_table_add(c.fn_sigs, sig)
                 c
@@ -18174,8 +18419,8 @@ impl Checker {
                     let int_lit_narrow = c.last_literal_kind == 1
                         && body_ty.kind == TypeKind::TyI64
                         && is_integer_type(sig2.return_type)
-                    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, body_ty.name) >= 0
-                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0
+                    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find_for_type(c.enums, body_ty) >= 0
+                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find_for_type(c.enums, sig2.return_type) >= 0
                     let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
                         || (is_numeric_type(body_ty) && ret_enum)
                     if !c.types_compatible_structural(body_ty, sig2.return_type)
@@ -18271,7 +18516,14 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = fn_sig_table_find_method(c.fn_sigs, c.current_impl_type.name, (*fd).name)
+                let sig_id = method_definition_sig_id(
+                    c.fn_sigs,
+                    (*fd).name,
+                    item.visibility.kind,
+                    c.current_module,
+                    c.current_module_id,
+                    (*fd).span.start,
+                )
                 if sig_id >= 0 {
                     let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
@@ -18399,7 +18651,7 @@ impl Checker {
                     || ann_ty.kind == TypeKind::TyAlternativeOption) {
                 bind_ty = init_ty
             } else {
-                bind_ty = ann_ty
+                bind_ty = ty_named_merge_known_identity(ann_ty, init_ty)
             }
         }
         // Validate refinement predicate on literal initializers
@@ -18457,7 +18709,7 @@ impl Checker {
                     || ann_ty.kind == TypeKind::TyAlternativeOption) {
                 bind_ty = init_ty
             } else {
-                bind_ty = ann_ty
+                bind_ty = ty_named_merge_known_identity(ann_ty, init_ty)
             }
         }
         // Validate refinement predicate on literal initializers
@@ -18507,7 +18759,7 @@ impl Checker {
 
     fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
         if ty.kind == TypeKind::TyNamed {
-            let idx = struct_table_find(self.structs, ty.name)
+            let idx = struct_table_find_for_type(self.structs, ty)
             if idx >= 0 {
                 return (*self.structs).entries[idx].is_linear
             }
@@ -18624,8 +18876,8 @@ impl Checker {
                     let path_pair = self.check_path_expr(*e)
                     let c = path_pair.0
                     let path_ty = path_pair.1
-                    if path_ty.kind == TypeKind::TyNamed && name_eq(path_ty.name, ann_ty.name) {
-                        (c, ann_ty)
+                    if path_ty.kind == TypeKind::TyNamed && types_compatible(path_ty, ann_ty) {
+                        (c, ty_named_merge_known_identity(ann_ty, path_ty))
                     } else {
                         (c, path_ty)
                     }
@@ -18716,10 +18968,14 @@ impl Checker {
                     checker_trace_import_stub_fn_resolution()
                 }
                 let sig = fn_sig_table_get(c.fn_sigs, fn_sig_id)
-                let local_private = sig.visibility_kind == VISIBILITY_PRIVATE
-                    && sig.defining_module_id == c.current_module_id
-                if c.enforce_visibility && !local_private
-                    && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
+                if c.enforce_visibility && !visibility_allows_access_with_module_identity(
+                    sig.visibility,
+                    sig.defining_module,
+                    c.current_module,
+                    c.crate_root,
+                    sig.defining_module_id,
+                    c.current_module_id,
+                ) {
                     c = c.report_error_at(e.span, 175, 0, 0, 0)
                 }
                 return (c, ty_fn(fn_sig_id))
@@ -18734,13 +18990,17 @@ impl Checker {
             }
             if variant_enum_idx >= 0 {
                 let ei = enum_table_get(c.enums, variant_enum_idx)
-                let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
-                    && ei.defining_module_id == c.current_module_id
-                if c.enforce_visibility && !local_private
-                    && !visibility_allows_access(ei.visibility, ei.defining_module, c.current_module, c.crate_root) {
+                if c.enforce_visibility && !visibility_allows_access_with_module_identity(
+                    ei.visibility,
+                    ei.defining_module,
+                    c.current_module,
+                    c.crate_root,
+                    ei.defining_module_id,
+                    c.current_module_id,
+                ) {
                     c = c.report_error_at(e.span, 177, 0, 0, 0)
                 }
-                return (c, ty_named(ei.name))
+                return (c, ty_named_in_module(ei.name, ei.defining_module_id))
             }
             if env_has {
                 return (c, env_ty)
@@ -18780,14 +19040,18 @@ impl Checker {
         }
         if enum_idx >= 0 {
             let ei = enum_table_get(self.enums, enum_idx)
-            let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
-                && ei.defining_module_id == self.current_module_id
-            if self.enforce_visibility && !local_private
-                && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+            if self.enforce_visibility && !visibility_allows_access_with_module_identity(
+                ei.visibility,
+                ei.defining_module,
+                self.current_module,
+                self.crate_root,
+                ei.defining_module_id,
+                self.current_module_id,
+            ) {
                 let c = self.report_error_at(e.span, 177, 0, 0, 0)
-                return (c, ty_named(first_name))
+                return (c, ty_named_in_module(ei.name, ei.defining_module_id))
             }
-            (self, ty_named(first_name))
+            (self, ty_named_in_module(ei.name, ei.defining_module_id))
         } else {
             // Could be a variant name directly (e.g. None, Some)
             var variant_enum_idx: i64 = 0 - 1
@@ -18802,14 +19066,18 @@ impl Checker {
                 (c, ty_error())
             } else if variant_enum_idx >= 0 {
                 let ei = enum_table_get(self.enums, variant_enum_idx)
-                let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
-                    && ei.defining_module_id == self.current_module_id
-                if self.enforce_visibility && !local_private
-                    && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+                if self.enforce_visibility && !visibility_allows_access_with_module_identity(
+                    ei.visibility,
+                    ei.defining_module,
+                    self.current_module,
+                    self.crate_root,
+                    ei.defining_module_id,
+                    self.current_module_id,
+                ) {
                     let c = self.report_error_at(e.span, 177, 0, 0, 0)
-                    return (c, ty_named(ei.name))
+                    return (c, ty_named_in_module(ei.name, ei.defining_module_id))
                 }
-                (self, ty_named(ei.name))
+                (self, ty_named_in_module(ei.name, ei.defining_module_id))
             } else {
                 // Look up in env as a regular binding
                 (self, self.env.lookup(first_name))
@@ -18905,8 +19173,8 @@ impl Checker {
         // and only enum-vs-numeric (enum-vs-same-enum already passes via name_eq in
         // binary_result_type; arithmetic stays rejected → matches canonical's `E::A + 1`).
         if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-            let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, left_ty.name) >= 0
-            let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, right_ty.name) >= 0
+            let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find_for_type(c.enums, left_ty) >= 0
+            let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find_for_type(c.enums, right_ty) >= 0
             if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
                 result = ty_bool()
             }
@@ -19251,7 +19519,7 @@ impl Checker {
         var c = pair.0
         let base_ty = pair.1
         if base_ty.kind == TypeKind::TyNamed {
-            let struct_idx = struct_table_find(c.structs, base_ty.name)
+            let struct_idx = struct_table_find_for_type(c.structs, base_ty)
             if struct_idx >= 0 {
                 let si = struct_table_get(c.structs, struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
@@ -19368,7 +19636,7 @@ impl Checker {
         } else if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
             let inner = call_ref_inner_or_self(base_ty)
             if inner.kind == TypeKind::TyNamed {
-                let struct_idx = struct_table_find(c.structs, inner.name)
+                let struct_idx = struct_table_find_for_type(c.structs, inner)
                 if struct_idx >= 0 {
                     let si = struct_table_get(c.structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
@@ -19508,7 +19776,10 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            let method_lookup = method_lookup_resolve(
+                c.fn_sigs, base_ty, e.name, c.enforce_visibility,
+                c.current_module, c.crate_root, c.current_module_id)
+            let sig_id = method_lookup.sig_id
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
@@ -19520,7 +19791,8 @@ impl Checker {
                 (c, sig.return_type)
             } else {
                 // Method not found
-                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                c = c.report_error_at(
+                    e.span, method_lookup_error_code(method_lookup, 11), 0, 0, 0)
                 // Still check args to accumulate errors
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
@@ -19547,7 +19819,10 @@ impl Checker {
             // branch — the method registered via `impl R for i64` is found by
             // fn_sig_table_find_method_semantic (kind-disambiguated, empty name).
             // Lookup miss keeps the original E019 so bogus primitive methods reject.
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            let method_lookup = method_lookup_resolve(
+                c.fn_sigs, base_ty, e.name, c.enforce_visibility,
+                c.current_module, c.crate_root, c.current_module_id)
+            let sig_id = method_lookup.sig_id
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
@@ -19556,7 +19831,8 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
-                c = c.report_error_at(e.span, 19, 0, 0, 0)
+                c = c.report_error_at(
+                    e.span, method_lookup_error_code(method_lookup, 19), 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
@@ -19643,7 +19919,10 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            let method_lookup = method_lookup_resolve(
+                c.fn_sigs, base_ty, e.name, c.enforce_visibility,
+                c.current_module, c.crate_root, c.current_module_id)
+            let sig_id = method_lookup.sig_id
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
@@ -19652,7 +19931,8 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
-                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                c = c.report_error_at(
+                    e.span, method_lookup_error_code(method_lookup, 11), 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
@@ -19675,7 +19955,10 @@ impl Checker {
             // branch — the method registered via `impl R for i64` is found by
             // fn_sig_table_find_method_semantic (kind-disambiguated, empty name).
             // Lookup miss keeps the original E019 so bogus primitive methods reject.
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            let method_lookup = method_lookup_resolve(
+                c.fn_sigs, base_ty, e.name, c.enforce_visibility,
+                c.current_module, c.crate_root, c.current_module_id)
+            let sig_id = method_lookup.sig_id
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                 let call_start_borrows = c.borrows
@@ -19684,7 +19967,8 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
-                c = c.report_error_at(e.span, 19, 0, 0, 0)
+                c = c.report_error_at(
+                    e.span, method_lookup_error_code(method_lookup, 19), 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
@@ -19974,7 +20258,14 @@ impl Checker {
         }
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
-            if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
+            if c.enforce_visibility && !visibility_allows_access_with_module_identity(
+                sig.visibility,
+                sig.defining_module,
+                c.current_module,
+                c.crate_root,
+                sig.defining_module_id,
+                c.current_module_id,
+            ) {
                 c = c.report_error_at(e.span, 175, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
@@ -22514,13 +22805,13 @@ impl Checker {
                 var field_ty = ty_unknown()
                 if scrut_ty.kind == TypeKind::TyNamed {
                     // First try: look up as struct
-                    let struct_idx = struct_table_find(c.structs, scrut_ty.name)
+                    let struct_idx = struct_table_find_for_type(c.structs, scrut_ty)
                     if struct_idx >= 0 {
                         let si = struct_table_get(c.structs, struct_idx)
                         field_ty = field_info_list_find(si.fields, (*list).head.name)
                     } else {
                         // Second try: look up as enum — find which variant has this field
-                        let enum_idx = enum_table_find(c.enums, scrut_ty.name)
+                        let enum_idx = enum_table_find_for_type(c.enums, scrut_ty)
                         if enum_idx >= 0 {
                             let ei = enum_table_get(c.enums, enum_idx)
                             // Search all variants for one that has this field
@@ -22684,19 +22975,23 @@ impl Checker {
         }
         if struct_idx >= 0 {
             let si = struct_table_get(self.structs, struct_idx)
-            let local_private = si.visibility_kind == VISIBILITY_PRIVATE
-                && si.defining_module_id == self.current_module_id
-            if self.enforce_visibility && !local_private
-                && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
+            if self.enforce_visibility && !visibility_allows_access_with_module_identity(
+                si.visibility,
+                si.defining_module,
+                self.current_module,
+                self.crate_root,
+                si.defining_module_id,
+                self.current_module_id,
+            ) {
                 let c = self.report_error_at(e.span, 176, 0, 0, 0)
-                return (c, ty_named(struct_name))
+                return (c, ty_named_in_module(si.name, si.defining_module_id))
             }
             if si.is_generic_template {
                 // Generic struct: infer type params from field initializers
                 self.check_generic_struct_lit(e, si)
             } else {
                 var c = self.check_struct_field_inits(e.fields, si, e.span)
-                (c, ty_named(struct_name))
+                (c, ty_named_in_module(si.name, si.defining_module_id))
             }
         } else {
             if name_eq(struct_name, make_name("Knowledge")) {
@@ -22714,10 +23009,14 @@ impl Checker {
                 let ei = enum_table_get(self.enums, enum_idx)
                 if variant_info_list_has(ei.variants, variant_name) {
                     var c = self
-                    let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
-                        && ei.defining_module_id == c.current_module_id
-                    if c.enforce_visibility && !local_private
-                        && !visibility_allows_access(ei.visibility, ei.defining_module, c.current_module, c.crate_root) {
+                    if c.enforce_visibility && !visibility_allows_access_with_module_identity(
+                        ei.visibility,
+                        ei.defining_module,
+                        c.current_module,
+                        c.crate_root,
+                        ei.defining_module_id,
+                        c.current_module_id,
+                    ) {
                         c = c.report_error_at(e.span, 177, 0, 0, 0)
                     }
                     let variant_fields = variant_info_list_find_fields(ei.variants, variant_name)
@@ -22735,7 +23034,7 @@ impl Checker {
                         defining_module: ei.defining_module,
                     }
                     c = c.check_struct_field_inits(e.fields, variant_info, e.span)
-                    return (c, ty_named(struct_name))
+                    return (c, ty_named_in_module(ei.name, ei.defining_module_id))
                 }
             }
 
@@ -22824,7 +23123,8 @@ impl Checker {
 
                 // Check if already monomorphized
                 var c = self
-                let existing_idx = struct_table_find(c.structs, mangled)
+                let existing_idx = struct_table_find_in_module(
+                    c.structs, mangled, tmpl_defining_module_id)
                 if existing_idx < 0 {
                     // Monomorphize
                     let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &args)
@@ -22845,12 +23145,13 @@ impl Checker {
                 }
 
                 // Now validate fields against the monomorphized struct
-                let mono_idx = struct_table_find(c.structs, mangled)
+                let mono_idx = struct_table_find_in_module(
+                    c.structs, mangled, tmpl_defining_module_id)
                 if mono_idx >= 0 {
                     let mono_si = struct_table_get(c.structs, mono_idx)
                     c = c.check_struct_field_inits(e.fields, mono_si, e.span)
                 }
-                (c, ty_named(mangled))
+                (c, ty_named_in_module(mangled, tmpl_defining_module_id))
             }
         }
     }
@@ -23248,6 +23549,7 @@ impl Checker {
             defining_module_id: c.current_module_id,
             visibility: visibility_private(),
             defining_module: c.current_module,
+            source_span_start: e.span.start,
         }
 
         // Add to fn_sigs table
