@@ -84,9 +84,9 @@ try:
     assert "stale_status != 1" in snapshot and "current_status != 0" in snapshot, "drift_refusal_assertion_missing"
 
     snapshot_status = function_body(frontend, "module_frontend_collected_snapshot_status")
-    assert "let snapshot_program = (*programs)[node_id]" in snapshot_status, "snapshot_program_not_materialized"
-    assert "use_path_to_string(snapshot_program.module_path)" in snapshot_status, "snapshot_logical_path_not_materialized"
-    assert "extract_imports_from_ast(snapshot_program)" in snapshot_status, "snapshot_imports_not_materialized"
+    assert "use_path_to_string((*programs)[node_id].module_path)" in snapshot_status, "snapshot_logical_path_not_read_by_value"
+    assert "extract_imports_from_ast((*programs)[node_id])" in snapshot_status, "snapshot_imports_not_read_by_value"
+    assert "let snapshot_program = (*programs)[node_id]" not in snapshot_status, "snapshot_program_retained_by_value"
     assert "&(*programs)[node_id]" not in snapshot_status, "seed_unsafe_indexed_program_borrow"
 
     assert re.search(
@@ -103,7 +103,7 @@ except AssertionError as exc:
 PY
 
 if [[ "$SOURCE_ONLY" -eq 1 ]]; then
-  printf '%s\n' 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract runtime=not_run entrypoint=bin/madaros native_dispatch=raw_build canonical_collections=1 legacy_adapter=kept snapshot_drift=instrumented snapshot_program_access=materialized'
+  printf '%s\n' 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract runtime=not_run entrypoint=bin/madaros native_dispatch=raw_build canonical_collections=1 legacy_adapter=kept snapshot_drift=instrumented snapshot_program_access=by_value'
   exit 0
 fi
 
@@ -171,5 +171,5 @@ set -e
 [[ "$ELF_RC" -eq 0 ]] || fail elf_rc
 printf '42\n' | cmp -s - "$STDOUT" || fail elf_stdout
 
-printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract_and_pinned_runtime entrypoint=bin/madaros launcher_sha256=%s raw_sha256=%s launcher_raw_identity=pinned native_dispatch=raw_build canonical_collections=1 snapshot_shapes=no_import+imported snapshot_collections=4 snapshot_drift=refused snapshot_program_access=materialized visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
+printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract_and_pinned_runtime entrypoint=bin/madaros launcher_sha256=%s raw_sha256=%s launcher_raw_identity=pinned native_dispatch=raw_build canonical_collections=1 snapshot_shapes=no_import+imported snapshot_collections=4 snapshot_drift=refused snapshot_program_access=by_value visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
   "$LAUNCHER_SHA256" "$RAW_SHA256"
