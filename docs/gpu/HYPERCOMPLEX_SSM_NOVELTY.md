@@ -90,12 +90,47 @@ producing exact results.
 4. "Why not associative scans for efficiency?" — they require associativity, which fails here; that is
    precisely why the tensor-core `L(a)` mechanism is needed.
 
-## 6. Empirical-payoff status (candid)
-The training results to date are **teacher-target identity tests** (recover reachable parameters, loss→0)
-— they validate the *machinery* (exact gradients, convergent BPTT), **not** model utility. The
-associator-as-feature and zero-divisor claims are **demonstrated-in-principle**. The ML-result framing
-becomes justified only once a task shows non-associativity or the associator yielding a **measurable,
-ablatable** benefit. That real-capacity, real-task step is tracked in `HYPER_MATVEC_DESIGN.md`.
+## 6. Empirical-payoff status (candid) — the ablatable benefit is now shown on synthetic data, and null on the one real clinical dataset tried
+
+Two things have moved past "demonstrated-in-principle":
+
+**(a) A measurable, ablatable benefit exists — on a task where non-associativity is the signal.**
+`NONASSOC_HEADTOHEAD.md`: target `y=‖[a*,b*,c]‖²` (an associator — identically 0 for any associative
+algebra — and quadratic, so linear readouts fail). All models trained under Adam; leave-out test:
+octonion (learns `a,b` via the associator VJP on tensor cores) **R² +1.00**; quaternion-associator ≡ 0
+**−3.57**; linear **−0.09**; MLP **−1.11**. This is the ablatable payoff §6 was waiting for: the
+octonion model *trains* to solve a task associative models provably cannot (`NONASSOC_BENCHMARK.md`
+shows the frozen-feature separation; `ASSOC_E2E_TRAINING.md` the trainability). The catch a reviewer will
+press: the signal is **constructed** to be non-associative.
+
+**(b) On the one real clinical dataset tried, non-associativity carries no signal — reported with a
+positive control.** `ABIDE_ASSOCIATOR_NULL.md`: ABIDE-I autism (500 subj, 20 sites, leave-one-site-out).
+Four representations (eigenmode-Gram, O-SSM 8×8, sequence-associator, full-200×200 associator field) are
+all at chance, while a **standard associative connectome classifier reaches 63.9%** (CI excludes chance,
+matching the literature) and the octonion associator field is 52.1% and *does not add* to it. The signal
+is real and fully associative. This is a rigorous **boundary**, stated up front, not a hidden failure.
+
+**The honest one-line status:** the non-associative advantage is *synthetic-provable and ablatable* and
+*real-clinical null (with a working positive control)*. The open empirical prize is §6.1.
+
+### 6.1 The decisive open question: a *natural* dataset where non-associativity matters
+ABIDE showed a real dataset where it does not. The claim graduates from "systems artifact + constructed
+demo" to "method" only on a dataset whose **generating process is itself non-associative** — where an
+associative model is *provably* lossy, not merely where we hope it is. Where to look, most-principled
+first:
+- **Bracketing / evaluation-order tasks** — the associator *is* `(ab)c − a(bc)`, so a task whose label
+  depends on parenthesization of a non-associative operation (expression evaluation under a non-assoc
+  op; parse/scope structure) is one where the associator is the exact discriminant. Semi-synthetic but
+  *natural-structured*, and the cleanest honest next test.
+- **A∞ / higher-homotopy / operadic data** — where associativity holds only up to a coherence whose
+  first obstruction is literally the associator (ties to the O-CSSM homology-functor thread).
+- **Exceptional-structure physics** — octonions in G₂/F₄ gauge structure, sedenion zero-divisor
+  geometry; genuinely non-associative but data is scarce/simulated.
+- Order-sensitive composition where the *composition operator* (not just the group) is non-associative —
+  most "order matters" data is non-*commutative* (rotations, braids) and stays associative; the filter
+  is strict.
+The next experiment should be a bracketing/evaluation-order task (non-associativity is the label by
+construction, yet the inputs are a real symbolic distribution), run with the same ablation panel.
 
 ## 7. Must-cite
 Octonion LSTM (2021); Numerion (2025); Deep Octonion Networks (Wu et al. 2019); Deep Sedenion Networks
