@@ -41,9 +41,9 @@ If topology is incomplete, surface validation has not run and the report says
 `surface_status\tnot_evaluated`; absence of a surface error is never promoted to
 an unevidenced `valid` claim.
 
-`SOUNIO_LEGACY_COMPACT_IR=1` selects the old compact table only as an explicit
-differential oracle. It cannot silently replace, or fall back into, the
-canonical AST-closure full-IR path.
+`SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1` selects the compact table only as an
+explicit differential oracle. Its logged fallback is not canonical evidence;
+the default path remains the canonical AST-closure full-IR path.
 
 Within one collected closure, bounded lexical lookup for functions, struct
 constructors, enum paths, and enum variants first selects the definition owned

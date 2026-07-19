@@ -491,7 +491,7 @@ run_build() {
   set +e
   (
     cd "$build_cwd"
-    MADAROS_RAW_BIN="$RAW_MADAROS" SOUNIO_STDLIB_PATH="$stdlib" SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1 SOUNIO_LEGACY_COMPACT_IR=0 \
+    MADAROS_RAW_BIN="$RAW_MADAROS" SOUNIO_STDLIB_PATH="$stdlib" SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1 SOUNIO_ENABLE_COMPACT_IMPORTED_IR=0 \
       timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
       "$WRAPPER" --science-boundary off build "$source" -o "$elf"
   ) >"$log" 2>&1

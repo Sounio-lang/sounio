@@ -29,6 +29,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cumsum_by (1M rows, 1000 groups) | | 36.1 | 22.3 | **1.62x** | (new verb) |
 | cumprod (1M rows, ungrouped) | | ~8 | ~7 | **~1.1x — parity** | (new verb) |
 | cumprod_by (1M rows, 1000 groups) | | ~35 | ~19 | **~1.8x** | (new verb) |
+| nunique_by (1M rows, 1000 groups) | | ~140 | ~42 | **~3.4x** | double-hash (pair-set + key-count) |
+| idxmax_by / idxmin_by (1M rows, 1000 groups) | | ~42 | ~17 | **~2.4x** | (new verb) |
 | cummax (1M rows, ungrouped) | | 4.8 | 11.3 | **0.42x — Sounio wins** | (new verb) |
 | cummin (1M rows, ungrouped) | | 4.9 | 10.6 | **0.46x — Sounio wins** | (new verb) |
 | cummax_by / cummin_by (1M rows, 1000 groups) | | ~34 | ~21 | **1.6x** | (new verb) |

@@ -47,6 +47,13 @@ fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> Big
     out
 }
 
+// look up col1 for the row whose col0 == key in a [key, value] result (hash-order).
+fn lookup2(t: &BigFrame, key: f64) -> f64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < bf_nrows(t) { if bf_get(t, r, 0) == key { return bf_get(t, r, 1) } r = r + 1 }
+    return 0.0 - 1.0
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let n: i64 = 1000000
 
@@ -574,6 +581,44 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if !approx_eq(bf_get(&cpb,0,0), 2.0) { print("FAIL cumprodby0\n"); return 213 }        // group 0, j=0: 2
     if !approx_eq(bf_get(&cpb,1000,0), 1.0) { print("FAIL cumprodby1000\n"); return 214 }    // j=1: 2*0.5
     if !approx_eq(bf_get(&cpb,2000,0), 2.0) { print("FAIL cumprodby2000\n"); return 215 }    // j=2: 1*2
+    // NUNIQUE PER GROUP. key=i%1000, val=(i/1000)%5 -> each of 1000 groups sees vals 0..4 -> nunique=5.
+    var nqf = bf_new(2, 16)
+    var nqi: i64 = 0
+    while nqi < 1000000 { var nqr:[f64;64]=[0.0;64]; nqr[0]=(nqi%1000) as f64; nqr[1]=((nqi/1000)-5*((nqi/1000)/5)) as f64; bf_push_row(&!nqf,&nqr,2); nqi=nqi+1 }
+    let nq = bf_nunique_by(&nqf, 0, 1)
+    if bf_nrows(&nq) != 1000 { print("FAIL nunique_ngroups\n"); return 216 }
+    if bf_ncols(&nq) != 2 { print("FAIL nunique_c\n"); return 217 }
+    if !approx_eq(bf_col_sum(&nq, 1), 5000.0) { print("FAIL nunique_total\n"); return 218 }   // 1000 groups x 5
+    // every group's nunique == 5.
+    var nqbad: i64 = 0; var nqj: i64 = 0
+    while nqj < bf_nrows(&nq) { if !approx_eq(bf_get(&nq, nqj, 1), 5.0) { nqbad = nqbad + 1 } nqj = nqj + 1 }
+    if nqbad != 0 { print("FAIL nunique_per_group\n"); return 219 }
+    // varied: key=i%7, val=i%13 (3000 rows) -> gcd(7,13)=1 so each group sees all 13 vals -> nunique=13.
+    var nvf = bf_new(2, 16)
+    var nvi: i64 = 0
+    while nvi < 3000 { var nvr:[f64;64]=[0.0;64]; nvr[0]=(nvi-7*(nvi/7)) as f64; nvr[1]=(nvi-13*(nvi/13)) as f64; bf_push_row(&!nvf,&nvr,2); nvi=nvi+1 }
+    let nv = bf_nunique_by(&nvf, 0, 1)
+    if bf_nrows(&nv) != 7 { print("FAIL nunique_var_ngroups\n"); return 220 }
+    if !approx_eq(bf_col_sum(&nv, 1), 91.0) { print("FAIL nunique_var_total\n"); return 221 }  // 7 groups x 13
+    // IDXMAX / IDXMIN PER GROUP. key=i%1000, val=i -> per group k: max at i=k+999000, min at i=k.
+    var ixf = bf_new(2, 16)
+    var ixi: i64 = 0
+    while ixi < 1000000 { var ixr:[f64;64]=[0.0;64]; ixr[0]=(ixi%1000) as f64; ixr[1]=ixi as f64; bf_push_row(&!ixf,&ixr,2); ixi=ixi+1 }
+    let imx = bf_idxmax_by(&ixf, 0, 1)
+    let imn = bf_idxmin_by(&ixf, 0, 1)
+    if bf_nrows(&imx) != 1000 { print("FAIL idxmax_n\n"); return 222 }
+    if !approx_eq(lookup2(&imx, 0.0), 999000.0) { print("FAIL idxmax_g0\n"); return 223 }     // max of group 0 at row 999000
+    if !approx_eq(lookup2(&imx, 500.0), 999500.0) { print("FAIL idxmax_g500\n"); return 224 }
+    if !approx_eq(lookup2(&imn, 0.0), 0.0) { print("FAIL idxmin_g0\n"); return 225 }           // min of group 0 at row 0
+    if !approx_eq(lookup2(&imn, 500.0), 500.0) { print("FAIL idxmin_g500\n"); return 226 }
+    // TIE: constant val -> both idxmax and idxmin return the FIRST index of the group.
+    var itf = bf_new(2, 16)
+    var iti: i64 = 0
+    while iti < 10000 { var itr:[f64;64]=[0.0;64]; itr[0]=(iti%100) as f64; itr[1]=5.0; bf_push_row(&!itf,&itr,2); iti=iti+1 }
+    let timx = bf_idxmax_by(&itf, 0, 1)
+    let timn = bf_idxmin_by(&itf, 0, 1)
+    if !approx_eq(lookup2(&timx, 7.0), 7.0) { print("FAIL idxmax_tie\n"); return 227 }   // first row of group 7 is index 7
+    if !approx_eq(lookup2(&timn, 7.0), 7.0) { print("FAIL idxmin_tie\n"); return 228 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
