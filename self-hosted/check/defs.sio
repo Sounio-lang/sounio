@@ -1424,6 +1424,55 @@ fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div
     0 - 1
 }
 
+// Multi-module free-function lookup used by the visibility preflight.
+//
+// `fn_sig_table_find` returns the *first* free function with a given name.
+// When two modules both define a private helper of the same name (e.g.
+// `chk` / `near` / `test_combine` in epistemic::gum and epistemic::knowledge),
+// the later module's body calls resolve to the earlier module's private sig
+// and trip false E175 ("function is private in its defining module") even
+// though the call is same-module. Prefer:
+//   1. free fn defined in `prefer_module_id` (private helpers of the module
+//      currently being checked)
+//   2. any non-private free fn (legitimate cross-module import target)
+//   3. first free-fn match (legacy; visibility check still rejects private
+//      cross-module access)
+fn fn_sig_table_find_prefer_module(t: *mut FnSigTable, name: Name, prefer_module_id: i64) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { break }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if !(*cur).entries[local as usize].is_method
+                && name_eq((*cur).entries[local as usize].name, name)
+                && (*cur).entries[local as usize].defining_module_id == prefer_module_id {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    gi = 0
+    cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { break }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if !(*cur).entries[local as usize].is_method
+                && name_eq((*cur).entries[local as usize].name, name)
+                && (*cur).entries[local as usize].visibility_kind != VISIBILITY_PRIVATE {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    fn_sig_table_find(t, name)
+}
+
 fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
     var gi: i64 = 0
     var cur = (*t).head
