@@ -446,6 +446,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.policy-observation-associator | repo_only | docs/internal/concepts/policy-observation-associator.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.policy-state-feedback | repo_only | docs/internal/concepts/policy-state-feedback.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.proof-carrying-deployment-validity-revocable-authority | repo_only | docs/internal/concepts/proof-carrying-deployment-validity-revocable-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-inference | repo_only | docs/internal/concepts/proof-carrying-inference.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-rebracketing-protocol | repo_only | docs/internal/concepts/proof-carrying-rebracketing-protocol.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-statistical-coverage-empirical-binding | repo_only | docs/internal/concepts/proof-carrying-statistical-coverage-empirical-binding.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -759,6 +760,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.proof-carrying-deployment-validity-revocable-authority-d10-2026-07-19 | historical | docs/research/proof_carrying_deployment_validity_revocable_authority_d10_2026-07-19.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-endogenous-observability-d4-2026-07-15 | historical | docs/research/proof_carrying_endogenous_observability_d4_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-epistemic-contest-d2-2026-07-14 | historical | docs/research/proof_carrying_epistemic_contest_d2_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-path-conditioned-identification-d8-2026-07-18 | historical | docs/research/proof_carrying_path_conditioned_identification_d8_2026-07-18.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -840,6 +842,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof | repo_only | docs/superpowers/plans/2026-07-14-stats-validation-runproof.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-14-units-vertical | repo_only | docs/superpowers/plans/2026-07-14-units-vertical.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-17-csv-reader | repo_only | docs/superpowers/plans/2026-07-17-csv-reader.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.plans.2026-07-19-proof-carrying-deployment-validity-revocable-authority-d10 | repo_only | docs/superpowers/plans/2026-07-19-proof-carrying-deployment-validity-revocable-authority-d10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9 | repo_only | docs/superpowers/plans/2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-data-science-io-design | repo_only | docs/superpowers/specs/2026-07-13-data-science-io-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-epistemic-gum-hardening-design | repo_only | docs/superpowers/specs/2026-07-13-epistemic-gum-hardening-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -854,6 +857,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-14-units-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-units-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-15-batched-verticals-index | repo_only | docs/superpowers/specs/2026-07-15-batched-verticals-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-17-csv-reader-design | repo_only | docs/superpowers/specs/2026-07-17-csv-reader-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-19-proof-carrying-deployment-validity-revocable-authority-d10-design | repo_only | docs/superpowers/specs/2026-07-19-proof-carrying-deployment-validity-revocable-authority-d10-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9-design | repo_only | docs/superpowers/specs/2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.testing | repo_only | docs/TESTING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
