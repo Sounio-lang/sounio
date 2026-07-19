@@ -6,7 +6,7 @@
 // hash-joins, a stable comparison sort, an adaptive stable radix sort,
 // unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
 // rolling-window sum / mean / max / min, shift / diff / pct-change, an
-// exponentially weighted moving mean, and expanding mean / var / std.
+// exponentially weighted moving mean, expanding mean / var / std, and rank.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -1496,5 +1496,116 @@ pub fn bf_expanding_std(src: &BigFrame, col: i64, fill: f64) -> BigFrame with Al
         if i >= 1 { write_f64(op, i, sqrt(m2 / (cnt - 1.0))) } else { write_f64(op, i, fill) }
         i = i + 1
     }
+    out
+}
+
+/// Rank the values of column `col`, ascending, 1-based (like pandas col.rank()).
+/// `method` selects the tie-handling: 0 = average (pandas' default -- tied values
+/// share the mean of their positions, e.g. two-way tie at positions 1,2 -> 1.5),
+/// 1 = min (all ties get the lowest position), 2 = max (the highest), 3 = dense (ties
+/// share a rank and the next distinct value is the next integer, no gaps). Returns a
+/// 1-column f64 BigFrame aligned to input rows. Implemented as a stable argsort (a
+/// paired key/index bottom-up mergesort, ping-ponged) followed by one pass over the
+/// sorted runs, scattering each run's rank back to its original rows. O(n log n).
+/// (The ordinal `first` method is intentionally omitted here.) NATIVE + lean_single
+/// only (heap).
+pub fn bf_rank(src: &BigFrame, col: i64, method: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var ka = heap_alloc(n * 8) as *mut f64
+    var kb = heap_alloc(n * 8) as *mut f64
+    var ia = heap_alloc(n * 8) as *mut i64
+    var ib = heap_alloc(n * 8) as *mut i64
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        write_f64(ka, i, read_f64(sp, i))
+        write_i64(ia, i, i)
+        i = i + 1
+    }
+    // Stable argsort: paired (value, original-index) mergesort with ping-pong buffers.
+    var ck = ka
+    var ci = ia
+    var dk = kb
+    var di = ib
+    var width: i64 = 1
+    while width < n {
+        var lo: i64 = 0
+        while lo < n {
+            var mid = lo + width
+            if mid > n { mid = n }
+            var hi = lo + width + width
+            if hi > n { hi = n }
+            var a = lo
+            var b = mid
+            var k = lo
+            while a < mid && b < hi {
+                let va = read_f64(ck, a)
+                let vb = read_f64(ck, b)
+                var take_a = false
+                if va <= vb { take_a = true }          // <= -> stable
+                if take_a {
+                    write_f64(dk, k, va)
+                    write_i64(di, k, read_i64(ci, a))
+                    a = a + 1
+                } else {
+                    write_f64(dk, k, vb)
+                    write_i64(di, k, read_i64(ci, b))
+                    b = b + 1
+                }
+                k = k + 1
+            }
+            while a < mid {
+                write_f64(dk, k, read_f64(ck, a))
+                write_i64(di, k, read_i64(ci, a))
+                a = a + 1
+                k = k + 1
+            }
+            while b < hi {
+                write_f64(dk, k, read_f64(ck, b))
+                write_i64(di, k, read_i64(ci, b))
+                b = b + 1
+                k = k + 1
+            }
+            lo = lo + width + width
+        }
+        let tk = ck
+        ck = dk
+        dk = tk
+        let ti = ci
+        ci = di
+        di = ti
+        width = width + width
+    }
+    // ck = sorted values, ci = sorted original indices. Walk equal-value runs.
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var p: i64 = 0
+    var dense: f64 = 0.0
+    while p < n {
+        var e = p
+        while e + 1 < n && read_f64(ck, e + 1) == read_f64(ck, p) { e = e + 1 }   // run [p,e]
+        dense = dense + 1.0
+        var r = 0.0
+        if method == 1 { r = (p + 1) as f64 }                    // min
+        else {
+            if method == 2 { r = (e + 1) as f64 }                // max
+            else {
+                if method == 3 { r = dense }                     // dense
+                else { r = ((p + e) as f64) / 2.0 + 1.0 }        // average (default)
+            }
+        }
+        var q = p
+        while q <= e {
+            write_f64(op, read_i64(ci, q), r)
+            q = q + 1
+        }
+        p = e + 1
+    }
+    heap_free(ka as *mut i8)
+    heap_free(kb as *mut i8)
+    heap_free(ia as *mut i8)
+    heap_free(ib as *mut i8)
     out
 }
