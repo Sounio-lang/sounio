@@ -1,23 +1,23 @@
 // epistemic-core/src/lib.sio
 //
 // Core epistemic types for Sounio.
-// Implements the KCoreKnowledge<T> type and GUM uncertainty propagation
+// Implements the KCoreKnowledge measurement type and GUM uncertainty propagation
 // as described in JCGM 100:2008 (Guide to the Expression of Uncertainty).
 //
-// This package is the canonical reference implementation of:
-//   - KCoreKnowledge<T> — value + uncertainty + confidence + provenance
+// This package provides:
+//   - KCoreKnowledge — f64 value + uncertainty + confidence + source metadata
 //   - GUM first-order propagation for binary operations
 //   - confidence_gate — assertion gate for epistemic claims
-//   - ProvenanceLedger — W3C PROV-DM compatible provenance chain
+//   - lightweight source metadata for measured and derived values
 //
 // Boundary authority is declared in sounio.toml and never inferred from a score.
 //
 // Usage:
-//   let dose = measure(500.0, 25.0, "mg", "HPLC_2025")
-//   let vol  = measure(10.0,  0.2,  "mL", "pipette_A")
-//   let conc = dose / vol
-//   confidence_gate(conc, 0.90)
-//   println_knowledge(conc)   // 50.0000 ± 2.6926 mg/mL [conf=1.00]
+//   let dose = measure(500.0, 25.0, "HPLC_2025")
+//   let vol  = measure(10.0,  0.2,  "pipette_A")
+//   let conc = knowledge_div(&dose, &vol)
+//   confidence_gate(&conc, 0.90)
+//   println_knowledge(&conc)   // 50.0000 ± 2.6926 mg/mL [conf=1.00]
 
 // ============================================================================
 // PROVENANCE
@@ -27,7 +27,7 @@ struct Source {
     label: [i8; 64],
     label_len: i64,
     method: i64,       // 0=sensor, 1=model, 2=literature, 3=prior, 4=derived
-    reliability: f64,  // [0,1] Bayesian reliability estimate
+    reliability: f64,  // caller-carried reliability metadata in [0,1]
 }
 
 let PROV_METHOD_SENSOR:     i64 = 0
@@ -51,7 +51,7 @@ fn source_reliability(src: &Source) -> f64 {
 }
 
 // ============================================================================
-// KNOWLEDGE<T>
+// KCOREKNOWLEDGE
 // ============================================================================
 
 // KCoreKnowledge<f64>: central value + standard uncertainty (σ) + confidence + provenance.
@@ -94,19 +94,19 @@ pub fn knowledge_value(k: &KCoreKnowledge) -> f64 { (*k).value }
 pub fn knowledge_uncertainty(k: &KCoreKnowledge) -> f64 { (*k).uncertainty }
 pub fn knowledge_confidence(k: &KCoreKnowledge) -> f64 { (*k).confidence }
 
-// Relative uncertainty (u / |value|)
-pub fn knowledge_rel_uncertainty(k: &KCoreKnowledge) -> f64 with Div {
-    if (*k).value == 0.0 { return 0.0 }
+// Relative uncertainty (u / |value|); undefined for a zero central value.
+pub fn knowledge_rel_uncertainty(k: &KCoreKnowledge) -> f64 with Div, Panic {
+    assert((*k).value != 0.0)
     (*k).uncertainty / if (*k).value < 0.0 { 0.0 - (*k).value } else { (*k).value }
 }
 
-// Expanded uncertainty U(k) = factor * u(x). Default k=2 for ~95% coverage.
+// Expanded uncertainty U = factor * u(x). The caller supplies the coverage factor.
 pub fn knowledge_expanded(k: &KCoreKnowledge, factor: f64) -> f64 with Mut, Div, Panic {
     factor * (*k).uncertainty
 }
 
 // ============================================================================
-// GUM ARITHMETIC (JCGM 100:2008 §13)
+// GUM ARITHMETIC (JCGM 100:2008 §5.1.2, Eq. 10; uncorrelated inputs)
 // ============================================================================
 
 // Helper: max of two f64
@@ -116,16 +116,12 @@ fn f64_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
 // sqrt via Newton-Raphson (no FFI dependency)
 fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var guess = x / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
-    guess = (guess + x / guess) / 2.0
+    var guess = if x < 1.0 { 1.0 } else { x / 2.0 }
+    var iteration: i64 = 0
+    while iteration < 64 {
+        guess = (guess + x / guess) / 2.0
+        iteration = iteration + 1
+    }
     guess
 }
 
@@ -137,7 +133,12 @@ pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic { sqrt_newton(x) }
 fn combine_confidence(a: f64, b: f64) -> f64 { f64_min(a, b) }
 
 fn derive_source() -> Source {
-    source_from_str("derived")
+    Source {
+        label: [0; 64],
+        label_len: 0,
+        method: PROV_METHOD_DERIVED,
+        reliability: 1.0,
+    }
 }
 
 // Addition: u(a+b) = sqrt(u(a)^2 + u(b)^2)
@@ -160,30 +161,28 @@ pub fn knowledge_sub(a: &KCoreKnowledge, b: &KCoreKnowledge) -> KCoreKnowledge w
     }
 }
 
-// Multiplication: u(ab)/|ab| = sqrt((u(a)/|a|)^2 + (u(b)/|b|)^2)
+// Multiplication: u(ab) = sqrt((b*u(a))^2 + (a*u(b))^2)
 pub fn knowledge_mul(a: &KCoreKnowledge, b: &KCoreKnowledge) -> KCoreKnowledge with Mut, Div, Panic {
     let result = (*a).value * (*b).value
-    let rel_a = if (*a).value == 0.0 { 0.0 } else { (*a).uncertainty / (if (*a).value < 0.0 { 0.0 - (*a).value } else { (*a).value }) }
-    let rel_b = if (*b).value == 0.0 { 0.0 } else { (*b).uncertainty / (if (*b).value < 0.0 { 0.0 - (*b).value } else { (*b).value }) }
-    let rel = gum_sqrt(rel_a * rel_a + rel_b * rel_b)
+    let contrib_a = (*b).value * (*a).uncertainty
+    let contrib_b = (*a).value * (*b).uncertainty
     KCoreKnowledge {
         value:       result,
-        uncertainty: (if result < 0.0 { 0.0 - result } else { result }) * rel,
+        uncertainty: gum_sqrt(contrib_a * contrib_a + contrib_b * contrib_b),
         confidence:  combine_confidence((*a).confidence, (*b).confidence),
         source:      derive_source(),
     }
 }
 
-// Division: same relative combination as multiplication
+// Division: u(a/b) = sqrt((u(a)/b)^2 + (a*u(b)/b^2)^2), b != 0
 pub fn knowledge_div(a: &KCoreKnowledge, b: &KCoreKnowledge) -> KCoreKnowledge with Mut, Div, Panic {
     assert((*b).value != 0.0)
     let result = (*a).value / (*b).value
-    let rel_a = if (*a).value == 0.0 { 0.0 } else { (*a).uncertainty / (if (*a).value < 0.0 { 0.0 - (*a).value } else { (*a).value }) }
-    let rel_b = if (*b).value == 0.0 { 0.0 } else { (*b).uncertainty / (if (*b).value < 0.0 { 0.0 - (*b).value } else { (*b).value }) }
-    let rel = gum_sqrt(rel_a * rel_a + rel_b * rel_b)
+    let contrib_a = (*a).uncertainty / (*b).value
+    let contrib_b = (*a).value * (*b).uncertainty / ((*b).value * (*b).value)
     KCoreKnowledge {
         value:       result,
-        uncertainty: (if result < 0.0 { 0.0 - result } else { result }) * rel,
+        uncertainty: gum_sqrt(contrib_a * contrib_a + contrib_b * contrib_b),
         confidence:  combine_confidence((*a).confidence, (*b).confidence),
         source:      derive_source(),
     }
@@ -205,7 +204,8 @@ pub fn knowledge_scale(k: &KCoreKnowledge, factor: f64) -> KCoreKnowledge {
 // ============================================================================
 
 // Asserts that confidence >= threshold. Panics if not.
-// This is the core epistemic safety mechanism — gate before critical decisions.
+// The gate checks explicitly carried confidence. measure() initializes it to 1.0;
+// use measure_with_confidence() when the caller has a justified lower value.
 pub fn confidence_gate(k: &KCoreKnowledge, min_confidence: f64) with Panic {
     assert((*k).confidence >= min_confidence)
 }
