@@ -110,6 +110,102 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     AstPath { segments: segs, seg_count: 1 }
 }
 
+fn mp_clear_ast_path(out: &!AstPath) with Mut {
+    var i: i64 = 0
+    while i < 128 {
+        (*out).segments.head_buf[i as usize] = 0
+        i = i + 1
+    }
+    (*out).segments.head_len = 0
+    (*out).segments.tail = None
+    (*out).seg_count = 0
+}
+
+fn file_path_to_module_path_into(path: string, out: &!AstPath) with Mut, Panic, Div {
+    mp_clear_ast_path(out)
+    let path_len = str_len(path)
+    var i: i64 = 0
+    var last_slash: i64 = 0 - 1
+    var dot_pos: i64 = path_len
+    while i < path_len {
+        let ch = str_char_at(path, i)
+        if ch == 47 {
+            last_slash = i
+        }
+        if ch == 46 {
+            dot_pos = i
+        }
+        i = i + 1
+    }
+    let start = last_slash + 1
+    var end = dot_pos
+    if end <= start {
+        end = path_len
+    }
+    var seg_len: i64 = 0
+    i = start
+    while i < end && seg_len < 128 {
+        (*out).segments.head_buf[seg_len as usize] = str_char_at(path, i) as i8
+        seg_len = seg_len + 1
+        i = i + 1
+    }
+    (*out).segments.head_len = seg_len
+    if seg_len > 0 {
+        (*out).seg_count = 1
+    }
+}
+
+fn mp_copy_string_list_into(
+    source: &StringList,
+    out: &!StringList,
+    remaining: i64,
+) -> bool with Mut, Alloc {
+    if remaining <= 0 || (*source).head_len <= 0 || (*source).head_len > 128 {
+        return false
+    }
+    var i: i64 = 0
+    while i < 128 {
+        (*out).head_buf[i as usize] = (*source).head_buf[i as usize]
+        i = i + 1
+    }
+    (*out).head_len = (*source).head_len
+    match (*source).tail {
+        None => {
+            (*out).tail = None
+            remaining == 1
+        }
+        Some(next) => {
+            if remaining <= 1 {
+                return false
+            }
+            var copied_tail = Box::new(StringList {
+                head_buf: [0; 128],
+                head_len: 0,
+                tail: None,
+            })
+            if !mp_copy_string_list_into(&(*next), &!(*copied_tail), remaining - 1) {
+                return false
+            }
+            (*out).tail = Some(copied_tail)
+            true
+        }
+    }
+}
+
+fn mp_copy_ast_path_into(source: &AstPath, out: &!AstPath) -> bool with Mut, Alloc {
+    let count = (*source).seg_count
+    if count <= 0 || count > 256 {
+        return false
+    }
+    mp_clear_ast_path(out)
+    if !mp_copy_string_list_into(&(*source).segments, &!(*out).segments, count) {
+        mp_clear_ast_path(out)
+        return false
+    }
+    (*out).seg_count = count
+    true
+}
+
 // parse_module_item stores declarations on its ItemUnit placeholder; real unit
 // declarations keep use_path empty.
 fn declared_module_path(items: Option<Box<ItemList>>) -> AstPath with Mut, Panic, Div, Alloc {
@@ -121,6 +217,26 @@ fn declared_module_path(items: Option<Box<ItemList>>) -> AstPath with Mut, Panic
                 item.use_path
             } else {
                 declared_module_path((*list).tail)
+            }
+        }
+    }
+}
+
+fn declared_module_path_into_bounded(
+    items: &Option<Box<ItemList>>,
+    out: &!AstPath,
+    remaining: i64,
+) -> i64 with Mut, Alloc {
+    if remaining <= 0 {
+        return 0 - 1
+    }
+    match *items {
+        None => 0
+        Some(list) => {
+            if (*list).head.kind == ItemKind::ItemUnit && (*list).head.use_path.seg_count > 0 {
+                if mp_copy_ast_path_into(&(*list).head.use_path, out) { 1 } else { 0 - 1 }
+            } else {
+                declared_module_path_into_bounded(&(*list).tail, out, remaining - 1)
             }
         }
     }
@@ -146,16 +262,19 @@ pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc
 // in place so a whole-struct SRET temporary cannot replace the slot pointer.
 pub fn load_module_file_into(path: string, out: &!Program) with IO, Mut, Div, Panic, Alloc {
     if !file_exists(path) {
-        (*out).module_path = empty_path()
+        mp_clear_ast_path(&!(*out).module_path)
         (*out).items = None
         return
     }
     let items = lex_file_parse_items(path)
-    var module_path = file_path_to_module_path(path)
-    let declared_path = declared_module_path(items)
-    if declared_path.seg_count > 0 {
-        module_path = declared_path
+    file_path_to_module_path_into(path, &!(*out).module_path)
+    let declared_status = declared_module_path_into_bounded(
+        &items,
+        &!(*out).module_path,
+        4096,
+    )
+    if declared_status < 0 {
+        mp_clear_ast_path(&!(*out).module_path)
     }
-    (*out).module_path = module_path
     (*out).items = items
 }
