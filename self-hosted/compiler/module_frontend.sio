@@ -10,13 +10,18 @@ use ir::ir::*
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
-use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
+use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_modules_verdict_boot4_with_visibility, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{LowerExternBindingHandle, LowerProgramItemsHandle, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, extract_imports_from_ast_ref, file_exists, file_path_to_module_path, load_module_file, load_module_file_into}
 use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
+
+// A canonical compile consumes the exact caller-owned closure snapshot that was
+// parsed for visibility. A later collection supersedes earlier snapshots in the
+// same compiler process, making accidental recollection observable and fatal.
+var MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL: i64 = 0
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
@@ -2400,8 +2405,27 @@ pub struct ModuleClosure {
     pub unresolved_count: i64,
     pub ambiguity_count: i64,
     pub surface_error_count: i64,
+    pub collection_id: i64,
     pub saturated: bool,
     pub parse_failed: bool,
+}
+
+fn module_frontend_next_closure_collection_id() -> i64 with Mut {
+    MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL = MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL + 1
+    if MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL <= 0 {
+        MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL = 1
+    }
+    MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL
+}
+
+fn module_frontend_trace_closure_collection(main_path: string, collection_id: i64) with IO, Mut, Panic, Div {
+    if !str_eq(read_env("SOUNIO_MODULE_CLOSURE_TRACE"), "1") {
+        return
+    }
+    print("module_closure_collect: phase=begin collection_id=")
+    print_int(collection_id)
+    print(" main=")
+    println(main_path)
 }
 
 fn module_frontend_trace_full_ir_closure(closure: &ModuleClosure) with IO, Mut, Panic, Div {
@@ -2877,6 +2901,8 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     out: &!ModuleClosure,
     programs: &! [Program; 256],
 ) -> bool with IO, Mut, Panic, Div, Alloc {
+    (*out).collection_id = module_frontend_next_closure_collection_id()
+    module_frontend_trace_closure_collection(main_path, (*out).collection_id)
     (*out).node_count = 0
     (*out).edge_count = 0
     (*out).unresolved_count = 0
@@ -2987,6 +3013,154 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     // Closure topology and import-surface validity are independent evidence.
     // Callers must inspect surface_error_count before checking or lowering.
     structurally_complete && !(*out).saturated && !(*out).parse_failed
+}
+
+// Validate that closure topology, pinned Program identity, and the collection
+// generation still describe one snapshot. Codes are stable gate evidence:
+// 0=current, 1=superseded, 2=invalid bounds/state, 3=root mismatch,
+// 4=program identity mismatch, 5=edge/AST topology mismatch.
+fn module_frontend_collected_snapshot_status(
+    main_path: string,
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+) -> i64 with Mut, Panic, Div, Alloc {
+    if (*closure).collection_id <= 0 ||
+       (*closure).collection_id != MODULE_FRONTEND_CLOSURE_COLLECTION_SERIAL {
+        return 1
+    }
+    if (*closure).node_count <= 0 || (*closure).node_count > 256 ||
+       (*closure).edge_count < 0 || (*closure).edge_count > 512 ||
+       (*closure).unresolved_count != 0 || (*closure).ambiguity_count != 0 ||
+       (*closure).surface_error_count != 0 || (*closure).saturated ||
+       (*closure).parse_failed {
+        return 2
+    }
+    if !str_eq((*closure).paths[0], main_path) {
+        return 3
+    }
+
+    var node_id: i64 = 0
+    var edge_cursor: i64 = 0
+    while node_id < (*closure).node_count {
+        if str_len((*closure).paths[node_id]) <= 0 {
+            return 4
+        }
+        let logical_path = use_path_ref_to_string(&(*programs)[node_id].module_path)
+        if !str_eq(logical_path, (*closure).logical_paths[node_id]) {
+            return 4
+        }
+        var prior_node: i64 = 0
+        while prior_node < node_id {
+            if str_eq((*closure).paths[prior_node], (*closure).paths[node_id]) {
+                return 4
+            }
+            prior_node = prior_node + 1
+        }
+
+        let imports = extract_imports_from_ast_ref(&(*programs)[node_id])
+        if imports.overflow {
+            return 5
+        }
+        var import_index: i64 = 0
+        while import_index < imports.count {
+            if edge_cursor >= (*closure).edge_count ||
+               (*closure).edge_caller_ids[edge_cursor] != node_id {
+                return 5
+            }
+            let requested_import = use_path_to_string(imports.paths[import_index])
+            if !str_eq((*closure).edge_imports[edge_cursor], requested_import) {
+                return 5
+            }
+            let dependency_id = (*closure).edge_dependency_ids[edge_cursor]
+            if dependency_id < 0 || dependency_id >= (*closure).node_count ||
+               !str_eq((*closure).edge_callers[edge_cursor], (*closure).paths[node_id]) ||
+               !str_eq((*closure).edge_dependencies[edge_cursor], (*closure).paths[dependency_id]) {
+                return 5
+            }
+            edge_cursor = edge_cursor + 1
+            import_index = import_index + 1
+        }
+        node_id = node_id + 1
+    }
+    if edge_cursor != (*closure).edge_count {
+        return 5
+    }
+    0
+}
+
+fn module_frontend_collected_snapshot_status_name(status: i64) -> string {
+    if status == 0 { "current" }
+    else if status == 1 { "superseded" }
+    else if status == 2 { "invalid_state" }
+    else if status == 3 { "root_mismatch" }
+    else if status == 4 { "program_identity_mismatch" }
+    else { "topology_mismatch" }
+}
+
+pub fn module_frontend_closure_snapshot_self_test(main_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var closure = ModuleClosure {
+        paths: [""; 256],
+        logical_paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        surface_error_callers: [""; 256],
+        surface_error_imports: [""; 256],
+        surface_error_names: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        ambiguity_count: 0,
+        surface_error_count: 0,
+        collection_id: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    if !module_frontend_collect_ast_closure_programs_into(main_path, &!closure, &!programs) {
+        println("MODULE_CLOSURE_SNAPSHOT_SELF_TEST status=fail reason=first_collection")
+        return 1
+    }
+    let first_id = closure.collection_id
+    let first_status = module_frontend_collected_snapshot_status(main_path, &closure, &!programs)
+    if first_status != 0 {
+        print("MODULE_CLOSURE_SNAPSHOT_SELF_TEST status=fail reason=first_status value=")
+        println(module_frontend_collected_snapshot_status_name(first_status))
+        return 2
+    }
+    if !module_frontend_collect_ast_closure_programs_into(main_path, &!closure, &!programs) {
+        println("MODULE_CLOSURE_SNAPSHOT_SELF_TEST status=fail reason=second_collection")
+        return 3
+    }
+    let second_id = closure.collection_id
+    closure.collection_id = first_id
+    let stale_status = module_frontend_collected_snapshot_status(main_path, &closure, &!programs)
+    closure.collection_id = second_id
+    let current_status = module_frontend_collected_snapshot_status(main_path, &closure, &!programs)
+    if first_id <= 0 || second_id <= first_id || stale_status != 1 || current_status != 0 {
+        print("MODULE_CLOSURE_SNAPSHOT_SELF_TEST status=fail reason=drift_not_refused first_id=")
+        print_int(first_id)
+        print(" second_id=")
+        print_int(second_id)
+        print(" stale_status=")
+        print_int(stale_status)
+        print(" current_status=")
+        print_int(current_status)
+        print("\n")
+        return 4
+    }
+    print("MODULE_CLOSURE_SNAPSHOT_SELF_TEST status=pass first_id=")
+    print_int(first_id)
+    print(" second_id=")
+    print_int(second_id)
+    print(" stale_state=superseded current_state=current collections=2\n")
+    0
 }
 
 pub fn module_frontend_collect_ast_closure_into(
@@ -6648,10 +6822,10 @@ pub fn module_frontend_compile_imported_to_file(
     output_path: string,
     optimize: bool,
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    // Compatibility adapter for callers that have not yet adopted the
+    // caller-owned snapshot API. It collects exactly once, then delegates.
     parser_reset_last_errors()
-    print("imported_compile: begin\n")
-    var trace = empty_load_multimodule_ir_trace()
-    print("imported_compile: load_begin\n")
+    print("imported_compile: legacy_adapter_load_begin\n")
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var closure = ModuleClosure {
         paths: [""; 256],
@@ -6673,6 +6847,7 @@ pub fn module_frontend_compile_imported_to_file(
         unresolved_count: 0,
         ambiguity_count: 0,
         surface_error_count: 0,
+        collection_id: 0,
         saturated: false,
         parse_failed: false,
     }
@@ -6681,7 +6856,7 @@ pub fn module_frontend_compile_imported_to_file(
         &!closure,
         &!programs,
     )
-    print("imported_compile: load_done\n")
+    print("imported_compile: legacy_adapter_load_done\n")
     if !closure_complete {
         print("imported_compile: closure_incomplete nodes=")
         print_int(closure.node_count)
@@ -6705,7 +6880,42 @@ pub fn module_frontend_compile_imported_to_file(
         return 1
     }
 
-    let loaded = closure.node_count
+    module_frontend_compile_collected_to_file(
+        main_path,
+        output_path,
+        optimize,
+        &!closure,
+        &!programs,
+    )
+}
+
+// Canonical native-v2 compile entry: visibility, checker, lowering, and codegen
+// consume the exact closure and Program arena collected by the caller. Both
+// aggregates stay behind references; no large by-value/SRET copy is introduced.
+pub fn module_frontend_compile_collected_to_file(
+    main_path: string,
+    output_path: string,
+    optimize: bool,
+    closure: &!ModuleClosure,
+    programs: &! [Program; 256],
+) -> i32 with IO, Mut, Div, Panic, Alloc {
+    parser_reset_last_errors()
+    print("imported_compile: collected_begin collection_id=")
+    print_int((*closure).collection_id)
+    print("\n")
+    let snapshot_status = module_frontend_collected_snapshot_status(
+        main_path,
+        closure,
+        programs,
+    )
+    if snapshot_status != 0 {
+        print("imported_compile: snapshot_invalid reason=")
+        println(module_frontend_collected_snapshot_status_name(snapshot_status))
+        return 1
+    }
+
+    var trace = empty_load_multimodule_ir_trace()
+    let loaded = (*closure).node_count
     trace.loaded_modules = loaded
     trace.last_stage = "load_main"
     trace.last_module_index = 0
@@ -6719,18 +6929,42 @@ pub fn module_frontend_compile_imported_to_file(
     print_int(loaded)
     print(" modules\n")
 
+    trace.last_stage = "visibility"
+    print("imported_compile: visibility_begin\n")
+    var visibility_verdict: i64 = 0
+    if loaded == 1 && (*closure).edge_count == 0 {
+        // Match the former two-collection behavior: visibility may check a
+        // specialized view, but lowering retains the pinned authored Program.
+        let visibility_items = specialize_generics((*programs)[0].items)
+        visibility_verdict = module_frontend_check_items_with_source_context(
+            visibility_items,
+            main_path,
+        )
+    } else {
+        visibility_verdict = check_modules_verdict_boot4_with_visibility(
+            programs,
+            loaded,
+            true,
+        )
+    }
+    print("imported_compile: visibility_done\n")
+    if visibility_verdict != 0 {
+        print("Visibility/type preflight failed during imported compile\n")
+        return 1
+    }
+
     trace.last_stage = "typecheck"
     print("imported_compile: typecheck_begin\n")
     // WP-A3: when a cross-module generic is instantiated, take the verdict from
     // the merged + monomorphized item list (drops the E008 CDElementExact__T
     // mono-mismatch); otherwise use the normal per-module verdict. The programs
     // array is left untouched, so IR lowering below is unchanged.
-    let spec_tc = module_frontend_specialized_typecheck(&! programs, loaded)
+    let spec_tc = module_frontend_specialized_typecheck(programs, loaded)
     var verdict: i64 = 0
     if spec_tc.0 {
         verdict = spec_tc.1
     } else {
-        verdict = check_modules_verdict_boot4(&! programs, loaded)
+        verdict = check_modules_verdict_boot4(programs, loaded)
     }
     print("imported_compile: typecheck_done\n")
     if verdict != 0 {
@@ -6742,8 +6976,8 @@ pub fn module_frontend_compile_imported_to_file(
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
-    module_frontend_trace_full_ir_closure(&closure)
-    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, &closure, &closure.paths, loaded, &! trace)
+    module_frontend_trace_full_ir_closure(closure)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, &(*closure), &!(*closure).paths, loaded, &! trace)
     print("imported_compile: lower_done\n")
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -7862,6 +8096,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         unresolved_count: 0,
         ambiguity_count: 0,
         surface_error_count: 0,
+        collection_id: 0,
         saturated: false,
         parse_failed: false,
     }

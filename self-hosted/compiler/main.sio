@@ -51,9 +51,9 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_compile_collected_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
-use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into, module_frontend_collect_ast_closure_programs_into, module_frontend_path_shape_self_test}
+use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into, module_frontend_collect_ast_closure_programs_into, module_frontend_path_shape_self_test, module_frontend_closure_snapshot_self_test}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -2034,6 +2034,41 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
     }
 }
 
+fn compiler_collect_visibility_closure_into(
+    source_path: string,
+    closure: &!ModuleClosure,
+    programs: &! [Program; 256],
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    if !module_frontend_collect_ast_closure_programs_into(source_path, closure, programs) {
+        print("run_check_mode: AST closure incomplete nodes=")
+        print_int((*closure).node_count)
+        print(" unresolved=")
+        print_int((*closure).unresolved_count)
+        print(" ambiguous=")
+        print_int((*closure).ambiguity_count)
+        print(" surface_errors=")
+        print_int((*closure).surface_error_count)
+        print(" saturated=")
+        if (*closure).saturated { print("true") } else { print("false") }
+        print("\n")
+        return false
+    }
+    if (*closure).surface_error_count > 0 {
+        var surface_index: i64 = 0
+        while surface_index < (*closure).surface_error_count {
+            print("error[E137]: imported name `")
+            print((*closure).surface_error_names[surface_index])
+            print("` is not exported by `")
+            print((*closure).surface_error_imports[surface_index])
+            print("` for caller ")
+            println((*closure).surface_error_callers[surface_index])
+            surface_index = surface_index + 1
+        }
+        return false
+    }
+    true
+}
+
 fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     var closure = ModuleClosure {
         paths: [""; 256],
@@ -2055,35 +2090,12 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         unresolved_count: 0,
         ambiguity_count: 0,
         surface_error_count: 0,
+        collection_id: 0,
         saturated: false,
         parse_failed: false,
     }
     var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
-    if !module_frontend_collect_ast_closure_programs_into(source_path, &!closure, &!programs) {
-        print("run_check_mode: AST closure incomplete nodes=")
-        print_int(closure.node_count)
-        print(" unresolved=")
-        print_int(closure.unresolved_count)
-        print(" ambiguous=")
-        print_int(closure.ambiguity_count)
-        print(" surface_errors=")
-        print_int(closure.surface_error_count)
-        print(" saturated=")
-        if closure.saturated { print("true") } else { print("false") }
-        print("\n")
-        return false
-    }
-    if closure.surface_error_count > 0 {
-        var surface_index: i64 = 0
-        while surface_index < closure.surface_error_count {
-            print("error[E137]: imported name `")
-            print(closure.surface_error_names[surface_index])
-            print("` is not exported by `")
-            print(closure.surface_error_imports[surface_index])
-            print("` for caller ")
-            println(closure.surface_error_callers[surface_index])
-            surface_index = surface_index + 1
-        }
+    if !compiler_collect_visibility_closure_into(source_path, &!closure, &!programs) {
         return false
     }
 
@@ -2138,6 +2150,7 @@ fn run_science_boundary_closure_report(
         unresolved_count: 0,
         ambiguity_count: 0,
         surface_error_count: 0,
+        collection_id: 0,
         saturated: false,
         parse_failed: false,
     }
@@ -3201,14 +3214,49 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
-    if !compiler_visibility_preflight(source_path) {
+    var compile_closure = ModuleClosure {
+        paths: [""; 256],
+        logical_paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        surface_error_callers: [""; 256],
+        surface_error_imports: [""; 256],
+        surface_error_names: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        ambiguity_count: 0,
+        surface_error_count: 0,
+        collection_id: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    var compile_programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    if !compiler_collect_visibility_closure_into(
+        source_path,
+        &!compile_closure,
+        &!compile_programs,
+    ) {
         panic("native-v2-compile failed: visibility preflight")
     }
     // The boxed compile-to-file route is SRET-safe for both imported and
     // single-module programs. Returning MultiModuleIrResult by value embeds a
     // full IrModule and crashes larger sources before the backend is reached.
     let optimize = compiler_mode_has_flag(args, "-O") || compiler_mode_has_flag(args, "--optimize")
-    let rc = module_frontend_compile_imported_to_file(source_path, out_path, optimize)
+    let rc = module_frontend_compile_collected_to_file(
+        source_path,
+        out_path,
+        optimize,
+        &!compile_closure,
+        &!compile_programs,
+    )
     if rc != 0 {
         print("native_v2_compile: front-half/backend failed rc=")
         print_int(rc as i64)
@@ -28171,6 +28219,18 @@ fn main() with IO, Mut, Panic, Div, Alloc {
                 panic("module path shape self-test failed")
             }
             println("module-path-shape-self-test: OK")
+            return
+        } else if mode == "--module-closure-snapshot-self-test" {
+            if arg_idx + 1 >= args.len {
+                panic("module closure snapshot self-test requires a source path")
+            }
+            let snapshot_rc = module_frontend_closure_snapshot_self_test(
+                arg_list_get(args, arg_idx + 1)
+            )
+            if snapshot_rc != 0 {
+                panic("module closure snapshot self-test failed")
+            }
+            println("module-closure-snapshot-self-test: OK")
             return
         } else if mode == "--native-compile" {
             run_native_compile_mode(args, arg_idx)
