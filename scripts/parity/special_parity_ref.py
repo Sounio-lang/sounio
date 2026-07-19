@@ -34,6 +34,18 @@ REF = {
     "igamma_lower":(lambda a,x: mp.gammainc(a, 0, x, regularized=True), 1e-2),
     "igamma_upper":(lambda a,x: mp.gammainc(a, x, mp.inf, regularized=True), 1e-2),
     "chi2_cdf":    (lambda x,k: mp.gammainc(k/2, 0, x/2, regularized=True), 1e-2),
+    "bessel_j0":(lambda x: mp.besselj(0,x), 1e-2),
+    "bessel_j1":(lambda x: mp.besselj(1,x), 1e-2),
+    "bessel_y0":(lambda x: mp.bessely(0,x), 1e-2),
+    "bessel_y1":(lambda x: mp.bessely(1,x), 1e-2),
+    "bessel_i0":(lambda x: mp.besseli(0,x), 1e-2),
+    "bessel_i1":(lambda x: mp.besseli(1,x), 1e-2),
+    "bessel_k0":(lambda x: mp.besselk(0,x), 1e-2),
+    "bessel_k1":(lambda x: mp.besselk(1,x), 1e-2),
+    "bessel_jn":(lambda n,x: mp.besselj(n,x), 1e-2),
+    "bessel_yn":(lambda n,x: mp.bessely(n,x), 1e-2),
+    "bessel_in":(lambda n,x: mp.besseli(n,x), 1e-2),
+    "bessel_kn":(lambda n,x: mp.besselk(n,x), 1e-2),
 }
 
 def main():
