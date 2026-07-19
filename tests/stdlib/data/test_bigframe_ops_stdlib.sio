@@ -87,6 +87,29 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let sfilt = bf_filter_gt(&sf, 0, 0.5)
     if bf_nrows(&sfilt) != 50 { print("FAIL scatter_n\n"); return 42 }
     if bf_get(&sfilt, 0, 1) != 1.0 { print("FAIL scatter_v\n"); return 43 }
+    // SPARSE-key hash groupby: keys 0,1000,..,999000 (all >> the dense cap of 1023, which would drop them)
+    var hg = bf_new(2, 1024)
+    var hi: i64 = 0
+    while hi < 50000 { var hrow:[f64;64]=[0.0;64]; hrow[0]=((hi%1000)*1000) as f64; hrow[1]=1.0; bf_push_row(&!hg,&hrow,2); hi=hi+1 }
+    let hgr = bf_groupby_sum_hash(&hg, 0, 1)
+    if bf_nrows(&hgr) != 1000 { print("FAIL hash_groupby_n\n"); return 44 }   // 1000 distinct sparse keys
+    var htot = bf_col_sum(&hgr, 1)
+    if htot < 49999.5 || htot > 50000.5 { print("FAIL hash_groupby_total\n"); return 45 }  // 50000 rows total
+    // INNER HASH-JOIN at scale: left 100000 rows (key=i, lval=i*10), right 60000 rows
+    // (key=i, rval=i*2). Inner join on key drops left rows with key >= 60000 -> 60000 matches.
+    var jl = bf_new(2, 1024)
+    var jli: i64 = 0
+    while jli < 100000 { var jrow:[f64;64]=[0.0;64]; jrow[0]=jli as f64; jrow[1]=(jli*10) as f64; bf_push_row(&!jl,&jrow,2); jli=jli+1 }
+    var jr = bf_new(2, 1024)
+    var jrx: i64 = 0
+    while jrx < 60000 { var krow:[f64;64]=[0.0;64]; krow[0]=jrx as f64; krow[1]=(jrx*2) as f64; bf_push_row(&!jr,&krow,2); jrx=jrx+1 }
+    let jj = bf_join_inner(&jl, 0, &jr, 0)
+    if bf_nrows(&jj) != 60000 { print("FAIL join_n\n"); return 46 }   // inner join filters 100k -> 60k
+    if bf_ncols(&jj) != 3 { print("FAIL join_c\n"); return 47 }       // left 2 cols + right 1 non-key col
+    // Left probe order preserved: joined row 5000 == left row 5000 joined to right row 5000.
+    if bf_get(&jj, 5000, 0) != 5000.0 { print("FAIL join_key\n"); return 48 }
+    if bf_get(&jj, 5000, 1) != 50000.0 { print("FAIL join_lval\n"); return 49 }  // left  i*10
+    if bf_get(&jj, 5000, 2) != 10000.0 { print("FAIL join_rval\n"); return 50 }  // right i*2
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
