@@ -3,7 +3,8 @@
 //
 // These are the relational primitives that make a >>1024-row BigFrame useful as a
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
-// hash-joins, a stable comparison sort, and an adaptive stable radix sort.
+// hash-joins, a stable comparison sort, an adaptive stable radix sort, and
+// unique / drop-duplicates.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -785,5 +786,85 @@ pub fn bf_sort_radix(src: &BigFrame, col: i64, ascending: bool) -> BigFrame with
     heap_free(kb as *mut i8)
     heap_free(ia as *mut i8)
     heap_free(ib as *mut i8)
+    out
+}
+
+/// Distinct values of column `col`, in FIRST-SEEN order (like pandas Series.unique()).
+/// Single pass with an open-addressing hash table (the bf_ghash Fibonacci mix, load
+/// factor <= 0.5); each value is emitted the first time its slot is claimed. Returns a
+/// 1-column BigFrame. O(n) expected. NATIVE + lean_single only (heap).
+pub fn bf_unique(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || nr <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64   // occupancy (starts 0 via calloc)
+    let hk  = heap_alloc(size * 8) as *mut f64   // key at that slot
+    let kp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, 16)
+    var r: i64 = 0
+    while r < nr {
+        let v = read_f64(kp, r)
+        var slot = bf_ghash(v, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, v)
+                var row: [f64; 64] = [0.0; 64]
+                row[0] = v
+                bf_push_row(&!out, &row, 1)      // emit on first sight -> first-seen order
+                done = true
+            } else {
+                if read_f64(hk, slot) == v { done = true } else { slot = (slot + 1) & mask }
+            }
+        }
+        r = r + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    out
+}
+
+/// Keep the FIRST row for each distinct value of `key_col`, dropping later duplicates
+/// (like pandas drop_duplicates(subset=[key], keep="first")). Preserves input row
+/// order among the survivors. Single pass with the same open-addressing table as
+/// bf_unique; on a key's first sighting the whole row is copied into the output.
+/// Returns a BigFrame with all of `src`'s columns. O(n) expected. NATIVE +
+/// lean_single only (heap).
+pub fn bf_drop_duplicates(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nc = bf_ncols(src)
+    let nr = bf_nrows(src)
+    if key_col < 0 || key_col >= nc || nr <= 0 { return bf_new(nc, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    var out = bf_new(nc, 16)
+    var r: i64 = 0
+    while r < nr {
+        let k = read_f64(kp, r)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                var row: [f64; 64] = [0.0; 64]
+                var c: i64 = 0
+                while c < nc { row[c] = bf_get(src, r, c); c = c + 1 }
+                bf_push_row(&!out, &row, nc)
+                done = true
+            } else {
+                if read_f64(hk, slot) == k { done = true } else { slot = (slot + 1) & mask }
+            }
+        }
+        r = r + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
     out
 }
