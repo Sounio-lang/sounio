@@ -501,6 +501,127 @@ def assert_unknowns(root: Path) -> None:
     check(reversed_edge_data["verdict"] == "UNKNOWN", "reversed edge identity became strict OK")
     check("E-SRB-000" in diagnostic_codes(reversed_edge_data), "reversed edge identity lacks E-SRB-000")
 
+    duplicate_state_report = write(
+        root / "forged-duplicate-state.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tincomplete",
+                "status\tcomplete",
+                "surface_status\tnot_evaluated",
+                "surface_status\tvalid",
+                "capacity\t1",
+                "capacity\t256",
+                "saturated\ttrue",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                "",
+            )
+        ),
+    )
+    duplicate_state_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-state.json",
+        duplicate_state_report,
+    )
+    check(duplicate_state_data["verdict"] == "UNKNOWN", "duplicate state records became strict OK")
+    check(
+        any("duplicate status record" in item["message"] for item in duplicate_state_data["diagnostics"]),
+        "duplicate state records lack causal diagnostics",
+    )
+
+    duplicate_node_report = write(
+        root / "forged-duplicate-node.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{src}",
+                "logical_node\t1\tcycle::host-audit-alias",
+                "",
+            )
+        ),
+    )
+    duplicate_node_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-node.json",
+        duplicate_node_report,
+    )
+    check(duplicate_node_data["verdict"] == "UNKNOWN", "duplicate physical node became strict OK")
+    check(
+        any("duplicate raw AST node" in item["message"] for item in duplicate_node_data["diagnostics"]),
+        "duplicate physical node lacks causal diagnostic",
+    )
+
+    missing_identity_report = write(
+        root / "forged-missing-identity.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "",
+            )
+        ),
+    )
+    missing_identity_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-missing-identity.json",
+        missing_identity_report,
+    )
+    check(missing_identity_data["verdict"] == "UNKNOWN", "legacy report without identity metadata became strict OK")
+    check(
+        any("lacks required state: surface_status" in item["message"] for item in missing_identity_data["diagnostics"]),
+        "missing identity metadata lacks causal diagnostic",
+    )
+
+    duplicate_logical_report = write(
+        root / "forged-duplicate-logical.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::same",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::same",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    duplicate_logical_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-logical.json",
+        duplicate_logical_report,
+    )
+    check(duplicate_logical_data["verdict"] == "UNKNOWN", "duplicate logical identity became strict OK")
+    check(
+        any("logical node identity is duplicated" in item["message"] for item in duplicate_logical_data["diagnostics"]),
+        "duplicate logical identity lacks causal diagnostic",
+    )
+
     no_evidence_manifest = write_policy(
         root,
         [policy_row("core", "pl-core").replace("gate:science_boundary_gate", "")],
