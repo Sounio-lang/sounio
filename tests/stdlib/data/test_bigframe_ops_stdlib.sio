@@ -19,6 +19,34 @@ fn approx_eq(a: f64, b: f64) -> bool {
     return ad < 0.0000001
 }
 
+// naive per-window median (sort a copy each window) -- reference for bf_rolling_median.
+fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n); out.n_rows = n; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(window * 8) as *mut f64
+    let half = window / 2; let odd = window - 2 * (window / 2)
+    var i: i64 = 0
+    while i < n {
+        if i >= window - 1 {
+            var t: i64 = 0
+            while t < window { write_f64(buf, t, read_f64(sp, i - window + 1 + t)); t = t + 1 }
+            var a: i64 = 1
+            while a < window {                    // insertion sort
+                let key = read_f64(buf, a); var b = a - 1
+                while b >= 0 && read_f64(buf, b) > key { write_f64(buf, b + 1, read_f64(buf, b)); b = b - 1 }
+                write_f64(buf, b + 1, key); a = a + 1
+            }
+            var med = 0.0
+            if odd == 1 { med = read_f64(buf, half) } else { med = (read_f64(buf, half - 1) + read_f64(buf, half)) / 2.0 }
+            write_f64(op, i, med)
+        } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    heap_free(buf as *mut i8)
+    out
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let n: i64 = 1000000
 
@@ -476,6 +504,55 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let lvstd = bf_expanding_std(&lvf, 0, 0.0 - 1.0)
     var lvlast = bf_get(&lvstd, 999999, 0)
     if lvlast < 1000000.0 || lvlast > 1000001.0 { print("FAIL expstd_largevar\n"); return 191 }  // 1000000.5; buggy sqrt ~1279997 excluded
+    // ROLLING VAR / STD. col0=i, col1=i*1000000 (large-var lock). fill=-1.0.
+    var rvf = bf_new(2, 16)
+    var rvfi: i64 = 0
+    while rvfi < 100000 { var rvr:[f64;64]=[0.0;64]; rvr[0]=rvfi as f64; rvr[1]=(rvfi*1000000) as f64; bf_push_row(&!rvf,&rvr,2); rvfi=rvfi+1 }
+    // window 3 over consecutive ints -> var=1, std=1 for i>=2 (devs {-1,0,1}, Σ=2, /2=1).
+    let rvv = bf_rolling_var(&rvf, 0, 3, 0.0 - 1.0)
+    let rvs = bf_rolling_std(&rvf, 0, 3, 0.0 - 1.0)
+    if bf_nrows(&rvv) != 100000 { print("FAIL rvar_n\n"); return 192 }
+    if bf_get(&rvv, 1, 0) != (0.0 - 1.0) { print("FAIL rvar_fill\n"); return 193 }   // window not full
+    if !approx_eq(bf_get(&rvv, 2, 0), 1.0) { print("FAIL rvar2\n"); return 194 }
+    if !approx_eq(bf_get(&rvv, 50000, 0), 1.0) { print("FAIL rvar50k\n"); return 195 }
+    if !approx_eq(bf_get(&rvs, 50000, 0), 1.0) { print("FAIL rstd50k\n"); return 196 }
+    // window 3 over col1=i*1e6 (strongly trending, values up to ~1e11) -> devs {-1e6,0,1e6},
+    // var=1e12 EXACT, std=1e6. Welford stays exact here (a naive S2-S1²/w cancels to ~0.1% off).
+    // std also LOCKS bf_sqrt: the buggy builtin sqrt(1e12) gave ~1279997, outside the range.
+    let rvvL = bf_rolling_var(&rvf, 1, 3, 0.0 - 1.0)
+    let rvsL = bf_rolling_std(&rvf, 1, 3, 0.0 - 1.0)
+    var rvL = bf_get(&rvvL, 99999, 0)
+    if rvL < 999999999.0 || rvL > 1000000000001.0 { print("FAIL rvar_large\n"); return 197 }       // 1e12 (Welford exact)
+    if !approx_eq(rvL / 1000000000000.0, 1.0) { print("FAIL rvar_large_exact\n"); return 198 }      // relative: essentially exact
+    var rsL = bf_get(&rvsL, 99999, 0)
+    if rsL < 999999.0 || rsL > 1000001.0 { print("FAIL rstd_large\n"); return 199 }                 // 1e6; buggy sqrt ~1.28e6 excluded
+    // constant window -> var=0, std=0.
+    var rcf = bf_new(1, 16); var rci: i64 = 0
+    while rci < 1000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=42.0; bf_push_row(&!rcf,&rcr,1); rci=rci+1 }
+    let rcv = bf_rolling_var(&rcf, 0, 100, 0.0 - 1.0)
+    let rcs = bf_rolling_std(&rcf, 0, 100, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rcv, 500, 0), 0.0) { print("FAIL rvar_const\n"); return 201 }
+    if !approx_eq(bf_get(&rcs, 500, 0), 0.0) { print("FAIL rstd_const\n"); return 202 }
+    // ROLLING MEDIAN. Exact small cases (odd + even window) then a differential vs the naive
+    // per-window sort on scrambled + duplicate-heavy data (validates binary-search insert/remove).
+    var rmf = bf_new(1, 16)
+    var rmi: i64 = 0
+    while rmi < 2000 { var rmr:[f64;64]=[0.0;64]; rmr[0]=(rmi%37) as f64; bf_push_row(&!rmf,&rmr,1); rmi=rmi+1 }
+    let rm5 = bf_rolling_median(&rmf, 0, 5, 0.0 - 1.0)   // window 5 over 0..36 sawtooth
+    if bf_get(&rm5, 3, 0) != (0.0 - 1.0) { print("FAIL rmed_fill\n"); return 203 }   // window not full
+    if !approx_eq(bf_get(&rm5, 4, 0), 2.0) { print("FAIL rmed5a\n"); return 204 }    // median[0..4]=median(0,1,2,3,4)=2
+    if !approx_eq(bf_get(&rm5, 9, 0), 7.0) { print("FAIL rmed5b\n"); return 205 }    // median(5,6,7,8,9)=7
+    let rm4 = bf_rolling_median(&rmf, 0, 4, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rm4, 3, 0), 1.5) { print("FAIL rmed4\n"); return 206 }     // even -> (1+2)/2 = 1.5
+    // DIFFERENTIAL vs naive: scrambled + dup-heavy col = (i*2654435761)%100, 3000 rows, window 50.
+    var rdf = bf_new(1, 16)
+    var rdi: i64 = 0
+    while rdi < 3000 { var rdr:[f64;64]=[0.0;64]; rdr[0]=((rdi*2654435761)%100) as f64; bf_push_row(&!rdf,&rdr,1); rdi=rdi+1 }
+    let rda = bf_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    let rdb = naive_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    var rdd: i64 = 0; var rdj: i64 = 0
+    while rdj < 3000 { if bf_get(&rda, rdj, 0) != bf_get(&rdb, rdj, 0) { rdd = rdd + 1 } rdj = rdj + 1 }
+    if rdd != 0 { print("FAIL rmed_vs_naive\n"); return 207 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
