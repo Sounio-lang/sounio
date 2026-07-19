@@ -772,6 +772,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-physics-epistemic-audit | historical | docs/research/particle_physics_epistemic_audit.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
