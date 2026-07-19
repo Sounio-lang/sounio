@@ -1,0 +1,99 @@
+use module_parse::{load_module_file}
+use parser::ast::{AstPath, ItemKind, ItemList, StringList}
+use parser::parser::{parser_last_error_count, parser_reset_last_errors}
+
+fn module_identity_segment_eq(segment: StringList, expected: string) -> bool with Mut, Panic, Div {
+    let expected_len = str_len(expected)
+    if segment.head_len != expected_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < expected_len {
+        if segment.head_buf[i as usize] != (str_char_at(expected, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn module_identity_path_eq_one(path: AstPath, first: string) -> bool with Mut, Panic, Div {
+    path.seg_count == 1 && module_identity_segment_eq(path.segments, first)
+}
+
+fn module_identity_path_eq_two(path: AstPath, first: string, second: string) -> bool with Mut, Panic, Div {
+    if path.seg_count != 2 || !module_identity_segment_eq(path.segments, first) {
+        return false
+    }
+    match path.segments.tail {
+        None => false
+        Some(rest) => module_identity_segment_eq(*rest, second)
+    }
+}
+
+fn module_identity_ast_has_declared_path(
+    items: Option<Box<ItemList>>,
+    first: string,
+    second: string,
+) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        None => false
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemUnit && item.use_path.seg_count > 0 {
+                module_identity_path_eq_two(item.use_path, first, second)
+            } else {
+                module_identity_ast_has_declared_path((*list).tail, first, second)
+            }
+        }
+    }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    parser_reset_last_errors()
+    let left = load_module_file("tests/compiler/module_declaration_identity/left/mod.sio")
+    if parser_last_error_count() > 0 {
+        print("module_declaration_identity_error=left_parse\n")
+        return 1
+    }
+
+    parser_reset_last_errors()
+    let right = load_module_file("tests/compiler/module_declaration_identity/right/mod.sio")
+    if parser_last_error_count() > 0 {
+        print("module_declaration_identity_error=right_parse\n")
+        return 2
+    }
+
+    parser_reset_last_errors()
+    let fallback = load_module_file("tests/compiler/module_declaration_identity/fallback/legacy_leaf.sio")
+    if parser_last_error_count() > 0 {
+        print("module_declaration_identity_error=fallback_parse\n")
+        return 3
+    }
+
+    let left_identity = module_identity_path_eq_two(left.module_path, "collision", "left")
+    let right_identity = module_identity_path_eq_two(right.module_path, "collision", "right")
+    let left_ast = module_identity_ast_has_declared_path(left.items, "collision", "left")
+    let right_ast = module_identity_ast_has_declared_path(right.items, "collision", "right")
+    let fallback_identity = module_identity_path_eq_one(fallback.module_path, "legacy_leaf")
+
+    print("declared_identity_left=")
+    if left_identity { print("1\n") } else { print("0\n") }
+    print("declared_identity_right=")
+    if right_identity { print("1\n") } else { print("0\n") }
+    print("module_decl_ast_left=")
+    if left_ast { print("1\n") } else { print("0\n") }
+    print("module_decl_ast_right=")
+    if right_ast { print("1\n") } else { print("0\n") }
+    print("same_basename_distinct_logical_identity=")
+    if left_identity && right_identity { print("1\n") } else { print("0\n") }
+    print("legacy_basename_fallback=")
+    if fallback_identity { print("1\n") } else { print("0\n") }
+
+    if left_identity && right_identity && left_ast && right_ast && fallback_identity {
+        print("module_declaration_identity_verdict=0\n")
+        return 0
+    }
+    print("module_declaration_identity_verdict=1\n")
+    1
+}
