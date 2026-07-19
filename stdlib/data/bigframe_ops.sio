@@ -3,8 +3,8 @@
 //
 // These are the relational primitives that make a >>1024-row BigFrame useful as a
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
-// hash-joins, a stable comparison sort, an adaptive stable radix sort, and
-// unique / drop-duplicates.
+// hash-joins, a stable comparison sort, an adaptive stable radix sort,
+// unique / drop-duplicates, and value-counts.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -866,5 +866,69 @@ pub fn bf_drop_duplicates(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, 
     }
     heap_free(occ as *mut i8)
     heap_free(hk as *mut i8)
+    out
+}
+
+/// Count occurrences of each distinct value of column `col`, returned as a 2-column
+/// [value, count] BigFrame SORTED BY COUNT DESCENDING (like pandas Series.value_counts()).
+/// One open-addressing hash-count pass (bf_ghash, load <= 0.5) tallies each distinct
+/// value; the distinct rows are emitted in first-seen order, then stably sorted by
+/// count descending (so equal counts keep first-seen order). O(n + d log d) for d
+/// distinct values. NATIVE + lean_single only (heap).
+pub fn bf_value_counts(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || nr <= 0 { return bf_new(2, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hc  = heap_alloc(size * 8) as *mut f64   // running count per slot
+    let ord = heap_alloc(size * 8) as *mut i64   // slots in first-seen order
+    let kp = bf_col_ptr(src, col) as *mut f64
+    var nd: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let v = read_f64(kp, r)
+        var slot = bf_ghash(v, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, v)
+                write_f64(hc, slot, 1.0)
+                write_i64(ord, nd, slot)
+                nd = nd + 1
+                done = true
+            } else {
+                if read_f64(hk, slot) == v {
+                    write_f64(hc, slot, read_f64(hc, slot) + 1.0)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    var cap = nd
+    if cap < 1 { cap = 1 }
+    var tmp = bf_new(2, cap)
+    var j: i64 = 0
+    while j < nd {
+        let s = read_i64(ord, j)
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = read_f64(hk, s)
+        row[1] = read_f64(hc, s)
+        bf_push_row(&!tmp, &row, 2)
+        j = j + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hc as *mut i8)
+    heap_free(ord as *mut i8)
+    let out = bf_sort_by(&tmp, 1, false)     // by count descending; stable -> ties first-seen
+    var tm = tmp
+    bf_free(&!tm)
     out
 }
