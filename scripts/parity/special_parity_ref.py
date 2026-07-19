@@ -95,7 +95,7 @@ REF = {
     "jacobi_p":    (lambda n,a,b,x: _jacobi_explicit(n, a, b, x), 1e-2),
 }
 
-def main():
+def main(require_all=False):
     # NOTE: tokenized over the whole stream, not split per-line. The Sounio
     # `print_int` builtin emits a trailing newline after every integer it
     # prints (confirmed empirically: `print_int(a); print(" "); print_int(b)`
@@ -125,7 +125,12 @@ def main():
     for fn in REF:
         pts = rows.get(fn, [])
         if not pts:
-            print(f"{fn:<18}{0:>7}{'NO DATA':>16}  SKIP"); continue
+            # NO-DATA is SKIP for partial/self-test runs, but a coverage FAIL
+            # under --require-all (a full gate run) so a missing/broken emitter
+            # can't silently drop a function from the map.
+            print(f"{fn:<18}{0:>7}{'NO DATA':>16}  {'FAIL(no-data)' if require_all else 'SKIP'}")
+            if require_all: fail = 1
+            continue
         worst = max(pts, key=lambda r: r[3]); mre = worst[3]; thr = REF[fn][1]
         ok = mre <= thr
         print(f"{fn:<18}{len(pts):>7}{mre:>16.3e}  {'PASS' if ok else 'FAIL(thr=%.0e)'%thr}")
@@ -147,4 +152,4 @@ def selftest():
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv: selftest()
-    else: sys.exit(main())
+    else: sys.exit(main(require_all=("--require-all" in sys.argv)))

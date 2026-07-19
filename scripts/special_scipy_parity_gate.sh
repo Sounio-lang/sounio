@@ -19,8 +19,11 @@ emit_all() { : > "$OUT/emit.txt"
   done
 }
 
-FAMILIES="${PARITY_FAMILIES:-erf}"
+# Full 9-family default. A dev may narrow it via PARITY_FAMILIES and set
+# REQUIRE_ALL=0 (a subset would otherwise fail the coverage assertion).
+FAMILIES="${PARITY_FAMILIES:-erf gamma beta igamma bessel airyzetaelliptic hypergeometric orthopoly}"
+REQ=""; [ "${REQUIRE_ALL:-1}" = "1" ] && REQ="--require-all"
 emit_all $FAMILIES || exit 1
-python3 "$REF" < "$OUT/emit.txt" | tee "$OUT/report.txt"
+python3 "$REF" $REQ < "$OUT/emit.txt" | tee "$OUT/report.txt"
 grep -q "SPECIAL_SCIPY_PARITY_OK" "$OUT/report.txt" \
   && echo "SPECIAL_SCIPY_PARITY_GATE_OK" || { echo "GATE FAILED"; exit 1; }
