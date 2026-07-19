@@ -239,6 +239,7 @@ variant_call_form="not-run-baseline"
 struct_variant="not-run-baseline"
 cross_kind="not-run-baseline"
 bare_variant="not-run-baseline"
+true_private_struct_variant="not-run-baseline"
 if [[ "$single_state" == resolved ]]; then
   expect_ambiguous_rejection ambiguous-global "$FIXTURES/ambiguous_public_main.sio"
   ambiguous_global="E137"
@@ -255,6 +256,10 @@ if [[ "$single_state" == resolved ]]; then
   struct_variant="pass"
   cross_kind="pass"
   bare_variant="pass"
+  expect_private_rejection private-enum-structured \
+    "$FIXTURES/private_structured_enum_main.sio" E177 \
+    'enum constructor is private in its defining module'
+  true_private_struct_variant="E177"
   expect_context_runtime single "$FIXTURES/duplicate_private_single_main.sio" \
     'PASS duplicate_private_single_context'
   expect_context_runtime matrix18 "$FIXTURES/duplicate_private_18_main.sio" \
@@ -272,7 +277,7 @@ expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
 
-echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state ambiguous_global=$ambiguous_global ambiguous_bare_variant=$ambiguous_bare_variant aggregate_witness_mode=check-only duplicate_private_struct=$duplicate_private_struct duplicate_private_enum=$duplicate_private_enum variant_call_form=$variant_call_form struct_variant=$struct_variant cross_kind=$cross_kind bare_variant=$bare_variant single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
+echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state ambiguous_global=$ambiguous_global ambiguous_bare_variant=$ambiguous_bare_variant aggregate_witness_mode=check-only duplicate_private_struct=$duplicate_private_struct duplicate_private_enum=$duplicate_private_enum variant_call_form=$variant_call_form struct_variant=$struct_variant cross_kind=$cross_kind bare_variant=$bare_variant single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 true_private_struct_variant=$true_private_struct_variant"
 
 if [[ "$EXPECT" == baseline && "$single_state" != baseline ]]; then
   fail "expected the pinned baseline, got $single_state"
