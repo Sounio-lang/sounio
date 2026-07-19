@@ -13,6 +13,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | filter_count (`bf_count_gt`, raw scan) | | 1.84 | 0.74 | **2.5x** | 12.1x |
 | filter_materialize (col-major gather) | | 12.5 | 6.2 | **2.0x** | 5.0x |
 | groupby_sum (10 dense keys, O(n) accumulator) | | 13.7 | 13.8 | **0.99x — parity** | 0.99x |
+| groupby_sum_hash (1000 SPARSE keys, open-addressing) | | 22.7 | 17.0 | **1.33x** | (dense drops keys>=1024) |
 | frame build (1M x 3) | | ~20 (once) | — | — | — |
 
 ## What changed (all stdlib, no compiler)

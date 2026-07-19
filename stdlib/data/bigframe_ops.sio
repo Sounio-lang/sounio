@@ -189,3 +189,74 @@ pub fn bf_groupby_sum(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame wi
     }
     out
 }
+
+// Fibonacci hash of an f64 key (via its bits) into [0, mask].
+fn bf_ghash(key: f64, mask: i64) -> i64 with Mut, Div, Panic {
+    var h = f64_to_bits(key)
+    h = h * (0 - 7046029254386353131)   // 0x9E3779B97F4A7C15 (signed) -- multiplicative/Fibonacci mix
+    h = h ^ (h >> 29)
+    h & mask
+}
+
+/// Group `src` by `key_col` (ANY f64 key -- sparse or large-domain, unlike bf_groupby_sum which caps
+/// keys at 0..1023) and sum `val_col` per group, via an open-addressing hash table on the heap. O(n)
+/// expected. Returns a 2-column [key, sum] BigFrame in hash-table order (not sorted). For small DENSE
+/// integer keys, bf_groupby_sum is faster (direct-index, no probing); use this when keys are sparse,
+/// large, or non-integer.
+pub fn bf_groupby_sum_hash(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    if key_col < 0 || key_col >= bf_ncols(src) { return bf_new(2, 1) }
+    if val_col < 0 || val_col >= bf_ncols(src) { return bf_new(2, 1) }
+    if nr <= 0 { return bf_new(2, 1) }
+    // table size = next power of two >= 2*nr (load factor <= 0.5 -> few probes). occ starts 0 (calloc).
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hs  = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var ndistinct: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let key = read_f64(kp, r)
+        let val = read_f64(vp, r)
+        var slot = bf_ghash(key, mask)
+        var placed = false
+        while !placed {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, key)
+                write_f64(hs, slot, val)
+                ndistinct = ndistinct + 1
+                placed = true
+            } else {
+                if read_f64(hk, slot) == key {
+                    write_f64(hs, slot, read_f64(hs, slot) + val)
+                    placed = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    var cap = ndistinct
+    if cap < 1 { cap = 1 }
+    var out = bf_new(2, cap)
+    var s: i64 = 0
+    while s < size {
+        if read_f64(occ, s) == 1.0 {
+            var row: [f64; 64] = [0.0; 64]
+            row[0] = read_f64(hk, s)
+            row[1] = read_f64(hs, s)
+            bf_push_row(&!out, &row, 2)
+        }
+        s = s + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hs as *mut i8)
+    out
+}
