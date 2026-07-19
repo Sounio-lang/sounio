@@ -1225,16 +1225,34 @@ fn gpu_batch_f64_dim(kernel: GpuKernelIr) -> i64 {
 // (its state-major layout [state*dim+comp] already matches a col-major B). D(dim×16) is computed as
 // (dim/8) m-tiles × 2 n-tiles × (dim/4) k-chunks of m8n8k4; each (m,n) tile accumulates its k-chunks in
 // the f64 fragment {%fd10,%fd11} then stores to pout (D-layout [comp*16+state]).
-fn gpu_emit_oct_batch_f64(paR: string, pHR: string, poutR: string, dim: i64, bits: i64, transpose: bool) -> string with Mut, Panic, Div, Alloc {
+fn gpu_emit_oct_batch_f64(paR: string, pHR: string, poutR: string, dim: i64, bits: i64, transpose: bool, grid: bool) -> string with Mut, Panic, Div, Alloc {
     let sh = if dim == 16 { 4 } else { 3 }
+    // grid: each block processes one independent problem — offset the pointers by %ctaid.x. a[dim],
+    // H[16*dim], D[256] per problem (all f64). The whole warp of each block runs its own tile.
+    var t = ""
+    if grid {
+        t = str_concat(t, "    mov.u32 %r2, %ctaid.x;\n")
+        t = str_concat(str_concat(t, "    mov.u32 %r3, "), i64_to_string(dim * 8))
+        t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd3, %r2, %r3;\n    add.s64 %rd3, "), paR)
+        t = str_concat(t, ", %rd3;\n")
+        t = str_concat(str_concat(t, "    mov.u32 %r3, "), i64_to_string(16 * dim * 8))
+        t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd4, %r2, %r3;\n    add.s64 %rd4, "), pHR)
+        t = str_concat(t, ", %rd4;\n")
+        t = str_concat(t, "    mov.u32 %r3, 2048;\n    mul.wide.u32 %rd5, %r2, %r3;\n    add.s64 %rd5, ")
+        t = str_concat(t, poutR)
+        t = str_concat(t, ", %rd5;\n")
+    }
+    let aR = if grid { "%rd3" } else { paR }
+    let hR = if grid { "%rd4" } else { pHR }
+    let oR = if grid { "%rd5" } else { poutR }
     // thread 0: build L(a) f64 into sL[shared_array]. Normal: sL[k*dim+j] = σ(k⊕j,j)·a[k⊕j] (row-major).
     // Transpose: sL[j*dim+k] = same value → L(a)ᵀ, so the tile computes L(a)ᵀ·B (the BPTT backward).
-    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BF0;\n"
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BF0;\n")
     t = str_concat(t, "    mov.u32 %r5, 0;\n$BFL:\n")
     t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
     t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
     t = str_concat(t, ";\n    xor.b32 %r8, %r6, %r7;\n")
-    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), aR)
     t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
     t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
     t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n    mul.f64 %fd0, %fd0, %fd1;\n")
@@ -1257,7 +1275,7 @@ fn gpu_emit_oct_batch_f64(paR: string, pHR: string, poutR: string, dim: i64, bit
     while mt < mtiles {
         var nt: i64 = 0
         while nt < 2 {
-            t = str_concat(t, gpu_emit_f64_mma_block(pHR, poutR, mt, nt, dim, kchunks))
+            t = str_concat(t, gpu_emit_f64_mma_block(hR, oR, mt, nt, dim, kchunks))
             nt = nt + 1
         }
         mt = mt + 1
@@ -1780,7 +1798,8 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let tdim = if op.rhs_imm == 16 { 16 } else { 8 }
             let tbits = if tdim == 16 { 4 } else { 3 }
             let ttr = op.byte_offset == 1
-            ptx_push_str(buf, gpu_emit_oct_batch_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), tdim, tbits, ttr))
+            let tgrid = op.byte_offset == 2
+            ptx_push_str(buf, gpu_emit_oct_batch_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), tdim, tbits, ttr, tgrid))
         }
 
         GpuOpcode::GpuWmmaTile => {
