@@ -127,8 +127,16 @@ first:
   58.4%. OCT vs QUAT differ *only* in the algebra → the 46-pt gap is attributable **entirely to
   non-associativity**. Semi-synthetic (real symbolic inputs, constructed non-associative label) — the
   §6.1 target met: non-associativity demonstrably matters on non-toy inputs.
-- **A∞ / higher-homotopy / operadic data** — where associativity holds only up to a coherence whose
-  first obstruction is literally the associator (ties to the O-CSSM homology-functor thread).
+- **A∞ / higher-homotopy — DONE, two-sided result** (`BORROMEAN_AINFINITY.md`). Borromean triple-linking
+  via path signatures (iterated integrals — a real time-series ML representation): on the pairwise-trivial
+  (Borromean) slice, associative level-1/level-2 invariants are **blind** (≈48%), the level-3 Massey `m₃`
+  iterated-area invariant reads it (**99.8%**), an unstructured MLP on the raw path reaches only 56%. So
+  the A∞ door is **real** on genuine topology (not a constructed task; computation verified — circle Lévy
+  area = π). **But** the octonion associator, naively applied (associator of the 3 coordinate increments),
+  is at chance (48.9%): the path Massey product and the Cayley-Dickson associator are **distinct**
+  non-associative structures. Sharp consequence for the paper: the octonion primitive pays off when the
+  signal is a **static ternary CD-type associator**, not for *every* higher-homotopy obstruction; a
+  faithful bridge (octonion-valued path signature) is open. Ties to the O-CSSM homology-functor thread.
 - **Exceptional-structure physics** — octonions in G₂/F₄ gauge structure, sedenion zero-divisor
   geometry; genuinely non-associative but data is scarce/simulated.
 - Order-sensitive composition where the *composition operator* (not just the group) is non-associative —
