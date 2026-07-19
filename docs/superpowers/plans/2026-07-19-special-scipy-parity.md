@@ -21,25 +21,42 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.pl
 
 ---
 
-## The wire format (single source of truth, no drift)
+## Phase-0 outcome (Task 0, commit `ffa93c5f1`) — DECISIONS THAT BIND THE REST
 
-Each emitter line is fully self-describing:
+- **`print_int(n: i64)` is a compiler builtin** — bare call, NO `use`.
+- **Bridge = BIT-EXACT** via the `f64_to_bits(x: f64) -> i64` builtin (validated:
+  `f64_to_bits(1.0)` = `4607182418800017408`). Lossless across all magnitudes; no
+  scaling, no "nice value" constraint on arguments. Fixed-point is only a
+  documented fallback and is NOT used.
+- **Engine = `lean_single` for EVERYTHING.** Glob-import into non-`pub`
+  `special::*` families fails on default Madaros (`E175 private`); `f64_to_bits`
+  segfaults on default. Every compile+run in this vertical MUST set
+  `SOUNIO_SOUC_ENGINE=lean_single`.
+- **f64-cast-bug guard:** keep every `f64_to_bits`/cast in the SAME function scope
+  as where the f64 is produced — never pass an f64 across a call boundary and
+  bitcast it after (per memory `madaros-f64-param-cast-bug`). The emit helpers
+  below therefore take the already-computed f64 and bit it immediately.
+
+---
+
+## The wire format (bit-exact, single source of truth, no drift)
+
+Each emitter line:
 
 ```
-<fn> <nargs> <arg1_micro> [<arg2_micro> ...] <val_scaled> <val_scale_exp>
+<fn> <nargs> <arg1_bits> [<arg2_bits> ...] <val_bits>
 ```
 
 - `fn` — unique function name (`erf`, `bessel_j0`, `lgamma`, …).
 - `nargs` — count of argument columns that follow.
-- `argK_micro` — `round(argK * 1e6)` as i64. Arguments are chosen as "nice"
-  values that round-trip exactly through 1e6 (e.g. 0.5, 2.5, -1.0, 0.1).
-- `val_scaled` — `round(value * 10^val_scale_exp)` as i64.
-- `val_scale_exp` — the base-10 exponent used for the value (per line, so the
-  Python side needs no shared config: `value = val_scaled / 10**val_scale_exp`,
-  `argK = argK_micro / 1e6`).
+- `argK_bits` / `val_bits` — the **signed i64 IEEE-754 bit pattern** of the f64,
+  from `f64_to_bits(x)`. Any f64 round-trips exactly (no precision loss, no range
+  limit, no shared scale config).
 
-Python reconstructs `argK` and `value`, computes `ref = mpmath_fn(*args)`, and
-records `rel_err = |value - ref| / max(|ref|, 1e-300)`.
+Python reconstructs each f64 exactly via
+`struct.unpack('<d', struct.pack('<q', bits))[0]`, computes `ref = mpmath_fn(*args)`,
+and records `rel_err = |value - ref| / max(|ref|, 1e-300)`. Because args are also
+bit-exact, mpmath evaluates at *exactly* the double Sounio used.
 
 ---
 
@@ -181,10 +198,13 @@ git commit -m "test(parity): Phase-0 capability probes (fixed-point/glob/bitcast
 ```python
 #!/usr/bin/env python3
 """Compare Sounio special-function emitter output against mpmath (dps=30).
-Reads emitter lines on stdin: `<fn> <nargs> <arg_micro...> <val_scaled> <val_scale_exp>`.
-Prints a per-function table and an overall verdict. No scipy dependency."""
-import sys, mpmath as mp
+Bit-exact wire on stdin: `<fn> <nargs> <arg_bits...> <val_bits>`, each field a
+signed-i64 IEEE-754 bit pattern (Sounio f64_to_bits). No scipy dependency."""
+import sys, struct, mpmath as mp
 mp.mp.dps = 30
+
+def bits_to_f64(field):
+    return struct.unpack('<d', struct.pack('<q', int(field)))[0]
 
 # fn -> (callable(*args)->mpf, gross_threshold). Thresholds are calibrated per
 # family in later tasks; default gross bar is 1e-2 (fail loudly only on that).
@@ -202,11 +222,10 @@ def main():
         line = line.strip()
         if not line or line.startswith("#"): continue
         parts = line.split()
-        if parts[0] not in REF: continue
+        if not parts or parts[0] not in REF: continue
         fn = parts[0]; nargs = int(parts[1])
-        args = [int(parts[2+i]) / 1e6 for i in range(nargs)]
-        val_scaled = int(parts[2+nargs]); exp = int(parts[3+nargs])
-        value = val_scaled / (10.0**exp)
+        args  = [bits_to_f64(parts[2+i]) for i in range(nargs)]
+        value = bits_to_f64(parts[2+nargs])
         ref = float(REF[fn][0](*[mp.mpf(a) for a in args]))
         rel = abs(value - ref) / max(abs(ref), 1e-300)
         rows.setdefault(fn, []).append((args, value, ref, rel))
@@ -223,11 +242,13 @@ def main():
     print("SPECIAL_SCIPY_PARITY_OK" if not fail else "SPECIAL_SCIPY_PARITY_FAIL")
     return fail
 
+def _bits(x):  # float64 -> signed i64 bit pattern (mirror of Sounio f64_to_bits)
+    return struct.unpack('<q', struct.pack('<d', x))[0]
+
 def selftest():
-    # Feed a synthetic exact line for erf(0.5); mpmath erf(0.5)=0.5204998778...
-    ref = float(mp.erf(mp.mpf(0.5)))
-    val_scaled = round(ref * 1e15)
-    line = f"erf 1 500000 {val_scaled} 15\n"
+    # Synthetic exact line for erf(0.5): args + value emitted as bit patterns.
+    val = float(mp.erf(mp.mpf('0.5')))
+    line = f"erf 1 {_bits(0.5)} {_bits(val)}\n"
     import io
     sys.stdin = io.StringIO(line)
     rc = main()
@@ -267,55 +288,40 @@ git commit -m "feat(parity): mpmath reference + comparator core (erf family)"
 
 - [ ] **Step 1: Write the shared emit helper**
 
-`stdlib/parity/emit.sio` — round-to-i64 + self-describing line printers.
-Substitute `print_int` with the real `PUTI` from Task 0 Step 1:
+`stdlib/parity/emit.sio` — bit-exact line printers. **Callers pass ALREADY-BITTED
+i64** (`f64_to_bits` applied to LOCALS in the caller's scope), so no f64 crosses a
+call boundary to be bitcast after (the f64-param-cast-bug guard). `print_int` and
+`f64_to_bits` are compiler builtins — no `use`.
 
 ```
-// Self-describing parity emit helpers. value line:
-//   <fn> <nargs> <arg_micro...> <val_scaled> <val_scale_exp>
-use io::*
-
-pub fn round_i64(x: f64) -> i64 with Mut, Div, Panic {
-    let r = if x >= 0.0 { x + 0.5 } else { x - 0.5 }
-    return r as i64
-}
-
-fn pow10(e: i64) -> f64 with Mut, Div, Panic {
-    var p = 1.0
-    var i = 0
-    while i < e { p = p * 10.0; i = i + 1 }
-    return p
-}
-
-pub fn emit1(name: string, a: f64, value: f64, exp: i64) with IO, Mut, Div, Panic {
+// Bit-exact parity emit. line: <fn> <nargs> <arg_bits...> <val_bits>
+pub fn emit1(name: string, a_bits: i64, val_bits: i64) with IO, Mut, Panic {
     print(name); print(" 1 ")
-    print_int(round_i64(a * 1000000.0)); print(" ")
-    print_int(round_i64(value * pow10(exp))); print(" ")
-    print_int(exp); print("\n")
+    print_int(a_bits); print(" ")
+    print_int(val_bits); print("\n")
 }
 
-pub fn emit2(name: string, a: f64, b: f64, value: f64, exp: i64) with IO, Mut, Div, Panic {
+pub fn emit2(name: string, a_bits: i64, b_bits: i64, val_bits: i64) with IO, Mut, Panic {
     print(name); print(" 2 ")
-    print_int(round_i64(a * 1000000.0)); print(" ")
-    print_int(round_i64(b * 1000000.0)); print(" ")
-    print_int(round_i64(value * pow10(exp))); print(" ")
-    print_int(exp); print("\n")
+    print_int(a_bits); print(" ")
+    print_int(b_bits); print(" ")
+    print_int(val_bits); print("\n")
 }
 
-pub fn emit3(name: string, a: f64, b: f64, c: f64, value: f64, exp: i64) with IO, Mut, Div, Panic {
+pub fn emit3(name: string, a_bits: i64, b_bits: i64, c_bits: i64, val_bits: i64) with IO, Mut, Panic {
     print(name); print(" 3 ")
-    print_int(round_i64(a * 1000000.0)); print(" ")
-    print_int(round_i64(b * 1000000.0)); print(" ")
-    print_int(round_i64(c * 1000000.0)); print(" ")
-    print_int(round_i64(value * pow10(exp))); print(" ")
-    print_int(exp); print("\n")
+    print_int(a_bits); print(" ")
+    print_int(b_bits); print(" ")
+    print_int(c_bits); print(" ")
+    print_int(val_bits); print("\n")
 }
 ```
 
 - [ ] **Step 2: Write the erf emitter**
 
-`tests/parity/special_parity_erf.sio` — evaluate each erf-family fn at nice
-points and emit. `exp=15` (all O(1)):
+`tests/parity/special_parity_erf.sio` — evaluate each erf-family fn at test
+points; **bit the arg and result as LOCALS in `main`** (f64-param-cast-bug guard),
+pass only i64 to the helper:
 
 ```
 //@ run-pass
@@ -323,22 +329,26 @@ use special::erf::*
 use parity::emit::*
 
 fn main() -> i32 with IO, Mut, Div, Panic {
-    // erf / erfc at a spread of nice points incl. the odd-symmetry anchor and 0
     let xs = [0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, -0.5, -1.0, -2.0]
     var i = 0
     while i < 10 {
         let x = xs[i]
-        emit1("erf", x, erf(x), 15)
-        emit1("erfc", x, erfc(x), 15)
-        emit1("normal_cdf", x, normal_cdf(x), 15)
+        let e = erf(x)
+        let ec = erfc(x)
+        let nc = normal_cdf(x)
+        emit1("erf", f64_to_bits(x), f64_to_bits(e))
+        emit1("erfc", f64_to_bits(x), f64_to_bits(ec))
+        emit1("normal_cdf", f64_to_bits(x), f64_to_bits(nc))
         i = i + 1
     }
-    // erfinv / normal_quantile on (-1,1) / (0,1)
     let ps = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975]
     var k = 0
     while k < 7 {
-        emit1("erfinv", ps[k], erfinv(ps[k]), 15)
-        emit1("normal_quantile", ps[k], normal_quantile(ps[k]), 15)
+        let p = ps[k]
+        let ei = erfinv(p)
+        let nq = normal_quantile(p)
+        emit1("erfinv", f64_to_bits(p), f64_to_bits(ei))
+        emit1("normal_quantile", f64_to_bits(p), f64_to_bits(nq))
         k = k + 1
     }
     return 0
@@ -353,11 +363,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 #!/usr/bin/env bash
 # SciPy↔Sounio special-function parity gate. Reference = mpmath (dps=30).
 # Requires mpmath (python3 -c 'import mpmath'). Dev-tier; not wired into ci.yml.
-# Point SOUC at a current-source or shipped Madaros; per-family engine per the
-# Phase-0 map (default unless a family needs lean_single).
+# The vertical is lean_single-LOCKED (Phase-0): glob-import into non-pub
+# special::* families and f64_to_bits both require lean_single. Every emitter is
+# compiled with SOUNIO_SOUC_ENGINE=lean_single.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+export SOUNIO_SOUC_ENGINE=lean_single   # mandatory for this vertical
 SOUC="${SOUNIO_TEST_SOUC_BIN:-./bin/souc}"
 REF="scripts/parity/special_parity_ref.py"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
@@ -366,8 +378,7 @@ python3 -c 'import mpmath' 2>/dev/null || { echo "SKIP: mpmath not installed"; e
 emit_all() { : > "$OUT/emit.txt"
   for fam in "$@"; do
     src="tests/parity/special_parity_${fam}.sio"
-    eng="${ENGINE_OVERRIDE:-}"   # set per-family if the map requires lean_single
-    if ! env ${eng:+SOUNIO_SOUC_ENGINE=$eng} "$SOUC" compile "$src" -o "$OUT/$fam.elf" >/dev/null 2>&1; then
+    if ! "$SOUC" compile "$src" -o "$OUT/$fam.elf" >/dev/null 2>&1; then
       echo "FAIL compile $src"; return 1; fi
     chmod +x "$OUT/$fam.elf"; "$OUT/$fam.elf" >> "$OUT/emit.txt" 2>/dev/null || { echo "FAIL run $src"; return 1; }
   done
@@ -399,6 +410,15 @@ git commit -m "feat(parity): erf family end-to-end (emit helper + gate + mpmath 
 ---
 
 ## Tasks 3–6: remaining pub families (names known)
+
+> **Phase-0 supersede:** the bridge is **bit-exact**, so IGNORE every `exp=…` /
+> `SCALE` mention in the per-family bullets below — there is no scale/exp. Emit
+> each arg and result via `f64_to_bits` of a LOCAL (exactly the Task 2 erf
+> emitter pattern) and pass i64 to `emit1/emit2/emit3`. Points may be any f64
+> (bit-exact round-trip) — the "nice value" constraint no longer applies. All
+> emitters compile under `SOUNIO_SOUC_ENGINE=lean_single` (the gate sets it).
+> The per-family bullets' real content is the **point selection + mpmath ref
+> mapping + convention checks**; keep those.
 
 Each task follows Task 2's pattern: add the fn to `REF` in
 `special_parity_ref.py`, write `tests/parity/special_parity_<fam>.sio`, extend
