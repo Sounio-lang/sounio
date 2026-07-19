@@ -184,3 +184,45 @@ claim is narrower and testable: suffering phenomena exhibit the **formal signatu
 figure above (fast-marching `∫`-geodesic vs bottleneck maximin path, with `c*` and the gratuitous excess
 shown side by side) is what makes §"definition" visible and survives review — `mountain_pass.py` is its
 first cut.
+
+## The publishable results — the Pareto frontier (second review) `pareto_mercy.py`
+
+A second review pointed out that the three-line table *understated* its own content. The corrected,
+mesh-converged, independently-verified results:
+
+**§1 — the STRAIGHT ≡ AGGREGATION coincidence is a theorem, not a tuning artifact.** The conformal
+functional decomposes as `J(λ) = ∫(1+λs)ds = L + λ∫s`. The straight path **Pareto-dominates** the maximin
+path in *both* coordinates (`L: 0.842 < 1.843` and `∫s: 0.095 < 0.460`), so
+`J_maximin − J_straight = 1.001 + 0.362λ > 0` for **all** `λ ≥ 0`: the λ-sweep is a horizontal line (peak
+stays `2.713` at `λ = 0,1,5,20,100`). The general statement:
+
+> **Proposition (aggregative blindness to thin barriers).** For a ridge of height `H` and width `w`
+> crossed transversally, the excess in the conformal functional scales as `λ·H·w`, while the minimax
+> penalty stays `H`. Hence for every `λ` and every `H` there is a `w` small enough that the aggregative
+> minimizer crosses. The aggregative criterion admits an **unbounded** suffering peak provided its duration
+> is evanescent; the minimax does not.
+
+This is the torture-vs-tickle objection to utilitarian aggregation, *derived over a field* — and §5 confirms
+it is not a discretization artifact: refining the mesh (`NG = 100→800`) the straight-path `∫s` **converges**
+(`0.1003 → 0.0964 → 0.0955 → 0.0952`) while the peak **rises** (`2.43 → 3.04`) as the thin spike is better
+resolved. Genuinely tall barrier, evanescent integral cost — the effect strengthens under refinement.
+
+**§2 — `c*` is a genuine topological obstruction, verified independently of the trajectory optimizer.**
+Union-find sublevel-set percolation (add nodes in increasing `s`; the threshold at which the origin's
+component first includes the target) returns `c* = 0.552`, **matching** the Dijkstra-minimax value; the
+ambient floor (median `s` off the wall) is `0.050 ≪ c*`, so `c*` is a *pass*, not a background floor. The
+"necessary suffering = geometry" claim now stands on two independent computations.
+
+**§3 — the Pareto frontier `Φ(c) = min ∫s  s.t.  max s ≤ c`** (mask the field above `c`, re-run) replaces
+the three points, and exposes the **true leximin**: `Φ(c*) = 0.144` at peak `c*` — the naive bottleneck
+maximin paid `0.460` (bottleneck algorithms return an arbitrary representative of the optimal class, so they
+**overpay ~3.2×**). Showing the naive maximin wastes *strengthens* the leximin recommendation, as predicted.
+
+**§4 — the price of mercy** (the transportable scalar, definable on any field): `Δ∫s / Δpeak = 0.021`
+(and `Δlength/Δpeak = 0.132`). Avoiding the acute spike (`peak 2.71 → 0.55`, a 4.9× reduction) costs only
+`+0.046` in `∫s` and `+0.286` in length — **mercy is cheap here**, and the naive maximin's implied price
+(`0.168`) overstated it ~8×. Report the *slope of `Φ`*, not three points.
+
+**Honest reframing (owed).** "The algebra does not determine the ethics" is a conceptual thesis the figure
+*illustrates*, not proves. What the figure *demonstrates* is the §1 Proposition — a stronger and citable
+result. State it that way.
