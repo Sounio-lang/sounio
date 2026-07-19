@@ -172,10 +172,15 @@ focused evidence gate directly after its focused production-gap step.
 
 ## Remaining Boundary
 
-The next evidence action is to prepare and review a separate reconciliation or
-materialization proposal for `Sounio-lang/sounio-examples`, then reissue this
-evidence against the resulting immutable head. This evidence set does not
-authorize that repository modification.
+The separate path-complete reconciliation proposal for
+`Sounio-lang/sounio-examples` is preserved under
+`artifacts/r3/canonical-production/20260719T213906Z/`. It remains
+`proposed-not-approved`, describes 1,029 additions, 3 replacements, and 7
+destination-only removals, and grants no destination-write authority. The
+evidence-bound source head is now historical relative to remote `main`, so the
+next evidence action is a fresh catalog, mapping, evidence, and reconciliation
+proposal chain. This evidence set and the separate proposal do not authorize
+repository modification.
 
 Even after exact parity, source removal, canonical production approval,
 execution/recovery policy, and an explicit human cutover decision remain

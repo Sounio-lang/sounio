@@ -129,6 +129,11 @@ required = {
         "execution_authority = none",
         "proposal_status = proposed-not-approved",
     ],
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_RECONCILIATION_PROPOSAL.md": [
+        "Status: executable R3 read-only proposal contract; reconciliation remains",
+        "destination_write_authority = none",
+        "canonical_cutover_execution_status = not-executed",
+    ],
     "docs/ecosystem/SOUNIO_TOML_SPEC.md": [
         "Status: Draft/local package manifest contract; public registry publishing is not launched.",
     ],
@@ -170,6 +175,7 @@ for rel in [
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md",
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md",
+    "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_RECONCILIATION_PROPOSAL.md",
     "docs/ecosystem/SOUNIO_TOML_SPEC.md",
     "docs/ecosystem/CURATED_PACKAGES.md",
     "docs/guide/programming.md",
@@ -227,6 +233,8 @@ run_step physical-extraction-canonical-production-gap \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
 run_step physical-extraction-canonical-production-evidence-set \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_evidence_set_gate.py"
+run_step physical-extraction-canonical-production-reconciliation-proposal \
+  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_reconciliation_proposal_gate.py"
 run_step physical-extraction-canonical-production-mapping-decision \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.py"
 
