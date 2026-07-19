@@ -5,7 +5,8 @@
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
 // hash-joins, a stable comparison sort, an adaptive stable radix sort,
 // unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
-// rolling-window sum / mean / max / min, and shift / diff / pct-change.
+// rolling-window sum / mean / max / min, shift / diff / pct-change, and an
+// exponentially weighted moving mean.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -1378,6 +1379,46 @@ pub fn bf_pct_change(src: &BigFrame, col: i64, fill: f64) -> BigFrame with Alloc
             write_f64(op, i, fill)
         }
         i = i + 1
+    }
+    out
+}
+
+/// Exponentially weighted moving mean of column `col` with smoothing factor `alpha`
+/// in (0,1] (like pandas col.ewm(alpha=..).mean()). A single-pass recurrence with
+/// beta = 1 - alpha. When `adjust` is true (pandas' default) it uses the ramp-up
+/// form -- running weighted sum num = x + beta*num over normalizer den = 1 + beta*den,
+/// out = num/den -- so early rows are correctly normalized by the partial weight mass.
+/// When `adjust` is false it uses the plain recursion out[i] = beta*out[i-1] +
+/// alpha*x[i] (out[0] = x[0]). O(n). Both modes match pandas bit-for-close.
+/// NATIVE + lean_single only (heap).
+pub fn bf_ewm_mean(src: &BigFrame, col: i64, alpha: f64, adjust: bool) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let beta = 1.0 - alpha
+    if adjust {
+        var num = 0.0
+        var den = 0.0
+        var i: i64 = 0
+        while i < n {
+            let x = read_f64(sp, i)
+            num = x + beta * num
+            den = 1.0 + beta * den
+            write_f64(op, i, num / den)
+            i = i + 1
+        }
+    } else {
+        var y = 0.0
+        var i: i64 = 0
+        while i < n {
+            let x = read_f64(sp, i)
+            if i == 0 { y = x } else { y = beta * y + alpha * x }
+            write_f64(op, i, y)
+            i = i + 1
+        }
     }
     out
 }
