@@ -9593,7 +9593,12 @@ fn emit_read_file() with Mut, Panic, Div {
 }
 
 fn emit_file_size() with Mut, Panic {
-    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
+    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48.
+    // A directory (st_mode S_IFDIR at offset 24) returns -1 so callers treat it
+    // like an unreadable/absent file: file_exists() == (file_size() >= 0) then
+    // reports false, and `--check <dir>` / `check <dir>` emit "could not read
+    // input file" instead of parsing an empty AST. (Returning st_size for a dir
+    // is a latent bug — a directory is never a valid source/import file.)
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
     em(0x48); em(0x81); em(0xec); em32(160)  // sub rsp, 160 (struct stat + padding)
     em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
@@ -9601,12 +9606,18 @@ fn emit_file_size() with Mut, Panic {
     em(0x0f); em(0x05)
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
     em(0x0f); em(0x88); let stat_fail = CL; em32(0)  // js stat_fail
+    // reject directories: (st_mode & S_IFMT) == S_IFDIR → -1
+    em(0x8b); em(0x44); em(0x24); em(24)  // mov eax, [rsp+24] (st_mode, 32-bit)
+    em(0x25); em32(0xF000)  // and eax, 0xF000 (S_IFMT)
+    em(0x3d); em32(0x4000)  // cmp eax, 0x4000 (S_IFDIR)
+    em(0x0f); em(0x84); let dir_fail = CL; em32(0)  // je stat_fail
     em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
     em(0xe9); let stat_done = CL; em32(0)
     let stat_fail_target = CL
     em(0x48); em(0xc7); em(0xc0); em32(-1)  // mov rax, -1 (missing/unreadable → sentinel)
     let stat_done_target = CL
     patch32(stat_fail, stat_fail_target)
+    patch32(dir_fail, stat_fail_target)
     patch32(stat_done, stat_done_target)
     em(0x48); em(0x81); em(0xc4); em32(160)  // add rsp, 160
 }
