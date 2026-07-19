@@ -50,6 +50,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rolling_var (1M rows, window 100, Welford) | | ~35 | ~42 | **~0.83x — win/parity** | (new verb) |
 | rolling_std (1M rows, window 100, +bf_sqrt) | | ~124 | ~44 | **~2.8x** | per-element sqrt-bound |
 | rolling_median (1M rows, window 100) | | ~330 | ~420 | **~0.8x — Sounio wins** | O(n·w) vs skip-list |
+| rolling_corr (1M rows, window 100, Welford) | | ~155 | ~95 | **~1.6x** | per-element sqrt-bound |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
