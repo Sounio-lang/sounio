@@ -361,11 +361,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.gpu.batched-hyper-syntax | repo_only | docs/gpu/BATCHED_HYPER_SYNTAX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.borromean-ainfinity | repo_only | docs/gpu/BORROMEAN_AINFINITY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.bracketing-task | repo_only | docs/gpu/BRACKETING_TASK.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.gpu.dyck-ssm-poc | repo_only | docs/gpu/DYCK_SSM_POC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.hyper-matvec-design | repo_only | docs/gpu/HYPER_MATVEC_DESIGN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.hypercomplex-ssm-novelty | repo_only | docs/gpu/HYPERCOMPLEX_SSM_NOVELTY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.nonassoc-benchmark | repo_only | docs/gpu/NONASSOC_BENCHMARK.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.nonassoc-headtohead | repo_only | docs/gpu/NONASSOC_HEADTOHEAD.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.oct-wmma-validate.gb10-receipt-20260716 | repo_only | docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.gpu.octonion-signature-bridge | repo_only | docs/gpu/OCTONION_SIGNATURE_BRIDGE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.check-sounio-guide | repo_only | docs/guide/CHECK_SOUNIO_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.getting-started-pt | repo_only | docs/guide/getting-started_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
