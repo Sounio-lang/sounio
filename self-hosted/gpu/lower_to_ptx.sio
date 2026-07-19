@@ -173,7 +173,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     let postadd = gpu_has_oct_postadd(kernel)
     // The associator, VJP and BPTT-backward need the same register classes as the cell.
     let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
-    let stage_or_pa = stage || postadd || cell
+    let readout = gpu_has_oct_readout(kernel)
+    let stage_or_pa = stage || postadd || cell || readout
 
     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
     var pred_count = kernel.max_reg_pred
@@ -188,6 +189,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     var b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
     if stage_or_pa && b32_count < 8 { b32_count = 8 }
     if cell && b32_count < 12 { b32_count = 12 }
+    if readout && b32_count < 6 { b32_count = 6 }
     if b32_count > 0 {
         out = ptx_push_str(out, "    .reg .b32 %r<")
         out = gpu_push_i64(out, b32_count)
@@ -198,7 +200,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
     // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
-    if (cell || postadd) && b64_count < 8 { b64_count = 8 }
+    if (cell || postadd || readout) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -222,7 +224,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
     var f64_count = kernel.max_reg_f64
     if stage && f64_count < 2 { f64_count = 2 }
-    if (postadd || cell) && f64_count < 3 { f64_count = 3 }
+    if (postadd || cell || readout) && f64_count < 3 { f64_count = 3 }
     if f64_count > 0 {
         out = ptx_push_str(out, "    .reg .f64 %fd<")
         out = gpu_push_i64(out, f64_count)
@@ -1105,6 +1107,45 @@ fn gpu_bwd_nl_dim(kernel: GpuKernelIr) -> i64 {
     8
 }
 
+// Does this kernel contain the real-readout op?
+fn gpu_has_oct_readout(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctReadout { return true }
+        i = i + 1
+    }
+    false
+}
+
+// O-SSM real readout y[b] = Re(C⊗h)[b] = Σ_p σ(p,p)·C[p]·h[p,b], thread 0. σ(p,p)=+1 for p=0, −1 for
+// p≥1, so y[b] = C[0]·h[0,b] − Σ_{p≥1} C[p]·h[p,b]. h is D-layout [p*16+b]; the p-stride is 16*8=128
+// bytes (immediate offsets, p unrolled). b runs 0..16 as a runtime loop. CR/HR/yR are the pointers.
+fn gpu_emit_oct_readout(CR: string, HR: string, yR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RDONE;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$RB:\n")
+    // %rd7 = HR + b*8  (base for h[p,b], p-stride +128)
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd6, %r5, 8;\n    add.s64 %rd7, "), HR)
+    t = str_concat(t, ", %rd6;\n")
+    // p=0: acc = C[0]·h[0,b]
+    t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), CR)
+    t = str_concat(t, "];\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd0, %fd1, %fd2;\n")
+    // p=1..dim-1: acc -= C[p]·h[p,b]  (immediate offsets p*8 on C, p*128 on h)
+    var p: i64 = 1
+    while p < dim {
+        t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), CR)
+        t = str_concat(str_concat(t, "+"), i64_to_string(p * 8))
+        t = str_concat(t, "];\n")
+        t = str_concat(str_concat(t, "    ld.global.f64 %fd2, [%rd7+"), i64_to_string(p * 128))
+        t = str_concat(t, "];\n    mul.f64 %fd1, %fd1, %fd2;\n    sub.f64 %fd0, %fd0, %fd1;\n")
+        p = p + 1
+    }
+    // y[b] = acc
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd6, %r5, 8;\n    add.s64 %rd7, "), yR)
+    t = str_concat(t, ", %rd6;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, 16;\n    @%p1 bra $RB;\n$RDONE:\n")
+    t
+}
+
 // O-SSM recurrence over T timesteps. H0 staged once into sH; then a runtime loop over t<T:
 // h_t = sigmoid(A⊗h_{t-1} + B·x_t) (tile1 + post-add + cubic sigmoid → sH col-major),
 // y_t = Re(C⊗h_t) (tile2 → sS row 0). x_t at px[(t*16+b)], y_t at py[(t*16+b)]. TR = T register.
@@ -1545,6 +1586,12 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let ndim = if op.rhs_imm == 16 { 16 } else { 8 }
             let nbits = if ndim == 16 { 4 } else { 3 }
             ptx_push_str(buf, gpu_emit_oct_bwd_nl(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), gpu_reg_u64(op.compare_reg), ndim, nbits))
+        }
+
+        GpuOpcode::GpuOctReadout => {
+            // O-SSM real readout y = Re(C⊗h). Pointers: pC=lhs, pH=rhs, py=addr.
+            let odim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_readout(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), odim))
         }
 
         GpuOpcode::GpuWmmaTile => {
