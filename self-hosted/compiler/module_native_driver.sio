@@ -16,6 +16,7 @@ use native::codegen_x86_linux::{
     compile_native_x86_linux_to_file,
 }
 use module_frontend::{imported_simple_ir_global_fn_count, imported_simple_ir_global_fn_kind, imported_simple_ir_global_fn_name_hash, imported_simple_ir_global_fn_target_hash, imported_simple_ir_global_fn_value, load_multimodule_ir, load_multimodule_imported_simple_ir_global, module_frontend_compile_imported_to_file, module_frontend_eval_imported_main_i64, module_frontend_file_maybe_has_use}
+use io::env::{read_env}
 use module_native_streaming::{compile_multimodule_native_maybe_streaming}
 
 fn native_driver_print_dispatch(
@@ -1169,22 +1170,40 @@ pub fn compile_multimodule_native_advanced(
     }
 
     if !optimize {
-        print("module_native_driver: imported source uses compact modular IR table path\n")
-        let imported_ir_status = load_multimodule_imported_simple_ir_global(main_path)
-        if imported_ir_status.ok {
-            let simple_rc = native_driver_write_imported_simple_ir_elf(output_path)
-            if simple_rc == 0 {
-                return 0
+        // The compact imported-simple-IR table path is an unfinished development
+        // stub: native_driver_write_imported_simple_ir_elf writes a hardcoded
+        // "42\n" data section whenever any function matches a print pattern, and
+        // native_driver_emit_imported_simple_fn for kind=3 always emits a generic
+        // "write 3 bytes from data_off" stub that never consults VALUES[fi]. This
+        // produces silently incorrect output for any multi-module program whose
+        // expected stdout is not exactly "42\n".
+        //
+        // Default route: skip the compact path; fall through to the full IR lane
+        // (module_frontend_compile_imported_to_file) which correctly lowers,
+        // merges, and finalises imported function bodies. The compact emitter is
+        // preserved as legacy/experimental code reachable only behind an explicit
+        // opt-in env var, so the implementation is available for diagnosis or for
+        // a future real fix without changing the default route again.
+        if str_eq(read_env("SOUNIO_ENABLE_COMPACT_IMPORTED_IR"), "1") {
+            print("module_native_driver: imported source uses compact modular IR table path (experimental; SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1)\n")
+            let imported_ir_status = load_multimodule_imported_simple_ir_global(main_path)
+            if imported_ir_status.ok {
+                let simple_rc = native_driver_write_imported_simple_ir_elf(output_path)
+                if simple_rc == 0 {
+                    return 0
+                }
+                print("module_native_driver: compact IR ELF write failed; rc=")
+                print_int(simple_rc)
+                print("; falling back to full IR path\n")
             }
-            print("module_native_driver: compact IR ELF write failed; rc=")
-            print_int(simple_rc)
-            print("; falling back to full IR path\n")
-        }
-        if !imported_ir_status.ok {
-            print("module_native_driver: compact IR load failed; falling back to full IR path\n")
-            print("module_native_driver: compact IR load error: ")
-            print(imported_ir_status.error_msg)
-            print("\n")
+            if !imported_ir_status.ok {
+                print("module_native_driver: compact IR load failed; falling back to full IR path\n")
+                print("module_native_driver: compact IR load error: ")
+                print(imported_ir_status.error_msg)
+                print("\n")
+            }
+        } else {
+            print("module_native_driver: using full IR path; compact experimental path disabled by default (set SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1 to re-enable)\n")
         }
     } else {
         print("module_native_driver: -O selects finalized full IR cleanup path\n")
