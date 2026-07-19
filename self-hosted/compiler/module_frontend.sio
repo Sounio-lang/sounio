@@ -2265,16 +2265,23 @@ fn module_frontend_import_items_contain_name(
     items: &Option<Box<ImportItemList>>,
     name: Name,
     remaining: i64,
+    exhausted: &!bool,
 ) -> bool with Mut, Panic, Div, Alloc {
     match *items {
         Some(node) => {
             if remaining <= 0 {
+                (*exhausted) = true
                 return false
             }
             if name_eq((*node).head, name) {
                 true
             } else {
-                module_frontend_import_items_contain_name(&(*node).tail, name, remaining - 1)
+                module_frontend_import_items_contain_name(
+                    &(*node).tail,
+                    name,
+                    remaining - 1,
+                    exhausted,
+                )
             }
         }
         None => false
@@ -2285,16 +2292,23 @@ fn module_frontend_variant_list_contains_name(
     variants: &Option<Box<VariantDefList>>,
     name: Name,
     remaining: i64,
+    exhausted: &!bool,
 ) -> bool with Mut, Panic, Div, Alloc {
     match *variants {
         Some(node) => {
             if remaining <= 0 {
+                (*exhausted) = true
                 return false
             }
             if name_eq((*node).head.name, name) {
                 true
             } else {
-                module_frontend_variant_list_contains_name(&(*node).tail, name, remaining - 1)
+                module_frontend_variant_list_contains_name(
+                    &(*node).tail,
+                    name,
+                    remaining - 1,
+                    exhausted,
+                )
             }
         }
         None => false
@@ -2304,6 +2318,7 @@ fn module_frontend_variant_list_contains_name(
 fn module_frontend_item_directly_exports_name(
     item: &Item,
     name: Name,
+    exhausted: &!bool,
 ) -> bool with Mut, Panic, Div, Alloc {
     if !visibility_ref_to_bool(&(*item).visibility) {
         return false
@@ -2320,6 +2335,7 @@ fn module_frontend_item_directly_exports_name(
                 &(*enum_def).variants,
                 name,
                 4096,
+                exhausted,
             )
             None => {}
         }
@@ -2335,16 +2351,21 @@ fn module_frontend_module_exports_name_items(
     visited: &! [bool; 256],
     items: &Option<Box<ItemList>>,
     remaining: i64,
+    exhausted: &!bool,
 ) -> bool with Mut, Panic, Div, Alloc {
     match *items {
         None => false
         Some(node) => {
             if remaining <= 0 {
+                (*exhausted) = true
                 return false
             }
             let item = &(*node).head
-            if module_frontend_item_directly_exports_name(item, name) {
+            if module_frontend_item_directly_exports_name(item, name, exhausted) {
                 return true
+            }
+            if (*exhausted) {
+                return false
             }
             if (*item).kind == ItemKind::ItemUse && visibility_ref_to_bool(&(*item).visibility) {
                 let requested_import = use_path_ref_to_string(&(*item).use_path)
@@ -2352,15 +2373,27 @@ fn module_frontend_module_exports_name_items(
                 if edge_index >= 0 {
                     let dependency_id = (*closure).edge_dependency_ids[edge_index]
                     let reexports_name = (*item).use_glob ||
-                        module_frontend_import_items_contain_name(&(*item).use_items, name, 4096)
+                        module_frontend_import_items_contain_name(
+                            &(*item).use_items,
+                            name,
+                            4096,
+                            exhausted,
+                        )
+                    if (*exhausted) {
+                        return false
+                    }
                     if reexports_name && module_frontend_module_exports_name(
                         closure,
                         programs,
                         dependency_id,
                         name,
                         visited,
+                        exhausted,
                     ) {
                         return true
+                    }
+                    if (*exhausted) {
+                        return false
                     }
                 }
             }
@@ -2372,6 +2405,7 @@ fn module_frontend_module_exports_name_items(
                 visited,
                 &(*node).tail,
                 remaining - 1,
+                exhausted,
             )
         }
     }
@@ -2383,6 +2417,7 @@ fn module_frontend_module_exports_name(
     module_id: i64,
     name: Name,
     visited: &! [bool; 256],
+    exhausted: &!bool,
 ) -> bool with Mut, Panic, Div, Alloc {
     if module_id < 0 || module_id >= (*closure).node_count || module_id >= 256 {
         return false
@@ -2400,6 +2435,7 @@ fn module_frontend_module_exports_name(
         visited,
         &(*program).items,
         4096,
+        exhausted,
     )
     (*visited)[module_id] = false
     found
@@ -2453,7 +2489,10 @@ fn module_frontend_program_facade_scan(
     }
 }
 
-fn module_frontend_program_is_facade(program: &Program) -> bool with Alloc {
+fn module_frontend_program_is_facade(
+    program: &Program,
+    exhausted: &!bool,
+) -> bool with Mut, Alloc {
     var has_import = false
     var has_named_item = false
     if !module_frontend_program_facade_scan(
@@ -2462,6 +2501,7 @@ fn module_frontend_program_is_facade(program: &Program) -> bool with Alloc {
         &!has_import,
         &!has_named_item,
     ) {
+        (*exhausted) = true
         return false
     }
     has_import && !has_named_item
@@ -2484,19 +2524,28 @@ fn module_frontend_validate_import_item_names(
             }
             let name = (*node).head
             var visited: [bool; 256] = [false; 256]
-            if !module_frontend_module_exports_name(
+            var export_scan_exhausted = false
+            let exports_name = module_frontend_module_exports_name(
                 &(*closure),
                 programs,
                 dependency_id,
                 name,
                 &!visited,
-            ) {
+                &!export_scan_exhausted,
+            )
+            if export_scan_exhausted {
+                return false
+            }
+            if !exports_name {
                 module_frontend_record_surface_error(
                     closure,
                     (*closure).paths[caller_id],
                     requested_import,
                     name,
                 )
+                if (*closure).saturated {
+                    return false
+                }
             }
             module_frontend_validate_import_item_names(
                 closure,
@@ -2535,11 +2584,24 @@ fn module_frontend_validate_import_surface_items(
                 if edge_index >= 0 {
                     let dependency_id = (*closure).edge_dependency_ids[edge_index]
                     let caller_program = &(*programs)[module_id]
-                    let caller_is_facade = module_frontend_program_is_facade(caller_program)
+                    var facade_scan_exhausted = false
+                    let caller_is_facade = module_frontend_program_is_facade(
+                        caller_program,
+                        &!facade_scan_exhausted,
+                    )
+                    if facade_scan_exhausted {
+                        return false
+                    }
                     var dependency_is_facade = false
                     if dependency_id >= 0 {
                         let dependency_program = &(*programs)[dependency_id]
-                        dependency_is_facade = module_frontend_program_is_facade(dependency_program)
+                        dependency_is_facade = module_frontend_program_is_facade(
+                            dependency_program,
+                            &!facade_scan_exhausted,
+                        )
+                        if facade_scan_exhausted {
+                            return false
+                        }
                     }
                     let validates_public_facade_edge = caller_is_facade &&
                         visibility_ref_to_bool(&(*item).visibility)
@@ -2586,7 +2648,7 @@ fn module_frontend_validate_import_surfaces(
             4096,
         ) {
             (*closure).saturated = true
-            (*closure).parse_failed = true
+            (*closure).surface_error_count = 0
             return
         }
         module_id = module_id + 1
