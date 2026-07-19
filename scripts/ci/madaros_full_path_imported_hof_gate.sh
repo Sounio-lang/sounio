@@ -47,7 +47,7 @@ expect_checker_rejection() {
   }
   is_fatal_log "$log" && fail "${label}_fatal"
   [[ "$(grep -Fc 'error[E' "$log" || true)" -eq "$expected_count" ]] || fail "${label}_diagnostic_count_mismatch"
-  [[ "$(grep -Fc "error[$code]" "$log" || true)" -eq "$expected_count" ]] || fail "${label}_${code}_count_mismatch"
+  [[ "$(grep -Fc "error[$code" "$log" || true)" -eq "$expected_count" ]] || fail "${label}_${code}_count_mismatch"
   [[ "$(grep -Fc "$message" "$log" || true)" -eq "$expected_count" ]] || fail "${label}_message_count_mismatch"
   grep -Fq 'run_check_mode: verdict=1' "$log" || fail "${label}_checker_verdict_missing"
 }
