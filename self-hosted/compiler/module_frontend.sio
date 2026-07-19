@@ -2256,6 +2256,30 @@ fn module_frontend_record_surface_error(
     (*closure).surface_error_count = index + 1
 }
 
+// A facade-only module has authored imports but no named implementation item of
+// its own. This bounded vertical validates facade surfaces without redefining
+// the compiler's existing crate-private import semantics (#854).
+fn module_frontend_program_is_facade(program: Program) -> bool with Alloc {
+    var has_import = false
+    var has_named_item = false
+    var cursor = program.items
+    while true {
+        match cursor {
+            Some(node) => {
+                let item = (*node).head
+                if item.kind == ItemKind::ItemUse {
+                    has_import = true
+                } else if item.name.len > 0 {
+                    has_named_item = true
+                }
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+    has_import && !has_named_item
+}
+
 fn module_frontend_validate_import_item_names(
     closure: &!ModuleClosure,
     programs: &! [Program; 256],
@@ -2312,7 +2336,13 @@ fn module_frontend_validate_import_surfaces(
                         )
                         if edge_index >= 0 {
                             let dependency_id = (*closure).edge_dependency_ids[edge_index]
-                            if dependency_id >= 0 {
+                            let caller_is_facade = module_frontend_program_is_facade((*programs)[module_id])
+                            let dependency_is_facade = dependency_id >= 0 &&
+                                module_frontend_program_is_facade((*programs)[dependency_id])
+                            let validates_public_facade_edge = caller_is_facade &&
+                                visibility_to_bool(item.visibility)
+                            if dependency_id >= 0 &&
+                               (dependency_is_facade || validates_public_facade_edge) {
                                 module_frontend_validate_import_item_names(
                                     closure,
                                     programs,
