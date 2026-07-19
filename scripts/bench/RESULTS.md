@@ -31,6 +31,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cumprod_by (1M rows, 1000 groups) | | ~35 | ~19 | **~1.8x** | (new verb) |
 | nunique_by (1M rows, 1000 groups) | | ~140 | ~42 | **~3.4x** | double-hash (pair-set + key-count) |
 | idxmax_by / idxmin_by (1M rows, 1000 groups) | | ~42 | ~17 | **~2.4x** | (new verb) |
+| mode_by (1M rows, 1000 groups) | | ~92 | ~89 | **~1.0x — parity** | pandas has no vectorized groupby-mode |
 | cummax (1M rows, ungrouped) | | 4.8 | 11.3 | **0.42x — Sounio wins** | (new verb) |
 | cummin (1M rows, ungrouped) | | 4.9 | 10.6 | **0.46x — Sounio wins** | (new verb) |
 | cummax_by / cummin_by (1M rows, 1000 groups) | | ~34 | ~21 | **1.6x** | (new verb) |
@@ -49,6 +50,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rolling_var (1M rows, window 100, Welford) | | ~35 | ~42 | **~0.83x — win/parity** | (new verb) |
 | rolling_std (1M rows, window 100, +bf_sqrt) | | ~124 | ~44 | **~2.8x** | per-element sqrt-bound |
 | rolling_median (1M rows, window 100) | | ~330 | ~420 | **~0.8x — Sounio wins** | O(n·w) vs skip-list |
+| rolling_corr (1M rows, window 100, Welford) | | ~155 | ~95 | **~1.6x** | per-element sqrt-bound |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |

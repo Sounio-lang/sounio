@@ -39,15 +39,19 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 > works *in-compiler*, so the idiomatic-looking form is exactly the trap. **File readers MUST use
 > `str_char_at(s,i)` + `str_len(s)`, never `raw[i]`,** until the string-index bug is fixed.
 >
-> **Remaining siblings (NOT fixed; separate items):** (1) `write_file` — identical 3-arg body in the
-> same file, same defect. (2) The `self-hosted/native/codegen.sio` old-backend copy of
+> **Remaining siblings (NOT fixed; separate items):** (1) ~~`write_file`~~ — **FIXED 2026-07-19** on
+> `fix/madaros-write-file-handle-abi`: `emit_builtin_write_file` now resolves the native-v2 GC handle
+> and unpacks 8-byte boxed slots into a packed buffer (mirrors `str_from_bytes`). Canonical shape is
+> `write_file(path, buf, n)` handle-by-value; `write_file(path, &buf, n)` remains wrong and must not
+> be "fixed" by adding a deref. Gate: `scripts/native_write_file_handle_abi_gate.sh` (needs
+> current-source Madaros). (2) The `self-hosted/native/codegen.sio` old-backend copy of
 > `emit_builtin_read_file` (reachable via wide/render drivers, not the default path). (3) The `raw[i]`
 > string-index-operator crash above. (4) `file_size`/`read_file` fail on some ABSOLUTE paths but work
 > on relative ones (path-length or cwd resolution — unconfirmed).
 >
 > Net: the "`&local_array` into builtin" root cause below is not the bug. `str_from_bytes`/`file_size`
-> work; `read_file` is now FIXED (native-v2 user path). Everything below is retained as the original
-> (incorrect) dispatch record.
+> work; `read_file` and `write_file` are FIXED (native-v2 user path; shipping prebuilt lags until
+> rebuild). Everything below is retained as the original (incorrect) dispatch record.
 
 **Date:** 2026-07-14
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine)
