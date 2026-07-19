@@ -65,11 +65,22 @@ has_post_surface_work() {
 
 closure_is_structurally_complete() {
   local report="$1"
+  local capacity
+  local capacity_value
+  local node_count
 
   is_fatal_log "$report" && return 1
   [[ "$(grep -Fxc 'SOUNIO_BOUNDARY_CLOSURE_V1' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^status\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'status\tcomplete' "$report" || true)" -eq 1 ]] || return 1
+  [[ "$(grep -c $'^capacity\t' "$report" || true)" -eq 1 ]] || return 1
+  capacity="$(sed -n $'s/^capacity\t//p' "$report")"
+  [[ "$capacity" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${#capacity}" -le 4 ]] || return 1
+  capacity_value=$((10#$capacity))
+  [[ "$capacity_value" -le 4096 ]] || return 1
+  node_count="$(grep -c $'^node\t' "$report" || true)"
+  [[ "$node_count" -le "$capacity_value" ]] || return 1
   [[ "$(grep -c $'^saturated\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'saturated\tfalse' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^parse_failed\t' "$report" || true)" -eq 1 ]] || return 1
@@ -223,6 +234,10 @@ run_classifier_self_test() {
   local legacy_compact_log="$WORK/selftest.legacy-compact.log"
   local target_log="$WORK/selftest.target.log"
   local complete="$WORK/selftest.complete.tsv"
+  local full_capacity="$WORK/selftest.full-capacity.tsv"
+  local missing_capacity="$WORK/selftest.missing-capacity.tsv"
+  local invalid_capacity="$WORK/selftest.invalid-capacity.tsv"
+  local exceeded_capacity="$WORK/selftest.exceeded-capacity.tsv"
   local surface_invalid="$WORK/selftest.surface-invalid.tsv"
   local incomplete="$WORK/selftest.incomplete.tsv"
   local conflicting="$WORK/selftest.conflicting.tsv"
@@ -295,6 +310,24 @@ run_classifier_self_test() {
   closure_is_complete "$complete" || fail selftest_complete_closure_rejected
   require_closure_cardinality "$complete" 1 0 || fail selftest_logical_node_counted_as_physical_node
   require_closure_identity_cardinality "$complete" 1 0 || fail selftest_logical_node_identity_rejected
+  cp "$complete" "$full_capacity"
+  sed -i $'s/^capacity\t256$/capacity\t1/' "$full_capacity"
+  closure_is_complete "$full_capacity" || fail selftest_full_non_saturated_capacity_rejected
+  cp "$complete" "$missing_capacity"
+  sed -i $'/^capacity\t/d' "$missing_capacity"
+  if closure_is_complete "$missing_capacity"; then
+    fail selftest_missing_capacity_accepted
+  fi
+  cp "$complete" "$invalid_capacity"
+  sed -i $'s/^capacity\t256$/capacity\t0/' "$invalid_capacity"
+  if closure_is_complete "$invalid_capacity"; then
+    fail selftest_invalid_capacity_accepted
+  fi
+  cp "$full_capacity" "$exceeded_capacity"
+  printf '%s\n' $'node\t/tmp/dependency.sio' $'logical_node\t1\tdependency' >>"$exceeded_capacity"
+  if closure_is_complete "$exceeded_capacity"; then
+    fail selftest_exceeded_capacity_accepted
+  fi
   cp "$complete" "$surface_invalid"
   sed -i $'s/^surface_status\tvalid$/surface_status\tinvalid/' "$surface_invalid"
   printf '%s\n' $'surface_error\t/tmp/root.sio\tfacade\tsynthetic_value' >>"$surface_invalid"
@@ -346,7 +379,7 @@ run_classifier_self_test() {
   if assert_no_artifact "$WORK/selftest.present.elf"; then
     fail selftest_present_artifact_accepted
   fi
-  printf 'MODULE_GRAPH_FACADE_VERTICAL_SELFTEST_PASS semantic_rc1=accepted rc139=rejected unrelated_diagnostic=rejected legacy_mixed_diagnostic=rejected post_surface_lowering=rejected misleading_path=rejected fatal=rejected fallback=detected legacy_compact=detected legacy_compact_differential=detected target_fallback=ignored closure_incomplete=rejected closure_conflict=rejected surface_invalid=separate missing_package=exact artifact_presence=detected\n'
+  printf 'MODULE_GRAPH_FACADE_VERTICAL_SELFTEST_PASS semantic_rc1=accepted rc139=rejected unrelated_diagnostic=rejected legacy_mixed_diagnostic=rejected post_surface_lowering=rejected misleading_path=rejected fatal=rejected fallback=detected legacy_compact=detected legacy_compact_differential=detected target_fallback=ignored closure_incomplete=rejected closure_conflict=rejected surface_invalid=separate capacity=exact missing_package=exact artifact_presence=detected\n'
 }
 
 run_classifier_self_test
