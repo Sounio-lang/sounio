@@ -20,7 +20,13 @@ def as_mat(rm):
     R = max(i for i, _ in rm) + 1; C = max(j for _, j in rm) + 1
     return mp.matrix([[mp.mpf(rm.get((i, j), 0.0)) for j in range(C)] for i in range(R)])
 
-def relerr(g, r): return abs(g - r) / max(abs(r), mp.mpf('1e-300'))
+def relerr(g, r):
+    # Mixed abs/rel tolerance: floor the denominator at 1e-9 (not 1e-300) so that
+    # legitimate O(1e-16) roundoff noise against a mathematically-exact-zero
+    # reference entry (e.g. QtQ off-diagonal, or a permuted-zero in P·A) doesn't
+    # blow up into a spurious ~1e283 "error". A genuine bug (>=1e-2 abs error on
+    # a zero reference) still fails: 1e-2 / 1e-9 = 1e7, far past THR.
+    return abs(g - r) / max(abs(r), mp.mpf('1e-9'))
 def matmax_rel(G, R):
     m = mp.mpf(0)
     for i in range(R.rows):
@@ -39,8 +45,24 @@ def chk_mul(d):   return matmax_rel(as_mat(d["R"]), as_mat(d["A"]) * as_mat(d["B
 def chk_inv(d):   return matmax_rel(as_mat(d["R"]), as_mat(d["A"])**-1)
 def chk_solve(d): return matmax_rel(as_mat(d["A"]) * as_mat(d["R"]), as_mat(d["B"]))
 
+def apply_piv(A, pivrole):
+    # Phase-0 CONFIRMED: piv is a full permutation vector; P[k,piv[k]]=1
+    #  ⟹ (P·A) row k = A row piv[k], and L·U == P·A.
+    n = A.rows
+    piv = [int(pivrole[(k, 0)]) for k in range(n)]
+    return mp.matrix([[A[piv[k], j] for j in range(A.cols)] for k in range(n)])
+def chk_lu(d):
+    A = as_mat(d["A"]); L = as_mat(d["L"]); U = as_mat(d["U"])
+    PA = apply_piv(A, d.get("P", {}))
+    return matmax_rel(L * U, PA)
+def chk_qr(d):
+    A = as_mat(d["A"]); Q = as_mat(d["Q"]); R = as_mat(d["RR"])
+    rec = matmax_rel(Q * R, A)
+    QtQ = Q.T * Q; I = mp.eye(Q.cols)
+    return max(rec, matmax_rel(QtQ, I))
+
 CHECKS = {"det":chk_det, "trace":chk_trace, "norm_fro":chk_fro, "transpose":chk_transpose,
-          "mul":chk_mul, "inv":chk_inv, "solve":chk_solve}
+          "mul":chk_mul, "inv":chk_inv, "solve":chk_solve, "lu":chk_lu, "qr":chk_qr}
 THR = {op: 1e-2 for op in CHECKS}
 
 def run(require_all=False):
