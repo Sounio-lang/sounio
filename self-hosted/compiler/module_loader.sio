@@ -23,7 +23,7 @@ use compiler::ontology::cache::{ontology_default_home, ontology_default_mode, on
 use ir::lower::{IrProgramSummary, IrProgramSummaryResult, IrProgramSummaryBoxResult, IrProgramSummaryFlat, IrProgramSummaryFlatResult, IrFunctionBodyResult, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
-use ir::serialize::{serialize_ir_module, deserialize_ir_module}
+use ir::serialize::{serialize_ir_module}
 use ir::inline::{inl_run_pass}
 use ir::opt_cleanup::{opt_cleanup_module}
 use ir::loop_opt::{lopt_optimize_module}
@@ -1998,41 +1998,29 @@ fn thin_cache_path(cache_dir: string, kind: string, digest: i64, ext: string) ->
     cache_dir + "/" + kind + "_" + io_trace_i64_string(digest) + ext
 }
 
+fn thin_emit_ir_cache_quarantine_receipt(operation: string, path: string) with IO {
+    print("[thinlink-ir-cache] schema=1 format=SOIR-v4 operation=")
+    print(operation)
+    print(" status=quarantined authority=0 reason=semantic-roundtrip-unproven path=")
+    print(path)
+    print("\n")
+}
+
+// SOIR v4 does not round-trip all IrFunction semantics. Persistent IR remains
+// non-authoritative until a semantic round-trip gate proves otherwise.
 fn thin_try_write_ir_cache(path: string, module: &IrModule, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div, Alloc {
-    let pair = serialize_ir_module(*module)
-    if pair.1 <= 0 || pair.1 > 131072 {
-        return false
-    }
-    let ok = write_file(path, pair.0, pair.1) == 0
-    if ok {
-        (*stats).persistent_bytes = (*stats).persistent_bytes + pair.1
-    }
-    ok
+    thin_emit_ir_cache_quarantine_receipt("write", path)
+    false
 }
 
 fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
-    let read_pair = thin_read_small_file(path)
-    if read_pair.0 == 0 {
-        return (false, ir_empty_module())
-    }
-    (*stats).persistent_bytes = (*stats).persistent_bytes + read_pair.2
-    let restored = deserialize_ir_module(read_pair.1, read_pair.2)
-    if restored.fn_count <= 0 {
-        return (false, ir_empty_module())
-    }
-    (true, restored)
+    thin_emit_ir_cache_quarantine_receipt("read", path)
+    (false, ir_empty_module())
 }
 
 fn thin_try_read_ir_cache_no_stats(path: string) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
-    let read_pair = thin_read_small_file(path)
-    if read_pair.0 == 0 {
-        return (false, ir_empty_module())
-    }
-    let restored = deserialize_ir_module(read_pair.1, read_pair.2)
-    if restored.fn_count <= 0 {
-        return (false, ir_empty_module())
-    }
-    (true, restored)
+    thin_emit_ir_cache_quarantine_receipt("read", path)
+    (false, ir_empty_module())
 }
 
 fn thin_try_write_binary_cache(path: string, bytes: [i8; 16777216], len: i64, stats: &! ThinCacheStats) -> bool with IO, Mut {
@@ -2820,7 +2808,9 @@ fn thin_build_compiled_unit(
             pi = pi + 1
         }
 
-        let _ = thin_try_write_ir_cache(body_cache_path, &body_module, &! stats)
+        if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
+            let _ = thin_try_write_ir_cache(body_cache_path, &body_module, &! stats)
+        }
     }
 
     let object_digest = thin_hash_mix(body_digest, 17)
@@ -2855,7 +2845,9 @@ fn thin_build_compiled_unit(
             object_module = tco_result.0
             tco_count = tco_result.1.stats.transformed
         }
-        let _ = thin_try_write_ir_cache(object_cache_path, &object_module, &! stats)
+        if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
+            let _ = thin_try_write_ir_cache(object_cache_path, &object_module, &! stats)
+        }
     } else if optimize {
         inline_count = object_module.fn_count
     }
