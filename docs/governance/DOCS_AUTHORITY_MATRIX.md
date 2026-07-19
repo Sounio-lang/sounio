@@ -636,6 +636,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.reference.epistemic-api | repo_only | docs/reference/EPISTEMIC_API.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.reference.stdlib-reference | repo_only | docs/reference/STDLIB_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.release-policy | repo_only | docs/RELEASE_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.2026-07-19-lean-single-bundler-arity-collision | historical | docs/research/2026-07-19-lean-single-bundler-arity-collision.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-linalg-parity | historical | docs/research/2026-07-19-linalg-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-special-scipy-parity | historical | docs/research/2026-07-19-special-scipy-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
