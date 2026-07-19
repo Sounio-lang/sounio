@@ -100,11 +100,12 @@ if [[ "$SOURCE_ONLY" -eq 1 ]]; then
 fi
 
 [[ -n "$RAW_MADAROS" ]] || fail raw_binary_not_set
+[[ -n "$EXPECTED_RAW_SHA256" ]] || fail expected_raw_sha256_not_set
 [[ -x "$RAW_MADAROS" ]] || fail raw_binary_not_executable
 RAW_MADAROS="$(cd "$(dirname "$RAW_MADAROS")" && pwd)/$(basename "$RAW_MADAROS")"
 RAW_SHA256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 LAUNCHER_SHA256="$(sha256sum "$LAUNCHER" | awk '{print $1}')"
-if [[ -n "$EXPECTED_RAW_SHA256" && "$RAW_SHA256" != "$EXPECTED_RAW_SHA256" ]]; then
+if [[ "$RAW_SHA256" != "$EXPECTED_RAW_SHA256" ]]; then
   fail raw_sha256_mismatch
 fi
 
@@ -136,7 +137,7 @@ SOUNIO_MODULE_CLOSURE_TRACE=1 MADAROS_RAW_BIN="$RAW_MADAROS" timeout 360 "$LAUNC
 BUILD_RC=$?
 set -e
 [[ "$BUILD_RC" -eq 0 ]] || fail build_rc
-[[ -s "$ELF" ]] || fail fresh_elf_missing
+[[ -s "$ELF" ]] || fail runtime_elf_missing
 [[ "$(grep -c '^module_closure_collect: phase=begin ' "$BUILD_LOG" || true)" -eq 1 ]] || fail canonical_collection_count
 grep -Fq 'imported_compile: collected_begin collection_id=1' "$BUILD_LOG" || fail collected_receipt_missing
 grep -Fq 'imported_compile: visibility_begin' "$BUILD_LOG" || fail visibility_not_reached
@@ -151,5 +152,5 @@ set -e
 [[ "$ELF_RC" -eq 0 ]] || fail elf_rc
 printf '42\n' | cmp -s - "$STDOUT" || fail elf_stdout
 
-printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_and_runtime entrypoint=bin/madaros launcher_sha256=%s raw_sha256=%s launcher_raw_identity=pinned native_dispatch=raw_build canonical_collections=1 snapshot_collections=2 snapshot_drift=refused visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
+printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract_and_pinned_runtime entrypoint=bin/madaros launcher_sha256=%s raw_sha256=%s launcher_raw_identity=pinned native_dispatch=raw_build canonical_collections=1 snapshot_collections=2 snapshot_drift=refused visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
   "$LAUNCHER_SHA256" "$RAW_SHA256"
