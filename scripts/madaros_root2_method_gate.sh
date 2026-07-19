@@ -27,6 +27,58 @@ run_ok() {
   echo "PASS: $sentinel"
 }
 
+is_fatal_log() {
+  grep -Eiq 'segmentation fault|core dumped|terminated by signal|fatal:|bus error|illegal instruction' "$1"
+}
+
+run_ambiguous_impl_authority_rejected() {
+  local src="tests/compiler/module_graph_impl_authority_ambiguity/main.sio"
+  local elf="$OUT/ambiguous-impl-authority.elf"
+  local log="$OUT/ambiguous-impl-authority.log"
+  local rc=0
+
+  echo "== multi-module impl-method authority ambiguity (expect reject) =="
+  rm -f "$elf"
+  set +e
+  "$SOUC" compile "$src" -o "$elf" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 1 ]]; then
+    echo "FAIL: ambiguous impl-method authority must reject with rc=1, got rc=$rc"
+    cat "$log" || true
+    fail=1
+    return
+  fi
+  if is_fatal_log "$log"; then
+    echo "FAIL: ambiguous impl-method authority produced a fatal compiler log"
+    cat "$log" || true
+    fail=1
+    return
+  fi
+  if [[ -e "$elf" ]]; then
+    echo "FAIL: ambiguous impl-method authority emitted an output artifact"
+    ls -l "$elf" || true
+    fail=1
+    return
+  fi
+  if [[ $(grep -Fc 'MODULE_FRONTEND_PROVENANCE_FAILURE kind=target_identity' "$log" || true) -ne 1 ]] ||
+     [[ $(grep -Fc 'instr_name=Authority_Collision_witness' "$log" || true) -ne 1 ]] ||
+     [[ $(grep -Fxc 'IR merge failed: unresolved or ambiguous function provenance' "$log" || true) -ne 1 ]]; then
+    echo "FAIL: ambiguous impl-method authority did not emit the exact provenance refusal"
+    cat "$log" || true
+    fail=1
+    return
+  fi
+  if grep -Fq 'Compilation successful!' "$log" || grep -Fq 'Written to ' "$log"; then
+    echo "FAIL: ambiguous impl-method authority reported output success"
+    cat "$log" || true
+    fail=1
+    return
+  fi
+  echo "PASS: imported impl-method ambiguity rejected without output"
+}
+
 run_ok "same-module method+associated" \
   tests/run-pass/madaros_root2_method_associated.sio \
   ROOT2_METHOD_ASSOCIATED_OK
@@ -38,6 +90,8 @@ run_ok "multi-module associated import" \
 run_ok "multi-module instance method" \
   tests/run-pass/madaros_root2_instance_import.sio \
   ROOT2_INSTANCE_IMPORT_OK
+
+run_ambiguous_impl_authority_rejected
 
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -54,9 +108,11 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module_associated_type_method",
     "same_module_method_on_method_return",
     "multimodule_associated_type_method_import",
-    "multimodule_instance_method_call"
+    "multimodule_instance_method_call",
+    "multimodule_impl_method_authority_ambiguity_fail_closed"
   ],
   "claims_not_made": [
+    "injective_impl_method_symbol_mangling",
     "full_root2_null_deref_closed",
     "enum_ctor_path"
   ]
