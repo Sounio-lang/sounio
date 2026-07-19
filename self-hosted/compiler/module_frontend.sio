@@ -2542,10 +2542,11 @@ fn module_frontend_item_directly_exports_name(
     false
 }
 
-fn module_frontend_module_exports_name_items(
+fn module_frontend_module_exports_name_from_definition_items(
     closure: &ModuleClosure,
     programs: &! [Program; 256],
     module_id: i64,
+    defining_module_id: i64,
     name: Name,
     visited: &! [bool; 256],
     items: &Option<Box<ItemList>>,
@@ -2560,7 +2561,8 @@ fn module_frontend_module_exports_name_items(
                 return false
             }
             let item = &(*node).head
-            if module_frontend_item_directly_exports_name(item, name, exhausted) {
+            if (defining_module_id < 0 || module_id == defining_module_id) &&
+               module_frontend_item_directly_exports_name(item, name, exhausted) {
                 return true
             }
             if (*exhausted) {
@@ -2581,10 +2583,11 @@ fn module_frontend_module_exports_name_items(
                     if (*exhausted) {
                         return false
                     }
-                    if reexports_name && module_frontend_module_exports_name(
+                    if reexports_name && module_frontend_module_exports_name_from_definition(
                         closure,
                         programs,
                         dependency_id,
+                        defining_module_id,
                         name,
                         visited,
                         exhausted,
@@ -2596,10 +2599,11 @@ fn module_frontend_module_exports_name_items(
                     }
                 }
             }
-            module_frontend_module_exports_name_items(
+            module_frontend_module_exports_name_from_definition_items(
                 closure,
                 programs,
                 module_id,
+                defining_module_id,
                 name,
                 visited,
                 &(*node).tail,
@@ -2610,10 +2614,11 @@ fn module_frontend_module_exports_name_items(
     }
 }
 
-fn module_frontend_module_exports_name(
+fn module_frontend_module_exports_name_from_definition(
     closure: &ModuleClosure,
     programs: &! [Program; 256],
     module_id: i64,
+    defining_module_id: i64,
     name: Name,
     visited: &! [bool; 256],
     exhausted: &!bool,
@@ -2627,10 +2632,11 @@ fn module_frontend_module_exports_name(
     (*visited)[module_id] = true
     let program = (*programs)[module_id]
     let program_items = program.items
-    let found = module_frontend_module_exports_name_items(
+    let found = module_frontend_module_exports_name_from_definition_items(
         closure,
         programs,
         module_id,
+        defining_module_id,
         name,
         visited,
         &program_items,
@@ -2639,6 +2645,25 @@ fn module_frontend_module_exports_name(
     )
     (*visited)[module_id] = false
     found
+}
+
+fn module_frontend_module_exports_name(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    module_id: i64,
+    name: Name,
+    visited: &! [bool; 256],
+    exhausted: &!bool,
+) -> bool with Mut, Panic, Div, Alloc {
+    module_frontend_module_exports_name_from_definition(
+        closure,
+        programs,
+        module_id,
+        0 - 1,
+        name,
+        visited,
+        exhausted,
+    )
 }
 
 fn module_frontend_record_surface_error(
@@ -5342,6 +5367,7 @@ fn module_frontend_lower_program_items_box_traced(
 fn module_frontend_lower_program_box_traced_with_externs(
     program: &Program,
     programs: &! [Program; 256],
+    closure: &ModuleClosure,
     file_paths: &![string; 256],
     program_count: i64,
     module_index: i64,
@@ -5356,6 +5382,8 @@ fn module_frontend_lower_program_box_traced_with_externs(
     }
     var epistemic = ir_empty_epistemic_section()
     let binding_count = module_frontend_collect_external_bindings(
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5387,6 +5415,8 @@ fn module_frontend_lower_program_box_traced_with_externs(
     let summary_module_box = summary_val.module
     module_frontend_assign_function_provenance(
         &! (*summary_module_box),
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5411,6 +5441,8 @@ fn module_frontend_lower_program_box_traced_with_externs(
     let body_module_box = body_result.module
     module_frontend_assign_function_provenance(
         &! (*body_module_box),
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5429,6 +5461,7 @@ fn module_frontend_lower_program_box_traced_with_externs(
 fn module_frontend_lower_program_items_box_traced_with_externs(
     items: &Option<Box<ItemList>>,
     programs: &! [Program; 256],
+    closure: &ModuleClosure,
     file_paths: &![string; 256],
     program_count: i64,
     module_index: i64,
@@ -5444,6 +5477,8 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     var epistemic = ir_empty_epistemic_section()
     let program = mf_program_from_items(items)
     let binding_count = module_frontend_collect_external_bindings(
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5475,6 +5510,8 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     let summary_module_box = summary_val.module
     module_frontend_assign_function_provenance(
         &! (*summary_module_box),
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5499,6 +5536,8 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     let body_module_box = body_result.module
     module_frontend_assign_function_provenance(
         &! (*body_module_box),
+        closure,
+        programs,
         &! MF_PROGRAM_ITEM_PTRS,
         file_paths,
         program_count,
@@ -5645,43 +5684,59 @@ fn module_frontend_import_item_list_contains(
     false
 }
 
-fn module_frontend_use_path_targets_file(
-    use_path: &AstPath,
-    importing_file_path: string,
-    candidate_file_path: string
-) -> bool with IO, Mut, Panic, Div, Alloc {
-    if (*use_path).seg_count <= 0 || str_len(candidate_file_path) <= 0 {
-        return false
-    }
-    let cur_dir = module_frontend_path_directory_slice(importing_file_path)
-    let resolved = resolve_import_file_path_result_ref(use_path, cur_dir)
-    !resolved.ambiguous && resolved.candidate_count == 1 && str_eq(resolved.path, candidate_file_path)
-}
-
-fn module_frontend_items_explicitly_import_from(
+fn module_frontend_items_explicitly_import_definition(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    file_paths: &![string; 256],
     items: &Option<Box<ItemList>>,
-    importing_file_path: string,
-    candidate_file_path: string,
-    name: Name
+    importing_module_id: i64,
+    defining_module_id: i64,
+    name: Name,
+    exhausted: &!bool,
 ) -> bool with IO, Mut, Panic, Div, Alloc {
     var current = items
     while true {
         match *current {
             Some(list) => {
                 let item = &(*list).head
-                if item.kind == ItemKind::ItemUse &&
-                   module_frontend_use_path_targets_file(
-                       &item.use_path,
-                       importing_file_path,
-                       candidate_file_path
-                   ) {
+                if item.kind == ItemKind::ItemUse {
                     var imports_name = item.use_glob
                     match item.use_items {
                         Some(_) => imports_name = module_frontend_import_item_list_contains(&item.use_items, name),
                         None => imports_name = true,
                     }
-                    if imports_name {
-                        return true
+                    if imports_name && !(*exhausted) {
+                        if (*closure).node_count <= 0 {
+                            let cur_dir = module_frontend_path_directory_slice(
+                                (*file_paths)[importing_module_id as usize]
+                            )
+                            let resolved = resolve_import_file_path_result_ref(&item.use_path, cur_dir)
+                            if !resolved.ambiguous && resolved.candidate_count == 1 &&
+                               str_eq(resolved.path, (*file_paths)[defining_module_id as usize]) {
+                                return true
+                            }
+                        }
+                        let requested_import = use_path_ref_to_string(&item.use_path)
+                        let edge_index = module_frontend_closure_edge_index(
+                            closure,
+                            importing_module_id,
+                            requested_import,
+                        )
+                        if edge_index >= 0 {
+                            let dependency_id = (*closure).edge_dependency_ids[edge_index]
+                            var visited: [bool; 256] = [false; 256]
+                            if module_frontend_module_exports_name_from_definition(
+                                closure,
+                                programs,
+                                dependency_id,
+                                defining_module_id,
+                                name,
+                                &!visited,
+                                exhausted,
+                            ) {
+                                return true
+                            }
+                        }
                     }
                 }
                 current = &(*list).tail
@@ -5693,6 +5748,8 @@ fn module_frontend_items_explicitly_import_from(
 }
 
 fn module_frontend_function_defining_module(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
     program_count: i64,
@@ -5717,6 +5774,7 @@ fn module_frontend_function_defining_module(
     var explicit_count: i64 = 0
     var found_module: i64 = IR_DEFINING_MODULE_UNKNOWN
     var found_count: i64 = 0
+    var authority_scan_exhausted = false
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
@@ -5729,11 +5787,15 @@ fn module_frontend_function_defining_module(
                 if import_anchor.len > 0 {
                     found_module = i
                     found_count = found_count + 1
-                    if module_frontend_items_explicitly_import_from(
+                    if module_frontend_items_explicitly_import_definition(
+                        closure,
+                        programs,
+                        file_paths,
                         &(*self_item_handle).items,
-                        (*file_paths)[self_index as usize],
-                        (*file_paths)[i as usize],
-                        import_anchor
+                        self_index,
+                        i,
+                        import_anchor,
+                        &!authority_scan_exhausted,
                     ) {
                         explicit_module = i
                         explicit_count = explicit_count + 1
@@ -5742,6 +5804,9 @@ fn module_frontend_function_defining_module(
             }
         }
         i = i + 1
+    }
+    if authority_scan_exhausted {
+        return IR_DEFINING_MODULE_AMBIGUOUS
     }
     if explicit_count == 1 {
         return explicit_module
@@ -5809,6 +5874,8 @@ fn module_frontend_append_external_binding(
 }
 
 fn module_frontend_collect_external_binding_name(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
     program_count: i64,
@@ -5818,6 +5885,8 @@ fn module_frontend_collect_external_binding_name(
     count: i64
 ) -> i64 with IO, Mut, Panic, Div, Alloc {
     let owner = module_frontend_function_defining_module(
+        closure,
+        programs,
         program_item_ptrs,
         file_paths,
         program_count,
@@ -5836,6 +5905,8 @@ fn module_frontend_collect_external_binding_name(
 }
 
 fn module_frontend_collect_external_impl_bindings(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
     program_count: i64,
@@ -5853,6 +5924,8 @@ fn module_frontend_collect_external_impl_bindings(
                 let method = &(*list).head
                 if method.kind == ItemKind::ItemFn {
                     next_count = module_frontend_collect_external_binding_name(
+                        closure,
+                        programs,
                         program_item_ptrs,
                         file_paths,
                         program_count,
@@ -5871,6 +5944,8 @@ fn module_frontend_collect_external_impl_bindings(
 }
 
 fn module_frontend_collect_external_bindings(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
     program_count: i64,
@@ -5891,6 +5966,8 @@ fn module_frontend_collect_external_bindings(
                         let item = &(*list).head
                         if item.kind == ItemKind::ItemFn {
                             count = module_frontend_collect_external_binding_name(
+                                closure,
+                                programs,
                                 program_item_ptrs,
                                 file_paths,
                                 program_count,
@@ -5904,6 +5981,8 @@ fn module_frontend_collect_external_bindings(
                             match *impl_def_ref {
                                 Some(impl_def) => {
                                     count = module_frontend_collect_external_impl_bindings(
+                                        closure,
+                                        programs,
                                         program_item_ptrs,
                                         file_paths,
                                         program_count,
@@ -5936,6 +6015,8 @@ fn module_frontend_collect_external_bindings(
 
 fn module_frontend_assign_function_provenance(
     module: &! IrModule,
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
     program_count: i64,
@@ -5948,6 +6029,8 @@ fn module_frontend_assign_function_provenance(
         if defining_module_id == IR_DEFINING_MODULE_UNKNOWN ||
            defining_module_id == IR_DEFINING_MODULE_AMBIGUOUS {
             defining_module_id = module_frontend_function_defining_module(
+                closure,
+                programs,
                 program_item_ptrs,
                 file_paths,
                 program_count,
@@ -6089,6 +6172,7 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
 
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
+    closure: &ModuleClosure,
     file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
@@ -6125,7 +6209,7 @@ fn module_frontend_lower_programs_array_direct_box(
     print("lower_array: seed_begin\n")
     let seed_program = (*programs)[0]
     let seed_items = seed_program.items
-    let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, file_paths, loaded, 0, trace)
+    let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, closure, file_paths, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
         return module_frontend_lower_direct_box_error(seed_lower.error_msg)
@@ -6157,7 +6241,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 let dep_arena_mark = __arena_mark()
                 let dep_program = (*programs)[i as usize]
                 let dep_items = dep_program.items
-                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, file_paths, loaded, i, trace)
+                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, closure, file_paths, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
                 print("\n")
@@ -6326,6 +6410,7 @@ fn module_frontend_lower_programs_array_direct_box(
 
 fn module_frontend_lower_programs_array_boxed(
     programs: &! [Program; 256],
+    closure: &ModuleClosure,
     file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
@@ -6334,7 +6419,7 @@ fn module_frontend_lower_programs_array_boxed(
         return module_frontend_lower_box_error("no_modules_loaded")
     }
 
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, closure, file_paths, loaded, trace)
     if !lowered.ok {
         return module_frontend_lower_box_error(lowered.error_msg)
     }
@@ -6505,6 +6590,7 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
 
 fn module_frontend_merge_imported_into(
     programs: &! [Program; 256],
+    closure: &ModuleClosure,
     file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace,
@@ -6530,7 +6616,7 @@ fn module_frontend_merge_imported_into(
 
     // Per-module check_program_with_artifacts cannot see cross-module imports and
     // either rejects (E137) or spins; multimodule verdict above is authoritative.
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, closure, file_paths, loaded, trace)
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
@@ -6657,7 +6743,7 @@ pub fn module_frontend_compile_imported_to_file(
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
     module_frontend_trace_full_ir_closure(&closure)
-    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, &closure.paths, loaded, &! trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, &closure, &closure.paths, loaded, &! trace)
     print("imported_compile: lower_done\n")
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -7756,7 +7842,37 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     }
 
     var merged_module = ir_empty_module()
-    if !module_frontend_merge_imported_into(&! programs, &! file_paths, loaded, trace, &! merged_module) {
+    let legacy_authority_closure = ModuleClosure {
+        paths: [""; 256],
+        logical_paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        surface_error_callers: [""; 256],
+        surface_error_imports: [""; 256],
+        surface_error_names: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        ambiguity_count: 0,
+        surface_error_count: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    if !module_frontend_merge_imported_into(
+        &! programs,
+        &legacy_authority_closure,
+        &! file_paths,
+        loaded,
+        trace,
+        &! merged_module,
+    ) {
         return multimodule_ir_error("ir_lowering_failed")
     }
 

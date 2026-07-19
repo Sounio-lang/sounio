@@ -95,6 +95,10 @@ run_ok "multi-module instance method" \
   tests/run-pass/madaros_root2_instance_import.sio \
   ROOT2_INSTANCE_IMPORT_OK
 
+run_ok "facade reexport preserves impl-method authority" \
+  tests/compiler/module_graph_impl_authority_reexport/main.sio \
+  MODULEGRAPH_IMPL_AUTHORITY_REEXPORT_OK
+
 run_ambiguous_impl_authority_rejected
 
 mkdir -p "$ROOT/artifacts/compiler"
@@ -124,6 +128,7 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module_method_on_method_return",
     "multimodule_associated_type_method_import",
     "multimodule_instance_method_call",
+    "multimodule_impl_method_authority_through_facade_reexport",
     "multimodule_impl_method_authority_ambiguity_fail_closed"
   ],
   "claims_not_made": [
