@@ -118,10 +118,15 @@ ABIDE showed a real dataset where it does not. The claim graduates from "systems
 demo" to "method" only on a dataset whose **generating process is itself non-associative** — where an
 associative model is *provably* lossy, not merely where we hope it is. Where to look, most-principled
 first:
-- **Bracketing / evaluation-order tasks** — the associator *is* `(ab)c − a(bc)`, so a task whose label
-  depends on parenthesization of a non-associative operation (expression evaluation under a non-assoc
-  op; parse/scope structure) is one where the associator is the exact discriminant. Semi-synthetic but
-  *natural-structured*, and the cleanest honest next test.
+- **Bracketing / evaluation-order tasks — DONE, decisive** (`BRACKETING_TASK.md`). The associator *is*
+  `(ab)c − a(bc)`, so a label that depends on parenthesization of a non-associative operation makes the
+  associator the exact discriminant. On a **realistic symbolic input distribution** (Zipfian 64-symbol
+  vocabulary, length-4 sequences), label `y=1[⟨w*, ((s1s2)(s3s4)) − (((s1s2)s3)s4)⟩>0]`: **OCT
+  bracketing-associator feature + logistic head 95.9%**, the **identical feature in the associative
+  4-dim subalgebra 49.9%** (`‖r1−r2‖=2.2e-16`, structurally zero/blind), linear-on-raw 51.6%, MLP-on-raw
+  58.4%. OCT vs QUAT differ *only* in the algebra → the 46-pt gap is attributable **entirely to
+  non-associativity**. Semi-synthetic (real symbolic inputs, constructed non-associative label) — the
+  §6.1 target met: non-associativity demonstrably matters on non-toy inputs.
 - **A∞ / higher-homotopy / operadic data** — where associativity holds only up to a coherence whose
   first obstruction is literally the associator (ties to the O-CSSM homology-functor thread).
 - **Exceptional-structure physics** — octonions in G₂/F₄ gauge structure, sedenion zero-divisor
