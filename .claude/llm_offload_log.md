@@ -3299,3 +3299,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-19 | none | main integration | test_epistemic_method_rx_chain_e2e.sio | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | The final current-main refresh incorporated `tests/stdlib/clinical/test_epistemic_method_rx_chain_e2e.sio` byte-identically from `origin/main@227f3985d117305bbb1b51932a72bcf4156d4fbb`: the index and origin object ID are both `3b5bcc5b4d0480d7fbbba57dfb6985effd5b91c0`. This proposal-only lane did not author, modify, or reinterpret its clinical behavior; duplicate offload would not review an integration-specific change. |
+
+## 2026-07-19 - final current-main math-document integration carry
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-19 | none | main integration | petitot-semantic-potential.md; petitot_potential.py | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | The fixed-cutoff refresh incorporated `docs/research/petitot-semantic-potential.md` and `docs/research/petitot_potential.py` byte-identically from `origin/main@4a572b4ccdfcdf3d875e80aa68fcd3e4481402fc`; index/origin object IDs are respectively `993e729861ad29dcd7d48e3c2f86c4f6b0dc5af8` and `96e381ade3d55319da2c87c06c4e916771af8fe7`. This proposal-only lane did not author, modify, or reinterpret their mathematical claims or executable analysis; duplicate offload would not review an integration-specific change. |
