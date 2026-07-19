@@ -97,6 +97,49 @@ fn native_driver_put_u64(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Pani
     native_driver_put_u32(buf, pos + 4, val >> 32)
 }
 
+// Convert an i64 to its base-10 ASCII representation followed by '\n' into buf.
+// Returns the total byte count written (digits + optional '-' + '\n').
+// Edge cases:
+//   value == 0             -> "0\n"  (2 bytes)
+//   value < 0 (incl INT64_MIN wrap-around risk ignored for fixture-scale values)
+//                          -> "-<digits>\n"
+// Used by native_driver_write_imported_simple_ir_elf to populate the data
+// section with the actual imported-function return value, replacing the
+// legacy hardcoded "42\n" stub.
+fn native_driver_ascii_decimal_with_newline(value: i64, buf: &![i8; 32]) -> i64 with Mut {
+    if value == 0 {
+        (*buf)[0] = 48 as i8
+        (*buf)[1] = 10 as i8
+        return 2
+    }
+    var neg: bool = false
+    var v: i64 = value
+    if v < 0 {
+        neg = true
+        v = 0 - v
+    }
+    var tmp: [i8; 32] = [0; 32]
+    var n: i64 = 0
+    while v > 0 {
+        tmp[n as usize] = (48 + (v - (v / 10) * 10)) as i8
+        v = v / 10
+        n = n + 1
+    }
+    var i: i64 = 0
+    if neg {
+        (*buf)[0] = 45 as i8
+        i = 1
+    }
+    var j: i64 = n - 1
+    while j >= 0 {
+        (*buf)[i as usize] = tmp[j as usize]
+        i = i + 1
+        j = j - 1
+    }
+    (*buf)[i as usize] = 10 as i8
+    return i + 1
+}
+
 fn native_driver_find_main_fn(module: &IrModule) -> i64 with Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -482,6 +525,7 @@ fn native_driver_emit_imported_simple_fn(
     fi: i64,
     func_start: i64,
     data_off: i64,
+    data_len: i64,
     bytes: &![i8; 131072]
 ) -> bool with Mut, Panic, Div {
     let kind = imported_simple_ir_global_fn_kind(fi)
@@ -516,6 +560,11 @@ fn native_driver_emit_imported_simple_fn(
         return true
     }
     if kind == 3 {
+        // Emits: mov eax,1; mov edi,1; lea rsi,[rip+disp32]; mov edx,data_len; syscall; xor eax,eax; ret
+        // data_len is the actual byte count of the ASCII representation written
+        // to data_off by native_driver_write_imported_simple_ir_elf (digits +
+        // optional '-' + '\n'). Replaces the legacy hardcoded length 3 which
+        // only matched "42\n".
         native_driver_put_u8(bytes, off, 184)
         native_driver_put_u32(bytes, off + 1, 1)
         native_driver_put_u8(bytes, off + 5, 191)
@@ -525,7 +574,7 @@ fn native_driver_emit_imported_simple_fn(
         native_driver_put_u8(bytes, off + 12, 53)
         native_driver_put_u32(bytes, off + 13, data_off - (off + 17))
         native_driver_put_u8(bytes, off + 17, 186)
-        native_driver_put_u32(bytes, off + 18, 3)
+        native_driver_put_u32(bytes, off + 18, data_len)
         native_driver_put_u8(bytes, off + 22, 15)
         native_driver_put_u8(bytes, off + 23, 5)
         native_driver_put_u8(bytes, off + 24, 49)
@@ -954,7 +1003,17 @@ fn native_driver_write_imported_simple_ir_elf(output_path: string) -> i32 with I
     }
     let code_len: i64 = native_driver_imported_simple_fn_offset(func_start, fn_count)
     let data_off: i64 = code_len
-    let file_len: i64 = if native_driver_imported_simple_has_print() { code_len + 3 } else { code_len }
+    // Compute the data section from main's classified value rather than the
+    // legacy hardcoded "42\n". main_fn is guaranteed non-negative here (we
+    // returned earlier if it was missing). When the program has no kind=3
+    // (print) function, no data section is emitted and data_len stays 0.
+    var ascii_buf: [i8; 32] = [0; 32]
+    var data_len: i64 = 0
+    if native_driver_imported_simple_has_print() {
+        let main_value = imported_simple_ir_global_fn_value(main_fn)
+        data_len = native_driver_ascii_decimal_with_newline(main_value, &! ascii_buf)
+    }
+    let file_len: i64 = code_len + data_len
 
     native_driver_put_u8(&! bytes, 0, 127)
     native_driver_put_u8(&! bytes, 1, 69)
@@ -993,17 +1052,21 @@ fn native_driver_write_imported_simple_ir_elf(output_path: string) -> i32 with I
 
     fi = 0
     while fi < fn_count {
-        if !native_driver_emit_imported_simple_fn(fi, func_start, data_off, &! bytes) {
+        if !native_driver_emit_imported_simple_fn(fi, func_start, data_off, data_len, &! bytes) {
             print("Native compilation failed: imported_simple_ir_emit_failed\n")
             return 1
         }
         fi = fi + 1
     }
 
-    if native_driver_imported_simple_has_print() {
-        native_driver_put_u8(&! bytes, data_off, 52)
-        native_driver_put_u8(&! bytes, data_off + 1, 50)
-        native_driver_put_u8(&! bytes, data_off + 2, 10)
+    // Write the actual data section bytes computed from main's value (or no
+    // bytes if there is no print). Replaces the legacy hardcoded "42\n" stub.
+    if data_len > 0 {
+        var k: i64 = 0
+        while k < data_len {
+            native_driver_put_u8(&! bytes, data_off + k, ascii_buf[k as usize] as i64)
+            k = k + 1
+        }
     }
 
     if write_file(output_path, bytes, file_len) < 0 {

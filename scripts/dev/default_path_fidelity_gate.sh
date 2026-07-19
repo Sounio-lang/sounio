@@ -89,7 +89,7 @@ declare -a CASES=(
 run_case() {
   local variant="$1"
   local expected_hex="$2"
-  local route="$3"   # "default" or "-O"
+  local route="$3"   # "default", "-O", or "compact"
   local label="${variant%.sio}_${route}"
   local out="$SCRATCH_DIR/${label}.elf"
   local stdout_file="$SCRATCH_DIR/${label}.stdout"
@@ -102,7 +102,11 @@ run_case() {
     raw_args+=("-O")
   fi
 
-  "$RAW" "${raw_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  if [[ "$route" == "compact" ]]; then
+    SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1 "$RAW" "${raw_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  else
+    "$RAW" "${raw_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  fi
   local cc_rc=$?
 
   if [[ $cc_rc -ne 0 ]]; then
@@ -149,6 +153,19 @@ for case_spec in "${CASES[@]}"; do
   variant="${case_spec%%|*}"
   expected="${case_spec#*|}"
   result_line=$(run_case "$variant" "$expected" "-O")
+  rc=$?
+  RESULTS+=("$result_line")
+  if [[ $rc -ne 0 ]]; then fail_count=$((fail_count + 1)); fi
+done
+
+# Compact route (SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1) — verifies the legacy
+# emitter, now reachable only behind the opt-in env var, also produces the
+# correct per-mutation stdout. Detects regressions in the compact emitter's
+# kind=3 / VALUES[fi] handling without changing the default route.
+for case_spec in "${CASES[@]}"; do
+  variant="${case_spec%%|*}"
+  expected="${case_spec#*|}"
+  result_line=$(run_case "$variant" "$expected" "compact")
   rc=$?
   RESULTS+=("$result_line")
   if [[ $rc -ne 0 ]]; then fail_count=$((fail_count + 1)); fi
