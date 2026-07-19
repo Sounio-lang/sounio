@@ -4780,12 +4780,20 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     // Check for error
     c.code = emit_test_rax_rax(c.code)
-    // If error (rax < 0), return -1
-    // For simplicity: load st_size regardless, on error it'll be garbage
-    // but we can check: if rax != 0, return rax (the error code)
-    c.code = emit_jnz_rel8(c.code, 5)                    // if error, skip to return rax
-    // Load st_size from [rsp + 48]
-    c.code = emit_mov_rax_rsp_disp8(c.code, 48)          // rax = st_size
+    // stat error (rax != 0) → return rax (negative errno). Directory (st_mode
+    // S_IFDIR at offset 24) → -1 so file_exists()==false (a directory is never a
+    // valid source/import file). Otherwise load st_size at offset 48. Mirrors the
+    // lean_single emit_file_size directory guard. Fixed-size block, hand-computed
+    // relative jumps (block spans 32 bytes; targets: err/done = +32, dir = the
+    // `mov rax,-1`). Verified byte-exact vs a reference assembler.
+    c.code = emit_byte(c.code, 0x75); c.code = emit_byte(c.code, 0x1e)  // jnz +30 (stat error → return rax)
+    c.code = emit_byte(c.code, 0x8b); c.code = emit_byte(c.code, 0x44); c.code = emit_byte(c.code, 0x24); c.code = emit_byte(c.code, 0x18)  // mov eax,[rsp+24] (st_mode)
+    c.code = emit_byte(c.code, 0x25); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0xf0); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x00)  // and eax,0xF000 (S_IFMT)
+    c.code = emit_byte(c.code, 0x3d); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x40); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x00)  // cmp eax,0x4000 (S_IFDIR)
+    c.code = emit_byte(c.code, 0x74); c.code = emit_byte(c.code, 0x07)  // je +7 (directory → -1)
+    c.code = emit_byte(c.code, 0x48); c.code = emit_byte(c.code, 0x8b); c.code = emit_byte(c.code, 0x44); c.code = emit_byte(c.code, 0x24); c.code = emit_byte(c.code, 0x30)  // mov rax,[rsp+48] (st_size)
+    c.code = emit_byte(c.code, 0xeb); c.code = emit_byte(c.code, 0x07)  // jmp +7 (done)
+    c.code = emit_byte(c.code, 0x48); c.code = emit_byte(c.code, 0xc7); c.code = emit_byte(c.code, 0xc0); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff)  // mov rax,-1 (directory)
 
     c.code = emit_mov_rsp_rbp(c.code)
     c.code = emit_pop_rbp(c.code)
