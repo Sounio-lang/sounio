@@ -1833,13 +1833,17 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             bwd.src_reg = instr.call_args[3]
             bwd.shared_addr = instr.call_args[4]
             k = gpu_kernel_append_op(k, bwd)
-        } else if hlir_name_is_oct_batch_mul_f64(cn) || hlir_name_is_sed_batch_mul_f64(cn) {
+        } else if hlir_name_is_oct_batch_mul_f64(cn) || hlir_name_is_sed_batch_mul_f64(cn) || hlir_name_is_oct_batch_mul_f64_t(cn) || hlir_name_is_sed_batch_mul_f64_t(cn) {
             // Batched hypercomplex multiply on f64 TENSOR CORES (wmma m8n8k4.f64). call_args =
             // [pa, pH, pout]. L(a) f64 in shared + m8n8k4 f64 tiles → one GpuOctBatchF64. 2048 bytes.
+            // The "_t" variants build L(a)ᵀ (byte_offset=1) → L(a)ᵀ·B, the BPTT backward L(A)ᵀ·dS.
+            let is_t = hlir_name_is_oct_batch_mul_f64_t(cn) || hlir_name_is_sed_batch_mul_f64_t(cn)
+            let is_sed = hlir_name_is_sed_batch_mul_f64(cn) || hlir_name_is_sed_batch_mul_f64_t(cn)
             if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
             var bf = gpu_op_new()
             bf.opcode = GpuOpcode::GpuOctBatchF64
-            bf.rhs_imm = if hlir_name_is_sed_batch_mul_f64(cn) { 16 } else { 8 }
+            bf.rhs_imm = if is_sed { 16 } else { 8 }
+            bf.byte_offset = if is_t { 1 } else { 0 }
             bf.lhs_reg = instr.call_args[0]
             bf.rhs_reg = instr.call_args[1]
             bf.addr_reg = instr.call_args[2]
@@ -2070,6 +2074,26 @@ fn hlir_name_is_sed_batch_mul_f64(n: HlirName) -> bool {
     n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
     n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
     n.buf[16] == 52 as i8
+}
+
+// "oct_batch_mul_f64_t" (19 chars) — TRANSPOSED f64 tensor-core tile L(a)ᵀ·B (the BPTT backward).
+fn hlir_name_is_oct_batch_mul_f64_t(n: HlirName) -> bool {
+    if n.len != 19 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 116 as i8
+}
+
+// "sed_batch_mul_f64_t" (19 chars) — TRANSPOSED f64 tensor-core tile (sedenion, dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul_f64_t(n: HlirName) -> bool {
+    if n.len != 19 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 116 as i8
 }
 
 // "ossm_oct_step_f64" (17 chars) — full-f64 O-SSM step S = A⊗H + B·x (octonion, dim=8, bits=3).
