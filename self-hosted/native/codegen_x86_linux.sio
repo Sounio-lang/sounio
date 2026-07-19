@@ -6356,34 +6356,13 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
     false
 }
 
-fn nc_core_emit_empty_frame_gc_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_collector_epoch())
-    nc_emit_mov_reg_imm(nc, 1, 1)
-    nc_emit_add_reg_reg(nc, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_collector_epoch())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 1)
-}
-
-fn nc_core_emit_alloc_retry_or_exit_into(nc: &! NativeCompiler, slow_jnz: i64, retry_target: i64, fail_code: i64) with Mut, Panic, Div {
+fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64) with Mut, Panic, Div {
     let slow_path = (*nc).code.len
     nc_patch_u32_le(nc, slow_jnz + 2, slow_path - (slow_jnz + 6))
-
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_pin_count())
-    nc_emit_test_rax_rax(nc)
-    let pinned_jnz = (*nc).code.len
-    nc_emit_jnz_rel32(nc)
-
-    nc_core_emit_empty_frame_gc_reset_into(nc)
-    let retry_jmp = (*nc).code.len
-    nc_emit_jmp_rel32(nc)
-
-    let fail_exit = (*nc).code.len
-    nc_patch_u32_le(nc, pinned_jnz + 2, fail_exit - (pinned_jnz + 6))
+    // Core-IR frames do not publish precise live-root maps. Recycling this
+    // monotonic arena can retarget handles that remain live in callers.
+    // Fail closed until a collector can prove that every live root is traced.
     nc_emit_exit_code(nc, fail_code)
-    nc_patch_u32_le(nc, retry_jmp + 1, retry_target - (retry_jmp + 5))
 }
 
 fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
@@ -6395,7 +6374,6 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
         return false
     }
 
-    let alloc_retry_target = (*nc).code.len
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
     nc_emit_mov_rdx_rax(nc)
     nc_emit_mov_reg_imm(nc, 1, total_size)
@@ -6469,8 +6447,8 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
 
-    nc_core_emit_alloc_retry_or_exit_into(nc, heap_slow_jnz, alloc_retry_target, 181)
-    nc_core_emit_alloc_retry_or_exit_into(nc, handle_slow_jnz, alloc_retry_target, 182)
+    nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+    nc_core_emit_alloc_fail_into(nc, handle_slow_jnz, 182)
 
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
