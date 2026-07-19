@@ -44,7 +44,41 @@ associative models cannot. On ABIDE ASD/TD at the representations tried (eigenmo
 sequence-associator), non-associativity carries no signal beyond chance. We did **not** search
 representations until one crossed 50% — that would be p-hacking a null.
 
-Open (genuinely untested) doors remain — full 200×200 connectomes, dynamic functional connectivity,
-finer parcellations, edge-labeled associator fields on the raw graph rather than the 8×8 summary — but
-the honest current state is: **the non-associative advantage is synthetic-provable and real-clinical
-null.** A preprint that says so is stronger than one that hides it. Harness `run_abide_assoc.cu`.
+## The decisive test: the FULL 200×200 connectome (with a positive control)
+
+The 8×8 summary above is lossy, so we ran one **pre-registered** test on the genuinely untested door —
+the full 200×200 CC200 connectome (Fisher-z Pearson correlation from the raw timeseries), with a
+per-fold-fitted (leakage-safe) PCA-8 node embedding, the octonion associator field `[o_i,o_j,o_k]` over
+a fixed sample of 300 node triples, leave-one-site-out CV, run **once, no representation search**. The
+key addition is a **positive control**: a standard associative connectome classifier (PCA-50 of the
+upper triangle).
+
+| Features (leave-one-site-out) | bal-acc | 95% CI lower |
+|---|---|---|
+| **RAW connectome PCA-50 (associative, positive control)** | **63.9% ± 9.2** | **59.9** ✓ beats chance |
+| Quaternion associator field ≡ 0 (control) | 50.3% ± 5.6 | 47.8 |
+| **Octonion associator field** | **52.1% ± 9.4** | 47.9 — at chance |
+| Octonion field + RAW | 62.7% ± 9.6 | 58.5 (≤ RAW alone) |
+
+This is the strongest form of the null, because **the positive control works**:
+- the ASD/TD signal **is present and real** — a standard associative classifier reads it at 63.9%
+  (consistent with the ABIDE literature), CI excluding chance;
+- the **octonion associator field carries none of it** (52.1%, CI includes 50);
+- adding the associator to the associative features **does not help** — it slightly hurts (62.7% ≤ 63.9).
+
+So the four nulls can no longer be blamed on a poor representation or on LOSO being too hard: the full
+connectome has signal, an associative model captures it, and the non-associative structure adds nothing.
+
+## What this means (and does not)
+This is a **boundary of the empirical claim, reported as such** — not a failure of the artifact. The
+contribution is (1) the compiler that lowers a non-associative algebra and its exact associator/VJP to
+tensor cores, and (2) the *provable* synthetic separation where the octonion associator solves a task
+associative models cannot. On ABIDE ASD/TD — across four representations (eigenmodes, O-SSM 8×8,
+sequence-associator, full-connectome associator field) and now against a working associative positive
+control — non-associativity carries no clinical signal. We did **not** search representations until one
+crossed chance; the full-connectome test was pre-registered and run once.
+
+**The honest state: the non-associative advantage is synthetic-provable and real-clinical null.** A
+preprint that says so — with a positive control proving the signal was there to be found — is stronger
+than one that hides it. Harnesses `run_abide_assoc.cu` (8×8, GB10 kernel) and
+`abide_connectome_assoc.py` (full connectome, pre-registered).
