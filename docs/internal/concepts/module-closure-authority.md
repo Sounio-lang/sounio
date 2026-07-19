@@ -39,6 +39,11 @@ names from `leaf`. A private `use` never expands the facade's public surface.
 differential oracle. It cannot silently replace, or fall back into, the
 canonical AST-closure full-IR path.
 
+With `SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1`, the full-IR path emits one
+`module_frontend_full_ir: lower_node` record per `ModuleId` and one
+`module_frontend_full_ir: lower_edge` record per authored edge. Legacy compact
+trace records are not evidence that the canonical lowering consumed a closure.
+
 ## Semantic Lane
 
 ```text
