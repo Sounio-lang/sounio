@@ -9,7 +9,7 @@
 // exponentially weighted moving mean, expanding mean / var / std, rank,
 // quantile / median, covariance / correlation (+ a correct bf_sqrt), and
 // rolling variance / std, rolling median, cumulative product, and
-// per-group distinct-count (nunique), and per-group idxmax / idxmin.
+// per-group distinct-count (nunique), per-group idxmax / idxmin, and per-group mode.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -2213,5 +2213,111 @@ pub fn bf_idxmin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with
     heap_free(hk as *mut i8)
     heap_free(hv as *mut i8)
     heap_free(hi as *mut i8)
+    out
+}
+
+/// Per-group MODE: for each distinct `key_col`, the most frequently occurring
+/// `val_col` value in that group (like pandas groupby(key)[val].mode()). On a
+/// frequency tie the SMALLEST value wins (matching pandas' sorted mode taken first).
+/// Returns a 2-column [key, mode] BigFrame. Two passes: count occurrences per
+/// (key,val) pair (bf_pairhash), then reduce each key to its max-count value. O(n)
+/// expected. NATIVE + lean_single only (heap).
+pub fn bf_mode_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || nr <= 0 { return bf_new(2, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let po = heap_alloc(size * 8) as *mut f64      // (key,val) -> occurrence count
+    let pk = heap_alloc(size * 8) as *mut f64
+    let pv = heap_alloc(size * 8) as *mut f64
+    let pc = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var r: i64 = 0
+    while r < nr {
+        let k = read_f64(kp, r)
+        let v = read_f64(vp, r)
+        var slot = bf_pairhash(k, v, mask)
+        var done = false
+        while !done {
+            if read_f64(po, slot) == 0.0 {
+                write_f64(po, slot, 1.0)
+                write_f64(pk, slot, k)
+                write_f64(pv, slot, v)
+                write_f64(pc, slot, 1.0)
+                done = true
+            } else {
+                if read_f64(pk, slot) == k && read_f64(pv, slot) == v {
+                    write_f64(pc, slot, read_f64(pc, slot) + 1.0)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    // Reduce per key: the value with the max count (tie -> smaller value).
+    let ko  = heap_alloc(size * 8) as *mut f64
+    let kk  = heap_alloc(size * 8) as *mut f64
+    let kbc = heap_alloc(size * 8) as *mut f64     // best count
+    let kbv = heap_alloc(size * 8) as *mut f64     // value achieving it
+    var nd: i64 = 0
+    var s: i64 = 0
+    while s < size {
+        if read_f64(po, s) == 1.0 {
+            let k = read_f64(pk, s)
+            let v = read_f64(pv, s)
+            let c = read_f64(pc, s)
+            var s2 = bf_ghash(k, mask)
+            var done2 = false
+            while !done2 {
+                if read_f64(ko, s2) == 0.0 {
+                    write_f64(ko, s2, 1.0)
+                    write_f64(kk, s2, k)
+                    write_f64(kbc, s2, c)
+                    write_f64(kbv, s2, v)
+                    nd = nd + 1
+                    done2 = true
+                } else {
+                    if read_f64(kk, s2) == k {
+                        let bc = read_f64(kbc, s2)
+                        let bv = read_f64(kbv, s2)
+                        if c > bc || (c == bc && v < bv) {
+                            write_f64(kbc, s2, c)
+                            write_f64(kbv, s2, v)
+                        }
+                        done2 = true
+                    } else {
+                        s2 = (s2 + 1) & mask
+                    }
+                }
+            }
+        }
+        s = s + 1
+    }
+    var cap = nd
+    if cap < 1 { cap = 1 }
+    var out = bf_new(2, cap)
+    s = 0
+    while s < size {
+        if read_f64(ko, s) == 1.0 {
+            var row: [f64; 64] = [0.0; 64]
+            row[0] = read_f64(kk, s)
+            row[1] = read_f64(kbv, s)
+            bf_push_row(&!out, &row, 2)
+        }
+        s = s + 1
+    }
+    heap_free(po as *mut i8)
+    heap_free(pk as *mut i8)
+    heap_free(pv as *mut i8)
+    heap_free(pc as *mut i8)
+    heap_free(ko as *mut i8)
+    heap_free(kk as *mut i8)
+    heap_free(kbc as *mut i8)
+    heap_free(kbv as *mut i8)
     out
 }
