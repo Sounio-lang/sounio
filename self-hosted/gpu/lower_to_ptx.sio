@@ -54,6 +54,18 @@ pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, All
         buf = ptx_push_str(buf, gpu_emit_cell_sign_table(ndim, nbits))
         buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(ndim, nbits))
     }
+    // Full-f64 step: ossm_Lsgn σ(k⊕j,j) for the L(A) build (read at runtime in the j-loop).
+    if gpu_has_oct_step_f64(kernel) {
+        let fdim = gpu_step_f64_dim(kernel)
+        let fbits = if fdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(fdim, fbits))
+    }
+    // f64 tensor-core tile: ossm_Lsgn σ(k⊕j,j) for the f64 L(a) build.
+    if gpu_has_oct_batch_f64(kernel) {
+        let tdim = gpu_batch_f64_dim(kernel)
+        let tbits = if tdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(tdim, tbits))
+    }
     // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
     // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
     // The function only emits cosmetic PTX comment lines; skip it for correctness.
@@ -158,7 +170,7 @@ fn gpu_has_wmma_tile(kernel: GpuKernelIr) -> bool {
     var i: i64 = 0
     while i < kernel.op_count {
         let oc = kernel.ops[i as usize].opcode
-        if oc == GpuOpcode::GpuWmmaTile || oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur || oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctVjp || oc == GpuOpcode::GpuOctBwd || oc == GpuOpcode::GpuOctBwdNl { return true }
+        if oc == GpuOpcode::GpuWmmaTile || oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur || oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctVjp || oc == GpuOpcode::GpuOctBwd || oc == GpuOpcode::GpuOctBwdNl || oc == GpuOpcode::GpuOctBatchF64 { return true }
         i = i + 1
     }
     false
@@ -174,7 +186,9 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // The associator, VJP and BPTT-backward need the same register classes as the cell.
     let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
     let readout = gpu_has_oct_readout(kernel)
-    let stage_or_pa = stage || postadd || cell || readout
+    let stepf64 = gpu_has_oct_step_f64(kernel)
+    let tc64 = gpu_has_oct_batch_f64(kernel)
+    let stage_or_pa = stage || postadd || cell || readout || stepf64 || tc64
 
     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
     var pred_count = kernel.max_reg_pred
@@ -190,6 +204,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     if stage_or_pa && b32_count < 8 { b32_count = 8 }
     if cell && b32_count < 12 { b32_count = 12 }
     if readout && b32_count < 6 { b32_count = 6 }
+    if stepf64 && b32_count < 12 { b32_count = 12 }
+    if tc64 && b32_count < 12 { b32_count = 12 }
     if b32_count > 0 {
         out = ptx_push_str(out, "    .reg .b32 %r<")
         out = gpu_push_i64(out, b32_count)
@@ -200,7 +216,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
     // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
-    if (cell || postadd || readout) && b64_count < 8 { b64_count = 8 }
+    if (cell || postadd || readout || stepf64 || tc64) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -214,6 +230,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .f32 %f<N> — the post-add needs %f1..%f3; the full cell needs %f1..%f6.
     var f32_count = kernel.max_reg_f32
     if postadd && f32_count < 4 { f32_count = 4 }
+    if stepf64 && f32_count < 1 { f32_count = 1 }
+    if tc64 && f32_count < 1 { f32_count = 1 }
     if cell && f32_count < 8 { f32_count = 8 }
     if f32_count > 0 {
         out = ptx_push_str(out, "    .reg .f32 %f<")
@@ -224,7 +242,8 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
     var f64_count = kernel.max_reg_f64
     if stage && f64_count < 2 { f64_count = 2 }
-    if (postadd || cell || readout) && f64_count < 3 { f64_count = 3 }
+    if (postadd || cell || readout || stepf64) && f64_count < 3 { f64_count = 3 }
+    if tc64 && f64_count < 14 { f64_count = 14 }
     if f64_count > 0 {
         out = ptx_push_str(out, "    .reg .f64 %fd<")
         out = gpu_push_i64(out, f64_count)
@@ -1117,6 +1136,152 @@ fn gpu_has_oct_readout(kernel: GpuKernelIr) -> bool {
     false
 }
 
+// Does this kernel contain the full-f64 step op?
+fn gpu_has_oct_step_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctStepF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the full-f64 step op (8 octonion / 16 sedenion), for the module-scope sign table.
+fn gpu_step_f64_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctStepF64 {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
+// (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
+// read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
+fn gpu_emit_oct_step_f64(pAR: string, pBR: string, pxR: string, pHR: string, poutR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $F64DONE;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$F64B:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")   // k=%r6, b=%r7
+    // acc = B[k]·x[b]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pBR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), pxR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd0, %fd1, %fd2;\n")
+    // inner: for j in 0..dim: acc += σ(k⊕j,j)·A[k⊕j]·H[b*dim+j]
+    t = str_concat(t, "    mov.u32 %r8, 0;\n$F64J:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r6, %r8;\n")   // i = k⊕j
+    // A[i]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), pAR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    // H[b*dim+j]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r7, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r8;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    // σ = ossm_Lsgn[k*dim+j]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, "), i64_to_string(dim))
+    t = str_concat(t, ";\n    @%p1 bra $F64J;\n")
+    // store S[k*16+b]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $F64B;\n$F64DONE:\n")
+    t
+}
+
+// Does this kernel contain the f64 tensor-core batched-multiply op?
+fn gpu_has_oct_batch_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the f64 tensor-core tile op (8 octonion / 16 sedenion), for the module-scope sign table.
+fn gpu_batch_f64_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchF64 {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Batched hypercomplex multiply D = L(a)·H on F64 TENSOR CORES (wmma m8n8k4.f64). L(a) (σ(k⊕j,j)·a[k⊕j])
+// is built f64 row-major into sL[shared]; H is loaded col-major directly from the global batch pointer
+// (its state-major layout [state*dim+comp] already matches a col-major B). D(dim×16) is computed as
+// (dim/8) m-tiles × 2 n-tiles × (dim/4) k-chunks of m8n8k4; each (m,n) tile accumulates its k-chunks in
+// the f64 fragment {%fd10,%fd11} then stores to pout (D-layout [comp*16+state]).
+fn gpu_emit_oct_batch_f64(paR: string, pHR: string, poutR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    // thread 0: build L(a) f64 row-major into sL[shared_array]  (sL[k*dim+j] = σ(k⊕j,j)·a[k⊕j])
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BF0;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$BFL:\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(t, ";\n    xor.b32 %r8, %r6, %r7;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    mov.u32 %r9, shared_array;\n    mul.lo.u32 %r10, %r5, 8;\n    add.u32 %r9, %r9, %r10;\n")
+    t = str_concat(t, "    st.shared.f64 [%r9], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim))
+    t = str_concat(t, ";\n    @%p1 bra $BFL;\n$BF0:\n    bar.sync 0;\n")
+    // warp-collective: (dim/8) m-tiles × 2 n-tiles, each accumulating (dim/4) k-chunks of m8n8k4
+    let mtiles = dim / 8
+    let kchunks = dim / 4
+    var mt: i64 = 0
+    while mt < mtiles {
+        var nt: i64 = 0
+        while nt < 2 {
+            t = str_concat(t, gpu_emit_f64_mma_block(pHR, poutR, mt, nt, dim, kchunks))
+            nt = nt + 1
+        }
+        mt = mt + 1
+    }
+    t
+}
+
+// One (mt,nt) output tile: fd=0; accumulate kchunks m8n8k4 f64 mma; store D(8×8) to pout D-layout.
+fn gpu_emit_f64_mma_block(pHR: string, poutR: string, mt: i64, nt: i64, dim: i64, kchunks: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.f64 %fd10, 0d0000000000000000;\n    mov.f64 %fd11, 0d0000000000000000;\n"
+    var kc: i64 = 0
+    while kc < kchunks {
+        // A: sL 8×4 slice at (mt*8, kc*4), row-major ldm=dim → shared byte addr = (mt*8*dim + kc*4)*8
+        t = str_concat(str_concat(t, "    mov.u32 %r1, shared_array;\n    add.u32 %r1, %r1, "), i64_to_string((mt * 8 * dim + kc * 4) * 8))
+        t = str_concat(str_concat(t, ";\n    wmma.load.a.sync.aligned.row.m8n8k4.shared.f64 {%fd12}, [%r1], "), i64_to_string(dim))
+        t = str_concat(t, ";\n")
+        // B: H 4×8 slice at (kc*4, nt*8), col-major ldm=dim → global byte addr = (nt*8*dim + kc*4)*8
+        t = str_concat(str_concat(t, "    add.s64 %rd7, "), pHR)
+        t = str_concat(str_concat(t, ", "), i64_to_string((nt * 8 * dim + kc * 4) * 8))
+        t = str_concat(str_concat(t, ";\n    wmma.load.b.sync.aligned.col.m8n8k4.f64 {%fd13}, [%rd7], "), i64_to_string(dim))
+        t = str_concat(t, ";\n")
+        // mma accumulate
+        t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m8n8k4.f64.f64.f64.f64.rn ")
+        t = str_concat(t, "{%fd10,%fd11}, {%fd12}, {%fd13}, {%fd10,%fd11};\n")
+        kc = kc + 1
+    }
+    // store D(8×8) at (mt*8 comps, nt*8 states) → pout D-layout [comp*16+state], ldm=16
+    t = str_concat(str_concat(t, "    add.s64 %rd7, "), poutR)
+    t = str_concat(str_concat(t, ", "), i64_to_string((mt * 8 * 16 + nt * 8) * 8))
+    t = str_concat(t, ";\n    wmma.store.d.sync.aligned.row.m8n8k4.f64 [%rd7], {%fd10,%fd11}, 16;\n")
+    t
+}
+
 // O-SSM real readout y[b] = Re(C⊗h)[b] = Σ_p σ(p,p)·C[p]·h[p,b], thread 0. σ(p,p)=+1 for p=0, −1 for
 // p≥1, so y[b] = C[0]·h[0,b] − Σ_{p≥1} C[p]·h[p,b]. h is D-layout [p*16+b]; the p-stride is 16*8=128
 // bytes (immediate offsets, p unrolled). b runs 0..16 as a runtime loop. CR/HR/yR are the pointers.
@@ -1592,6 +1757,19 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             // O-SSM real readout y = Re(C⊗h). Pointers: pC=lhs, pH=rhs, py=addr.
             let odim = if op.rhs_imm == 16 { 16 } else { 8 }
             ptx_push_str(buf, gpu_emit_oct_readout(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), odim))
+        }
+
+        GpuOpcode::GpuOctStepF64 => {
+            // Full-f64 O-SSM step. Pointers: pA=lhs, pB=rhs, px=addr, pH=src, pout=shared_addr.
+            let fdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_step_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), fdim))
+        }
+
+        GpuOpcode::GpuOctBatchF64 => {
+            // Batched hypercomplex multiply on f64 tensor cores (m8n8k4.f64). pa=lhs, pH=rhs, pout=addr.
+            let tdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let tbits = if tdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_batch_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), tdim, tbits))
         }
 
         GpuOpcode::GpuWmmaTile => {
