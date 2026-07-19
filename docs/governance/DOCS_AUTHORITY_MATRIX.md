@@ -839,6 +839,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-14-units-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-units-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-15-batched-verticals-index | repo_only | docs/superpowers/specs/2026-07-15-batched-verticals-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-17-csv-reader-design | repo_only | docs/superpowers/specs/2026-07-17-csv-reader-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-19-special-scipy-parity-design | repo_only | docs/superpowers/specs/2026-07-19-special-scipy-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.testing | repo_only | docs/TESTING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.theory.epistemic-monotonicity | repo_only | docs/theory/epistemic_monotonicity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
