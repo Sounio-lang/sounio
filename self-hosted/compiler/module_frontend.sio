@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
+use ir::lower::{LowerExternBindingHandle, LowerProgramItemsHandle, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -146,6 +146,10 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+// Flat pointer storage is bootstrap-safe. Each pointer owns a heap-pinned
+// LowerExternBindingHandle; aggregate Name arrays in BSS are not stable.
+var MF_EXTERN_BINDING_PTRS: [i64; 2048] = [0; 2048]
+var MF_PROGRAM_ITEM_PTRS: [i64; 256] = [0; 256]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -1292,13 +1296,6 @@ fn ir_merge_is_direct_fn_ref_opcode(op: IrOpcode) -> bool {
     }
 }
 
-fn ir_merge_function_name_at(module: &IrModule, fn_id: i64) -> Name with Mut, Div, Panic {
-    if fn_id >= 0 && fn_id < (*module).fn_count {
-        return (*module).functions[fn_id as usize].name
-    }
-    ir_empty_name()
-}
-
 fn ir_merge_prepare_function_with_remap_from_func(
     func_in: IrFunction,
     src: &IrModule,
@@ -1325,11 +1322,9 @@ fn ir_merge_prepare_function_with_remap_from_func(
             if old_id >= 0 && old_id < dep_fn_count {
                 let mapped_id = fn_remap[old_id as usize]
                 if mapped_id >= 0 {
-                    let dep_name = (*src).functions[old_id as usize].name
-                    let current_name = ir_merge_function_name_at(dst, old_id)
-                    if ir_name_eq(dep_name, current_name) || ir_merge_find_function_name_index(dst, dep_name) < 0 {
-                        func.instrs[ii as usize].fn_id = mapped_id
-                    }
+                    // fn_remap was built from the dependency slot's exact
+                    // (module_id, name) identity.
+                    func.instrs[ii as usize].fn_id = mapped_id
                 }
             }
         }
@@ -1389,44 +1384,82 @@ fn ir_merge_prepare_function_with_remap(
     )
 }
 
-// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
-// over import stubs so dependency functions keep calling real implementations.
-fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+fn ir_function_has_exact_definition_identity(func: IrFunction) -> bool {
+    func.defining_module_id >= 0 || func.defining_module_id == IR_DEFINING_MODULE_BUILTIN
+}
+
+fn ir_function_definition_identity_eq(a: IrFunction, b: IrFunction) -> bool with Mut, Div, Panic {
+    ir_function_has_exact_definition_identity(a) &&
+    ir_function_has_exact_definition_identity(b) &&
+    a.defining_module_id == b.defining_module_id &&
+    ir_name_eq(a.name, b.name)
+}
+
+fn ir_merge_find_function_identity_index(
+    module: &IrModule,
+    defining_module_id: i64,
+    name: Name
+) -> i64 with Mut, Div, Panic {
+    if defining_module_id < 0 && defining_module_id != IR_DEFINING_MODULE_BUILTIN {
+        return -1
+    }
+    var found_body: i64 = -1
+    var found_stub: i64 = -1
     var fi: i64 = 0
-    var found: i64 = 0 - 1
-    var found_stub: i64 = 0 - 1
     while fi < (*module).fn_count {
-        if ir_name_eq((*module).functions[fi as usize].name, name) {
-            if (*module).functions[fi as usize].instr_count > 0 {
-                found = fi
+        let candidate = (*module).functions[fi as usize]
+        if candidate.defining_module_id == defining_module_id && ir_name_eq(candidate.name, name) {
+            if candidate.instr_count > 0 {
+                if found_body < 0 { found_body = fi }
             } else if found_stub < 0 {
                 found_stub = fi
             }
         }
         fi = fi + 1
     }
-    if found >= 0 { found } else { found_stub }
+    if found_body >= 0 { found_body } else { found_stub }
 }
 
-// After stub replacement, remap in-function IrCall/IrCallSret targets from the
-// dependency module's local fn_id space to the accumulated module by name.
-fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &IrModule) -> IrFunction with Mut, Panic, Div {
-    var out = func
-    var ii: i64 = 0
-    while ii < out.instr_count {
-        if out.instrs[ii as usize].op == IrOpcode::IrCall || out.instrs[ii as usize].op == IrOpcode::IrCallSret {
-            let old_id = out.instrs[ii as usize].fn_id
-            if old_id >= 0 && old_id < (*src).fn_count {
-                let target_name = (*src).functions[old_id as usize].name
-                let new_id = ir_merge_find_function_name_index(dst, target_name)
-                if new_id >= 0 {
-                    out.instrs[ii as usize].fn_id = new_id
+// Bare-name recovery is valid only when the name denotes one definition
+// identity. Distinct module owners and explicit ambiguity fail closed.
+fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    var selected: i64 = -1
+    var selected_module_id: i64 = IR_DEFINING_MODULE_UNKNOWN
+    var selected_exact: bool = false
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let candidate = (*module).functions[fi as usize]
+        if ir_name_eq(candidate.name, name) {
+            if candidate.defining_module_id == IR_DEFINING_MODULE_AMBIGUOUS {
+                return -1
+            }
+            let candidate_exact = ir_function_has_exact_definition_identity(candidate)
+            if selected < 0 {
+                selected = fi
+                selected_module_id = candidate.defining_module_id
+                selected_exact = candidate_exact
+            } else {
+                if !selected_exact || !candidate_exact || candidate.defining_module_id != selected_module_id {
+                    return -1
+                }
+                if (*module).functions[selected as usize].instr_count <= 0 && candidate.instr_count > 0 {
+                    selected = fi
                 }
             }
         }
-        ii = ii + 1
+        fi = fi + 1
     }
-    out
+    selected
+}
+
+fn ir_merge_find_function_for_target(module: &IrModule, target: IrFunction) -> i64 with Mut, Div, Panic {
+    if ir_function_has_exact_definition_identity(target) {
+        return ir_merge_find_function_identity_index(module, target.defining_module_id, target.name)
+    }
+    if target.defining_module_id == IR_DEFINING_MODULE_UNKNOWN {
+        return ir_merge_find_function_name_index(module, target.name)
+    }
+    -1
 }
 
 // Takes &! IrModule (not &! Box<IrModule>): the latter triggers a lean_single
@@ -1478,9 +1511,8 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
-// Resolve a call's canonical target from its (fn_id, name) fields only.
-// Prefer lowered bodies (instr_count>0) over import stubs; fall back to the
-// callee symbol at the current fn_id when the call's name is empty.
+// Resolve a call from its slot identity. Bare-name recovery is allowed only
+// for a globally unique definition.
 //
 // A8 fix: the previous entry point (`ir_module_resolve_one_call_target`) took
 // `instr: IrInstr` BY VALUE. IrInstr is a
@@ -1490,32 +1522,25 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
 // (`var r = zero(k); r.c[i]=1; return r`). Passing only the scalar fn_id + fixed-size
 // Name avoids the large-struct/Box by-value copy entirely.
 fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
-    var resolve_name = instr_name
-    if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
-        resolve_name = (*module).functions[old_id as usize].name
-    }
-    if resolve_name.len > 0 {
-        let new_id = ir_merge_find_function_name_index(module, resolve_name)
-        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
-            return new_id
+    if old_id >= 0 && old_id < (*module).fn_count {
+        let target = (*module).functions[old_id as usize]
+        if instr_name.len == 0 || ir_name_eq(instr_name, target.name) {
+            let exact_id = ir_merge_find_function_for_target(module, target)
+            if exact_id >= 0 && (*module).functions[exact_id as usize].instr_count > 0 {
+                return exact_id
+            }
         }
     }
-    // Remap calls that still point at import stubs (ic=0) even when name-based
-    // lookup above failed — duplicate symbols can leave stale low fn_ids.
-    if old_id >= 0 && old_id < (*module).fn_count {
-        if (*module).functions[old_id as usize].instr_count == 0 {
-            let stub_name = (*module).functions[old_id as usize].name
-            let new_id = ir_merge_find_function_name_index(module, stub_name)
-            if new_id >= 0 && new_id != old_id && (*module).functions[new_id as usize].instr_count > 0 {
-                return new_id
-            }
+    if instr_name.len > 0 {
+        let unique_id = ir_merge_find_function_name_index(module, instr_name)
+        if unique_id >= 0 && (*module).functions[unique_id as usize].instr_count > 0 {
+            return unique_id
         }
     }
     old_id
 }
 
-// After multimodule merge, rebind every direct IrCall/IrCallSret to the merged
-// module's canonical fn_id for instr.name. Prefer lowered bodies over import stubs.
+// After multimodule merge, rebind direct calls to canonical exact identities.
 fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -1849,17 +1874,13 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     }
 }
 
-// Map a fn_id to the merged module's canonical index for its symbol name.
-// Prefer lowered bodies (instr_count>0) over import stubs.
+// Map a fn_id to the canonical slot for its exact definition identity.
 fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 with Mut, Div, Panic {
     if fn_id < 0 || fn_id >= (*module).fn_count {
         return fn_id
     }
-    let sym_name = (*module).functions[fn_id as usize].name
-    if sym_name.len == 0 {
-        return fn_id
-    }
-    let canon = ir_merge_find_function_name_index(module, sym_name)
+    let target = (*module).functions[fn_id as usize]
+    let canon = ir_merge_find_function_for_target(module, target)
     if canon >= 0 {
         return canon
     }
@@ -1879,15 +1900,12 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
             while ii < f.instr_count {
                 if ir_merge_is_direct_fn_ref_opcode(f.instrs[ii as usize].op) {
                     let old_id = f.instrs[ii as usize].fn_id
-                    let nm = f.instrs[ii as usize].name
                     var canon: i64 = old_id
-                    if nm.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, nm)
-                        if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
-                            canon = by_name
-                        }
-                    } else if old_id >= 0 {
+                    if old_id >= 0 {
                         canon = ir_module_canonical_fn_id_for_index(&out, old_id)
+                    } else if f.instrs[ii as usize].name.len > 0 {
+                        let unique = ir_merge_find_function_name_index(&out, f.instrs[ii as usize].name)
+                        if unique >= 0 { canon = unique }
                     }
                     if canon >= 0
                         && canon < out.fn_count
@@ -1928,9 +1946,9 @@ fn ir_module_promote_canonical_into_stub_slots(module: IrModule) -> IrModule wit
     var fi: i64 = 0
     while fi < out.fn_count {
         if out.functions[fi as usize].instr_count == 0 {
-            let sym_name = out.functions[fi as usize].name
-            if sym_name.len > 0 {
-                let canon = ir_merge_find_function_name_index(&out, sym_name)
+            let target = out.functions[fi as usize]
+            if target.name.len > 0 {
+                let canon = ir_merge_find_function_for_target(&out, target)
                 if canon >= 0 && canon != fi && out.functions[canon as usize].instr_count > 0 {
                     out.functions[fi as usize] = ir_function_deep_copy(out.functions[canon as usize])
                 }
@@ -1963,15 +1981,16 @@ fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut,
                 let cn = f.instrs[ii as usize].name
                 if cn.len > 0 && native_v2_builtin_id_for_name(cn) != 0 {
                     let cur = f.instrs[ii as usize].fn_id
-                    var ok: bool = false
+                    var target: i64 = -1
                     if cur >= 0 && cur < out.fn_count {
-                        if ir_name_eq(out.functions[cur as usize].name, cn) { ok = true }
+                        if ir_name_eq(out.functions[cur as usize].name, cn) { target = cur }
                     }
-                    if !ok {
-                        var target = ir_merge_find_function_name_index(&out, cn)
+                    if target < 0 {
+                        target = ir_merge_find_function_name_index(&out, cn)
                         if target < 0 && out.fn_count < IR_MAX_FUNCS {
                             var stub = ir_empty_function()
                             stub.name = cn
+                            stub.defining_module_id = IR_DEFINING_MODULE_BUILTIN
                             out.functions[out.fn_count as usize] = stub
                             target = out.fn_count
                             out.fn_count = out.fn_count + 1
@@ -1979,6 +1998,14 @@ fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut,
                         if target >= 0 {
                             f.instrs[ii as usize].fn_id = target
                             changed = true
+                        }
+                    }
+                    if target >= 0 && target < out.fn_count {
+                        var target_slot = out.functions[target as usize]
+                        if target_slot.instr_count == 0 &&
+                           target_slot.defining_module_id == IR_DEFINING_MODULE_UNKNOWN {
+                            target_slot.defining_module_id = IR_DEFINING_MODULE_BUILTIN
+                            out.functions[target as usize] = target_slot
                         }
                     }
                 }
@@ -2034,6 +2061,32 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
     out
 }
 
+fn ir_module_direct_fn_provenance_is_complete(module: &IrModule) -> bool with Mut, Div, Panic {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let func = (*module).functions[fi as usize]
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let ins = func.instrs[ii as usize]
+            if ir_merge_is_direct_fn_ref_opcode(ins.op) {
+                if ins.fn_id < 0 || ins.fn_id >= (*module).fn_count {
+                    return false
+                }
+                let target = (*module).functions[ins.fn_id as usize]
+                if !ir_function_has_exact_definition_identity(target) {
+                    return false
+                }
+                if ins.name.len > 0 && !ir_name_eq(ins.name, target.name) {
+                    return false
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    true
+}
+
 // Reinstall seed user main after finalize: owned-module finalize passes can clobber
 // fn=0 under the lean_single JIT. Stub slots are already promoted; keep seed fn_ids.
 fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) -> IrModule with Mut, Div, Panic {
@@ -2043,6 +2096,7 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
     }
     var slot = out.functions[0 as usize]
     slot.name = user_main.name
+    slot.defining_module_id = user_main.defining_module_id
     slot.instr_count = user_main.instr_count
     slot.reg_count = user_main.reg_count
     slot.label_count = user_main.label_count
@@ -2073,6 +2127,106 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
     }
     out.functions[0 as usize] = slot
     out
+}
+
+fn ir_direct_call_result_flags(op: IrOpcode, current_flags: i64, target_returns_float: i64) -> i64 {
+    if op != IrOpcode::IrCall {
+        return current_flags
+    }
+    if target_returns_float == 1 { IR_FLOAT_REG_MARKER_FLAG } else { 0 }
+}
+
+fn ir_fields_are_paired_float_marker(op: IrOpcode, imm_flags: i64, dst: i64, call_dst: i64) -> bool {
+    op == IrOpcode::IrNop &&
+    imm_flags == IR_FLOAT_REG_MARKER_FLAG &&
+    dst == call_dst
+}
+
+// Result-class metadata is refreshed only after exact call targets are known.
+// Keep the call flag and the following marker Nop synchronized.
+fn ir_module_refresh_direct_call_result_classes(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var out = module
+    var fi: i64 = 0
+    while fi < out.fn_count {
+        var func = out.functions[fi as usize]
+        var changed: bool = false
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            var ins = func.instrs[ii as usize]
+            if ins.op == IrOpcode::IrCall && ins.fn_id >= 0 && ins.fn_id < out.fn_count {
+                let target = out.functions[ins.fn_id as usize]
+                if target.defining_module_id >= 0 {
+                    let result_flags = ir_direct_call_result_flags(ins.op, ins.imm_flags, target.returns_float)
+                    if ins.imm_flags != result_flags {
+                        ins.imm_flags = result_flags
+                        func.instrs[ii as usize] = ins
+                        changed = true
+                    }
+
+                    var has_pair = false
+                    if ii + 1 < func.instr_count {
+                        let next_op = func.instrs[(ii + 1) as usize].op
+                        let next_flags = func.instrs[(ii + 1) as usize].imm_flags
+                        let next_dst = func.instrs[(ii + 1) as usize].dst
+                        has_pair = ir_fields_are_paired_float_marker(next_op, next_flags, next_dst, ins.dst)
+                    }
+                    if result_flags == IR_FLOAT_REG_MARKER_FLAG && !has_pair && ins.dst >= 0 {
+                        if func.instr_count < IR_MAX_INSTRS {
+                            var shift = func.instr_count
+                            while shift > ii + 1 {
+                                func.instrs[shift as usize] = func.instrs[(shift - 1) as usize]
+                                shift = shift - 1
+                            }
+                            func.instrs[(ii + 1) as usize] = ir_mark_float_reg(ins.dst)
+                            func.instr_count = func.instr_count + 1
+                            changed = true
+                        }
+                    } else if result_flags == 0 && has_pair {
+                        var stale_marker = func.instrs[(ii + 1) as usize]
+                        stale_marker.imm_flags = 0
+                        func.instrs[(ii + 1) as usize] = stale_marker
+                        changed = true
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        if changed {
+            out.functions[fi as usize] = func
+        }
+        fi = fi + 1
+    }
+    out
+}
+
+fn ir_module_direct_call_result_classes_are_complete(module: &IrModule) -> bool with Mut, Div, Panic {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let func = (*module).functions[fi as usize]
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let ins = func.instrs[ii as usize]
+            if ins.op == IrOpcode::IrCall && ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+                let target = (*module).functions[ins.fn_id as usize]
+                if target.defining_module_id >= 0 {
+                    let expected = ir_direct_call_result_flags(ins.op, ins.imm_flags, target.returns_float)
+                    var has_pair = false
+                    if ii + 1 < func.instr_count {
+                        let next_op = func.instrs[(ii + 1) as usize].op
+                        let next_flags = func.instrs[(ii + 1) as usize].imm_flags
+                        let next_dst = func.instrs[(ii + 1) as usize].dst
+                        has_pair = ir_fields_are_paired_float_marker(next_op, next_flags, next_dst, ins.dst)
+                    }
+                    if ins.imm_flags != expected { return false }
+                    if expected == IR_FLOAT_REG_MARKER_FLAG && (ins.dst < 0 || !has_pair) { return false }
+                    if expected == 0 && has_pair { return false }
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    true
 }
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
@@ -5143,6 +5297,7 @@ fn module_frontend_lower_program_items_box_traced(
 fn module_frontend_lower_program_box_traced_with_externs(
     program: &Program,
     programs: &! [Program; 256],
+    file_paths: &![string; 256],
     program_count: i64,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
@@ -5155,7 +5310,25 @@ fn module_frontend_lower_program_box_traced_with_externs(
         return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(&program.items))
     }
     var epistemic = ir_empty_epistemic_section()
-    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
+    let binding_count = module_frontend_collect_external_bindings(
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
+    if binding_count < 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("extern_binding_handle_alloc_failed")
+    }
+    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(
+        program,
+        &! MF_PROGRAM_ITEM_PTRS,
+        program_count,
+        module_index,
+        &! MF_EXTERN_BINDING_PTRS,
+        binding_count,
+        &epistemic
+    )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -5166,6 +5339,15 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
+    let summary_module_box = summary_val.module
+    module_frontend_assign_function_provenance(
+        &! (*summary_module_box),
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
+    summary_val.module = summary_module_box
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         program,
         &summary_val,
@@ -5181,6 +5363,14 @@ fn module_frontend_lower_program_box_traced_with_externs(
         trace.last_stage = "lower_bodies_error"
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
+    let body_module_box = body_result.module
+    module_frontend_assign_function_provenance(
+        &! (*body_module_box),
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
@@ -5188,12 +5378,13 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
     trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
     trace.last_stage = "lower_bodies_done"
-    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
+    module_frontend_lower_box_ok(body_module_box, body_result.patch_stats)
 }
 
 fn module_frontend_lower_program_items_box_traced_with_externs(
     items: &Option<Box<ItemList>>,
     programs: &! [Program; 256],
+    file_paths: &![string; 256],
     program_count: i64,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
@@ -5207,7 +5398,25 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     }
     var epistemic = ir_empty_epistemic_section()
     let program = mf_program_from_items(items)
-    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &epistemic)
+    let binding_count = module_frontend_collect_external_bindings(
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
+    if binding_count < 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("extern_binding_handle_alloc_failed")
+    }
+    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(
+        &program,
+        &! MF_PROGRAM_ITEM_PTRS,
+        program_count,
+        module_index,
+        &! MF_EXTERN_BINDING_PTRS,
+        binding_count,
+        &epistemic
+    )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -5218,6 +5427,15 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
+    let summary_module_box = summary_val.module
+    module_frontend_assign_function_provenance(
+        &! (*summary_module_box),
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
+    summary_val.module = summary_module_box
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         &program,
         &summary_val,
@@ -5233,9 +5451,17 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         trace.last_stage = "lower_bodies_error"
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
+    let body_module_box = body_result.module
+    module_frontend_assign_function_provenance(
+        &! (*body_module_box),
+        &! MF_PROGRAM_ITEM_PTRS,
+        file_paths,
+        program_count,
+        module_index
+    )
 
     if module_frontend_items_have_ontology(items) {
-        checker_apply_ir_ontology_parameter_links_from_items(items, &! (*body_result.module))
+        checker_apply_ir_ontology_parameter_links_from_items(items, &! (*body_module_box))
     }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
@@ -5244,7 +5470,7 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
     trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
     trace.last_stage = "lower_bodies_done"
-    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
+    module_frontend_lower_box_ok(body_module_box, body_result.patch_stats)
 }
 
 fn module_frontend_populate_imported_programs(
@@ -5287,6 +5513,261 @@ fn module_frontend_populate_imported_programs(
 
     trace.resolved_modules = loaded
     loaded
+}
+
+fn module_frontend_items_define_ir_function(
+    items: &Option<Box<ItemList>>,
+    name: Name
+) -> bool with Mut, Panic, Div {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item = &(*list).head
+                if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, name) {
+                    return true
+                }
+                current = &(*list).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn module_frontend_import_item_list_contains(
+    items: &Option<Box<ImportItemList>>,
+    name: Name
+) -> bool with Mut, Panic, Div {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                if ir_name_eq((*list).head, name) {
+                    return true
+                }
+                current = &(*list).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn module_frontend_use_path_targets_file(
+    use_path: &AstPath,
+    importing_file_path: string,
+    candidate_file_path: string
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    if (*use_path).seg_count <= 0 || str_len(candidate_file_path) <= 0 {
+        return false
+    }
+    let cur_dir = module_frontend_path_directory_slice(importing_file_path)
+    let resolved = resolve_import_file_path_result_ref(use_path, cur_dir)
+    !resolved.ambiguous && resolved.candidate_count == 1 && str_eq(resolved.path, candidate_file_path)
+}
+
+fn module_frontend_items_explicitly_import_from(
+    items: &Option<Box<ItemList>>,
+    importing_file_path: string,
+    candidate_file_path: string,
+    name: Name
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item = &(*list).head
+                if item.kind == ItemKind::ItemUse &&
+                   module_frontend_use_path_targets_file(
+                       &item.use_path,
+                       importing_file_path,
+                       candidate_file_path
+                   ) {
+                    var imports_name = item.use_glob
+                    match item.use_items {
+                        Some(_) => imports_name = module_frontend_import_item_list_contains(&item.use_items, name),
+                        None => imports_name = true,
+                    }
+                    if imports_name {
+                        return true
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn module_frontend_function_defining_module(
+    program_item_ptrs: &![i64; 256],
+    file_paths: &![string; 256],
+    program_count: i64,
+    self_index: i64,
+    name: Name
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if self_index < 0 || self_index >= program_count {
+        return IR_DEFINING_MODULE_UNKNOWN
+    }
+    let self_item_handle = (*program_item_ptrs)[self_index as usize] as *mut LowerProgramItemsHandle
+    if self_item_handle as i64 == 0 {
+        return IR_DEFINING_MODULE_UNKNOWN
+    }
+    if module_frontend_items_define_ir_function(&(*self_item_handle).items, name) {
+        return self_index
+    }
+    if native_v2_builtin_id_for_name(name) != 0 {
+        return IR_DEFINING_MODULE_BUILTIN
+    }
+
+    var explicit_module: i64 = IR_DEFINING_MODULE_UNKNOWN
+    var explicit_count: i64 = 0
+    var found_module: i64 = IR_DEFINING_MODULE_UNKNOWN
+    var found_count: i64 = 0
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let candidate_item_handle = (*program_item_ptrs)[i as usize] as *mut LowerProgramItemsHandle
+            if candidate_item_handle as i64 != 0 &&
+               module_frontend_items_define_ir_function(&(*candidate_item_handle).items, name) {
+                found_module = i
+                found_count = found_count + 1
+                if module_frontend_items_explicitly_import_from(
+                    &(*self_item_handle).items,
+                    (*file_paths)[self_index as usize],
+                    (*file_paths)[i as usize],
+                    name
+                ) {
+                    explicit_module = i
+                    explicit_count = explicit_count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if explicit_count == 1 {
+        return explicit_module
+    }
+    if explicit_count > 1 {
+        return IR_DEFINING_MODULE_AMBIGUOUS
+    }
+    if found_count == 1 {
+        return found_module
+    }
+    if found_count > 1 {
+        return IR_DEFINING_MODULE_AMBIGUOUS
+    }
+    IR_DEFINING_MODULE_UNKNOWN
+}
+
+fn module_frontend_binding_already_present(
+    binding_ptrs: &![i64; 2048],
+    count: i64,
+    defining_module_id: i64,
+    name: Name
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
+        if binding as i64 != 0 {
+            if (*binding).defining_module_id == defining_module_id &&
+               ir_name_eq((*binding).name, name) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn module_frontend_collect_external_bindings(
+    program_item_ptrs: &![i64; 256],
+    file_paths: &![string; 256],
+    program_count: i64,
+    self_index: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var count: i64 = 0
+    var module_index: i64 = 0
+    while module_index < program_count && count < 2048 {
+        if module_index != self_index {
+            let item_handle = (*program_item_ptrs)[module_index as usize] as *mut LowerProgramItemsHandle
+            if item_handle as i64 == 0 {
+                return -1
+            }
+            var current = &(*item_handle).items
+            while count < 2048 {
+                match *current {
+                    Some(list) => {
+                        let item = &(*list).head
+                        if item.kind == ItemKind::ItemFn {
+                            let owner = module_frontend_function_defining_module(
+                                program_item_ptrs,
+                                file_paths,
+                                program_count,
+                                self_index,
+                                item.name
+                            )
+                            if owner == module_index &&
+                               !module_frontend_binding_already_present(
+                                   &! MF_EXTERN_BINDING_PTRS,
+                                   count,
+                                   owner,
+                                   item.name
+                               ) {
+                                var binding = MF_EXTERN_BINDING_PTRS[count as usize] as *mut LowerExternBindingHandle
+                                if binding as i64 == 0 {
+                                    binding = heap_alloc(256) as *mut LowerExternBindingHandle
+                                    if binding as i64 == 0 {
+                                        return -1
+                                    }
+                                    MF_EXTERN_BINDING_PTRS[count as usize] = binding as i64
+                                }
+                                (*binding).name = item.name
+                                (*binding).defining_module_id = owner
+                                count = count + 1
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break,
+                }
+            }
+        }
+        module_index = module_index + 1
+    }
+    count
+}
+
+fn module_frontend_assign_function_provenance(
+    module: &! IrModule,
+    program_item_ptrs: &![i64; 256],
+    file_paths: &![string; 256],
+    program_count: i64,
+    self_index: i64
+) with IO, Mut, Panic, Div, Alloc {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        var func = (*module).functions[fi as usize]
+        var defining_module_id = func.defining_module_id
+        if defining_module_id == IR_DEFINING_MODULE_UNKNOWN ||
+           defining_module_id == IR_DEFINING_MODULE_AMBIGUOUS {
+            defining_module_id = module_frontend_function_defining_module(
+                program_item_ptrs,
+                file_paths,
+                program_count,
+                self_index,
+                func.name
+            )
+            if defining_module_id == IR_DEFINING_MODULE_UNKNOWN && func.instr_count > 0 {
+                defining_module_id = self_index
+            }
+        }
+        func.defining_module_id = defining_module_id
+        (*module).functions[fi as usize] = func
+        fi = fi + 1
+    }
 }
 
 pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
@@ -5414,11 +5895,31 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
 
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
+    file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
     if loaded <= 0 {
         return module_frontend_lower_direct_box_error("no_modules_loaded")
+    }
+
+    // ModuleGraph remains the owner of Program topology. Lowering snapshots
+    // only stable ItemList handles because repeated external projections from
+    // the large Program array are not reliable under the bootstrap ABI.
+    var snapshot_i: i64 = 0
+    while snapshot_i < loaded {
+        var item_handle = MF_PROGRAM_ITEM_PTRS[snapshot_i as usize] as *mut LowerProgramItemsHandle
+        if item_handle as i64 == 0 {
+            item_handle = heap_alloc(32) as *mut LowerProgramItemsHandle
+            if item_handle as i64 == 0 {
+                return module_frontend_lower_direct_box_error("program_items_handle_alloc_failed")
+            }
+            MF_PROGRAM_ITEM_PTRS[snapshot_i as usize] = item_handle as i64
+        }
+        let snapshot_program = (*programs)[snapshot_i as usize]
+        let snapshot_items = snapshot_program.items
+        (*item_handle).items = snapshot_items
+        snapshot_i = snapshot_i + 1
     }
 
     trace.last_stage = "lower_summary"
@@ -5428,8 +5929,9 @@ fn module_frontend_lower_programs_array_direct_box(
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
     }
     print("lower_array: seed_begin\n")
-    let seed_items = (*programs)[0].items
-    let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
+    let seed_program = (*programs)[0]
+    let seed_items = seed_program.items
+    let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, file_paths, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
         return module_frontend_lower_direct_box_error(seed_lower.error_msg)
@@ -5459,8 +5961,9 @@ fn module_frontend_lower_programs_array_direct_box(
                 // per-module lowering scratch (dep_box and everything it
                 // pulls in) falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
-                let dep_items = (*programs)[i as usize].items
-                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
+                let dep_program = (*programs)[i as usize]
+                let dep_items = dep_program.items
+                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, file_paths, loaded, i, trace)
                 print("lower_array: dep_lower_done ")
                 print_int(i)
                 print("\n")
@@ -5501,9 +6004,9 @@ fn module_frontend_lower_programs_array_direct_box(
                             var existing_body_idx: i64 = 0 - 1
                             var sfi: i64 = 0
                             while sfi < (*acc_box).fn_count {
-                                if ir_name_eq(
-                                    (*acc_box).functions[sfi as usize].name,
-                                    (*dep_box).functions[rfi as usize].name
+                                if ir_function_definition_identity_eq(
+                                    (*acc_box).functions[sfi as usize],
+                                    (*dep_box).functions[rfi as usize]
                                 ) {
                                     if (*acc_box).functions[sfi as usize].instr_count <= 0 {
                                         stub_idx = sfi
@@ -5545,12 +6048,10 @@ fn module_frontend_lower_programs_array_direct_box(
                             // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
                             // skip re-placing it. Only place newly-appended functions.
                             if dst_fi >= acc_fn_before {
-                                // Remap cross-module call targets by symbol name while fn_id
-                                // values are still in the dependency module index space.
-                                var dep_func = (*dep_box).functions[mfi as usize]
-                                dep_func = ir_merge_remap_existing_call_targets(dep_func, &(*dep_box), &(*acc_box))
+                                // Remap dependency-local references by exact identity while
+                                // fn_id values are still in the dependency index space.
                                 var func = ir_merge_prepare_function_with_remap_from_func(
-                                    dep_func,
+                                    (*dep_box).functions[mfi as usize],
                                     &(*dep_box),
                                     &(*acc_box),
                                     dep_fn_count,
@@ -5631,6 +6132,7 @@ fn module_frontend_lower_programs_array_direct_box(
 
 fn module_frontend_lower_programs_array_boxed(
     programs: &! [Program; 256],
+    file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerBoxResult with IO, Mut, Panic, Div, Alloc {
@@ -5638,7 +6140,7 @@ fn module_frontend_lower_programs_array_boxed(
         return module_frontend_lower_box_error("no_modules_loaded")
     }
 
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
     if !lowered.ok {
         return module_frontend_lower_box_error(lowered.error_msg)
     }
@@ -5809,6 +6311,7 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
 
 fn module_frontend_merge_imported_into(
     programs: &! [Program; 256],
+    file_paths: &![string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace,
     out_module: &! IrModule
@@ -5833,7 +6336,7 @@ fn module_frontend_merge_imported_into(
 
     // Per-module check_program_with_artifacts cannot see cross-module imports and
     // either rejects (E137) or spins; multimodule verdict above is authoritative.
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
@@ -5847,7 +6350,16 @@ fn module_frontend_merge_imported_into(
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
     var finalized = ir_module_finalize_merged_calls(*module_box)
-    (*out_module) = ir_module_restore_user_main_calls(finalized, user_main_snapshot)
+    finalized = ir_module_restore_user_main_calls(finalized, user_main_snapshot)
+    (*out_module) = ir_module_refresh_direct_call_result_classes(finalized)
+    if loaded > 1 && !ir_module_direct_fn_provenance_is_complete(out_module) {
+        print("IR merge failed: unresolved or ambiguous function provenance\n")
+        return false
+    }
+    if loaded > 1 && !ir_module_direct_call_result_classes_are_complete(out_module) {
+        print("IR merge failed: incomplete direct-call result classification\n")
+        return false
+    }
     true
 }
 
@@ -5951,7 +6463,7 @@ pub fn module_frontend_compile_imported_to_file(
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
     module_frontend_trace_full_ir_closure(&closure)
-    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, &closure.paths, loaded, &! trace)
     print("imported_compile: lower_done\n")
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -6013,6 +6525,15 @@ pub fn module_frontend_compile_imported_to_file(
     }
     var merged_module = ir_module_finalize_merged_calls(*module_box)
     merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
+    merged_module = ir_module_refresh_direct_call_result_classes(merged_module)
+    if !ir_module_direct_fn_provenance_is_complete(&merged_module) {
+        print("IR merge failed: unresolved or ambiguous function provenance\n")
+        return 1
+    }
+    if !ir_module_direct_call_result_classes_are_complete(&merged_module) {
+        print("IR merge failed: incomplete direct-call result classification\n")
+        return 1
+    }
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: post_finalize\n")
         ir_module_dump_all_calls_diag(&merged_module)
@@ -6034,6 +6555,17 @@ pub fn module_frontend_compile_imported_to_file(
     if optimize {
         let cleanup_receipt = opt_cleanup_module_inplace(&! merged_module)
         module_frontend_print_rebracket_receipt("merged-post-finalize", cleanup_receipt)
+        // Cleanup compacts marker Nops. Rebuild result-class markers from the
+        // final exact targets, then prove the IR that codegen will consume.
+        merged_module = ir_module_refresh_direct_call_result_classes(merged_module)
+        if !ir_module_direct_fn_provenance_is_complete(&merged_module) {
+            print("IR merge failed after optimization: unresolved or ambiguous function provenance\n")
+            return 1
+        }
+        if !ir_module_direct_call_result_classes_are_complete(&merged_module) {
+            print("IR merge failed after optimization: incomplete direct-call result classification\n")
+            return 1
+        }
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
@@ -7030,7 +7562,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     }
 
     var merged_module = ir_empty_module()
-    if !module_frontend_merge_imported_into(&! programs, loaded, trace, &! merged_module) {
+    if !module_frontend_merge_imported_into(&! programs, &! file_paths, loaded, trace, &! merged_module) {
         return multimodule_ir_error("ir_lowering_failed")
     }
 
