@@ -516,11 +516,11 @@ fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>,
     knowledge_context_validate_items(items)
 }
 
-fn module_frontend_string_segment(sl: StringList) -> string with Mut, Panic, Div {
+fn module_frontend_string_segment_ref(sl: &StringList) -> string with Mut, Panic, Div {
     var segment: string = ""
     var i: i64 = 0
-    while i < sl.head_len {
-        segment = str_concat(segment, module_frontend_import_byte_to_str(sl.head_buf[i]))
+    while i < (*sl).head_len {
+        segment = str_concat(segment, module_frontend_import_byte_to_str((*sl).head_buf[i]))
         i = i + 1
     }
     segment
@@ -541,28 +541,32 @@ fn module_frontend_path_shape_valid(sl: &StringList, remaining: i64) -> bool wit
     }
 }
 
-fn module_frontend_qualified_segments(sl: StringList, remaining: i64) -> string with Mut, Panic, Div, Alloc {
-    let segment = module_frontend_string_segment(sl)
+fn module_frontend_qualified_segments_ref(sl: &StringList, remaining: i64) -> string with Mut, Panic, Div, Alloc {
+    let segment = module_frontend_string_segment_ref(sl)
     if remaining <= 1 {
         return segment
     }
-    match sl.tail {
+    match (*sl).tail {
         None => segment
         Some(next) => str_concat(
             str_concat(segment, "::"),
-            module_frontend_qualified_segments(*next, remaining - 1)
+            module_frontend_qualified_segments_ref(&(*next), remaining - 1)
         )
     }
 }
 
+fn use_path_ref_to_string(path: &AstPath) -> string with Mut, Panic, Div, Alloc {
+    if (*path).seg_count <= 0 || (*path).seg_count > 256 {
+        return ""
+    }
+    if !module_frontend_path_shape_valid(&(*path).segments, (*path).seg_count) {
+        return ""
+    }
+    module_frontend_qualified_segments_ref(&(*path).segments, (*path).seg_count)
+}
+
 fn use_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
-    if path.seg_count <= 0 || path.seg_count > 256 {
-        return ""
-    }
-    if !module_frontend_path_shape_valid(&path.segments, path.seg_count) {
-        return ""
-    }
-    module_frontend_qualified_segments(path.segments, path.seg_count)
+    use_path_ref_to_string(&path)
 }
 
 fn module_frontend_test_string_segment(text: string, tail: Option<Box<StringList>>) -> StringList with Mut, Panic, Div {
@@ -2330,7 +2334,7 @@ fn module_frontend_module_exports_name(
                 if module_frontend_item_directly_exports_name(item, name) {
                     found = true
                 } else if item.kind == ItemKind::ItemUse && visibility_to_bool(item.visibility) {
-                    let requested_import = use_path_to_string(item.use_path)
+                    let requested_import = use_path_ref_to_string(&item.use_path)
                     let edge_index = module_frontend_closure_edge_index(closure, module_id, requested_import)
                     if edge_index >= 0 {
                         let dependency_id = (*closure).edge_dependency_ids[edge_index]
@@ -2446,7 +2450,7 @@ fn module_frontend_validate_import_surfaces(
                 Some(node) => {
                     let item = (*node).head
                     if item.kind == ItemKind::ItemUse {
-                        let requested_import = use_path_to_string(item.use_path)
+                        let requested_import = use_path_ref_to_string(&item.use_path)
                         let edge_index = module_frontend_closure_edge_index(
                             &(*closure),
                             module_id,
@@ -2501,7 +2505,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
         return false
     }
     (*out).paths[0] = main_path
-    (*out).logical_paths[0] = use_path_to_string((*programs)[0].module_path)
+    (*out).logical_paths[0] = use_path_ref_to_string(&(*programs)[0].module_path)
     (*out).node_count = 1
 
     var work_front: i64 = 0
@@ -2515,7 +2519,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
         }
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
-            let requested_import = use_path_to_string(imports.paths[i])
+            let requested_import = use_path_ref_to_string(&imports.paths[i])
             let resolution = resolve_import_file_path_result(imports.paths[i], cur_dir)
             let dependency_path = resolution.path
             var dependency_id: i64 = 0 - 1
@@ -2551,8 +2555,8 @@ pub fn module_frontend_collect_ast_closure_programs_into(
                             (*out).parse_failed = true
                         } else {
                             (*out).paths[dependency_id] = dependency_path
-                            (*out).logical_paths[dependency_id] = use_path_to_string(
-                                (*programs)[dependency_id].module_path
+                            (*out).logical_paths[dependency_id] = use_path_ref_to_string(
+                                &(*programs)[dependency_id].module_path
                             )
                             (*out).node_count = dependency_id + 1
                         }
