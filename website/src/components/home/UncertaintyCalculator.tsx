@@ -136,8 +136,8 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
               onClick={() => switchPreset(key as keyof typeof PRESETS)}
               className={`px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200 ${
                 preset === key
-                  ? 'bg-[var(--color-accent-gold)] text-[#10233e] shadow-lg shadow-[var(--color-accent-gold)]/20'
-                  : 'bg-[rgba(255,255,255,0.06)] text-[var(--color-text-secondary)] border border-[var(--glass-border)] hover:border-[var(--color-accent-gold)]/40'
+                  ? 'bg-[var(--color-accent-champagne)] text-[#10233e] shadow-lg shadow-[var(--color-accent-champagne)]/20'
+                  : 'bg-[rgba(255,255,255,0.06)] text-[var(--color-text-secondary)] border border-[var(--glass-border)] hover:border-[var(--color-accent-champagne)]/40'
               }`}
             >
               {key === 'bmi' ? 'BMI Calculation' : key === 'dosing' ? 'Drug Dosing' : 'fMRI Signal'}
@@ -155,28 +155,28 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                 <label className="text-sm text-[var(--color-text-secondary)] mb-1 block">{p.a.label}</label>
                 <div className="flex gap-2">
                   <input type="number" value={aVal} onChange={(e) => setAVal(+e.target.value || 0)} step="0.1"
-                    className="flex-1 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
+                    className="flex-1 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-champagne)]/60 focus:outline-none" />
                   <div className="flex items-center gap-1">
                     <span className="text-xs text-[var(--color-text-tertiary)]">\u00B1</span>
                     <input type="number" value={aUnc} onChange={(e) => setAUnc(+e.target.value || 0)} step="0.1" min="0"
-                      className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
+                      className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-champagne)]/60 focus:outline-none" />
                   </div>
                 </div>
-                <span className="text-xs text-[var(--color-accent-teal)] mt-1 block font-mono">prov: {p.a.prov}</span>
+                <span className="text-xs text-[var(--color-accent-champagne)] mt-1 block font-mono">prov: {p.a.prov}</span>
               </div>
 
               <div>
                 <label className="text-sm text-[var(--color-text-secondary)] mb-1 block">{p.b.label}</label>
                 <div className="flex gap-2">
                   <input type="number" value={bVal} onChange={(e) => setBVal(+e.target.value || 0)} step="0.1"
-                    className="flex-1 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
+                    className="flex-1 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-champagne)]/60 focus:outline-none" />
                   <div className="flex items-center gap-1">
                     <span className="text-xs text-[var(--color-text-tertiary)]">\u00B1</span>
                     <input type="number" value={bUnc} onChange={(e) => setBUnc(+e.target.value || 0)} step="0.1" min="0"
-                      className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
+                      className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-champagne)]/60 focus:outline-none" />
                   </div>
                 </div>
-                <span className="text-xs text-[var(--color-accent-teal)] mt-1 block font-mono">prov: {p.b.prov}</span>
+                <span className="text-xs text-[var(--color-accent-champagne)] mt-1 block font-mono">prov: {p.b.prov}</span>
               </div>
 
               <div className="mt-2">
@@ -185,7 +185,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                 </label>
                 <input type="range" min="0.50" max="0.99" step="0.01" value={threshold}
                   onChange={(e) => setThreshold(+e.target.value)}
-                  className="w-full accent-[var(--color-accent-gold)]" />
+                  className="w-full accent-[var(--color-accent-champagne)]" />
                 <div className="flex justify-between text-xs text-[var(--color-text-tertiary)]">
                   <span>Lenient (0.50)</span>
                   <span>Strict (0.99)</span>
@@ -196,7 +196,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
 
           {/* Arrow */}
           <div className="hidden lg:flex items-center justify-center pt-16">
-            <svg className="w-10 h-10 text-[var(--color-accent-gold)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+            <svg className="w-10 h-10 text-[var(--color-accent-champagne)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
             </svg>
           </div>
@@ -221,7 +221,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                   </div>
                   <div>
                     <span className="text-[var(--color-text-tertiary)]">prov: </span>
-                    <span className="text-[var(--color-accent-teal)]">{p.a.prov} \u00D7 {p.b.prov}</span>
+                    <span className="text-[var(--color-accent-champagne)]">{p.a.prov} \u00D7 {p.b.prov}</span>
                   </div>
                 </div>
               </div>

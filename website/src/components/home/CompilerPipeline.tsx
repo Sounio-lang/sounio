@@ -11,7 +11,7 @@ const STAGES = [
     id: 'source',
     label: 'Source',
     sub: '.sio file',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-champagne)',
     icon: '{ }',
     desc: 'UTF-8 text with Sounio syntax. Units, effects, Knowledge<T>, algebra declarations, linear types — all in one file.',
     example: 'let dose: Knowledge<mg> = …',
@@ -20,7 +20,7 @@ const STAGES = [
     id: 'lexer',
     label: 'Lexer',
     sub: 'tokenizer',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-champagne)',
     icon: 'T',
     desc: 'Hand-written tokenizer. Produces a flat token stream with byte-offset spans. Unicode-aware; Greek letters (ε, α, Ω) are valid identifiers.',
     example: 'Knowledge · < · mg · > · = · …',
@@ -29,7 +29,7 @@ const STAGES = [
     id: 'parser',
     label: 'Parser',
     sub: 'recursive descent',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-champagne)',
     icon: '⊢',
     desc: 'Recursive-descent parser with no backtracking. Produces a typed AST with full source locations for every node — used by the error reporter and LSP.',
     example: 'LetDecl { name, ty: KnowledgeTy, …}',
@@ -47,7 +47,7 @@ const STAGES = [
     id: 'hir',
     label: 'HIR',
     sub: 'high-level IR',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-champagne)',
     icon: '◇',
     desc: 'Desugared, monomorphised IR. Epistemic metadata (ε, provenance) is still structurally attached. This is where trait resolution and algebra law-binding happens.',
     example: 'HirCall { callee, args, ε_bound: 0.85 }',
@@ -65,7 +65,7 @@ const STAGES = [
     id: 'codegen',
     label: 'Codegen',
     sub: 'x86-64',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-champagne)',
     icon: '⚙',
     desc: 'Register allocation + instruction selection targeting x86-64 System V ABI via the self-hosted native backend. No LLVM required for the default bin/souc workflow.',
     example: 'mov rax, [rsp+8]  ; load Knowledge value',
@@ -123,7 +123,7 @@ export default function CompilerPipeline() {
             {/* Connecting spine */}
             <div
               className="absolute left-[27px] top-8 bottom-8 w-[2px]"
-              style={{ background: 'linear-gradient(to bottom, var(--color-accent-gold), #22c55e)' }}
+              style={{ background: 'linear-gradient(to bottom, var(--color-accent-champagne), #22c55e)' }}
               aria-hidden="true"
             />
 

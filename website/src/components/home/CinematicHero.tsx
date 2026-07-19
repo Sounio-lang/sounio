@@ -69,7 +69,7 @@ export function CinematicHero({ localePath }: Props) {
             transitionDelay: '120ms',
           }}
         >
-          <span className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 font-mono text-xs uppercase tracking-[0.2em] text-[var(--color-accent-gold-soft)] backdrop-blur-md">
+          <span className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 font-mono text-xs uppercase tracking-[0.2em] text-[var(--color-accent-champagne-soft)] backdrop-blur-md">
             UNCERTAINTY • PROVENANCE • DECISION BOUNDARIES
           </span>
         </div>
@@ -149,7 +149,7 @@ export function CinematicHero({ localePath }: Props) {
             href={localePath('/science')}
             className="group relative overflow-hidden rounded-full bg-white px-8 py-4 font-semibold text-black transition-transform duration-300 hover:scale-105"
           >
-            <div className="absolute inset-0 bg-gradient-to-r from-[var(--color-accent-gold)] to-[var(--color-accent-teal)] opacity-0 transition-opacity duration-500 group-hover:opacity-20" />
+            <div className="absolute inset-0 bg-gradient-to-r from-[var(--color-accent-champagne)] to-[var(--color-accent-champagne)] opacity-0 transition-opacity duration-500 group-hover:opacity-20" />
             <span className="relative z-10">Enter the proof surfaces</span>
           </a>
 
