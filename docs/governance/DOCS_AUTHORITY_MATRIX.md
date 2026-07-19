@@ -384,6 +384,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.continuity.wp-b1 | repo_only | docs/handoff/continuity/WP-B1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.wp-b2 | repo_only | docs/handoff/continuity/WP-B2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.d6-multimodule-runtime-blocker-2026-07-18 | repo_only | docs/handoff/d6_multimodule_runtime_blocker_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.d9-current-main-d4-ast-closure-regression-2026-07-19 | repo_only | docs/handoff/d9_current_main_d4_ast_closure_regression_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.exact-engine-prereqs | repo_only | docs/handoff/exact_engine_prereqs.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.gpu-knowledge-vecmat-swarm-plan | repo_only | docs/handoff/gpu_knowledge_vecmat_swarm_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.madaros-fixed-array-call-boundary-alias-2026-07-14 | repo_only | docs/handoff/madaros_fixed_array_call_boundary_alias_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -447,6 +448,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-inference | repo_only | docs/internal/concepts/proof-carrying-inference.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-rebracketing-protocol | repo_only | docs/internal/concepts/proof-carrying-rebracketing-protocol.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.proof-carrying-statistical-coverage-empirical-binding | repo_only | docs/internal/concepts/proof-carrying-statistical-coverage-empirical-binding.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.reflexive-inquiry | repo_only | docs/internal/concepts/reflexive-inquiry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -764,6 +766,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.proof-carrying-policy-state-feedback-d5-2026-07-15 | historical | docs/research/proof_carrying_policy_state_feedback_d5_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-rebracketing-protocol-d7-2026-07-15 | historical | docs/research/proof_carrying_rebracketing_protocol_d7_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-carrying-reflexive-inquiry-d3-2026-07-15 | historical | docs/research/proof_carrying_reflexive_inquiry_d3_2026-07-15.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.proof-carrying-statistical-coverage-empirical-binding-d9-2026-07-19 | historical | docs/research/proof_carrying_statistical_coverage_empirical_binding_d9_2026-07-19.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-microkernel-suite-2026-06-23 | historical | docs/research/proof-checker-microkernel-suite-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -837,6 +840,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof | repo_only | docs/superpowers/plans/2026-07-14-stats-validation-runproof.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-14-units-vertical | repo_only | docs/superpowers/plans/2026-07-14-units-vertical.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-17-csv-reader | repo_only | docs/superpowers/plans/2026-07-17-csv-reader.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.plans.2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9 | repo_only | docs/superpowers/plans/2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-data-science-io-design | repo_only | docs/superpowers/specs/2026-07-13-data-science-io-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-epistemic-gum-hardening-design | repo_only | docs/superpowers/specs/2026-07-13-epistemic-gum-hardening-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-14-integrate-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-integrate-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -850,6 +854,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-14-units-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-units-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-15-batched-verticals-index | repo_only | docs/superpowers/specs/2026-07-15-batched-verticals-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-17-csv-reader-design | repo_only | docs/superpowers/specs/2026-07-17-csv-reader-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9-design | repo_only | docs/superpowers/specs/2026-07-19-proof-carrying-statistical-coverage-empirical-binding-d9-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.testing | repo_only | docs/TESTING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.theory.epistemic-monotonicity | repo_only | docs/theory/epistemic_monotonicity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
