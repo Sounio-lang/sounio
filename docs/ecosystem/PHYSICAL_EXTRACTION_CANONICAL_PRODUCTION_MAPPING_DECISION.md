@@ -9,7 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.phys
 
 # Physical Extraction Canonical Production Mapping Decision
 
-Status: executable R3 non-authorizing mapping-selection processing; repository creation, production approval, and cutover execution remain absent.
+Status: executable R3 non-authorizing mapping-selection processing; four public
+empty destination repositories are provisioned, while content materialization,
+post-provisioning mapping reconfirmation, production approval, and cutover
+execution remain absent.
 
 `tools/science_boundary/canonical_production_mapping_decision_processor.py`
 turns one reviewed transcription of an explicit mapping selection into a
@@ -172,7 +175,25 @@ The catalog, source response, decision, receipt, and their exact bindings are
 preserved under
 `artifacts/r3/canonical-production/20260718T165725Z/`. Issue comment
 [`5012139001`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5012139001)
-records the same processing result. No repository was created or modified.
+records the same processing result. At that processing checkpoint, no
+repository had been created or modified.
+
+On `2026-07-19`, separate interactive authorization was used only to create the
+four requested repositories. `epistemic-core`, `sounio-formats`,
+`sounio-io-primitives`, and `sounio-units` are public and empty, report
+configured default branch `main`, and have no Git refs. Creation used
+`auto_init=false`; no package content or other source was materialized. The
+post-creation organization catalog was observed at `2026-07-19T00:39:21Z`,
+contains 14 repositories, and has identity
+`46ef6e4ecde6063e3a1c744a499bc3cdca905a7334405d955cd120171142f0c6`.
+The provisioning receipt identity is
+`93c70857c13f0e5572a7870689d3c57ec5cd004d48445e6af89007f206254569`.
+Issue comment
+[`5013552386`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5013552386)
+records the same result, and the observation set is preserved under
+`artifacts/r3/canonical-production/20260719T003921Z/`.
+The requested `sounio-scientific-packages-maintainers` team slug was not
+observed, so no team or team permission was created.
 
 ## Acceptance Gate
 
@@ -222,9 +243,11 @@ implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
-The executable processor has recorded the human selection without emitting a
-mapping proposal. The next state is separately authorized provisioning of the
-four requested repositories, followed by a fresh organization catalog and
+The four requested repositories are provisioned but intentionally empty. Empty
+catalog rows have no HEAD and cannot pass the processor's `reuse-observed`
+requirements. The next state requires separately authorized destination
+content materialization, followed by another organization catalog and
 canonical `main` observation and a complete reconfirmation of all five targets.
-Production materialization evidence, recovery policy, approval, explicit
-cutover decision, and execution remain later and separate interfaces.
+The mapping proposal, production materialization evidence, recovery policy,
+approval, explicit cutover decision, and execution remain later and separate
+interfaces.

@@ -122,7 +122,10 @@ required = {
         "canonical_cutover_execution_status = not-executed",
     ],
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md": [
-        "Status: executable R3 non-authorizing mapping-selection processing; repository creation, production approval, and cutover execution remain absent.",
+        "Status: executable R3 non-authorizing mapping-selection processing; four public",
+        "empty destination repositories are provisioned, while content materialization,",
+        "post-provisioning mapping reconfirmation, production approval, and cutover",
+        "execution remain absent.",
         "execution_authority = none",
         "proposal_status = proposed-not-approved",
     ],
