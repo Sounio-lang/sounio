@@ -135,17 +135,17 @@ export const capabilityCards: Record<Audience, CapabilityCard[]> = {
     {
       title: 'Data Provenance',
       body: 'Know exactly which instrument, which run, and which calibration produced each number. Essential for reproducible science and regulatory compliance.',
-      accent: 'var(--color-accent-teal)',
+      accent: 'var(--color-accent-steel)',
     },
     {
       title: 'Automatic Error Propagation',
       body: 'No more manual uncertainty formulas in spreadsheets. Sounio follows the GUM standard (JCGM 100:2008) to propagate measurement uncertainty through all your calculations — including through ODEs and neural networks.',
-      accent: 'var(--color-accent-blue)',
+      accent: 'var(--color-accent-steel)',
     },
     {
       title: 'Safety Gates',
       body: 'Set minimum confidence thresholds. If a calculation\u2019s confidence drops too low, the system prevents it from being used in downstream decisions.',
-      accent: 'var(--color-accent-green)',
+      accent: 'var(--color-accent-evidence)',
     },
   ],
   technical: [
@@ -157,17 +157,17 @@ export const capabilityCards: Record<Audience, CapabilityCard[]> = {
     {
       title: 'Algebra System',
       body: 'Declare algebraic laws on types (commutative, alternative, Fano-selective). The e-graph optimizer only applies rewrites permitted by your declared algebra — Quaternion, Octonion, Clifford, G2.',
-      accent: 'var(--color-accent-teal)',
+      accent: 'var(--color-accent-steel)',
     },
     {
       title: 'Self-Hosted Stack v2.0',
       body: 'gen2==gen3 fixed point (bit-identical, 230KB ELF). Ownership tracking with use-after-move and move-while-borrowed enforced at compile time.',
-      accent: 'var(--color-accent-blue)',
+      accent: 'var(--color-accent-steel)',
     },
     {
       title: 'Gate-Tracked Stdlib',
       body: '743 stdlib files, 257 run-pass tests, 1,003+ e-graph rewrite rules. Repo artifacts track which stdlib lanes are callable today and which are still gated.',
-      accent: 'var(--color-accent-green)',
+      accent: 'var(--color-accent-evidence)',
     },
   ],
 };

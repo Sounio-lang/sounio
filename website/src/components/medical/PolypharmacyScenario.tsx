@@ -41,7 +41,7 @@ export default function PolypharmacyScenario() {
             <div className="flex flex-col gap-3">
               <label className="text-xs font-mono text-gray-300 uppercase">Primary Medication (Substrate)</label>
               <select 
-                className="w-full bg-black/60 border border-white/20 rounded-lg p-3 text-white appearance-none outline-none focus:border-[var(--color-accent-blue)]"
+                className="w-full bg-black/60 border border-white/20 rounded-lg p-3 text-white appearance-none outline-none focus:border-[var(--color-accent-steel)]"
                 value={substrateId}
                 onChange={(e) => { setSubstrateId(e.target.value); setVerifying(false); }}
               >
@@ -51,7 +51,7 @@ export default function PolypharmacyScenario() {
               </select>
               <div className="flex justify-between">
                 <span className="text-[10px] text-gray-500 font-mono">Index: {substrate.index}</span>
-                <span className="text-[10px] text-[var(--color-accent-blue)] font-mono">{substrate.pathway}</span>
+                <span className="text-[10px] text-[var(--color-accent-steel)] font-mono">{substrate.pathway}</span>
               </div>
             </div>
 
@@ -60,7 +60,7 @@ export default function PolypharmacyScenario() {
             <div className="flex flex-col gap-3">
               <label className="text-xs font-mono text-gray-300 uppercase">Concomitant Medication</label>
               <select 
-                className="w-full bg-black/60 border border-white/20 rounded-lg p-3 text-white appearance-none outline-none focus:border-[var(--color-accent-blue)]"
+                className="w-full bg-black/60 border border-white/20 rounded-lg p-3 text-white appearance-none outline-none focus:border-[var(--color-accent-steel)]"
                 value={interactorId}
                 onChange={(e) => { setInteractorId(e.target.value); setVerifying(false); }}
               >
@@ -73,7 +73,7 @@ export default function PolypharmacyScenario() {
             <button 
               onClick={runVerification}
               disabled={verifying}
-              className="mt-4 w-full py-3 bg-[var(--color-accent-blue)] hover:bg-blue-600 text-black font-bold rounded-lg transition-colors font-mono uppercase text-xs"
+              className="mt-4 w-full py-3 bg-[var(--color-accent-steel)] hover:bg-blue-600 text-black font-bold rounded-lg transition-colors font-mono uppercase text-xs"
             >
               {verifying ? 'Analyzing...' : 'Verify Interaction'}
             </button>
@@ -89,20 +89,20 @@ export default function PolypharmacyScenario() {
             verifying 
               ? 'border-white/10 bg-black/40' 
               : severity === 'Safe'
-                ? 'border-[var(--color-accent-green)] bg-[var(--color-accent-green)]/10'
+                ? 'border-[var(--color-accent-evidence)] bg-[var(--color-accent-evidence)]/10'
                 : severity === 'Critical'
                   ? 'border-red-500/50 bg-red-500/10'
                   : 'border-yellow-500/50 bg-yellow-500/10'
           }`}>
             {verifying ? (
               <>
-                <div className="w-12 h-12 rounded-full border-2 border-t-[var(--color-accent-blue)] border-white/10 animate-spin"></div>
+                <div className="w-12 h-12 rounded-full border-2 border-t-[var(--color-accent-steel)] border-white/10 animate-spin"></div>
                 <p className="font-mono text-xs text-gray-400">Solving competitive enzyme kinetics...</p>
               </>
             ) : severity === 'Safe' ? (
               <>
-                <div className="w-16 h-16 rounded-full bg-[var(--color-accent-green)]/20 flex items-center justify-center">
-                  <svg className="w-8 h-8 text-[var(--color-accent-green)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="w-16 h-16 rounded-full bg-[var(--color-accent-evidence)]/20 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-[var(--color-accent-evidence)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>

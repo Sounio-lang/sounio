@@ -118,7 +118,7 @@ export function ClimateSimulator() {
           max="80" 
           value={uncertainty} 
           onChange={(e) => setUncertainty(Number(e.target.value))}
-          className="w-full accent-[var(--color-accent-green)]"
+          className="w-full accent-[var(--color-accent-evidence)]"
         />
         <p className="text-[0.8rem] text-[var(--color-text-tertiary)] leading-snug mt-1">
           Increase to simulate wider confidence intervals in sparse pre-1950 surface temperature records.
@@ -131,11 +131,11 @@ export function ClimateSimulator() {
           Historical Record
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-[2px] bg-[var(--color-accent-green)]"></div>
+          <div className="w-3 h-[2px] bg-[var(--color-accent-evidence)]"></div>
           Future Projection
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-3 bg-[var(--color-accent-green)] opacity-20 border border-[var(--color-accent-green)]"></div>
+          <div className="w-3 h-3 bg-[var(--color-accent-evidence)] opacity-20 border border-[var(--color-accent-evidence)]"></div>
           Ensemble Spread (Uncertainty)
         </div>
       </div>
@@ -157,9 +157,9 @@ export function ClimateSimulator() {
         <path d={histPath} fill="none" stroke="var(--color-text-primary)" strokeWidth="2" />
 
         {/* Projection Area & Line */}
-        <path d={projArea} fill="var(--color-accent-green)" opacity="0.15" />
-        <path d={projArea} fill="none" stroke="var(--color-accent-green)" strokeWidth="1" opacity="0.4" strokeDasharray="2 2" />
-        <path d={projPath} fill="none" stroke="var(--color-accent-green)" strokeWidth="2" />
+        <path d={projArea} fill="var(--color-accent-evidence)" opacity="0.15" />
+        <path d={projArea} fill="none" stroke="var(--color-accent-evidence)" strokeWidth="1" opacity="0.4" strokeDasharray="2 2" />
+        <path d={projPath} fill="none" stroke="var(--color-accent-evidence)" strokeWidth="2" />
         
         {/* Halt Marker */}
         {projectionData.haltedYear !== -1 && (

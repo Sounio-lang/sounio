@@ -99,7 +99,7 @@ export function NeuroSimulator() {
           max="80" 
           value={sparsity} 
           onChange={(e) => setSparsity(Number(e.target.value))}
-          className="w-full accent-[var(--color-accent-blue)]"
+          className="w-full accent-[var(--color-accent-steel)]"
         />
         <p className="text-[0.8rem] text-[var(--color-text-tertiary)] leading-snug mt-1">
           Increase spatial sparsity to simulate motion artifacts or scanner signal degradation.

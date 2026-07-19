@@ -46,7 +46,7 @@ export default function PrecisionDosingScenario() {
             <div className="flex flex-col gap-3">
               <div className="flex justify-between items-center">
                 <label className="text-xs font-mono text-gray-300 uppercase">Renal Function [CrCl mL/min]</label>
-                <span className="text-xs font-mono text-[var(--color-accent-blue)]">
+                <span className="text-xs font-mono text-[var(--color-accent-steel)]">
                   Range: {renalMin} - {renalMax}
                 </span>
               </div>
@@ -60,7 +60,7 @@ export default function PrecisionDosingScenario() {
                       const val = parseInt(e.target.value);
                       if (val <= renalMax) setRenalMin(val);
                     }}
-                    className="w-full accent-[var(--color-accent-blue)]"
+                    className="w-full accent-[var(--color-accent-steel)]"
                   />
                 </div>
                 <div className="flex flex-col w-full">
@@ -71,7 +71,7 @@ export default function PrecisionDosingScenario() {
                       const val = parseInt(e.target.value);
                       if (val >= renalMin) setRenalMax(val);
                     }}
-                    className="w-full accent-[var(--color-accent-blue)]"
+                    className="w-full accent-[var(--color-accent-steel)]"
                   />
                 </div>
               </div>
@@ -95,7 +95,7 @@ export default function PrecisionDosingScenario() {
           <div className="flex justify-between items-end border-b border-white/10 pb-2">
             <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">Formal Verification</h3>
             {verifying ? (
-              <span className="text-xs font-mono text-[var(--color-accent-blue)] animate-pulse">Computing...</span>
+              <span className="text-xs font-mono text-[var(--color-accent-steel)] animate-pulse">Computing...</span>
             ) : (
               <span className="text-xs font-mono text-gray-500">Idle</span>
             )}
@@ -105,18 +105,18 @@ export default function PrecisionDosingScenario() {
             verifying 
               ? 'border-white/10 bg-black/40' 
               : result === 'safe'
-                ? 'border-[var(--color-accent-green)] bg-[var(--color-accent-green)]/10 shadow-[0_0_30px_rgba(34,197,94,0.15)]'
+                ? 'border-[var(--color-accent-evidence)] bg-[var(--color-accent-evidence)]/10 shadow-[0_0_30px_rgba(34,197,94,0.15)]'
                 : 'border-red-500/50 bg-red-500/10 shadow-[0_0_30px_rgba(239,68,68,0.15)]'
           }`}>
             {verifying ? (
               <>
-                <div className="w-12 h-12 rounded-full border-2 border-t-[var(--color-accent-blue)] border-white/10 animate-spin"></div>
+                <div className="w-12 h-12 rounded-full border-2 border-t-[var(--color-accent-steel)] border-white/10 animate-spin"></div>
                 <p className="font-mono text-xs text-gray-400">Evaluating bounded parameter space...</p>
               </>
             ) : result === 'safe' ? (
               <>
-                <div className="w-16 h-16 rounded-full bg-[var(--color-accent-green)]/20 flex items-center justify-center">
-                  <svg className="w-8 h-8 text-[var(--color-accent-green)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="w-16 h-16 rounded-full bg-[var(--color-accent-evidence)]/20 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-[var(--color-accent-evidence)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                 </div>

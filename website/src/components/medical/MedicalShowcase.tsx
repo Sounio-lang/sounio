@@ -45,7 +45,7 @@ export default function MedicalShowcase() {
 
   return (
     <div className="w-full max-w-7xl mx-auto p-6 flex flex-col gap-8">
-      <div className="flex flex-col gap-2 border-l-4 border-[var(--color-accent-blue)] pl-6">
+      <div className="flex flex-col gap-2 border-l-4 border-[var(--color-accent-steel)] pl-6">
         <h2 className="text-3xl font-bold text-white tracking-tight">Clinical Verification Engine</h2>
         <p className="text-gray-400 max-w-3xl leading-relaxed">
           Sounio guarantees patient safety by lifting biological uncertainty into the type system. Rather than 
@@ -63,12 +63,12 @@ export default function MedicalShowcase() {
               onClick={() => setActiveScenario(s.id)}
               className={`flex flex-col items-start p-5 rounded-xl border transition-all text-left group ${
                 activeScenario === s.id 
-                  ? 'glass border-[var(--color-accent-blue)] bg-[var(--color-accent-blue)]/10 shadow-[0_0_15px_rgba(59,130,246,0.15)]' 
+                  ? 'glass border-[var(--color-accent-steel)] bg-[var(--color-accent-steel)]/10 shadow-[0_0_15px_rgba(59,130,246,0.15)]' 
                   : 'border-white/10 hover:border-white/30 bg-black/40'
               }`}
             >
               <div className="flex items-center gap-3 mb-2 w-full">
-                <svg className={`w-5 h-5 ${activeScenario === s.id ? 'text-[var(--color-accent-blue)]' : 'text-gray-500 group-hover:text-gray-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg className={`w-5 h-5 ${activeScenario === s.id ? 'text-[var(--color-accent-steel)]' : 'text-gray-500 group-hover:text-gray-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d={s.icon} />
                 </svg>
                 <span className="text-[10px] font-mono text-gray-400 uppercase tracking-widest">{s.category}</span>
@@ -95,8 +95,8 @@ export default function MedicalShowcase() {
             {/* Clinical Header Bar */}
             <div className="bg-black/60 border-b border-white/10 px-6 py-4 flex justify-between items-center">
               <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-[var(--color-accent-blue)]/20 flex items-center justify-center">
-                  <svg className="w-4 h-4 text-[var(--color-accent-blue)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="w-8 h-8 rounded-full bg-[var(--color-accent-steel)]/20 flex items-center justify-center">
+                  <svg className="w-4 h-4 text-[var(--color-accent-steel)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                   </svg>
                 </div>

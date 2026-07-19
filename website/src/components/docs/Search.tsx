@@ -187,7 +187,7 @@ export default function Search({ locale, strings }: Props) {
         void ensurePagefind();
         setIsOpen(true);
       }}
-      className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-ink-2)] bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded-lg hover:border-[var(--color-accent-blue)] transition-colors"
+      className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-ink-2)] bg-[var(--color-surface-raise)] border border-[var(--color-line)] rounded-lg hover:border-[var(--color-accent-steel)] transition-colors"
       aria-label="Open search"
     >
       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -258,7 +258,7 @@ export default function Search({ locale, strings }: Props) {
                       >
                         <h3 className="font-medium text-[var(--color-ink-1)] mb-1">{result.title}</h3>
                         <p
-                          className="text-sm text-[var(--color-ink-2)] line-clamp-2 [&_mark]:bg-[var(--color-accent-blue)]/30 [&_mark]:text-[var(--color-ink-1)] [&_mark]:rounded"
+                          className="text-sm text-[var(--color-ink-2)] line-clamp-2 [&_mark]:bg-[var(--color-accent-steel)]/30 [&_mark]:text-[var(--color-ink-1)] [&_mark]:rounded"
                           dangerouslySetInnerHTML={{ __html: result.excerpt }}
                         />
                       </a>

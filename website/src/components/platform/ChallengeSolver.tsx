@@ -148,13 +148,13 @@ export default function ChallengeSolver() {
               onClick={() => setActiveId(c.id)}
               className={`p-4 rounded-xl border text-left transition-all ${
                 activeId === c.id 
-                  ? 'glass glass-specular border-[var(--color-accent-green)] bg-[var(--color-accent-green)]/10' 
+                  ? 'glass glass-specular border-[var(--color-accent-evidence)] bg-[var(--color-accent-evidence)]/10' 
                   : 'border-[var(--glass-border)] hover:border-white/20'
               }`}
             >
               <div className="flex justify-between items-start mb-2">
                 <span className="text-xs font-mono text-gray-500 uppercase tracking-widest">{c.domain}</span>
-                {activeId === c.id && <span className="w-2 h-2 rounded-full bg-[var(--color-accent-green)] animate-pulse" />}
+                {activeId === c.id && <span className="w-2 h-2 rounded-full bg-[var(--color-accent-evidence)] animate-pulse" />}
               </div>
               <h3 className="font-bold text-white mb-1">{c.title}</h3>
               <p className="text-xs text-gray-400 line-clamp-2">{c.description}</p>
@@ -166,11 +166,11 @@ export default function ChallengeSolver() {
         <div className="lg:col-span-2 flex flex-col gap-6">
           <div className="glass glass-specular border border-[var(--glass-border)] rounded-2xl p-8">
             <div className="flex flex-wrap gap-4 mb-6">
-              <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-[var(--color-accent-blue)] uppercase tracking-tighter">
+              <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-[var(--color-accent-steel)] uppercase tracking-tighter">
                 Difficulty: {active.difficulty}
               </div>
               <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-white uppercase tracking-tighter">
-                Status: <span className="text-[var(--color-accent-green)]">{active.result.status}</span>
+                Status: <span className="text-[var(--color-accent-evidence)]">{active.result.status}</span>
               </div>
             </div>
 
@@ -182,7 +182,7 @@ export default function ChallengeSolver() {
                 <div className="mt-4 flex flex-col gap-3">
                   <div className="flex justify-between items-center py-2 border-b border-white/5">
                     <span className="text-sm text-gray-400">Confidence</span>
-                    <span className="font-mono text-[var(--color-accent-green)]">{(active.result.confidence * 100).toFixed(1)}%</span>
+                    <span className="font-mono text-[var(--color-accent-evidence)]">{(active.result.confidence * 100).toFixed(1)}%</span>
                   </div>
                   <div className="flex justify-between items-center py-2 border-b border-white/5">
                     <span className="text-sm text-gray-400">Resolution Method</span>

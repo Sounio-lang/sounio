@@ -116,13 +116,13 @@ export default function ComparisonMatrix() {
           )}
 
           <div className="mb-8">
-            <p className="uppercase text-xs tracking-[0.12em] text-[var(--color-accent-blue)] font-semibold mb-3">
+            <p className="uppercase text-xs tracking-[0.12em] text-[var(--color-accent-steel)] font-semibold mb-3">
               What this means for your research
             </p>
             <ul className="grid md:grid-cols-2 gap-2.5 text-sm list-none p-0 m-0">
               {s.researchImpact.map((item, i) => (
                 <li key={i} className="flex gap-2.5 text-[var(--color-text-secondary)]">
-                  <span className="text-[var(--color-accent-blue)] shrink-0">\u2192</span> {item}
+                  <span className="text-[var(--color-accent-steel)] shrink-0">\u2192</span> {item}
                 </li>
               ))}
             </ul>

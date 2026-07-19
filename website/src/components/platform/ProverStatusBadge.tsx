@@ -44,8 +44,8 @@ export function ProverStatusBadge() {
           <div><span className="text-[#ff7b72]">fn</span> <span className="text-[#d2a8ff]">analyze_dosing</span>(patient_data: <span className="text-[#d2a8ff]">Knowledge</span>[<span className="text-[#79c0ff]">f64</span>]) -&gt; <span className="text-[#79c0ff]">Reliable</span>&lt;<span className="text-[#79c0ff]">f64</span>&gt; {'{'}</div>
           <div className="pl-4 relative">
             <div className={`absolute -left-2 top-0 bottom-0 w-1 transition-colors duration-500 ${
-              status === 'evaluating' ? 'bg-[var(--color-accent-orange)] animate-pulse' :
-              status === 'verified' ? 'bg-[var(--color-accent-green)]' : 'bg-transparent'
+              status === 'evaluating' ? 'bg-[var(--color-accent-warning)] animate-pulse' :
+              status === 'verified' ? 'bg-[var(--color-accent-evidence)]' : 'bg-transparent'
             }`}></div>
             <span className="text-[#ff7b72]">let</span> <span className="text-[#79c0ff]">clearance</span> = patient_data * <span className="text-[#a5d6ff]">0.4</span><br/>
             <span className="text-[#ff7b72]">let</span> <span className="text-[#79c0ff]">dosing</span> = compute_auc(clearance)<br/>
@@ -63,8 +63,8 @@ export function ProverStatusBadge() {
           <div className={`
             flex items-center gap-3 p-3 rounded-lg border transition-all duration-300
             ${status === 'idle' ? 'bg-[var(--color-surface)] border-[var(--glass-border)] text-[var(--color-text-secondary)]' : ''}
-            ${status === 'evaluating' ? 'bg-[var(--color-accent-orange)]/10 border-[var(--color-accent-orange)]/30 text-[var(--color-accent-orange)]' : ''}
-            ${status === 'verified' ? 'bg-[var(--color-accent-green)]/10 border-[var(--color-accent-green)]/30 text-[var(--color-accent-green)] shadow-[0_0_15px_rgba(46,160,67,0.15)]' : ''}
+            ${status === 'evaluating' ? 'bg-[var(--color-accent-warning)]/10 border-[var(--color-accent-warning)]/30 text-[var(--color-accent-warning)]' : ''}
+            ${status === 'verified' ? 'bg-[var(--color-accent-evidence)]/10 border-[var(--color-accent-evidence)]/30 text-[var(--color-accent-evidence)] shadow-[0_0_15px_rgba(46,160,67,0.15)]' : ''}
           `}>
             <div className="shrink-0">
               {status === 'idle' && (

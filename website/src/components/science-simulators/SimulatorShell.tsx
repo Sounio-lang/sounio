@@ -70,7 +70,7 @@ export function SimulatorShell({
 
       <div className="p-[1rem] bg-[rgba(0,0,0,0.4)] border-t border-[var(--glass-border)] font-mono text-[0.85rem] h-[160px] overflow-y-auto">
         <div className="flex items-center gap-2 mb-3 text-[var(--color-text-tertiary)] text-[0.75rem] uppercase tracking-wider">
-          <span className="w-2 h-2 rounded-full bg-[var(--color-accent-green)] animate-pulse"></span>
+          <span className="w-2 h-2 rounded-full bg-[var(--color-accent-evidence)] animate-pulse"></span>
           Sounio WASM Runtime
         </div>
         <div className="flex flex-col gap-1">
@@ -80,7 +80,7 @@ export function SimulatorShell({
               className={`
                 ${line.type === 'error' ? 'text-red-400' : ''}
                 ${line.type === 'warn' ? 'text-amber-400' : ''}
-                ${line.type === 'success' ? 'text-[var(--color-accent-green)]' : ''}
+                ${line.type === 'success' ? 'text-[var(--color-accent-evidence)]' : ''}
                 ${line.type === 'info' ? 'text-[var(--color-text-secondary)]' : ''}
               `}
             >

@@ -110,7 +110,7 @@ export function QuantumSimulator() {
           max="80" 
           value={noise} 
           onChange={(e) => setNoise(Number(e.target.value))}
-          className="w-full accent-[var(--color-accent-blue)]"
+          className="w-full accent-[var(--color-accent-steel)]"
         />
         <p className="text-[0.8rem] text-[var(--color-text-tertiary)] leading-snug mt-1">
           Increase measurement error to simulate noisy intermediate-scale quantum (NISQ) hardware.
@@ -119,11 +119,11 @@ export function QuantumSimulator() {
       
       <div className="flex flex-col gap-2 mt-4">
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-[2px] bg-[var(--color-accent-blue)]"></div>
+          <div className="w-3 h-[2px] bg-[var(--color-accent-steel)]"></div>
           Measured Optimization Path
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-[2px] bg-[var(--color-accent-blue)] opacity-30 border-dashed border-[var(--color-accent-blue)]"></div>
+          <div className="w-3 h-[2px] bg-[var(--color-accent-steel)] opacity-30 border-dashed border-[var(--color-accent-steel)]"></div>
           Ideal Ground State Trajectory
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
@@ -138,10 +138,10 @@ export function QuantumSimulator() {
     <div className="w-full h-full min-h-[300px] flex items-center justify-center relative">
       <svg viewBox="0 0 500 300" className="w-full h-full overflow-visible">
         {/* Ideal path */}
-        <path d={idealPath} fill="none" stroke="var(--color-accent-blue)" strokeWidth="2" opacity="0.3" strokeDasharray="4 4" />
+        <path d={idealPath} fill="none" stroke="var(--color-accent-steel)" strokeWidth="2" opacity="0.3" strokeDasharray="4 4" />
         
         {/* Actual path */}
-        <path d={actualPath} fill="none" stroke="var(--color-accent-blue)" strokeWidth="2" />
+        <path d={actualPath} fill="none" stroke="var(--color-accent-steel)" strokeWidth="2" />
         
         {/* Halt Marker */}
         {optimizationData.haltedStep !== -1 && (

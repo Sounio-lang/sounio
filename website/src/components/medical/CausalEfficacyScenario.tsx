@@ -52,7 +52,7 @@ export default function CausalEfficacyScenario() {
                 type="checkbox" 
                 checked={adjustAge} 
                 onChange={(e) => { setAdjustAge(e.target.checked); runVerification(); }}
-                className="w-5 h-5 accent-[var(--color-accent-blue)]" 
+                className="w-5 h-5 accent-[var(--color-accent-steel)]" 
               />
               <div className="flex flex-col">
                 <span className="text-sm text-white">Adjust for Patient Age (C1)</span>
@@ -65,7 +65,7 @@ export default function CausalEfficacyScenario() {
                 type="checkbox" 
                 checked={adjustSeverity} 
                 onChange={(e) => { setAdjustSeverity(e.target.checked); runVerification(); }}
-                className="w-5 h-5 accent-[var(--color-accent-blue)]" 
+                className="w-5 h-5 accent-[var(--color-accent-steel)]" 
               />
               <div className="flex flex-col">
                 <span className="text-sm text-white">Adjust for Disease Severity (C2)</span>
@@ -98,14 +98,14 @@ export default function CausalEfficacyScenario() {
             verifying 
               ? 'border-white/10 bg-black/40' 
               : isCausal
-                ? 'border-[var(--color-accent-green)] bg-[var(--color-accent-green)]/10'
+                ? 'border-[var(--color-accent-evidence)] bg-[var(--color-accent-evidence)]/10'
                 : isNeutral
                   ? 'border-yellow-500/50 bg-yellow-500/10'
                   : 'border-red-500/50 bg-red-500/10'
           }`}>
             {verifying ? (
               <div className="flex flex-col items-center justify-center h-full">
-                <div className="w-8 h-8 rounded-full border-2 border-t-[var(--color-accent-blue)] border-white/10 animate-spin mb-3"></div>
+                <div className="w-8 h-8 rounded-full border-2 border-t-[var(--color-accent-steel)] border-white/10 animate-spin mb-3"></div>
                 <p className="font-mono text-xs text-gray-400">Computing backdoor adjustment...</p>
               </div>
             ) : (
@@ -114,7 +114,7 @@ export default function CausalEfficacyScenario() {
                 
                 <div className="flex items-end gap-3 mb-2">
                   <span className={`text-4xl font-mono font-bold ${
-                    isCausal ? 'text-[var(--color-accent-green)]' : isNeutral ? 'text-yellow-400' : 'text-red-400'
+                    isCausal ? 'text-[var(--color-accent-evidence)]' : isNeutral ? 'text-yellow-400' : 'text-red-400'
                   }`}>
                     {trueEffect > 0 ? '+' : ''}{trueEffect}%
                   </span>

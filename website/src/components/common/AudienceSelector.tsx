@@ -71,9 +71,9 @@ export default function AudienceSelector({ strings = defaultStrings }: Props) {
       </button>
 
       {showTooltip && !hasExplicitChoice && (
-        <div className="absolute top-full right-0 mt-2 px-3 py-1.5 rounded-lg bg-[var(--color-accent-blue)] text-[#10233e] text-xs font-semibold whitespace-nowrap shadow-lg z-50 animate-[fadeIn_0.3s_ease]">
+        <div className="absolute top-full right-0 mt-2 px-3 py-1.5 rounded-lg bg-[var(--color-accent-steel)] text-[#10233e] text-xs font-semibold whitespace-nowrap shadow-lg z-50 animate-[fadeIn_0.3s_ease]">
           {strings.choose}
-          <div className="absolute -top-1 right-4 w-2 h-2 bg-[var(--color-accent-blue)] rotate-45" />
+          <div className="absolute -top-1 right-4 w-2 h-2 bg-[var(--color-accent-steel)] rotate-45" />
         </div>
       )}
     </div>
