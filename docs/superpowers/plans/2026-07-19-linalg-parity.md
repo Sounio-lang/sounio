@@ -272,15 +272,12 @@ Add a 3×3 setter helper and ≥2 more cases covering all 7 ops. Names/signature
 
 - [ ] **Step 1 — add LU/QR checks to the comparator:**
 ```python
-def apply_piv(A, piv):
-    # piv per Phase-0 Step 2. Default: sequence of row-swap partners.
-    M = A.copy()
-    for k in range(A.rows):
-        p = piv.get((k,0)) if isinstance(piv, dict) else piv[k]
-        if p != k:
-            for j in range(A.cols):
-                M[k,j], M[p,j] = M[p,j], M[k,j]
-    return M
+def apply_piv(A, pivrole):
+    # Phase-0 CONFIRMED: piv is a full PERMUTATION VECTOR (not swap partners):
+    # P[k, piv[k]] = 1  ⟹  (P·A) row k = A row piv[k], and L·U == P·A.
+    n = A.rows
+    piv = [int(pivrole[(k, 0)]) for k in range(n)]
+    return mp.matrix([[A[piv[k], j] for j in range(A.cols)] for k in range(n)])
 def chk_lu(d):
     A = as_mat(d["A"]); L = as_mat(d["L"]); U = as_mat(d["U"])
     PA = apply_piv(A, d.get("P", {}))
