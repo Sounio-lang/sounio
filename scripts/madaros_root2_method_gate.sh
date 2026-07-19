@@ -21,10 +21,7 @@ fi
 
 COMPILER_AUTHORITY=resolved_souc_raw_elf
 COMPILER_PATH=""
-if [[ -n "${MADAROS_RAW_BIN:-}" ]]; then
-  COMPILER_AUTHORITY=explicit_madaros_raw_bin
-  COMPILER_PATH="$(realpath "$MADAROS_RAW_BIN")"
-elif [[ -x "$SOUC" && "$(head -c4 "$SOUC" 2>/dev/null)" == $'\x7fELF' ]]; then
+if [[ -x "$SOUC" && "$(head -c4 "$SOUC" 2>/dev/null)" == $'\x7fELF' ]]; then
   COMPILER_AUTHORITY=explicit_souc_elf
   COMPILER_PATH="$(realpath "$SOUC")"
 else
@@ -35,6 +32,16 @@ if [[ -z "$COMPILER_PATH" || ! -x "$COMPILER_PATH" || "$(head -c4 "$COMPILER_PAT
   exit 2
 fi
 COMPILER_PATH="$(realpath "$COMPILER_PATH")"
+if [[ -n "${MADAROS_RAW_BIN:-}" ]]; then
+  EXPECTED_COMPILER_PATH="$(realpath "$MADAROS_RAW_BIN")"
+  if [[ "$COMPILER_PATH" != "$EXPECTED_COMPILER_PATH" ]]; then
+    echo "FAIL: MADAROS_RAW_BIN does not match the compiler resolved by SOUC" >&2
+    echo "expected: $EXPECTED_COMPILER_PATH" >&2
+    echo "resolved: $COMPILER_PATH" >&2
+    exit 2
+  fi
+  COMPILER_AUTHORITY=explicit_madaros_raw_bin
+fi
 COMPILER_SHA256="$(sha256sum "$COMPILER_PATH" | awk '{print $1}')"
 
 ROOT2_FIXTURE_MAINS=(

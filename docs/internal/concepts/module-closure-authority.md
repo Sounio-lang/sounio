@@ -80,12 +80,12 @@ trace records are not evidence that the canonical lowering consumed a closure.
 Semantic-Lane-ID: modulegraph-facade-vertical-r1
 Owner: Codex-2 compiler lane
 Concept-IDs: SOUNIO-MODULE-CLOSURE-AUTHORITY
-Intent-Preserved: authored module order and closure-local definition identity survive into executable multimodule lowering
-Transformation: repeated textual import discovery becomes one parsed closure whose module indices identify definitions during one compile; bounded lexical checker lookup is local-ModuleId-first and global-unique-only
+Intent-Preserved: authored module order and closure-local definition identity are retained through checking and presented to executable multimodule lowering
+Transformation: repeated textual import discovery becomes one parsed closure whose module indices carry definition identity during one compile; bounded lexical checker lookup is local-ModuleId-first and global-unique-only
 Types-Changed: ModuleClosure carrier fields and IrFunction.defining_module_id in memory
 Effects-Changed: none
-IR-Changed: IrFunction.defining_module_id is authoritative in memory for multimodule lowering and merge; SOIR v4 does not serialize it
-Claims-Introduced: the exact vertical gate proves closure-local function identity is consumed by checker lookup, lowering, and merge; check-only #854 witnesses cover bounded lexical struct/enum/variant constructor selection through both in-place and remaining by-value checker paths; the HOF gate independently proves imported-stub refinement, function-reference privacy, and named function-value execution
+IR-Changed: IrFunction.defining_module_id is carried in memory for multimodule lowering and merge; its identity consumption is not yet attested and SOIR v4 does not serialize it
+Claims-Introduced: the exact vertical gate proves closure-local identity is consumed by checker lookup and that the same ordered closure is presented to lowering before executable behavior; check-only #854 witnesses cover bounded lexical struct/enum/variant constructor selection through both in-place and remaining by-value checker paths; the HOF gate independently proves imported-stub refinement, function-reference privacy, and named function-value execution
 Claims-Forbidden: direct checker TypeEntry-to-IR identity continuity, capturing closures, function-value ABI generality, TypeEntry-derived aggregate identity, cross-module transport or inspection of same-spelled aggregates, tuple-payload enum typing, canonical import binding, SOIR round-trip preservation, compiler-wide ModuleId preservation, general visibility correctness, the complete ModuleGraph epic, lean_single reexports, large-graph capacity, or #991 receipt semantics
 Assumptions: authored imports resolve within the declared module-root set or established local/package paths
 Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_native_driver.sio, self-hosted/compiler/main.sio, self-hosted/compiler/module_parse.sio, self-hosted/parser/items.sio, self-hosted/check/check.sio, self-hosted/check/defs.sio, self-hosted/ir/ir.sio, self-hosted/ir/lower.sio, self-hosted/ir/serialize.sio, self-hosted/ir/optimize.sio, self-hosted/ir/ssa.sio
@@ -106,7 +106,7 @@ outside that closure. Deserializing SOIR v4 explicitly restores
 This lane therefore makes no SOIR round-trip or compiler-wide preservation claim.
 
 This contract establishes the carrier, bounded contextual checker lookup,
-in-memory lowering identity, and refusal boundary for the exact gate. It does
+in-memory identity presented to lowering, and refusal boundary for the exact gate. It does
 not close the remaining ModuleGraph epic work: a ModuleId-bearing aggregate type
 carrier, canonical import bindings, normalized physical identity, graph digest,
 large-closure capacity, SOIR installation, compiler-wide identity propagation,
