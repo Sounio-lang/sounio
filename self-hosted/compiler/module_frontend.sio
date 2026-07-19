@@ -263,10 +263,76 @@ fn module_frontend_file_path_mod_fallback(path: string) -> string with Mut, Pani
     str_concat(str_concat(base, "/mod"), ".sio")
 }
 
-fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> string with IO, Mut, Panic, Div {
+struct ModuleImportResolution {
+    path: string,
+    candidate_count: i64,
+    ambiguous: bool,
+}
+
+fn module_frontend_import_resolution(path: string, candidate_count: i64) -> ModuleImportResolution {
+    ModuleImportResolution {
+        path: path,
+        candidate_count: candidate_count,
+        ambiguous: candidate_count > 1,
+    }
+}
+
+fn module_frontend_consider_module_root_candidate(
+    result: &!ModuleImportResolution,
+    candidate: string,
+) with IO, Mut, Panic, Div {
+    if !file_exists(candidate) {
+        return
+    }
+    if (*result).candidate_count == 0 {
+        (*result).path = candidate
+        (*result).candidate_count = 1
+        return
+    }
+    if !str_eq((*result).path, candidate) {
+        (*result).candidate_count = (*result).candidate_count + 1
+        (*result).ambiguous = true
+    }
+}
+
+// Explicit module roots are consulted only after the established local,
+// ancestor, stdlib, and package searches fail. Root order is not authority:
+// distinct matching files make the import ambiguous and therefore unusable.
+fn module_frontend_resolve_from_module_roots(rel_path: string) -> ModuleImportResolution with IO, Mut, Panic, Div {
+    var result = module_frontend_import_resolution("", 0)
+    let roots = read_env("SOUNIO_MODULE_PATH")
+    let roots_len = str_len(roots)
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= roots_len {
+        if i == roots_len || str_char_at(roots, i) == 58 {
+            if i > start {
+                let root = str_slice(roots, start, i)
+                let root_len = str_len(root)
+                let candidate = if root_len > 0 && str_char_at(root, root_len - 1) == 47 {
+                    str_concat(root, rel_path)
+                } else {
+                    str_concat(str_concat(root, "/"), rel_path)
+                }
+                module_frontend_consider_module_root_candidate(&!result, candidate)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if result.ambiguous {
+        result.path = ""
+    }
+    result
+}
+
+fn module_frontend_resolve_import_relpath_result(
+    rel_path: string,
+    cur_dir: string,
+) -> ModuleImportResolution with IO, Mut, Panic, Div {
     let local_path = str_concat(str_concat(cur_dir, "/"), rel_path)
     if file_exists(local_path) {
-        return local_path
+        return module_frontend_import_resolution(local_path, 1)
     }
     // Search upward through ancestor directories. The compiler's modules share one source
     // root (e.g. self-hosted/), so an import like `check::types` from
@@ -283,7 +349,7 @@ fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> 
         } else {
             let anc_path = str_concat(str_concat(parent, "/"), rel_path)
             if file_exists(anc_path) {
-                return anc_path
+                return module_frontend_import_resolution(anc_path, 1)
             }
             ancestor = parent
             anc_depth = anc_depth + 1
@@ -293,22 +359,31 @@ fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> 
     if str_len(stdlib_env_root) > 0 {
         let stdlib_env_path = str_concat(str_concat(stdlib_env_root, "/"), rel_path)
         if file_exists(stdlib_env_path) {
-            return stdlib_env_path
+            return module_frontend_import_resolution(stdlib_env_path, 1)
         }
     }
     let stdlib_path = str_concat("stdlib/", rel_path)
     if file_exists(stdlib_path) {
-        return stdlib_path
+        return module_frontend_import_resolution(stdlib_path, 1)
     }
     let pkg_path = module_frontend_relpath_to_package_path(rel_path)
     if str_len(pkg_path) > 0 && file_exists(pkg_path) {
-        return pkg_path
+        return module_frontend_import_resolution(pkg_path, 1)
     }
     let pkg_mod = module_frontend_file_path_mod_fallback(pkg_path)
     if str_len(pkg_mod) > 0 && file_exists(pkg_mod) {
-        return pkg_mod
+        return module_frontend_import_resolution(pkg_mod, 1)
     }
-    local_path
+    let rooted = module_frontend_resolve_from_module_roots(rel_path)
+    if rooted.candidate_count > 0 {
+        return rooted
+    }
+    module_frontend_import_resolution(local_path, 0)
+}
+
+fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> string with IO, Mut, Panic, Div {
+    let result = module_frontend_resolve_import_relpath_result(rel_path, cur_dir)
+    result.path
 }
 
 fn module_frontend_extract_relpath_from_loaded(path_start: i64, line_end: i64) -> string with Mut, Panic {
@@ -489,6 +564,14 @@ fn module_frontend_ast_import_relpath(path: AstPath) -> string with Mut, Panic, 
 }
 
 fn module_frontend_resolve_ast_import_relpath(rel_path: string, cur_dir: string) -> string with IO, Mut, Panic, Div {
+    let result = module_frontend_resolve_ast_import_relpath_result(rel_path, cur_dir)
+    result.path
+}
+
+fn module_frontend_resolve_ast_import_relpath_result(
+    rel_path: string,
+    cur_dir: string,
+) -> ModuleImportResolution with IO, Mut, Panic, Div {
     var base_dir = cur_dir
     var offset: i64 = 0
     let rel_len = str_len(rel_path)
@@ -506,15 +589,23 @@ fn module_frontend_resolve_ast_import_relpath(rel_path: string, cur_dir: string)
             stripping_super = false
         }
     }
-    module_frontend_resolve_import_relpath(str_slice(rel_path, offset, rel_len), base_dir)
+    module_frontend_resolve_import_relpath_result(str_slice(rel_path, offset, rel_len), base_dir)
 }
 
 fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let result = resolve_import_file_path_result(path, cur_dir)
+    result.path
+}
+
+fn resolve_import_file_path_result(
+    path: AstPath,
+    cur_dir: string,
+) -> ModuleImportResolution with IO, Mut, Panic, Div, Alloc {
     let rel_path = module_frontend_ast_import_relpath(path)
     if str_len(rel_path) == 0 {
-        return ""
+        return module_frontend_import_resolution("", 0)
     }
-    module_frontend_resolve_ast_import_relpath(rel_path, cur_dir)
+    module_frontend_resolve_ast_import_relpath_result(rel_path, cur_dir)
 }
 
 fn mf_empty_program() -> Program {
@@ -1985,24 +2076,47 @@ fn visited_contains(visited: [string; 256], count: i64, path: string) -> bool wi
 // Missing imports and capacity saturation are data, never implicit success.
 pub struct ModuleClosure {
     pub paths: [string; 256],
+    pub logical_paths: [string; 256],
     pub edge_callers: [string; 512],
     pub edge_dependencies: [string; 512],
+    pub edge_imports: [string; 512],
+    pub edge_caller_ids: [i64; 512],
+    pub edge_dependency_ids: [i64; 512],
     pub unresolved_callers: [string; 256],
     pub unresolved_imports: [string; 256],
+    pub ambiguous_callers: [string; 256],
+    pub ambiguous_imports: [string; 256],
     pub node_count: i64,
     pub edge_count: i64,
     pub unresolved_count: i64,
+    pub ambiguity_count: i64,
     pub saturated: bool,
     pub parse_failed: bool,
 }
 
-pub fn module_frontend_collect_ast_closure_into(
+fn module_frontend_closure_node_index(
+    closure: &ModuleClosure,
+    path: string,
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*closure).node_count {
+        if str_eq((*closure).paths[i], path) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn module_frontend_collect_ast_closure_programs_into(
     main_path: string,
-    out: &!ModuleClosure
+    out: &!ModuleClosure,
+    programs: &! [Program; 256],
 ) -> bool with IO, Mut, Panic, Div, Alloc {
     (*out).node_count = 0
     (*out).edge_count = 0
     (*out).unresolved_count = 0
+    (*out).ambiguity_count = 0
     (*out).saturated = false
     (*out).parse_failed = false
 
@@ -2013,54 +2127,89 @@ pub fn module_frontend_collect_ast_closure_into(
         return false
     }
     (*out).paths[0] = main_path
+    (*out).logical_paths[0] = use_path_to_string(main_prog.module_path)
+    (*programs)[0] = main_prog
     (*out).node_count = 1
 
     var work_front: i64 = 0
     while work_front < (*out).node_count {
         let caller_path = (*out).paths[work_front]
         let cur_dir = module_frontend_path_directory_slice(caller_path)
-        parser_reset_last_errors()
-        let work_prog = load_module_file(caller_path)
-        if parser_last_error_count() > 0 {
-            (*out).parse_failed = true
-            work_front = (*out).node_count
-        }
+        let work_prog = (*programs)[work_front]
         let imports = extract_imports_from_ast(work_prog)
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
-            let dependency_path = resolve_import_file_path(imports.paths[i], cur_dir)
-            if (*out).edge_count < 512 {
-                let edge_index = (*out).edge_count
-                (*out).edge_callers[edge_index] = caller_path
-                (*out).edge_dependencies[edge_index] = dependency_path
-                (*out).edge_count = edge_index + 1
-            } else {
-                (*out).saturated = true
-            }
+            let requested_import = use_path_to_string(imports.paths[i])
+            let resolution = resolve_import_file_path_result(imports.paths[i], cur_dir)
+            let dependency_path = resolution.path
+            var dependency_id: i64 = 0 - 1
 
-            if !file_exists(dependency_path) {
+            if resolution.ambiguous {
+                if (*out).ambiguity_count < 256 {
+                    let ambiguity_index = (*out).ambiguity_count
+                    (*out).ambiguous_callers[ambiguity_index] = caller_path
+                    (*out).ambiguous_imports[ambiguity_index] = requested_import
+                    (*out).ambiguity_count = ambiguity_index + 1
+                } else {
+                    (*out).saturated = true
+                }
+            } else if !file_exists(dependency_path) {
                 if (*out).unresolved_count < 256 {
                     let unresolved_index = (*out).unresolved_count
                     (*out).unresolved_callers[unresolved_index] = caller_path
-                    (*out).unresolved_imports[unresolved_index] = use_path_to_string(imports.paths[i])
+                    (*out).unresolved_imports[unresolved_index] = requested_import
                     (*out).unresolved_count = unresolved_index + 1
                 } else {
                     (*out).saturated = true
                 }
-            } else if !visited_contains((*out).paths, (*out).node_count, dependency_path) {
-                if (*out).node_count >= 256 {
-                    (*out).saturated = true
-                } else {
-                    let node_index = (*out).node_count
-                    (*out).paths[node_index] = dependency_path
-                    (*out).node_count = node_index + 1
+            } else {
+                dependency_id = module_frontend_closure_node_index(&(*out), dependency_path)
+                if dependency_id < 0 {
+                    if (*out).node_count >= 256 {
+                        (*out).saturated = true
+                    } else {
+                        dependency_id = (*out).node_count
+                        parser_reset_last_errors()
+                        let dependency_program = load_module_file(dependency_path)
+                        if parser_last_error_count() > 0 {
+                            (*out).parse_failed = true
+                        } else {
+                            (*out).paths[dependency_id] = dependency_path
+                            (*out).logical_paths[dependency_id] = requested_import
+                            (*programs)[dependency_id] = dependency_program
+                            (*out).node_count = dependency_id + 1
+                        }
+                    }
                 }
+            }
+
+            if (*out).edge_count < 512 {
+                let edge_index = (*out).edge_count
+                (*out).edge_callers[edge_index] = caller_path
+                (*out).edge_dependencies[edge_index] = dependency_path
+                (*out).edge_imports[edge_index] = requested_import
+                (*out).edge_caller_ids[edge_index] = work_front
+                (*out).edge_dependency_ids[edge_index] = dependency_id
+                (*out).edge_count = edge_index + 1
+            } else {
+                (*out).saturated = true
             }
             i = i + 1
         }
         work_front = work_front + 1
     }
-    !(*out).saturated && !(*out).parse_failed && (*out).unresolved_count == 0
+    !(*out).saturated &&
+    !(*out).parse_failed &&
+    (*out).unresolved_count == 0 &&
+    (*out).ambiguity_count == 0
+}
+
+pub fn module_frontend_collect_ast_closure_into(
+    main_path: string,
+    out: &!ModuleClosure
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    module_frontend_collect_ast_closure_programs_into(main_path, out, &!programs)
 }
 
 pub struct ImportPathList {
@@ -5150,67 +5299,51 @@ pub fn module_frontend_compile_imported_to_file(
     print("imported_compile: begin\n")
     var trace = empty_load_multimodule_ir_trace()
     print("imported_compile: load_begin\n")
-    let main_prog = load_module_file(main_path)
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    var closure = ModuleClosure {
+        paths: [""; 256],
+        logical_paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        ambiguity_count: 0,
+        saturated: false,
+        parse_failed: false,
+    }
+    let closure_complete = module_frontend_collect_ast_closure_programs_into(
+        main_path,
+        &!closure,
+        &!programs,
+    )
     print("imported_compile: load_done\n")
-    if parser_last_error_count() > 0 {
-        print("Parse failed during imported compile\n")
+    if !closure_complete {
+        print("imported_compile: closure_incomplete nodes=")
+        print_int(closure.node_count)
+        print(" unresolved=")
+        print_int(closure.unresolved_count)
+        print(" ambiguous=")
+        print_int(closure.ambiguity_count)
+        print(" saturated=")
+        if closure.saturated { print("true") } else { print("false") }
+        print(" parse_failed=")
+        if closure.parse_failed { print("true") } else { print("false") }
+        print("\n")
         return 1
     }
 
-    var programs: [Program; 256] = [mf_empty_program(); 256]
-    var file_paths: [string; 256] = [""; 256]
-    programs[0] = main_prog
-    file_paths[0] = main_path
-    var loaded: i64 = 1
-    var visited_paths: [string; 256] = [""; 256]
-    var visited_count: i64 = 0
-    visited_paths[0] = main_path
-    visited_count = 1
-    var work_front: i64 = 0
-    var dep_i: i64 = 0
-    trace.loaded_modules = 1
+    let loaded = closure.node_count
+    trace.loaded_modules = loaded
     trace.last_stage = "load_main"
     trace.last_module_index = 0
-
-    while work_front < loaded && loaded < 256 {
-        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
-        if module_frontend_lower_trace_enabled() {
-            print("imported_compile: scan_front=")
-            print_int(work_front)
-            print(" loaded=")
-            print_int(loaded)
-            print(" count=")
-            print_int(work_imports.count)
-            print("\n")
-        }
-        work_front = work_front + 1
-        dep_i = 0
-        while dep_i < work_imports.count && loaded < 256 {
-            let file_path = work_imports.paths[dep_i]
-            if module_frontend_lower_trace_enabled() {
-                print("imported_compile: dep front=")
-                print_int(work_front - 1)
-                print(" dep=")
-                print_int(dep_i)
-                print(" path=")
-                print(file_path)
-                print("\n")
-            }
-            if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
-                visited_count = visited_count + 1
-                if file_exists(file_path) {
-                    programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
-                    loaded = loaded + 1
-                    trace.loaded_modules = loaded
-                    trace.last_stage = "load_deps"
-                    trace.last_module_index = loaded - 1
-                }
-            }
-            dep_i = dep_i + 1
-        }
-    }
 
     if loaded <= 0 {
         print("Multi-module IR failed: no_modules_loaded\n")
