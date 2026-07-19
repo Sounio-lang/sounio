@@ -2426,14 +2426,13 @@ fn module_frontend_module_exports_name(
         return false
     }
     (*visited)[module_id] = true
-    let program = &(*programs)[module_id]
     let found = module_frontend_module_exports_name_items(
         closure,
         programs,
         module_id,
         name,
         visited,
-        &(*program).items,
+        &(*programs)[module_id].items,
         4096,
         exhausted,
     )
@@ -2490,13 +2489,13 @@ fn module_frontend_program_facade_scan(
 }
 
 fn module_frontend_program_is_facade(
-    program: &Program,
+    program: Program,
     exhausted: &!bool,
 ) -> bool with Mut, Alloc {
     var has_import = false
     var has_named_item = false
     if !module_frontend_program_facade_scan(
-        &(*program).items,
+        &program.items,
         4096,
         &!has_import,
         &!has_named_item,
@@ -2583,10 +2582,9 @@ fn module_frontend_validate_import_surface_items(
                 )
                 if edge_index >= 0 {
                     let dependency_id = (*closure).edge_dependency_ids[edge_index]
-                    let caller_program = &(*programs)[module_id]
                     var facade_scan_exhausted = false
                     let caller_is_facade = module_frontend_program_is_facade(
-                        caller_program,
+                        (*programs)[module_id],
                         &!facade_scan_exhausted,
                     )
                     if facade_scan_exhausted {
@@ -2594,9 +2592,8 @@ fn module_frontend_validate_import_surface_items(
                     }
                     var dependency_is_facade = false
                     if dependency_id >= 0 {
-                        let dependency_program = &(*programs)[dependency_id]
                         dependency_is_facade = module_frontend_program_is_facade(
-                            dependency_program,
+                            (*programs)[dependency_id],
                             &!facade_scan_exhausted,
                         )
                         if facade_scan_exhausted {
@@ -2639,12 +2636,11 @@ fn module_frontend_validate_import_surfaces(
     (*closure).surface_error_count = 0
     var module_id: i64 = 0
     while module_id < (*closure).node_count {
-        let program = &(*programs)[module_id]
         if !module_frontend_validate_import_surface_items(
             closure,
             programs,
             module_id,
-            &(*program).items,
+            &(*programs)[module_id].items,
             4096,
         ) {
             (*closure).saturated = true
@@ -2669,11 +2665,15 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     (*out).parse_failed = false
 
     parser_reset_last_errors()
-    let root_loaded = load_module_file_into(main_path, &!(*programs)[0])
+    var root_program = Box::new(mf_empty_program())
+    let root_loaded = load_module_file_into(main_path, &!(*root_program))
     if !root_loaded || parser_last_error_count() > 0 {
         (*out).parse_failed = true
         return false
     }
+    // Aggregate arrays are pointer tables in the current bootstrap ABI. Pin the
+    // Program in arena-backed storage before publishing its slot.
+    (*programs)[0] = *root_program
     (*out).paths[0] = main_path
     (*out).logical_paths[0] = use_path_ref_to_string(&(*programs)[0].module_path)
     (*out).node_count = 1
@@ -2682,7 +2682,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     while work_front < (*out).node_count {
         let caller_path = (*out).paths[work_front]
         let cur_dir = module_frontend_path_directory_slice(caller_path)
-        let imports = extract_imports_from_ast_ref(&(*programs)[work_front])
+        let imports = extract_imports_from_ast((*programs)[work_front])
         if imports.overflow {
             (*out).saturated = true
         }
@@ -2719,14 +2719,16 @@ pub fn module_frontend_collect_ast_closure_programs_into(
                     } else {
                         let candidate_dependency_id = (*out).node_count
                         parser_reset_last_errors()
+                        var dependency_program = Box::new(mf_empty_program())
                         let dependency_loaded = load_module_file_into(
                             dependency_path,
-                            &!(*programs)[candidate_dependency_id],
+                            &!(*dependency_program),
                         )
                         if !dependency_loaded || parser_last_error_count() > 0 {
                             (*out).parse_failed = true
                         } else {
                             dependency_id = candidate_dependency_id
+                            (*programs)[dependency_id] = *dependency_program
                             (*out).paths[dependency_id] = dependency_path
                             (*out).logical_paths[dependency_id] = use_path_ref_to_string(
                                 &(*programs)[dependency_id].module_path
