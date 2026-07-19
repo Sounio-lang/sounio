@@ -6,7 +6,8 @@
 // hash-joins, a stable comparison sort, an adaptive stable radix sort,
 // unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
 // rolling-window sum / mean / max / min, shift / diff / pct-change, an
-// exponentially weighted moving mean, expanding mean / var / std, and rank.
+// exponentially weighted moving mean, expanding mean / var / std, rank, and
+// quantile / median.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -1608,4 +1609,87 @@ pub fn bf_rank(src: &BigFrame, col: i64, method: i64) -> BigFrame with Alloc, Mu
     heap_free(ia as *mut i8)
     heap_free(ib as *mut i8)
     out
+}
+
+// Swap two f64 slots of a heap buffer.
+fn bf_fswap(a: *mut f64, i: i64, j: i64) with Mut, Div, Panic {
+    let t = read_f64(a, i)
+    write_f64(a, i, read_f64(a, j))
+    write_f64(a, j, t)
+}
+
+// k-th smallest value (0-based) of a[0..n), computed IN PLACE via a 3-way (Dutch-flag)
+// quickselect with median-of-3 pivots. The 3-way split makes duplicate-heavy / constant
+// columns O(n) rather than O(n^2). Partitions the buffer so a[k] is the k-th order
+// statistic (and a[<k] <= a[k] <= a[>k]).
+fn bf_quickselect(a: *mut f64, n: i64, k: i64) -> f64 with Mut, Div, Panic {
+    var lo: i64 = 0
+    var hi: i64 = n - 1
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let x = read_f64(a, lo)
+        let y = read_f64(a, mid)
+        let z = read_f64(a, hi)
+        var p = x                                    // median-of-3 pivot value
+        if (y <= x && x <= z) || (z <= x && x <= y) { p = x }
+        else {
+            if (x <= y && y <= z) || (z <= y && y <= x) { p = y } else { p = z }
+        }
+        var lt = lo
+        var gt = hi
+        var i = lo
+        while i <= gt {
+            let v = read_f64(a, i)
+            if v < p { bf_fswap(a, lt, i); lt = lt + 1; i = i + 1 }
+            else {
+                if v > p { bf_fswap(a, i, gt); gt = gt - 1 } else { i = i + 1 }
+            }
+        }
+        // [lo,lt-1] < p, [lt,gt] == p, [gt+1,hi] > p
+        if k < lt { hi = lt - 1 } else { if k > gt { lo = gt + 1 } else { return p } }
+    }
+    read_f64(a, k)
+}
+
+/// The `q`-quantile (q in [0,1]) of column `col` with pandas' default LINEAR
+/// interpolation: with pos = q*(n-1), lo = floor(pos), the result is
+/// sorted[lo] + (pos-lo)*(sorted[lo+1] - sorted[lo]). Returns an f64. Implemented by
+/// an O(n) 3-way quickselect on a heap copy of the column (the source is not mutated),
+/// plus, when interpolating, one scan for the next order statistic. NATIVE +
+/// lean_single only (heap).
+pub fn bf_quantile(src: &BigFrame, col: i64, q: f64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let buf = heap_alloc(n * 8) as *mut f64
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var i: i64 = 0
+    while i < n { write_f64(buf, i, read_f64(sp, i)); i = i + 1 }
+    if n == 1 { let r = read_f64(buf, 0); heap_free(buf as *mut i8); return r }
+    var qq = q
+    if qq < 0.0 { qq = 0.0 }
+    if qq > 1.0 { qq = 1.0 }
+    let pos = qq * ((n - 1) as f64)
+    let lo = pos as i64
+    let frac = pos - (lo as f64)
+    let vlo = bf_quickselect(buf, n, lo)
+    var res = vlo
+    if frac > 0.0 {
+        // next order statistic = min of the post-partition region a[lo+1 ..], all >= vlo.
+        var vhi = read_f64(buf, lo + 1)
+        var j = lo + 2
+        while j < n {
+            let v = read_f64(buf, j)
+            if v < vhi { vhi = v }
+            j = j + 1
+        }
+        res = vlo + frac * (vhi - vlo)
+    }
+    heap_free(buf as *mut i8)
+    res
+}
+
+/// Median of column `col` = the 0.5-quantile (linear interpolation), like pandas
+/// col.median(). NATIVE + lean_single only (heap).
+pub fn bf_median(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic {
+    bf_quantile(src, col, 0.5)
 }
