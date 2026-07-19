@@ -63,16 +63,12 @@ has_post_surface_work() {
   grep -Eq 'run_check_mode: about to check|run_check_mode: verdict=|typecheck:|imported_compile:|module_frontend_full_ir: lower_|lower_array:|Merged IR:|Compilation successful!' "$1"
 }
 
-closure_is_structurally_complete() {
+closure_has_valid_capacity() {
   local report="$1"
   local capacity
   local capacity_value
   local node_count
 
-  is_fatal_log "$report" && return 1
-  [[ "$(grep -Fxc 'SOUNIO_BOUNDARY_CLOSURE_V1' "$report" || true)" -eq 1 ]] || return 1
-  [[ "$(grep -c $'^status\t' "$report" || true)" -eq 1 ]] || return 1
-  [[ "$(grep -Fxc $'status\tcomplete' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^capacity\t' "$report" || true)" -eq 1 ]] || return 1
   capacity="$(sed -n $'s/^capacity\t//p' "$report")"
   [[ "$capacity" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -80,7 +76,17 @@ closure_is_structurally_complete() {
   capacity_value=$((10#$capacity))
   [[ "$capacity_value" -le 4096 ]] || return 1
   node_count="$(grep -c $'^node\t' "$report" || true)"
-  [[ "$node_count" -le "$capacity_value" ]] || return 1
+  [[ "$node_count" -le "$capacity_value" ]]
+}
+
+closure_is_structurally_complete() {
+  local report="$1"
+
+  is_fatal_log "$report" && return 1
+  [[ "$(grep -Fxc 'SOUNIO_BOUNDARY_CLOSURE_V1' "$report" || true)" -eq 1 ]] || return 1
+  [[ "$(grep -c $'^status\t' "$report" || true)" -eq 1 ]] || return 1
+  [[ "$(grep -Fxc $'status\tcomplete' "$report" || true)" -eq 1 ]] || return 1
+  closure_has_valid_capacity "$report" || return 1
   [[ "$(grep -c $'^saturated\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'saturated\tfalse' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^parse_failed\t' "$report" || true)" -eq 1 ]] || return 1
@@ -112,6 +118,7 @@ closure_is_missing_package() {
   [[ "$(grep -Fxc 'SOUNIO_BOUNDARY_CLOSURE_V1' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^status\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'status\tincomplete' "$report" || true)" -eq 1 ]] || return 1
+  closure_has_valid_capacity "$report" || return 1
   [[ "$(grep -c $'^saturated\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'saturated\tfalse' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^parse_failed\t' "$report" || true)" -eq 1 ]] || return 1
@@ -243,6 +250,8 @@ run_classifier_self_test() {
   local conflicting="$WORK/selftest.conflicting.tsv"
   local missing_source="$WORK/package_import_missing_package.sio"
   local missing_report="$WORK/selftest.missing-package.tsv"
+  local missing_report_without_capacity="$WORK/selftest.missing-package-no-capacity.tsv"
+  local missing_report_invalid_capacity="$WORK/selftest.missing-package-invalid-capacity.tsv"
   local mixed_missing_report="$WORK/selftest.mixed-missing-package.tsv"
 
   printf '%s\n' \
@@ -368,6 +377,16 @@ run_classifier_self_test() {
     $'edge_identity\t0\t-1\tpackage_import_missing' \
     $'unresolved\t'"$missing_source"$'\tpackage_import_missing' >"$missing_report"
   closure_is_missing_package "$missing_report" "$missing_source" || fail selftest_exact_missing_package_rejected
+  cp "$missing_report" "$missing_report_without_capacity"
+  sed -i $'/^capacity\t/d' "$missing_report_without_capacity"
+  if closure_is_missing_package "$missing_report_without_capacity" "$missing_source"; then
+    fail selftest_missing_package_without_capacity_accepted
+  fi
+  cp "$missing_report" "$missing_report_invalid_capacity"
+  sed -i $'s/^capacity\t256$/capacity\t0/' "$missing_report_invalid_capacity"
+  if closure_is_missing_package "$missing_report_invalid_capacity" "$missing_source"; then
+    fail selftest_missing_package_invalid_capacity_accepted
+  fi
   cp "$missing_report" "$mixed_missing_report"
   printf '%s\n' $'ambiguous\t'"$missing_source"$'\tpackage_import_missing' >>"$mixed_missing_report"
   if closure_is_missing_package "$mixed_missing_report" "$missing_source"; then
