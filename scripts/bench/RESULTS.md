@@ -27,6 +27,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cumsum (1M rows, ungrouped) | | 5.0 | 9.0 | **0.56x — Sounio wins** | (new verb) |
 | cumcount_by (1M rows, 1000 groups) | | 32.5 | 46.3 | **0.70x — Sounio wins** | (new verb) |
 | cumsum_by (1M rows, 1000 groups) | | 36.1 | 22.3 | **1.62x** | (new verb) |
+| cumprod (1M rows, ungrouped) | | ~8 | ~7 | **~1.1x — parity** | (new verb) |
+| cumprod_by (1M rows, 1000 groups) | | ~35 | ~19 | **~1.8x** | (new verb) |
 | cummax (1M rows, ungrouped) | | 4.8 | 11.3 | **0.42x — Sounio wins** | (new verb) |
 | cummin (1M rows, ungrouped) | | 4.9 | 10.6 | **0.46x — Sounio wins** | (new verb) |
 | cummax_by / cummin_by (1M rows, 1000 groups) | | ~34 | ~21 | **1.6x** | (new verb) |
