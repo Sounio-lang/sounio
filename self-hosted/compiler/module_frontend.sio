@@ -2465,27 +2465,30 @@ fn module_frontend_record_surface_error(
 fn module_frontend_program_facade_scan(
     items: &Option<Box<ItemList>>,
     remaining: i64,
-    has_import: &!bool,
-    has_named_item: &!bool,
-) -> bool with Mut, Alloc {
+) -> i64 with Mut, Alloc {
     match *items {
-        None => true
+        None => 0
         Some(node) => {
             if remaining <= 0 {
-                return false
+                return 0 - 1
             }
-            let item = &(*node).head
-            if (*item).kind == ItemKind::ItemUse {
-                (*has_import) = true
-            } else if (*item).name.len > 0 {
-                (*has_named_item) = true
-            }
-            module_frontend_program_facade_scan(
+            let tail_flags = module_frontend_program_facade_scan(
                 &(*node).tail,
                 remaining - 1,
-                has_import,
-                has_named_item,
             )
+            if tail_flags < 0 {
+                return 0 - 1
+            }
+            let item = &(*node).head
+            let has_import = (*item).kind == ItemKind::ItemUse ||
+                tail_flags == 1 || tail_flags == 3
+            let has_named_item = ((*item).kind != ItemKind::ItemUse &&
+                (*item).name.len > 0) || tail_flags == 2 || tail_flags == 3
+            if has_import {
+                if has_named_item { 3 } else { 1 }
+            } else {
+                if has_named_item { 2 } else { 0 }
+            }
         }
     }
 }
@@ -2571,18 +2574,14 @@ fn module_frontend_validate_import_surface_items(
                     if dependency_id >= 0 {
                         let dependency_program = (*programs)[dependency_id]
                         let dependency_items = dependency_program.items
-                        var dependency_has_import = false
-                        var dependency_has_named_item = false
-                        if !module_frontend_program_facade_scan(
+                        let dependency_facade_flags = module_frontend_program_facade_scan(
                             &dependency_items,
                             4096,
-                            &!dependency_has_import,
-                            &!dependency_has_named_item,
-                        ) {
+                        )
+                        if dependency_facade_flags < 0 {
                             return false
                         }
-                        dependency_is_facade = dependency_has_import &&
-                            !dependency_has_named_item
+                        dependency_is_facade = dependency_facade_flags == 1
                     }
                     let validates_public_facade_edge = caller_is_facade &&
                         visibility_ref_to_bool(&(*item).visibility)
@@ -2623,19 +2622,16 @@ fn module_frontend_validate_import_surfaces(
     while module_id < (*closure).node_count {
         let program = (*programs)[module_id]
         let program_items = program.items
-        var caller_has_import = false
-        var caller_has_named_item = false
-        if !module_frontend_program_facade_scan(
+        let caller_facade_flags = module_frontend_program_facade_scan(
             &program_items,
             4096,
-            &!caller_has_import,
-            &!caller_has_named_item,
-        ) {
+        )
+        if caller_facade_flags < 0 {
             (*closure).saturated = true
             (*closure).surface_error_count = 0
             return
         }
-        let caller_is_facade = caller_has_import && !caller_has_named_item
+        let caller_is_facade = caller_facade_flags == 1
         if !module_frontend_validate_import_surface_items(
             closure,
             programs,
