@@ -10,7 +10,7 @@
 // quantile / median, covariance / correlation (+ a correct bf_sqrt), and
 // rolling variance / std, rolling median, cumulative product, and
 // per-group distinct-count (nunique), per-group idxmax / idxmin, per-group mode,
-// rolling correlation, and rolling covariance / skewness.
+// rolling correlation, and rolling covariance / skewness / kurtosis.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -2493,5 +2493,66 @@ pub fn bf_rolling_skew(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigF
         i = i + 1
     }
     heap_free(sc as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) sample excess KURTOSIS of column `col` over `window`
+/// (like pandas col.rolling(window).kurt()): the bias-corrected Fisher excess
+/// kurtosis G2 = (w-1)/((w-2)(w-3)) * [(w+1)*(m4/m2^2 - 3) + 6], from the window's
+/// 2nd and 4th central moments. Sliding power sums S1/S2/S3/S4 (add entering,
+/// subtract leaving), shifted by the global mean (moments are shift-invariant) for
+/// conditioning. NO sqrt (it is a ratio of even moments). A zero-variance window
+/// yields 0. Requires window >= 4; first window-1 rows take `fill`. O(n). NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_kurt(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 3 { return bf_new(1, 1) }
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var gs = 0.0
+    var g: i64 = 0
+    while g < n { gs = gs + read_f64(sp, g); g = g + 1 }
+    let k = gs / (n as f64)                             // global-mean shift
+    let wf = window as f64
+    let c1 = (wf - 1.0) / ((wf - 2.0) * (wf - 3.0))     // bias factor, constant
+    var s1 = 0.0
+    var s2 = 0.0
+    var s3 = 0.0
+    var s4 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let d = read_f64(sp, i) - k
+        let d2 = d * d
+        s1 = s1 + d
+        s2 = s2 + d2
+        s3 = s3 + d2 * d
+        s4 = s4 + d2 * d2
+        if i >= window {
+            let o = read_f64(sp, i - window) - k
+            let o2 = o * o
+            s1 = s1 - o
+            s2 = s2 - o2
+            s3 = s3 - o2 * o
+            s4 = s4 - o2 * o2
+        }
+        if i >= window - 1 {
+            let m = s1 / wf
+            let m2s = s2 - s1 * m                       // Σ(x-x̄)² over the window
+            let m4s = s4 - 4.0 * m * s3 + 6.0 * m * m * s2 - 4.0 * m * m * m * s1 + wf * m * m * m * m
+            if m2s <= 0.0 {
+                write_f64(op, i, 0.0)
+            } else {
+                let m2b = m2s / wf
+                let m4b = m4s / wf
+                let g2 = m4b / (m2b * m2b) - 3.0
+                write_f64(op, i, c1 * ((wf + 1.0) * g2 + 6.0))
+            }
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
     out
 }
