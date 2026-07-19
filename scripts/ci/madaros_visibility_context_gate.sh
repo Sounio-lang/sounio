@@ -158,6 +158,38 @@ expect_private_rejection() {
   }
 }
 
+expect_ambiguous_rejection() {
+  local source="$1"
+  local log="$WORK/ambiguous-global.log"
+  local rc=0
+
+  set +e
+  MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check "$source" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  is_fatal_log "$log" && {
+    cat "$log" >&2
+    fail "ambiguous-global produced a fatal compiler log"
+  }
+  [[ "$rc" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "ambiguous-global must fail closed instead of selecting the first global candidate (rc=$rc)"
+  }
+  [[ "$(count_marker 'error[E' "$log")" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "ambiguous-global must emit exactly one compiler diagnostic"
+  }
+  [[ "$(count_marker 'error[E137' "$log")" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "ambiguous-global must remain unresolved with exactly one E137 diagnostic"
+  }
+  [[ "$(count_marker 'use of undeclared variable' "$log")" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "ambiguous-global must emit the canonical unresolved-name message"
+  }
+}
+
 FIXTURES="$ROOT_DIR/tests/compiler/madaros_visibility_context"
 classify_context_check single "$FIXTURES/duplicate_private_single_main.sio" 1
 single_state="$CASE_STATE"
@@ -169,7 +201,10 @@ matrix_state="$CASE_STATE"
 }
 
 runtime_state="not-run-baseline"
+ambiguous_global="not-run-baseline"
 if [[ "$single_state" == resolved ]]; then
+  expect_ambiguous_rejection "$FIXTURES/ambiguous_public_main.sio"
+  ambiguous_global="E137"
   expect_context_runtime single "$FIXTURES/duplicate_private_single_main.sio" \
     'PASS duplicate_private_single_context'
   expect_context_runtime matrix18 "$FIXTURES/duplicate_private_18_main.sio" \
@@ -187,7 +222,7 @@ expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
 
-echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
+echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state ambiguous_global=$ambiguous_global single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
 
 if [[ "$EXPECT" == baseline && "$single_state" != baseline ]]; then
   fail "expected the pinned baseline, got $single_state"
