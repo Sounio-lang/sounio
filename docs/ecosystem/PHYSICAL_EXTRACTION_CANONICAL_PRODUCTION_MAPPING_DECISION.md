@@ -9,10 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.phys
 
 # Physical Extraction Canonical Production Mapping Decision
 
-Status: executable R3 non-authorizing mapping-selection processing; four public
-destination repositories now contain exact reviewed package copies, while
-post-materialization mapping reconfirmation, production approval, and cutover
-execution remain absent.
+Status: executable R3 non-authorizing mapping-selection processing; all five
+targets were explicitly reconfirmed and emitted as a reviewed
+`proposed-not-approved` mapping, while production approval and cutover execution
+remain absent.
 
 `tools/science_boundary/canonical_production_mapping_decision_processor.py`
 turns one reviewed transcription of an explicit mapping selection into a
@@ -229,6 +229,42 @@ public copies are deliberately bound to its remote source commit rather than to
 `origin/main`; any substantive PR rewrite requires a new binding before
 canonical use.
 
+At `2026-07-19T03:50:45Z`, `agourakis82` explicitly reconfirmed all five
+destinations in issue comment
+[`5014112002`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5014112002).
+The response is 1896 bytes with SHA-256
+`22207dcecb8ba8ec7377e9957a36cbcb91fc7fff8110ce3266c221cbe177fea3`.
+It authorizes only processing and review of a `proposed-not-approved` mapping
+and explicitly withholds source removal, production approval, and cutover.
+
+The selection binds catalog observation `2026-07-19T03:39:58Z`, catalog
+identity
+`cef66e6c59e9b7f4b35a5d4dd0637bfd71865a93b049a8af6dd4471ade8ad55a`,
+and clean canonical `sounio/main` snapshot
+`88530f217bab58cac6a9a7c31160f75415b77d68`. The four package destination
+commits and the `sounio-examples` commit were unchanged from the preceding
+materialization catalog.
+
+The deterministic decision identity is
+`63be89d31b54dd21617c27abfdcde0b598d65c74b60b40af965e89da9a736bed`.
+Process and verify modes independently reconstructed receipt identity
+`d67863e77e2b432221b8c741807a102301c39afc5e91859b34b398e0432a5f87`
+with status `proposal-input-complete`, five `reuse-observed` rows, no
+`request-new` or `revise-target` rows, and proposal identity
+`a32de28e879ea03370f90382f0d67a3651a53b4108d8c45ed0403b1106921f2d`.
+Every emitted mapping remains `proposed-not-approved`; execution authority is
+`none` and canonical cutover is `not-executed`.
+
+Contract-bound review by xAI/Grok 4.3 and Z.AI/GLM-5.2 found no BLOCKER or
+MAJOR inconsistency in the proposal. The downstream production-gap assessor
+accepted and independently verified it as assessment identity
+`c050015eac9fa7cf794f1ff989cfb114e801ca575d55e28f811b6488a7a28a1d`,
+retaining status `production-evidence-and-human-decision-required`. Issue
+comment
+[`5014152829`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5014152829)
+records the result byte-identically. The complete evidence is preserved under
+`artifacts/r3/canonical-production/20260719T033958Z/`.
+
 ## Acceptance Gate
 
 The focused gate is
@@ -277,11 +313,12 @@ implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
-The four requested repositories are public, non-empty, and have verified
-`main` commits, but this does not silently convert the earlier `request-new`
-selection into `reuse-observed`. The next state requires a complete explicit
-human reconfirmation of all five targets against catalog identity
-`095de409e315ff0c716c4877274c8b2d439310bd255233cf1558f42f2b19be2c`.
-The maintainer team and branch-rule evidence are still absent. Mapping proposal
-review, production approval, recovery policy, explicit cutover decision, source
-removal, and execution remain later and separate interfaces.
+The complete post-materialization selection and proposal review are recorded,
+but the proposal is not an approval. The maintainer team and branch-rule
+evidence remain absent. Production materialization evidence supplied to the gap
+assessor, source-removal authorization, canonical-production approval, an
+execution policy, and an explicit human cutover decision remain missing and
+separate interfaces. PR #1176 remains unresolved, and the canonical repository
+continued to receive unrelated commits after the bound point-in-time catalog;
+no later head is silently substituted. Catalog or governed-source drift requires
+a new selection record before downstream use.
