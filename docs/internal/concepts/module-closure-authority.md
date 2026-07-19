@@ -54,26 +54,33 @@ trace records are not evidence that the canonical lowering consumed a closure.
 Semantic-Lane-ID: modulegraph-facade-vertical-r1
 Owner: Codex-2 compiler lane
 Concept-IDs: SOUNIO-MODULE-CLOSURE-AUTHORITY
-Intent-Preserved: authored module order, visibility, and identity survive into executable lowering
-Transformation: repeated textual import discovery becomes one parsed closure with stable ModuleIds
-Types-Changed: ModuleClosure carrier fields only
+Intent-Preserved: authored module order and closure-local definition identity survive into executable multimodule lowering
+Transformation: repeated textual import discovery becomes one parsed closure whose module indices identify function definitions during one compile
+Types-Changed: ModuleClosure carrier fields and IrFunction.defining_module_id in memory
 Effects-Changed: none
-IR-Changed: none
-Claims-Introduced: a passing vertical gate proves one facade closure checks, lowers, and executes without fallback
-Claims-Forbidden: this alone fixes lean_single reexports, all visibility semantics, large-graph capacity, or #991 receipt semantics
+IR-Changed: IrFunction.defining_module_id is authoritative in memory for multimodule lowering and merge; SOIR v4 does not serialize it
+Claims-Introduced: the exact vertical gate proves closure-local function identity is consumed by lowering and merge when its #854 context witnesses resolve and execute
+Claims-Forbidden: SOIR round-trip preservation, compiler-wide ModuleId preservation, general visibility correctness, the complete ModuleGraph epic, lean_single reexports, large-graph capacity, or #991 receipt semantics
 Assumptions: authored imports resolve within the declared module-root set or established local/package paths
-Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_native_driver.sio, self-hosted/compiler/main.sio, self-hosted/compiler/module_parse.sio, self-hosted/parser/items.sio
+Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_native_driver.sio, self-hosted/compiler/main.sio, self-hosted/compiler/module_parse.sio, self-hosted/parser/items.sio, self-hosted/ir/ir.sio, self-hosted/ir/lower.sio, self-hosted/ir/serialize.sio, self-hosted/ir/optimize.sio, self-hosted/ir/ssa.sio
 Read-Set: checker, resolver, native backend, legacy compact importer
-Positive-Witness: root -> public facade -> leaf -> ELF prints 42
-Negative-Witness: missing, non-reexported, private, unresolved, and ambiguous imports produce no ELF
+Positive-Witness: scripts/ci/module_graph_facade_vertical_gate.sh reports context_state=resolved, runtime_state=pass, and the facade ELF prints 42
+Negative-Witness: the same gate rejects missing, non-reexported, private, unresolved, ambiguous, or context-partial states without accepting fallback
 Acceptance-Gate: scripts/ci/module_graph_facade_vertical_gate.sh
 Integration-Target: origin/main
-Authoritative-Only-If: source-fresh compiler passes positive and negative witnesses with no fallback marker
+Authoritative-Only-If: source-fresh compiler passes the exact positive and negative witnesses with context_state=resolved, runtime_state=pass, and no fallback marker
 ```
 
 ## Current Boundary
 
-This contract establishes the carrier and refusal boundary. It does not close
-the remaining ModuleGraph epic work: normalized physical identity, graph digest,
-large-closure capacity, SOIR installation, scientific metadata, numeric payload,
-or complete receipts remain separate executable milestones.
+The `ModuleId` stored in `IrFunction.defining_module_id` is an index in the active
+compile's closure. It is not a persistent module identifier and is not authority
+outside that closure. Deserializing SOIR v4 explicitly restores
+`IR_DEFINING_MODULE_UNKNOWN`, because the v4 wire format has no provenance field.
+This lane therefore makes no SOIR round-trip or compiler-wide preservation claim.
+
+This contract establishes the carrier, in-memory lowering identity, and refusal
+boundary for the exact gate. It does not close the remaining ModuleGraph epic
+work: normalized physical identity, graph digest, large-closure capacity, SOIR
+installation, compiler-wide identity propagation, scientific metadata, numeric
+payload, or complete receipts remain separate executable milestones.
