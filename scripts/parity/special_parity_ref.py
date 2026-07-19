@@ -55,6 +55,10 @@ REF = {
     "dirichlet_eta":(lambda s: mp.altzeta(s), 1e-2),
     "elliptic_k":   (lambda k: mp.ellipk(k**2), 1e-2),
     "elliptic_e":   (lambda k: mp.ellipe(k**2), 1e-2),
+    "hyperg_0f1":(lambda b,z: mp.hyp0f1(b,z), 1e-2),
+    "hyperg_1f1":(lambda a,b,z: mp.hyp1f1(a,b,z), 1e-2),
+    "hyperg_u":  (lambda a,b,z: mp.hyperu(a,b,z), 1e-2),
+    "hyperg_2f1":(lambda a,b,c,z: mp.hyp2f1(a,b,c,z), 1e-2),
 }
 
 def main():
