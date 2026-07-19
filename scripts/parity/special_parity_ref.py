@@ -13,6 +13,32 @@ def _ibetainv(a, b, p):
         else: hi = mid
     return (lo + hi) / 2
 
+def _jacobi_explicit(n, a, b, x):
+    # Explicit finite-sum formula (DLMF 18.5.7), independent of mpmath's
+    # mp.jacobi(): mp.jacobi's hypergeometric-series representation spuriously
+    # fails to converge for several alpha==beta test points here (a genuine
+    # mpmath convergence-detection quirk, not a property of the polynomial).
+    n = int(n)
+    def binom(nn, kk):
+        # Generalized binomial via the rising-product form (kk a small
+        # non-negative int here), not gamma ratios: gamma(x+1)/gamma(y+1) for
+        # half-integer x,y goes through sqrt(pi) that only cancels
+        # symbolically, leaving ~1e-32 floating residue at dps=30 — enough to
+        # turn an exact zero (odd Jacobi poly at x=0 with alpha==beta) into a
+        # spurious "1.0 relative error" against Sounio's exact 0.0.
+        kk = int(kk)
+        num = mp.mpf(1)
+        for i in range(kk):
+            num *= (nn - i)
+        den = mp.mpf(1)
+        for i in range(1, kk + 1):
+            den *= i
+        return num / den
+    s = mp.mpf(0)
+    for k in range(n + 1):
+        s += binom(n + a, n - k) * binom(n + b, k) * ((x - 1) / 2) ** k * ((x + 1) / 2) ** (n - k)
+    return s
+
 def bits_to_f64(field):
     return struct.unpack('<d', struct.pack('<q', int(field)))[0]
 
@@ -59,6 +85,14 @@ REF = {
     "hyperg_1f1":(lambda a,b,z: mp.hyp1f1(a,b,z), 1e-2),
     "hyperg_u":  (lambda a,b,z: mp.hyperu(a,b,z), 1e-2),
     "hyperg_2f1":(lambda a,b,c,z: mp.hyp2f1(a,b,c,z), 1e-2),
+    "legendre_p":  (lambda n,x: mp.legendre(n, x), 1e-2),
+    "chebyshev_t": (lambda n,x: mp.chebyt(n, x), 1e-2),
+    "chebyshev_u": (lambda n,x: mp.chebyu(n, x), 1e-2),
+    "hermite_h":   (lambda n,x: mp.hermite(n, x), 1e-2),
+    "hermite_he":  (lambda n,x: 2**(-n/2) * mp.hermite(n, x/mp.sqrt(2)), 1e-2),
+    "laguerre_l":  (lambda n,x: mp.laguerre(n, 0, x), 1e-2),
+    "laguerre_l_assoc":(lambda n,a,x: mp.laguerre(n, a, x), 1e-2),
+    "jacobi_p":    (lambda n,a,b,x: _jacobi_explicit(n, a, b, x), 1e-2),
 }
 
 def main():
