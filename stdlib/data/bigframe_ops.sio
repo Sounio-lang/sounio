@@ -2,7 +2,8 @@
 // Scale verbs over the heap-backed columnar BigFrame (stdlib/data/bigframe.sio).
 //
 // These are the relational primitives that make a >>1024-row BigFrame useful as a
-// dataframe: a row filter, integer and hash groupby-sum, and an inner hash-join.
+// dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
+// hash-joins, and a stable sort-by-column.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -380,5 +381,294 @@ pub fn bf_join_inner(left: &BigFrame, lkey: i64, right: &BigFrame, rkey: i64) ->
     heap_free(ri as *mut i8)
     heap_free(ml as *mut i8)
     heap_free(mr as *mut i8)
+    out
+}
+
+// Shared engine for the outer-family joins. Builds a hash table on `right`'s key
+// column (first-row-wins on a duplicate key -- `right` is the unique/lookup side,
+// same model as bf_join_inner) and probes `left`, keeping EVERY left row: matched
+// left rows carry the right columns, unmatched left rows carry `fill` in the right
+// columns. When `include_right_only` is true (full outer join) it then appends the
+// right rows whose key no left row matched, with `fill` in the left columns except
+// the join-key column, which is coalesced to the right key. Output layout matches
+// bf_join_inner: all `left` columns, then all `right` columns except `rkey`. Left
+// rows come out in probe order; right-only rows follow in right-scan order.
+// O(nl + nr) expected. NATIVE + lean_single only (heap).
+fn bf_join_lo(left: &BigFrame, lkey: i64, right: &BigFrame, rkey: i64, fill: f64, include_right_only: bool) -> BigFrame with Alloc, Mut, Div, Panic {
+    let lnc = bf_ncols(left)
+    let rnc = bf_ncols(right)
+    let lnr = bf_nrows(left)
+    let rnr = bf_nrows(right)
+    let outc = lnc + rnc - 1
+    if lkey < 0 || lkey >= lnc { return bf_new(outc, 1) }
+    if rkey < 0 || rkey >= rnc { return bf_new(outc, 1) }
+    if lnr <= 0 { return bf_new(outc, 1) }
+
+    // Build a table on right's key column (occ starts 0 via calloc). ri = right row.
+    var size: i64 = 16
+    while size < rnr + rnr { size = size * 2 }
+    if rnr <= 0 { size = 16 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let ri  = heap_alloc(size * 8) as *mut f64
+    let rkeyp = bf_col_ptr(right, rkey) as *mut f64
+    var b: i64 = 0
+    while b < rnr {
+        let key = read_f64(rkeyp, b)
+        var slot = bf_ghash(key, mask)
+        var placed = false
+        while !placed {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, key)
+                write_f64(ri, slot, b as f64)
+                placed = true
+            } else {
+                if read_f64(hk, slot) == key {
+                    placed = true              // first build row wins on a duplicate key
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        b = b + 1
+    }
+
+    // Probe every left row. mr[l] = matched right row index, or -1 on a miss.
+    // matched[r] flags right rows some left row hit (for the right-only outer pass).
+    let lkp = bf_col_ptr(left, lkey) as *mut f64
+    let mr = heap_alloc(lnr * 8) as *mut f64
+    var rcap = rnr
+    if rcap < 1 { rcap = 1 }
+    let matched = heap_alloc(rcap * 8) as *mut f64   // 0 = unmatched (calloc)
+    var l: i64 = 0
+    while l < lnr {
+        let key = read_f64(lkp, l)
+        var slot = bf_ghash(key, mask)
+        var found: i64 = 0 - 1
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                done = true
+            } else {
+                if read_f64(hk, slot) == key {
+                    found = read_f64(ri, slot) as i64
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        write_f64(mr, l, found as f64)
+        if found >= 0 { write_f64(matched, found, 1.0) }
+        l = l + 1
+    }
+
+    // Collect right-only rows (full outer): right rows whose key no left row matched.
+    let rro = heap_alloc(rcap * 8) as *mut f64
+    var nonly: i64 = 0
+    if include_right_only {
+        var b2: i64 = 0
+        while b2 < rnr {
+            if read_f64(matched, b2) == 0.0 {
+                write_f64(rro, nonly, b2 as f64)
+                nonly = nonly + 1
+            }
+            b2 = b2 + 1
+        }
+    }
+
+    let total = lnr + nonly
+    var cap = total
+    if cap < 1 { cap = 1 }
+    var out = bf_new(outc, cap)
+    out.n_rows = total
+
+    // Left columns: left rows in order; right-only rows get `fill` (key col coalesced).
+    var c: i64 = 0
+    while c < lnc {
+        let sp = bf_col_ptr(left, c) as *mut f64
+        let op = bf_col_ptr(&out, c) as *mut f64
+        var j: i64 = 0
+        while j < lnr {
+            write_f64(op, j, read_f64(sp, j))
+            j = j + 1
+        }
+        if include_right_only {
+            var t: i64 = 0
+            while t < nonly {
+                if c == lkey {
+                    write_f64(op, lnr + t, read_f64(rkeyp, read_f64(rro, t) as i64))
+                } else {
+                    write_f64(op, lnr + t, fill)
+                }
+                t = t + 1
+            }
+        }
+        c = c + 1
+    }
+    // Right columns except the join key: matched right row, else `fill`; right-only
+    // rows carry their own right values.
+    var oc: i64 = lnc
+    var rc: i64 = 0
+    while rc < rnc {
+        if rc != rkey {
+            let sp = bf_col_ptr(right, rc) as *mut f64
+            let op = bf_col_ptr(&out, oc) as *mut f64
+            var j: i64 = 0
+            while j < lnr {
+                let m = read_f64(mr, j) as i64
+                if m >= 0 {
+                    write_f64(op, j, read_f64(sp, m))
+                } else {
+                    write_f64(op, j, fill)
+                }
+                j = j + 1
+            }
+            if include_right_only {
+                var t: i64 = 0
+                while t < nonly {
+                    write_f64(op, lnr + t, read_f64(sp, read_f64(rro, t) as i64))
+                    t = t + 1
+                }
+            }
+            oc = oc + 1
+        }
+        rc = rc + 1
+    }
+
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(ri as *mut i8)
+    heap_free(mr as *mut i8)
+    heap_free(matched as *mut i8)
+    heap_free(rro as *mut i8)
+    out
+}
+
+/// LEFT outer join: keep every `left` row, attaching the matched `right` columns or
+/// `fill` where no right key matches (pass `make_nan()`-style value for pandas NaN
+/// semantics, or any sentinel). Output = all `left` columns then `right` columns
+/// except the join key, in left probe order. See bf_join_lo for the lookup model.
+pub fn bf_join_left(left: &BigFrame, lkey: i64, right: &BigFrame, rkey: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_join_lo(left, lkey, right, rkey, fill, false)
+}
+
+/// FULL OUTER join: every `left` row (right columns filled where unmatched) plus
+/// every `right` row whose key no `left` row matched (left columns `fill`ed, the
+/// join-key column coalesced to the right key). Output layout matches bf_join_left;
+/// left rows first, then right-only rows. `right` is treated as the unique/lookup
+/// side (first build row wins on a duplicate key). See bf_join_lo.
+pub fn bf_join_outer(left: &BigFrame, lkey: i64, right: &BigFrame, rkey: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_join_lo(left, lkey, right, rkey, fill, true)
+}
+
+/// Sort all rows of `src` by column `col` (`ascending` toggles direction), returning
+/// a NEW BigFrame with the rows permuted. Argsort + column-major gather: a bottom-up
+/// STABLE mergesort orders (key, original-row) pairs, then each output column is
+/// gathered through the sorted index list. Paired key/index buffers with ping-pong
+/// (no per-pass copy-back) keep the comparisons sequential (cache-friendly) rather
+/// than chasing an index into the key array. O(n log n), stable (equal keys keep
+/// their input order). Comparison is a direct f64 `<=`/`>=`, correct for every
+/// non-NaN value; NaN ordering is unspecified (as in pandas). NATIVE + lean_single
+/// only (heap).
+pub fn bf_sort_by(src: &BigFrame, col: i64, ascending: bool) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nc = bf_ncols(src)
+    let n = bf_nrows(src)
+    if col < 0 || col >= nc || n <= 0 { return bf_new(nc, 1) }
+
+    // Two key buffers + two index buffers, ping-ponged each merge pass. ka/ia start
+    // as the identity (key = src column value, index = row number).
+    var ka = heap_alloc(n * 8) as *mut f64
+    var kb = heap_alloc(n * 8) as *mut f64
+    var ia = heap_alloc(n * 8) as *mut i64
+    var ib = heap_alloc(n * 8) as *mut i64
+    let kp = bf_col_ptr(src, col) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        write_f64(ka, i, read_f64(kp, i))
+        write_i64(ia, i, i)
+        i = i + 1
+    }
+
+    // cur = source buffers this pass, dst = scratch; swapped after each pass.
+    var ck = ka
+    var ci = ia
+    var dk = kb
+    var di = ib
+    var width: i64 = 1
+    while width < n {
+        var lo: i64 = 0
+        while lo < n {
+            var mid = lo + width
+            if mid > n { mid = n }
+            var hi = lo + width + width
+            if hi > n { hi = n }
+            var a = lo
+            var b = mid
+            var k = lo
+            while a < mid && b < hi {
+                let va = read_f64(ck, a)
+                let vb = read_f64(ck, b)
+                var take_a = false
+                if ascending {
+                    if va <= vb { take_a = true }   // <= keeps left (earlier) row first -> stable
+                } else {
+                    if va >= vb { take_a = true }
+                }
+                if take_a {
+                    write_f64(dk, k, va)
+                    write_i64(di, k, read_i64(ci, a))
+                    a = a + 1
+                } else {
+                    write_f64(dk, k, vb)
+                    write_i64(di, k, read_i64(ci, b))
+                    b = b + 1
+                }
+                k = k + 1
+            }
+            while a < mid {
+                write_f64(dk, k, read_f64(ck, a))
+                write_i64(di, k, read_i64(ci, a))
+                a = a + 1
+                k = k + 1
+            }
+            while b < hi {
+                write_f64(dk, k, read_f64(ck, b))
+                write_i64(di, k, read_i64(ci, b))
+                b = b + 1
+                k = k + 1
+            }
+            lo = lo + width + width
+        }
+        let tk = ck
+        ck = dk
+        dk = tk
+        let ti = ci
+        ci = di
+        di = ti
+        width = width + width
+    }
+
+    // ci holds the original-row indices in sorted order. Gather each column.
+    var out = bf_new(nc, n)
+    out.n_rows = n
+    var c: i64 = 0
+    while c < nc {
+        let sp = bf_col_ptr(src, c) as *mut f64
+        let op = bf_col_ptr(&out, c) as *mut f64
+        var j: i64 = 0
+        while j < n {
+            write_f64(op, j, read_f64(sp, read_i64(ci, j)))
+            j = j + 1
+        }
+        c = c + 1
+    }
+
+    heap_free(ka as *mut i8)
+    heap_free(kb as *mut i8)
+    heap_free(ia as *mut i8)
+    heap_free(ib as *mut i8)
     out
 }
