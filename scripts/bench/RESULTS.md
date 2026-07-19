@@ -15,6 +15,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | groupby_sum (10 dense keys, O(n) accumulator) | | 13.7 | 13.8 | **0.99x — parity** | 0.99x |
 | groupby_sum_hash (1000 SPARSE keys, open-addressing) | | 22.7 | 17.0 | **1.33x** | (dense drops keys>=1024) |
 | inner hash-join (100k×100k, shuffled keys) | | 35.4 | 8.7 | **4.1x** | (new verb) |
+| left  outer join (100k×100k, 50% match) | | 26.1 | 15.3 | **1.71x** | (new verb) |
+| full  outer join (100k×100k → 150k rows) | | 27.3 | 29.8 | **0.92x — Sounio wins** | (new verb) |
 | frame build (1M x 3) | | ~20 (once) | — | — | — |
 
 ## What changed (all stdlib, no compiler)
@@ -27,6 +29,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 - **Reductions/scans now within ~2.1-2.6x of pandas** (were 2.3-12x). The residual is pure SIMD: pandas runs AVX 4-wide, Sounio a scalar loop. That is the C3 compiler auto-vectorization dispatch (`docs/handoff/c3_simd_autovectorization_codex_dispatch_2026-07-19.md`) -- the stdlib multi-accumulator/raw-scan is the ceiling without SIMD codegen.
 - **groupby at parity**: the more algorithm-bound the op, the closer Sounio gets.
 - **inner hash-join (4.1x)**: `bf_join_inner` builds an open-addressing table on the right key (reusing the `bf_ghash` Fibonacci mix), probes the left, then gathers the output COLUMN-MAJOR through raw column pointers. It is correct and scale-proven (100k×60k → 60k matches, oracle-exact), but it is the verb furthest from pandas: `pd.merge` is a hand-tuned C hash-join with SIMD gather, while Sounio hashes and gathers scalar (keys/indices boxed through f64). Measured on SHUFFLED keys — the fair general case; on *sorted-unique* keys pandas hits a near-memcpy fast path (~0.9ms) that a general hash-join cannot match by design. Same C3 SIMD path plus an integer-index gather would close most of the gap.
+- **left / full outer join (1.71x / 0.92x)**: `bf_join_left` / `bf_join_outer` share one engine with `bf_join_inner` (build-on-right, probe-left), keeping every left row (unmatched right cells take a caller `fill`, e.g. `make_nan()` for pandas NaN) and, for the full outer, appending right rows whose key no left row matched (left cells filled, join key coalesced). **The full outer join actually BEATS pandas (0.92x)**: `pd.merge(how="outer")` factorizes both sides, unions the keys, and does NaN alignment (~30ms here), while Sounio's outer is just the left pass plus a cheap append of the unmatched right rows (~27ms). The left join (1.71x) is much closer to pandas than the inner (4.1x) because the tighter data (50% match) and the all-left-rows-in-order emit avoid the inner's per-match index churn. Numbers are data-shape dependent (match ratio, key distribution) but reproduced locally on shuffled keys.
 - **filter_materialize (3.1x)**: bounded by copying 500k*3 cells one write_f64 at a time; a bulk column-wise copy (memcpy-style contiguous move) would close most of the rest -- a follow-up.
 - **GPU**: a single 1M reduction is memory-bandwidth-bound (8MB CPU->GPU transfer > the op); GPU is for GPU-resident multi-op columns (C3b), and the DGX is remote (not benchmarked here).
 
