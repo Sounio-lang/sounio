@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, VariantDefList, make_name, name_eq, visibility_to_bool}
+use parser::ast::{AstPath, empty_path, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, VariantDefList, make_name, name_eq, visibility_ref_to_bool, visibility_to_bool}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -638,7 +638,11 @@ pub fn module_frontend_path_shape_self_test() -> i64 with Mut, Panic, Div, Alloc
 }
 
 fn module_frontend_ast_import_relpath(path: AstPath) -> string with Mut, Panic, Div, Alloc {
-    let qualified = use_path_to_string(path)
+    module_frontend_ast_import_relpath_ref(&path)
+}
+
+fn module_frontend_ast_import_relpath_ref(path: &AstPath) -> string with Mut, Panic, Div, Alloc {
+    let qualified = use_path_ref_to_string(path)
     let qualified_len = str_len(qualified)
     if qualified_len == 0 {
         return ""
@@ -697,7 +701,14 @@ fn resolve_import_file_path_result(
     path: AstPath,
     cur_dir: string,
 ) -> ModuleImportResolution with IO, Mut, Panic, Div, Alloc {
-    let rel_path = module_frontend_ast_import_relpath(path)
+    resolve_import_file_path_result_ref(&path, cur_dir)
+}
+
+fn resolve_import_file_path_result_ref(
+    path: &AstPath,
+    cur_dir: string,
+) -> ModuleImportResolution with IO, Mut, Panic, Div, Alloc {
+    let rel_path = module_frontend_ast_import_relpath_ref(path)
     if str_len(rel_path) == 0 {
         return module_frontend_import_resolution("", 0)
     }
@@ -2289,20 +2300,20 @@ fn module_frontend_variant_list_contains_name(
 }
 
 fn module_frontend_item_directly_exports_name(
-    item: Item,
+    item: &Item,
     name: Name,
 ) -> bool with Mut, Panic, Div, Alloc {
-    if !visibility_to_bool(item.visibility) {
+    if !visibility_ref_to_bool(&(*item).visibility) {
         return false
     }
-    if item.kind == ItemKind::ItemUse || item.kind == ItemKind::ItemImpl {
+    if (*item).kind == ItemKind::ItemUse || (*item).kind == ItemKind::ItemImpl {
         return false
     }
-    if item.name.len > 0 && name_eq(item.name, name) {
+    if (*item).name.len > 0 && name_eq((*item).name, name) {
         return true
     }
-    if item.kind == ItemKind::ItemEnum {
-        match item.enum_def {
+    if (*item).kind == ItemKind::ItemEnum {
+        match (*item).enum_def {
             Some(enum_def) => return module_frontend_variant_list_contains_name((*enum_def).variants, name)
             None => {}
         }
@@ -2330,16 +2341,16 @@ fn module_frontend_module_exports_name(
     while !found {
         match cursor {
             Some(node) => {
-                let item = (*node).head
+                let item = &(*node).head
                 if module_frontend_item_directly_exports_name(item, name) {
                     found = true
-                } else if item.kind == ItemKind::ItemUse && visibility_to_bool(item.visibility) {
-                    let requested_import = use_path_ref_to_string(&item.use_path)
+                } else if (*item).kind == ItemKind::ItemUse && visibility_ref_to_bool(&(*item).visibility) {
+                    let requested_import = use_path_ref_to_string(&(*item).use_path)
                     let edge_index = module_frontend_closure_edge_index(closure, module_id, requested_import)
                     if edge_index >= 0 {
                         let dependency_id = (*closure).edge_dependency_ids[edge_index]
-                        let reexports_name = item.use_glob ||
-                            module_frontend_import_items_contain_name(item.use_items, name)
+                        let reexports_name = (*item).use_glob ||
+                            module_frontend_import_items_contain_name((*item).use_items, name)
                         if reexports_name && module_frontend_module_exports_name(
                             closure,
                             programs,
@@ -2388,10 +2399,10 @@ fn module_frontend_program_is_facade(program: &Program) -> bool with Alloc {
     while true {
         match cursor {
             Some(node) => {
-                let item = (*node).head
-                if item.kind == ItemKind::ItemUse {
+                let item = &(*node).head
+                if (*item).kind == ItemKind::ItemUse {
                     has_import = true
-                } else if item.name.len > 0 {
+                } else if (*item).name.len > 0 {
                     has_named_item = true
                 }
                 cursor = (*node).tail
@@ -2448,9 +2459,9 @@ fn module_frontend_validate_import_surfaces(
         while true {
             match cursor {
                 Some(node) => {
-                    let item = (*node).head
-                    if item.kind == ItemKind::ItemUse {
-                        let requested_import = use_path_ref_to_string(&item.use_path)
+                    let item = &(*node).head
+                    if (*item).kind == ItemKind::ItemUse {
+                        let requested_import = use_path_ref_to_string(&(*item).use_path)
                         let edge_index = module_frontend_closure_edge_index(
                             &(*closure),
                             module_id,
@@ -2464,7 +2475,7 @@ fn module_frontend_validate_import_surfaces(
                             let dependency_is_facade = dependency_id >= 0 &&
                                 module_frontend_program_is_facade(&(*programs)[dependency_id])
                             let validates_public_facade_edge = caller_is_facade &&
-                                visibility_to_bool(item.visibility)
+                                visibility_ref_to_bool(&(*item).visibility)
                             if dependency_id >= 0 &&
                                (dependency_is_facade || validates_public_facade_edge) {
                                 module_frontend_validate_import_item_names(
@@ -2473,7 +2484,7 @@ fn module_frontend_validate_import_surfaces(
                                     module_id,
                                     dependency_id,
                                     requested_import,
-                                    item.use_items,
+                                    (*item).use_items,
                                 )
                             }
                         }
@@ -2521,7 +2532,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
             let requested_import = use_path_ref_to_string(&imports.paths[i])
-            let resolution = resolve_import_file_path_result(imports.paths[i], cur_dir)
+            let resolution = resolve_import_file_path_result_ref(&imports.paths[i], cur_dir)
             let dependency_path = resolution.path
             var dependency_id: i64 = 0 - 1
 
