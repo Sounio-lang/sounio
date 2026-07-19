@@ -33,22 +33,46 @@ fn bf_groupby_max_keys() -> i64 { 1024 }
 // Single O(n_rows * n_cols) pass: for each qualifying row we copy every column
 // value into a stack row buffer and append it via bf_push_row (which grows the
 // result's column buffers 2x on demand).
+// Count the rows of `src` whose column `col` is strictly greater than `thresh` (a pure O(n) scan
+// over the raw column buffer -- no allocation).
+pub fn bf_count_gt(src: &BigFrame, col: i64, thresh: f64) -> i64 with Mut, Div, Panic {
+    let nc = bf_ncols(src)
+    if col < 0 { return 0 }
+    if col >= nc { return 0 }
+    let p = bf_col_ptr(src, col) as *mut f64
+    let n = bf_nrows(src)
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if read_f64(p, i) > thresh { cnt = cnt + 1 }
+        i = i + 1
+    }
+    cnt
+}
+
+// Return a NEW BigFrame with exactly the rows where column `col` > `thresh`. TWO-PASS: pass 1 counts
+// the survivors (via bf_count_gt) so the output is allocated ONCE at the exact size -- no doubling
+// realloc churn (the old single-pass version reallocated ~log2(survivors) times, copying the growing
+// buffer each time). Pass 2 copies the matching rows. Columns/order preserved; caller must bf_free.
 pub fn bf_filter_gt(src: &BigFrame, col: i64, thresh: f64) -> BigFrame with Alloc, Mut {
     let nc = bf_ncols(src)
     let nr = bf_nrows(src)
 
-    // Small starting capacity; bf_push_row auto-grows. cap>=1 keeps the first
-    // allocation a real heap_alloc (never a realloc on null).
-    var out = bf_new(nc, 16)
+    if col < 0 { return bf_new(nc, 1) }
+    if col >= nc { return bf_new(nc, 1) }
 
-    // Guard: an out-of-range column matches nothing -> empty frame.
-    if col < 0 { return out }
-    if col >= nc { return out }
+    // Pass 1: exact survivor count -> pre-size the output (min 1 so the first alloc is a real
+    // heap_alloc, never a realloc on null).
+    var cap = bf_count_gt(src, col, thresh)
+    if cap < 1 { cap = 1 }
+    var out = bf_new(nc, cap)
 
+    // Pass 2: copy matching rows (no growth -- capacity is exact).
+    let kp = bf_col_ptr(src, col) as *mut f64
     var row: [f64; 64] = [0.0; 64]
     var r: i64 = 0
     while r < nr {
-        if bf_get(src, r, col) > thresh {
+        if read_f64(kp, r) > thresh {
             var c: i64 = 0
             while c < nc {
                 row[c] = bf_get(src, r, c)
