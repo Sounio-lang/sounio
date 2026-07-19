@@ -7,6 +7,7 @@ export LC_ALL=C
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAIN="$ROOT_DIR/self-hosted/compiler/main.sio"
 FRONTEND="$ROOT_DIR/self-hosted/compiler/module_frontend.sio"
+LAUNCHER="$ROOT_DIR/bin/madaros"
 FIXTURE="$ROOT_DIR/tests/compiler/module_closure_single_compile/main.sio"
 RAW_MADAROS="${SOUNIO_SINGLE_CLOSURE_RAW_BIN:-}"
 EXPECTED_RAW_SHA256="${SOUNIO_SINGLE_CLOSURE_EXPECTED_RAW_SHA256:-}"
@@ -25,15 +26,17 @@ fi
 
 [[ -f "$MAIN" ]] || fail main_missing
 [[ -f "$FRONTEND" ]] || fail frontend_missing
+[[ -x "$LAUNCHER" ]] || fail launcher_missing
 [[ -f "$FIXTURE" ]] || fail fixture_missing
 
-python3 - "$MAIN" "$FRONTEND" <<'PY' || exit 1
+python3 - "$MAIN" "$FRONTEND" "$LAUNCHER" <<'PY' || exit 1
 import re
 import sys
 from pathlib import Path
 
 main = Path(sys.argv[1]).read_text(encoding="utf-8")
 frontend = Path(sys.argv[2]).read_text(encoding="utf-8")
+launcher = Path(sys.argv[3]).read_text(encoding="utf-8")
 
 def function_body(source: str, name: str) -> str:
     match = re.search(r"(?:pub\s+)?fn\s+" + re.escape(name) + r"\s*\(", source)
@@ -77,13 +80,22 @@ try:
     assert snapshot.count("module_frontend_collect_ast_closure_programs_into(") == 2, "self_test_collection_count"
     assert "closure.collection_id = first_id" in snapshot, "controlled_stale_snapshot_missing"
     assert "stale_status != 1" in snapshot and "current_status != 0" in snapshot, "drift_refusal_assertion_missing"
+
+    assert re.search(
+        r'exec\s+timeout\s+300\s+"\$RAW_MADAROS"\s+build\s+"\$src"\s+-o\s+"\$out"',
+        launcher,
+    ), "public_launcher_drops_build_verb"
+    assert not re.search(
+        r'exec\s+timeout\s+300\s+"\$RAW_MADAROS"\s+"\$src"\s+-o\s+"\$out"',
+        launcher,
+    ), "legacy_native_positional_dispatch_present"
 except AssertionError as exc:
     print(f"MADAROS_SINGLE_CLOSURE_COMPILE_FAIL reason=source_contract_{exc}", file=sys.stderr)
     raise SystemExit(1)
 PY
 
 if [[ "$SOURCE_ONLY" -eq 1 ]]; then
-  printf '%s\n' 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract runtime=not_run canonical_collections=1 legacy_adapter=kept snapshot_drift=instrumented'
+  printf '%s\n' 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_contract runtime=not_run entrypoint=bin/madaros native_dispatch=raw_build canonical_collections=1 legacy_adapter=kept snapshot_drift=instrumented'
   exit 0
 fi
 
@@ -91,6 +103,7 @@ fi
 [[ -x "$RAW_MADAROS" ]] || fail raw_binary_not_executable
 RAW_MADAROS="$(cd "$(dirname "$RAW_MADAROS")" && pwd)/$(basename "$RAW_MADAROS")"
 RAW_SHA256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
+LAUNCHER_SHA256="$(sha256sum "$LAUNCHER" | awk '{print $1}')"
 if [[ -n "$EXPECTED_RAW_SHA256" && "$RAW_SHA256" != "$EXPECTED_RAW_SHA256" ]]; then
   fail raw_sha256_mismatch
 fi
@@ -99,8 +112,12 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-single-closure-compile.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 SNAPSHOT_LOG="$WORK/snapshot.log"
 BUILD_LOG="$WORK/build.log"
+LAUNCHER_INFO="$WORK/launcher.info"
 ELF="$WORK/witness.elf"
 STDOUT="$WORK/stdout"
+
+MADAROS_RAW_BIN="$RAW_MADAROS" "$LAUNCHER" info >"$LAUNCHER_INFO"
+grep -Fxq "raw_elf:      $RAW_MADAROS" "$LAUNCHER_INFO" || fail launcher_raw_identity_mismatch
 
 set +e
 SOUNIO_MODULE_CLOSURE_TRACE=1 timeout 180 "$RAW_MADAROS" \
@@ -114,8 +131,8 @@ grep -Fxq 'module-closure-snapshot-self-test: OK' "$SNAPSHOT_LOG" || fail snapsh
 
 rm -f "$ELF"
 set +e
-SOUNIO_MODULE_CLOSURE_TRACE=1 timeout 360 "$RAW_MADAROS" \
-  build "$FIXTURE" -o "$ELF" >"$BUILD_LOG" 2>&1
+SOUNIO_MODULE_CLOSURE_TRACE=1 MADAROS_RAW_BIN="$RAW_MADAROS" timeout 360 "$LAUNCHER" \
+  --science-boundary off build "$FIXTURE" -o "$ELF" >"$BUILD_LOG" 2>&1
 BUILD_RC=$?
 set -e
 [[ "$BUILD_RC" -eq 0 ]] || fail build_rc
@@ -134,5 +151,5 @@ set -e
 [[ "$ELF_RC" -eq 0 ]] || fail elf_rc
 printf '42\n' | cmp -s - "$STDOUT" || fail elf_stdout
 
-printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_and_runtime raw_sha256=%s canonical_collections=1 snapshot_collections=2 snapshot_drift=refused visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
-  "$RAW_SHA256"
+printf 'MADAROS_SINGLE_CLOSURE_COMPILE_RECEIPT status=pass evidence=source_and_runtime entrypoint=bin/madaros launcher_sha256=%s raw_sha256=%s launcher_raw_identity=pinned native_dispatch=raw_build canonical_collections=1 snapshot_collections=2 snapshot_drift=refused visibility=same_snapshot lowering=same_snapshot runtime_stdout=42_LF legacy_adapter=kept recollection_fallback=none\n' \
+  "$LAUNCHER_SHA256" "$RAW_SHA256"
