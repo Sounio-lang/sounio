@@ -3258,3 +3258,12 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-19 | none | main integration | test_midazolam_ddi_e2e.sio; test_vanco_auc_tdm_e2e.sio; test_vanco_model_validation_e2e.sio | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | Draft PR #1169 merged current `origin/main` only to clear an append-only log conflict. These three clinical test blobs are byte-identical to `origin/main@d1d1d28ed278150f2457c2d2f8b6fc0a09ca2e79`: index/origin object IDs are respectively `e7b63e429d2f4e83e8143ee8c6709bc50e75d0f2`, `f92a2a9d0fbd765c633634819fdaad9efeade04e`, and `8271fee426f8be9b04c1f0d1d4999a16ae3d5b7c`. This evidence-only lane did not author or modify clinical behavior; duplicate offload would not review an integration-specific change. |
+| 2026-07-19 | none | main integration | knowledge.sio | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | A second current-main refresh incorporated `stdlib/epistemic/knowledge.sio` byte-identically from `origin/main@04b2069540d37cf5671a195bb97a06febd80d5df`; the index and origin object ID are both `a0b5ff98337ad7ede90755099d38b55156ef919a`. This evidence-only lane did not author, change, or reinterpret its mathematical content. |
+
+## 2026-07-19 - epistemic prescription chain + Madaros GUM D1
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
+| 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
+| 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |

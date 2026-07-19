@@ -85,8 +85,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-demo-sweep-2026-06-02 | repo_only | docs/audit/EPISTEMIC_DEMO_SWEEP_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.epistemic-knowledge-madaros-d3-2026-07-19 | repo_only | docs/audit/EPISTEMIC_KNOWLEDGE_MADAROS_D3_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-nn-backward-e2e-2026-06-02 | repo_only | docs/audit/EPISTEMIC_NN_BACKWARD_E2E_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-ode-e2e-vertical-2026-07-19 | repo_only | docs/audit/EPISTEMIC_ODE_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.epistemic-prescription-chain-madaros-2026-07-19 | repo_only | docs/audit/EPISTEMIC_PRESCRIPTION_CHAIN_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-self-application-audit-2026-06-03 | repo_only | docs/audit/EPISTEMIC_SELF_APPLICATION_AUDIT_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-trust-map-2026-07-14 | repo_only | docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_BENETTIN_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

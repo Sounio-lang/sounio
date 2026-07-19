@@ -11,6 +11,13 @@
 // Arithmetic propagates variance via the delta method.
 // Confidence decays multiplicatively through operations.
 // No heap, no strings, no generics — pure flat-struct arithmetic.
+//
+// MADAROS D3 (2026-07-19): free-function surface is the native-import-safe API.
+// Method-call form (`Epistemic::measured`, `e.val()`) still trips Madaros Root 2
+// (null-deref on method call lowering — MADAROS_SRET_ROOT_SYNTHESIS). Thin `impl`
+// wrappers remain for lean_single / source-compat; selftests and Madaros E2E use
+// free functions only. Do not name a free function `measure` — collides with the
+// language Knowledge<T> builtin.
 
 // ============================================================================
 // SQRT HELPER
@@ -47,7 +54,7 @@ fn ep_clamp_conf(c: i64) -> i64 {
 }
 
 // ============================================================================
-// EPISTEMIC STRUCT
+// EPISTEMIC STRUCT + FREE API (Madaros-import-safe)
 // ============================================================================
 
 pub struct Epistemic {
@@ -56,121 +63,116 @@ pub struct Epistemic {
     confidence: i64,
 }
 
-impl Epistemic {
-    pub fn new(val: f64, variance: f64, confidence: i64) -> Epistemic {
-        Epistemic { val: val, variance: variance, confidence: ep_clamp_conf(confidence) }
-    }
+pub fn ep_new(val: f64, variance: f64, confidence: i64) -> Epistemic {
+    Epistemic { val: val, variance: variance, confidence: ep_clamp_conf(confidence) }
+}
 
-    pub fn certain(val: f64) -> Epistemic {
-        Epistemic { val: val, variance: 0.0, confidence: 1000 }
-    }
+pub fn ep_certain(val: f64) -> Epistemic {
+    Epistemic { val: val, variance: 0.0, confidence: 1000 }
+}
 
-    pub fn measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
-        Epistemic { val: val, variance: std_dev * std_dev, confidence: 900 }
-    }
+pub fn ep_measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
+    Epistemic { val: val, variance: std_dev * std_dev, confidence: 900 }
+}
 
-    pub fn val(self: &Epistemic) -> f64 { self.val }
-    pub fn variance(self: &Epistemic) -> f64 { self.variance }
-    pub fn confidence(self: &Epistemic) -> i64 { self.confidence }
+pub fn ep_val(e: &Epistemic) -> f64 { e.val }
+pub fn ep_variance(e: &Epistemic) -> f64 { e.variance }
+pub fn ep_confidence(e: &Epistemic) -> i64 { e.confidence }
 
-    pub fn std(self: &Epistemic) -> f64 with Mut, Div, Panic {
-        ep_sqrt(self.variance)
-    }
+pub fn ep_std(e: &Epistemic) -> f64 with Mut, Div, Panic {
+    ep_sqrt(e.variance)
+}
 
-    pub fn is_credible(self: &Epistemic, min_conf: i64) -> bool {
-        self.confidence >= min_conf
-    }
+pub fn ep_is_credible(e: &Epistemic, min_conf: i64) -> bool {
+    e.confidence >= min_conf
+}
 
-    // GUM: Var(X+Y) = Var(X) + Var(Y); conf = min(conf_X, conf_Y) scaled
-    pub fn add(self: &Epistemic, other: &Epistemic) -> Epistemic {
-        Epistemic {
-            val: self.val + other.val,
-            variance: self.variance + other.variance,
-            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 99 / 100),
-        }
-    }
-
-    // GUM: Var(X-Y) = Var(X) + Var(Y)
-    pub fn sub(self: &Epistemic, other: &Epistemic) -> Epistemic {
-        Epistemic {
-            val: self.val - other.val,
-            variance: self.variance + other.variance,
-            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 99 / 100),
-        }
-    }
-
-    // GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
-    pub fn mul(self: &Epistemic, other: &Epistemic) -> Epistemic {
-        let new_var = other.val * other.val * self.variance
-                    + self.val * self.val * other.variance
-        Epistemic {
-            val: self.val * other.val,
-            variance: new_var,
-            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 98 / 100),
-        }
-    }
-
-    // GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
-    pub fn div(self: &Epistemic, other: &Epistemic) -> Epistemic with Div, Panic {
-        let y2 = other.val * other.val
-        let y4 = y2 * y2
-        let new_var = self.variance / y2 + self.val * self.val * other.variance / y4
-        Epistemic {
-            val: self.val / other.val,
-            variance: new_var,
-            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 97 / 100),
-        }
-    }
-
-    // Var(c·X) = c²·Var(X); confidence unchanged
-    pub fn scale(self: &Epistemic, c: f64) -> Epistemic {
-        Epistemic {
-            val: self.val * c,
-            variance: self.variance * c * c,
-            confidence: self.confidence,
-        }
-    }
-
-    // Var(X+c) = Var(X); confidence unchanged
-    pub fn shift(self: &Epistemic, c: f64) -> Epistemic {
-        Epistemic {
-            val: self.val + c,
-            variance: self.variance,
-            confidence: self.confidence,
-        }
-    }
-
-    // Var(X²) ≈ 4X²·Var(X)
-    pub fn square(self: &Epistemic) -> Epistemic {
-        Epistemic {
-            val: self.val * self.val,
-            variance: 4.0 * self.val * self.val * self.variance,
-            confidence: ep_clamp_conf(self.confidence * 98 / 100),
-        }
-    }
-
-    // Var(√X) ≈ Var(X)/(4X)
-    pub fn sqrt(self: &Epistemic) -> Epistemic with Mut, Div, Panic {
-        let new_val = ep_sqrt(self.val)
-        let new_var = if self.val > 0.0 { self.variance / (4.0 * self.val) } else { 0.0 }
-        let new_conf = ep_clamp_conf(self.confidence * 98 / 100)
-        Epistemic {
-            val: new_val,
-            variance: new_var,
-            confidence: new_conf,
-        }
-    }
-
-    // Relative uncertainty (σ/|μ|), returns 0.0 if val ≈ 0
-    pub fn rel_uncertainty(self: &Epistemic) -> f64 with Mut, Div, Panic {
-        let abs_val = ep_abs(self.val)
-        if abs_val < 1e-15 { return 0.0 }
-        ep_sqrt(self.variance) / abs_val
+// GUM: Var(X+Y) = Var(X) + Var(Y); conf = min scaled
+pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val + b.val,
+        variance: a.variance + b.variance,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
 
+// GUM: Var(X-Y) = Var(X) + Var(Y)
+pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val - b.val,
+        variance: a.variance + b.variance,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    let new_var = b.val * b.val * a.variance + a.val * a.val * b.variance
+    Epistemic {
+        val: a.val * b.val,
+        variance: new_var,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
+pub fn ep_div(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
+    let y2 = b.val * b.val
+    let y4 = y2 * y2
+    let new_var = a.variance / y2 + a.val * a.val * b.variance / y4
+    Epistemic {
+        val: a.val / b.val,
+        variance: new_var,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 97 / 100),
+    }
+}
+
+// Var(c·X) = c²·Var(X)
+pub fn ep_scale(a: &Epistemic, c: f64) -> Epistemic {
+    Epistemic {
+        val: a.val * c,
+        variance: a.variance * c * c,
+        confidence: a.confidence,
+    }
+}
+
+// Var(X+c) = Var(X)
+pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
+    Epistemic {
+        val: a.val + c,
+        variance: a.variance,
+        confidence: a.confidence,
+    }
+}
+
+// Var(X²) ≈ 4X²·Var(X)
+pub fn ep_square(a: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val * a.val,
+        variance: 4.0 * a.val * a.val * a.variance,
+        confidence: ep_clamp_conf(a.confidence * 98 / 100),
+    }
+}
+
+// Var(√X) ≈ Var(X)/(4X)
+pub fn ep_sqrt_ep(a: &Epistemic) -> Epistemic with Mut, Div, Panic {
+    let new_val = ep_sqrt(a.val)
+    let new_var = if a.val > 0.0 { a.variance / (4.0 * a.val) } else { 0.0 }
+    Epistemic {
+        val: new_val,
+        variance: new_var,
+        confidence: ep_clamp_conf(a.confidence * 98 / 100),
+    }
+}
+
+pub fn ep_rel_uncertainty(a: &Epistemic) -> f64 with Mut, Div, Panic {
+    let abs_val = ep_abs(a.val)
+    if abs_val < 1e-15 { return 0.0 }
+    ep_sqrt(a.variance) / abs_val
+}
+
 // ============================================================================
-// GATE FUNCTIONS
+// GATE / MERGE / CONFIDENCE
 // ============================================================================
 
 /// Soft gate: returns 1 if confidence ≥ min_conf, 0 otherwise.
@@ -178,10 +180,7 @@ pub fn ep_gate(e: &Epistemic, min_conf: i64) -> i64 {
     if e.confidence >= min_conf { 1 } else { 0 }
 }
 
-/// Hard gate: returns ep unchanged if confidence ≥ min_conf.
-/// If below threshold, returns a GATE_FAIL sentinel (confidence=0, variance preserved).
-/// Caller checks: if result.confidence() == 0 { /* gate failed */ }.
-/// This enables compile-time-trackable confidence floors through QFT chains.
+/// Hard gate: GATE_FAIL sentinel when below threshold (confidence=0).
 pub fn ep_require_conf(e: Epistemic, min_conf: i64) -> Epistemic {
     if e.confidence >= min_conf {
         e
@@ -190,8 +189,7 @@ pub fn ep_require_conf(e: Epistemic, min_conf: i64) -> Epistemic {
     }
 }
 
-/// Budget report: relative uncertainty and confidence as two scalars.
-/// Returns (rel_unc_ppm, confidence) where rel_unc_ppm = (σ/|μ|) × 10⁶.
+/// Budget report: (rel_unc_ppm, confidence) where rel_unc_ppm = (σ/|μ|) × 10⁶.
 pub fn ep_budget(e: &Epistemic) -> (f64, i64) with Mut, Div, Panic {
     let abs_val = if e.val < 0.0 { 0.0 - e.val } else { e.val }
     let std = ep_sqrt(e.variance)
@@ -199,9 +197,8 @@ pub fn ep_budget(e: &Epistemic) -> (f64, i64) with Mut, Div, Panic {
     (rel_ppm, e.confidence)
 }
 
-// Combine two independent measurements (weighted mean, variance sum-inverse)
+// Inverse-variance weighted merge
 pub fn ep_merge(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
-    // Inverse-variance weighting
     let w_a = if a.variance > 0.0 { 1.0 / a.variance } else { 1e15 }
     let w_b = if b.variance > 0.0 { 1.0 / b.variance } else { 1e15 }
     let w_total = w_a + w_b
@@ -221,19 +218,58 @@ pub fn ep_combine(c1: i64, c2: i64) -> i64 {
 }
 
 // ============================================================================
-// TESTS
+// THIN IMPL WRAPPERS — lean_single / source-compat only
+// Method *call sites* under Madaros multi-module still SEGV (Root 2). Definitions
+// alone are safe; free-function API is the Madaros path.
+// ============================================================================
+
+impl Epistemic {
+    pub fn new(val: f64, variance: f64, confidence: i64) -> Epistemic {
+        ep_new(val, variance, confidence)
+    }
+    pub fn certain(val: f64) -> Epistemic {
+        ep_certain(val)
+    }
+    pub fn measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
+        ep_measured(val, std_dev)
+    }
+    pub fn val(self: &Epistemic) -> f64 { ep_val(self) }
+    pub fn variance(self: &Epistemic) -> f64 { ep_variance(self) }
+    pub fn confidence(self: &Epistemic) -> i64 { ep_confidence(self) }
+    pub fn std(self: &Epistemic) -> f64 with Mut, Div, Panic { ep_std(self) }
+    pub fn is_credible(self: &Epistemic, min_conf: i64) -> bool {
+        ep_is_credible(self, min_conf)
+    }
+    pub fn add(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_add(self, other) }
+    pub fn sub(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_sub(self, other) }
+    pub fn mul(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_mul(self, other) }
+    pub fn div(self: &Epistemic, other: &Epistemic) -> Epistemic with Div, Panic {
+        ep_div(self, other)
+    }
+    pub fn scale(self: &Epistemic, c: f64) -> Epistemic { ep_scale(self, c) }
+    pub fn shift(self: &Epistemic, c: f64) -> Epistemic { ep_shift(self, c) }
+    pub fn square(self: &Epistemic) -> Epistemic { ep_square(self) }
+    pub fn sqrt(self: &Epistemic) -> Epistemic with Mut, Div, Panic { ep_sqrt_ep(self) }
+    pub fn rel_uncertainty(self: &Epistemic) -> f64 with Mut, Div, Panic {
+        ep_rel_uncertainty(self)
+    }
+}
+
+// ============================================================================
+// SELFTEST — free-function only (Madaros-safe call sites)
 // ============================================================================
 
 var CNT: [i64; 2] = [0; 2]
 
+// Avoid print(i64) under Madaros (can SIGSEGV); tally only, labels in comments at call sites.
 fn chk(label: i64, ok: i64) with IO, Mut {
     if ok == 1 {
-        print("  PASS ["); print(label); print("]\n")
         CNT[0] = CNT[0] + 1
     } else {
-        print("  FAIL ["); print(label); print("]\n")
+        print("  FAIL chk\n")
         CNT[1] = CNT[1] + 1
     }
+    let _keep = label
 }
 
 fn near(a: f64, b: f64, tol: f64) -> i64 {
@@ -243,99 +279,86 @@ fn near(a: f64, b: f64, tol: f64) -> i64 {
 }
 
 fn test_basic() with IO, Mut, Div, Panic {
-    let x = Epistemic::new(3.0, 0.01, 900)
-    let y = Epistemic::new(4.0, 0.04, 800)
+    let x = ep_new(3.0, 0.01, 900)
+    let y = ep_new(4.0, 0.04, 800)
 
-    chk(1, near(x.val(), 3.0, 1e-12))
-    chk(2, near(x.variance(), 0.01, 1e-12))
-    chk(3, if x.confidence() == 900 { 1 } else { 0 })
-    chk(4, near(x.std(), 0.1, 1e-9))
+    chk(1, near(ep_val(&x), 3.0, 1e-12))
+    chk(2, near(ep_variance(&x), 0.01, 1e-12))
+    chk(3, if ep_confidence(&x) == 900 { 1 } else { 0 })
+    chk(4, near(ep_std(&x), 0.1, 1e-9))
 
-    // Add: val=7, var=0.05
-    let s = x.add(&y)
-    chk(5, near(s.val(), 7.0, 1e-12))
-    chk(6, near(s.variance(), 0.05, 1e-12))
-    chk(7, if s.confidence() <= 800 { 1 } else { 0 })
+    let s = ep_add(&x, &y)
+    chk(5, near(ep_val(&s), 7.0, 1e-12))
+    chk(6, near(ep_variance(&s), 0.05, 1e-12))
+    chk(7, if ep_confidence(&s) <= 800 { 1 } else { 0 })
 
-    // Sub: val=-1, var=0.05
-    let d = x.sub(&y)
-    chk(8, near(d.val(), 0.0 - 1.0, 1e-12))
-    chk(9, near(d.variance(), 0.05, 1e-12))
+    let d = ep_sub(&x, &y)
+    chk(8, near(ep_val(&d), 0.0 - 1.0, 1e-12))
+    chk(9, near(ep_variance(&d), 0.05, 1e-12))
 }
 
 fn test_mul_div() with IO, Mut, Div, Panic {
-    let x = Epistemic::new(3.0, 0.01, 900)
-    let y = Epistemic::new(4.0, 0.04, 800)
+    let x = ep_new(3.0, 0.01, 900)
+    let y = ep_new(4.0, 0.04, 800)
 
-    // Mul: val=12, var=4²·0.01 + 3²·0.04 = 0.16 + 0.36 = 0.52
-    let p = x.mul(&y)
-    chk(10, near(p.val(), 12.0, 1e-12))
-    chk(11, near(p.variance(), 0.52, 1e-10))
+    let p = ep_mul(&x, &y)
+    chk(10, near(ep_val(&p), 12.0, 1e-12))
+    chk(11, near(ep_variance(&p), 0.52, 1e-10))
 
-    // Div: val=3/4=0.75, var=0.01/16 + 9·0.04/256 = 0.000625 + 0.00140625 = 0.00203125
-    let q = x.div(&y)
-    chk(12, near(q.val(), 0.75, 1e-12))
-    chk(13, near(q.variance(), 0.00203125, 1e-10))
+    let q = ep_div(&x, &y)
+    chk(12, near(ep_val(&q), 0.75, 1e-12))
+    chk(13, near(ep_variance(&q), 0.00203125, 1e-10))
 }
 
 fn test_scale_shift() with IO, Mut, Div, Panic {
-    let x = Epistemic::new(2.0, 0.04, 850)
+    let x = ep_new(2.0, 0.04, 850)
 
-    // scale by 3: val=6, var=9·0.04=0.36
-    let s = x.scale(3.0)
-    chk(14, near(s.val(), 6.0, 1e-12))
-    chk(15, near(s.variance(), 0.36, 1e-12))
-    chk(16, if s.confidence() == 850 { 1 } else { 0 })
+    let s = ep_scale(&x, 3.0)
+    chk(14, near(ep_val(&s), 6.0, 1e-12))
+    chk(15, near(ep_variance(&s), 0.36, 1e-12))
+    chk(16, if ep_confidence(&s) == 850 { 1 } else { 0 })
 
-    // shift by 10: val=12, var unchanged
-    let sh = s.shift(10.0)
-    chk(17, near(sh.val(), 16.0, 1e-12))
-    chk(18, near(sh.variance(), 0.36, 1e-12))
+    let sh = ep_shift(&s, 10.0)
+    chk(17, near(ep_val(&sh), 16.0, 1e-12))
+    chk(18, near(ep_variance(&sh), 0.36, 1e-12))
 }
 
 fn test_sqrt_square() with IO, Mut, Div, Panic {
-    let x = Epistemic::new(4.0, 0.16, 900)
+    let x = ep_new(4.0, 0.16, 900)
 
-    // ep_sqrt standalone (separate from impl method to avoid JIT SRET+Mut bug)
-    let sq_val = ep_sqrt(x.val())
+    let sq_val = ep_sqrt(ep_val(&x))
     chk(19, near(sq_val, 2.0, 1e-9))
 
-    // sqrt var formula: 0.16 / (4 * 4) = 0.01
-    let sq_var = x.variance() / (4.0 * x.val())
+    let sq_var = ep_variance(&x) / (4.0 * ep_val(&x))
     chk(20, near(sq_var, 0.01, 1e-10))
 
-    // square: val=16, var=4·16·0.16=10.24
-    let sq2 = x.square()
-    chk(21, near(sq2.val(), 16.0, 1e-12))
-    chk(22, near(sq2.variance(), 10.24, 1e-10))
+    let sq2 = ep_square(&x)
+    chk(21, near(ep_val(&sq2), 16.0, 1e-12))
+    chk(22, near(ep_variance(&sq2), 10.24, 1e-10))
 }
 
 fn test_credibility() with IO, Mut, Div, Panic {
-    let x = Epistemic::new(1.0, 0.001, 800)
-    chk(23, if x.is_credible(700) { 1 } else { 0 })
-    chk(24, if x.is_credible(900) { 0 } else { 1 })
+    let x = ep_new(1.0, 0.001, 800)
+    chk(23, if ep_is_credible(&x, 700) { 1 } else { 0 })
+    chk(24, if ep_is_credible(&x, 900) { 0 } else { 1 })
     chk(25, if ep_gate(&x, 700) == 1 { 1 } else { 0 })
     chk(26, if ep_gate(&x, 900) == 0 { 1 } else { 0 })
 }
 
 fn test_combine() with IO, Mut, Div, Panic {
-    // Two measurements of same quantity: x=1.0±0.1, y=1.0±0.2
-    let a = Epistemic::new(1.0, 0.01, 900)
-    let b = Epistemic::new(1.0, 0.04, 800)
+    let a = ep_new(1.0, 0.01, 900)
+    let b = ep_new(1.0, 0.04, 800)
     let c = ep_merge(&a, &b)
-    // Combined: w_a=100, w_b=25, total=125
-    // val = (100·1.0 + 25·1.0)/125 = 1.0
-    // var = 1/125 = 0.008
-    chk(27, near(c.val(), 1.0, 1e-10))
-    chk(28, near(c.variance(), 0.008, 1e-10))
+    chk(27, near(ep_val(&c), 1.0, 1e-10))
+    chk(28, near(ep_variance(&c), 0.008, 1e-10))
 }
 
 fn test_certain() with IO, Mut, Div, Panic {
-    let c = Epistemic::certain(42.0)
-    chk(29, near(c.val(), 42.0, 1e-12))
-    chk(30, near(c.variance(), 0.0, 1e-12))
-    chk(31, if c.confidence() == 1000 { 1 } else { 0 })
-    chk(32, if c.is_credible(1000) { 1 } else { 0 })
+    let c = ep_certain(42.0)
+    chk(29, near(ep_val(&c), 42.0, 1e-12))
+    chk(30, near(ep_variance(&c), 0.0, 1e-12))
+    chk(31, if ep_confidence(&c) == 1000 { 1 } else { 0 })
+    chk(32, if ep_is_credible(&c, 1000) { 1 } else { 0 })
 }
 
 pub fn main() -> i32 with IO, Mut, Div, Panic {
@@ -348,6 +371,16 @@ pub fn main() -> i32 with IO, Mut, Div, Panic {
     test_credibility()
     test_combine()
     test_certain()
-    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
-    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
+    // Avoid print(i64); report only via sentinel + exit code.
+    if CNT[1] == 0 {
+        if CNT[0] == 32 {
+            print("─── 32/32 PASS ───\n")
+            print("ALL PASS\n")
+            return 0
+        }
+        print("─── PASS count mismatch ───\n")
+        return 2
+    }
+    print("─── HAS FAILS ───\n")
+    return 1
 }
