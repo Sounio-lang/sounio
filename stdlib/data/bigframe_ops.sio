@@ -5,8 +5,9 @@
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
 // hash-joins, a stable comparison sort, an adaptive stable radix sort,
 // unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
-// rolling-window sum / mean / max / min, shift / diff / pct-change, and an
-// exponentially weighted moving mean.
+// rolling-window sum / mean / max / min, shift / diff / pct-change, an
+// exponentially weighted moving mean, expanding mean / var / std, rank, and
+// quantile / median.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -1421,4 +1422,274 @@ pub fn bf_ewm_mean(src: &BigFrame, col: i64, alpha: f64, adjust: bool) -> BigFra
         }
     }
     out
+}
+
+/// Expanding (cumulative-window) mean of column `col`: out[i] = mean(col[0..=i]) (like
+/// pandas col.expanding().mean()). A single sequential accumulate / (i+1). O(n).
+/// NATIVE + lean_single only (heap). (expanding sum/max/min are bf_cumsum/cummax/cummin.)
+pub fn bf_expanding_mean(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        write_f64(op, i, acc / ((i + 1) as f64))
+        i = i + 1
+    }
+    out
+}
+
+/// Expanding SAMPLE variance (ddof=1) of column `col` (like pandas col.expanding()
+/// .var()), computed in one pass by WELFORD's online algorithm (numerically stable --
+/// no catastrophic cancellation from a sum-of-squares). Row 0 is undefined (1 sample,
+/// zero d.o.f.) and takes `fill` (pass make_nan() for pandas NaN). O(n). NATIVE +
+/// lean_single only (heap).
+pub fn bf_expanding_var(src: &BigFrame, col: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var mean = 0.0
+    var m2 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(sp, i)
+        let cnt = (i + 1) as f64
+        let delta = x - mean
+        mean = mean + delta / cnt
+        let delta2 = x - mean
+        m2 = m2 + delta * delta2
+        if i >= 1 { write_f64(op, i, m2 / (cnt - 1.0)) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Expanding sample standard deviation (ddof=1) of column `col` (like pandas
+/// col.expanding().std()): the square root of bf_expanding_var, via Welford in one
+/// pass. Row 0 takes `fill`. NOTE: `sqrt` is currently an extern libc call (~240ns
+/// per element), so this verb is sqrt-bound at scale until sqrt lowers to the hardware
+/// instruction (a compiler concern). O(n). NATIVE + lean_single only (heap).
+pub fn bf_expanding_std(src: &BigFrame, col: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var mean = 0.0
+    var m2 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(sp, i)
+        let cnt = (i + 1) as f64
+        let delta = x - mean
+        mean = mean + delta / cnt
+        let delta2 = x - mean
+        m2 = m2 + delta * delta2
+        if i >= 1 { write_f64(op, i, sqrt(m2 / (cnt - 1.0))) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Rank the values of column `col`, ascending, 1-based (like pandas col.rank()).
+/// `method` selects the tie-handling: 0 = average (pandas' default -- tied values
+/// share the mean of their positions, e.g. two-way tie at positions 1,2 -> 1.5),
+/// 1 = min (all ties get the lowest position), 2 = max (the highest), 3 = dense (ties
+/// share a rank and the next distinct value is the next integer, no gaps). Returns a
+/// 1-column f64 BigFrame aligned to input rows. Implemented as a stable argsort (a
+/// paired key/index bottom-up mergesort, ping-ponged) followed by one pass over the
+/// sorted runs, scattering each run's rank back to its original rows. O(n log n).
+/// (The ordinal `first` method is intentionally omitted here.) NATIVE + lean_single
+/// only (heap).
+pub fn bf_rank(src: &BigFrame, col: i64, method: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var ka = heap_alloc(n * 8) as *mut f64
+    var kb = heap_alloc(n * 8) as *mut f64
+    var ia = heap_alloc(n * 8) as *mut i64
+    var ib = heap_alloc(n * 8) as *mut i64
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        write_f64(ka, i, read_f64(sp, i))
+        write_i64(ia, i, i)
+        i = i + 1
+    }
+    // Stable argsort: paired (value, original-index) mergesort with ping-pong buffers.
+    var ck = ka
+    var ci = ia
+    var dk = kb
+    var di = ib
+    var width: i64 = 1
+    while width < n {
+        var lo: i64 = 0
+        while lo < n {
+            var mid = lo + width
+            if mid > n { mid = n }
+            var hi = lo + width + width
+            if hi > n { hi = n }
+            var a = lo
+            var b = mid
+            var k = lo
+            while a < mid && b < hi {
+                let va = read_f64(ck, a)
+                let vb = read_f64(ck, b)
+                var take_a = false
+                if va <= vb { take_a = true }          // <= -> stable
+                if take_a {
+                    write_f64(dk, k, va)
+                    write_i64(di, k, read_i64(ci, a))
+                    a = a + 1
+                } else {
+                    write_f64(dk, k, vb)
+                    write_i64(di, k, read_i64(ci, b))
+                    b = b + 1
+                }
+                k = k + 1
+            }
+            while a < mid {
+                write_f64(dk, k, read_f64(ck, a))
+                write_i64(di, k, read_i64(ci, a))
+                a = a + 1
+                k = k + 1
+            }
+            while b < hi {
+                write_f64(dk, k, read_f64(ck, b))
+                write_i64(di, k, read_i64(ci, b))
+                b = b + 1
+                k = k + 1
+            }
+            lo = lo + width + width
+        }
+        let tk = ck
+        ck = dk
+        dk = tk
+        let ti = ci
+        ci = di
+        di = ti
+        width = width + width
+    }
+    // ck = sorted values, ci = sorted original indices. Walk equal-value runs.
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var p: i64 = 0
+    var dense: f64 = 0.0
+    while p < n {
+        var e = p
+        while e + 1 < n && read_f64(ck, e + 1) == read_f64(ck, p) { e = e + 1 }   // run [p,e]
+        dense = dense + 1.0
+        var r = 0.0
+        if method == 1 { r = (p + 1) as f64 }                    // min
+        else {
+            if method == 2 { r = (e + 1) as f64 }                // max
+            else {
+                if method == 3 { r = dense }                     // dense
+                else { r = ((p + e) as f64) / 2.0 + 1.0 }        // average (default)
+            }
+        }
+        var q = p
+        while q <= e {
+            write_f64(op, read_i64(ci, q), r)
+            q = q + 1
+        }
+        p = e + 1
+    }
+    heap_free(ka as *mut i8)
+    heap_free(kb as *mut i8)
+    heap_free(ia as *mut i8)
+    heap_free(ib as *mut i8)
+    out
+}
+
+// Swap two f64 slots of a heap buffer.
+fn bf_fswap(a: *mut f64, i: i64, j: i64) with Mut, Div, Panic {
+    let t = read_f64(a, i)
+    write_f64(a, i, read_f64(a, j))
+    write_f64(a, j, t)
+}
+
+// k-th smallest value (0-based) of a[0..n), computed IN PLACE via a 3-way (Dutch-flag)
+// quickselect with median-of-3 pivots. The 3-way split makes duplicate-heavy / constant
+// columns O(n) rather than O(n^2). Partitions the buffer so a[k] is the k-th order
+// statistic (and a[<k] <= a[k] <= a[>k]).
+fn bf_quickselect(a: *mut f64, n: i64, k: i64) -> f64 with Mut, Div, Panic {
+    var lo: i64 = 0
+    var hi: i64 = n - 1
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let x = read_f64(a, lo)
+        let y = read_f64(a, mid)
+        let z = read_f64(a, hi)
+        var p = x                                    // median-of-3 pivot value
+        if (y <= x && x <= z) || (z <= x && x <= y) { p = x }
+        else {
+            if (x <= y && y <= z) || (z <= y && y <= x) { p = y } else { p = z }
+        }
+        var lt = lo
+        var gt = hi
+        var i = lo
+        while i <= gt {
+            let v = read_f64(a, i)
+            if v < p { bf_fswap(a, lt, i); lt = lt + 1; i = i + 1 }
+            else {
+                if v > p { bf_fswap(a, i, gt); gt = gt - 1 } else { i = i + 1 }
+            }
+        }
+        // [lo,lt-1] < p, [lt,gt] == p, [gt+1,hi] > p
+        if k < lt { hi = lt - 1 } else { if k > gt { lo = gt + 1 } else { return p } }
+    }
+    read_f64(a, k)
+}
+
+/// The `q`-quantile (q in [0,1]) of column `col` with pandas' default LINEAR
+/// interpolation: with pos = q*(n-1), lo = floor(pos), the result is
+/// sorted[lo] + (pos-lo)*(sorted[lo+1] - sorted[lo]). Returns an f64. Implemented by
+/// an O(n) 3-way quickselect on a heap copy of the column (the source is not mutated),
+/// plus, when interpolating, one scan for the next order statistic. NATIVE +
+/// lean_single only (heap).
+pub fn bf_quantile(src: &BigFrame, col: i64, q: f64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let buf = heap_alloc(n * 8) as *mut f64
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var i: i64 = 0
+    while i < n { write_f64(buf, i, read_f64(sp, i)); i = i + 1 }
+    if n == 1 { let r = read_f64(buf, 0); heap_free(buf as *mut i8); return r }
+    var qq = q
+    if qq < 0.0 { qq = 0.0 }
+    if qq > 1.0 { qq = 1.0 }
+    let pos = qq * ((n - 1) as f64)
+    let lo = pos as i64
+    let frac = pos - (lo as f64)
+    let vlo = bf_quickselect(buf, n, lo)
+    var res = vlo
+    if frac > 0.0 {
+        // next order statistic = min of the post-partition region a[lo+1 ..], all >= vlo.
+        var vhi = read_f64(buf, lo + 1)
+        var j = lo + 2
+        while j < n {
+            let v = read_f64(buf, j)
+            if v < vhi { vhi = v }
+            j = j + 1
+        }
+        res = vlo + frac * (vhi - vlo)
+    }
+    heap_free(buf as *mut i8)
+    res
+}
+
+/// Median of column `col` = the 0.5-quantile (linear interpolation), like pandas
+/// col.median(). NATIVE + lean_single only (heap).
+pub fn bf_median(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic {
+    bf_quantile(src, col, 0.5)
 }
