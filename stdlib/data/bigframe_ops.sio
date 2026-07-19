@@ -59,14 +59,39 @@ pub fn bf_filter_gt(src: &BigFrame, col: i64, thresh: f64) -> BigFrame with Allo
     let nr = bf_nrows(src)
     if col < 0 { return bf_new(nc, 1) }
     if col >= nc { return bf_new(nc, 1) }
-    var cnt = bf_count_gt(src, col, thresh)
-    if cnt < 1 { cnt = 1 }
-    var out = bf_new(nc, cnt)
     let kp = bf_col_ptr(src, col) as *mut f64
-    // Adaptive gather (measured crossover ~6-8 columns):
-    //  NARROW (nc<8): column-major recompute -- predicate per column in a tight raw loop.
-    //  WIDE   (nc>=8): index-array -- build the survivor row-index list ONCE (heap f64), gather each
-    //                  column by index (predicate computed once, not nc times).
+    // Single scan: survivor count + first/last position (for the contiguous fast-path).
+    var first: i64 = 0 - 1
+    var last: i64 = 0 - 1
+    var cnt: i64 = 0
+    var r0: i64 = 0
+    while r0 < nr {
+        if read_f64(kp, r0) > thresh {
+            if first < 0 { first = r0 }
+            last = r0
+            cnt = cnt + 1
+        }
+        r0 = r0 + 1
+    }
+    var cap = cnt
+    if cap < 1 { cap = 1 }
+    var out = bf_new(nc, cap)
+    if cnt <= 0 { return out }
+    // CONTIGUOUS fast-path: survivors form an unbroken run [first,last] (e.g. a sorted/monotone
+    // column) -> copy each column's slice sequentially, no predicate/index/random-access. ~1.4x.
+    if cnt == (last - first + 1) {
+        var c: i64 = 0
+        while c < nc {
+            let sp = bf_col_ptr(src, c) as *mut f64
+            let op = bf_col_ptr(&out, c) as *mut f64
+            var j: i64 = 0
+            while j < cnt { write_f64(op, j, read_f64(sp, first + j)); j = j + 1 }
+            c = c + 1
+        }
+        out.n_rows = cnt
+        return out
+    }
+    // Scattered survivors: adaptive gather (index-array wide / column-major narrow).
     if nc >= 8 {
         let idx = heap_alloc(cnt * 8) as *mut f64
         var w: i64 = 0
@@ -80,10 +105,7 @@ pub fn bf_filter_gt(src: &BigFrame, col: i64, thresh: f64) -> BigFrame with Allo
             let sp = bf_col_ptr(src, c) as *mut f64
             let op = bf_col_ptr(&out, c) as *mut f64
             var j: i64 = 0
-            while j < w {
-                write_f64(op, j, read_f64(sp, read_f64(idx, j) as i64))
-                j = j + 1
-            }
+            while j < w { write_f64(op, j, read_f64(sp, read_f64(idx, j) as i64)); j = j + 1 }
             c = c + 1
         }
         heap_free(idx as *mut i8)
