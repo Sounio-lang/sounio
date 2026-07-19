@@ -152,6 +152,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-builtin-emission-2026-06-24 | repo_only | docs/audit/MADAROS_BUILTIN_EMISSION_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step1-fix-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP1_FIX_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step2-capture-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP2_CAPTURE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-dual-gum-knowledge-import-2026-07-19 | repo_only | docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -640,6 +641,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.reference.epistemic-api | repo_only | docs/reference/EPISTEMIC_API.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.reference.stdlib-reference | repo_only | docs/reference/STDLIB_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.release-policy | repo_only | docs/RELEASE_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.2026-07-19-lean-single-bundler-arity-collision | historical | docs/research/2026-07-19-lean-single-bundler-arity-collision.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-linalg-parity | historical | docs/research/2026-07-19-linalg-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-special-scipy-parity | historical | docs/research/2026-07-19-special-scipy-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
