@@ -135,8 +135,15 @@ first:
   area = π). **But** the octonion associator, naively applied (associator of the 3 coordinate increments),
   is at chance (48.9%): the path Massey product and the Cayley-Dickson associator are **distinct**
   non-associative structures. Sharp consequence for the paper: the octonion primitive pays off when the
-  signal is a **static ternary CD-type associator**, not for *every* higher-homotopy obstruction; a
-  faithful bridge (octonion-valued path signature) is open. Ties to the O-CSSM homology-functor thread.
+  signal is a **static ternary CD-type associator**, not for *every* higher-homotopy obstruction. The
+  faithful bridge (an octonion-valued path signature) is now **built and resolved as a theorem-backed
+  negative** (`OCTONION_SIGNATURE_BRIDGE.md`): its depth-3 iterated associator `D=Σ[g_r,g_s,g_t]` is
+  genuinely nonzero (std ≈4e2) yet **orthogonal** to the Massey invariant (corr 0.02, at chance). Reason,
+  verified to 1e-15: the CD associator is **alternating** (the G₂ 3-form / `Λ³` component) while the
+  Massey product has **mixed symmetry** (the `[2,1]` hook) — different irreducibles of depth-3, hence
+  orthogonal. So the octonion associator *is precisely* an alternating G₂-3-form ternary operation, the
+  exact right tool for static alternating-associator signals and *provably* the wrong one for
+  mixed-symmetry higher-homotopy obstructions. Ties to the O-CSSM homology-functor thread.
 - **Exceptional-structure physics** — octonions in G₂/F₄ gauge structure, sedenion zero-divisor
   geometry; genuinely non-associative but data is scarce/simulated.
 - Order-sensitive composition where the *composition operator* (not just the group) is non-associative —
