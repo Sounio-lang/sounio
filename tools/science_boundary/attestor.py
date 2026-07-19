@@ -724,13 +724,19 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
     lines = lines[header_index:]
 
     status = ""
+    surface_status = ""
     declared_nodes: list[Path] = []
     declared_edges: list[tuple[Path, Path]] = []
+    declared_logical_nodes: dict[int, str] = {}
+    declared_edge_identities: list[tuple[int, int, str]] = []
+    declared_surface_errors: list[tuple[Path, str, str]] = []
     for line_number, line in enumerate(lines[1:], start=2):
         fields = line.split("\t")
         kind = fields[0] if fields else ""
         if kind == "status" and len(fields) == 2:
             status = fields[1]
+        elif kind == "surface_status" and len(fields) == 2:
+            surface_status = fields[1]
         elif kind == "capacity" and len(fields) == 2:
             try:
                 closure.capacity = max(1, min(int(fields[1]), 4096))
@@ -747,6 +753,15 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
                 closure.parse_failures.append((source, f"invalid raw AST node on report line {line_number}"))
             else:
                 declared_nodes.append(node)
+        elif kind == "logical_node" and len(fields) == 3:
+            try:
+                module_id = int(fields[1])
+            except ValueError:
+                module_id = -1
+            if module_id < 0 or module_id in declared_logical_nodes or not fields[2]:
+                closure.parse_failures.append((source, f"invalid logical node on report line {line_number}"))
+            else:
+                declared_logical_nodes[module_id] = fields[2]
         elif kind == "edge" and len(fields) == 3:
             caller = closure_report_path(fields[1], root)
             dependency = closure_report_path(fields[2], root)
@@ -754,12 +769,35 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
                 closure.parse_failures.append((source, f"raw AST edge escapes root on report line {line_number}"))
             else:
                 declared_edges.append((caller, dependency))
+        elif kind == "edge_identity" and len(fields) == 4:
+            try:
+                caller_id = int(fields[1])
+                dependency_id = int(fields[2])
+            except ValueError:
+                caller_id = -1
+                dependency_id = -1
+            if caller_id < 0 or dependency_id < 0 or not fields[3]:
+                closure.parse_failures.append((source, f"invalid edge identity on report line {line_number}"))
+            else:
+                declared_edge_identities.append((caller_id, dependency_id, fields[3]))
         elif kind == "unresolved" and len(fields) == 3:
             caller = closure_report_path(fields[1], root)
             if caller is None:
                 closure.parse_failures.append((source, f"raw AST unresolved caller escapes root on report line {line_number}"))
             else:
                 closure.unresolved.append((caller, fields[2]))
+        elif kind == "ambiguous" and len(fields) == 3:
+            caller = closure_report_path(fields[1], root)
+            if caller is None:
+                closure.parse_failures.append((source, f"raw AST ambiguous caller escapes root on report line {line_number}"))
+            else:
+                closure.unresolved.append((caller, f"ambiguous:{fields[2]}"))
+        elif kind == "surface_error" and len(fields) == 4:
+            caller = closure_report_path(fields[1], root)
+            if caller is None or not fields[2] or not fields[3]:
+                closure.parse_failures.append((source, f"invalid surface error on report line {line_number}"))
+            else:
+                declared_surface_errors.append((caller, fields[2], fields[3]))
         elif line:
             closure.parse_failures.append((source, f"invalid raw AST record on report line {line_number}"))
 
@@ -769,6 +807,19 @@ def load_raw_ast_closure_report(path: Path, source: Path, root: Path) -> tuple[C
     for caller, dependency in declared_edges:
         if caller not in node_set or dependency not in node_set:
             closure.parse_failures.append((source, "raw AST edge references an undeclared node"))
+    if declared_logical_nodes and set(declared_logical_nodes) != set(range(len(declared_nodes))):
+        closure.parse_failures.append((source, "raw AST logical node identities are not contiguous"))
+    for caller_id, dependency_id, _requested_import in declared_edge_identities:
+        if caller_id not in declared_logical_nodes or dependency_id not in declared_logical_nodes:
+            closure.parse_failures.append((source, "raw AST edge identity references an undeclared ModuleId"))
+    if declared_edge_identities and len(declared_edge_identities) != len(declared_edges):
+        closure.parse_failures.append((source, "raw AST edge identity count does not match physical edges"))
+    if surface_status and surface_status not in {"valid", "invalid"}:
+        closure.parse_failures.append((source, "raw AST surface status is invalid"))
+    elif surface_status == "valid" and declared_surface_errors:
+        closure.parse_failures.append((source, "raw AST surface claims valid with recorded errors"))
+    elif surface_status == "invalid" and not declared_surface_errors:
+        closure.parse_failures.append((source, "raw AST surface claims invalid without recorded errors"))
     if status not in {"complete", "incomplete"}:
         closure.parse_failures.append((source, "raw AST closure status is missing or invalid"))
     elif status == "incomplete" and not closure.parse_failures:

@@ -29,10 +29,11 @@ legacy compact IR        != canonical lowering
 ```
 
 Resolution fails closed when an import is unresolved or ambiguous, parsing
-fails, capacity saturates, or a selective import is absent from the target's
-recursive public surface. `pub use leaf::{x}` can forward `x`; it does not
-forward other public names from `leaf`. A private `use` never expands the
-facade's public surface.
+fails, or capacity saturates. Import-surface validation is a separate refusal:
+the closure report remains structurally `complete`, records
+`surface_status\tinvalid`, and compilation rejects the unavailable name with
+`E137`. `pub use leaf::{x}` can forward `x`; it does not forward other public
+names from `leaf`. A private `use` never expands the facade's public surface.
 
 `SOUNIO_LEGACY_COMPACT_IR=1` selects the old compact table only as an explicit
 differential oracle. It cannot silently replace, or fall back into, the
