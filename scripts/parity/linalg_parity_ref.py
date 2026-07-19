@@ -61,8 +61,23 @@ def chk_qr(d):
     QtQ = Q.T * Q; I = mp.eye(Q.cols)
     return max(rec, matmax_rel(QtQ, I))
 
+def chk_eig(d):
+    A = as_mat(d["A"]); n = A.rows
+    got = sorted(mp.mpf(d["EVAL"][(i,0)]) for i in range(n))
+    E, Q = mp.eigsy(A)   # symmetric: real eigenvalues ascending + orthonormal Q
+    ref = sorted(mp.mpf(E[i]) for i in range(n))
+    ev_err = max(float(relerr(g, r)) for g, r in zip(got, ref))
+    V = as_mat(d["EVEC"]); res = 0.0
+    for k in range(n):
+        vk = mp.matrix([V[i, k] for i in range(n)])   # column k = eigenvector k (Phase-0)
+        lam = mp.mpf(d["EVAL"][(k,0)])
+        nrm = mp.norm(vk) or mp.mpf(1)
+        res = max(res, float(mp.norm(A*vk - lam*vk) / nrm))
+    return max(ev_err, res)
+
 CHECKS = {"det":chk_det, "trace":chk_trace, "norm_fro":chk_fro, "transpose":chk_transpose,
-          "mul":chk_mul, "inv":chk_inv, "solve":chk_solve, "lu":chk_lu, "qr":chk_qr}
+          "mul":chk_mul, "inv":chk_inv, "solve":chk_solve, "lu":chk_lu, "qr":chk_qr,
+          "eig":chk_eig}
 THR = {op: 1e-2 for op in CHECKS}
 
 def run(require_all=False):
