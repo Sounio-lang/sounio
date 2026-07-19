@@ -35,6 +35,7 @@ use check::ontology_side_table_cache::{
 use check::mod::{check_policy_requirements_to_ir}
 use parser::ast::*
 use ir::ir::*
+use io::env::{read_env}
 
 // ============================================================
 // Visibility / module-path helpers
@@ -6535,6 +6536,12 @@ fn checker_variant_enums_find_inplace(c: *mut Checker, name: Name) -> i64 with M
     enum_table_find_variant_enum_unique((*c).enums, name)
 }
 
+fn checker_trace_import_stub_fn_resolution() with IO, Mut, Panic, Div {
+    if str_eq(read_env("SOUNIO_CHECKER_CONTEXTUAL_LOOKUP_TRACE"), "1") {
+        print("checker_contextual_lookup: kind=fn_ref source=TyUnknown result=TyFn policy=local-first-global-unique\n")
+    }
+}
+
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
     let vis_kind = sig.visibility_kind
@@ -7174,6 +7181,12 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if !env_has || env_ty.kind == TypeKind::TyUnknown {
         let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
         if fn_sig_id >= 0 {
+            if env_has && env_ty.kind == TypeKind::TyUnknown {
+                checker_trace_import_stub_fn_resolution()
+            }
+            if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, fn_sig_id) {
+                checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            }
             return ty_fn(fn_sig_id)
         }
         let variant_enum_idx = checker_variant_enums_find_inplace(c, e.name)
@@ -18686,6 +18699,16 @@ impl Checker {
                 fn_sig_id = fn_sig_table_find_unique(c.fn_sigs, e.name)
             }
             if fn_sig_id >= 0 {
+                if env_has && env_ty.kind == TypeKind::TyUnknown {
+                    checker_trace_import_stub_fn_resolution()
+                }
+                let sig = fn_sig_table_get(c.fn_sigs, fn_sig_id)
+                let local_private = sig.visibility_kind == VISIBILITY_PRIVATE
+                    && sig.defining_module_id == c.current_module_id
+                if c.enforce_visibility && !local_private
+                    && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
+                    c = c.report_error_at(e.span, 175, 0, 0, 0)
+                }
                 return (c, ty_fn(fn_sig_id))
             }
             var variant_enum_idx = enum_table_find_variant_enum_in_module(c.enums, e.name, c.current_module_id)
