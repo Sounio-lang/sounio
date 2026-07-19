@@ -55,7 +55,15 @@ Base: `origin/codex/psychiatric-d9-statistical-binding-20260719` at
 
 ## Task 5: Publish Without Merge
 
-- [ ] Commit narrow implementation and documentation phases.
-- [ ] Push the stacked branch and open a draft D10 PR.
-- [ ] Run remote CI and close the implementation audit.
-- [ ] Leave merge and production-authority integration to explicit follow-up.
+- [x] Commit narrow implementation and documentation phases.
+- [x] Push the stacked branch and open a draft D10 PR.
+- [x] Run remote CI and close the implementation audit.
+- [x] Leave merge and production-authority integration to explicit follow-up.
+
+Publication receipt:
+
+- draft PR: `#1220`;
+- stacked base: `codex/psychiatric-d9-statistical-binding-20260719`;
+- reviewed semantic head: `6c31f6258634a3a7e105f6687bab1dba535c05b1`;
+- green remote CI: run `29693506010`, including final `CI Decision`;
+- merge requested: no.
