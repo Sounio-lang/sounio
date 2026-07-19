@@ -46,6 +46,15 @@ REF = {
     "bessel_yn":(lambda n,x: mp.bessely(n,x), 1e-2),
     "bessel_in":(lambda n,x: mp.besseli(n,x), 1e-2),
     "bessel_kn":(lambda n,x: mp.besselk(n,x), 1e-2),
+    "airy_ai":      (lambda x: mp.airyai(x), 1e-2),
+    "airy_bi":      (lambda x: mp.airybi(x), 1e-2),
+    "airy_ai_prime":(lambda x: mp.airyai(x, 1), 1e-2),
+    "airy_bi_prime":(lambda x: mp.airybi(x, 1), 1e-2),
+    "riemann_zeta": (lambda s: mp.zeta(s), 1e-2),
+    "hurwitz_zeta": (lambda s,a: mp.zeta(s, a), 1e-2),
+    "dirichlet_eta":(lambda s: mp.altzeta(s), 1e-2),
+    "elliptic_k":   (lambda k: mp.ellipk(k**2), 1e-2),
+    "elliptic_e":   (lambda k: mp.ellipe(k**2), 1e-2),
 }
 
 def main():
