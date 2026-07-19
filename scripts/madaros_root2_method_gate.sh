@@ -17,8 +17,12 @@ echo "== madaros_root2_method_gate =="
 run_ok() {
   local name="$1" src="$2" sentinel="$3"
   echo "== $name =="
+  rm -f "$OUT/t.elf"
   if ! "$SOUC" compile "$src" -o "$OUT/t.elf" >"$OUT/c.log" 2>&1; then
     echo "FAIL: compile $src"; tail -15 "$OUT/c.log" || true; fail=1; return
+  fi
+  if [[ ! -s "$OUT/t.elf" ]]; then
+    echo "FAIL: compile $src produced no fresh ELF"; fail=1; return
   fi
   chmod +x "$OUT/t.elf"
   if ! "$OUT/t.elf" >"$OUT/r.log" 2>&1 || ! grep -Fxq "$sentinel" "$OUT/r.log"; then
