@@ -72,7 +72,7 @@ export function PharmaSimulator() {
           max="100" 
           value={noise} 
           onChange={(e) => setNoise(Number(e.target.value))}
-          className="w-full accent-[var(--color-accent-champagne)]"
+          className="w-full accent-[var(--color-accent-hyperlink)]"
         />
         <p className="text-[0.8rem] text-[var(--color-text-tertiary)] leading-snug mt-1">
           Simulate higher uncertainty in patient sensor data or population variability.
@@ -85,11 +85,11 @@ export function PharmaSimulator() {
           Toxicity Threshold (60 mg/L)
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-3 bg-[var(--color-accent-champagne)] opacity-20 border border-[var(--color-accent-champagne)]"></div>
+          <div className="w-3 h-3 bg-[var(--color-accent-hyperlink)] opacity-20 border border-[var(--color-accent-hyperlink)]"></div>
           95% Confidence Envelope
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-          <div className="w-3 h-[2px] bg-[var(--color-accent-champagne)]"></div>
+          <div className="w-3 h-[2px] bg-[var(--color-accent-hyperlink)]"></div>
           Predicted Concentration
         </div>
       </div>
@@ -104,11 +104,11 @@ export function PharmaSimulator() {
         <text x="10" y={300 - (TOXICITY_THRESHOLD * 3) - 10} fill="rgba(239, 68, 68, 0.8)" fontSize="12" fontFamily="monospace">Toxicity Limit</text>
         
         {/* Uncertainty Envelope */}
-        <path d={areaPath} fill="var(--color-accent-champagne)" opacity="0.15" />
-        <path d={areaPath} fill="none" stroke="var(--color-accent-champagne)" strokeWidth="1" opacity="0.3" strokeDasharray="4 2" />
+        <path d={areaPath} fill="var(--color-accent-hyperlink)" opacity="0.15" />
+        <path d={areaPath} fill="none" stroke="var(--color-accent-hyperlink)" strokeWidth="1" opacity="0.3" strokeDasharray="4 2" />
         
         {/* Main Curve */}
-        <path d={curvePath} fill="none" stroke="var(--color-accent-champagne)" strokeWidth="3" />
+        <path d={curvePath} fill="none" stroke="var(--color-accent-hyperlink)" strokeWidth="3" />
         
         {/* Axis */}
         <line x1="0" y1="300" x2="500" y2="300" stroke="var(--glass-border)" strokeWidth="2" />
