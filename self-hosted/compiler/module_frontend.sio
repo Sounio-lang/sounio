@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, VariantDefList, make_name, name_eq, visibility_ref_to_bool, visibility_to_bool}
+use parser::ast::{AstPath, empty_path, ImplDef, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, VariantDefList, make_name, name_eq, visibility_ref_to_bool, visibility_to_bool}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -5560,16 +5560,18 @@ fn module_frontend_populate_imported_programs(
     loaded
 }
 
-fn module_frontend_items_define_ir_function(
-    items: &Option<Box<ItemList>>,
+fn module_frontend_impl_methods_define_ir_function(
+    type_name: Name,
+    methods: &Option<Box<ItemList>>,
     name: Name
 ) -> bool with Mut, Panic, Div {
-    var current = items
+    var current = methods
     while true {
         match *current {
             Some(list) => {
-                let item = &(*list).head
-                if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, name) {
+                let method = &(*list).head
+                if method.kind == ItemKind::ItemFn &&
+                   ir_name_eq(ir_mangle_method_name(type_name, method.name), name) {
                     return true
                 }
                 current = &(*list).tail
@@ -5578,6 +5580,50 @@ fn module_frontend_items_define_ir_function(
         }
     }
     false
+}
+
+fn module_frontend_items_ir_function_import_anchor(
+    items: &Option<Box<ItemList>>,
+    name: Name
+) -> Name with Mut, Panic, Div {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item = &(*list).head
+                if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, name) {
+                    return item.name
+                }
+                if item.kind == ItemKind::ItemImpl {
+                    let impl_def_ref: &Option<Box<ImplDef>> = &item.impl_def
+                    match *impl_def_ref {
+                        Some(impl_def) => {
+                            if module_frontend_impl_methods_define_ir_function(
+                                item.name,
+                                &(*impl_def).methods,
+                                name
+                            ) {
+                                // Selective imports name the impl type, not its
+                                // compiler-owned mangled method symbol.
+                                return item.name
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => return ir_empty_name(),
+        }
+    }
+    ir_empty_name()
+}
+
+fn module_frontend_items_define_ir_function(
+    items: &Option<Box<ItemList>>,
+    name: Name
+) -> bool with Mut, Panic, Div {
+    module_frontend_items_ir_function_import_anchor(items, name).len > 0
 }
 
 fn module_frontend_import_item_list_contains(
@@ -5675,18 +5721,23 @@ fn module_frontend_function_defining_module(
     while i < program_count {
         if i != self_index {
             let candidate_item_handle = (*program_item_ptrs)[i as usize] as *mut LowerProgramItemsHandle
-            if candidate_item_handle as i64 != 0 &&
-               module_frontend_items_define_ir_function(&(*candidate_item_handle).items, name) {
-                found_module = i
-                found_count = found_count + 1
-                if module_frontend_items_explicitly_import_from(
-                    &(*self_item_handle).items,
-                    (*file_paths)[self_index as usize],
-                    (*file_paths)[i as usize],
+            if candidate_item_handle as i64 != 0 {
+                let import_anchor = module_frontend_items_ir_function_import_anchor(
+                    &(*candidate_item_handle).items,
                     name
-                ) {
-                    explicit_module = i
-                    explicit_count = explicit_count + 1
+                )
+                if import_anchor.len > 0 {
+                    found_module = i
+                    found_count = found_count + 1
+                    if module_frontend_items_explicitly_import_from(
+                        &(*self_item_handle).items,
+                        (*file_paths)[self_index as usize],
+                        (*file_paths)[i as usize],
+                        import_anchor
+                    ) {
+                        explicit_module = i
+                        explicit_count = explicit_count + 1
+                    }
                 }
             }
         }
@@ -5727,6 +5778,98 @@ fn module_frontend_binding_already_present(
     false
 }
 
+fn module_frontend_append_external_binding(
+    binding_ptrs: &![i64; 2048],
+    count: i64,
+    defining_module_id: i64,
+    name: Name
+) -> i64 with Mut, Panic, Div, Alloc {
+    if count < 0 || count >= 2048 {
+        return count
+    }
+    if module_frontend_binding_already_present(
+        binding_ptrs,
+        count,
+        defining_module_id,
+        name
+    ) {
+        return count
+    }
+    var binding = (*binding_ptrs)[count as usize] as *mut LowerExternBindingHandle
+    if binding as i64 == 0 {
+        binding = heap_alloc(256) as *mut LowerExternBindingHandle
+        if binding as i64 == 0 {
+            return -1
+        }
+        (*binding_ptrs)[count as usize] = binding as i64
+    }
+    (*binding).name = name
+    (*binding).defining_module_id = defining_module_id
+    count + 1
+}
+
+fn module_frontend_collect_external_binding_name(
+    program_item_ptrs: &![i64; 256],
+    file_paths: &![string; 256],
+    program_count: i64,
+    self_index: i64,
+    module_index: i64,
+    name: Name,
+    count: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let owner = module_frontend_function_defining_module(
+        program_item_ptrs,
+        file_paths,
+        program_count,
+        self_index,
+        name
+    )
+    if owner != module_index {
+        return count
+    }
+    module_frontend_append_external_binding(
+        &! MF_EXTERN_BINDING_PTRS,
+        count,
+        owner,
+        name
+    )
+}
+
+fn module_frontend_collect_external_impl_bindings(
+    program_item_ptrs: &![i64; 256],
+    file_paths: &![string; 256],
+    program_count: i64,
+    self_index: i64,
+    module_index: i64,
+    type_name: Name,
+    methods: &Option<Box<ItemList>>,
+    count: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var next_count = count
+    var current = methods
+    while next_count >= 0 && next_count < 2048 {
+        match *current {
+            Some(list) => {
+                let method = &(*list).head
+                if method.kind == ItemKind::ItemFn {
+                    next_count = module_frontend_collect_external_binding_name(
+                        program_item_ptrs,
+                        file_paths,
+                        program_count,
+                        self_index,
+                        module_index,
+                        ir_mangle_method_name(type_name, method.name),
+                        next_count
+                    )
+                }
+                current = &(*list).tail
+            }
+            _ => break,
+        }
+    }
+    next_count
+}
+
 fn module_frontend_collect_external_bindings(
     program_item_ptrs: &![i64; 256],
     file_paths: &![string; 256],
@@ -5747,32 +5890,38 @@ fn module_frontend_collect_external_bindings(
                     Some(list) => {
                         let item = &(*list).head
                         if item.kind == ItemKind::ItemFn {
-                            let owner = module_frontend_function_defining_module(
+                            count = module_frontend_collect_external_binding_name(
                                 program_item_ptrs,
                                 file_paths,
                                 program_count,
                                 self_index,
-                                item.name
+                                module_index,
+                                item.name,
+                                count
                             )
-                            if owner == module_index &&
-                               !module_frontend_binding_already_present(
-                                   &! MF_EXTERN_BINDING_PTRS,
-                                   count,
-                                   owner,
-                                   item.name
-                               ) {
-                                var binding = MF_EXTERN_BINDING_PTRS[count as usize] as *mut LowerExternBindingHandle
-                                if binding as i64 == 0 {
-                                    binding = heap_alloc(256) as *mut LowerExternBindingHandle
-                                    if binding as i64 == 0 {
+                        } else if item.kind == ItemKind::ItemImpl {
+                            let impl_def_ref: &Option<Box<ImplDef>> = &item.impl_def
+                            match *impl_def_ref {
+                                Some(impl_def) => {
+                                    count = module_frontend_collect_external_impl_bindings(
+                                        program_item_ptrs,
+                                        file_paths,
+                                        program_count,
+                                        self_index,
+                                        module_index,
+                                        item.name,
+                                        &(*impl_def).methods,
+                                        count
+                                    )
+                                    if count < 0 {
                                         return -1
                                     }
-                                    MF_EXTERN_BINDING_PTRS[count as usize] = binding as i64
                                 }
-                                (*binding).name = item.name
-                                (*binding).defining_module_id = owner
-                                count = count + 1
+                                _ => {}
                             }
+                        }
+                        if count < 0 {
+                            return -1
                         }
                         current = &(*list).tail
                     }
