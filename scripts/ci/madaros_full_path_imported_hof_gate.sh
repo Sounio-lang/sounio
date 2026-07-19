@@ -10,6 +10,7 @@ RAW_MADAROS="${SOUNIO_MADAROS_FULL_PATH_HOF_RAW_BIN:-}"
 KEEP_WORK="${SOUNIO_MADAROS_FULL_PATH_HOF_KEEP:-0}"
 TIMEOUT_SECONDS="${SOUNIO_MADAROS_FULL_PATH_HOF_TIMEOUT_SECONDS:-360}"
 SOURCE="$ROOT_DIR/tests/compiler/module_graph_fn_ref_hof/main.sio"
+PRIVATE_SOURCE="$ROOT_DIR/tests/compiler/module_graph_fn_ref_hof/private_fn_ref_main.sio"
 
 fail() {
   printf '[madaros-full-path-hof] FAIL: %s\n' "$1" >&2
@@ -22,6 +23,33 @@ is_fatal_log() {
 
 has_forbidden_path() {
   grep -Eq 'native_prebundle:|falling back to full IR path|compact modular IR table path|legacy compact IR differential enabled' "$1"
+}
+
+expect_checker_rejection() {
+  local label="$1"
+  local source="$2"
+  local code="$3"
+  local message="$4"
+  local expected_count="$5"
+  local log="$WORK/$label.check.log"
+  local rc=0
+
+  set +e
+  MADAROS_RAW_BIN="$RAW_MADAROS" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+    timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
+    "$WRAPPER" --science-boundary off check "$source" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  [[ "$rc" -eq 1 ]] || {
+    cat "$log" >&2 || true
+    fail "${label}_expected_rc_1_got_$rc"
+  }
+  is_fatal_log "$log" && fail "${label}_fatal"
+  [[ "$(grep -Fc 'error[E' "$log" || true)" -eq "$expected_count" ]] || fail "${label}_diagnostic_count_mismatch"
+  [[ "$(grep -Fc "error[$code]" "$log" || true)" -eq "$expected_count" ]] || fail "${label}_${code}_count_mismatch"
+  [[ "$(grep -Fc "$message" "$log" || true)" -eq "$expected_count" ]] || fail "${label}_message_count_mismatch"
+  grep -Fq 'run_check_mode: verdict=1' "$log" || fail "${label}_checker_verdict_missing"
 }
 
 if [[ -n "${SOUNIO_MADAROS_FULL_PATH_HOF_DIR:-}" ]]; then
@@ -50,10 +78,15 @@ RAW_MADAROS="$(cd "$(dirname "$RAW_MADAROS")" && pwd)/$(basename "$RAW_MADAROS")
 [[ "$(od -An -tx1 -N4 "$RAW_MADAROS" | tr -d ' \n')" == 7f454c46 ]] || fail raw_compiler_must_be_elf
 [[ -f "$SOURCE" ]] || fail fixture_main_missing
 [[ -f "$ROOT_DIR/tests/compiler/module_graph_fn_ref_hof/hof_leaf.sio" ]] || fail fixture_leaf_missing
+[[ -f "$PRIVATE_SOURCE" ]] || fail fixture_private_ref_main_missing
+[[ -f "$ROOT_DIR/tests/compiler/module_graph_fn_ref_hof/private_fn_ref_leaf.sio" ]] || fail fixture_private_ref_leaf_missing
+
+expect_checker_rejection imported_private_fn_ref "$PRIVATE_SOURCE" E175 'function is private in its defining module' 2
 
 CHECK_LOG="$WORK/check.log"
 set +e
 MADAROS_RAW_BIN="$RAW_MADAROS" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+  SOUNIO_CHECKER_CONTEXTUAL_LOOKUP_TRACE=1 \
   timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
   "$WRAPPER" --science-boundary off check "$SOURCE" >"$CHECK_LOG" 2>&1
 CHECK_RC=$?
@@ -66,6 +99,8 @@ set -e
 is_fatal_log "$CHECK_LOG" && fail check_fatal
 grep -Fq 'run_check_mode: verdict=0' "$CHECK_LOG" || fail checker_verdict_missing
 grep -Fq 'check: OK' "$CHECK_LOG" || fail checker_ok_missing
+[[ "$(grep -Fc 'checker_contextual_lookup: kind=fn_ref source=TyUnknown result=TyFn policy=local-first-global-unique' "$CHECK_LOG" || true)" -eq 2 ]] \
+  || fail checker_contextual_fn_ref_receipt_mismatch
 if grep -Fq 'error[E' "$CHECK_LOG" || grep -Eq '^error:' "$CHECK_LOG"; then
   fail checker_diagnostic_on_success
 fi
@@ -125,4 +160,4 @@ set -e
 [[ ! -s "$STDOUT" ]] || fail runtime_stdout_not_empty
 [[ ! -s "$STDERR" ]] || fail runtime_stderr_not_empty
 
-printf 'MADAROS_FULL_PATH_IMPORTED_HOF_PASS closure_modules=2 runtime_exit=42 stdout=empty fallback=none\n'
+printf 'MADAROS_FULL_PATH_IMPORTED_HOF_PASS closure_modules=2 checker_refinement=TyUnknown-to-TyFn paths=inplace+by-value private_fn_ref=E175x2 runtime_exit=42 stdout=empty fallback=none\n'
