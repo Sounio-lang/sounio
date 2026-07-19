@@ -79,6 +79,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-drug-switch-vanco-validation-2026-07-19 | repo_only | docs/audit/CLINICAL_DRUG_SWITCH_VANCO_VALIDATION_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.clinical-midazolam-ddi-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_MIDAZOLAM_DDI_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-vanco-tdm-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_VANCO_TDM_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -352,6 +353,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.batched-hyper-syntax | repo_only | docs/gpu/BATCHED_HYPER_SYNTAX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.hyper-matvec-design | repo_only | docs/gpu/HYPER_MATVEC_DESIGN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.gpu.hypercomplex-ssm-novelty | repo_only | docs/gpu/HYPERCOMPLEX_SSM_NOVELTY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.oct-wmma-validate.gb10-receipt-20260716 | repo_only | docs/gpu/oct_wmma_validate.gb10-receipt-20260716.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.check-sounio-guide | repo_only | docs/guide/CHECK_SOUNIO_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
