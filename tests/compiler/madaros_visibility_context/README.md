@@ -78,7 +78,8 @@ this checker pass for mixed implementation modules.
 
 ```text
 Semantic-Lane-ID: issue-854-contextual-checker-port-r2
-Concept-IDs: proposed SOUNIO-MODULE-BINDING-IDENTITY
+Owner: Codex-2 compiler lane
+Concept-IDs: SOUNIO-MODULE-CLOSURE-AUTHORITY
 Status: implementation-candidate; source-fresh acceptance pending
 Intent-Preserved: binding resolution precedes visibility authorization
 Transformation: name-only lookup -> local ModuleId first, global unique-only fallback
@@ -87,12 +88,31 @@ Effects-Changed: none
 IR-Changed: none in this port; closure-local IR identity is an input prerequisite
 Claims-Introduced: bounded unqualified-function lookup distinguishes module-local identities and fails closed on duplicate global candidates
 Claims-Forbidden: canonical import binding; general qualified-name resolution; general re-export correctness; issue #854 closed before the source-fresh acceptance gate passes
+Assumptions: the modular checker stamps each collected signature and current checker pass with the closure-local ModuleId
+Write-Set: self-hosted/check/check.sio; self-hosted/check/defs.sio; self-hosted/compiler/main.sio; scripts/ci/madaros_visibility_context_gate.sh; scripts/ci/module_graph_facade_vertical_gate.sh; tests/compiler/madaros_visibility_context/*
+Read-Set: self-hosted/check/mod.sio; self-hosted/compiler/module_frontend.sio; self-hosted/ir/ir.sio; self-hosted/ir/lower.sio; native codegen
 Positive-Witness: duplicate_private_single_main.sio and duplicate_private_18_main.sio execute exact PASS markers
 Negative-Witness: ambiguous_public_main.sio=E137; private function=E175; private struct=E176; private enum=E177
 Acceptance-Gate: MADAROS_RAW_BIN=<current-source-madaros> SOUNIO_MADAROS_VISIBILITY_CONTEXT_EXPECT=resolved bash scripts/ci/madaros_visibility_context_gate.sh
+Integration-Target: origin/main
+Authoritative-Only-If: the source-fresh acceptance gate reports context_state=resolved, runtime_state=pass, ambiguous_global=E137, and exact E175/E176/E177 controls without compiler fallback
 Fallback-Path: unique-only global lookup; rejected when more than one candidate exists
 Legacy-Kept: name-only lookup remains for consumers outside the contextual checker surface
 LLM-Offload: not-required (compiler binding mechanics; no math, clinical pathway, or external-facing claim)
+```
+
+```text
+Semantic-Outcome: implementation candidate; source-fresh semantic evidence pending
+Concept-Status-Before: SOUNIO-MODULE-CLOSURE-AUTHORITY executable-candidate with checker read-only
+Concept-Status-After: SOUNIO-MODULE-CLOSURE-AUTHORITY executable-candidate with bounded contextual checker ownership
+Distinctions-Added: same spelling != same binding; binding resolution != visibility authorization
+Distinctions-Preserved: authored import edge != global name visibility; compile success != runtime parity
+Distinctions-Erased: none
+Evidence-Run: semantic scanner, diff checks, shell syntax gates, and historical-prebuilt baseline classifier; source-fresh acceptance pending
+Fallback-Path: compiler fallback none; checker lookup fallback global-unique-only and fail-closed on duplicates
+Legacy-Kept: name-only helper and SOIR v4 path remain outside the proven contextual surface
+Conflicting-Lanes: scanner reported observational historical overlaps; no active ownership conflict established
+Next-Semantic-Interface: canonical import-binding records tied to authored closure edges
 ```
 
 ## Exact baseline receipt

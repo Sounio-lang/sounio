@@ -24,6 +24,8 @@ checking and full-IR lowering.
 logical module identity != physical source path
 declared module identity != authored import spelling
 authored import edge     != global name visibility
+same spelling            != same binding
+binding resolution       != visibility authorization
 closed file closure      != valid export surface
 compile success          != executable parity
 legacy compact IR        != canonical lowering
@@ -43,6 +45,14 @@ an unevidenced `valid` claim.
 differential oracle. It cannot silently replace, or fall back into, the
 canonical AST-closure full-IR path.
 
+Within one collected closure, unqualified function lookup first selects the
+definition owned by the current `ModuleId`. If no local definition exists, the
+checker accepts the global fallback only when exactly one non-method definition
+has that spelling. Visibility authorization runs after that lookup. This rule
+fails closed on duplicate global candidates, but it is not yet a canonical
+import-binding graph: `FnSigTable` does not record which authored `use` edge
+introduced the selected name.
+
 With `SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1`, the full-IR path emits one
 `module_frontend_full_ir: lower_node` record per `ModuleId` and one
 `module_frontend_full_ir: lower_edge` record per authored edge. Legacy compact
@@ -55,17 +65,17 @@ Semantic-Lane-ID: modulegraph-facade-vertical-r1
 Owner: Codex-2 compiler lane
 Concept-IDs: SOUNIO-MODULE-CLOSURE-AUTHORITY
 Intent-Preserved: authored module order and closure-local definition identity survive into executable multimodule lowering
-Transformation: repeated textual import discovery becomes one parsed closure whose module indices identify function definitions during one compile
+Transformation: repeated textual import discovery becomes one parsed closure whose module indices identify function definitions during one compile; checker lookup is local-ModuleId-first and global-unique-only
 Types-Changed: ModuleClosure carrier fields and IrFunction.defining_module_id in memory
 Effects-Changed: none
 IR-Changed: IrFunction.defining_module_id is authoritative in memory for multimodule lowering and merge; SOIR v4 does not serialize it
-Claims-Introduced: the exact vertical gate proves closure-local function identity is consumed by lowering and merge when its #854 context witnesses resolve and execute
-Claims-Forbidden: SOIR round-trip preservation, compiler-wide ModuleId preservation, general visibility correctness, the complete ModuleGraph epic, lean_single reexports, large-graph capacity, or #991 receipt semantics
+Claims-Introduced: the exact vertical gate proves closure-local function identity is consumed by checker lookup, lowering, and merge when its #854 context witnesses resolve and execute
+Claims-Forbidden: canonical import binding, SOIR round-trip preservation, compiler-wide ModuleId preservation, general visibility correctness, the complete ModuleGraph epic, lean_single reexports, large-graph capacity, or #991 receipt semantics
 Assumptions: authored imports resolve within the declared module-root set or established local/package paths
-Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_native_driver.sio, self-hosted/compiler/main.sio, self-hosted/compiler/module_parse.sio, self-hosted/parser/items.sio, self-hosted/ir/ir.sio, self-hosted/ir/lower.sio, self-hosted/ir/serialize.sio, self-hosted/ir/optimize.sio, self-hosted/ir/ssa.sio
-Read-Set: checker, resolver, native backend, legacy compact importer
+Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_native_driver.sio, self-hosted/compiler/main.sio, self-hosted/compiler/module_parse.sio, self-hosted/parser/items.sio, self-hosted/check/check.sio, self-hosted/check/defs.sio, self-hosted/ir/ir.sio, self-hosted/ir/lower.sio, self-hosted/ir/serialize.sio, self-hosted/ir/optimize.sio, self-hosted/ir/ssa.sio
+Read-Set: resolver, native backend, legacy compact importer
 Positive-Witness: scripts/ci/module_graph_facade_vertical_gate.sh reports context_state=resolved, runtime_state=pass, and the facade ELF prints 42
-Negative-Witness: the same gate rejects missing, non-reexported, private, unresolved, ambiguous, or context-partial states without accepting fallback
+Negative-Witness: the same gate rejects missing, non-reexported, private, unresolved, ambiguous, duplicate-global, or context-partial states without accepting fallback
 Acceptance-Gate: scripts/ci/module_graph_facade_vertical_gate.sh
 Integration-Target: origin/main
 Authoritative-Only-If: source-fresh compiler passes the exact positive and negative witnesses with context_state=resolved, runtime_state=pass, and no fallback marker
@@ -79,8 +89,9 @@ outside that closure. Deserializing SOIR v4 explicitly restores
 `IR_DEFINING_MODULE_UNKNOWN`, because the v4 wire format has no provenance field.
 This lane therefore makes no SOIR round-trip or compiler-wide preservation claim.
 
-This contract establishes the carrier, in-memory lowering identity, and refusal
-boundary for the exact gate. It does not close the remaining ModuleGraph epic
-work: normalized physical identity, graph digest, large-closure capacity, SOIR
+This contract establishes the carrier, bounded contextual checker lookup,
+in-memory lowering identity, and refusal boundary for the exact gate. It does
+not close the remaining ModuleGraph epic work: canonical import bindings,
+normalized physical identity, graph digest, large-closure capacity, SOIR
 installation, compiler-wide identity propagation, scientific metadata, numeric
 payload, or complete receipts remain separate executable milestones.
