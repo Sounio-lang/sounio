@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18
+-->
+
 # Stats scipy.stats-class E2E vertical — 2026-07-18
 
 ## Scope

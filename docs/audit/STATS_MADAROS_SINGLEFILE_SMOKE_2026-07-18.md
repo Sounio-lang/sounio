@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.stats-madaros-singlefile-smoke-2026-07-18
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.stats-madaros-singlefile-smoke-2026-07-18
+-->
+
 # Madaros single-file stats smoke — 2026-07-18
 
 ## Scope
