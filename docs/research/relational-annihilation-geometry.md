@@ -68,8 +68,15 @@ suffering — that is analogy. Claim instead that suffering phenomena exhibit th
 composition failure (rare, structured, configuration-specific), and derive a test: **risk (e.g.
 suicidality) should be conjunctive and low-dimensional** — interaction terms should dominate main effects,
 and the risk set should occupy a small-dimensional slice of predictor space (the empirical analog of the
-dimension-4-in-16 / codimension-12 annihilator). This is testable on a large cohort (e.g. COMPASS,
-N≈6,543) and connects directly to the discrete-curvature program (`ABIDE`/Ollivier-Ricci as fragility
+dimension-4-in-16 / codimension-12 annihilator).  This is testable on a large cohort (e.g. COMPASS, N≈6,543), in a **pre-registrable** form:
+**(a) interaction dominance** — variance explained by order-k≥2 terms exceeds that of main effects
+(functional-ANOVA / Sobol indices); **(b) low intrinsic dimension** of the high-risk set, `d ≪ p`
+(two-NN or participation ratio on the high-risk subset); **(c) configurational sparsity** — the
+high-risk fraction falls far below an additive model calibrated on the same marginals.
+**Falsifier:** if an additive main-effects model matches or beats the interaction model out-of-sample
+and `d ~ p`, the signature is absent. Do **not** anchor (b) on the literal 4/16 ratio — the algebra
+motivates the qualitative form, not a numeric value in a clinical predictor space. This connects to the
+discrete-curvature program (`ABIDE`/Ollivier-Ricci as fragility
 geometry). If risk turns out additive and high-dimensional, the annihilation model is wrong — which is the
 point: it can be wrong.
 
