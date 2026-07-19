@@ -11,7 +11,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
 | filter_count (`bf_count_gt`, raw scan) | | 1.84 | 0.74 | **2.5x** | 12.1x |
-| filter_materialize (2-pass pre-size) | | 22.8 | 7.3 | **3.1x** | 5.0x |
+| filter_materialize (col-major gather) | | 12.5 | 6.2 | **2.0x** | 5.0x |
 | groupby_sum (10 dense keys, O(n) accumulator) | | 13.7 | 13.8 | **0.99x — parity** | 0.99x |
 | frame build (1M x 3) | | ~20 (once) | — | — | — |
 
