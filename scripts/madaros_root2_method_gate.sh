@@ -99,6 +99,13 @@ run_ambiguous_impl_authority_rejected
 
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+COMPILER_AUTHORITY=resolver_default
+COMPILER_PATH="$(realpath "$SOUC")"
+if [[ -n "${MADAROS_RAW_BIN:-}" ]]; then
+  COMPILER_AUTHORITY=explicit_madaros_raw_bin
+  COMPILER_PATH="$(realpath "$MADAROS_RAW_BIN")"
+fi
+COMPILER_SHA256="$(sha256sum "$COMPILER_PATH" | awk '{print $1}')"
 STATUS=fail
 [[ $fail -eq 0 ]] && STATUS=pass
 cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
@@ -107,6 +114,10 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
   "status": "$STATUS",
   "engine": "madaros_default",
   "commit": "$COMMIT",
+  "scope": "source_to_elf",
+  "compiler_authority": "$COMPILER_AUTHORITY",
+  "compiler_path": "$COMPILER_PATH",
+  "compiler_sha256": "$COMPILER_SHA256",
   "claims": [
     "same_module_self_ref_method_call",
     "same_module_associated_type_method",
@@ -117,6 +128,7 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
   ],
   "claims_not_made": [
     "injective_impl_method_symbol_mangling",
+    "soir_v4_roundtrip_semantics",
     "full_root2_null_deref_closed",
     "enum_ctor_path"
   ]
