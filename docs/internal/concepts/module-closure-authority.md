@@ -22,6 +22,7 @@ checking and full-IR lowering.
 
 ```text
 logical module identity != physical source path
+declared module identity != authored import spelling
 authored import edge     != global name visibility
 closed file closure      != valid export surface
 compile success          != executable parity
@@ -34,6 +35,9 @@ the closure report remains structurally `complete`, records
 `surface_status\tinvalid`, and compilation rejects the unavailable name with
 `E137`. `pub use leaf::{x}` can forward `x`; it does not forward other public
 names from `leaf`. A private `use` never expands the facade's public surface.
+If topology is incomplete, surface validation has not run and the report says
+`surface_status\tnot_evaluated`; absence of a surface error is never promoted to
+an unevidenced `valid` claim.
 
 `SOUNIO_LEGACY_COMPACT_IR=1` selects the old compact table only as an explicit
 differential oracle. It cannot silently replace, or fall back into, the

@@ -172,6 +172,39 @@ def evaluate(
     return json.loads(receipt.read_text(encoding="ascii")), result
 
 
+def evaluate_with_report(
+    src: Path,
+    manifest: Path,
+    receipt: Path,
+    report: Path,
+    *,
+    expected: int = 21,
+) -> dict[str, Any]:
+    run(
+        [
+            sys.executable,
+            str(ATTESTOR),
+            "evaluate",
+            "--source",
+            str(src),
+            "--mode",
+            "strict",
+            "--manifest",
+            str(manifest),
+            "--receipt",
+            str(receipt),
+            "--compiler",
+            str(RAW_MADAROS),
+            "--engine-identity",
+            "Madaros forged-report fixture",
+            "--closure-report",
+            str(report),
+        ],
+        expected=expected,
+    )
+    return json.loads(receipt.read_text(encoding="ascii"))
+
+
 def write_gate_closure_report(
     src: Path,
     root: Path,
@@ -408,6 +441,65 @@ def assert_unknowns(root: Path) -> None:
     forged_data = json.loads(forged_receipt.read_text(encoding="ascii"))
     check(forged_data["verdict"] == "UNKNOWN", "raw closure report without its root became authoritative")
     check("E-SRB-000" in diagnostic_codes(forged_data), "missing raw closure root lacks E-SRB-000")
+
+    surface_report = write(
+        root / "forged-invalid-surface.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tinvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"surface_error\t{src}\tcycle::first\thidden",
+                "",
+            )
+        ),
+    )
+    surface_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-invalid-surface.json",
+        surface_report,
+    )
+    check(surface_data["verdict"] == "UNKNOWN", "invalid import surface became strict OK")
+    check("E-SRB-000" in diagnostic_codes(surface_data), "invalid import surface lacks E-SRB-000")
+    check(
+        any("import=cycle::first name=hidden" in item["message"] for item in surface_data["diagnostics"]),
+        "invalid import surface lost its causal receipt",
+    )
+
+    reversed_edge_report = write(
+        root / "forged-reversed-edge-identity.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t1\t0\tcycle::first",
+                "",
+            )
+        ),
+    )
+    reversed_edge_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-reversed-edge-identity.json",
+        reversed_edge_report,
+    )
+    check(reversed_edge_data["verdict"] == "UNKNOWN", "reversed edge identity became strict OK")
+    check("E-SRB-000" in diagnostic_codes(reversed_edge_data), "reversed edge identity lacks E-SRB-000")
 
     no_evidence_manifest = write_policy(
         root,

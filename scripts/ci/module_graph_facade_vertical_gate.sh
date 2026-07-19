@@ -106,7 +106,7 @@ closure_is_missing_package() {
   [[ "$(grep -c $'^parse_failed\t' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -Fxc $'parse_failed\tfalse' "$report" || true)" -eq 1 ]] || return 1
   [[ "$(grep -c $'^surface_status\t' "$report" || true)" -eq 1 ]] || return 1
-  grep -Fxq $'surface_status\tvalid' "$report" || return 1
+  grep -Fxq $'surface_status\tnot_evaluated' "$report" || return 1
   grep -Fxq $'node\t'"$source" "$report" || return 1
   grep -Fxq $'edge\t'"$source"$'\t'"$missing_source" "$report" || return 1
   grep -Fxq $'unresolved\t'"$source"$'\tpackage_import_missing' "$report" || return 1
@@ -311,7 +311,7 @@ run_classifier_self_test() {
   printf '%s\n' \
     'SOUNIO_BOUNDARY_CLOSURE_V1' \
     $'status\tincomplete' \
-    $'surface_status\tvalid' \
+    $'surface_status\tnot_evaluated' \
     $'capacity\t256' \
     $'saturated\tfalse' \
     $'parse_failed\tfalse' \
@@ -325,7 +325,7 @@ run_classifier_self_test() {
   printf '%s\n' \
     'SOUNIO_BOUNDARY_CLOSURE_V1' \
     $'status\tincomplete' \
-    $'surface_status\tvalid' \
+    $'surface_status\tnot_evaluated' \
     $'capacity\t256' \
     $'saturated\tfalse' \
     $'parse_failed\tfalse' \
@@ -603,6 +603,60 @@ if [[ -n "$ISSUE_991_ROOT" ]]; then
   printf 'MODULE_GRAPH_FACADE_ISSUE_991_ORACLE state=%s head=%s witness_sha256=9e7188f10893b796e01fa1576fd752f03a5139b7ee39f27b3de2e0efb8660c70 probe_sha256=e7ef5cff6b754844f34d6afb10917a3f35bae2253f79d3b623c756faa7e42cf6 gate_dependency=false\n' \
     "$ISSUE_991_STATE" "$ISSUE_991_HEAD"
 fi
+
+IDENTITY_DIR="$ROOT_DIR/tests/compiler/module_declaration_identity"
+IDENTITY_CONSUMER="$IDENTITY_DIR/alias_consumer.sio"
+IDENTITY_DECLARED="$IDENTITY_DIR/left/mod.sio"
+require_sha256 "$IDENTITY_CONSUMER" 42ee4f4cebf9fbde5d80f53e4c79e4e9029b73a5bf4d5c40dceedd4c0011b0ec identity_alias_consumer
+require_sha256 "$IDENTITY_DECLARED" 1ab4de8250dc5363cec1646788392a7603e3ac8d350e96a62b5f379b0cf033cb identity_declared_module
+run_closure declared-identity "$ROOT_DIR" "$ROOT_DIR/stdlib" "$IDENTITY_CONSUMER"
+[[ "$CASE_RC" -eq 0 ]] || blocked "declared_identity_closure_rc_${CASE_RC}" closure_identity
+closure_is_complete "$CASE_LOG" || blocked declared_identity_closure_incomplete closure_identity
+require_closure_cardinality "$CASE_LOG" 2 1 || blocked declared_identity_closure_cardinality closure_identity
+require_closure_identity_cardinality "$CASE_LOG" 2 1 || blocked declared_identity_receipt_cardinality closure_identity
+require_closure_node "$CASE_LOG" "$IDENTITY_CONSUMER" || blocked declared_identity_consumer_node_missing closure_identity
+require_closure_node "$CASE_LOG" "$IDENTITY_DECLARED" || blocked declared_identity_dependency_node_missing closure_identity
+require_closure_edge "$CASE_LOG" "$IDENTITY_CONSUMER" "$IDENTITY_DECLARED" || blocked declared_identity_physical_edge_missing closure_identity
+grep -Fxq $'logical_node\t0\talias_consumer' "$CASE_LOG" || blocked declared_identity_root_mismatch closure_identity
+grep -Fxq $'logical_node\t1\tcollision::left' "$CASE_LOG" || blocked declared_identity_dependency_mismatch closure_identity
+grep -Fxq $'edge_identity\t0\t1\tleft::mod' "$CASE_LOG" || blocked declared_identity_authored_edge_mismatch closure_identity
+printf 'MODULE_GRAPH_DECLARED_IDENTITY_PASS node_identity=collision::left authored_import=left::mod distinctions=preserved\n'
+
+CAPACITY_DIR="$WORK/import-capacity"
+mkdir -p "$CAPACITY_DIR"
+printf '%s\n' 'pub fn capacity_value() -> i64 { 1 }' >"$CAPACITY_DIR/dep.sio"
+make_import_capacity_root() {
+  local path="$1"
+  local count="$2"
+  local i=0
+  : >"$path"
+  while [[ "$i" -lt "$count" ]]; do
+    printf '%s\n' 'use dep::*' >>"$path"
+    i=$((i + 1))
+  done
+}
+
+CAPACITY_256="$CAPACITY_DIR/imports_256.sio"
+make_import_capacity_root "$CAPACITY_256" 256
+run_closure imports-256 "$CAPACITY_DIR" "$ROOT_DIR/stdlib" "$CAPACITY_256"
+[[ "$CASE_RC" -eq 0 ]] || blocked "imports_256_closure_rc_${CASE_RC}" closure_capacity
+closure_is_complete "$CASE_LOG" || blocked imports_256_closure_incomplete closure_capacity
+require_closure_cardinality "$CASE_LOG" 2 256 || blocked imports_256_closure_cardinality closure_capacity
+require_closure_identity_cardinality "$CASE_LOG" 2 256 || blocked imports_256_identity_cardinality closure_capacity
+
+CAPACITY_257="$CAPACITY_DIR/imports_257.sio"
+make_import_capacity_root "$CAPACITY_257" 257
+run_closure imports-257 "$CAPACITY_DIR" "$ROOT_DIR/stdlib" "$CAPACITY_257"
+[[ "$CASE_RC" -eq 0 ]] || blocked "imports_257_closure_rc_${CASE_RC}" closure_capacity
+grep -Fxq $'status\tincomplete' "$CASE_LOG" || blocked imports_257_status_not_incomplete closure_capacity
+grep -Fxq $'surface_status\tnot_evaluated' "$CASE_LOG" || blocked imports_257_surface_was_claimed closure_capacity
+grep -Fxq $'saturated\ttrue' "$CASE_LOG" || blocked imports_257_not_saturated closure_capacity
+require_closure_cardinality "$CASE_LOG" 2 256 || blocked imports_257_closure_cardinality closure_capacity
+require_closure_identity_cardinality "$CASE_LOG" 2 256 || blocked imports_257_identity_cardinality closure_capacity
+if grep -q $'^unresolved\t\|^ambiguous\t\|^surface_error\t' "$CASE_LOG"; then
+  blocked imports_257_wrong_failure_class closure_capacity
+fi
+printf 'MODULE_GRAPH_IMPORT_CAPACITY_PASS imports_256=complete imports_257=saturated fail_closed=true\n'
 
 VERTICAL_DIR="$ROOT_DIR/tests/compiler/module_graph_facade_vertical"
 VERTICAL_MAIN="$VERTICAL_DIR/main.sio"
