@@ -96,6 +96,11 @@ var FN_PTX_EXTENT_SLOT: [i64; 65536] = [0; 65536]
 var FN_PTX_PARAM_KINDS: [i64; 65536] = [0; 65536]
 var FN_COUNT: i64 = 0
 var FN_RECV_HASH: [i64; 65536] = [0; 65536]
+// 1 iff the fn was defined inside a real `impl` block (a true method, dot-called
+// via recv-aware fn_find_method). 0 for free functions — including UFCS free fns
+// whose struct first param gives them a nonzero FN_RECV_HASH but which are still
+// name-only-resolved by fn_find. Used by the bundle collision check.
+var FN_IN_IMPL: [i64; 65536] = [0; 65536]
 
 var PTX_BUF: [i8; 262144] = [0; 262144]
 var PTX_LEN: i64 = 0
@@ -4178,6 +4183,25 @@ fn tc_duplicate_fn(tok: i64) -> i64 with IO, Mut, Panic {
     tc_error(tok, "duplicate function name")
 }
 
+// Two bundled functions share a name + receiver but have DIFFERENT arity.
+// Call resolution (fn_find) is name-only first-wins, so any call to the shadowed
+// definition resolves to the surviving one's arity. This is only a *latent*
+// hazard: if the shadowed definition is never called with its own arity, the
+// bundle compiles and runs correctly (the loser is effectively dead). We only
+// hard-fail when a wrong-arity call is actually resolved — that path is caught
+// by tc_wrong_arity_hard, which now sets TYPECHECK_FAILED even for imported
+// bodies. Here we emit a *warning* that names the collision, so that when the
+// hard failure does fire the user has the cross-module context ("two `foo` with
+// different arity") rather than a bare "arity mismatch at line N" in a library.
+fn tc_conflicting_arity_fn(tok: i64) -> i64 with IO, Mut, Panic {
+    print("warning: conflicting definitions of the same function name with different arity across the bundle at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(") — a call to the shadowed definition will fail to compile\n")
+    return 0
+}
+
 fn tc_duplicate_param(tok: i64) -> i64 with IO, Mut, Panic {
     tc_error_hard(tok, "duplicate parameter name")
 }
@@ -4705,6 +4729,15 @@ fn tc_wrong_arity_hard(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, P
     print_int(got)
     print("\n")
     tc_mark_failed()
+    // Honor a wrong-arity call even inside an imported function body. The
+    // from_import guard in tc_mark_failed tolerates errors in imported modules
+    // (effects, generics, standalone-typecheck artifacts), but a call whose
+    // argument count does not match the resolved definition is a genuine
+    // mis-resolution — almost always the name-only fn_find picking a same-named
+    // definition of a different arity from another bundled module. Emitting a
+    // binary in that state silently miscompiles the shadowed call, so fail hard
+    // regardless of where the call lives.
+    TYPECHECK_FAILED = 1
     return 0
 }
 
@@ -28330,6 +28363,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             FN_SIG[sig_fi as usize] = fnsig_from_decl_name_tok(p)
             FN_NEEDS_SESSION[sig_fi as usize] = 0
             FN_ARITY[sig_fi as usize] = 0
+            FN_IN_IMPL[sig_fi as usize] = 0
             FN_RET_TY[sig_fi as usize] = 5
             FN_RET_HASH[sig_fi as usize] = 0
             var q: i64 = p + 1
@@ -28412,6 +28446,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Impl block: if we're inside an impl, force receiver hash
             if sig_impl_hash != 0 {
                 FN_RECV_HASH[sig_fi as usize] = sig_impl_hash
+                FN_IN_IMPL[sig_fi as usize] = 1
             }
             // Study block: functions inside get implicit Hypothesis effect (bit 256)
             if sig_study_depth > 0 {
@@ -28423,8 +28458,30 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             var dup_i: i64 = 0
             while dup_i < sig_fi {
                 if name_eq(FN_NS[dup_i as usize], FN_NE[dup_i as usize], FN_NS[sig_fi as usize], FN_NE[sig_fi as usize]) {
-                    if FN_RECV_HASH[dup_i as usize] == FN_RECV_HASH[sig_fi as usize] {
-                        tc_duplicate_fn(FN_NAME_TOK[sig_fi as usize])
+                    if FN_ARITY[dup_i as usize] != FN_ARITY[sig_fi as usize] {
+                        // Same name, different arity. Free-call resolution
+                        // (fn_find) is name-only — it ignores FN_RECV_HASH — so it
+                        // will resolve calls to the wrong-arity definition and
+                        // silently miscompile. Safe ONLY when BOTH defs are true
+                        // impl-block methods on distinct receivers: those are
+                        // dot-called through the recv-aware fn_find_method and
+                        // never collide. Anything else (two free fns, a free fn
+                        // vs a method, or UFCS free fns with struct receivers) is
+                        // a bundle-structural error.
+                        let both_methods = FN_IN_IMPL[dup_i as usize] == 1 && FN_IN_IMPL[sig_fi as usize] == 1
+                        if both_methods && FN_RECV_HASH[dup_i as usize] != FN_RECV_HASH[sig_fi as usize] {
+                            // legit method overloading across distinct types
+                        } else {
+                            tc_conflicting_arity_fn(FN_NAME_TOK[sig_fi as usize])
+                        }
+                    } else {
+                        // Same name, same arity. Preserve prior behavior: a soft
+                        // warning only when the receiver also matches (e.g. every
+                        // module's 0-arg `run_tests`); distinct-receiver methods
+                        // are fine.
+                        if FN_RECV_HASH[dup_i as usize] == FN_RECV_HASH[sig_fi as usize] {
+                            tc_duplicate_fn(FN_NAME_TOK[sig_fi as usize])
+                        }
                     }
                 }
                 dup_i = dup_i + 1

@@ -640,6 +640,65 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     while mti < 8 { var mtr:[f64;64]=[0.0;64]; mtr[0]=0.0; mtr[1]=mtv[mti]; bf_push_row(&!mtf,&mtr,2); mti=mti+1 }
     let mt = bf_mode_by(&mtf, 0, 1)
     if !approx_eq(lookup2(&mt, 0.0), 2.0) { print("FAIL mode_tie\n"); return 233 }
+    // ROLLING CORR. x=i, y=2i (perfectly correlated) -> rolling corr = 1.0 for every full window;
+    // y2=-i (anti) -> -1.0. window 50 over 5000 rows. fill=-2.0 sentinel.
+    var rcf = bf_new(3, 16)
+    var rcii: i64 = 0
+    while rcii < 5000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=rcii as f64; rcr[1]=(2*rcii) as f64; rcr[2]=(0-rcii) as f64; bf_push_row(&!rcf,&rcr,3); rcii=rcii+1 }
+    let rcp = bf_rolling_corr(&rcf, 0, 1, 50, 0.0 - 2.0)
+    let rcn = bf_rolling_corr(&rcf, 0, 2, 50, 0.0 - 2.0)
+    if bf_nrows(&rcp) != 5000 { print("FAIL rcorr_n\n"); return 234 }
+    if bf_get(&rcp, 48, 0) != (0.0 - 2.0) { print("FAIL rcorr_fill\n"); return 235 }   // window not full
+    if !approx_eq(bf_get(&rcp, 49, 0), 1.0) { print("FAIL rcorr_pos49\n"); return 236 }
+    if !approx_eq(bf_get(&rcp, 2500, 0), 1.0) { print("FAIL rcorr_pos\n"); return 237 }
+    if !approx_eq(bf_get(&rcn, 2500, 0), 0.0 - 1.0) { print("FAIL rcorr_neg\n"); return 238 }
+    // varied (pandas-verified): x=(i*7)%13, y=(i*11)%17, window 100.
+    var rvf2 = bf_new(2, 16)
+    var rvfi2: i64 = 0
+    while rvfi2 < 5000 { var rvr2:[f64;64]=[0.0;64]; rvr2[0]=((rvfi2*7)%13) as f64; rvr2[1]=((rvfi2*11)%17) as f64; bf_push_row(&!rvf2,&rvr2,2); rvfi2=rvfi2+1 }
+    let rvc2 = bf_rolling_corr(&rvf2, 0, 1, 100, 0.0 - 2.0)
+    // references are pandas values rounded to 6 dp -> compare with a 1e-5 tolerance.
+    var rcd1 = bf_get(&rvc2, 100, 0) - 0.008766
+    if rcd1 < 0.0 { rcd1 = 0.0 - rcd1 }
+    if rcd1 > 0.00001 { print("FAIL rcorr_var100\n"); return 239 }
+    var rcd2 = bf_get(&rvc2, 2000, 0) - (0.0 - 0.033538)
+    if rcd2 < 0.0 { rcd2 = 0.0 - rcd2 }
+    if rcd2 > 0.00001 { print("FAIL rcorr_var2000\n"); return 240 }
+    // ROLLING COV. x=i, y=2i, const=5, window 50. cov(x,x)=var, cov(x,2x)=2var, cov(x,const)=0.
+    var kvf = bf_new(3, 16)
+    var kvi: i64 = 0
+    while kvi < 5000 { var kvr:[f64;64]=[0.0;64]; kvr[0]=kvi as f64; kvr[1]=(2*kvi) as f64; kvr[2]=5.0; bf_push_row(&!kvf,&kvr,3); kvi=kvi+1 }
+    let kc1 = bf_rolling_cov(&kvf, 0, 1, 50, 0.0 - 999.0)  // cov(x,2x)
+    let kc2 = bf_rolling_cov(&kvf, 0, 0, 50, 0.0 - 999.0)  // cov(x,x)=var
+    let kc3 = bf_rolling_cov(&kvf, 0, 2, 50, 0.0 - 999.0)  // cov(x,const)=0
+    if bf_nrows(&kc1) != 5000 { print("FAIL rcov_n\n"); return 241 }
+    if !approx_eq(bf_get(&kc1, 2500, 0), 425.0) { print("FAIL rcov_2x\n"); return 242 }   // 2*var(50 consecutive)
+    if !approx_eq(bf_get(&kc2, 2500, 0), 212.5) { print("FAIL rcov_xx\n"); return 243 }
+    if !approx_eq(bf_get(&kc3, 2500, 0), 0.0) { print("FAIL rcov_const\n"); return 244 }
+    // ROLLING SKEW. varied data matches pandas to 6 dp (1e-5 tol). Symmetric window -> ~0.
+    var skf = bf_new(1, 16)
+    var ski: i64 = 0
+    while ski < 5000 { var skr:[f64;64]=[0.0;64]; skr[0]=((ski*7)%13 + (ski%5)) as f64; bf_push_row(&!skf,&skr,1); ski=ski+1 }
+    let sk = bf_rolling_skew(&skf, 0, 100, 0.0 - 999.0)
+    var skd1 = bf_get(&sk, 100, 0) - 0.005080
+    if skd1 < 0.0 { skd1 = 0.0 - skd1 }
+    if skd1 > 0.00001 { print("FAIL rskew_100\n"); return 245 }
+    var skd2 = bf_get(&sk, 2000, 0) - (0.0 - 0.012472)
+    if skd2 < 0.0 { skd2 = 0.0 - skd2 }
+    if skd2 > 0.00001 { print("FAIL rskew_2000\n"); return 246 }
+    // ROLLING KURT. varied data matches pandas to 6 dp (1e-5 tol). window 100.
+    var kuf = bf_new(1, 16)
+    var kui: i64 = 0
+    while kui < 5000 { var kur:[f64;64]=[0.0;64]; kur[0]=((kui*7)%13 + (kui%5)) as f64; bf_push_row(&!kuf,&kur,1); kui=kui+1 }
+    let ku = bf_rolling_kurt(&kuf, 0, 100, 0.0 - 999.0)
+    if bf_nrows(&ku) != 5000 { print("FAIL rkurt_n\n"); return 247 }
+    if bf_get(&ku, 98, 0) != (0.0 - 999.0) { print("FAIL rkurt_fill\n"); return 248 }   // window not full
+    var kud1 = bf_get(&ku, 100, 0) - (0.0 - 0.913665)
+    if kud1 < 0.0 { kud1 = 0.0 - kud1 }
+    if kud1 > 0.00001 { print("FAIL rkurt_100\n"); return 249 }
+    var kud2 = bf_get(&ku, 4999, 0) - (0.0 - 0.990208)
+    if kud2 < 0.0 { kud2 = 0.0 - kud2 }
+    if kud2 > 0.00001 { print("FAIL rkurt_4999\n"); return 250 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
