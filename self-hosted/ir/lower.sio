@@ -598,6 +598,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.prof_counter_id = (*summary.module).functions[i as usize].prof_counter_id
         func.hyper_algebra_kind = (*summary.module).functions[i as usize].hyper_algebra_kind
         func.bss_size = (*summary.module).functions[i as usize].bss_size
+        func.first_param_is_ref = (*summary.module).functions[i as usize].first_param_is_ref
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -686,6 +687,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.prof_counter_id = summary.module.functions[i as usize].prof_counter_id
         func.hyper_algebra_kind = summary.module.functions[i as usize].hyper_algebra_kind
         func.bss_size = summary.module.functions[i as usize].bss_size
+        func.first_param_is_ref = summary.module.functions[i as usize].first_param_is_ref
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -845,6 +847,7 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
+    fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
         if fn_slot.prof_counter_id < 0 {
@@ -976,6 +979,18 @@ fn lowerer_preseed_external_struct_items_mut(
                     match *fn_def_opt_ref {
                         Some(fd) => {
                             lowerer_preseed_fn_signature_mut(lo, head_owned.name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                        }
+                        _ => {}
+                    }
+                }
+                // Root 2 multi-module: preseed mangled impl methods (Type_method)
+                // so seed-module call sites resolve E_get with first_param_is_ref /
+                // return_struct_name instead of inventing a body-less bare "get".
+                if head_owned.kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head_owned.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            lowerer_preseed_impl_method_summaries_mut(lo, head_owned.name, &(*id).methods, ir_empty_name())
                         }
                         _ => {}
                     }
@@ -1312,6 +1327,7 @@ fn lowerer_preseed_program_items_mut(
                                     fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                     fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                     fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                                    fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                                         fn_slot_sig.param_count = fn_slot_sig.param_count + 1
                                         if fn_slot_sig.prof_counter_id < 0 {
@@ -1443,6 +1459,7 @@ fn ir_fast_summary_preseed_fn_signature(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         module_value.functions[fn_id as usize].param_count = module_value.functions[fn_id as usize].param_count + 1
         if module_value.functions[fn_id as usize].prof_counter_id < 0 {
@@ -1567,6 +1584,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         module_value.functions[fn_id as usize].param_count = module_value.functions[fn_id as usize].param_count + 1
         if module_value.functions[fn_id as usize].prof_counter_id < 0 {
@@ -1881,6 +1899,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
                                     module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                     if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -1974,6 +1993,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                                        module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
                                                             module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                                             if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -2329,6 +2349,7 @@ fn lowerer_lower_fn_item_mut(
         current_func.compile_strategy = preserved.compile_strategy
         current_func.returns_float = preserved.returns_float
         current_func.return_struct_name = preserved.return_struct_name
+        current_func.first_param_is_ref = preserved.first_param_is_ref
         current_func.prof_counter_id = preserved.prof_counter_id
     }
     (*lo).current_func = Box::new(current_func)
@@ -2368,6 +2389,7 @@ fn lowerer_lower_fn_item_mut(
     }
     (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+    (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*lo).current_func = strategy_func_box
 
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -2743,6 +2765,16 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
 
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
     (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
+}
+
+// True when the first parameter is &T / &!T (typical method self-by-ref).
+fn lower_fn_first_param_is_ref(params: &Option<Box<ParamList>>) -> i64 with Alloc, Mut, Div {
+    match *params {
+        Some(list) => {
+            if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+        }
+        None => 0,
+    }
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -3332,6 +3364,7 @@ impl Lowerer {
             current_func.compile_strategy = preserved.compile_strategy
             current_func.returns_float = preserved.returns_float
             current_func.return_struct_name = preserved.return_struct_name
+            current_func.first_param_is_ref = preserved.first_param_is_ref
             current_func.prof_counter_id = preserved.prof_counter_id
         }
         lo.current_func = Box::new(current_func)
@@ -4891,7 +4924,13 @@ impl Lowerer {
                 if (*callee_expr).kind == ExprKind::ExprIdent {
                     callee_name = (*callee_expr).name
                 } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    callee_name = ir_path_first_name((*callee_expr).path)
+                    let first = ir_path_first_name((*callee_expr).path)
+                    let last = ir_path_last_name((*callee_expr).path)
+                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
+                        callee_name = ir_mangle_method_name(first, last)
+                    } else {
+                        callee_name = first
+                    }
                 } else {
                     return ir_empty_name()
                 }
@@ -5480,6 +5519,20 @@ impl Lowerer {
                     }
                 }
                 None => {}
+            }
+            return false
+        }
+        // print(e.val()) / method results: same returns_float lookup as ExprCall.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return self.module.functions[fn_id as usize].returns_float == 1
             }
             return false
         }
@@ -6088,6 +6141,7 @@ impl Lowerer {
         func.returns_float = lower_opt_return_float_code(return_type)
         func.return_struct_name = lower_opt_type_named_name(return_type)
         func.param_count = ir_param_list_count_ref(params)
+        func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
         func.instr_count = 0
         func.reg_count = 0
@@ -6687,6 +6741,7 @@ impl Lowerer {
             current_func.compile_strategy = preserved.compile_strategy
             current_func.returns_float = preserved.returns_float
             current_func.return_struct_name = preserved.return_struct_name
+            current_func.first_param_is_ref = preserved.first_param_is_ref
             current_func.prof_counter_id = preserved.prof_counter_id
         }
         lo.current_func = Box::new(current_func)
@@ -6729,6 +6784,7 @@ impl Lowerer {
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         // Sprint 44: allocate profiling counter for instrumented functions
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6874,6 +6930,7 @@ impl Lowerer {
             current_func.compile_strategy = preserved.compile_strategy
             current_func.returns_float = preserved.returns_float
             current_func.return_struct_name = preserved.return_struct_name
+            current_func.first_param_is_ref = preserved.first_param_is_ref
             current_func.prof_counter_id = preserved.prof_counter_id
         }
         lo.current_func = Box::new(current_func)
@@ -6903,6 +6960,7 @@ impl Lowerer {
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
             if (*lo.current_func).prof_counter_id < 0 {
@@ -7390,6 +7448,20 @@ impl Lowerer {
                         // "Box" so `*b` lowers to a field-0 read (box deref through the
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
                         lo = lo.bind_local_struct_type(s.name, callee_struct_name)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprMethodCall {
+                    // `let s = a.add(&b)`: bind s to the method's return struct so
+                    // `s.get()` mangles to Type_get (Root 2 chain residual).
+                    let recv_type = lo.lower_method_recv_type(&(*expr_box).left)
+                    let call_name = if recv_type.len > 0 {
+                        ir_mangle_method_name(recv_type, (*expr_box).name)
+                    } else {
+                        (*expr_box).name
+                    }
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, call_name)
+                    let ret_name = lo.return_struct_name_for_fn_id(fn_id)
+                    if ret_name.len > 0 {
+                        lo = lo.bind_local_struct_type(s.name, ret_name)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
@@ -7911,7 +7983,14 @@ impl Lowerer {
         if e.kind == ExprKind::ExprIdent {
             e.name
         } else if e.kind == ExprKind::ExprPath {
-            ir_path_first_name(e.path)
+            // Type::method → Type_method (matches ir_mangle_method_name for impl methods).
+            // Using only the first path segment mis-resolves E::of as bare "E" (body-less).
+            let first = ir_path_first_name(e.path)
+            let last = ir_path_last_name(e.path)
+            if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
+                return ir_mangle_method_name(first, last)
+            }
+            first
         } else if e.kind == ExprKind::ExprFieldAccess {
             e.name
         } else if e.kind == ExprKind::ExprMethodCall {
@@ -9466,8 +9545,41 @@ impl Lowerer {
         let recv_type = self.lower_method_recv_type(&e.left)
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_b.0
-        let base_reg = pair_b.1
+        var lo1 = pair_b.0
+        var base_reg = pair_b.1
+        // Root 2: &self methods need a pointer. Free-form e_get(&x) works because
+        // the caller passes OpRef; method syntax x.get() previously passed the
+        // loaded struct value and SEGV'd. Auto-ref when first_param_is_ref and
+        // the receiver is not already a reference binding / &expr.
+        let pair_fn0 = lo1.find_or_add_fn_id(call_name)
+        lo1 = pair_fn0.0
+        let fn_id0 = pair_fn0.1
+        var needs_ref = false
+        if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            needs_ref = (*lo1.module).functions[fn_id0 as usize].first_param_is_ref == 1
+        }
+        if needs_ref {
+            var already_ref = false
+            match e.left {
+                Some(recv) => {
+                    if (*recv).kind == ExprKind::ExprIdent {
+                        already_ref = lo1.lookup_local_is_ref((*recv).name)
+                    } else if (*recv).kind == ExprKind::ExprUnary {
+                        if (*recv).un_op == UnaryOp::OpRef || (*recv).un_op == UnaryOp::OpRefMut {
+                            already_ref = true
+                        }
+                    }
+                }
+                None => {}
+            }
+            if !already_ref {
+                let pair_aref = lo1.fresh_reg()
+                lo1 = pair_aref.0
+                let areg = pair_aref.1
+                lo1 = lo1.emit(ir_unaryop(areg, UnaryOp::OpRef, base_reg))
+                base_reg = areg
+            }
+        }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
         let lo2 = pair_args.lowerer
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }

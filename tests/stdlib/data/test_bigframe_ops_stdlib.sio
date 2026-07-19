@@ -19,6 +19,34 @@ fn approx_eq(a: f64, b: f64) -> bool {
     return ad < 0.0000001
 }
 
+// naive per-window median (sort a copy each window) -- reference for bf_rolling_median.
+fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n); out.n_rows = n; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(window * 8) as *mut f64
+    let half = window / 2; let odd = window - 2 * (window / 2)
+    var i: i64 = 0
+    while i < n {
+        if i >= window - 1 {
+            var t: i64 = 0
+            while t < window { write_f64(buf, t, read_f64(sp, i - window + 1 + t)); t = t + 1 }
+            var a: i64 = 1
+            while a < window {                    // insertion sort
+                let key = read_f64(buf, a); var b = a - 1
+                while b >= 0 && read_f64(buf, b) > key { write_f64(buf, b + 1, read_f64(buf, b)); b = b - 1 }
+                write_f64(buf, b + 1, key); a = a + 1
+            }
+            var med = 0.0
+            if odd == 1 { med = read_f64(buf, half) } else { med = (read_f64(buf, half - 1) + read_f64(buf, half)) / 2.0 }
+            write_f64(op, i, med)
+        } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    heap_free(buf as *mut i8)
+    out
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let n: i64 = 1000000
 
@@ -362,6 +390,169 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if bf_get(&pc, 1, 0) != 1.0 { print("FAIL pct1\n"); return 145 }      // (2-1)/1
     if bf_get(&pc, 2, 0) != 0.5 { print("FAIL pct2\n"); return 146 }      // (3-2)/2
     if bf_get(&pc, 4, 0) != 0.25 { print("FAIL pct4\n"); return 147 }     // (5-4)/4
+    // EWM (exponentially weighted moving mean).
+    // (a) adjust=false, alpha=0.5, impulse x=[0,4,0,0,...] -> y=[0,2,1,0.5,0.25,...] (exact).
+    var ef = bf_new(1, 16)
+    var efi: i64 = 0
+    while efi < 1000 { var er:[f64;64]=[0.0;64]; if efi == 1 { er[0]=4.0 } else { er[0]=0.0 } bf_push_row(&!ef,&er,1); efi=efi+1 }
+    let ew = bf_ewm_mean(&ef, 0, 0.5, false)
+    if bf_nrows(&ew) != 1000 { print("FAIL ewm_n\n"); return 148 }
+    if bf_get(&ew, 0, 0) != 0.0 { print("FAIL ewm0\n"); return 149 }
+    if bf_get(&ew, 1, 0) != 2.0 { print("FAIL ewm1\n"); return 150 }    // 0.5*0 + 0.5*4
+    if bf_get(&ew, 2, 0) != 1.0 { print("FAIL ewm2\n"); return 151 }    // 0.5*2
+    if bf_get(&ew, 3, 0) != 0.5 { print("FAIL ewm3\n"); return 152 }
+    if bf_get(&ew, 4, 0) != 0.25 { print("FAIL ewm4\n"); return 153 }
+    // (b) constant input -> both modes return the constant (weighted mean of equal values).
+    var ec = bf_new(1, 16)
+    var eci: i64 = 0
+    while eci < 1000 { var cr2:[f64;64]=[0.0;64]; cr2[0]=5.0; bf_push_row(&!ec,&cr2,1); eci=eci+1 }
+    let eca = bf_ewm_mean(&ec, 0, 0.3, true)
+    if !approx_eq(bf_get(&eca, 500, 0), 5.0) { print("FAIL ewm_const_adj\n"); return 154 }
+    let ecf = bf_ewm_mean(&ec, 0, 0.3, false)
+    if !approx_eq(bf_get(&ecf, 500, 0), 5.0) { print("FAIL ewm_const_noadj\n"); return 155 }
+    // (c) adjust=true, alpha=0.3, x=(i*7)%13: y[1] = (7 + 0.7*0)/(1+0.7) = 7/1.7 (pandas-verified).
+    var ev = bf_new(1, 16)
+    var evi: i64 = 0
+    while evi < 1000 { var vr2:[f64;64]=[0.0;64]; vr2[0]=((evi*7)%13) as f64; bf_push_row(&!ev,&vr2,1); evi=evi+1 }
+    let eva = bf_ewm_mean(&ev, 0, 0.3, true)
+    if bf_get(&eva, 0, 0) != 0.0 { print("FAIL ewm_adj0\n"); return 156 }
+    if !approx_eq(bf_get(&eva, 1, 0), 4.1176470588) { print("FAIL ewm_adj1\n"); return 157 }  // 7/1.7
+    let evf = bf_ewm_mean(&ev, 0, 0.3, false)
+    if !approx_eq(bf_get(&evf, 1, 0), 2.1) { print("FAIL ewm_noadj1\n"); return 158 }         // 0.3*7
+    // EXPANDING mean / var / std over x=(i*7)%13, validated against pandas-computed values.
+    var xf2 = bf_new(1, 16)
+    var xf2i: i64 = 0
+    while xf2i < 1000 { var xr2:[f64;64]=[0.0;64]; xr2[0]=((xf2i*7)%13) as f64; bf_push_row(&!xf2,&xr2,1); xf2i=xf2i+1 }
+    let em2 = bf_expanding_mean(&xf2, 0)
+    if bf_nrows(&em2) != 1000 { print("FAIL exp_mean_n\n"); return 159 }
+    if bf_get(&em2, 0, 0) != 0.0 { print("FAIL exp_mean0\n"); return 160 }
+    if !approx_eq(bf_get(&em2, 1, 0), 3.5) { print("FAIL exp_mean1\n"); return 161 }     // (0+7)/2
+    if !approx_eq(bf_get(&em2, 999, 0), 6.0) { print("FAIL exp_mean999\n"); return 162 } // pandas-verified
+    let ev2 = bf_expanding_var(&xf2, 0, 0.0 - 1.0)
+    if bf_get(&ev2, 0, 0) != (0.0 - 1.0) { print("FAIL exp_var0\n"); return 163 }        // undefined -> fill
+    if !approx_eq(bf_get(&ev2, 1, 0), 24.5) { print("FAIL exp_var1\n"); return 164 }     // var([0,7], ddof1)
+    if !approx_eq(bf_get(&ev2, 999, 0), 14.02802803) { print("FAIL exp_var999\n"); return 165 } // pandas-verified
+    let es2 = bf_expanding_std(&xf2, 0, 0.0 - 1.0)
+    if bf_get(&es2, 0, 0) != (0.0 - 1.0) { print("FAIL exp_std0\n"); return 166 }
+    if !approx_eq(bf_get(&es2, 1, 0), 4.94974747) { print("FAIL exp_std1\n"); return 167 }      // sqrt(24.5)
+    if !approx_eq(bf_get(&es2, 999, 0), 3.74540090) { print("FAIL exp_std999\n"); return 168 }  // sqrt(14.028)
+    // RANK (ascending, 1-based). x=[30,10,20,10,40] (tie at 10). All 4 methods pandas-verified.
+    var rf2 = bf_new(1, 16)
+    var rvals: [f64;5] = [30.0, 10.0, 20.0, 10.0, 40.0]
+    var rvi: i64 = 0
+    while rvi < 5 { var rrow:[f64;64]=[0.0;64]; rrow[0]=rvals[rvi]; bf_push_row(&!rf2,&rrow,1); rvi=rvi+1 }
+    let rkA = bf_rank(&rf2, 0, 0)   // average -> [4, 1.5, 3, 1.5, 5]
+    if bf_nrows(&rkA) != 5 { print("FAIL rank_n\n"); return 169 }
+    if bf_get(&rkA,0,0) != 4.0 || bf_get(&rkA,1,0) != 1.5 || bf_get(&rkA,2,0) != 3.0 || bf_get(&rkA,3,0) != 1.5 || bf_get(&rkA,4,0) != 5.0 { print("FAIL rank_avg\n"); return 170 }
+    let rkM = bf_rank(&rf2, 0, 1)   // min -> [4, 1, 3, 1, 5]
+    if bf_get(&rkM,1,0) != 1.0 || bf_get(&rkM,3,0) != 1.0 || bf_get(&rkM,0,0) != 4.0 { print("FAIL rank_min\n"); return 171 }
+    let rkX = bf_rank(&rf2, 0, 2)   // max -> [4, 2, 3, 2, 5]
+    if bf_get(&rkX,1,0) != 2.0 || bf_get(&rkX,3,0) != 2.0 { print("FAIL rank_max\n"); return 172 }
+    let rkD = bf_rank(&rf2, 0, 3)   // dense -> [3, 1, 2, 1, 4]
+    if bf_get(&rkD,0,0) != 3.0 || bf_get(&rkD,1,0) != 1.0 || bf_get(&rkD,2,0) != 2.0 || bf_get(&rkD,4,0) != 4.0 { print("FAIL rank_dense\n"); return 173 }
+    // SCALE: average-rank of 1M rows is a permutation-average -> sum == n(n+1)/2 exactly.
+    var rbig = bf_new(1, 16)
+    var rbi: i64 = 0
+    while rbi < 1000000 { var brow:[f64;64]=[0.0;64]; brow[0]=((rbi*7)%1000) as f64; bf_push_row(&!rbig,&brow,1); rbi=rbi+1 }
+    let rkbig = bf_rank(&rbig, 0, 0)
+    if bf_nrows(&rkbig) != 1000000 { print("FAIL rank_big_n\n"); return 174 }
+    var rksum = bf_col_sum(&rkbig, 0)
+    if rksum < 499999999999.0 || rksum > 500001000000.0 { print("FAIL rank_big_sum\n"); return 175 }  // n(n+1)/2 = 500000500000
+    // QUANTILE / MEDIAN (pandas linear interpolation). x=[50,10,40,20,30] -> sorted [10,20,30,40,50].
+    var qf = bf_new(1, 16)
+    var qvals: [f64;5] = [50.0, 10.0, 40.0, 20.0, 30.0]
+    var qvi: i64 = 0
+    while qvi < 5 { var qrow:[f64;64]=[0.0;64]; qrow[0]=qvals[qvi]; bf_push_row(&!qf,&qrow,1); qvi=qvi+1 }
+    if !approx_eq(bf_quantile(&qf,0,0.0), 10.0) { print("FAIL q0\n"); return 176 }
+    if !approx_eq(bf_quantile(&qf,0,0.1), 14.0) { print("FAIL q10\n"); return 177 }    // 10 + 0.4*(20-10)
+    if !approx_eq(bf_quantile(&qf,0,0.25), 20.0) { print("FAIL q25\n"); return 178 }
+    if !approx_eq(bf_median(&qf,0), 30.0) { print("FAIL median\n"); return 179 }
+    if !approx_eq(bf_quantile(&qf,0,0.9), 46.0) { print("FAIL q90\n"); return 180 }    // 40 + 0.6*(50-40)
+    if !approx_eq(bf_quantile(&qf,0,1.0), 50.0) { print("FAIL q100\n"); return 181 }
+    // Constant column (duplicate-heavy quickselect stress -> must stay O(n), correct).
+    var qc = bf_new(1, 16); var qci: i64 = 0
+    while qci < 5000 { var ccr:[f64;64]=[0.0;64]; ccr[0]=7.0; bf_push_row(&!qc,&ccr,1); qci=qci+1 }
+    if !approx_eq(bf_median(&qc,0), 7.0) { print("FAIL const_median\n"); return 182 }
+    // SCALE: col=i over 1M rows -> median = 499999.5 (interp of sorted[499999],sorted[500000]).
+    var qbig = bf_new(1, 16); var qbi: i64 = 0
+    while qbi < 1000000 { var qbr:[f64;64]=[0.0;64]; qbr[0]=qbi as f64; bf_push_row(&!qbig,&qbr,1); qbi=qbi+1 }
+    if !approx_eq(bf_median(&qbig,0), 499999.5) { print("FAIL big_median\n"); return 183 }
+    if !approx_eq(bf_quantile(&qbig,0,0.0), 0.0) { print("FAIL big_q0\n"); return 184 }
+    if !approx_eq(bf_quantile(&qbig,0,1.0), 999999.0) { print("FAIL big_q1\n"); return 185 }
+    // COV / CORR. Small: x=[1,2,3,4,5], y=[2,4,6,8,10] (cov=5, corr=1); y2=[5,4,3,2,1] (corr=-1).
+    var cvf = bf_new(3, 16)
+    var cx:[f64;5]=[1.0,2.0,3.0,4.0,5.0]; var cy:[f64;5]=[2.0,4.0,6.0,8.0,10.0]; var cy2:[f64;5]=[5.0,4.0,3.0,2.0,1.0]
+    var cvi: i64 = 0
+    while cvi < 5 { var cvr:[f64;64]=[0.0;64]; cvr[0]=cx[cvi]; cvr[1]=cy[cvi]; cvr[2]=cy2[cvi]; bf_push_row(&!cvf,&cvr,3); cvi=cvi+1 }
+    if !approx_eq(bf_cov(&cvf,0,1), 5.0) { print("FAIL cov_small\n"); return 186 }
+    if !approx_eq(bf_corr(&cvf,0,1), 1.0) { print("FAIL corr_pos\n"); return 187 }
+    if !approx_eq(bf_corr(&cvf,0,2), 0.0 - 1.0) { print("FAIL corr_neg\n"); return 188 }
+    // LARGE-MAGNITUDE corr: x=1e9+i, y=1e9+2i (perfectly correlated) -> corr MUST be 1.0.
+    // This routes bf_sqrt over cxx*cyy ~ 2.8e28; the BUGGY builtin sqrt returned 6e-9 here.
+    var lmf = bf_new(2, 16)
+    var lmi: i64 = 0
+    while lmi < 100000 { var lmr:[f64;64]=[0.0;64]; lmr[0]=1000000000.0+(lmi as f64); lmr[1]=1000000000.0+(2*lmi) as f64; bf_push_row(&!lmf,&lmr,2); lmi=lmi+1 }
+    if !approx_eq(bf_corr(&lmf,0,1), 1.0) { print("FAIL corr_largemag\n"); return 189 }
+    var lmcov = bf_cov(&lmf,0,1)
+    if lmcov < 1666683000.0 || lmcov > 1666683700.0 { print("FAIL cov_largemag\n"); return 190 }  // 1666683333.33
+    // LARGE-VARIANCE expanding_std (locks the sqrt correctness fix): alternating [0, 2e6] x 1M rows
+    // -> final sample std = 1000000.5. The OLD builtin sqrt(var~1e12) gave ~1279997 (WRONG); the
+    // correct bf_sqrt gives ~1000000.5, so this range would FAIL under the buggy sqrt.
+    var lvf = bf_new(1, 16)
+    var lvi: i64 = 0
+    while lvi < 1000000 { var lvr:[f64;64]=[0.0;64]; if lvi%2==1 { lvr[0]=2000000.0 } else { lvr[0]=0.0 } bf_push_row(&!lvf,&lvr,1); lvi=lvi+1 }
+    let lvstd = bf_expanding_std(&lvf, 0, 0.0 - 1.0)
+    var lvlast = bf_get(&lvstd, 999999, 0)
+    if lvlast < 1000000.0 || lvlast > 1000001.0 { print("FAIL expstd_largevar\n"); return 191 }  // 1000000.5; buggy sqrt ~1279997 excluded
+    // ROLLING VAR / STD. col0=i, col1=i*1000000 (large-var lock). fill=-1.0.
+    var rvf = bf_new(2, 16)
+    var rvfi: i64 = 0
+    while rvfi < 100000 { var rvr:[f64;64]=[0.0;64]; rvr[0]=rvfi as f64; rvr[1]=(rvfi*1000000) as f64; bf_push_row(&!rvf,&rvr,2); rvfi=rvfi+1 }
+    // window 3 over consecutive ints -> var=1, std=1 for i>=2 (devs {-1,0,1}, Σ=2, /2=1).
+    let rvv = bf_rolling_var(&rvf, 0, 3, 0.0 - 1.0)
+    let rvs = bf_rolling_std(&rvf, 0, 3, 0.0 - 1.0)
+    if bf_nrows(&rvv) != 100000 { print("FAIL rvar_n\n"); return 192 }
+    if bf_get(&rvv, 1, 0) != (0.0 - 1.0) { print("FAIL rvar_fill\n"); return 193 }   // window not full
+    if !approx_eq(bf_get(&rvv, 2, 0), 1.0) { print("FAIL rvar2\n"); return 194 }
+    if !approx_eq(bf_get(&rvv, 50000, 0), 1.0) { print("FAIL rvar50k\n"); return 195 }
+    if !approx_eq(bf_get(&rvs, 50000, 0), 1.0) { print("FAIL rstd50k\n"); return 196 }
+    // window 3 over col1=i*1e6 (strongly trending, values up to ~1e11) -> devs {-1e6,0,1e6},
+    // var=1e12 EXACT, std=1e6. Welford stays exact here (a naive S2-S1²/w cancels to ~0.1% off).
+    // std also LOCKS bf_sqrt: the buggy builtin sqrt(1e12) gave ~1279997, outside the range.
+    let rvvL = bf_rolling_var(&rvf, 1, 3, 0.0 - 1.0)
+    let rvsL = bf_rolling_std(&rvf, 1, 3, 0.0 - 1.0)
+    var rvL = bf_get(&rvvL, 99999, 0)
+    if rvL < 999999999.0 || rvL > 1000000000001.0 { print("FAIL rvar_large\n"); return 197 }       // 1e12 (Welford exact)
+    if !approx_eq(rvL / 1000000000000.0, 1.0) { print("FAIL rvar_large_exact\n"); return 198 }      // relative: essentially exact
+    var rsL = bf_get(&rvsL, 99999, 0)
+    if rsL < 999999.0 || rsL > 1000001.0 { print("FAIL rstd_large\n"); return 199 }                 // 1e6; buggy sqrt ~1.28e6 excluded
+    // constant window -> var=0, std=0.
+    var rcf = bf_new(1, 16); var rci: i64 = 0
+    while rci < 1000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=42.0; bf_push_row(&!rcf,&rcr,1); rci=rci+1 }
+    let rcv = bf_rolling_var(&rcf, 0, 100, 0.0 - 1.0)
+    let rcs = bf_rolling_std(&rcf, 0, 100, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rcv, 500, 0), 0.0) { print("FAIL rvar_const\n"); return 201 }
+    if !approx_eq(bf_get(&rcs, 500, 0), 0.0) { print("FAIL rstd_const\n"); return 202 }
+    // ROLLING MEDIAN. Exact small cases (odd + even window) then a differential vs the naive
+    // per-window sort on scrambled + duplicate-heavy data (validates binary-search insert/remove).
+    var rmf = bf_new(1, 16)
+    var rmi: i64 = 0
+    while rmi < 2000 { var rmr:[f64;64]=[0.0;64]; rmr[0]=(rmi%37) as f64; bf_push_row(&!rmf,&rmr,1); rmi=rmi+1 }
+    let rm5 = bf_rolling_median(&rmf, 0, 5, 0.0 - 1.0)   // window 5 over 0..36 sawtooth
+    if bf_get(&rm5, 3, 0) != (0.0 - 1.0) { print("FAIL rmed_fill\n"); return 203 }   // window not full
+    if !approx_eq(bf_get(&rm5, 4, 0), 2.0) { print("FAIL rmed5a\n"); return 204 }    // median[0..4]=median(0,1,2,3,4)=2
+    if !approx_eq(bf_get(&rm5, 9, 0), 7.0) { print("FAIL rmed5b\n"); return 205 }    // median(5,6,7,8,9)=7
+    let rm4 = bf_rolling_median(&rmf, 0, 4, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rm4, 3, 0), 1.5) { print("FAIL rmed4\n"); return 206 }     // even -> (1+2)/2 = 1.5
+    // DIFFERENTIAL vs naive: scrambled + dup-heavy col = (i*2654435761)%100, 3000 rows, window 50.
+    var rdf = bf_new(1, 16)
+    var rdi: i64 = 0
+    while rdi < 3000 { var rdr:[f64;64]=[0.0;64]; rdr[0]=((rdi*2654435761)%100) as f64; bf_push_row(&!rdf,&rdr,1); rdi=rdi+1 }
+    let rda = bf_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    let rdb = naive_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    var rdd: i64 = 0; var rdj: i64 = 0
+    while rdj < 3000 { if bf_get(&rda, rdj, 0) != bf_get(&rdb, rdj, 0) { rdd = rdd + 1 } rdj = rdj + 1 }
+    if rdd != 0 { print("FAIL rmed_vs_naive\n"); return 207 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
