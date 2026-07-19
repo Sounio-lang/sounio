@@ -9,7 +9,8 @@
 // exponentially weighted moving mean, expanding mean / var / std, rank,
 // quantile / median, covariance / correlation (+ a correct bf_sqrt), and
 // rolling variance / std, rolling median, cumulative product, and
-// per-group distinct-count (nunique), per-group idxmax / idxmin, and per-group mode.
+// per-group distinct-count (nunique), per-group idxmax / idxmin, per-group mode,
+// and rolling correlation.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -2319,5 +2320,73 @@ pub fn bf_mode_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with A
     heap_free(kk as *mut i8)
     heap_free(kbc as *mut i8)
     heap_free(kbv as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) Pearson correlation between columns `xcol` and `ycol`
+/// over `window` (like pandas x.rolling(window).corr(y)): out[i] = corr over the
+/// window ending at row i. A single pass with a WELFORD add/remove recurrence over
+/// two variables -- running means, the co-moment Cxy, and the two sums of squares
+/// Mx, My -- so it is numerically stable at every magnitude (never a difference of
+/// large sums). corr = Cxy / sqrt(Mx*My) via the correct bf_sqrt; a constant column
+/// (zero variance) yields 0. First window-1 rows take `fill`. O(n). NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_corr(src: &BigFrame, xcol: i64, ycol: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if xcol < 0 || xcol >= nc || ycol < 0 || ycol >= nc || n <= 0 || window <= 1 { return bf_new(1, 1) }
+    let xp = bf_col_ptr(src, xcol) as *mut f64
+    let yp = bf_col_ptr(src, ycol) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64                 // scratch for bf_sqrt
+    var mx = 0.0
+    var my = 0.0
+    var cxy = 0.0
+    var mxx = 0.0
+    var myy = 0.0
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if i >= window {                               // remove the pair leaving the window
+            let xo = read_f64(xp, i - window)
+            let yo = read_f64(yp, i - window)
+            cnt = cnt - 1
+            if cnt == 0 {
+                mx = 0.0
+                my = 0.0
+                cxy = 0.0
+                mxx = 0.0
+                myy = 0.0
+            } else {
+                let dx = xo - mx
+                let dy = yo - my
+                mx = mx - dx / (cnt as f64)
+                my = my - dy / (cnt as f64)
+                cxy = cxy - dx * (yo - my)
+                mxx = mxx - dx * (xo - mx)
+                myy = myy - dy * (yo - my)
+            }
+        }
+        let x = read_f64(xp, i)                        // add the entering pair
+        let y = read_f64(yp, i)
+        cnt = cnt + 1
+        let dx = x - mx
+        let dy = y - my
+        mx = mx + dx / (cnt as f64)
+        my = my + dy / (cnt as f64)
+        cxy = cxy + dx * (y - my)
+        mxx = mxx + dx * (x - mx)
+        myy = myy + dy * (y - my)
+        if i >= window - 1 {
+            let d = bf_sqrt(mxx * myy, sc)
+            if d == 0.0 { write_f64(op, i, 0.0) } else { write_f64(op, i, cxy / d) }
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
     out
 }
