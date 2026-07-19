@@ -60,7 +60,7 @@ has_legacy_compact_path() {
 }
 
 has_post_surface_work() {
-  grep -Eq 'run_check_mode: about to check|run_check_mode: verdict=|typecheck:|imported_compile:|module_frontend_full_ir: lower_|lower_array:|Merged IR:|Compilation successful!' "$1"
+  grep -Eq 'run_check_mode: about to check|run_check_mode: verdict=|typecheck:|imported_compile:|module_frontend_full_ir: lower_|lower_array:|Compilation successful!' "$1"
 }
 
 closure_has_valid_capacity() {
