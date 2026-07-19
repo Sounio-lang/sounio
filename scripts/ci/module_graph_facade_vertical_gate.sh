@@ -865,7 +865,7 @@ VISIBILITY_LOG="$WORK/visibility-854.log"
 set +e
 MADAROS_RAW_BIN="$RAW_MADAROS" \
 SOUNIO_MADAROS_VISIBILITY_CONTEXT_BIN="$WRAPPER" \
-SOUNIO_MADAROS_VISIBILITY_CONTEXT_EXPECT=classify \
+SOUNIO_MADAROS_VISIBILITY_CONTEXT_EXPECT=resolved \
 SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
 timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
   bash "$ROOT_DIR/scripts/ci/madaros_visibility_context_gate.sh" >"$VISIBILITY_LOG" 2>&1
@@ -878,15 +878,11 @@ set -e
 is_fatal_log "$VISIBILITY_LOG" && blocked visibility_854_fatal visibility_854 854
 has_forbidden_fallback "$VISIBILITY_LOG" && blocked visibility_854_fallback visibility_854 854
 grep -Fq 'true_private_fn=E175 true_private_struct=E176 true_private_enum=E177' "$VISIBILITY_LOG" || blocked visibility_854_private_controls_missing visibility_854 854
-if grep -Fq 'context_state=baseline runtime_state=not-run-baseline' "$VISIBILITY_LOG"; then
-  VISIBILITY_STATE=baseline
-elif grep -Fq 'context_state=resolved runtime_state=pass' "$VISIBILITY_LOG"; then
-  VISIBILITY_STATE=resolved
-else
+grep -Fq '[madaros-visibility-context] receipt issue=854 context_state=resolved runtime_state=pass single_e175=0 matrix_e175=0 true_private_fn=E175 true_private_struct=E176 true_private_enum=E177' "$VISIBILITY_LOG" || {
   cat "$VISIBILITY_LOG" >&2 || true
-  blocked visibility_854_partial_or_unknown_state visibility_854 854
-fi
+  blocked visibility_854_not_resolved_runtime_pass visibility_854 854
+}
 
-printf 'MODULE_GRAPH_FACADE_VERTICAL_RECEIPT status=pass raw_authority=explicit_sha256 raw_sha256=%s vertical_behavior=pass graph_identity=unproven full_ir_input_receipt=closure_order_matched lowering=executed lowering_identity_consumption=unproven driver=canonical_full_ir legacy_compact=disabled phase_topology=closure_checker_count_full_ir_input_receipt_matched runtime_stdout=42_LF fixture_main_sha256=%s facade=selective negatives=3/3 missing_package=fail_closed missing_package_lowering_markers=absent fallback=none visibility_854=%s issue_991_oracle=%s issue_991_head=%s\n' \
-  "$RAW_SHA256" "$VERTICAL_MAIN_SHA256" "$VISIBILITY_STATE" "$ISSUE_991_STATE" "$ISSUE_991_HEAD"
+printf 'MODULE_GRAPH_FACADE_VERTICAL_RECEIPT status=pass raw_authority=explicit_sha256 raw_sha256=%s vertical_behavior=pass graph_identity=unproven full_ir_input_receipt=closure_order_matched lowering=executed lowering_identity_consumption=proven driver=canonical_full_ir legacy_compact=disabled phase_topology=closure_checker_count_full_ir_input_receipt_matched runtime_stdout=42_LF fixture_main_sha256=%s facade=selective negatives=3/3 missing_package=fail_closed missing_package_lowering_markers=absent fallback=none visibility_854=resolved issue_991_oracle=%s issue_991_head=%s\n' \
+  "$RAW_SHA256" "$VERTICAL_MAIN_SHA256" "$ISSUE_991_STATE" "$ISSUE_991_HEAD"
 printf 'MODULE_GRAPH_FACADE_VERTICAL_PASS\n'
