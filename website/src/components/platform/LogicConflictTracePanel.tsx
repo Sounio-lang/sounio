@@ -102,7 +102,7 @@ export function LogicConflictTracePanel() {
             <span>Z3 Model: <span className="font-mono text-[var(--color-text-secondary)]">UNSAT</span></span>
             <span>Proof Time: <span className="font-mono text-[var(--color-text-secondary)]">12ms</span></span>
           </div>
-          <button className="text-xs font-semibold bg-[var(--color-surface)] border border-[var(--glass-border)] hover:border-[var(--color-accent-hyperlink)] text-[var(--color-text-primary)] px-4 py-2 rounded-lg transition-colors">
+          <button className="text-xs font-semibold bg-[var(--color-surface)] border border-[var(--glass-border)] hover:border-[var(--color-accent-blue)] text-[var(--color-text-primary)] px-4 py-2 rounded-lg transition-colors">
             Open in Editor
           </button>
         </div>

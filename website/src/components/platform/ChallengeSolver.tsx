@@ -166,7 +166,7 @@ export default function ChallengeSolver() {
         <div className="lg:col-span-2 flex flex-col gap-6">
           <div className="glass glass-specular border border-[var(--glass-border)] rounded-2xl p-8">
             <div className="flex flex-wrap gap-4 mb-6">
-              <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-[var(--color-accent-hyperlink)] uppercase tracking-tighter">
+              <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-[var(--color-accent-blue)] uppercase tracking-tighter">
                 Difficulty: {active.difficulty}
               </div>
               <div className="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-[10px] font-mono text-white uppercase tracking-tighter">

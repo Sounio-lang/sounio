@@ -431,14 +431,14 @@ export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
           </div>
 
           {/* Sounio panel */}
-          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-hyperlink)]/20 min-w-0">
-            <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-hyperlink)]/20">
+          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-blue)]/20 min-w-0">
+            <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-blue)]/20">
               <div className="flex gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
                 <div className="w-3 h-3 rounded-full bg-[#febc2e]"></div>
                 <div className="w-3 h-3 rounded-full bg-[#28c840]"></div>
               </div>
-              <span className="flex-1 text-center text-[var(--color-accent-hyperlink)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-blue)] text-sm font-mono">
                 example.sio
               </span>
             </div>
