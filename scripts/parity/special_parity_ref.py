@@ -31,6 +31,9 @@ REF = {
     "lbeta":    (lambda a,b: mp.log(mp.beta(a,b)), 1e-2),
     "ibeta":    (lambda a,b,x: mp.betainc(a,b,0,x,regularized=True), 1e-2),
     "ibeta_inv":(lambda a,b,p: _ibetainv(a,b,p), 1e-2),
+    "igamma_lower":(lambda a,x: mp.gammainc(a, 0, x, regularized=True), 1e-2),
+    "igamma_upper":(lambda a,x: mp.gammainc(a, x, mp.inf, regularized=True), 1e-2),
+    "chi2_cdf":    (lambda x,k: mp.gammainc(k/2, 0, x/2, regularized=True), 1e-2),
 }
 
 def main():
