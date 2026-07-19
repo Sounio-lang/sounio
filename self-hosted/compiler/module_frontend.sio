@@ -151,6 +151,8 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE: bool = false
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND: i64 = 0
 // Flat pointer storage is bootstrap-safe. Each pointer owns a heap-pinned
 // LowerExternBindingHandle; aggregate Name arrays in BSS are not stable.
 var MF_EXTERN_BINDING_PTRS: [i64; 2048] = [0; 2048]
@@ -7510,6 +7512,8 @@ fn module_frontend_source_body_final_call_callee(data: string, body: i64, end: i
 
 fn module_frontend_imported_simple_global_reset() with Mut, Panic {
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = 0
+    MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE = true
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND = 0
     var i: i64 = 0
     while i < 64 {
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[i as usize] = 0
@@ -7520,6 +7524,24 @@ fn module_frontend_imported_simple_global_reset() with Mut, Panic {
     }
 }
 
+fn module_frontend_imported_simple_failure_name(kind: i64) -> string {
+    if kind == 1 { "unsupported_function_shape" }
+    else if kind == 2 { "function_capacity_exceeded" }
+    else if kind == 3 { "recursion_depth_exceeded" }
+    else { "ir_lowering_failed" }
+}
+
+fn module_frontend_imported_simple_mark_failure(kind: i64, path: string) with IO, Mut {
+    if MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE {
+        MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE = false
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND = kind
+        print("COMPACT_IMPORTED_IR_REFUSAL reason=")
+        print(module_frontend_imported_simple_failure_name(kind))
+        print(" path=")
+        println(path)
+    }
+}
+
 fn module_frontend_imported_simple_global_push_fn(
     path: string,
     data: string,
@@ -7527,13 +7549,16 @@ fn module_frontend_imported_simple_global_push_fn(
     size: i64
 ) with IO, Mut, Panic, Div {
     if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 64 {
+        module_frontend_imported_simple_mark_failure(2, path)
         return
     }
     let idx = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
     let fn_name_start = module_frontend_source_fn_name_start(data, fn_pos, size)
     let fn_name = module_frontend_source_fn_name(data, fn_name_start, size)
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_name_start, size)
-    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
+    // Zero is the explicit unsupported sentinel. A recognizer below must
+    // replace it before this function can enter the compact emitter table.
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 0
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = 0
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 0
 
@@ -7694,22 +7719,31 @@ fn module_frontend_imported_simple_global_push_fn(
                     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
                     let callee = module_frontend_source_ident_at(data, expr2, size)
                     if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
-                        // Narrow the scan for a literal int to the argument
-                        // parens of print_int/println only. Without this
-                        // bound, first_int_after would scan past the call's
-                        // close paren and pick up unrelated literals later in
-                        // the body (e.g. `print_char(10)`), masking the
-                        // imported-function evaluation fallback below.
-                        let call_close = module_frontend_source_paren_close(data, expr2 + callee.len, size)
-                        let scan_end = if call_close < 0 { size } else { call_close }
-                        let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, scan_end)
-                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
-                        if printed.0 {
-                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
+                        let call_open = module_frontend_source_skip_ws(data, expr2 + callee.len, size)
+                        let call_close = module_frontend_source_paren_close(data, call_open, size)
+                        var printed_ok = false
+                        var printed_value: i64 = 0
+                        if call_open < size && data[call_open as usize] == (40 as i8) && call_close >= 0 {
+                            let printed = module_frontend_try_eval_source_expr_i64(
+                                data,
+                                call_open + 1,
+                                call_close,
+                                size,
+                                0,
+                            )
+                            if printed.0 {
+                                printed_ok = true
+                                printed_value = printed.1
+                            }
                         }
-                        if !printed.0 && module_frontend_source_contains_pattern(path, "answer()") {
+                        if printed_ok {
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
+                            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed_value
+                        }
+                        if !printed_ok && module_frontend_source_contains_pattern(path, "answer()") {
                             let answer_value = module_frontend_try_eval_imported_function_i64(path, module_frontend_name_from_string("answer"), 0)
                             if answer_value.0 {
+                                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
                                 MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = answer_value.1
                             }
                         }
@@ -7763,9 +7797,22 @@ fn module_frontend_lower_source_file_simple_global(
     }
     let data = read_file(path)
     var i: i64 = 0
-    while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
+    while i + 2 < size {
         if module_frontend_source_is_fn_at(data, i, size) {
+            if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT >= 64 {
+                module_frontend_imported_simple_mark_failure(2, path)
+                return false
+            }
+            let fn_index = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
             module_frontend_imported_simple_global_push_fn(path, data, i, size)
+            if !MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE {
+                return false
+            }
+            if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT != fn_index + 1 ||
+               MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[fn_index as usize] == 0 {
+                module_frontend_imported_simple_mark_failure(1, path)
+                return false
+            }
         }
         i = i + 1
     }
@@ -7784,7 +7831,8 @@ fn module_frontend_lower_imported_simple_global_recursive(
     trace: &! LoadMultimoduleIrTrace
 ) -> bool with IO, Mut, Panic, Div {
     if depth > 16 {
-        return true
+        module_frontend_imported_simple_mark_failure(3, path)
+        return false
     }
     if depth > 0 {
         trace.loaded_modules = trace.loaded_modules + 1
@@ -7837,7 +7885,19 @@ pub fn load_multimodule_imported_simple_ir_global(main_path: string) -> MultiMod
     trace.last_module_index = 0
     if !module_frontend_lower_imported_simple_global_recursive(main_path, 0, &! trace) {
         print("IR lowering failed for imported source\n")
-        return multimodule_frontend_error("ir_lowering_failed")
+        return multimodule_frontend_error(
+            module_frontend_imported_simple_failure_name(
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND
+            )
+        )
+    }
+    if !MODULE_FRONTEND_IMPORTED_SIMPLE_COMPLETE {
+        print("IR lowering failed for imported source\n")
+        return multimodule_frontend_error(
+            module_frontend_imported_simple_failure_name(
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND
+            )
+        )
     }
     if MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT <= 0 {
         print("IR lowering failed for imported source\n")
