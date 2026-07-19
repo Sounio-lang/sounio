@@ -28,6 +28,7 @@ use check::ownership::*
 use check::lint::*
 use check::layout::*
 use io::file_write::*
+use io::trace::{io_trace_i64_string}
 use native::encode::*
 use native::elf::*
 use native::reloc::*
@@ -52,7 +53,7 @@ use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
-use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into}
+use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into, module_frontend_collect_ast_closure_programs_into, module_frontend_path_shape_self_test}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -2036,38 +2037,54 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
 fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     var closure = ModuleClosure {
         paths: [""; 256],
+        logical_paths: [""; 256],
         edge_callers: [""; 512],
         edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        surface_error_callers: [""; 256],
+        surface_error_imports: [""; 256],
+        surface_error_names: [""; 256],
         node_count: 0,
         edge_count: 0,
         unresolved_count: 0,
+        ambiguity_count: 0,
+        surface_error_count: 0,
         saturated: false,
         parse_failed: false,
     }
-    if !module_frontend_collect_ast_closure_into(source_path, &!closure) {
+    var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    if !module_frontend_collect_ast_closure_programs_into(source_path, &!closure, &!programs) {
         print("run_check_mode: AST closure incomplete nodes=")
         print_int(closure.node_count)
         print(" unresolved=")
         print_int(closure.unresolved_count)
+        print(" ambiguous=")
+        print_int(closure.ambiguity_count)
+        print(" surface_errors=")
+        print_int(closure.surface_error_count)
         print(" saturated=")
         if closure.saturated { print("true") } else { print("false") }
         print("\n")
         return false
     }
-
-    var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
-    var load_index: i64 = 0
-    while load_index < closure.node_count {
-        parser_reset_last_errors()
-        programs[load_index] = load_module_file(closure.paths[load_index])
-        if parser_last_error_count() > 0 {
-            print("run_check_mode: AST reload failed for ")
-            println(closure.paths[load_index])
-            return false
+    if closure.surface_error_count > 0 {
+        var surface_index: i64 = 0
+        while surface_index < closure.surface_error_count {
+            print("error[E137]: imported name `")
+            print(closure.surface_error_names[surface_index])
+            print("` is not exported by `")
+            print(closure.surface_error_imports[surface_index])
+            print("` for caller ")
+            println(closure.surface_error_callers[surface_index])
+            surface_index = surface_index + 1
         }
-        load_index = load_index + 1
+        return false
     }
 
     if closure.node_count == 1 && closure.edge_count == 0 {
@@ -2082,6 +2099,9 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     print("run_check_mode: about to check ")
     print_int(closure.node_count)
     print(" modules\n")
+    // Facade exports were checked against the authored ModuleClosure above. The
+    // merged checker still owns definition visibility, using module-local lookup
+    // before the unique cross-module fallback.
     let verdict = check_modules_verdict_boot4_with_visibility(
         &!programs,
         closure.node_count,
@@ -2100,19 +2120,38 @@ fn run_science_boundary_closure_report(
     let source_path = compiler_mode_source_arg(args, flag_index, "--science-boundary-closure")
     var closure = ModuleClosure {
         paths: [""; 256],
+        logical_paths: [""; 256],
         edge_callers: [""; 512],
         edge_dependencies: [""; 512],
+        edge_imports: [""; 512],
+        edge_caller_ids: [-1; 512],
+        edge_dependency_ids: [-1; 512],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
+        ambiguous_callers: [""; 256],
+        ambiguous_imports: [""; 256],
+        surface_error_callers: [""; 256],
+        surface_error_imports: [""; 256],
+        surface_error_names: [""; 256],
         node_count: 0,
         edge_count: 0,
         unresolved_count: 0,
+        ambiguity_count: 0,
+        surface_error_count: 0,
         saturated: false,
         parse_failed: false,
     }
     let complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
     if complete { println("status\tcomplete") } else { println("status\tincomplete") }
+    print("surface_status\t")
+    if !complete {
+        println("not_evaluated")
+    } else if closure.surface_error_count == 0 {
+        println("valid")
+    } else {
+        println("invalid")
+    }
     print("capacity\t256\n")
     print("saturated\t")
     if closure.saturated { println("true") } else { println("false") }
@@ -2122,6 +2161,10 @@ fn run_science_boundary_closure_report(
     while i < closure.node_count {
         print("node\t")
         println(closure.paths[i])
+        print("logical_node\t")
+        print(io_trace_i64_string(i))
+        print("\t")
+        println(closure.logical_paths[i])
         i = i + 1
     }
     i = 0
@@ -2130,6 +2173,12 @@ fn run_science_boundary_closure_report(
         print(closure.edge_callers[i])
         print("\t")
         println(closure.edge_dependencies[i])
+        print("edge_identity\t")
+        print(io_trace_i64_string(closure.edge_caller_ids[i]))
+        print("\t")
+        print(io_trace_i64_string(closure.edge_dependency_ids[i]))
+        print("\t")
+        println(closure.edge_imports[i])
         i = i + 1
     }
     i = 0
@@ -2138,6 +2187,24 @@ fn run_science_boundary_closure_report(
         print(closure.unresolved_callers[i])
         print("\t")
         println(closure.unresolved_imports[i])
+        i = i + 1
+    }
+    i = 0
+    while i < closure.ambiguity_count {
+        print("ambiguous\t")
+        print(closure.ambiguous_callers[i])
+        print("\t")
+        println(closure.ambiguous_imports[i])
+        i = i + 1
+    }
+    i = 0
+    while i < closure.surface_error_count {
+        print("surface_error\t")
+        print(closure.surface_error_callers[i])
+        print("\t")
+        print(closure.surface_error_imports[i])
+        print("\t")
+        println(closure.surface_error_names[i])
         i = i + 1
     }
 }
@@ -28078,6 +28145,16 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--science-boundary-closure" {
             run_science_boundary_closure_report(args, arg_idx)
+            return
+        } else if mode == "--module-path-shape-self-test" {
+            let path_shape_rc = module_frontend_path_shape_self_test()
+            if path_shape_rc != 0 {
+                print("module-path-shape-self-test: FAIL rc=")
+                print_int(path_shape_rc)
+                print("\n")
+                panic("module path shape self-test failed")
+            }
+            println("module-path-shape-self-test: OK")
             return
         } else if mode == "--native-compile" {
             run_native_compile_mode(args, arg_idx)

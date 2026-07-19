@@ -172,6 +172,39 @@ def evaluate(
     return json.loads(receipt.read_text(encoding="ascii")), result
 
 
+def evaluate_with_report(
+    src: Path,
+    manifest: Path,
+    receipt: Path,
+    report: Path,
+    *,
+    expected: int = 21,
+) -> dict[str, Any]:
+    run(
+        [
+            sys.executable,
+            str(ATTESTOR),
+            "evaluate",
+            "--source",
+            str(src),
+            "--mode",
+            "strict",
+            "--manifest",
+            str(manifest),
+            "--receipt",
+            str(receipt),
+            "--compiler",
+            str(RAW_MADAROS),
+            "--engine-identity",
+            "Madaros forged-report fixture",
+            "--closure-report",
+            str(report),
+        ],
+        expected=expected,
+    )
+    return json.loads(receipt.read_text(encoding="ascii"))
+
+
 def write_gate_closure_report(
     src: Path,
     root: Path,
@@ -408,6 +441,282 @@ def assert_unknowns(root: Path) -> None:
     forged_data = json.loads(forged_receipt.read_text(encoding="ascii"))
     check(forged_data["verdict"] == "UNKNOWN", "raw closure report without its root became authoritative")
     check("E-SRB-000" in diagnostic_codes(forged_data), "missing raw closure root lacks E-SRB-000")
+
+    surface_report = write(
+        root / "forged-invalid-surface.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tinvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"surface_error\t{src}\tcycle::first\thidden",
+                "",
+            )
+        ),
+    )
+    surface_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-invalid-surface.json",
+        surface_report,
+    )
+    check(surface_data["verdict"] == "UNKNOWN", "invalid import surface became strict OK")
+    check("E-SRB-000" in diagnostic_codes(surface_data), "invalid import surface lacks E-SRB-000")
+    check(
+        any("import=cycle::first name=hidden" in item["message"] for item in surface_data["diagnostics"]),
+        "invalid import surface lost its causal receipt",
+    )
+
+    reversed_edge_report = write(
+        root / "forged-reversed-edge-identity.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t1\t0\tcycle::first",
+                "",
+            )
+        ),
+    )
+    reversed_edge_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-reversed-edge-identity.json",
+        reversed_edge_report,
+    )
+    check(reversed_edge_data["verdict"] == "UNKNOWN", "reversed edge identity became strict OK")
+    check("E-SRB-000" in diagnostic_codes(reversed_edge_data), "reversed edge identity lacks E-SRB-000")
+
+    duplicate_state_report = write(
+        root / "forged-duplicate-state.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tincomplete",
+                "status\tcomplete",
+                "surface_status\tnot_evaluated",
+                "surface_status\tvalid",
+                "capacity\t1",
+                "capacity\t256",
+                "saturated\ttrue",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                "",
+            )
+        ),
+    )
+    duplicate_state_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-state.json",
+        duplicate_state_report,
+    )
+    check(duplicate_state_data["verdict"] == "UNKNOWN", "duplicate state records became strict OK")
+    check(
+        any("duplicate status record" in item["message"] for item in duplicate_state_data["diagnostics"]),
+        "duplicate state records lack causal diagnostics",
+    )
+
+    full_capacity_report = write(
+        root / "forged-full-capacity-valid.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t2",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    full_capacity_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-full-capacity-valid.json",
+        full_capacity_report,
+        expected=0,
+    )
+    check(full_capacity_data["verdict"] == "OK", "full non-saturated capacity was rejected")
+
+    for invalid_capacity in (0, 4097):
+        invalid_capacity_report = write(
+            root / f"forged-capacity-{invalid_capacity}.closure.tsv",
+            "\n".join(
+                (
+                    "SOUNIO_BOUNDARY_CLOSURE_V1",
+                    "status\tcomplete",
+                    "surface_status\tvalid",
+                    f"capacity\t{invalid_capacity}",
+                    "saturated\tfalse",
+                    "parse_failed\tfalse",
+                    f"node\t{src}",
+                    "logical_node\t0\tcycle::host-audit",
+                    "",
+                )
+            ),
+        )
+        invalid_capacity_data = evaluate_with_report(
+            src,
+            cycle_manifest,
+            root / f"forged-capacity-{invalid_capacity}.json",
+            invalid_capacity_report,
+        )
+        check(invalid_capacity_data["verdict"] == "UNKNOWN", "out-of-range capacity became strict OK")
+        check(
+            any(
+                f"capacity {invalid_capacity} is outside supported range 1..4096" in item["message"]
+                for item in invalid_capacity_data["diagnostics"]
+            ),
+            "out-of-range capacity lacks causal diagnostic",
+        )
+
+    capacity_occupancy_report = write(
+        root / "forged-capacity-occupancy.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t1",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::first",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    capacity_occupancy_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-capacity-occupancy.json",
+        capacity_occupancy_report,
+    )
+    check(capacity_occupancy_data["verdict"] == "UNKNOWN", "closure above declared capacity became strict OK")
+    check(
+        any(
+            "raw AST node count 2 exceeds capacity 1" in item["message"]
+            for item in capacity_occupancy_data["diagnostics"]
+        ),
+        "capacity occupancy violation lacks causal diagnostic",
+    )
+
+    duplicate_node_report = write(
+        root / "forged-duplicate-node.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::host-audit",
+                f"node\t{src}",
+                "logical_node\t1\tcycle::host-audit-alias",
+                "",
+            )
+        ),
+    )
+    duplicate_node_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-node.json",
+        duplicate_node_report,
+    )
+    check(duplicate_node_data["verdict"] == "UNKNOWN", "duplicate physical node became strict OK")
+    check(
+        any("duplicate raw AST node" in item["message"] for item in duplicate_node_data["diagnostics"]),
+        "duplicate physical node lacks causal diagnostic",
+    )
+
+    missing_identity_report = write(
+        root / "forged-missing-identity.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "",
+            )
+        ),
+    )
+    missing_identity_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-missing-identity.json",
+        missing_identity_report,
+    )
+    check(missing_identity_data["verdict"] == "UNKNOWN", "legacy report without identity metadata became strict OK")
+    check(
+        any("lacks required state: surface_status" in item["message"] for item in missing_identity_data["diagnostics"]),
+        "missing identity metadata lacks causal diagnostic",
+    )
+
+    duplicate_logical_report = write(
+        root / "forged-duplicate-logical.closure.tsv",
+        "\n".join(
+            (
+                "SOUNIO_BOUNDARY_CLOSURE_V1",
+                "status\tcomplete",
+                "surface_status\tvalid",
+                "capacity\t256",
+                "saturated\tfalse",
+                "parse_failed\tfalse",
+                f"node\t{src}",
+                "logical_node\t0\tcycle::same",
+                f"node\t{first}",
+                "logical_node\t1\tcycle::same",
+                f"edge\t{src}\t{first}",
+                "edge_identity\t0\t1\tcycle::first",
+                "",
+            )
+        ),
+    )
+    duplicate_logical_data = evaluate_with_report(
+        src,
+        cycle_manifest,
+        root / "forged-duplicate-logical.json",
+        duplicate_logical_report,
+    )
+    check(duplicate_logical_data["verdict"] == "UNKNOWN", "duplicate logical identity became strict OK")
+    check(
+        any("logical node identity is duplicated" in item["message"] for item in duplicate_logical_data["diagnostics"]),
+        "duplicate logical identity lacks causal diagnostic",
+    )
 
     no_evidence_manifest = write_policy(
         root,

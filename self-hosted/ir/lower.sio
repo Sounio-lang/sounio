@@ -7,6 +7,17 @@ use ir::ir::*
 use io::trace::*
 use io::env::{read_env}
 
+pub struct LowerProgramItemsHandle {
+    pub items: Option<Box<ItemList>>,
+}
+
+// Heap-pinned payload referenced by the module frontend's flat i64 sidecar.
+// Aggregate-valued BSS arrays are not stable under the bootstrap ABI.
+pub struct LowerExternBindingHandle {
+    pub name: Name,
+    pub defining_module_id: i64,
+}
+
 struct LowerLocalStack {
     names: [Name; 4096],
     regs: [i64; 4096],
@@ -591,6 +602,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         let sm_strat = (*summary.module).functions[i as usize].compile_strategy
         var func = ir_empty_function()
         func.name = (*summary.module).functions[i as usize].name
+        func.defining_module_id = (*summary.module).functions[i as usize].defining_module_id
         func.param_count = (*summary.module).functions[i as usize].param_count
         func.compile_strategy = sm_strat
         func.returns_float = (*summary.module).functions[i as usize].returns_float
@@ -680,6 +692,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     while i < summary.module.fn_count && i < IR_MAX_FUNCS {
         var func = ir_empty_function()
         func.name = summary.module.functions[i as usize].name
+        func.defining_module_id = summary.module.functions[i as usize].defining_module_id
         func.param_count = summary.module.functions[i as usize].param_count
         func.compile_strategy = summary.module.functions[i as usize].compile_strategy
         func.returns_float = summary.module.functions[i as usize].returns_float
@@ -812,6 +825,38 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     idx
 }
 
+fn lowerer_find_or_add_fn_identity_mut(
+    lo: &! Lowerer,
+    defining_module_id: i64,
+    name: Name
+) -> i64 with Mut, Panic, Div {
+    var module_box = (*lo).module
+    var i: i64 = 0
+    while i < (*module_box).fn_count {
+        let candidate = (*module_box).functions[i as usize]
+        if candidate.defining_module_id == defining_module_id && ir_name_eq(candidate.name, name) {
+            (*lo).module = module_box
+            return i
+        }
+        i = i + 1
+    }
+
+    if (*module_box).fn_count >= IR_MAX_FUNCS {
+        (*lo).module = module_box
+        lowerer_mark_error(lo)
+        return -1
+    }
+
+    let idx = (*module_box).fn_count
+    var fn_slot = (*module_box).functions[idx as usize]
+    fn_slot.name = name
+    fn_slot.defining_module_id = defining_module_id
+    (*module_box).functions[idx as usize] = fn_slot
+    (*module_box).fn_count = idx + 1
+    (*lo).module = module_box
+    idx
+}
+
 fn lowerer_flush_current_func_mut(lo: &! Lowerer) with Mut, Panic, Div {
     if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
         var module_box = (*lo).module
@@ -848,6 +893,52 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
+    if strategy == IR_STRATEGY_INSTRUMENTED {
+        fn_slot.param_count = fn_slot.param_count + 1
+        if fn_slot.prof_counter_id < 0 {
+            let ctr_idx = (*module_box).prof_counter_count
+            if ctr_idx < 64 {
+                (*module_box).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
+                    fn_id: fn_id,
+                    fn_name: name,
+                    counter_id: ctr_idx,
+                }
+                (*module_box).prof_counter_count = ctr_idx + 1
+                fn_slot.prof_counter_id = ctr_idx
+            } else {
+                lo.error_count = lo.error_count + 1
+                lo.had_error = true
+            }
+        }
+    }
+    fn_slot.param_regs = [IR_INVALID_REG; 64]
+    fn_slot.instr_count = 0
+    fn_slot.reg_count = 0
+    fn_slot.label_count = 0
+    (*module_box).functions[fn_id as usize] = fn_slot
+    (*lo).module = module_box
+}
+
+fn lowerer_preseed_external_fn_signature_mut(
+    lo: &! Lowerer,
+    defining_module_id: i64,
+    name: Name,
+    params: &Option<Box<ParamList>>,
+    return_type: &Option<Box<TypeExpr>>,
+    effects: &Option<Box<EffectList>>
+) with Mut, Panic, Div, Alloc {
+    let fn_id = lowerer_find_or_add_fn_identity_mut(lo, defining_module_id, name)
+    if fn_id < 0 {
+        return
+    }
+
+    let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
+    var module_box = (*lo).module
+    var fn_slot = (*module_box).functions[fn_id as usize]
+    fn_slot.compile_strategy = strategy
+    fn_slot.returns_float = lower_opt_return_float_code(return_type)
+    fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
+    fn_slot.param_count = ir_param_list_count_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
         if fn_slot.prof_counter_id < 0 {
@@ -970,15 +1061,63 @@ fn lowerer_preseed_external_struct_items_mut(
                         _ => {}
                     }
                 }
-                // Also preseed imported FREE functions' signatures (returns_float /
-                // return_struct_name), so the caller recognizes an imported fn's f64
-                // return instead of treating the call result as int (cvtsi2sd). The
-                // struct-only preseed above left free-function returns unclassified.
-                if head_owned.kind == ItemKind::ItemFn {
-                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head_owned.fn_def
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+fn lowerer_extern_binding_contains(
+    binding_ptrs: &![i64; 2048],
+    count: i64,
+    defining_module_id: i64,
+    name: Name
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
+        if binding as i64 != 0 {
+            if (*binding).defining_module_id == defining_module_id &&
+               ir_name_eq((*binding).name, name) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lowerer_preseed_external_function_items_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>,
+    defining_module_id: i64,
+    binding_ptrs: &![i64; 2048],
+    binding_count: i64
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn &&
+                   lowerer_extern_binding_contains(
+                       binding_ptrs,
+                       binding_count,
+                       defining_module_id,
+                       head.name
+                   ) {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                     match *fn_def_opt_ref {
                         Some(fd) => {
-                            lowerer_preseed_fn_signature_mut(lo, head_owned.name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            lowerer_preseed_external_fn_signature_mut(
+                                lo,
+                                defining_module_id,
+                                head.name,
+                                &(*fd).params,
+                                &(*fd).return_type,
+                                &(*fd).effects
+                            )
                         }
                         _ => {}
                     }
@@ -988,6 +1127,23 @@ fn lowerer_preseed_external_struct_items_mut(
             _ => break
         }
     }
+}
+
+fn lowerer_assign_unknown_function_provenance_mut(
+    lo: &! Lowerer,
+    defining_module_id: i64
+) with Mut, Panic, Div {
+    var module_box = (*lo).module
+    var i: i64 = 0
+    while i < (*module_box).fn_count {
+        var fn_slot = (*module_box).functions[i as usize]
+        if fn_slot.defining_module_id == IR_DEFINING_MODULE_UNKNOWN {
+            fn_slot.defining_module_id = defining_module_id
+            (*module_box).functions[i as usize] = fn_slot
+        }
+        i = i + 1
+    }
+    (*lo).module = module_box
 }
 
 fn lowerer_register_struct_fields_direct_mut(
@@ -10817,21 +10973,48 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
 // right field_idx.
 fn lower_program_to_ir_summary_box_with_externs_ref(
     prog: &Program,
-    programs: &! [Program; 256],
+    program_item_ptrs: &![i64; 256],
     program_count: i64,
     self_index: i64,
+    binding_ptrs: &![i64; 2048],
+    binding_count: i64,
     epistemic: &IrEpistemicSection
 ) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_with_epistemic(epistemic)
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
-            let ext_prog = (*programs)[i as usize]
-            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+            let item_handle = (*program_item_ptrs)[i as usize] as *mut LowerProgramItemsHandle
+            if item_handle as i64 == 0 {
+                lowerer_mark_error(&! lo)
+                i = program_count
+            } else {
+                lowerer_preseed_external_struct_items_mut(&! lo, &(*item_handle).items)
+            }
         }
         i = i + 1
     }
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    lowerer_assign_unknown_function_provenance_mut(&! lo, self_index)
+    i = 0
+    while i < program_count {
+        if i != self_index {
+            let item_handle = (*program_item_ptrs)[i as usize] as *mut LowerProgramItemsHandle
+            if item_handle as i64 == 0 {
+                lowerer_mark_error(&! lo)
+                i = program_count
+            } else {
+                lowerer_preseed_external_function_items_mut(
+                    &! lo,
+                    &(*item_handle).items,
+                    i,
+                    binding_ptrs,
+                    binding_count
+                )
+            }
+        }
+        i = i + 1
+    }
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)

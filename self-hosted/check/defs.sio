@@ -163,6 +163,33 @@ fn struct_table_find(t: *mut StructTable, name: Name) -> i64 with Mut, Panic, Di
     0 - 1
 }
 
+fn struct_table_find_in_module(t: *mut StructTable, name: Name, module_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        let entry = (*t).entries[i as usize]
+        if name_eq(entry.name, name) && entry.defining_module_id == module_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn struct_table_find_unique(t: *mut StructTable, name: Name) -> i64 with Mut, Panic, Div {
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i as usize].name, name) {
+            if found >= 0 {
+                return 0 - 1
+            }
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
 fn struct_table_find_by_buf8(t: *mut StructTable, buf: [i8; 128]) -> i64 with Mut, Panic, Div {
     // Match the struct whose name equals the first 8 bytes of buf (zero-padded).
     // Called from checker_lower_ref_like_type_mut where only name.buf[0..7]
@@ -361,6 +388,33 @@ fn enum_table_find(t: *mut EnumTable, name: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
+fn enum_table_find_in_module(t: *mut EnumTable, name: Name, module_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*t).count {
+        let entry = (*t).entries[i as usize]
+        if name_eq(entry.name, name) && entry.defining_module_id == module_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn enum_table_find_unique(t: *mut EnumTable, name: Name) -> i64 with Mut, Panic, Div {
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).entries[i as usize].name, name) {
+            if found >= 0 {
+                return 0 - 1
+            }
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
 fn enum_table_get(t: *mut EnumTable, idx: i64) -> EnumInfo with Mut, Panic, Div {
     if idx < 0 || idx >= (*t).count {
         empty_enum_info()
@@ -394,6 +448,40 @@ fn enum_table_find_variant_enum(t: *mut EnumTable, variant_name: Name) -> i64 wi
         i = i + 1
     }
     0 - 1
+}
+
+// A bare variant is authoritative only when one enum in the selected namespace
+// owns that spelling. Return -2 for ambiguity so a shared TyUnknown env stub
+// cannot turn two candidates into an apparently successful check.
+fn enum_table_find_variant_enum_in_module(t: *mut EnumTable, variant_name: Name, module_id: i64) -> i64 with Mut, Panic, Div, Alloc {
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < (*t).count {
+        let entry = (*t).entries[i as usize]
+        if entry.defining_module_id == module_id && variant_info_list_has(entry.variants, variant_name) {
+            if found >= 0 {
+                return 0 - 2
+            }
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn enum_table_find_variant_enum_unique(t: *mut EnumTable, variant_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < (*t).count {
+        if variant_info_list_has((*t).entries[i as usize].variants, variant_name) {
+            if found >= 0 {
+                return 0 - 2
+            }
+            found = i
+        }
+        i = i + 1
+    }
+    found
 }
 
 fn enum_table_alloc() -> *mut EnumTable with Mut, Panic, Div, Alloc {
@@ -1422,6 +1510,52 @@ fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div
         cur = (*cur).next
     }
     0 - 1
+}
+
+// Prefer the definition owned by the module currently being checked. A
+// same-spelled private definition in another module is a different binding.
+fn fn_sig_table_find_in_module(t: *mut FnSigTable, name: Name, module_id: i64) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            let sig = (*cur).entries[local as usize]
+            if name_eq(sig.name, name) && !sig.is_method && sig.defining_module_id == module_id {
+                return gi
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    0 - 1
+}
+
+// Until import bindings are explicit in FnSigTable, a cross-module bare-name
+// fallback is authoritative only when exactly one definition has that name.
+fn fn_sig_table_find_unique(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic, Div {
+    var found: i64 = 0 - 1
+    var gi: i64 = 0
+    var cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { return 0 - 1 }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            let sig = (*cur).entries[local as usize]
+            if name_eq(sig.name, name) && !sig.is_method {
+                if found >= 0 {
+                    return 0 - 1
+                }
+                found = gi
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    found
 }
 
 fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {

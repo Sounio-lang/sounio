@@ -35,6 +35,7 @@ use check::ontology_side_table_cache::{
 use check::mod::{check_policy_requirements_to_ir}
 use parser::ast::*
 use ir::ir::*
+use io::env::{read_env}
 
 // ============================================================
 // Visibility / module-path helpers
@@ -4173,7 +4174,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
-            let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
+            let sig_id = checker_fn_sigs_find_inplace(c, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -4681,7 +4682,11 @@ fn checker_check_continue_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wi
 // populated. See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
 fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_name = checker_copy_string_list_to_name(e.path.segments)
-    let enum_idx = enum_table_find((*c).enums, first_name)
+    let enum_idx = if e.path.seg_count > 1 {
+        checker_enums_find_inplace(c, first_name)
+    } else {
+        0 - 1
+    }
     if enum_idx >= 0 {
         let ei = enum_table_get((*c).enums, enum_idx)
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
@@ -4690,8 +4695,15 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         ty_named(first_name)
     } else {
         // Could be a variant name directly (e.g. None, Some)
-        let variant_enum_idx = enum_table_find_variant_enum((*c).enums, first_name)
-        if variant_enum_idx >= 0 {
+        let variant_enum_idx = if e.path.seg_count == 1 {
+            checker_variant_enums_find_inplace(c, first_name)
+        } else {
+            0 - 1
+        }
+        if variant_enum_idx == (0 - 2) {
+            checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+            ty_error()
+        } else if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
                 checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
@@ -5572,7 +5584,22 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
-    let struct_idx = struct_table_find((*c).structs, struct_name)
+    let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
+    let local_enum_idx = enum_table_find_in_module((*c).enums, struct_name, (*c).current_module_id)
+    var local_enum_variant_idx: i64 = 0 - 1
+    if e.path.seg_count > 1 && local_enum_idx >= 0 {
+        let local_ei = enum_table_get((*c).enums, local_enum_idx)
+        if variant_info_list_has(local_ei.variants, variant_name) {
+            local_enum_variant_idx = local_enum_idx
+        }
+    }
+    // `E::V { ... }` owned by this module must not be preempted by a remote
+    // same-spelled struct E before enum-constructor dispatch gets a chance.
+    let struct_idx = if local_enum_variant_idx >= 0 {
+        0 - 1
+    } else {
+        checker_structs_find_inplace(c, struct_name)
+    }
     if struct_idx >= 0 {
         let si = struct_table_get((*c).structs, struct_idx)
         if (*c).enforce_visibility && !checker_struct_visible_inplace(c, struct_idx) {
@@ -5747,11 +5774,17 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         // inits against the variant's declared fields and yield ty_named(enum_name) — matching
         // how checker_check_path_expr_inplace types a variant path, so a later
         // `match c { Event::C { x: cx } => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name). ----
-        let enum_idx = enum_table_find((*c).enums, struct_name)
+        let enum_idx = if local_enum_variant_idx >= 0 {
+            local_enum_variant_idx
+        } else {
+            checker_enums_find_inplace(c, struct_name)
+        }
         if enum_idx >= 0 {
-            let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
             let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
+                if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
+                    checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+                }
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
                 // Count check first (E046), mirroring the non-generic struct branch:
                 // report and still yield ty_named so the variant type is known downstream.
@@ -6412,7 +6445,7 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
                 return -1
             }
             let head_name = checker_copy_string_list_to_name((*expr).path.segments)
-            let enum_idx = enum_table_find((*c).enums, head_name)
+            let enum_idx = checker_enums_find_inplace(c, head_name)
             if enum_idx < 0 {
                 return -1
             }
@@ -6469,7 +6502,44 @@ fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 }
 
 fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
-    fn_sig_table_find((*c).fn_sigs, name)
+    let local_id = fn_sig_table_find_in_module((*c).fn_sigs, name, (*c).current_module_id)
+    if local_id >= 0 {
+        return local_id
+    }
+    fn_sig_table_find_unique((*c).fn_sigs, name)
+}
+
+fn checker_structs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let local_idx = struct_table_find_in_module((*c).structs, name, (*c).current_module_id)
+    if local_idx >= 0 {
+        return local_idx
+    }
+    struct_table_find_unique((*c).structs, name)
+}
+
+fn checker_enums_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let local_idx = enum_table_find_in_module((*c).enums, name, (*c).current_module_id)
+    if local_idx >= 0 {
+        return local_idx
+    }
+    enum_table_find_unique((*c).enums, name)
+}
+
+fn checker_variant_enums_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let local_idx = enum_table_find_variant_enum_in_module((*c).enums, name, (*c).current_module_id)
+    if local_idx == (0 - 2) {
+        return 0 - 2
+    }
+    if local_idx >= 0 {
+        return local_idx
+    }
+    enum_table_find_variant_enum_unique((*c).enums, name)
+}
+
+fn checker_trace_import_stub_fn_resolution() with IO, Mut, Panic, Div {
+    if str_eq(read_env("SOUNIO_CHECKER_CONTEXTUAL_LOOKUP_TRACE"), "1") {
+        print("checker_contextual_lookup: kind=fn_ref source=TyUnknown result=TyFn policy=local-first-global-unique\n")
+    }
 }
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -7104,17 +7174,39 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if !(*c).env.has_binding(e.name) {
-        // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
-        // function reference via the chunked fn_sigs before reporting E137.
+    let env_has = (*c).env.has_binding(e.name)
+    let env_ty = if env_has { (*c).env.lookup(e.name) } else { ty_error() }
+    // Pass 1 records imported names and enum variants as TyUnknown stubs. They
+    // are not concrete lexical shadows, so resolve their module-owned identity.
+    if !env_has || env_ty.kind == TypeKind::TyUnknown {
         let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
         if fn_sig_id >= 0 {
+            if env_has && env_ty.kind == TypeKind::TyUnknown {
+                checker_trace_import_stub_fn_resolution()
+            }
+            if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, fn_sig_id) {
+                checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            }
             return ty_fn(fn_sig_id)
+        }
+        let variant_enum_idx = checker_variant_enums_find_inplace(c, e.name)
+        if variant_enum_idx == (0 - 2) {
+            checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+            return ty_error()
+        } else if variant_enum_idx >= 0 {
+            let ei = enum_table_get((*c).enums, variant_enum_idx)
+            if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
+                checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+            }
+            return ty_named(ei.name)
+        }
+        if env_has {
+            return env_ty
         }
         checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
         return ty_error()
     }
-    let ident_ty = (*c).env.lookup(e.name)
+    let ident_ty = env_ty
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
@@ -18032,7 +18124,10 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
-                let sig_id = fn_sig_table_find(c.fn_sigs, (*fd).name)
+                var sig_id = fn_sig_table_find_in_module(c.fn_sigs, (*fd).name, c.current_module_id)
+                if sig_id < 0 {
+                    sig_id = fn_sig_table_find_unique(c.fn_sigs, (*fd).name)
+                }
                 if sig_id >= 0 {
                     let sig = fn_sig_table_get(c.fn_sigs, sig_id)
                     c.current_return_type = sig.return_type
@@ -18563,33 +18658,7 @@ impl Checker {
             ExprKind::ExprBoolFalse => (c, ty_bool())
             ExprKind::ExprStringLit => (c, ty_string())
             ExprKind::ExprCharLit => (c, ty_char())
-            ExprKind::ExprIdent => {
-                if !c.env.has_binding(e.name) {
-                    // Functions live in fn_sigs (not env) — resolve a bare fn reference there.
-                    let fn_sig_id = fn_sig_table_find(c.fn_sigs, e.name)
-                    if fn_sig_id >= 0 {
-                        return (c, ty_fn(fn_sig_id))
-                    }
-                    let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
-                    return (c_err, ty_error())
-                }
-                let ident_ty = c.env.lookup(e.name)
-                // If this is a linear type variable, mark it as consumed
-                var c2 = c
-                if c2.is_linear_type(ident_ty) && c2.suppress_linear_consume_depth == 0 {
-                    // CRITICAL FIX: Check if borrowed before consuming
-                    if c2.borrows.is_borrowed(e.name) {
-                        c2 = c2.report_error_at(e.span, 38, 0, 0, 0)  // Cannot consume borrowed value
-                    } else {
-                        let consume_result = c2.borrows.consume_linear(e.name)
-                        c2.borrows = consume_result.0
-                        if consume_result.1 != 0 {
-                            c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
-                        }
-                    }
-                }
-                (c2, ident_ty)
-            }
+            ExprKind::ExprIdent => c.check_ident_expr(e)
             ExprKind::ExprPath => c.check_path_expr(e)
             ExprKind::ExprBinary => c.check_binary_expr(e)
             ExprKind::ExprUnary => c.check_unary_expr(e)
@@ -18620,6 +18689,67 @@ impl Checker {
         (result.0.exit_expr_depth(), result.1)
     }
 
+    fn check_ident_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let env_has = c.env.has_binding(e.name)
+        let env_ty = if env_has { c.env.lookup(e.name) } else { ty_error() }
+        if !env_has || env_ty.kind == TypeKind::TyUnknown {
+            var fn_sig_id = fn_sig_table_find_in_module(c.fn_sigs, e.name, c.current_module_id)
+            if fn_sig_id < 0 {
+                fn_sig_id = fn_sig_table_find_unique(c.fn_sigs, e.name)
+            }
+            if fn_sig_id >= 0 {
+                if env_has && env_ty.kind == TypeKind::TyUnknown {
+                    checker_trace_import_stub_fn_resolution()
+                }
+                let sig = fn_sig_table_get(c.fn_sigs, fn_sig_id)
+                let local_private = sig.visibility_kind == VISIBILITY_PRIVATE
+                    && sig.defining_module_id == c.current_module_id
+                if c.enforce_visibility && !local_private
+                    && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
+                    c = c.report_error_at(e.span, 175, 0, 0, 0)
+                }
+                return (c, ty_fn(fn_sig_id))
+            }
+            var variant_enum_idx = enum_table_find_variant_enum_in_module(c.enums, e.name, c.current_module_id)
+            if variant_enum_idx == (0 - 1) {
+                variant_enum_idx = enum_table_find_variant_enum_unique(c.enums, e.name)
+            }
+            if variant_enum_idx == (0 - 2) {
+                c = c.report_error_at(e.span, 137, 0, 0, 0)
+                return (c, ty_error())
+            }
+            if variant_enum_idx >= 0 {
+                let ei = enum_table_get(c.enums, variant_enum_idx)
+                let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
+                    && ei.defining_module_id == c.current_module_id
+                if c.enforce_visibility && !local_private
+                    && !visibility_allows_access(ei.visibility, ei.defining_module, c.current_module, c.crate_root) {
+                    c = c.report_error_at(e.span, 177, 0, 0, 0)
+                }
+                return (c, ty_named(ei.name))
+            }
+            if env_has {
+                return (c, env_ty)
+            }
+            c = c.report_error_at(e.span, 137, 0, 0, 0)
+            return (c, ty_error())
+        }
+
+        if c.is_linear_type(env_ty) && c.suppress_linear_consume_depth == 0 {
+            if c.borrows.is_borrowed(e.name) {
+                c = c.report_error_at(e.span, 38, 0, 0, 0)
+            } else {
+                let consume_result = c.borrows.consume_linear(e.name)
+                c.borrows = consume_result.0
+                if consume_result.1 != 0 {
+                    c = c.report_error_at(e.span, consume_result.1, 0, 0, 0)
+                }
+            }
+        }
+        (c, env_ty)
+    }
+
     // --------------------------------------------------------
     // Path expression — enum variant
     // --------------------------------------------------------
@@ -18628,20 +18758,41 @@ impl Checker {
         // First segment is enum/type name, last is variant
         // For now, look up first segment as enum name
         let first_name = checker_copy_string_list_to_name(e.path.segments)
-        let enum_idx = enum_table_find(self.enums, first_name)
+        var enum_idx: i64 = 0 - 1
+        if e.path.seg_count > 1 {
+            enum_idx = enum_table_find_in_module(self.enums, first_name, self.current_module_id)
+            if enum_idx < 0 {
+                enum_idx = enum_table_find_unique(self.enums, first_name)
+            }
+        }
         if enum_idx >= 0 {
             let ei = enum_table_get(self.enums, enum_idx)
-            if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+            let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
+                && ei.defining_module_id == self.current_module_id
+            if self.enforce_visibility && !local_private
+                && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
                 let c = self.report_error_at(e.span, 177, 0, 0, 0)
                 return (c, ty_named(first_name))
             }
             (self, ty_named(first_name))
         } else {
             // Could be a variant name directly (e.g. None, Some)
-            let variant_enum_idx = enum_table_find_variant_enum(self.enums, first_name)
-            if variant_enum_idx >= 0 {
+            var variant_enum_idx: i64 = 0 - 1
+            if e.path.seg_count == 1 {
+                variant_enum_idx = enum_table_find_variant_enum_in_module(self.enums, first_name, self.current_module_id)
+                if variant_enum_idx == (0 - 1) {
+                    variant_enum_idx = enum_table_find_variant_enum_unique(self.enums, first_name)
+                }
+            }
+            if variant_enum_idx == (0 - 2) {
+                let c = self.report_error_at(e.span, 137, 0, 0, 0)
+                (c, ty_error())
+            } else if variant_enum_idx >= 0 {
                 let ei = enum_table_get(self.enums, variant_enum_idx)
-                if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+                let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
+                    && ei.defining_module_id == self.current_module_id
+                if self.enforce_visibility && !local_private
+                    && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
                     let c = self.report_error_at(e.span, 177, 0, 0, 0)
                     return (c, ty_named(ei.name))
                 }
@@ -22501,10 +22652,29 @@ impl Checker {
 
     fn check_struct_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let struct_name = checker_copy_string_list_to_name(e.path.segments)
-        let struct_idx = struct_table_find(self.structs, struct_name)
+        let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
+        let local_enum_idx = enum_table_find_in_module(self.enums, struct_name, self.current_module_id)
+        var local_enum_variant_idx: i64 = 0 - 1
+        if e.path.seg_count > 1 && local_enum_idx >= 0 {
+            let local_ei = enum_table_get(self.enums, local_enum_idx)
+            if variant_info_list_has(local_ei.variants, variant_name) {
+                local_enum_variant_idx = local_enum_idx
+            }
+        }
+
+        var struct_idx: i64 = 0 - 1
+        if local_enum_variant_idx < 0 {
+            struct_idx = struct_table_find_in_module(self.structs, struct_name, self.current_module_id)
+            if struct_idx < 0 {
+                struct_idx = struct_table_find_unique(self.structs, struct_name)
+            }
+        }
         if struct_idx >= 0 {
             let si = struct_table_get(self.structs, struct_idx)
-            if self.enforce_visibility && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
+            let local_private = si.visibility_kind == VISIBILITY_PRIVATE
+                && si.defining_module_id == self.current_module_id
+            if self.enforce_visibility && !local_private
+                && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
                 let c = self.report_error_at(e.span, 176, 0, 0, 0)
                 return (c, ty_named(struct_name))
             }
@@ -22519,6 +22689,43 @@ impl Checker {
             if name_eq(struct_name, make_name("Knowledge")) {
                 return self.check_knowledge_struct_lit(e)
             }
+
+            var enum_idx = local_enum_variant_idx
+            if enum_idx < 0 {
+                enum_idx = enum_table_find_in_module(self.enums, struct_name, self.current_module_id)
+                if enum_idx < 0 {
+                    enum_idx = enum_table_find_unique(self.enums, struct_name)
+                }
+            }
+            if enum_idx >= 0 {
+                let ei = enum_table_get(self.enums, enum_idx)
+                if variant_info_list_has(ei.variants, variant_name) {
+                    var c = self
+                    let local_private = ei.visibility_kind == VISIBILITY_PRIVATE
+                        && ei.defining_module_id == c.current_module_id
+                    if c.enforce_visibility && !local_private
+                        && !visibility_allows_access(ei.visibility, ei.defining_module, c.current_module, c.crate_root) {
+                        c = c.report_error_at(e.span, 177, 0, 0, 0)
+                    }
+                    let variant_fields = variant_info_list_find_fields(ei.variants, variant_name)
+                    let variant_info = StructInfo {
+                        name: struct_name,
+                        fields: variant_fields,
+                        field_count: field_info_list_count(variant_fields),
+                        is_linear: false,
+                        type_param_count: 0,
+                        type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                        is_generic_template: false,
+                        visibility_kind: ei.visibility_kind,
+                        defining_module_id: ei.defining_module_id,
+                        visibility: ei.visibility,
+                        defining_module: ei.defining_module,
+                    }
+                    c = c.check_struct_field_inits(e.fields, variant_info, e.span)
+                    return (c, ty_named(struct_name))
+                }
+            }
+
             var c = self.report_error_at(e.span, 15, 0, 0, 0)
             c = c.check_struct_field_inits_no_type(e.fields)
             (c, ty_error())

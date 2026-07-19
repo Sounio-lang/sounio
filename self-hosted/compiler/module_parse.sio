@@ -8,20 +8,26 @@ use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Progr
 use lexer::mod::{lex_file_parse_items}
 
 pub struct ImportList {
-    pub paths: [AstPath; 64],
+    pub paths: [AstPath; 256],
     pub count: i64,
+    pub overflow: bool,
 }
 
 pub fn extract_imports_from_ast(prog: Program) -> ImportList with Mut, Panic, Div, Alloc {
+    extract_imports_from_ast_ref(&prog)
+}
+
+pub fn extract_imports_from_ast_ref(prog: &Program) -> ImportList with Mut, Panic, Div, Alloc {
     var imports = ImportList {
-        paths: [empty_path(); 64],
+        paths: [empty_path(); 256],
         count: 0,
+        overflow: false,
     }
 
-    match prog.items {
+    match (*prog).items {
         None => imports
         Some(items) => {
-            extract_imports_walk_into(*items, &! imports)
+            extract_imports_walk_ref_into(&(*items), &! imports)
             imports
         }
     }
@@ -33,9 +39,22 @@ fn extract_imports_walk_into(list: ItemList, out: &! ImportList) with Mut, Panic
 
 fn extract_imports_walk_ref_into(list: &ItemList, out: &! ImportList) with Mut, Panic, Div, Alloc {
     if (*list).head.kind == ItemKind::ItemUse {
-        if (*out).count < 64 {
-            (*out).paths[(*out).count] = (*list).head.use_path
-            (*out).count = (*out).count + 1
+        if (*out).count < 256 {
+            let import_index = (*out).count
+            // Aggregate arrays are pointer tables in the current bootstrap ABI.
+            // Populate the AstPath in stable storage before publishing its slot.
+            var import_path = Box::new(empty_path())
+            if mp_copy_ast_path_into(
+                &(*list).head.use_path,
+                &!(*import_path),
+            ) {
+                (*out).paths[import_index] = *import_path
+                (*out).count = import_index + 1
+            } else {
+                (*out).overflow = true
+            }
+        } else {
+            (*out).overflow = true
         }
     }
     match (*list).tail {
@@ -106,12 +125,175 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     AstPath { segments: segs, seg_count: 1 }
 }
 
+fn mp_clear_ast_path(out: &!AstPath) with Mut {
+    var i: i64 = 0
+    while i < 128 {
+        (*out).segments.head_buf[i as usize] = 0
+        i = i + 1
+    }
+    (*out).segments.head_len = 0
+    (*out).segments.tail = None
+    (*out).seg_count = 0
+}
+
+fn file_path_to_module_path_into(path: string, out: &!AstPath) with Mut, Panic, Div {
+    mp_clear_ast_path(out)
+    let path_len = str_len(path)
+    var i: i64 = 0
+    var last_slash: i64 = 0 - 1
+    var dot_pos: i64 = path_len
+    while i < path_len {
+        let ch = str_char_at(path, i)
+        if ch == 47 {
+            last_slash = i
+        }
+        if ch == 46 {
+            dot_pos = i
+        }
+        i = i + 1
+    }
+    let start = last_slash + 1
+    var end = dot_pos
+    if end <= start {
+        end = path_len
+    }
+    var seg_len: i64 = 0
+    i = start
+    while i < end && seg_len < 128 {
+        (*out).segments.head_buf[seg_len as usize] = str_char_at(path, i) as i8
+        seg_len = seg_len + 1
+        i = i + 1
+    }
+    (*out).segments.head_len = seg_len
+    if seg_len > 0 {
+        (*out).seg_count = 1
+    }
+}
+
+fn mp_copy_string_list_into(
+    source: &StringList,
+    out: &!StringList,
+    remaining: i64,
+) -> bool with Mut, Alloc {
+    if remaining <= 0 || (*source).head_len <= 0 || (*source).head_len > 128 {
+        return false
+    }
+    var i: i64 = 0
+    while i < 128 {
+        (*out).head_buf[i as usize] = (*source).head_buf[i as usize]
+        i = i + 1
+    }
+    (*out).head_len = (*source).head_len
+    match (*source).tail {
+        None => {
+            (*out).tail = None
+            remaining == 1
+        }
+        Some(next) => {
+            if remaining <= 1 {
+                return false
+            }
+            var copied_tail = Box::new(StringList {
+                head_buf: [0; 128],
+                head_len: 0,
+                tail: None,
+            })
+            if !mp_copy_string_list_into(&(*next), &!(*copied_tail), remaining - 1) {
+                return false
+            }
+            (*out).tail = Some(copied_tail)
+            true
+        }
+    }
+}
+
+fn mp_copy_ast_path_into(source: &AstPath, out: &!AstPath) -> bool with Mut, Alloc {
+    let count = (*source).seg_count
+    if count <= 0 || count > 256 {
+        return false
+    }
+    mp_clear_ast_path(out)
+    if !mp_copy_string_list_into(&(*source).segments, &!(*out).segments, count) {
+        mp_clear_ast_path(out)
+        return false
+    }
+    (*out).seg_count = count
+    true
+}
+
+// parse_module_item stores declarations on its ItemUnit placeholder; real unit
+// declarations keep use_path empty.
+fn declared_module_path(items: Option<Box<ItemList>>) -> AstPath with Mut, Panic, Div, Alloc {
+    match items {
+        None => empty_path()
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemUnit && item.use_path.seg_count > 0 {
+                item.use_path
+            } else {
+                declared_module_path((*list).tail)
+            }
+        }
+    }
+}
+
+fn declared_module_path_into_bounded(
+    items: &Option<Box<ItemList>>,
+    out: &!AstPath,
+    remaining: i64,
+) -> i64 with Mut, Alloc {
+    match *items {
+        None => 0
+        Some(list) => {
+            if remaining <= 0 {
+                return 0 - 1
+            }
+            if (*list).head.kind == ItemKind::ItemUnit && (*list).head.use_path.seg_count > 0 {
+                if mp_copy_ast_path_into(&(*list).head.use_path, out) { 1 } else { 0 - 1 }
+            } else {
+                declared_module_path_into_bounded(&(*list).tail, out, remaining - 1)
+            }
+        }
+    }
+}
+
 pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
     if !file_exists(path) {
         return mp_empty_program()
     }
-    Program {
-        module_path: file_path_to_module_path(path),
-        items: lex_file_parse_items(path),
+    let items = lex_file_parse_items(path)
+    var module_path = file_path_to_module_path(path)
+    let declared_path = declared_module_path(items)
+    if declared_path.seg_count > 0 {
+        module_path = declared_path
     }
+    Program {
+        module_path: module_path,
+        items: items,
+    }
+}
+
+// Populate caller-provided stable storage. Callers that publish this Program in
+// an aggregate array must pin the storage first; current aggregate arrays hold
+// pointers, so the address of an array slot is not the Program's address.
+pub fn load_module_file_into(path: string, out: &!Program) -> bool with IO, Mut, Div, Panic, Alloc {
+    if !file_exists(path) {
+        mp_clear_ast_path(&!(*out).module_path)
+        (*out).items = None
+        return false
+    }
+    let items = lex_file_parse_items(path)
+    file_path_to_module_path_into(path, &!(*out).module_path)
+    let declared_status = declared_module_path_into_bounded(
+        &items,
+        &!(*out).module_path,
+        4096,
+    )
+    if declared_status < 0 {
+        mp_clear_ast_path(&!(*out).module_path)
+        (*out).items = items
+        return false
+    }
+    (*out).items = items
+    true
 }
