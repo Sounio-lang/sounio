@@ -526,6 +526,21 @@ fn module_frontend_string_segment(sl: StringList) -> string with Mut, Panic, Div
     segment
 }
 
+fn module_frontend_path_shape_valid(sl: &StringList, remaining: i64) -> bool with Mut {
+    if remaining <= 0 || (*sl).head_len <= 0 || (*sl).head_len > 128 {
+        return false
+    }
+    match (*sl).tail {
+        None => remaining == 1
+        Some(next) => {
+            if remaining <= 1 {
+                return false
+            }
+            module_frontend_path_shape_valid(&(*next), remaining - 1)
+        }
+    }
+}
+
 fn module_frontend_qualified_segments(sl: StringList, remaining: i64) -> string with Mut, Panic, Div, Alloc {
     let segment = module_frontend_string_segment(sl)
     if remaining <= 1 {
@@ -544,7 +559,70 @@ fn use_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
     if path.seg_count <= 0 || path.seg_count > 256 {
         return ""
     }
+    if !module_frontend_path_shape_valid(&path.segments, path.seg_count) {
+        return ""
+    }
     module_frontend_qualified_segments(path.segments, path.seg_count)
+}
+
+fn module_frontend_test_string_segment(text: string, tail: Option<Box<StringList>>) -> StringList with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    let len = str_len(text)
+    var i: i64 = 0
+    while i < len && i < 128 {
+        buf[i as usize] = str_char_at(text, i) as i8
+        i = i + 1
+    }
+    StringList { head_buf: buf, head_len: len, tail: tail }
+}
+
+pub fn module_frontend_path_shape_self_test() -> i64 with Mut, Panic, Div, Alloc {
+    let valid_tail = module_frontend_test_string_segment("beta", None)
+    let valid_head = module_frontend_test_string_segment("alpha", Some(Box::new(valid_tail)))
+    if use_path_to_string(AstPath { segments: valid_head, seg_count: 2 }) != "alpha::beta" {
+        return 1
+    }
+
+    let under_tail = module_frontend_test_string_segment("beta", None)
+    let under_head = module_frontend_test_string_segment("alpha", Some(Box::new(under_tail)))
+    if use_path_to_string(AstPath { segments: under_head, seg_count: 1 }) != "" {
+        return 2
+    }
+
+    let over_head = module_frontend_test_string_segment("alpha", None)
+    if use_path_to_string(AstPath { segments: over_head, seg_count: 2 }) != "" {
+        return 3
+    }
+
+    var empty_head = module_frontend_test_string_segment("alpha", None)
+    empty_head.head_len = 0
+    if use_path_to_string(AstPath { segments: empty_head, seg_count: 1 }) != "" {
+        return 4
+    }
+
+    var long_head = module_frontend_test_string_segment("alpha", None)
+    long_head.head_len = 129
+    if use_path_to_string(AstPath { segments: long_head, seg_count: 1 }) != "" {
+        return 5
+    }
+
+    var empty_tail = module_frontend_test_string_segment("beta", None)
+    empty_tail.head_len = 0
+    let invalid_tail_head = module_frontend_test_string_segment("alpha", Some(Box::new(empty_tail)))
+    if use_path_to_string(AstPath { segments: invalid_tail_head, seg_count: 2 }) != "" {
+        return 6
+    }
+
+    let zero_count = module_frontend_test_string_segment("alpha", None)
+    if use_path_to_string(AstPath { segments: zero_count, seg_count: 0 }) != "" {
+        return 7
+    }
+
+    let excessive_count = module_frontend_test_string_segment("alpha", None)
+    if use_path_to_string(AstPath { segments: excessive_count, seg_count: 257 }) != "" {
+        return 8
+    }
+    0
 }
 
 fn module_frontend_ast_import_relpath(path: AstPath) -> string with Mut, Panic, Div, Alloc {

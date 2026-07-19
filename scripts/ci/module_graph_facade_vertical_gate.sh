@@ -377,6 +377,15 @@ set -e
 [[ "$RAW_VERSION_RC" -eq 0 ]] || fail raw_compiler_identity_failed
 grep -Fq 'Madaros v' "$WORK/raw-version.log" || fail raw_compiler_identity_missing
 
+set +e
+timeout "$TIMEOUT_SECONDS" "$RAW_MADAROS" --module-path-shape-self-test >"$WORK/module-path-shape-self-test.log" 2>&1
+PATH_SHAPE_RC=$?
+set -e
+[[ "$PATH_SHAPE_RC" -eq 0 ]] || blocked "module_path_shape_self_test_rc_${PATH_SHAPE_RC}" closure_identity
+grep -Fxq 'module-path-shape-self-test: OK' "$WORK/module-path-shape-self-test.log" || \
+  blocked module_path_shape_self_test_receipt_missing closure_identity
+printf 'MODULE_GRAPH_PATH_SHAPE_PASS exact_arity=true head_bounds=1..128 malformed=fail_closed\n'
+
 run_closure() {
   local label="$1"
   local cwd="$2"
