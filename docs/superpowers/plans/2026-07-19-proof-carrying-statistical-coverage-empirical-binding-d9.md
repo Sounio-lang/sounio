@@ -92,9 +92,11 @@ check-only under `BLK-20260718-D6-MULTIMODULE-RUNTIME`.
 - [x] Run a hostile clinical-authority review without PHI.
 - [x] Resolve or document every BLOCKER/MAJOR finding.
 - [x] Run `node scripts/docs/sync_governance_metadata.mjs` and re-run docs gates.
-- [ ] Commit in narrow phases, push the stacked branch, and open a D9 PR with
+- [x] Commit in narrow phases, push the stacked branch, and open a D9 PR with
   base `codex/psychiatric-mainline-d0-d2-20260717` while PR #1155 is open.
-- [ ] After PR #1155 merges, retarget D9 to `main` and revalidate before merge.
+- [ ] Post-D9 integration follow-up: after PR #1155 merges, retarget D9 to
+  `main` and revalidate before merge. This is not part of the bounded D9
+  implementation closure.
   Retarget acceptance is currently blocked by
   `BLK-20260719-D9-D4-CURRENT-MAIN-AST-CLOSURE`, owned by codex-2.
 
@@ -111,5 +113,5 @@ check-only under `BLK-20260718-D6-MULTIMODULE-RUNTIME`.
   nominally non-substitutable.
 - [x] No real empirical, patient, causal, or clinical authority claim is made.
 - [x] No compiler/resolver or existing D0-D8 semantic file is changed.
-- [ ] All required local gates, ontology paths, offloads, and remote CI evidence
+- [x] All required local gates, ontology paths, offloads, and remote CI evidence
   are green.
