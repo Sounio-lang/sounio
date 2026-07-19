@@ -363,6 +363,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.apple-selfhost-release-gate-sigsegv-2026-07-10 | repo_only | docs/handoff/apple_selfhost_release_gate_sigsegv_2026-07-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.butterfly-handoff | repo_only | docs/handoff/butterfly-handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.c2-heap-columnar-dataframe-codex-dispatch-2026-07-18 | repo_only | docs/handoff/c2_heap_columnar_dataframe_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.c3-simd-autovectorization-codex-dispatch-2026-07-19 | repo_only | docs/handoff/c3_simd_autovectorization_codex_dispatch_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-651-defects-codex-dispatch-2026-07-15 | repo_only | docs/handoff/compiler_651_defects_codex_dispatch_2026-07-15.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-generic-f-engine-unblock-prompt | repo_only | docs/handoff/compiler_generic_F_engine_unblock_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-generic-struct-return-diagnosis | repo_only | docs/handoff/compiler_generic_struct_return_diagnosis.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -397,6 +398,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.neurodyn-oct-mul-sign-fix-codex-handoff-2026-07-07 | repo_only | docs/handoff/neurodyn_oct_mul_sign_fix_codex_handoff_2026-07-07.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.pending-changes-triage-2026-07-11 | repo_only | docs/handoff/pending_changes_triage_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-512-vreg-wall-codex-dispatch-2026-07-18 | repo_only | docs/handoff/souc_512_vreg_wall_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.souc-decimal-literal-rounding-codex-dispatch-2026-07-18 | repo_only | docs/handoff/souc_decimal_literal_rounding_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.souc-v0800-defects | repo_only | docs/handoff/souc_v0800_defects.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.zero-event-native-compile-privacy-2026-07-11 | repo_only | docs/handoff/zero_event_native_compile_privacy_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.bootstrap-seed-policy | historical | docs/implementation/BOOTSTRAP_SEED_POLICY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
