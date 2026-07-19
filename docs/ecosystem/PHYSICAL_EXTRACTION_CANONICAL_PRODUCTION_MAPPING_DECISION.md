@@ -295,6 +295,49 @@ and its observed `epistemic-core` head `732b3fbf...`. The later operational
 catalog and destination head are evidence of point-in-time drift, not an
 implicit amendment, reconfirmation, or approval.
 
+At `2026-07-19T14:54:08Z`, issue comment
+[`5016172474`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5016172474)
+recorded the interactive instruction `faca o proximo passo` after the next
+required action had been identified as a new selection record against the
+post-reconciliation catalog. The record is explicitly referential: it
+incorporates the same five mappings from comment `5014112002`, updates the
+catalog binding to
+`243517f90deda6afc8c704bc5e0813302f67b9d9e91375f00c3e8821ef9894dc`,
+and updates the expected `epistemic-core/main` head to
+`3e7d49fb84c7b8c74b8fd4b1cc39660772d9c7d1`. It does not present the
+interactive instruction as a newly repeated verbatim five-row statement.
+
+The referential selection body is 2398 bytes with SHA-256
+`d4dc5ba0ea581928d14a962e3cbaf1340be430641e9fbb1fd9b5a52765ebae9e`.
+Its deterministic decision identity is
+`dd9d8efde5ff256a7fdce36b163b9b9885a50f1d698946b23de5e1ad57f2c7c8`.
+Process and verify modes, running from a clean local `main` exactly at the
+catalog-bound source head `e19af3279a040a6a707967d786be657bdf0d4203`,
+independently reconstructed receipt identity
+`a921d72dffd4669d021bd91c5d04c4561ff3cfe3a36ce854edf186ff549b1377`
+and proposal identity
+`44f3a2f91534ca17fc0cd8e6794a78989629e5660256375464f33e48b743e069`.
+The proposal contains five `reuse-observed` rows and remains
+`proposed-not-approved`, with execution authority `none` and cutover
+`not-executed`.
+
+The downstream assessor independently reconstructed assessment identity
+`3c17f8b9229f00f789afe0771e02755cf1650a2b75fe431d5ef06c326d65d784`
+and retained `production-evidence-and-human-decision-required`. Contract-bound
+xAI/Grok 4.3 and Z.AI/GLM-5.2 reviews found no BLOCKER or MAJOR inconsistency.
+Issue comment
+[`5016204605`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5016204605)
+records the processing result byte-identically. The evidence is preserved
+under `artifacts/r3/canonical-production/20260719T145223Z/`.
+
+A read-only observation at `2026-07-19T15:05:26Z` found all five destination
+heads still equal to the selected catalog and all five governed source trees
+unchanged. Canonical `origin/main` itself had advanced to
+`c5d8f752cfbe0827cc649b76328ab61f283d2837`, so this proposal remains a
+point-in-time review artifact. That later repository-head movement is not
+silently substituted into the selection and must be handled by the existing
+drift rule before any downstream use.
+
 ## Acceptance Gate
 
 The focused gate is
@@ -343,13 +386,14 @@ implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
-The complete post-materialization selection and proposal review are recorded,
-but the proposal is not an approval. The maintainer team and branch-rule
-evidence remain absent. Production materialization evidence supplied to the gap
+The post-reconciliation selection and proposal review are recorded, but the
+proposal is not an approval. The maintainer team and branch-rule evidence
+remain absent. Production materialization evidence supplied to the gap
 assessor, source-removal authorization, canonical-production approval, an
 execution policy, and an explicit human cutover decision remain missing and
 separate interfaces. PR #1176 is merged and its public package source binding
-has been reconciled, but that operation advanced `epistemic-core/main` beyond
-the proposal's catalog-bound head. No later head is silently substituted.
-Catalog or governed-source drift requires a new selection record before
-downstream use.
+has been reconciled. The later referential selection captures the reconciled
+destination head, while subsequent canonical `main` movement remains explicit
+point-in-time drift even though the five governed source trees were unchanged.
+No later head is silently substituted. Catalog or governed-source drift
+requires another selection record before downstream use.
