@@ -492,6 +492,13 @@ J0(0)=1) keep an implicit tight check via their point being near-exact. Any fn
 above the **1e-2 gross bar** is flagged as a likely bug, not calibrated away —
 list it in the report's "weak/suspect" section.
 
+> **Coverage check (Task 1 left NO-DATA as SKIP, not FAIL).** The comparator
+> skips functions with no emitted data so partial/self-test runs work. The FULL
+> gate must therefore separately assert that EVERY function in `REF` appeared in
+> the emitter output — else a missing/broken emitter silently SKIPs and hides a
+> gap. Add to the gate (or the comparator via a `--require-all` flag): after
+> scoring, fail if any `REF` key has 0 data rows in a full run.
+
 - [ ] **Step 2: Run the full gate over every family**
 
 Run: `PARITY_FAMILIES="erf gamma beta igamma bessel airy zeta elliptic hypergeometric orthopoly" bash scripts/special_scipy_parity_gate.sh | tee /tmp/parity_report.txt`
