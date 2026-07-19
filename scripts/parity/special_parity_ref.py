@@ -5,6 +5,14 @@ signed-i64 IEEE-754 bit pattern (Sounio f64_to_bits). No scipy dependency."""
 import sys, struct, mpmath as mp
 mp.mp.dps = 30
 
+def _ibetainv(a, b, p):
+    lo, hi = mp.mpf(0), mp.mpf(1)
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if mp.betainc(a, b, 0, mid, regularized=True) < p: lo = mid
+        else: hi = mid
+    return (lo + hi) / 2
+
 def bits_to_f64(field):
     return struct.unpack('<d', struct.pack('<q', int(field)))[0]
 
@@ -19,6 +27,10 @@ REF = {
     "gamma":  (lambda x: mp.gamma(x), 1e-2),
     "lgamma": (lambda x: mp.loggamma(x), 1e-2),
     "digamma":(lambda x: mp.digamma(x), 1e-2),
+    "beta":     (lambda a,b: mp.beta(a,b), 1e-2),
+    "lbeta":    (lambda a,b: mp.log(mp.beta(a,b)), 1e-2),
+    "ibeta":    (lambda a,b,x: mp.betainc(a,b,0,x,regularized=True), 1e-2),
+    "ibeta_inv":(lambda a,b,p: _ibetainv(a,b,p), 1e-2),
 }
 
 def main():
