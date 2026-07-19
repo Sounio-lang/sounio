@@ -47,31 +47,31 @@ A result is usable under native import iff **both** hold:
 | `correlation` | `covariance` of independents = 0 | self-contained; this is the **analytic** (shared-source) covariance, exact 0 for no shared variable — not a finite-sample estimator, so the exact-zero check is appropriate |
 | `knightian` (p-box) | `pb_gap`, `pb_midpoint` | self-contained |
 | `covariance` | `cov_new` and accessors | self-contained |
+| `knowledge` (**free-function** `ep_*` API) | `ep_measured` / `ep_add` / `ep_mul` / `ep_merge` / `ep_gate` | **D3 partial 2026-07-19** — free-function surface imports under Madaros; see `EPISTEMIC_KNOWLEDGE_MADAROS_D3_2026-07-19` |
 
 Heuristic: **self-contained modules (no stdlib `use` deps) that avoid `f64→i64`
-casts import cleanly and return correct numbers.**
+casts and method-call sites import cleanly and return correct numbers.**
 
 ### ⚠️ Importable but specific outputs CORRUPTED
 
 | Module | Corrupted output | Root |
 |---|---|---|
-| `gum` | `gum_k95`, `gum_u95`, `gum_u99` (coverage factors / expanded uncertainty) | `dof_to_i64(nu_eff)` bitcasts → k95 = 1.960 for **all** dof; correct is `t95(nu_eff)` (e.g. 2.776 at nu=4). `u_c` and `value` are unaffected. |
+| `gum` | `gum_k95`, `gum_u95`, `gum_u99` (coverage factors / expanded uncertainty) | `dof_to_i64(nu_eff)` bitcasts → k95 = 1.960 for **all** dof; correct is `t95(nu_eff)` (e.g. 2.776 at nu=4). `u_c` and `value` are unaffected. **Note:** stdlib GUM-site workaround may land separately (prescription-chain lane). |
 
 **Guidance:** report point estimate + combined standard uncertainty `u_c`; do
 **not** rely on `U95`/`U99` from an imported `gum` until the cast bug is fixed.
 
 ### ❌ Not usable via native import (compile fails)
 
-| Module | Failure | Consequence |
+| Module / form | Failure | Consequence |
 |---|---|---|
-| `knowledge` (Knowledge<T> / `Epistemic`) | **segfault** (self-contained; cause TBD) | the flagship epistemic type cannot be imported into a native program |
-| `propagate` (uncertainty propagation: `exp`/`ln`/`pow`/Monte-Carlo) | compile-fail (transitively `use`s `knowledge`) | the propagation layer is native-import-blocked |
-| `order_spread_exact` (CPC N=4 exact-spread receipt) | **segfault** (uses `knowledge`+`algebra`) | works only via lean_single, not native import |
-| `uncertain_eq` | segfault (uses `knowledge`) | equality-under-uncertainty native-import-blocked |
+| `knowledge` **method-call** form (`Epistemic::measured`, `e.val()`) | SEGV in method-call lowering (Root 2) | use free `ep_*` API under Madaros; methods still OK under lean_single |
+| `propagate` | blocked / fragile multi-module | propagation layer not yet native-trustworthy |
+| `order_spread_exact` | **segfault** (uses `knowledge`+`algebra`) | works only via lean_single, not native import |
+| `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked |
 
-These are usable today only by **inlining into `main()`** (the `gum_to_csv`
-workaround) or via the **lean_single** engine — not by importing into a native
-program.
+Method-form and remaining modules are usable today only by **free-function rewrite**,
+**inlining into `main()`**, or via the **lean_single** engine.
 
 ## Blast radius
 

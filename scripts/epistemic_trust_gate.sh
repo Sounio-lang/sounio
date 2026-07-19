@@ -27,6 +27,7 @@ echo "### A. TRUSTWORTHY under native import (gating) ###"
 runproof "gum: value + u_c"          tests/epistemic_trust/gum_trust.sio         GUM_TRUST_OK
 runproof "correlation: covariance"   tests/epistemic_trust/correlation_trust.sio CORRELATION_TRUST_OK
 runproof "knightian: p-box"          tests/epistemic_trust/knightian_trust.sio   KNIGHTIAN_TRUST_OK
+runproof "knowledge: free Epistemic" tests/epistemic_trust/knowledge_trust.sio   KNOWLEDGE_TRUST_OK
 
 echo "### B. KNOWN-CORRUPTED trip-wire (informational) ###"
 echo "== gum k95 coverage factor (should be 2776 = t95(4); bug gives 1960) =="
@@ -37,12 +38,22 @@ if $SOUC compile tests/epistemic_trust/witness_gum_k95.sio -o "$OUT/k.elf" >/dev
 else echo "witness_gum_k95 failed to compile (unexpected)"; fi
 
 echo "### C. KNOWN-UNIMPORTABLE trip-wire (informational) ###"
-for w in witness_import_knowledge witness_import_order_spread; do
-  echo "== $w (expected: native compile FAILS) =="
-  if $SOUC compile "tests/epistemic_trust/$w.sio" -o "$OUT/w.elf" >/dev/null 2>&1; then
-    echo "!! $w now COMPILES — module became native-importable; update trust map"
-  else echo "CONFIRMED unimportable (native compile fails, as documented)"; fi
-done
+# Free-function knowledge import is now Section A. Residual: method-call form (Root 2).
+echo "== witness_import_knowledge_method (expected: native compile FAILS) =="
+if $SOUC compile tests/epistemic_trust/witness_import_knowledge_method.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
+  echo "!! method-call knowledge now COMPILES — Root 2 may be FIXED; update trust map"
+else echo "CONFIRMED unimportable (method-call form, as documented)"; fi
+
+echo "== witness_import_order_spread (trip-wire; may compile after knowledge free-API) =="
+if $SOUC compile tests/epistemic_trust/witness_import_order_spread.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
+  echo "NOTE: order_spread_exact COMPILES under native import — re-classify in trust map when numeric gate exists"
+else echo "CONFIRMED unimportable (native compile fails, as documented)"; fi
+
+# Legacy free-function witness should now succeed (informational flip)
+echo "== witness_import_knowledge free API (expected: now COMPILES) =="
+if $SOUC compile tests/epistemic_trust/witness_import_knowledge.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
+  echo "OK free-function knowledge import COMPILES (promoted to Section A)"
+else echo "FAIL unexpected: free knowledge import broke"; fail=1; fi
 
 echo
 [ $fail -eq 0 ] && echo "EPISTEMIC_TRUST_GATE_OK"

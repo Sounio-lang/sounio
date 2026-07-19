@@ -3,7 +3,9 @@
 //
 // These are the relational primitives that make a >>1024-row BigFrame useful as a
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
-// hash-joins, a stable comparison sort, and an adaptive stable radix sort.
+// hash-joins, a stable comparison sort, an adaptive stable radix sort,
+// unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
+// rolling-window sum / mean / max / min, and shift / diff / pct-change.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -785,5 +787,597 @@ pub fn bf_sort_radix(src: &BigFrame, col: i64, ascending: bool) -> BigFrame with
     heap_free(kb as *mut i8)
     heap_free(ia as *mut i8)
     heap_free(ib as *mut i8)
+    out
+}
+
+/// Distinct values of column `col`, in FIRST-SEEN order (like pandas Series.unique()).
+/// Single pass with an open-addressing hash table (the bf_ghash Fibonacci mix, load
+/// factor <= 0.5); each value is emitted the first time its slot is claimed. Returns a
+/// 1-column BigFrame. O(n) expected. NATIVE + lean_single only (heap).
+pub fn bf_unique(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || nr <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64   // occupancy (starts 0 via calloc)
+    let hk  = heap_alloc(size * 8) as *mut f64   // key at that slot
+    let kp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, 16)
+    var r: i64 = 0
+    while r < nr {
+        let v = read_f64(kp, r)
+        var slot = bf_ghash(v, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, v)
+                var row: [f64; 64] = [0.0; 64]
+                row[0] = v
+                bf_push_row(&!out, &row, 1)      // emit on first sight -> first-seen order
+                done = true
+            } else {
+                if read_f64(hk, slot) == v { done = true } else { slot = (slot + 1) & mask }
+            }
+        }
+        r = r + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    out
+}
+
+/// Keep the FIRST row for each distinct value of `key_col`, dropping later duplicates
+/// (like pandas drop_duplicates(subset=[key], keep="first")). Preserves input row
+/// order among the survivors. Single pass with the same open-addressing table as
+/// bf_unique; on a key's first sighting the whole row is copied into the output.
+/// Returns a BigFrame with all of `src`'s columns. O(n) expected. NATIVE +
+/// lean_single only (heap).
+pub fn bf_drop_duplicates(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nc = bf_ncols(src)
+    let nr = bf_nrows(src)
+    if key_col < 0 || key_col >= nc || nr <= 0 { return bf_new(nc, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    var out = bf_new(nc, 16)
+    var r: i64 = 0
+    while r < nr {
+        let k = read_f64(kp, r)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                var row: [f64; 64] = [0.0; 64]
+                var c: i64 = 0
+                while c < nc { row[c] = bf_get(src, r, c); c = c + 1 }
+                bf_push_row(&!out, &row, nc)
+                done = true
+            } else {
+                if read_f64(hk, slot) == k { done = true } else { slot = (slot + 1) & mask }
+            }
+        }
+        r = r + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    out
+}
+
+/// Count occurrences of each distinct value of column `col`, returned as a 2-column
+/// [value, count] BigFrame SORTED BY COUNT DESCENDING (like pandas Series.value_counts()).
+/// One open-addressing hash-count pass (bf_ghash, load <= 0.5) tallies each distinct
+/// value; the distinct rows are emitted in first-seen order, then stably sorted by
+/// count descending (so equal counts keep first-seen order). O(n + d log d) for d
+/// distinct values. NATIVE + lean_single only (heap).
+pub fn bf_value_counts(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || nr <= 0 { return bf_new(2, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hc  = heap_alloc(size * 8) as *mut f64   // running count per slot
+    let ord = heap_alloc(size * 8) as *mut i64   // slots in first-seen order
+    let kp = bf_col_ptr(src, col) as *mut f64
+    var nd: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let v = read_f64(kp, r)
+        var slot = bf_ghash(v, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, v)
+                write_f64(hc, slot, 1.0)
+                write_i64(ord, nd, slot)
+                nd = nd + 1
+                done = true
+            } else {
+                if read_f64(hk, slot) == v {
+                    write_f64(hc, slot, read_f64(hc, slot) + 1.0)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    var cap = nd
+    if cap < 1 { cap = 1 }
+    var tmp = bf_new(2, cap)
+    var j: i64 = 0
+    while j < nd {
+        let s = read_i64(ord, j)
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = read_f64(hk, s)
+        row[1] = read_f64(hc, s)
+        bf_push_row(&!tmp, &row, 2)
+        j = j + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hc as *mut i8)
+    heap_free(ord as *mut i8)
+    let out = bf_sort_by(&tmp, 1, false)     // by count descending; stable -> ties first-seen
+    var tm = tmp
+    bf_free(&!tm)
+    out
+}
+
+/// Running (cumulative) sum of column `col`: a 1-column BigFrame of length n where
+/// out[i] = col[0] + col[1] + ... + col[i] (like pandas Series.cumsum()). A single
+/// sequential accumulate -- O(n), no hashing. (f64 accumulation, so it carries the
+/// same rounding as any f64 running sum.) NATIVE + lean_single only (heap).
+pub fn bf_cumsum(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        write_f64(op, i, acc)
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group running count (0-indexed), aligned to input row order: out[i] = the
+/// number of EARLIER rows sharing row i's `key_col` value (like pandas
+/// groupby(key).cumcount()). One pass with an open-addressing hash table mapping key
+/// -> count-so-far. Returns a 1-column BigFrame of length n. O(n) expected. NATIVE +
+/// lean_single only (heap).
+pub fn bf_cumcount_by(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < n + n { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hc  = heap_alloc(size * 8) as *mut f64   // count-so-far per key
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hc, slot, 1.0)
+                write_f64(op, i, 0.0)              // first sighting -> 0 prior
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    let c = read_f64(hc, slot)
+                    write_f64(op, i, c)
+                    write_f64(hc, slot, c + 1.0)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        i = i + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hc as *mut i8)
+    out
+}
+
+/// Per-group running sum of `val_col`, aligned to input row order: out[i] = the sum
+/// of `val_col` over all rows up to and including row i that share row i's `key_col`
+/// value (like pandas groupby(key)[val].cumsum()). One pass with an open-addressing
+/// hash table mapping key -> running sum. Returns a 1-column BigFrame of length n.
+/// O(n) expected. NATIVE + lean_single only (heap).
+pub fn bf_cumsum_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < n + n { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hs  = heap_alloc(size * 8) as *mut f64   // running sum per key
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i)
+        let v = read_f64(vp, i)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hs, slot, v)
+                write_f64(op, i, v)
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    let s = read_f64(hs, slot) + v
+                    write_f64(hs, slot, s)
+                    write_f64(op, i, s)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        i = i + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hs as *mut i8)
+    out
+}
+
+/// Running (cumulative) maximum of column `col`: a 1-column BigFrame of length n
+/// where out[i] = max(col[0..=i]) (like pandas Series.cummax()). A single sequential
+/// compare-accumulate, O(n), no hashing. NATIVE + lean_single only (heap).
+pub fn bf_cummax(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = read_f64(sp, 0)
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        if v > acc { acc = v }
+        write_f64(op, i, acc)
+        i = i + 1
+    }
+    out
+}
+
+/// Running (cumulative) minimum of column `col`: out[i] = min(col[0..=i]) (like
+/// pandas Series.cummin()). Single sequential compare-accumulate, O(n), no hashing.
+/// NATIVE + lean_single only (heap).
+pub fn bf_cummin(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = read_f64(sp, 0)
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        if v < acc { acc = v }
+        write_f64(op, i, acc)
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group running maximum of `val_col`, aligned to input row order: out[i] = the
+/// max of `val_col` over all rows up to and including i that share row i's `key_col`
+/// value (like pandas groupby(key)[val].cummax()). One pass with an open-addressing
+/// table mapping key -> running max. Returns a 1-column BigFrame of length n. O(n)
+/// expected. NATIVE + lean_single only (heap).
+pub fn bf_cummax_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < n + n { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hm  = heap_alloc(size * 8) as *mut f64   // running max per key
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i)
+        let v = read_f64(vp, i)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hm, slot, v)
+                write_f64(op, i, v)
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    var m = read_f64(hm, slot)
+                    if v > m { m = v }
+                    write_f64(hm, slot, m)
+                    write_f64(op, i, m)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        i = i + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hm as *mut i8)
+    out
+}
+
+/// Per-group running minimum of `val_col`, aligned to input row order (like pandas
+/// groupby(key)[val].cummin()). One pass with an open-addressing table mapping key ->
+/// running min. Returns a 1-column BigFrame of length n. O(n) expected. NATIVE +
+/// lean_single only (heap).
+pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < n + n { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hm  = heap_alloc(size * 8) as *mut f64   // running min per key
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i)
+        let v = read_f64(vp, i)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hm, slot, v)
+                write_f64(op, i, v)
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    var m = read_f64(hm, slot)
+                    if v < m { m = v }
+                    write_f64(hm, slot, m)
+                    write_f64(op, i, m)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        i = i + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hm as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) sum of column `col` over a fixed `window`: out[i] = the
+/// sum of col[i-window+1 .. i] (like pandas col.rolling(window).sum()). The first
+/// window-1 rows have an incomplete window and get `fill` (pass make_nan() for pandas
+/// NaN, or any sentinel). O(n) via a running accumulator that adds the entering value
+/// and subtracts the leaving one. NOTE: the sliding add/subtract carries f64 rounding
+/// like any online window sum; for exactness use integer-valued data. NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_sum(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        if i >= window { acc = acc - read_f64(sp, i - window) }
+        if i >= window - 1 { write_f64(op, i, acc) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Rolling (sliding-window) mean of column `col` (like pandas col.rolling(window)
+/// .mean()): the rolling sum divided by `window`, with the first window-1 rows set to
+/// `fill`. O(n). Same f64-rounding note as bf_rolling_sum. NATIVE + lean_single only.
+pub fn bf_rolling_mean(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let wf = window as f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        if i >= window { acc = acc - read_f64(sp, i - window) }
+        if i >= window - 1 { write_f64(op, i, acc / wf) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Rolling (sliding-window) maximum of column `col` (like pandas col.rolling(window)
+/// .max()): out[i] = max(col[i-window+1 .. i]), first window-1 rows = `fill`. O(n)
+/// via a MONOTONIC DEQUE of indices whose values decrease front-to-back, so the front
+/// is always the window max; each index is pushed and popped at most once. NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_max(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let dq = heap_alloc(n * 8) as *mut i64   // indices; values decreasing front->back
+    var head: i64 = 0
+    var tail: i64 = 0                        // deque occupies [head, tail)
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        while tail > head && read_f64(sp, read_i64(dq, tail - 1)) <= v { tail = tail - 1 }  // pop smaller-or-equal from back
+        write_i64(dq, tail, i)
+        tail = tail + 1
+        if read_i64(dq, head) <= i - window { head = head + 1 }                             // drop out-of-window front
+        if i >= window - 1 {
+            write_f64(op, i, read_f64(sp, read_i64(dq, head)))
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
+    heap_free(dq as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) minimum of column `col` (like pandas col.rolling(window)
+/// .min()): out[i] = min(col[i-window+1 .. i]), first window-1 rows = `fill`. O(n) via
+/// a monotonic deque whose values INCREASE front-to-back (front = window min). NATIVE
+/// + lean_single only (heap).
+pub fn bf_rolling_min(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let dq = heap_alloc(n * 8) as *mut i64
+    var head: i64 = 0
+    var tail: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        while tail > head && read_f64(sp, read_i64(dq, tail - 1)) >= v { tail = tail - 1 }  // pop larger-or-equal from back
+        write_i64(dq, tail, i)
+        tail = tail + 1
+        if read_i64(dq, head) <= i - window { head = head + 1 }
+        if i >= window - 1 {
+            write_f64(op, i, read_f64(sp, read_i64(dq, head)))
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
+    heap_free(dq as *mut i8)
+    out
+}
+
+/// Shift column `col` by `periods` rows: out[i] = col[i - periods] where in range,
+/// else `fill` (like pandas col.shift(periods)). `periods` may be negative (shift up).
+/// O(n). NOTE: this is a memory move; pandas lowers shift to a near-memcpy, so until a
+/// mem_copy builtin is exposed (dispatch #1179) Sounio's per-element copy trails it.
+/// First/last |periods| rows take `fill` (pass make_nan() for pandas NaN). NATIVE +
+/// lean_single only (heap).
+pub fn bf_shift(src: &BigFrame, col: i64, periods: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let j = i - periods
+        if j >= 0 && j < n { write_f64(op, i, read_f64(sp, j)) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Discrete difference of column `col`: out[i] = col[i] - col[i - periods] where in
+/// range, else `fill` (like pandas col.diff(periods)). `periods` may be negative. O(n).
+/// NOTE: pandas lowers diff to a vectorized SIMD subtract; Sounio's scalar per-element
+/// subtract trails it until SIMD codegen (C3) lands. First/last |periods| rows take
+/// `fill`. NATIVE + lean_single only (heap).
+pub fn bf_diff(src: &BigFrame, col: i64, periods: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let j = i - periods
+        if j >= 0 && j < n { write_f64(op, i, read_f64(sp, i) - read_f64(sp, j)) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Fractional change of column `col` between consecutive rows: out[i] = (col[i] -
+/// col[i-1]) / col[i-1] (like pandas col.pct_change()). Row 0 takes `fill`. A zero
+/// prior value yields inf/nan (as in pandas). O(n) single pass. NATIVE + lean_single
+/// only (heap).
+pub fn bf_pct_change(src: &BigFrame, col: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        if i >= 1 {
+            let prev = read_f64(sp, i - 1)
+            write_f64(op, i, (read_f64(sp, i) - prev) / prev)
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
     out
 }
