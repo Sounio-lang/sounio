@@ -4,7 +4,8 @@
 // These are the relational primitives that make a >>1024-row BigFrame useful as a
 // dataframe: a row filter, integer and hash groupby-sum, the inner/left/outer
 // hash-joins, a stable comparison sort, an adaptive stable radix sort,
-// unique / drop-duplicates, value-counts, and cumulative sum / count / max / min.
+// unique / drop-duplicates, value-counts, cumulative sum / count / max / min, and
+// rolling-window sum / mean / max / min.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -1199,5 +1200,117 @@ pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with
     heap_free(occ as *mut i8)
     heap_free(hk as *mut i8)
     heap_free(hm as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) sum of column `col` over a fixed `window`: out[i] = the
+/// sum of col[i-window+1 .. i] (like pandas col.rolling(window).sum()). The first
+/// window-1 rows have an incomplete window and get `fill` (pass make_nan() for pandas
+/// NaN, or any sentinel). O(n) via a running accumulator that adds the entering value
+/// and subtracts the leaving one. NOTE: the sliding add/subtract carries f64 rounding
+/// like any online window sum; for exactness use integer-valued data. NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_sum(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        if i >= window { acc = acc - read_f64(sp, i - window) }
+        if i >= window - 1 { write_f64(op, i, acc) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Rolling (sliding-window) mean of column `col` (like pandas col.rolling(window)
+/// .mean()): the rolling sum divided by `window`, with the first window-1 rows set to
+/// `fill`. O(n). Same f64-rounding note as bf_rolling_sum. NATIVE + lean_single only.
+pub fn bf_rolling_mean(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let wf = window as f64
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + read_f64(sp, i)
+        if i >= window { acc = acc - read_f64(sp, i - window) }
+        if i >= window - 1 { write_f64(op, i, acc / wf) } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    out
+}
+
+/// Rolling (sliding-window) maximum of column `col` (like pandas col.rolling(window)
+/// .max()): out[i] = max(col[i-window+1 .. i]), first window-1 rows = `fill`. O(n)
+/// via a MONOTONIC DEQUE of indices whose values decrease front-to-back, so the front
+/// is always the window max; each index is pushed and popped at most once. NATIVE +
+/// lean_single only (heap).
+pub fn bf_rolling_max(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let dq = heap_alloc(n * 8) as *mut i64   // indices; values decreasing front->back
+    var head: i64 = 0
+    var tail: i64 = 0                        // deque occupies [head, tail)
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        while tail > head && read_f64(sp, read_i64(dq, tail - 1)) <= v { tail = tail - 1 }  // pop smaller-or-equal from back
+        write_i64(dq, tail, i)
+        tail = tail + 1
+        if read_i64(dq, head) <= i - window { head = head + 1 }                             // drop out-of-window front
+        if i >= window - 1 {
+            write_f64(op, i, read_f64(sp, read_i64(dq, head)))
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
+    heap_free(dq as *mut i8)
+    out
+}
+
+/// Rolling (sliding-window) minimum of column `col` (like pandas col.rolling(window)
+/// .min()): out[i] = min(col[i-window+1 .. i]), first window-1 rows = `fill`. O(n) via
+/// a monotonic deque whose values INCREASE front-to-back (front = window min). NATIVE
+/// + lean_single only (heap).
+pub fn bf_rolling_min(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || window <= 0 { return bf_new(1, 1) }
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let sp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let dq = heap_alloc(n * 8) as *mut i64
+    var head: i64 = 0
+    var tail: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let v = read_f64(sp, i)
+        while tail > head && read_f64(sp, read_i64(dq, tail - 1)) >= v { tail = tail - 1 }  // pop larger-or-equal from back
+        write_i64(dq, tail, i)
+        tail = tail + 1
+        if read_i64(dq, head) <= i - window { head = head + 1 }
+        if i >= window - 1 {
+            write_f64(op, i, read_f64(sp, read_i64(dq, head)))
+        } else {
+            write_f64(op, i, fill)
+        }
+        i = i + 1
+    }
+    heap_free(dq as *mut i8)
     out
 }
