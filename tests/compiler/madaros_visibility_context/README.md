@@ -1,12 +1,13 @@
 # Madaros module-binding identity reducer
 
-This fixture family reduces issue #854 without changing checker semantics. It
-separates a false privacy diagnostic caused by name-only lookup from genuine
-cross-module private access.
+This fixture family began as a reducer for issue #854. It separates a false
+privacy diagnostic caused by name-only lookup from genuine cross-module private
+access, then gates the bounded contextual-checker implementation described
+below.
 
 The one-call reducer mirrors the E5 test. The root and imported leaf each own a
-private `abs_f64`; the leaf's one internal call currently resolves to the
-root's earlier table entry and emits one false E175.
+private `abs_f64`; in the pinned baseline the leaf's one internal call resolves
+to the root's earlier table entry and emits one false E175.
 
 The matrix mirrors the public example exactly at the causal level:
 
@@ -42,16 +43,57 @@ SOUNIO_MADAROS_VISIBILITY_CONTEXT_EXPECT=resolved \
 `MADAROS_RAW_BIN` is mandatory so the gate cannot silently use the checked-in
 or otherwise stale compiler. The gate accepts only two coherent
 classifications: the exact `1/18` E175 check baseline, or two clean checks
-followed by both executable contextual-lookup witnesses. In either state it
-requires the canonical E175, E176, and E177 true-private negative controls.
+followed by an exact ambiguous-global E137 rejection and both executable
+contextual-lookup witnesses. In either state it requires the canonical E175,
+E176, and E177 true-private negative controls.
 Mixed states, fatal logs, diagnostic-count drift, successful checks that
 retain privacy diagnostics, and runtime exits without exact markers are
 rejected.
 
-This diagnostic gate is intentionally **not wired into ordinary CI**. The
-implementation PR must wire the `EXPECT=resolved` form after it owns the
-checker change; the present lane records and classifies the blocker without
-making a known failure block unrelated pull requests.
+The ModuleGraph facade vertical invokes this gate with `EXPECT=resolved` once a
+current-source raw compiler is available. The checked-in prebuilt remains a
+valid historical-baseline classifier; it is not evidence for the implementing
+state. The enclosing vertical accepts only `ambiguous_global=E137` and republishes
+that fact as `visibility_854_ambiguous_global=E137` in its own receipt.
+
+## Contextual checker port boundary
+
+The 2026-07-19 port onto `b75376c9e` restores the checker half of the proven
+#867/#869 stack after closure-local function identity made the runtime witnesses
+pass. The lookup rule is deliberately bounded:
+
+1. An unqualified function name first resolves to the definition with the
+   current `ModuleId`.
+2. If no local definition exists, a global fallback is accepted only when the
+   name has exactly one non-method definition in the collected closure.
+3. Definition visibility is then checked with the real current `ModuleId`.
+
+This is sufficient to distinguish same-spelled private locals, reject a genuine
+cross-module private function/struct/enum, and refuse collection-order choice
+between two public global candidates. It is **not** a canonical import-binding
+graph: the selected `use` edge is not yet carried into `FnSigTable`, and the
+unique global fallback does not prove that a particular import introduced the
+binding. The facade surface validator remains facade-only and cannot replace
+this checker pass for mixed implementation modules.
+
+```text
+Semantic-Lane-ID: issue-854-contextual-checker-port-r2
+Concept-IDs: proposed SOUNIO-MODULE-BINDING-IDENTITY
+Status: implementation-candidate; source-fresh acceptance pending
+Intent-Preserved: binding resolution precedes visibility authorization
+Transformation: name-only lookup -> local ModuleId first, global unique-only fallback
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none in this port; closure-local IR identity is an input prerequisite
+Claims-Introduced: bounded unqualified-function lookup distinguishes module-local identities and fails closed on duplicate global candidates
+Claims-Forbidden: canonical import binding; general qualified-name resolution; general re-export correctness; issue #854 closed before the source-fresh acceptance gate passes
+Positive-Witness: duplicate_private_single_main.sio and duplicate_private_18_main.sio execute exact PASS markers
+Negative-Witness: ambiguous_public_main.sio=E137; private function=E175; private struct=E176; private enum=E177
+Acceptance-Gate: MADAROS_RAW_BIN=<current-source-madaros> SOUNIO_MADAROS_VISIBILITY_CONTEXT_EXPECT=resolved bash scripts/ci/madaros_visibility_context_gate.sh
+Fallback-Path: unique-only global lookup; rejected when more than one candidate exists
+Legacy-Kept: name-only lookup remains for consumers outside the contextual checker surface
+LLM-Offload: not-required (compiler binding mechanics; no math, clinical pathway, or external-facing claim)
+```
 
 ## Exact baseline receipt
 
@@ -79,7 +121,7 @@ compiler is fixed. A separate synthetic compiler that accepts every input is
 rejected when the E175 negative control returns 0. This pins the state machine
 and anti-weakening behavior independently of the current compiler result.
 
-## Blocker handoff
+## Historical blocker handoff
 
 ```text
 Blocker-ID: BLK-20260713-MADAROS-EISA-E5-VISIBILITY-E175
@@ -105,7 +147,7 @@ LLM-Offload: not-required (diagnostic fixtures/gate only; no math, clinical, or 
 Next-Action: implement module-aware function binding lookup after PR #814 releases checker ownership
 ```
 
-## Semantic lane declaration
+## Reducer semantic lane declaration (historical)
 
 `SOUNIO-MODULE-BINDING-IDENTITY` is proposed here for the future implementation
 lane. It is not yet registered as an executable concept, and this reducer does
