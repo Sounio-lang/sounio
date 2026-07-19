@@ -636,6 +636,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.reference.epistemic-api | repo_only | docs/reference/EPISTEMIC_API.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.reference.stdlib-reference | repo_only | docs/reference/STDLIB_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.release-policy | repo_only | docs/RELEASE_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.2026-07-19-linalg-parity | historical | docs/research/2026-07-19-linalg-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-special-scipy-parity | historical | docs/research/2026-07-19-special-scipy-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -843,6 +844,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.plans.2026-07-14-stats-validation-runproof | repo_only | docs/superpowers/plans/2026-07-14-stats-validation-runproof.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-14-units-vertical | repo_only | docs/superpowers/plans/2026-07-14-units-vertical.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-17-csv-reader | repo_only | docs/superpowers/plans/2026-07-17-csv-reader.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.plans.2026-07-19-linalg-parity | repo_only | docs/superpowers/plans/2026-07-19-linalg-parity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-19-special-scipy-parity | repo_only | docs/superpowers/plans/2026-07-19-special-scipy-parity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.plans.2026-07-19-stats-dist-parity | repo_only | docs/superpowers/plans/2026-07-19-stats-dist-parity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-13-data-science-io-design | repo_only | docs/superpowers/specs/2026-07-13-data-science-io-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -858,6 +860,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-14-units-vertical-design | repo_only | docs/superpowers/specs/2026-07-14-units-vertical-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-15-batched-verticals-index | repo_only | docs/superpowers/specs/2026-07-15-batched-verticals-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-17-csv-reader-design | repo_only | docs/superpowers/specs/2026-07-17-csv-reader-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-19-linalg-parity-design | repo_only | docs/superpowers/specs/2026-07-19-linalg-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-19-special-scipy-parity-design | repo_only | docs/superpowers/specs/2026-07-19-special-scipy-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-19-stats-dist-parity-design | repo_only | docs/superpowers/specs/2026-07-19-stats-dist-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
