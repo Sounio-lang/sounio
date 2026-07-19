@@ -41,6 +41,7 @@ ROOT2_FIXTURE_MAINS=(
   tests/run-pass/madaros_root2_method_associated.sio
   tests/run-pass/madaros_root2_associated_import.sio
   tests/run-pass/madaros_root2_instance_import.sio
+  tests/run-pass/madaros_root2_multimodule_method.sio
   tests/compiler/module_graph_impl_authority_reexport/main.sio
   tests/compiler/module_graph_impl_authority_ambiguity/main.sio
 )
@@ -134,6 +135,10 @@ run_ok instance_import "multi-module instance method" \
   tests/run-pass/madaros_root2_instance_import.sio \
   ROOT2_INSTANCE_IMPORT_OK
 
+run_ok multimodule_f64 "multi-module imported method with f64 result" \
+  tests/run-pass/madaros_root2_multimodule_method.sio \
+  ROOT2_MULTIMODULE_METHOD_OK
+
 run_ok facade_reexport "facade reexport preserves impl-method authority" \
   tests/compiler/module_graph_impl_authority_reexport/main.sio \
   MODULEGRAPH_IMPL_AUTHORITY_REEXPORT_OK
@@ -145,6 +150,7 @@ EMITTED_ELF_MANIFEST_SHA256="$(sha256sum "$OUT/emitted-elf.sha256" | awk '{print
 SAME_MODULE_ELF_SHA256="$(awk '$1 == "same_module" { print $2 }' "$OUT/emitted-elf.sha256")"
 ASSOCIATED_IMPORT_ELF_SHA256="$(awk '$1 == "associated_import" { print $2 }' "$OUT/emitted-elf.sha256")"
 INSTANCE_IMPORT_ELF_SHA256="$(awk '$1 == "instance_import" { print $2 }' "$OUT/emitted-elf.sha256")"
+MULTIMODULE_F64_ELF_SHA256="$(awk '$1 == "multimodule_f64" { print $2 }' "$OUT/emitted-elf.sha256")"
 FACADE_REEXPORT_ELF_SHA256="$(awk '$1 == "facade_reexport" { print $2 }' "$OUT/emitted-elf.sha256")"
 AMBIGUITY_LOG_SHA256=unavailable
 if [[ -s "$OUT/ambiguity-negative-log.sha256" ]]; then
@@ -168,6 +174,7 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "tests/run-pass/madaros_root2_method_associated.sio",
     "tests/run-pass/madaros_root2_associated_import.sio",
     "tests/run-pass/madaros_root2_instance_import.sio",
+    "tests/run-pass/madaros_root2_multimodule_method.sio",
     "tests/compiler/module_graph_impl_authority_reexport/main.sio",
     "tests/compiler/module_graph_impl_authority_ambiguity/main.sio"
   ],
@@ -177,6 +184,7 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module": "$SAME_MODULE_ELF_SHA256",
     "associated_import": "$ASSOCIATED_IMPORT_ELF_SHA256",
     "instance_import": "$INSTANCE_IMPORT_ELF_SHA256",
+    "multimodule_f64": "$MULTIMODULE_F64_ELF_SHA256",
     "facade_reexport": "$FACADE_REEXPORT_ELF_SHA256"
   },
   "ambiguity_negative_log_sha256": "$AMBIGUITY_LOG_SHA256",
@@ -186,6 +194,8 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module_method_on_method_return",
     "multimodule_associated_type_method_import",
     "multimodule_instance_method_call",
+    "multimodule_imported_method_f64_result",
+    "multimodule_imported_epistemic_method_chain",
     "multimodule_impl_method_authority_through_facade_reexport",
     "multimodule_impl_method_authority_ambiguity_fail_closed"
   ],
