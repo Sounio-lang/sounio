@@ -123,8 +123,8 @@ required = {
     ],
     "docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md": [
         "Status: executable R3 non-authorizing mapping-selection processing; four public",
-        "empty destination repositories are provisioned, while content materialization,",
-        "post-provisioning mapping reconfirmation, production approval, and cutover",
+        "destination repositories now contain exact reviewed package copies, while",
+        "post-materialization mapping reconfirmation, production approval, and cutover",
         "execution remain absent.",
         "execution_authority = none",
         "proposal_status = proposed-not-approved",

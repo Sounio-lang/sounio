@@ -10,8 +10,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.phys
 # Physical Extraction Canonical Production Mapping Decision
 
 Status: executable R3 non-authorizing mapping-selection processing; four public
-empty destination repositories are provisioned, while content materialization,
-post-provisioning mapping reconfirmation, production approval, and cutover
+destination repositories now contain exact reviewed package copies, while
+post-materialization mapping reconfirmation, production approval, and cutover
 execution remain absent.
 
 `tools/science_boundary/canonical_production_mapping_decision_processor.py`
@@ -195,6 +195,40 @@ records the same result, and the observation set is preserved under
 The requested `sounio-scientific-packages-maintainers` team slug was not
 observed, so no team or team permission was created.
 
+Later on `2026-07-19`, a separate interactive instruction authorized only the
+exact materialization of the four package roots, initial `main` commits, pushes,
+and verification. The bound source is remote review-branch commit
+`317e6d085ad5304c8fac185eee03552a6b916123`; correction PR
+[#1176](https://github.com/Sounio-lang/sounio/pull/1176) remained draft and
+unmerged. Independent math review had caught and prompted repair of a wrong GUM
+example and zero-central-value multiplication uncertainty before the copy.
+
+The materialized commits are:
+
+- `epistemic-core`: `732b3fbf7ff1d596cf591124b475791fe5e1add9`;
+- `sounio-formats`: `c412c0d1e7ef276d3ad9d1e662d681369e3e384c`;
+- `sounio-io-primitives`: `8e593615072e7ad9962ab27c0e316a8be521457d`;
+- `sounio-units`: `229d310f676d2a3a1e183983764da2ddd63f6fe0`.
+
+Source inventory identity
+`f03458beb2ed07380e7d4a7b1242bb7b32e3c609a47f204e44c34eca64a429e5`
+binds all package files and tree hashes. Four fresh clones reproduced those
+hashes and commits after push. The post-materialization organization catalog
+was observed at `2026-07-19T02:48:12Z`, contains 14 repositories, and has
+identity
+`095de409e315ff0c716c4877274c8b2d439310bd255233cf1558f42f2b19be2c`.
+Issue comment
+[`5013887205`](https://github.com/Sounio-lang/sounio/issues/1122#issuecomment-5013887205)
+records the result byte-identically, and the evidence is preserved under
+`artifacts/r3/canonical-production/20260719T024812Z/`.
+
+This operation did not materialize `sounio-examples`, remove source paths,
+repair manifest repository fields, create a team or branch rule, emit a mapping
+proposal, or approve production or cutover. While PR #1176 is unmerged, the
+public copies are deliberately bound to its remote source commit rather than to
+`origin/main`; any substantive PR rewrite requires a new binding before
+canonical use.
+
 ## Acceptance Gate
 
 The focused gate is
@@ -243,11 +277,11 @@ implementation fallback or real hosting operation ran.
 
 ## Remaining Boundary
 
-The four requested repositories are provisioned but intentionally empty. Empty
-catalog rows have no HEAD and cannot pass the processor's `reuse-observed`
-requirements. The next state requires separately authorized destination
-content materialization, followed by another organization catalog and
-canonical `main` observation and a complete reconfirmation of all five targets.
-The mapping proposal, production materialization evidence, recovery policy,
-approval, explicit cutover decision, and execution remain later and separate
-interfaces.
+The four requested repositories are public, non-empty, and have verified
+`main` commits, but this does not silently convert the earlier `request-new`
+selection into `reuse-observed`. The next state requires a complete explicit
+human reconfirmation of all five targets against catalog identity
+`095de409e315ff0c716c4877274c8b2d439310bd255233cf1558f42f2b19be2c`.
+The maintainer team and branch-rule evidence are still absent. Mapping proposal
+review, production approval, recovery policy, explicit cutover decision, source
+removal, and execution remain later and separate interfaces.
