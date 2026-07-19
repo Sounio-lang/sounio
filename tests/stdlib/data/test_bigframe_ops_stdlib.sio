@@ -296,6 +296,46 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let gmxb = bf_cummax_by(&gf, 0, 1)  // max val in group so far = current i (val increasing in group)
     if bf_get(&gmxb, 500500, 0) != 500500.0 { print("FAIL cummax_by_grp\n"); return 124 }
     if bf_get(&gmxb, 999999, 0) != 999999.0 { print("FAIL cummax_by_grp_last\n"); return 125 }
+    // ROLLING WINDOW. fill = -1.0 sentinel for the first window-1 incomplete rows.
+    // (a) sum/mean over col0=1.0 (window 100): sum=100, mean=1.0 once the window fills.
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < 1000000 { var rr:[f64;64]=[0.0;64]; rr[0]=1.0; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rs = bf_rolling_sum(&rf, 0, 100, 0.0 - 1.0)
+    if bf_nrows(&rs) != 1000000 { print("FAIL rsum_n\n"); return 126 }
+    if bf_get(&rs, 98, 0) != (0.0 - 1.0) { print("FAIL rsum_fill\n"); return 127 }   // window not full yet
+    if bf_get(&rs, 99, 0) != 100.0 { print("FAIL rsum_full\n"); return 128 }
+    if bf_get(&rs, 999999, 0) != 100.0 { print("FAIL rsum_last\n"); return 129 }
+    // mean over col1=i (window 3): out[i] = ((i-2)+(i-1)+i)/3 = i-1 for i>=2.
+    let rm = bf_rolling_mean(&rf, 1, 3, 0.0 - 1.0)
+    if bf_get(&rm, 1, 0) != (0.0 - 1.0) { print("FAIL rmean_fill\n"); return 130 }
+    if bf_get(&rm, 2, 0) != 1.0 { print("FAIL rmean2\n"); return 131 }
+    if bf_get(&rm, 100, 0) != 99.0 { print("FAIL rmean100\n"); return 132 }
+    // (b) rolling max/min via monotonic deque, DIFFERENTIALLY verified against a naive
+    // O(n*w) scan over a 5000-row sawtooth (col = i%37, window 50) -> must be identical.
+    var wf2 = bf_new(1, 16)
+    var wfi: i64 = 0
+    while wfi < 5000 { var wr:[f64;64]=[0.0;64]; wr[0]=(wfi%37) as f64; bf_push_row(&!wf2,&wr,1); wfi=wfi+1 }
+    let rmax = bf_rolling_max(&wf2, 0, 50, 0.0 - 1.0)
+    let rmin = bf_rolling_min(&wf2, 0, 50, 0.0 - 1.0)
+    var rd: i64 = 0
+    var rj: i64 = 0
+    while rj < 5000 {
+        // naive window [rj-49, rj]
+        if rj >= 49 {
+            var mx = bf_get(&wf2, rj - 49, 0)
+            var mn = mx
+            var t: i64 = rj - 48
+            while t <= rj { let vv = bf_get(&wf2, t, 0); if vv > mx { mx = vv } if vv < mn { mn = vv } t = t + 1 }
+            if bf_get(&rmax, rj, 0) != mx { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != mn { rd = rd + 1 }
+        } else {
+            if bf_get(&rmax, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+        }
+        rj = rj + 1
+    }
+    if rd != 0 { print("FAIL rolling_maxmin_vs_naive\n"); return 133 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
