@@ -599,6 +599,17 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.hyper_algebra_kind = (*summary.module).functions[i as usize].hyper_algebra_kind
         func.bss_size = (*summary.module).functions[i as usize].bss_size
         func.first_param_is_ref = (*summary.module).functions[i as usize].first_param_is_ref
+        // Preserve element-list init words packed into BSS slot instrs[]
+        // (count>1 → per-element stores in emit_global_var_inits_into).
+        let ic = (*summary.module).functions[i as usize].instr_count
+        if ic > 0 {
+            var ji: i64 = 0
+            while ji < ic && ji < IR_MAX_INSTRS {
+                func.instrs[ji as usize] = (*summary.module).functions[i as usize].instrs[ji as usize]
+                ji = ji + 1
+            }
+            func.instr_count = ic
+        }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -688,6 +699,16 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.hyper_algebra_kind = summary.module.functions[i as usize].hyper_algebra_kind
         func.bss_size = summary.module.functions[i as usize].bss_size
         func.first_param_is_ref = summary.module.functions[i as usize].first_param_is_ref
+        // Preserve element-list init words packed into BSS slot instrs[].
+        let ic = summary.module.functions[i as usize].instr_count
+        if ic > 0 {
+            var ji: i64 = 0
+            while ji < ic && ji < IR_MAX_INSTRS {
+                func.instrs[ji as usize] = summary.module.functions[i as usize].instrs[ji as usize]
+                ji = ji + 1
+            }
+            func.instr_count = ic
+        }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -1301,6 +1322,30 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
     }
 }
 
+// Apply parse-time GLOBAL_VAR_INIT_* side-table data onto a BSS global slot.
+// - count == 0: no recorded init (BSS stays zero)
+// - count == 1: scalar or array-repeat fill → returns_float=1, prof_counter_id=word
+// - count  > 1: element-list → also pack words into instrs[] for per-element stores
+// Presence uses count (not value!=0) so a list starting with 0 still inits.
+fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Div {
+    let count = ast_global_var_init_count(name)
+    if count <= 0 {
+        return
+    }
+    (*slot).returns_float = 1
+    (*slot).prof_counter_id = ast_global_var_init_nth(name, 0)
+    if count > 1 {
+        var j: i64 = 0
+        while j < count && j < IR_MAX_INSTRS {
+            var instr = (*slot).instrs[j as usize]
+            instr.imm_i64 = ast_global_var_init_nth(name, j)
+            (*slot).instrs[j as usize] = instr
+            j = j + 1
+        }
+        (*slot).instr_count = j
+    }
+}
+
 fn lowerer_preseed_program_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
@@ -1377,11 +1422,7 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.param_count = bss_off
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
-                                    let init_val = ast_lookup_global_var_init(name)
-                                    if init_val != 0 {
-                                        bss_slot.returns_float = 1
-                                        bss_slot.prof_counter_id = init_val
-                                    }
+                                    lower_apply_global_var_init(&! bss_slot, name)
                                     (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox2).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox2
@@ -1816,11 +1857,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.param_count = bss_mod.bss_total_size
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
-                                        let init_val = ast_lookup_global_var_init(name)
-                                        if init_val != 0 {
-                                            bss_slot.returns_float = 1
-                                            bss_slot.prof_counter_id = init_val
-                                        }
+                                        lower_apply_global_var_init(&! bss_slot, name)
                                         bss_mod.functions[bss_fid as usize] = bss_slot
                                         bss_mod.fn_count = bss_fid + 1
                                         bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -1932,11 +1969,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.param_count = bss_mod.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
-                                let init_val = ast_lookup_global_var_init(name)
-                                if init_val != 0 {
-                                    bss_slot.returns_float = 1
-                                    bss_slot.prof_counter_id = init_val
-                                }
+                                lower_apply_global_var_init(&! bss_slot, name)
                                 bss_mod.functions[bss_fid as usize] = bss_slot
                                 bss_mod.fn_count = bss_fid + 1
                                 bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -5646,7 +5679,21 @@ impl Lowerer {
         match *base_opt {
             Some(base_expr) => {
                 if (*base_expr).kind == ExprKind::ExprIdent {
-                    return self.lookup_local_array_elem_float((*base_expr).name)
+                    if self.lookup_local_array_elem_float((*base_expr).name) {
+                        return true
+                    }
+                    // Module-level `var F: [f64; N]`: not always bound as a local with
+                    // array_elem_float=1. Fall back to the preseed global type table so
+                    // `print(F[i])` routes to print_f64 (IEEE bits → dtoa) instead of
+                    // print_int (raw bit pattern as decimal).
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*base_expr).name)
+                    if fn_id >= 0 {
+                        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                        if gkind == LOWER_GLOBAL_ELEM_F64 {
+                            return true
+                        }
+                    }
+                    return false
                 }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
                     return self.field_array_elem_is_float_for_base_ref(&(*base_expr).left, (*base_expr).name)

@@ -13,9 +13,12 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
     items_reverse_item_list_loop(items, None)
 }
 
-// Record a compile-time integer global initializer for native BSS fill.
-// Covers: scalar `42` / `-42`, and array-repeat `[42; N]` / `[0 - 42; N]`.
-// Element-list forms `[a, b, c]` are not recorded (fill emission is repeat-only).
+// Record a compile-time integer/float global initializer for native BSS fill.
+// Covers:
+//   - scalar `42` / `-42` / `1.5` / unary-neg floats
+//   - array-repeat `[V; N]`  → one fill word (i64 value or f64 bits)
+//   - element-list `[a, b, c]` → one word per element, same name hash, source order
+// Non-literal elements are silently skipped (BSS stays zero for those slots).
 fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     if (*init).kind == ExprKind::ExprIntLit {
         ast_record_global_var_init(name, (*init).int_val)
@@ -25,6 +28,7 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
         // Module-level `let/var X: f64 = <lit>`: record the IEEE-754 bits so the
         // BSS-global initializer emits the value. int_val is 0 for a float literal,
         // so without this branch f64 globals silently read 0.
+        // Also covers f64 array-repeat fill: `[1.5; N]` recurses into this branch.
         ast_record_global_var_init(name, f64_to_bits((*init).float_val))
         return
     }
@@ -42,12 +46,25 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
         return
     }
     if (*init).kind == ExprKind::ExprArrayLit {
-        // Repeat form: left = fill value, right = count
+        // Repeat form: left = fill value, right = count → single fill word
         match (*init).left {
             Some(repeat_val) => {
                 items_record_global_int_init(name, &(*repeat_val))
             }
-            _ => {}
+            None => {
+                // Element-list form: [a, b, c] — record each literal in source order
+                // (args is already reversed into source order by parse_array_literal).
+                var cur = (*init).args
+                while true {
+                    match cur {
+                        Some(node) => {
+                            items_record_global_int_init(name, &(*node).head)
+                            cur = (*node).tail
+                        }
+                        None => { break }
+                    }
+                }
+            }
         }
     }
 }
