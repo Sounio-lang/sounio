@@ -20,6 +20,18 @@ fail() {
   exit 1
 }
 
+has_forbidden_path() {
+  grep -Eq \
+    'native_prebundle:|falling back to full IR path|compact modular IR table path|legacy compact IR differential enabled|SELFHOST=fallback|driver_orchestration.*status=fallback' \
+    "$1"
+}
+
+has_fatal_log() {
+  grep -Eiq \
+    'segmentation fault|core dumped|terminated by signal|fatal:|bus error|illegal instruction' \
+    "$1"
+}
+
 usage() {
   cat <<'EOF'
 usage: scripts/ci/madaros_import_call_authority_gate.sh [--source-only|--runtime]
@@ -144,7 +156,27 @@ if [[ "$KEEP_WORK" != 1 ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
 
-RUNNER=(env "MADAROS_RAW_BIN=$RAW_MADAROS" "$WRAPPER" --science-boundary off)
+INFO_LOG="$WORK/wrapper.info"
+if ! env \
+    -u SOUNIO_MADAROS_BIN \
+    -u SOUNIO_SOUC_BIN \
+    "MADAROS_RAW_BIN=$RAW_MADAROS" \
+    "$WRAPPER" info >"$INFO_LOG" 2>&1; then
+  cat "$INFO_LOG" >&2 || true
+  fail wrapper_info_failed
+fi
+grep -Fxq "raw_elf:      $RAW_MADAROS" "$INFO_LOG" || fail wrapper_raw_identity_mismatch
+
+RUNNER=(env \
+  -u SOUNIO_MADAROS_BIN \
+  -u SOUNIO_SOUC_BIN \
+  "MADAROS_RAW_BIN=$RAW_MADAROS" \
+  "SOUNIO_STDLIB_PATH=$ROOT_DIR/stdlib" \
+  SOUNIO_SOUC_ENGINE=madaros \
+  SOUNIO_ENABLE_COMPACT_IMPORTED_IR=0 \
+  OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+  "$WRAPPER" \
+  --science-boundary off)
 
 compile_case() {
   local label="$1"
@@ -152,15 +184,23 @@ compile_case() {
   local elf="$WORK/$label.elf"
   local log="$WORK/$label.compile.log"
 
+  rm -f "$elf"
   if ! timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
       "${RUNNER[@]}" compile "$source" -o "$elf" >"$log" 2>&1; then
     cat "$log" >&2 || true
     fail "${label}_compile_failed"
   fi
-  [[ -s "$elf" ]] || fail "${label}_elf_missing"
+  has_fatal_log "$log" && fail "${label}_compiler_crash"
+  has_forbidden_path "$log" && fail "${label}_compact_or_fallback_path"
+  if grep -Fq 'error[E' "$log" || grep -Eq '^error:' "$log"; then
+    cat "$log" >&2 || true
+    fail "${label}_diagnostic_on_success"
+  fi
+  [[ -s "$elf" && -x "$elf" ]] || fail "${label}_elf_missing_or_not_executable"
   [[ "$(od -An -tx1 -N4 "$elf" | tr -d ' \n')" == 7f454c46 ]] || fail "${label}_output_not_elf"
   grep -Fq 'MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1' "$log" || fail "${label}_authority_receipt_missing"
   grep -Fq 'global_unique_fallback=0' "$log" || fail "${label}_fallback_receipt_missing"
+  grep -Eq '^Merged IR: [1-9][0-9]*$' "$log" || fail "${label}_merged_ir_receipt_missing"
 }
 
 run_exit_42() {
@@ -187,12 +227,17 @@ timeout --signal=TERM --kill-after=10s "$TIMEOUT_SECONDS" \
   "${RUNNER[@]}" compile "$FIXTURES/selective_negative/main.sio" -o "$negative_elf" >"$negative_log" 2>&1
 negative_rc=$?
 set -e
-[[ "$negative_rc" -ne 0 ]] || fail selective_negative_unexpected_accept
+[[ "$negative_rc" -eq 1 ]] || fail "selective_negative_unexpected_rc_${negative_rc}"
 [[ ! -e "$negative_elf" ]] || fail selective_negative_left_final_elf
+has_fatal_log "$negative_log" && fail selective_negative_compiler_crash
+has_forbidden_path "$negative_log" && fail selective_negative_compact_or_fallback_path
 [[ "$(grep -Fc 'error[E137]' "$negative_log" || true)" -eq 1 ]] || fail selective_negative_e137_count
 grep -Fq 'reason=not_selected' "$negative_log" || fail selective_negative_reason_missing
 grep -Fq 'MADAROS_IMPORT_AUTHORITY_REFUSAL schema=1 global_unique_fallback=0 errors=1' "$negative_log" ||
   fail selective_negative_refusal_receipt_missing
+if grep -Eq 'imported_compile: lower_begin|lower_array:|Merged IR:|Compilation successful!' "$negative_log"; then
+  fail selective_negative_reached_lowering
+fi
 
 compile_case qualified "$FIXTURES/qualified/main.sio"
 grep -Eq 'qualified_rewrites=[1-9][0-9]*' "$WORK/qualified.compile.log" || fail qualified_rewrite_receipt_missing
@@ -203,5 +248,7 @@ run_exit_42 duplicate_left_first
 compile_case duplicate_right_first "$FIXTURES/duplicate_order/right_first.sio"
 run_exit_42 duplicate_right_first
 
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf qualified=42 duplicate_left_first=42 duplicate_right_first=42 closure_order=both\n' \
+final_compiler_sha256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
+[[ "$final_compiler_sha256" == "$compiler_sha256" ]] || fail compiler_changed_during_gate
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 duplicate_left_first=42 duplicate_right_first=42 closure_order=both compact=disabled fallback=none\n' \
   "$compiler_sha256" "$source_sha256"
