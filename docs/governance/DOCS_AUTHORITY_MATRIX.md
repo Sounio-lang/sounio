@@ -752,6 +752,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.madore-spindle-q3q11-2026-05-30 | historical | docs/research/madore-spindle-q3q11-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.mercy-exchange-rate | historical | docs/research/mercy-exchange-rate.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.mercyful-learning | historical | docs/research/mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-f32-cohort-analysis | historical | docs/research/moonshot-a-abide-f32-cohort-analysis.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-transport-conditioned-orc | historical | docs/research/moonshot-a-abide-transport-conditioned-orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
