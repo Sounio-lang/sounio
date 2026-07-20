@@ -4,16 +4,28 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-
 # The PETAB baseline and PBPK/GUM workflow import stdlib + packages/* modules.
-# lean_single resolves those imports and enforces the full effect/ontology
-# surface; the Madaros default (bin/souc since 2026-06-14) does not yet — it
-# fails this workflow with a spurious "effect not declared (missing: GPU)"
-# during multimodule thin-link. Pin the raw ELF to lean_single, matching the
-# package import sub-gate (package_import_science_gate.sh). The raw lean_single
-# ELF only accepts the positional `SRC OUT` CLI, so route the souc `run`/`compile`
-# verbs this gate uses through souc-native-wrapper.sh. Override via SOUNIO_SOUC_BIN.
+# Madaros owns the package-import acceptance sub-gate. The two large PBPK runtime
+# witnesses still exceed Madaros' multimodule native thin-link path, so retain the
+# bootstrap compiler only for those explicitly named runtime witnesses until that
+# separate parity blocker is closed.
+OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
+trap 'rm -rf "$OUT_DIR"' EXIT
+
+RAW_MADAROS="${MADAROS_RAW_BIN:-}"
+if [[ -z "$RAW_MADAROS" ]]; then
+  RAW_MADAROS="$OUT_DIR/madaros-current-source"
+  bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$RAW_MADAROS"
+fi
+if [[ ! -x "$RAW_MADAROS" || "$(head -c 2 "$RAW_MADAROS" 2>/dev/null)" == '#!' ]]; then
+  echo '[package-pbpk-gum] FAIL: current-source raw Madaros ELF unavailable' >&2
+  exit 1
+fi
+if ! "$RAW_MADAROS" --version | grep -qF 'Madaros'; then
+  echo '[package-pbpk-gum] FAIL: compiler does not identify as Madaros' >&2
+  exit 1
+fi
+
 LEAN_SOUC="${SOUNIO_SOUC_BIN:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
 if [[ ! -x "$LEAN_SOUC" ]]; then
   LEAN_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
@@ -29,14 +41,14 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 BASELINE="tests/stdlib/darwin_pbpk/test_observed_petab_fit_e2e.sio"
 WORKFLOW="tests/packages/package_pbpk_gum_workflow.sio"
-OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
-trap 'rm -rf "$OUT_DIR"' EXIT
 
-printf '[package-pbpk-gum] souc=%s\n' "$SOUC_BIN"
+printf '[package-pbpk-gum] package-acceptance-madaros=%s\n' "$RAW_MADAROS"
+printf '[package-pbpk-gum] legacy-runtime-souc=%s\n' "$SOUC_BIN"
 printf '[package-pbpk-gum] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 
 printf '[package-pbpk-gum] run package import contract gate\n'
-bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_import_science.log" 2>&1
+MADAROS_RAW_BIN="$RAW_MADAROS" \
+  bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_import_science.log" 2>&1
 cat "$OUT_DIR/package_import_science.log"
 
 printf '[package-pbpk-gum] run canonical observed PETAB baseline %s\n' "$BASELINE"
