@@ -540,9 +540,11 @@ assert_build_success() {
     blocked "${label}_forbidden_fallback" lowering
   }
   has_legacy_compact_path "$log" && blocked "${label}_legacy_compact_path" lowering
-  grep -Fq 'canonical AST closure full IR path' "$log" || blocked "${label}_canonical_full_ir_marker_missing" lowering
+  grep -Fq 'imported_compile: collected_begin collection_id=' "$log" || blocked "${label}_closure_collection_receipt_missing" lowering
+  grep -Fq 'imported_compile: lower_begin' "$log" || blocked "${label}_lower_begin_receipt_missing" lowering
+  grep -Fq 'imported_compile: lower_done' "$log" || blocked "${label}_lower_done_receipt_missing" lowering
   grep -Fq 'Merged IR:' "$log" || blocked "${label}_merged_ir_missing" lowering
-  grep -Fq 'Compilation successful!' "$log" || blocked "${label}_compile_success_marker_missing" lowering
+  grep -Fxq "native_v2_compile: emitted path=$elf" "$log" || blocked "${label}_native_emission_receipt_missing" lowering
   if grep -Fq 'error[E' "$log" || grep -Eq '^error:' "$log"; then
     blocked "${label}_compiler_diagnostic_on_build_success" lowering
   fi

@@ -130,9 +130,11 @@ set -e
 }
 is_fatal_log "$BUILD_LOG" && fail build_fatal
 has_forbidden_path "$BUILD_LOG" && fail forbidden_lowering_path
-grep -Fq 'canonical AST closure full IR path' "$BUILD_LOG" || fail canonical_full_ir_marker_missing
+grep -Fq 'imported_compile: collected_begin collection_id=' "$BUILD_LOG" || fail closure_collection_receipt_missing
+grep -Fq 'imported_compile: lower_begin' "$BUILD_LOG" || fail lower_begin_receipt_missing
+grep -Fq 'imported_compile: lower_done' "$BUILD_LOG" || fail lower_done_receipt_missing
 grep -Fq 'Merged IR:' "$BUILD_LOG" || fail merged_ir_marker_missing
-grep -Fq 'Compilation successful!' "$BUILD_LOG" || fail compilation_success_marker_missing
+grep -Fxq "native_v2_compile: emitted path=$ELF" "$BUILD_LOG" || fail native_emission_receipt_missing
 if grep -Fq 'error[E' "$BUILD_LOG" || grep -Eq '^error:' "$BUILD_LOG"; then
   fail compiler_diagnostic_on_build_success
 fi

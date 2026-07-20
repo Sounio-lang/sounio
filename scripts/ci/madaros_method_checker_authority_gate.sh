@@ -56,6 +56,21 @@ expect_success() {
   ! grep -Fq 'error[E' "$log" || fail "${label}_diagnostic_on_success"
 }
 
+expect_single_success() {
+  local label="$1"
+  local source="$2"
+  local log="$WORK/$label.log"
+
+  run_check "$label" "$source"
+  [[ "$(cat "$WORK/$label.rc")" -eq 0 ]] || {
+    cat "$log" >&2 || true
+    fail "${label}_expected_success"
+  }
+  grep -Fq 'check: OK' "$log" || fail "${label}_ok_missing"
+  ! grep -Fq 'error[E' "$log" || fail "${label}_diagnostic_on_success"
+  ! grep -Fq 'run_check_mode: about to check' "$log" || fail "${label}_unexpected_multimodule_path"
+}
+
 expect_rejection() {
   local label="$1"
   local source="$2"
@@ -112,7 +127,8 @@ for fixture in \
   private_distractor_target.sio private_distractor_unrelated.sio \
   ambiguous_same_receiver_main.sio ambiguous_same_receiver_marker.sio \
   method_body_contract_main.sio method_body_contract_leaf.sio \
-  local_precedence_main.sio local_precedence_distractor.sio; do
+  local_precedence_main.sio local_precedence_distractor.sio \
+  single_local_helper_main.sio; do
   [[ -f "$FIXTURES/$fixture" ]] || fail "fixture_missing_$fixture"
 done
 
@@ -155,6 +171,7 @@ done
   || fail direct_path_visibility_reintroduced
 
 expect_success public_unique "$FIXTURES/public_unique_main.sio"
+expect_single_success single_local_helper "$FIXTURES/single_local_helper_main.sio"
 expect_success local_precedence "$FIXTURES/local_precedence_main.sio"
 expect_success nominal_target_distractor_first "$FIXTURES/ambiguous_remote_main.sio"
 expect_success nominal_target_target_first "$FIXTURES/ambiguous_remote_reversed_main.sio"
@@ -174,4 +191,4 @@ expect_rejection ambiguous_same_receiver "$FIXTURES/ambiguous_same_receiver_main
 expect_rejection method_body_contract "$FIXTURES/method_body_contract_main.sio" \
   E008 "return value does not match function's declared return type"
 
-printf 'MADAROS_METHOD_CHECKER_AUTHORITY_PASS public_unique=pass local_precedence=pass nominal_identity_orders=passx2 private_distractor_orders=passx2 associated_reexport_compat=pass private_surfaces=fn:E175+struct:E176+enum:E177+method:E175 ambiguity=E219 method_body_contract=E008 method_lookup=receiver-first+visibility-before-uniqueness outcomes=FOUND+PRIVATE+AMBIGUOUS+MISSING legacy_fallback=unknown-nominal-identity checker_paths=inplace-executed+by-value-source-routed selective_import_authority=not_claimed generic_mangling_identity=not_claimed forward_reference_backpatch=not_claimed\n'
+printf 'MADAROS_METHOD_CHECKER_AUTHORITY_PASS public_unique=pass single_local_helper=pass root_module_id=0 local_precedence=pass nominal_identity_orders=passx2 private_distractor_orders=passx2 associated_reexport_compat=pass private_surfaces=fn:E175+struct:E176+enum:E177+method:E175 ambiguity=E219 method_body_contract=E008 method_lookup=receiver-first+visibility-before-uniqueness outcomes=FOUND+PRIVATE+AMBIGUOUS+MISSING legacy_fallback=list-only-unknown checker_paths=inplace-executed+by-value-source-routed selective_import_authority=not_claimed generic_mangling_identity=not_claimed forward_reference_backpatch=not_claimed\n'
