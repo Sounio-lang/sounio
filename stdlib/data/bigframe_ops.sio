@@ -12,7 +12,8 @@
 // per-group distinct-count (nunique), per-group idxmax / idxmin, per-group mode,
 // rolling correlation, rolling covariance / skewness / kurtosis, rolling quantile,
 // and grouped rolling sum / mean / max / min / var / std / median / quantile;
-// grouped nlargest / nsmallest; grouped first / last / nth.
+// grouped nlargest / nsmallest; grouped first / last / nth; grouped transform (broadcast);
+// grouped cumulative min / max.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -3585,4 +3586,161 @@ pub fn bf_nth_by(src: &BigFrame, key_col: i64, val_col: i64, k: i64) -> BigFrame
     heap_free(cursor as *mut i8)
     heap_free(flat as *mut i8)
     out
+}
+
+/// Group-by TRANSFORM engine shared by bf_transform_*_by: broadcasts a per-group
+/// aggregate back to EVERY row (row-aligned, length n), like pandas
+/// df.groupby(key)[val].transform('mean'|'sum'|'min'|'max'|'count'|'std'|'var'). op codes:
+/// 0 mean, 1 sum, 2 min, 3 max, 4 count, 5 std (ddof=1), 6 var (ddof=1). DENSE integer
+/// keys 0..1023 only (direct-index accumulators, no hashing -- the same fast dense-key
+/// contract as bf_groupby_sum; rows whose key is outside [0,1024) get 0.0). O(n): one
+/// accumulate pass, a second pass for std/var (exact Σ(x-mean)² -- no cancellation), then
+/// a broadcast pass. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
+fn bf_transform_by(src: &BigFrame, key_col: i64, val_col: i64, op: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var gcnt: [f64; 1024] = [0.0; 1024]
+    var gsum: [f64; 1024] = [0.0; 1024]
+    var gmin: [f64; 1024] = [0.0; 1024]
+    var gmax: [f64; 1024] = [0.0; 1024]
+    var gm2:  [f64; 1024] = [0.0; 1024]
+    var gres: [f64; 1024] = [0.0; 1024]
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, nr)
+    out.n_rows = nr
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || nr <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < nr {                                       // pass 1: per-group cnt/sum/min/max
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let v = read_f64(vp, i)
+            if gcnt[k] == 0.0 { gmin[k] = v; gmax[k] = v }
+            else { if v < gmin[k] { gmin[k] = v } if v > gmax[k] { gmax[k] = v } }
+            gsum[k] = gsum[k] + v
+            gcnt[k] = gcnt[k] + 1.0
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if gcnt[g] > 0.0 {
+            let mean = gsum[g] / gcnt[g]
+            if op == 0 { gres[g] = mean }
+            else { if op == 1 { gres[g] = gsum[g] }
+            else { if op == 2 { gres[g] = gmin[g] }
+            else { if op == 3 { gres[g] = gmax[g] }
+            else { if op == 4 { gres[g] = gcnt[g] }
+            else { gres[g] = mean } } } } }
+        }
+        g = g + 1
+    }
+    if op == 5 || op == 6 {                              // std/var: exact second pass Σ(x-mean)²
+        i = 0
+        while i < nr {
+            let k = read_f64(kp, i) as i64
+            if k >= 0 && k < 1024 { let d = read_f64(vp, i) - (gsum[k] / gcnt[k]); gm2[k] = gm2[k] + d * d }
+            i = i + 1
+        }
+        g = 0
+        while g < 1024 {
+            if gcnt[g] > 1.0 {
+                let va = gm2[g] / (gcnt[g] - 1.0)
+                if op == 6 { gres[g] = va } else { gres[g] = bf_sqrt(va, sc) }
+            } else { gres[g] = 0.0 }
+            g = g + 1
+        }
+    }
+    let opc = bf_col_ptr(&out, 0) as *mut f64
+    i = 0
+    while i < nr {                                       // broadcast pass
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { write_f64(opc, i, gres[k]) } else { write_f64(opc, i, 0.0) }
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Group-by transform MEAN (pandas df.groupby(key)[val].transform('mean')): each row gets
+/// the mean of its group. Dense integer keys 0..1023 (see bf_transform_by). Row-aligned,
+/// length n. NATIVE + lean_single only.
+pub fn bf_transform_mean_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 0)
+}
+
+/// Group-by transform SUM (each row gets its group's total). Dense keys 0..1023. NATIVE + lean_single.
+pub fn bf_transform_sum_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 1)
+}
+
+/// Group-by transform MIN (each row gets its group's minimum). Dense keys 0..1023. NATIVE + lean_single.
+pub fn bf_transform_min_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 2)
+}
+
+/// Group-by transform MAX (each row gets its group's maximum). Dense keys 0..1023. NATIVE + lean_single.
+pub fn bf_transform_max_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 3)
+}
+
+/// Group-by transform COUNT (each row gets its group's row count). Dense keys 0..1023. NATIVE + lean_single.
+pub fn bf_transform_count_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 4)
+}
+
+/// Group-by transform STD (sample, ddof=1; each row gets its group's standard deviation --
+/// the denominator for group normalisation (x - group_mean) / group_std). Dense keys
+/// 0..1023. NATIVE + lean_single only.
+pub fn bf_transform_std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_transform_by(src, key_col, val_col, 5)
+}
+
+/// Per-group cumulative min/max engine shared by bf_cummin_by / bf_cummax_by: a
+/// row-aligned running extreme WITHIN each key_col group (like pandas
+/// df.groupby(key)[val].cummin() / .cummax()): out[i] = min/max of val over the rows of
+/// row i's group up to and including i. ismax=1 -> cummax, 0 -> cummin. DENSE integer keys
+/// 0..1023 only (direct-index running array, no hashing -- the same fast dense-key
+/// contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own value).
+/// O(n), a single pass. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
+fn bf_cumextrema_by(src: &BigFrame, key_col: i64, val_col: i64, ismax: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var run: [f64; 1024] = [0.0; 1024]
+    var seen: [i64; 1024] = [0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i)
+        if k >= 0 && k < 1024 {
+            if seen[k] == 0 { seen[k] = 1; run[k] = v }
+            else { if ismax == 1 { if v > run[k] { run[k] = v } } else { if v < run[k] { run[k] = v } } }
+            write_f64(op, i, run[k])
+        } else {
+            write_f64(op, i, v)
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group cumulative MAXIMUM (pandas df.groupby(key)[val].cummax()): out[i] = the max
+/// of val over row i's group up to and including i, row-aligned. Dense integer keys
+/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
+pub fn bf_cummax_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cumextrema_by(src, key_col, val_col, 1)
+}
+
+/// Per-group cumulative MINIMUM (pandas df.groupby(key)[val].cummin()): out[i] = the min
+/// of val over row i's group up to and including i, row-aligned. Dense integer keys
+/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
+pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cumextrema_by(src, key_col, val_col, 0)
 }
