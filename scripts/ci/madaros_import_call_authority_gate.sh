@@ -104,6 +104,7 @@ for sidecar in \
   grep -Fq "var $sidecar: [string; 2048]" "$FRONTEND" || fail "binding_sidecar_${sidecar}_missing"
 done
 grep -Fq 'fn module_frontend_call_text_selects_binding(' "$FRONTEND" || fail qualified_exact_path_selection_missing
+grep -Fq 'ir_name_eq((*binding).local_name, local_name)' "$FRONTEND" || fail bare_exact_local_name_selection_missing
 grep -Fq 'call_len != qualifier_len + 2 + export_len' "$FRONTEND" || fail qualified_exact_path_length_missing
 grep -Fq 'str_char_at(call_path, qualifier_len) != 58' "$FRONTEND" || fail qualified_separator_comparison_missing
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
