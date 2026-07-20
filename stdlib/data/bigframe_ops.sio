@@ -18,7 +18,8 @@
 // grouped winsorize (quantile-clip); grouped sample; grouped reverse cumsum;
 // grouped expanding sum / mean / var / std / max / min; grouped cumprod;
 // grouped zscore / demean / minmax-scale / sem / range; grouped head / tail mask;
-// grouped mad / skew / kurt; grouped prod / first / last broadcast; any / all + cumany / cumall.
+// grouped mad / skew / kurt; grouped prod / first / last broadcast; any / all + cumany / cumall;
+// grouped reverse cummax/min/prod; share / cumsum-pct / l2norm / count-nonzero; corr / cov; fill-with-mean.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -4998,4 +4999,194 @@ pub fn bf_cumany_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with
 /// bf_cumbool_by). NATIVE + lean_single only.
 pub fn bf_cumall_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     bf_cumbool_by(src, key_col, val_col, 0)
+}
+
+/// Per-group REVERSE cumulative extremum/product engine shared by bf_cummax_rev_by /
+/// bf_cummin_rev_by / bf_cumprod_rev_by: a suffix running max (mode 0) / min (mode 1) /
+/// product (mode 2) within each group (out[i] over rows j>=i in row i's group, like pandas
+/// df[::-1].groupby(key)[val].cummax()/.cummin()/.cumprod()[::-1]). DENSE keys 0..1023
+/// (no hashing -- the bf_groupby_sum contract). O(n), one BACKWARD pass. NATIVE +
+/// lean_single only.
+fn bf_cumrev_by(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var acc: [f64; 1024] = [0.0; 1024]
+    var seen: [i64; 1024] = [0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = n - 1
+    while i >= 0 {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i)
+        if k >= 0 && k < 1024 {
+            if seen[k] == 0 { seen[k] = 1; acc[k] = v }
+            else { if mode == 0 { if v > acc[k] { acc[k] = v } } else { if mode == 1 { if v < acc[k] { acc[k] = v } } else { acc[k] = acc[k] * v } } }
+            write_f64(op, i, acc[k])
+        } else {
+            write_f64(op, i, v)
+        }
+        i = i - 1
+    }
+    out
+}
+
+/// Per-group reverse cumulative MAX (suffix max; pandas df[::-1].groupby.cummax()[::-1]).
+/// Dense backward pass (see bf_cumrev_by). NATIVE + lean_single only.
+pub fn bf_cummax_rev_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_cumrev_by(src, key_col, val_col, 0) }
+/// Per-group reverse cumulative MIN (suffix min). Dense backward pass. NATIVE + lean_single.
+pub fn bf_cummin_rev_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_cumrev_by(src, key_col, val_col, 1) }
+/// Per-group reverse cumulative PRODUCT (suffix product; overflows to inf as in pandas).
+/// Dense backward pass. NATIVE + lean_single only.
+pub fn bf_cumprod_rev_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_cumrev_by(src, key_col, val_col, 2) }
+
+/// Per-group RATIO / normalisation engine shared by bf_share_by / bf_cumsum_pct_by /
+/// bf_l2norm_by / bf_count_nonzero_by: mode 0 share (val / group_sum), 1 cumsum_pct
+/// (running_sum / group_sum -- the cumulative fraction, a Lorenz/running-share curve),
+/// 2 L2-normalise (val / sqrt(group Σval²)), 3 count of non-zero values per group
+/// broadcast. A dense two-pass over keys 0..1023 (pass 1 group sum/sumsq/nonzero-count,
+/// pass 2 broadcast). A zero denominator yields 0. DENSE keys 0..1023 (no hashing). O(n).
+/// NATIVE + lean_single only.
+fn bf_group_ratio(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sum: [f64; 1024] = [0.0; 1024]
+    var ssq: [f64; 1024] = [0.0; 1024]
+    var nz:  [f64; 1024] = [0.0; 1024]
+    var run: [f64; 1024] = [0.0; 1024]
+    var l2:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { let v = read_f64(vp, i); sum[k] = sum[k] + v; ssq[k] = ssq[k] + v * v; if v != 0.0 { nz[k] = nz[k] + 1.0 } } i = i + 1 }
+    var g: i64 = 0
+    while g < 1024 { l2[g] = bf_sqrt(ssq[g], sc); g = g + 1 }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let v = read_f64(vp, i)
+            var r = 0.0
+            if mode == 0 { if sum[k] != 0.0 { r = v / sum[k] } }
+            else { if mode == 1 { run[k] = run[k] + v; if sum[k] != 0.0 { r = run[k] / sum[k] } }
+            else { if mode == 2 { if l2[k] > 0.0 { r = v / l2[k] } }
+            else { r = nz[k] } } }
+            write_f64(op, i, r)
+        } else {
+            write_f64(op, i, read_f64(vp, i))
+        }
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Per-group SHARE (val / group_sum): each value's fraction of its group's total. Dense
+/// two-pass (see bf_group_ratio). NATIVE + lean_single only.
+pub fn bf_share_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ratio(src, key_col, val_col, 0) }
+/// Per-group CUMULATIVE SHARE (running_sum / group_sum): the running fraction of the group
+/// total (Lorenz / running-share curve). Dense two-pass. NATIVE + lean_single only.
+pub fn bf_cumsum_pct_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ratio(src, key_col, val_col, 1) }
+/// Per-group L2 NORMALISE (val / sqrt(group Σval²)): scale each group to unit L2 norm.
+/// Dense two-pass. NATIVE + lean_single only.
+pub fn bf_l2norm_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ratio(src, key_col, val_col, 2) }
+/// Per-group COUNT of NON-ZERO values, broadcast to every row. Dense two-pass. NATIVE +
+/// lean_single only.
+pub fn bf_count_nonzero_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ratio(src, key_col, val_col, 3) }
+
+/// Per-group CORRELATION / COVARIANCE engine (between two value columns) shared by
+/// bf_corr_by / bf_cov_by: mode 0 = Pearson correlation of x,y within each group, 1 =
+/// sample covariance (ddof=1), broadcast to every row of the group (like pandas
+/// groupby(key).apply(g: g[x].corr(g[y])) mapped back). A dense two-pass over keys 0..1023
+/// (pass 1 group means of x and y; pass 2 the co-moments cxy/cxx/cyy). corr uses bf_sqrt;
+/// a degenerate group (count<2 or zero variance) yields 0. DENSE keys 0..1023 (no hashing).
+/// O(n). NATIVE + lean_single only.
+fn bf_group_corrcov(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var sx:  [f64; 1024] = [0.0; 1024]
+    var sy:  [f64; 1024] = [0.0; 1024]
+    var mx:  [f64; 1024] = [0.0; 1024]
+    var my:  [f64; 1024] = [0.0; 1024]
+    var cxy: [f64; 1024] = [0.0; 1024]
+    var cxx: [f64; 1024] = [0.0; 1024]
+    var cyy: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { cnt[k] = cnt[k] + 1.0; sx[k] = sx[k] + read_f64(xp, i); sy[k] = sy[k] + read_f64(yp, i) } i = i + 1 }
+    var g: i64 = 0
+    while g < 1024 { if cnt[g] > 0.0 { mx[g] = sx[g] / cnt[g]; my[g] = sy[g] / cnt[g] } g = g + 1 }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let dx = read_f64(xp, i) - mx[k]; let dy = read_f64(yp, i) - my[k]; cxy[k] = cxy[k] + dx * dy; cxx[k] = cxx[k] + dx * dx; cyy[k] = cyy[k] + dy * dy }
+        i = i + 1
+    }
+    g = 0
+    while g < 1024 {
+        if cnt[g] > 1.0 {
+            if mode == 0 { let den = bf_sqrt(cxx[g] * cyy[g], sc); if den > 0.0 { res[g] = cxy[g] / den } else { res[g] = 0.0 } }
+            else { res[g] = cxy[g] / (cnt[g] - 1.0) }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Per-group PEARSON CORRELATION of two columns, broadcast (pandas groupby corr of x,y).
+/// Dense two-pass (see bf_group_corrcov). NATIVE + lean_single only.
+pub fn bf_corr_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_corrcov(src, key_col, x_col, y_col, 0) }
+/// Per-group sample COVARIANCE (ddof=1) of two columns, broadcast. Dense two-pass. NATIVE +
+/// lean_single only.
+pub fn bf_cov_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_corrcov(src, key_col, x_col, y_col, 1) }
+
+/// Per-group FILL-WITH-MEAN: replace each cell equal to the sentinel `na` with its group's
+/// mean of the non-`na` values (pandas df.groupby(key)[val].transform(lambda s:
+/// s.fillna(s.mean()))). Missing is marked by the caller sentinel, not IEEE NaN (Sounio's
+/// f64 NaN comparison is non-IEEE -- see bf_ffill_by). DENSE keys 0..1023 (no hashing).
+/// O(n), two passes (group mean of valid, then fill). NATIVE + lean_single only.
+pub fn bf_fillmean_by(src: &BigFrame, key_col: i64, val_col: i64, na: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sum: [f64; 1024] = [0.0; 1024]
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var mean: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { let v = read_f64(vp, i); if v != na { sum[k] = sum[k] + v; cnt[k] = cnt[k] + 1.0 } } i = i + 1 }
+    var g: i64 = 0
+    while g < 1024 { if cnt[g] > 0.0 { mean[g] = sum[g] / cnt[g] } g = g + 1 }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let v = read_f64(vp, i); if v == na { write_f64(op, i, mean[k]) } else { write_f64(op, i, v) } }
+        else { write_f64(op, i, read_f64(vp, i)) }
+        i = i + 1
+    }
+    out
 }
