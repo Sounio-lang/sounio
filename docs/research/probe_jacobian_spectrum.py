@@ -71,6 +71,35 @@ def probe_checkpoint(build_model, ckpt_path, make_forward, sample_inputs, n_path
     print(f"checkpoint {ckpt_path}: verdicts over {n_paths} paths → {verdicts}")
     return verdicts
 
+
+# ============================ the MECHANISM: subspace alignment (the valid discriminant) ============================
+# The product-spectrum gap is NOT sufficient: a stack of matrices each with a low-mult tail but with the
+# dead directions ROTATING between factors produces a large product gap WITHOUT any composing structure
+# (validated: the rotating control's gap_dominance exceeds genuine structure). The gap only means
+# "composing annihilation" if consecutive dead subspaces are ALIGNED. Measure that directly.
+def dying_subspace(J, k=4):
+    import numpy as np
+    U,sv,Vt=np.linalg.svd(J); return Vt[-k:]                     # bottom-k right singular vectors
+def subspace_alignment(J_list, k=4):
+    """mean cos(principal angle) between the dying k-subspaces of consecutive Jacobians.
+    ~1 = aligned (dead directions compose → genuine structural annihilation);
+    ~sqrt(k/dim) = baseline (dead directions rotate → gap is an artifact, NOT structure)."""
+    import numpy as np
+    cs=[np.linalg.svd(dying_subspace(J_list[l],k)@dying_subspace(J_list[l+1],k).T,compute_uv=False).mean()
+        for l in range(len(J_list)-1)]
+    return float(np.mean(cs)), np.sqrt(k/J_list[0].shape[1])     # (measured, baseline)
+def gap_vs_T(J_list, Ts=(1,2,4,8,16,32)):
+    """gap_dominance of the product of the first T factors — report the CURVE, not a point."""
+    import numpy as np
+    def gd(A):
+        sv=np.linalg.svd(A,compute_uv=False); s=np.sort(sv)[::-1]; s/=s[0]; lg=np.log10(s+1e-30)
+        g=lg[:-1]-lg[1:]; gi=int(np.argmax(g)); return float(g[gi])/(float(lg[0]-lg[gi])+1e-9)
+    P=np.eye(J_list[0].shape[0]); out={}
+    for t in range(1,max(Ts)+1):
+        P=J_list[t-1]@P
+        if t in Ts: out[t]=gd(np.linalg.svd(P,compute_uv=False)) if False else gd(P)
+    return out
+
 # ============================ self-contained validation (numpy, runs now) ============================
 if __name__=='__main__':
     import sys
