@@ -17,10 +17,19 @@ Commands:
   check                          status, then fail when active file conflicts exist
   claim   --agent ID --lane ID --intent TEXT --files PATH [PATH ...]
                                  reserve a file set for one lane
+  scope   --agent ID --lane ID --intent TEXT [--files PATH ...]
+                                 create or extend a session-aware lease
   heartbeat --agent ID --lane ID
                                  refresh an existing claim
   release --agent ID --lane ID --reason TEXT
                                  release a claim and record the handoff event
+  send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
+          --kind KIND --message TEXT
+                                 send a message to another lane or broadcast
+  inbox   --agent ID --lane ID [--all]
+                                 show unread messages for one lane
+  ack     --agent ID --lane ID --message ID
+                                 mark a message as read by one lane
   prune                          remove expired claims
 
 Environment:
@@ -32,7 +41,12 @@ Examples:
   bin/sounio-coord status
   bin/sounio-coord claim --agent codex-1 --lane parser-fix \
     --intent "isolate parser regression" --files 'self-hosted/parser/**' tests/compile-fail/foo.sio
+  bin/sounio-coord scope --agent codex --lane session-abc123 \
+    --intent "active Codex session" --files self-hosted/parser/ast.sio
   bin/sounio-coord heartbeat --agent codex-1 --lane parser-fix
+  bin/sounio-coord send --agent codex-1 --lane parser-fix \
+    --to-agent claude --kind request --message "Can you review the parser boundary?"
+  bin/sounio-coord inbox --agent claude --lane integration
   bin/sounio-coord release --agent codex-1 --lane parser-fix --reason "handed to shepherd"
 USAGE
 }
@@ -62,8 +76,10 @@ esac
 REPO_KEY="$(printf '%s' "$GIT_COMMON_DIR" | cksum | awk '{print $1}')"
 STATE_DIR="${SOUNIO_COORD_DIR:-${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY}"
 CLAIMS_DIR="$STATE_DIR/claims"
+MESSAGES_DIR="$STATE_DIR/messages"
+ACKS_DIR="$STATE_DIR/message-acks"
 EVENT_LOG="$STATE_DIR/events.log"
-mkdir -p "$CLAIMS_DIR"
+mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -218,7 +234,7 @@ paths_overlap() {
 }
 
 write_claim() {
-  local claim_file="$1" tmp_file
+  local claim_file="$1" tmp_file file
   tmp_file="$(mktemp "$CLAIMS_DIR/.claim-write.XXXXXX")"
   {
     printf 'claim_id=%s\n' "$C_ID"
@@ -232,9 +248,20 @@ write_claim() {
     printf 'last_seen_epoch=%s\n' "$C_LAST_EPOCH"
     printf 'ttl_seconds=%s\n' "$C_TTL"
     printf 'intent=%s\n' "$C_INTENT"
-    printf 'file=%s\n' "${C_FILES[@]}"
+    for file in "${C_FILES[@]}"; do
+      [[ -n "$file" ]] && printf 'file=%s\n' "$file"
+    done
   } > "$tmp_file"
   mv "$tmp_file" "$claim_file"
+}
+
+array_contains() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
 }
 
 append_event() {
@@ -242,6 +269,48 @@ append_event() {
   printf 'utc=%s event=%s agent=%s lane=%s worktree=%s branch=%s sha=%s files=%s intent=%s reason=%s\n' \
     "$NOW_UTC" "$event" "$C_AGENT" "$C_LANE" "$C_WORKTREE" "$C_BRANCH" \
     "$C_SHA" "$(join_files)" "$C_INTENT" "$reason" >> "$EVENT_LOG"
+}
+
+load_message() {
+  local message_file="$1" line
+  M_ID=''
+  M_CREATED_UTC=''
+  M_CREATED_EPOCH=0
+  M_TTL=0
+  M_FROM_AGENT=''
+  M_FROM_LANE=''
+  M_FROM_WORKTREE=''
+  M_FROM_BRANCH=''
+  M_TO_AGENT=''
+  M_TO_LANE=''
+  M_KIND=''
+  M_TEXT=''
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      message_id=*) M_ID="${line#message_id=}" ;;
+      created_utc=*) M_CREATED_UTC="${line#created_utc=}" ;;
+      created_epoch=*) M_CREATED_EPOCH="${line#created_epoch=}" ;;
+      ttl_seconds=*) M_TTL="${line#ttl_seconds=}" ;;
+      from_agent=*) M_FROM_AGENT="${line#from_agent=}" ;;
+      from_lane=*) M_FROM_LANE="${line#from_lane=}" ;;
+      from_worktree=*) M_FROM_WORKTREE="${line#from_worktree=}" ;;
+      from_branch=*) M_FROM_BRANCH="${line#from_branch=}" ;;
+      to_agent=*) M_TO_AGENT="${line#to_agent=}" ;;
+      to_lane=*) M_TO_LANE="${line#to_lane=}" ;;
+      kind=*) M_KIND="${line#kind=}" ;;
+      text=*) M_TEXT="${line#text=}" ;;
+    esac
+  done < "$message_file"
+}
+
+message_expired() {
+  [[ "$M_TTL" =~ ^[0-9]+$ && "$M_CREATED_EPOCH" =~ ^[0-9]+$ ]] || return 0
+  ((NOW_EPOCH > M_CREATED_EPOCH + M_TTL))
+}
+
+message_ack_path() {
+  printf '%s/%s--%s--%s.ack' "$ACKS_DIR" "$(slug "$1")" "$(slug "$2")" "$(slug "$3")"
 }
 
 claim_paths=()
@@ -343,6 +412,102 @@ claim_command() {
   printf 'next=bin/sounio-coord heartbeat --agent %s --lane %s\n' "$agent" "$lane"
 }
 
+scope_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
+  local file claim_file existing old_file new_file requested_id created_utc event='SCOPE' conflict=0
+  local files=() merged_files=() existing_files=()
+
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --files)
+        shift
+        while (($#)); do files+=("$(normalize_path "$1")"); shift; done
+        ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown scope option: $1 (put paths after --files)" ;;
+    esac
+  done
+
+  [[ -n "$agent" ]] || die "scope requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "scope requires --lane"
+  [[ -n "$intent" ]] || die "scope requires --intent"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value intent "$intent"
+  for file in "${files[@]}"; do validate_value file "$file"; done
+
+  requested_id="$(claim_id_for "$agent" "$lane")"
+  claim_file="$CLAIMS_DIR/$requested_id.claim"
+  acquire_state_lock "the scope update"
+
+  if [[ -f "$claim_file" ]]; then
+    load_claim "$claim_file"
+    if claim_expired; then
+      append_event EXPIRED "lease expired before scope refresh"
+      unlink "$claim_file"
+      created_utc="$NOW_UTC"
+      event='CLAIM'
+    else
+      [[ "$C_AGENT" == "$agent" ]] || die "claim owner mismatch: $C_AGENT"
+      [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+      [[ "$C_BRANCH" == "$(current_branch)" ]] || die "branch changed from $C_BRANCH; release and scope again"
+      existing_files=("${C_FILES[@]}")
+      created_utc="${C_CREATED_UTC:-$NOW_UTC}"
+    fi
+  else
+    created_utc="$NOW_UTC"
+    event='CLAIM'
+  fi
+
+  merged_files=("${existing_files[@]}")
+  for file in "${files[@]}"; do
+    [[ -n "$file" ]] || continue
+    if ! array_contains "$file" "${merged_files[@]}"; then
+      merged_files+=("$file")
+    fi
+  done
+
+  refresh_claim_paths
+  for existing in "${claim_paths[@]}"; do
+    [[ -f "$existing" && "$existing" != "$claim_file" ]] || continue
+    load_claim "$existing"
+    claim_expired && continue
+    for new_file in "${merged_files[@]}"; do
+      [[ -n "$new_file" ]] || continue
+      for old_file in "${C_FILES[@]}"; do
+        [[ -n "$old_file" ]] || continue
+        if paths_overlap "$new_file" "$old_file"; then
+          printf 'CONFLICT existing_claim=%s agent=%s lane=%s path=%s requested_by=%s requested_lane=%s\n' \
+            "$C_ID" "$C_AGENT" "$C_LANE" "$old_file" "$agent" "$lane" >&2
+          conflict=1
+        fi
+      done
+    done
+  done
+  ((conflict == 0)) || die "requested file set overlaps an active claim"
+
+  C_ID="$requested_id"
+  C_AGENT="$agent"
+  C_LANE="$lane"
+  C_WORKTREE="$WORKTREE"
+  C_BRANCH="$(current_branch)"
+  C_SHA="$(current_sha)"
+  C_CREATED_UTC="$created_utc"
+  C_LAST_UTC="$NOW_UTC"
+  C_LAST_EPOCH="$NOW_EPOCH"
+  C_TTL="$ttl"
+  C_INTENT="$intent"
+  C_FILES=("${merged_files[@]}")
+  write_claim "$claim_file"
+  append_event "$event"
+  printf 'SCOPED claim_id=%s files=%s last_seen=%s\n' "$C_ID" "$(join_files)" "$C_LAST_UTC"
+}
+
 heartbeat_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' claim_file
   while (($#)); do
@@ -399,8 +564,122 @@ release_command() {
   printf 'RELEASED claim_id=%s reason=%s\n' "$C_ID" "${reason:-unspecified}"
 }
 
+send_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
+  local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
+  local message_id message_file tmp_file
+
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --to-agent) require_arg "$1" "$2"; to_agent="$2"; shift 2 ;;
+      --to-lane) require_arg "$1" "$2"; to_lane="$2"; shift 2 ;;
+      --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown send option: $1" ;;
+    esac
+  done
+
+  [[ -n "$agent" ]] || die "send requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "send requires --lane"
+  [[ -n "$message" ]] || die "send requires --message"
+  [[ "$kind" =~ ^(info|request|reply|blocker|handoff)$ ]] || \
+    die "--kind must be info, request, reply, blocker, or handoff"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value to-agent "$to_agent"
+  validate_value to-lane "$to_lane"
+  validate_value message "$message"
+
+  message_id="msg-${NOW_EPOCH}-$$-${RANDOM}"
+  message_file="$MESSAGES_DIR/$message_id.message"
+  acquire_state_lock "the message"
+  tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
+  {
+    printf 'message_id=%s\n' "$message_id"
+    printf 'created_utc=%s\n' "$NOW_UTC"
+    printf 'created_epoch=%s\n' "$NOW_EPOCH"
+    printf 'ttl_seconds=%s\n' "$ttl"
+    printf 'from_agent=%s\n' "$agent"
+    printf 'from_lane=%s\n' "$lane"
+    printf 'from_worktree=%s\n' "$WORKTREE"
+    printf 'from_branch=%s\n' "$(current_branch)"
+    printf 'to_agent=%s\n' "$to_agent"
+    printf 'to_lane=%s\n' "$to_lane"
+    printf 'kind=%s\n' "$kind"
+    printf 'text=%s\n' "$message"
+  } > "$tmp_file"
+  mv "$tmp_file" "$message_file"
+  printf 'utc=%s event=MESSAGE message_id=%s from_agent=%s from_lane=%s to_agent=%s to_lane=%s kind=%s\n' \
+    "$NOW_UTC" "$message_id" "$agent" "$lane" "$to_agent" "$to_lane" "$kind" >> "$EVENT_LOG"
+  printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s\n' \
+    "$message_id" "${to_agent:-*}" "${to_lane:-*}" "$kind"
+}
+
+inbox_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' show_all=0 message_file ack_file shown=0
+  local -a message_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --all) show_all=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown inbox option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "inbox requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "inbox requires --lane"
+
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || continue
+    [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || continue
+    [[ "$M_FROM_AGENT" != "$agent" || "$M_FROM_LANE" != "$lane" ]] || continue
+    ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
+    ((show_all)) || [[ ! -f "$ack_file" ]] || continue
+    printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s\n' \
+      "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT"
+    shown=$((shown + 1))
+  done
+  printf 'inbox_messages=%s\n' "$shown"
+}
+
+ack_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file ack_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown ack option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "ack requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "ack requires --lane"
+  [[ -n "$message_id" ]] || die "ack requires --message"
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || die "message not found: $message_id"
+  load_message "$message_file"
+  [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || die "message is addressed to agent $M_TO_AGENT"
+  [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || die "message is addressed to lane $M_TO_LANE"
+  acquire_state_lock "the acknowledgement"
+  ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
+  printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$ack_file"
+  printf 'ACKED message_id=%s agent=%s lane=%s\n' "$M_ID" "$agent" "$lane"
+}
+
 prune_command() {
-  local removed=0 claim_file
+  local removed=0 messages_removed=0 claim_file message_file ack_file
+  local -a message_paths=() ack_paths=()
   acquire_state_lock "prune"
   refresh_claim_paths
   for claim_file in "${claim_paths[@]}"; do
@@ -413,7 +692,21 @@ prune_command() {
       printf 'PRUNED claim_id=%s agent=%s lane=%s\n' "$C_ID" "$C_AGENT" "$C_LANE"
     fi
   done
-  printf 'pruned=%s\n' "$removed"
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    if message_expired; then
+      unlink "$message_file"
+      ack_paths=("$ACKS_DIR/$(slug "$M_ID")"--*.ack)
+      for ack_file in "${ack_paths[@]}"; do
+        [[ -f "$ack_file" ]] && unlink "$ack_file"
+      done
+      messages_removed=$((messages_removed + 1))
+      printf 'PRUNED_MESSAGE message_id=%s\n' "$M_ID"
+    fi
+  done
+  printf 'pruned=%s pruned_messages=%s\n' "$removed" "$messages_removed"
 }
 
 status_command() {
@@ -592,12 +885,16 @@ case "$command" in
     printf 'COORDINATION_CHECK=PASS\n'
     ;;
   claim) claim_command "$@" ;;
+  scope) scope_command "$@" ;;
   heartbeat) heartbeat_command "$@" ;;
   release) release_command "$@" ;;
+  send) send_command "$@" ;;
+  inbox) inbox_command "$@" ;;
+  ack) ack_command "$@" ;;
   prune)
     (($# == 0)) || die "prune does not accept arguments"
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try brief, status, check, claim, heartbeat, release, or prune)" ;;
+  *) die "unknown command: $command (try brief, status, check, claim, scope, heartbeat, release, send, inbox, ack, or prune)" ;;
 esac
