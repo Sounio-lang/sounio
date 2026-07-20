@@ -63,6 +63,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rolling_median_by (1M rows, 1000 groups, window 100, sorted-window) | | ~336 | ~474 | **0.71x — Sounio wins** | counting-sort + per-region sorted window |
 | rolling_quantile_by (1M rows, 1000 groups, window 100, q=0.9) | | ~346 | ~484 | **0.72x — Sounio wins** | generalises median_by; interp at q*(w-1) |
 | nlargest_by / nsmallest_by (1M rows, 1000 groups, n=10) | | ~52 | ~335 | **0.15x — Sounio wins (6.5x)** | bounded top-n buffer vs pandas per-group sort |
+| first_by / last_by (1M rows, 1000 dense keys) | | ~3.3 | ~15 | **0.22x — Sounio wins (4.5x)** | dense direct-index, no hashing (keys 0..1023) |
+| nth_by(k) (1M rows, 1000 groups, k=2) | | ~45 | ~46 | **0.98x — parity/win** | counting-sort + positional pick, any key/any k |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
