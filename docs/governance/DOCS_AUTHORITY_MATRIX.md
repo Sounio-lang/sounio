@@ -624,6 +624,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.preprint.rapamycin-des-combo-outline | repo_only | docs/preprint/rapamycin_des_combo_outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-meta-analysis | repo_only | docs/proposals/epistemic-meta-analysis.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-workflows | repo_only | docs/proposals/epistemic-workflows.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.proposals.global-array-literal-init-2026-07-20 | repo_only | docs/proposals/GLOBAL_ARRAY_LITERAL_INIT_2026-07-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.native-heap-allocation-2026-07-12 | repo_only | docs/proposals/NATIVE_HEAP_ALLOCATION_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.nma-nonassociative-algebra-note | repo_only | docs/proposals/nma_nonassociative_algebra_note.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.pbpk-osp-interop-roadmap | repo_only | docs/proposals/pbpk-osp-interop-roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -645,6 +646,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.2026-07-19-linalg-parity | historical | docs/research/2026-07-19-linalg-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-special-scipy-parity | historical | docs/research/2026-07-19-special-scipy-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.bbb-pbpk-dissertation-chapter | historical | docs/research/bbb_pbpk_dissertation_chapter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.beta0-octonion-gum-derivation | historical | docs/research/beta0_octonion_gum_derivation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -751,6 +753,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.lorenz-i256-y-step-z0-bridge-2026-06-24 | historical | docs/research/lorenz-i256-y-step-z0-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lorenz-i256-z-derivative-bounded-bridge-2026-06-24 | historical | docs/research/lorenz-i256-z-derivative-bounded-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lorenz-i256-z-step-bounded-bridge-2026-06-24 | historical | docs/research/lorenz-i256-z-step-bounded-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.lyapunov-repositioning | historical | docs/research/lyapunov-repositioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -783,6 +786,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.probe-corrected-protocol | historical | docs/research/probe-corrected-protocol.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.probe-usage | historical | docs/research/probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-microkernel-suite-2026-06-23 | historical | docs/research/proof-checker-microkernel-suite-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -793,6 +798,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.runtime-abi-gate-blocker-query-envelope-2026-06-24 | historical | docs/research/runtime-abi-gate-blocker-query-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-as-singularity | historical | docs/research/rupture-as-singularity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.second-derivative-filter-and-spinoza | historical | docs/research/second-derivative-filter-and-spinoza.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-associator-1848 | historical | docs/research/sedenion_associator_1848.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-automorphism-168 | historical | docs/research/sedenion_automorphism_168.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-cd-qbig | historical | docs/research/sedenion_cd_qbig.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -816,6 +822,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.solver-proof-profile-acceptance-2026-06-23 | historical | docs/research/solver-proof-profile-acceptance-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-proof-profile-dispatch-envelope-2026-06-24 | historical | docs/research/solver-proof-profile-dispatch-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-proofchecker-sota-2026-06-22 | historical | docs/research/solver-proofchecker-sota-2026-06-22.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.spectral-signature | historical | docs/research/spectral-signature.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-cohort-orc | historical | docs/research/subptx_abide_cohort_orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-cross-arch-repro | historical | docs/research/subptx_abide_cross_arch_repro.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-orc-sweep | historical | docs/research/subptx_abide_orc_sweep.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -825,6 +832,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.the-reckoning | historical | docs/research/the-reckoning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.train-and-probe-usage | historical | docs/research/train-and-probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
