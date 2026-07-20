@@ -7554,6 +7554,21 @@ fn fn_find_method(ns: i64, ne: i64, recv_hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Resolve a dot-call using the same receiver normalization on every backend.
+// Primitive receivers use their textual type hash; references use the inner
+// type hash. This lets declared methods shadow same-named intrinsic methods.
+fn fn_find_expr_method(ns: i64, ne: i64, expr_ty: i64, expr_hash: i64) -> i64 with Panic, Mut {
+    var recv_hash = expr_hash
+    if expr_ty == 10 {
+        recv_hash = ref_hash_inner_hash(expr_hash)
+    }
+    if recv_hash == 0 {
+        let primitive_hash = prim_lit_hash(expr_ty)
+        if primitive_hash != 0 { recv_hash = primitive_hash }
+    }
+    return fn_find_method(ns, ne, recv_hash)
+}
+
 fn fn_find_lit(name: string) -> i64 with Panic, Mut, Div {
     let name_len = str_len(name)
     var i: i64 = 0
@@ -13742,8 +13757,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
+            let math_intrinsic_allowed = math_intrinsic_call_allowed(ident_fi)
             // β⁷ Tier 3: two-arg atan2(y,x) with full Hessian propagation
-            if src_match(ns, ne - ns, "atan2") {
+            if math_intrinsic_allowed && src_match(ns, ne - ns, "atan2") {
                 EP = EP + 1
                 compile_or()
                 let a2_y_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(a2_y_slot)
@@ -13966,7 +13982,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // β⁷ Tier 3: two-arg pow(x,y) = exp(y*ln(x)) with full Hessian propagation
-            if src_match(ns, ne - ns, "pow") {
+            if math_intrinsic_allowed && src_match(ns, ne - ns, "pow") {
                 EP = EP + 1
                 compile_or()
                 let pw_x_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_x_slot)
@@ -14115,7 +14131,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_PARAM_USED = pw_x_param_used | pw_y_param_used
                 return
             }
-            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos") {
+            if math_intrinsic_allowed && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -14540,7 +14556,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "abs") {
+            if math_intrinsic_allowed && src_match(ns, ne - ns, "abs") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -16077,7 +16093,11 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if src_match(fns, fne - fns, "acos") { is_math_mm = 1; math_mm_fi = fn_find_lit("__native_acos_f64") }
                 if src_match(fns, fne - fns, "abs") { is_math_mm = 1; math_mm_fi = fn_find_lit("__native_abs_f64") }
                 if src_match(fns, fne - fns, "floor") { is_math_mm = 1; math_mm_fi = fn_find_lit("__native_floor_f64") }
+                var declared_math_mm: i64 = -1
                 if is_math_mm == 1 {
+                    declared_math_mm = fn_find_expr_method(fns, fne, EXPR_TY, EXPR_TY_HASH)
+                }
+                if is_math_mm == 1 && declared_math_mm < 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
                     EP = EP + 1  // skip )
@@ -16451,21 +16471,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             }
             // Method call: obj.method(args) → method(obj, args)
             if TK[(EP + 1) as usize] == 6 {
-                var recv_h = EXPR_TY_HASH
-                if EXPR_TY == 10 {
-                    recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
-                }
-                // C2: a primitive receiver normally carries hash 0 (scan_type never
-                // sets SCAN_TY_HASH for primitives), which fn_find_method() cannot
-                // disambiguate when two impls of the same trait both define this
-                // method name. Recover the literal-name hash impl registration used
-                // for FN_RECV_HASH (`impl Trait for i64` -> gl_name_hash("i64") text)
-                // so the exact-match branch of fn_find_method() can select correctly.
-                if recv_h == 0 {
-                    let recv_prim_h = prim_lit_hash(EXPR_TY)
-                    if recv_prim_h != 0 { recv_h = recv_prim_h }
-                }
-                let mfi = fn_find_method(fns, fne, recv_h)
+                let mfi = fn_find_expr_method(fns, fne, EXPR_TY, EXPR_TY_HASH)
                 if mfi >= 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
@@ -33269,7 +33275,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
-            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+            let math_intrinsic_allowed_a64 = math_intrinsic_call_allowed(ident_fi)
+            if math_intrinsic_allowed_a64 && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -33301,7 +33308,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "abs") {
+            if math_intrinsic_allowed_a64 && src_match(ns, ne - ns, "abs") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -34299,7 +34306,11 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 if src_match(fns, fne - fns, "tanh") { is_math_mm_a = 1; math_mm_fi_a = fn_find_lit("__native_tanh_f64") }
                 if src_match(fns, fne - fns, "abs") { is_math_mm_a = 1; math_mm_fi_a = fn_find_lit("__native_abs_f64") }
                 if src_match(fns, fne - fns, "floor") { is_math_mm_a = 1; math_mm_fi_a = fn_find_lit("__native_floor_f64") }
+                var declared_math_mm_a: i64 = -1
                 if is_math_mm_a == 1 {
+                    declared_math_mm_a = fn_find_expr_method(fns, fne, EXPR_TY, EXPR_TY_HASH)
+                }
+                if is_math_mm_a == 1 && declared_math_mm_a < 0 {
                     EP = EP + 1  // skip method name
                     EP = EP + 1  // skip (
                     EP = EP + 1  // skip )
@@ -34331,17 +34342,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 // EP is now at >; EP+1 is ( for method call dispatch below
             }
             if TK[(EP + 1) as usize] == 6 {
-                var recv_h = EXPR_TY_HASH
-                if EXPR_TY == 10 {
-                    recv_h = ref_hash_inner_hash(EXPR_TY_HASH)
-                }
-                // C2 (a64 mirror of the x86_64 fix): see the x86_64 method-call site
-                // for the full rationale.
-                if recv_h == 0 {
-                    let recv_prim_h = prim_lit_hash(EXPR_TY)
-                    if recv_prim_h != 0 { recv_h = recv_prim_h }
-                }
-                let mfi = fn_find_method(fns, fne, recv_h)
+                let mfi = fn_find_expr_method(fns, fne, EXPR_TY, EXPR_TY_HASH)
                 if mfi >= 0 {
                     EP = EP + 1; EP = EP + 1
                     // TODO: Add auto-borrow for ARM64 (see x86_64 version)
@@ -38834,8 +38835,31 @@ var EXTERN_STUB_NAME_OFF: [i64; 128] = [0; 128]     // byte offset of each name 
 var EXTERN_STUB_NAME_LEN: [i64; 128] = [0; 128]     // length of each name
 var EXTERN_STUB_ARITY:    [i64; 128] = [0; 128]     // param count
 var EXTERN_STUB_RET:      [i64; 128] = [0; 128]     // 1=i64/int, 2=f64, 4=bool, 5=unit
+var EXTERN_STUB_GEN_NS:   [i64; 128] = [0; 128]     // generated stub name start in SRC
+var EXTERN_STUB_GEN_NE:   [i64; 128] = [0; 128]     // generated stub name end in SRC
+var EXTERN_STUB_IS_MATH:  [i64; 128] = [0; 128]     // generated stub intentionally uses math intrinsic lowering
 var EXTERN_STUB_COUNT:    i64 = 0
 var EXTERN_STUB_BUF_OFF:  i64 = 0                   // next free offset in name buf
+
+// A declared Sounio function owns its resolved identity even when its terminal
+// name is also a math builtin. The sole declared-function exception is the
+// exact generated function that replaced an extern "C" math declaration.
+fn math_intrinsic_call_allowed(fi: i64) -> bool with Panic, Mut {
+    if fi < 0 { return true }
+    if fi >= FN_COUNT { return false }
+    let fn_ns = FN_NS[fi as usize]
+    let fn_ne = FN_NE[fi as usize]
+    var si: i64 = 0
+    while si < EXTERN_STUB_COUNT {
+        if EXTERN_STUB_IS_MATH[si as usize] == 1 &&
+           EXTERN_STUB_GEN_NS[si as usize] == fn_ns &&
+           EXTERN_STUB_GEN_NE[si as usize] == fn_ne {
+            return true
+        }
+        si = si + 1
+    }
+    return false
+}
 
 // Parse a type keyword starting at position p in SRC; return type code.
 // Returns 1 for integer types, 2 for f64/f32, 4 for bool, 5 for unit/void, 0 for unknown.
@@ -38886,6 +38910,16 @@ fn append_extern_stub_name(idx: i64) with Mut, Panic {
     }
 }
 
+// Start a generated math stub and bind its exact source identity to the
+// registry entry. Later intrinsic dispatch checks these spans against FN_NS/NE.
+fn append_extern_math_stub_prefix(idx: i64) with Mut, Panic {
+    append_src_lit("fn ")
+    EXTERN_STUB_GEN_NS[idx as usize] = SRC_LEN
+    append_extern_stub_name(idx)
+    EXTERN_STUB_GEN_NE[idx as usize] = SRC_LEN
+    EXTERN_STUB_IS_MATH[idx as usize] = 1
+}
+
 // Generate Sounio stub source code for all registered extern "C" functions.
 // Called from append_native_prelude after strip_extern_blocks.
 // Each stub wraps the extern fn using the correct mechanism:
@@ -38901,6 +38935,9 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
     while si < EXTERN_STUB_COUNT {
         let ret = EXTERN_STUB_RET[si as usize]
         let arity = EXTERN_STUB_ARITY[si as usize]
+        EXTERN_STUB_GEN_NS[si as usize] = -1
+        EXTERN_STUB_GEN_NE[si as usize] = -1
+        EXTERN_STUB_IS_MATH[si as usize] = 0
         append_src_lit("\n")
         // ── Zero-argument integer-returning syscalls ──
         // getpid → Linux x86-64 syscall 39
@@ -38951,81 +38988,91 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
         // Using __native_* stubs means no XMM0 read is needed — RAX is already correct.
         // (Any direct C-ABI call must emit `movq rax, xmm0` after the call for f64.)
         if extern_stub_name_eq(si, "sqrt") == 1 {
-            append_src_lit("fn sqrt(x: f64) -> f64 with Mut, Div, Panic { __native_sqrt_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_sqrt_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "sin") == 1 {
-            append_src_lit("fn sin(x: f64) -> f64 with Mut, Div, Panic { __native_sin_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_sin_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "cos") == 1 {
-            append_src_lit("fn cos(x: f64) -> f64 with Mut, Div, Panic { __native_cos_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_cos_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "exp") == 1 {
-            append_src_lit("fn exp(x: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "log") == 1 {
-            append_src_lit("fn log(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "ln") == 1 {
-            append_src_lit("fn ln(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_ln_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "fabs") == 1 || extern_stub_name_eq(si, "abs") == 1 {
+            append_extern_math_stub_prefix(si)
             if ret == 2 {
-                append_src_lit("fn ")
-                append_extern_stub_name(si)
                 append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_abs_f64(x) }\n")
             } else {
-                append_src_lit("fn ")
-                append_extern_stub_name(si)
                 append_src_lit("(x: i64) -> i64 { __native_abs_i64(x) }\n")
             }
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "tanh") == 1 {
-            append_src_lit("fn tanh(x: f64) -> f64 with Mut, Div, Panic { __native_tanh_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_tanh_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "atan2") == 1 {
-            append_src_lit("fn atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic { __native_atan2_f64(y, x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(y: f64, x: f64) -> f64 with Mut, Div, Panic { __native_atan2_f64(y, x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "atan") == 1 {
-            append_src_lit("fn atan(x: f64) -> f64 with Mut, Div, Panic { __native_atan_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_atan_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "tan") == 1 {
-            append_src_lit("fn tan(x: f64) -> f64 with Mut, Div, Panic { __native_tan_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_tan_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "asin") == 1 {
-            append_src_lit("fn asin(x: f64) -> f64 with Mut, Div, Panic { __native_asin_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_asin_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "acos") == 1 {
-            append_src_lit("fn acos(x: f64) -> f64 with Mut, Div, Panic { __native_acos_f64(x) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64) -> f64 with Mut, Div, Panic { __native_acos_f64(x) }\n")
             si = si + 1
             continue
         }
         if extern_stub_name_eq(si, "pow") == 1 {
             // pow(x, y) = exp(y * ln(x)) — approximation using native functions
-            append_src_lit("fn pow(x: f64, y: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(y * __native_ln_f64(x)) }\n")
+            append_extern_math_stub_prefix(si)
+            append_src_lit("(x: f64, y: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(y * __native_ln_f64(x)) }\n")
             si = si + 1
             continue
         }
