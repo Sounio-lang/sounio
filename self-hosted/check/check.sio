@@ -6603,30 +6603,47 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         return ty_unit()
     }
+    // Declared functions take precedence over same-named intrinsic fallbacks.
+    // This matches lean_single and lets imported package APIs intentionally use
+    // names such as measure without being retyped as compiler intrinsics.
+    var direct_sig_id: i64 = -1
+    match e.left {
+        Some(callee_expr) => {
+            if (*callee_expr).kind == ExprKind::ExprIdent {
+                direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
+            } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
+                let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
+                let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
+                let recv_ty = ty_named(path_type_name)
+                direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+            }
+        }
+        None => {}
+    }
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
-    if call_expr_is_builtin_measure(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_variance_of(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_variance_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_uncertainty_of(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_uncertainty_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_slice_len(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_assert(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_assert(e.left) {
         return checker_check_assert_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_print_int(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_print_int(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_print_char(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_print_char(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_println(e.left) {
+    if direct_sig_id < 0 && call_expr_is_builtin_println(e.left) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
         if checker_type_is_unobserved_like(arg_ty) {
@@ -6645,7 +6662,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // callee ident does not fall through to the unbound-identifier check (E137).
     // The GPU backend lowers these by name to PTX sregs (%tid.x / %ctaid.x /
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
-    if call_expr_is_gpu_builtin(e.left) {
+    if direct_sig_id < 0 && call_expr_is_gpu_builtin(e.left) {
         // Barriers (gpu_barrier, gpu_barrier_sync, gpu_sync_threads) are void
         // side-effects; the thread-index/dim intrinsics return a u32 coordinate.
         if call_expr_is_gpu_barrier(e.left) {
@@ -6661,10 +6678,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // typing intact without changing the emitted register width.
         return ty_i64()
     }
-    if call_expr_is_box_new(e.left) {
+    if direct_sig_id < 0 && call_expr_is_box_new(e.left) {
         return checker_check_box_new_expr_inplace(c, e)
     }
-    if call_expr_should_bridge_by_value(e) {
+    if direct_sig_id < 0 && call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
@@ -6685,28 +6702,6 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 checker_store_from_value(c, pen)
             }
         }
-    }
-    var direct_sig_id: i64 = -1
-    // Type::method associated-function path (e.g. E::of / Epistemic::measured).
-    // When the method is registered, resolve it so the return type is known and
-    // subsequent instance methods typecheck. When lookup misses (multi-module
-    // residual for some imported associated forms), fall through to the legacy
-    // path-as-first-segment behaviour rather than hard-rejecting — unknown
-    // *instance* methods are rejected in checker_check_method_call_with_base_ty
-    // even under TyUnknown receivers (see is_error_or_unknown branch).
-    match e.left {
-        Some(callee_expr) => {
-            if (*callee_expr).kind == ExprKind::ExprIdent {
-                direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
-            } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
-                let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
-                let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
-                // Prefer semantic match (kind+name) then name-only self_type_name.
-                let recv_ty = ty_named(path_type_name)
-                direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
-            }
-        }
-        None => {}
     }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
