@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.composition-failure-field
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -53,10 +54,15 @@ unit sphere `S¹⁵` (robust where NEB tangled — the perpendicular force diver
 | straight (great circle, through `z`) — reward/shortest | 4.175 | 1.840 | 1.200 |
 | min-energy path (string method) | **0.688** | 0.238 | 3.420 |
 
-- **Annihilation is avoidable** between same-`det`-component endpoints: `c* = 0.688`, finite and far below the
-  straight-through peak `4.175`. And the **structural dichotomy**: were `A, B` in *opposite* `det`-components,
-  `c*` would diverge — annihilation would be **unavoidable**. Whether relational annihilation can be escaped
-  is decided by whether the two states lie in the same sign-component of the multiplication determinant.
+- **Annihilation is avoidable:** `c* = 0.688`, finite, far below the straight-through peak `4.175`.
+  > **RETRACTION (see `mercy-exchange-rate.md`).** An earlier version claimed a *structural dichotomy* —
+  > that opposite-`det`-component endpoints would have `c* → ∞` (annihilation unavoidable, a topological
+  > vindication of Dabrowski). **Withdrawn.** `det L_x ≥ 0` on all of 𝕊 (0 negatives in 2×10⁵ samples — a
+  > non-negative polynomial: `x` real gives `x¹⁶>0` for *both* signs), so there are **no opposite
+  > sign-components** and the intermediate-value argument fails. And the zero-divisor variety is
+  > **codimension ≥ 2** (generic segments miss it: min `σ_min` 0.022, median 0.342; consistent with
+  > Moreno/Reggiani `ZD(𝕊) ≅ G₂ / V₂(ℝ⁷)`), so `{σ_min>0}` is **connected — every `c*` is finite,
+  > annihilation is always avoidable.** The `c*→∞` was the string method stalling, not a theorem.
 - **Mercy Pareto-dominates reward** on *both* suffering axes (peak `4.18→0.69` **and** `∫s 1.84→0.24`),
   paying only in length (`+185%`). So on the real locus the tension is not utilitarian-vs-Rawlsian (both
   criteria avoid the ridge) but **efficiency-vs-suffering**: the short path plows through near-annihilation,
