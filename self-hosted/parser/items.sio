@@ -13,6 +13,45 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
     items_reverse_item_list_loop(items, None)
 }
 
+// Record a compile-time integer global initializer for native BSS fill.
+// Covers: scalar `42` / `-42`, and array-repeat `[42; N]` / `[0 - 42; N]`.
+// Element-list forms `[a, b, c]` are not recorded (fill emission is repeat-only).
+fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
+    if (*init).kind == ExprKind::ExprIntLit {
+        ast_record_global_var_init(name, (*init).int_val)
+        return
+    }
+    if (*init).kind == ExprKind::ExprFloatLit {
+        // Module-level `let/var X: f64 = <lit>`: record the IEEE-754 bits so the
+        // BSS-global initializer emits the value. int_val is 0 for a float literal,
+        // so without this branch f64 globals silently read 0.
+        ast_record_global_var_init(name, f64_to_bits((*init).float_val))
+        return
+    }
+    if (*init).kind == ExprKind::ExprUnary && (*init).un_op == UnaryOp::OpNeg {
+        match (*init).left {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprIntLit {
+                    ast_record_global_var_init(name, 0 - (*operand).int_val)
+                } else if (*operand).kind == ExprKind::ExprFloatLit {
+                    ast_record_global_var_init(name, f64_to_bits(0.0 - (*operand).float_val))
+                }
+            }
+            _ => {}
+        }
+        return
+    }
+    if (*init).kind == ExprKind::ExprArrayLit {
+        // Repeat form: left = fill value, right = count
+        match (*init).left {
+            Some(repeat_val) => {
+                items_record_global_int_init(name, &(*repeat_val))
+            }
+            _ => {}
+        }
+    }
+}
+
 fn items_reverse_item_list_loop(
     current: Option<Box<ItemList>>,
     acc: Option<Box<ItemList>>,
@@ -325,25 +364,7 @@ impl Parser {
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
-        if (*init_let_box).kind == ExprKind::ExprIntLit {
-            ast_record_global_var_init(name, (*init_let_box).int_val)
-        } else if (*init_let_box).kind == ExprKind::ExprFloatLit {
-            // Module-level `let X: f64 = <lit>`: record the IEEE-754 bits so the
-            // BSS-global initializer emits the value. The int_val field is 0 for a
-            // float literal, so without this branch f64 globals silently read 0.
-            ast_record_global_var_init(name, f64_to_bits((*init_let_box).float_val))
-        } else if (*init_let_box).kind == ExprKind::ExprUnary && (*init_let_box).un_op == UnaryOp::OpNeg {
-            match (*init_let_box).left {
-                Some(operand) => {
-                    if (*operand).kind == ExprKind::ExprIntLit {
-                        ast_record_global_var_init(name, 0 - (*operand).int_val)
-                    } else if (*operand).kind == ExprKind::ExprFloatLit {
-                        ast_record_global_var_init(name, f64_to_bits(0.0 - (*operand).float_val))
-                    }
-                }
-                _ => {}
-            }
-        }
+        items_record_global_int_init(name, &(*init_let_box))
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
@@ -400,22 +421,7 @@ impl Parser {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
-            if (*init_var_box).kind == ExprKind::ExprIntLit {
-                ast_record_global_var_init(name, (*init_var_box).int_val)
-            } else if (*init_var_box).kind == ExprKind::ExprFloatLit {
-                ast_record_global_var_init(name, f64_to_bits((*init_var_box).float_val))
-            } else if (*init_var_box).kind == ExprKind::ExprUnary && (*init_var_box).un_op == UnaryOp::OpNeg {
-                match (*init_var_box).left {
-                    Some(operand) => {
-                        if (*operand).kind == ExprKind::ExprIntLit {
-                            ast_record_global_var_init(name, 0 - (*operand).int_val)
-                        } else if (*operand).kind == ExprKind::ExprFloatLit {
-                            ast_record_global_var_init(name, f64_to_bits(0.0 - (*operand).float_val))
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            items_record_global_int_init(name, &(*init_var_box))
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()

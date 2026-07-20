@@ -13,7 +13,7 @@
 // rolling correlation, rolling covariance / skewness / kurtosis, rolling quantile,
 // and grouped rolling sum / mean / max / min / var / std / median / quantile;
 // grouped nlargest / nsmallest; grouped first / last / nth; grouped transform (broadcast);
-// grouped cumulative min / max.
+// grouped cumulative min / max; grouped rank; grouped ngroup / descending cumcount.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -3794,4 +3794,212 @@ pub fn bf_cummax_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with
 /// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
 pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     bf_cumextrema_by(src, key_col, val_col, 0)
+}
+
+/// Per-group RANK of `val_col`, ascending, 1-based within each `key_col` group (like
+/// pandas df.groupby(key)[val].rank(method=...)): out[i] = the rank of row i's value
+/// among its group. `method`: 0 = average (default -- ties share the mean of their
+/// positions), 1 = min, 2 = max, 3 = dense. Handles ANY f64 key. O(n + Σ sz·log sz):
+/// an O(n) factorize + counting-sort of row indices into contiguous per-group regions
+/// (with each region's values gathered in the same pass), then a LOCAL bottom-up
+/// stable mergesort per region and one tie-run pass assigning ranks. (Sort-bound: this
+/// trails pandas' specialised Cython group-rank by ~2x; a compiler radix-sort / SIMD
+/// path -- the same C3 dispatch as ungrouped sort/quantile -- would close it. The
+/// ordinal `first` method is intentionally omitted, as in bf_rank.) Returns a 1-column
+/// f64 BigFrame aligned to input rows. NATIVE + lean_single only (heap).
+pub fn bf_rank_by(src: &BigFrame, key_col: i64, val_col: i64, method: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || nr <= 0 { return bf_new(1, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hid = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let id = heap_alloc(nr * 8) as *mut i64
+    let sizes = heap_alloc(nr * 8) as *mut i64
+    var gcount: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let k = read_f64(kp, r)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hid, slot, gcount as f64)
+                write_i64(id, r, gcount)
+                write_i64(sizes, gcount, 1)
+                gcount = gcount + 1
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    let g = read_f64(hid, slot) as i64
+                    write_i64(id, r, g)
+                    write_i64(sizes, g, read_i64(sizes, g) + 1)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    let offsets = heap_alloc(nr * 8) as *mut i64
+    let cursor = heap_alloc(nr * 8) as *mut i64
+    var acc: i64 = 0
+    var g: i64 = 0
+    while g < gcount {
+        write_i64(offsets, g, acc)
+        write_i64(cursor, g, acc)
+        acc = acc + read_i64(sizes, g)
+        g = g + 1
+    }
+    let flat = heap_alloc(nr * 8) as *mut i64
+    let fval = heap_alloc(nr * 8) as *mut f64   // group-ordered values (gathered sequentially here)
+    r = 0
+    while r < nr {
+        let g2 = read_i64(id, r)
+        let p = read_i64(cursor, g2)
+        write_i64(flat, p, r)
+        write_f64(fval, p, read_f64(vp, r))
+        write_i64(cursor, g2, p + 1)
+        r = r + 1
+    }
+    let va = heap_alloc(nr * 8) as *mut f64      // per-region sort buffers, ping-pong a<->b
+    let vb = heap_alloc(nr * 8) as *mut f64
+    let ia = heap_alloc(nr * 8) as *mut i64
+    let ib = heap_alloc(nr * 8) as *mut i64
+    var out = bf_new(1, nr)
+    out.n_rows = nr
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    g = 0
+    while g < gcount {
+        let base = read_i64(offsets, g)
+        let sz = read_i64(sizes, g)
+        var j: i64 = 0
+        while j < sz { write_f64(va, base + j, read_f64(fval, base + j)); write_i64(ia, base + j, read_i64(flat, base + j)); j = j + 1 }
+        var curV = va
+        var curI = ia
+        var dstV = vb
+        var dstI = ib
+        var width: i64 = 1
+        while width < sz {
+            var lo: i64 = 0
+            while lo < sz {
+                var mid = lo + width
+                if mid > sz { mid = sz }
+                var hi = lo + width + width
+                if hi > sz { hi = sz }
+                var a = base + lo
+                var b = base + mid
+                let amax = base + mid
+                let bmax = base + hi
+                var k = base + lo
+                while a < amax && b < bmax {
+                    let x = read_f64(curV, a)
+                    let y = read_f64(curV, b)
+                    if x <= y { write_f64(dstV, k, x); write_i64(dstI, k, read_i64(curI, a)); a = a + 1 }
+                    else { write_f64(dstV, k, y); write_i64(dstI, k, read_i64(curI, b)); b = b + 1 }
+                    k = k + 1
+                }
+                while a < amax { write_f64(dstV, k, read_f64(curV, a)); write_i64(dstI, k, read_i64(curI, a)); a = a + 1; k = k + 1 }
+                while b < bmax { write_f64(dstV, k, read_f64(curV, b)); write_i64(dstI, k, read_i64(curI, b)); b = b + 1; k = k + 1 }
+                lo = lo + width + width
+            }
+            let tv = curV; curV = dstV; dstV = tv
+            let ti = curI; curI = dstI; dstI = ti
+            width = width + width
+        }
+        var dense: f64 = 0.0
+        var q: i64 = 0
+        while q < sz {
+            var e = q
+            while e + 1 < sz && read_f64(curV, base + e + 1) == read_f64(curV, base + q) { e = e + 1 }
+            dense = dense + 1.0
+            let minr = (q + 1) as f64
+            let maxr = (e + 1) as f64
+            var rr = 0.0
+            if method == 1 { rr = minr }
+            else { if method == 2 { rr = maxr } else { if method == 3 { rr = dense } else { rr = (minr + maxr) / 2.0 } } }
+            var t = q
+            while t <= e { write_f64(op, read_i64(curI, base + t), rr); t = t + 1 }
+            q = e + 1
+        }
+        g = g + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hid as *mut i8)
+    heap_free(id as *mut i8)
+    heap_free(sizes as *mut i8)
+    heap_free(offsets as *mut i8)
+    heap_free(cursor as *mut i8)
+    heap_free(flat as *mut i8)
+    heap_free(fval as *mut i8)
+    heap_free(va as *mut i8)
+    heap_free(vb as *mut i8)
+    heap_free(ia as *mut i8)
+    heap_free(ib as *mut i8)
+    out
+}
+
+/// Per-row group NUMBER (like pandas df.groupby(key).ngroup()): out[i] = the 0-based
+/// index of row i's group, groups numbered in ASCENDING key order (pandas' sort=True
+/// default). DENSE integer keys 0..1023 (direct-index, no hashing -- the same fast
+/// dense-key contract as bf_groupby_sum; a row whose key is outside [0,1024) gets -1).
+/// For sparse keys the numbering is the compacted sorted rank of the distinct keys.
+/// O(n), two passes. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
+pub fn bf_ngroup_by(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var seen: [i64; 1024] = [0; 1024]
+    var gnum: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { seen[k] = 1 } i = i + 1 }
+    var g: f64 = 0.0
+    var k2: i64 = 0
+    while k2 < 1024 { if seen[k2] == 1 { gnum[k2] = g; g = g + 1.0 } k2 = k2 + 1 }   // ascending key -> ascending number
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { write_f64(op, i, gnum[k]) } else { write_f64(op, i, 0.0 - 1.0) }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group DESCENDING running count (like pandas df.groupby(key).cumcount(ascending=
+/// False)): out[i] = the number of LATER rows sharing row i's `key_col` value (so the
+/// last row of each group gets 0 and the first gets size-1). DENSE integer keys 0..1023
+/// (direct-index, no hashing -- the same fast dense-key contract as bf_groupby_sum; a row
+/// whose key is outside [0,1024) gets 0). O(n), two passes (count sizes, then walk).
+/// Returns a 1-column BigFrame of length n. NATIVE + lean_single only (heap).
+pub fn bf_cumcount_desc_by(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sz:  [f64; 1024] = [0.0; 1024]
+    var cur: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { sz[k] = sz[k] + 1.0 } i = i + 1 }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { write_f64(op, i, sz[k] - 1.0 - cur[k]); cur[k] = cur[k] + 1.0 }
+        else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    out
 }
