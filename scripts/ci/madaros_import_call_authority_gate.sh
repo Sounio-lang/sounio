@@ -86,9 +86,12 @@ grep -Fq 'module_frontend_prepare_import_authority(' <<<"$collector_shape" ||
 grep -Fq 'module_frontend_authority_rewrite_item_list_opt(' <<<"$authority_shape" ||
   fail authority_ast_rewrite_missing
 grep -Fq '(*callee).kind == ExprKind::ExprPath' "$FRONTEND" || fail qualified_path_classifier_missing
-grep -Fq 'rewritten.kind = ExprKind::ExprIdent' "$FRONTEND" || fail qualified_path_rewrite_missing
-grep -Fq 'rewritten.name = make_name(MF_EXTERN_BINDING_LOCAL_NAMES[binding_index as usize])' "$FRONTEND" ||
+grep -Fq '(*callee).kind = ExprKind::ExprIdent' "$FRONTEND" || fail qualified_path_rewrite_missing
+grep -Fq '(*callee).name = make_name(MF_EXTERN_BINDING_LOCAL_NAMES[binding_index as usize])' "$FRONTEND" ||
   fail qualified_path_exact_local_name_missing
+if grep -Fq '(*stage).e.left = Some(Box::new(rewritten))' "$FRONTEND"; then
+  fail qualified_path_reboxing_reintroduced
+fi
 grep -Fq 'MF_EXTERN_BINDING_QUALIFIER_PATHS[qualifier_sidecar_index as usize] = requested_import' "$FRONTEND" ||
   fail qualifier_text_not_derived_from_authored_import
 for sidecar in \
