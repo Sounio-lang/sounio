@@ -33,6 +33,15 @@ var IMP_NAMED_COUNT: i64 = 0
 var IMP_NAMED_SCRATCH_NS: [i64; 512] = [0; 512]
 var IMP_NAMED_SCRATCH_NE: [i64; 512] = [0; 512]
 var IMP_NAMED_SCRATCH_COUNT: i64 = 0
+// Authored module qualifiers for direct import edges. Unlike the flattened
+// function table, this preserves which `qualifier::name` was actually written.
+var IMP_QUAL_FROM: [i64; 16384] = [0; 16384]
+var IMP_QUAL_TO: [i64; 16384] = [0; 16384]
+var IMP_QUAL_NAME_OFF: [i64; 16384] = [0; 16384]
+var IMP_QUAL_NAME_LEN: [i64; 16384] = [0; 16384]
+var IMP_QUAL_NAME_BUF: [i8; 262144] = [0; 262144]
+var IMP_QUAL_NAME_USED: i64 = 0
+var IMP_QUAL_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
@@ -7510,6 +7519,60 @@ fn fn_named_import_visible(fi: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
     return true
 }
 
+fn fn_defined_in_qualified_target(fi: i64, target_source: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
+    let def_source = imp_source_index_for_pos(FN_NS[fi as usize])
+    if def_source == target_source { return true }
+
+    // Preserve the existing one-hop public facade contract for qualified calls.
+    var i: i64 = 0
+    while i < IMP_NAMED_COUNT {
+        if IMP_NAMED_FROM[i as usize] == target_source &&
+           IMP_NAMED_TO[i as usize] == def_source &&
+           IMP_NAMED_PUBLIC[i as usize] == 1 &&
+           name_eq(IMP_NAMED_NS[i as usize], IMP_NAMED_NE[i as usize], ns, ne) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn imp_qualifier_text_eq(edge_i: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
+    let n = ne - ns
+    if n != IMP_QUAL_NAME_LEN[edge_i as usize] { return false }
+    let off = IMP_QUAL_NAME_OFF[edge_i as usize]
+    var i: i64 = 0
+    while i < n {
+        if IMP_QUAL_NAME_BUF[(off + i) as usize] as i64 != sb(ns + i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Resolve a module-qualified free call through the exact authored direct-import
+// edge. Unknown qualifiers and qualifier/name mismatches fail closed instead of
+// falling through to the flattened bare function table.
+fn fn_find_qualified(call_pos: i64, qns: i64, qne: i64, ns: i64, ne: i64) -> i64 with Panic, Mut {
+    let caller_source = imp_source_index_for_pos(call_pos)
+    var edge_i: i64 = 0
+    while edge_i < IMP_QUAL_COUNT {
+        if IMP_QUAL_FROM[edge_i as usize] == caller_source &&
+           imp_qualifier_text_eq(edge_i, qns, qne) {
+            let target_source = IMP_QUAL_TO[edge_i as usize]
+            var fi: i64 = 0
+            while fi < FN_COUNT {
+                if name_eq(FN_NS[fi as usize], FN_NE[fi as usize], ns, ne) &&
+                   fn_defined_in_qualified_target(fi, target_source, ns, ne) {
+                    return fi
+                }
+                fi = fi + 1
+            }
+        }
+        edge_i = edge_i + 1
+    }
+    return -1
+}
+
 fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
@@ -12074,13 +12137,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
             }
         }
+        var call_is_qualified: i64 = 0
+        var call_qualifier_ns: i64 = -1
+        var call_qualifier_ne: i64 = -1
         // Multi-segment module-qualified path (mod::sub::...::name), 2+ `::`.
-        // Sounio's function namespace is flat (populated by `use mod::*`, looked
-        // up by bare name via fn_find) — a chain of `::`-segments beyond the
-        // first is a decorative module-path prefix, not a nested type/enum
-        // access. Flatten the chain down to its terminal segment and fall
-        // through to the ordinary identifier/call resolution below, exactly as
-        // if the terminal name had been written bare. Without this, the single
+        // The parser still consumes the chain down to its terminal function
+        // segment, while retaining the penultimate authored qualifier for exact
+        // direct-import resolution. Without this, the single
         // `::` handling below (Enum::Variant / Type::method()) misinterprets
         // the first segment, silently emits 0, and abandons the parse partway
         // through the chain. Guarded by `mseg_flattened` so a genuine single
@@ -12096,6 +12159,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             mseg_flattened = 1
         }
         if mseg_flattened == 1 && TK[EP as usize] == 51 {
+            call_is_qualified = 1
+            call_qualifier_ns = ns
+            call_qualifier_ne = ne
             EP = EP + 1  // skip ::
             ns = TS[EP as usize]
             ne = TE[EP as usize]
@@ -12103,6 +12169,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Enum::Variant — look up discriminant
         if TK[EP as usize] == 51 {
+            let single_qualifier_ns = ns
+            let single_qualifier_ne = ne
             let vns = TS[(EP + 1) as usize]
             let vne = TE[(EP + 1) as usize]
             let eh = gl_name_hash(ns, ne)
@@ -12192,19 +12260,18 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
-                // Method not found: this single-`::` prefix isn't a real
-                // struct/enum with a matching method — before assuming it's a
-                // broken static-method-call and stubbing 0, treat the prefix as
-                // a decorative module qualifier (exactly like the 2+-`::`
-                // flatten above already does) and fall through to ordinary
-                // bare-name call resolution. EP is already positioned at `(`
+                // Method not found: preserve this single-`::` prefix as a module
+                // qualifier and resolve it through the authored import edge. EP
+                // is already positioned at `(`
                 // (right after consuming `::method_name`), matching what the
                 // bare-call path below expects. Real motivating case: `use
                 // pkg::mod as alias; alias::fn()` (issue #632) — module
-                // aliasing has no dedicated alias table, so any unrecognized
-                // single-`::` prefix in call position falls through instead.
+                // aliasing is recorded by the import resolver before lowering.
                 ns = method_ns
                 ne = method_ne
+                call_is_qualified = 1
+                call_qualifier_ns = single_qualifier_ns
+                call_qualifier_ne = single_qualifier_ne
                 mcall_fallthrough = 1
             }
             if mcall_fallthrough == 0 {
@@ -12263,7 +12330,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 inf_gi = inf_gi + 1
             }
         }
-            let ident_fi = fn_find(ns, ne)
+        var ident_fi = fn_find(ns, ne)
+        if call_is_qualified == 1 {
+            ident_fi = fn_find_qualified(TS[name_tok as usize], call_qualifier_ns, call_qualifier_ne, ns, ne)
+        }
         // Function call: ident(args)
         // Disambiguate: if `(` is on a line below the ident, treat as a new stmt,
         // not a call. This mirrors Rust's behavior and fixes `let x = a + b \n (x, ...)`
@@ -13757,7 +13827,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            let math_intrinsic_allowed = math_intrinsic_call_allowed(ident_fi)
+            let math_intrinsic_allowed = call_is_qualified == 0 && math_intrinsic_call_allowed(ident_fi)
             // β⁷ Tier 3: two-arg atan2(y,x) with full Hessian propagation
             if math_intrinsic_allowed && src_match(ns, ne - ns, "atan2") {
                 EP = EP + 1
@@ -32427,9 +32497,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         // Multi-segment module-qualified path (mod::sub::...::name), 2+ `::`.
         // See the x86-64 twin (compile_primary(), same comment) for the full
-        // rationale: flatten the decorative module-path prefix down to the
-        // terminal segment before the single-`::` Enum::Variant handling below
-        // (which only understands one `::` level) gets a chance to misparse it.
+        // rationale: consume the path to its terminal segment while retaining
+        // the authored qualifier for exact direct-import resolution.
+        var call_is_qualified_a64: i64 = 0
+        var call_qualifier_ns_a64: i64 = -1
+        var call_qualifier_ne_a64: i64 = -1
         var mseg_flattened_a64: i64 = 0
         // Static-method-call resolution for `Type::method(...)`: resolved by
         // receiver hash below (mirror of x86 fn_find_method :~11887) and used to
@@ -32443,19 +32515,23 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             mseg_flattened_a64 = 1
         }
         if mseg_flattened_a64 == 1 && TK[EP as usize] == 51 {
+            call_is_qualified_a64 = 1
+            call_qualifier_ns_a64 = ns
+            call_qualifier_ne_a64 = ne
             EP = EP + 1  // skip ::
             ns = TS[EP as usize]
             ne = TE[EP as usize]
             EP = EP + 1  // skip terminal segment name
         }
         // Enum::Variant (or, when it isn't a real enum and a call follows, a
-        // decorative single-`::` prefix in call position — see the x86-64
+        // module qualifier in call position — see the x86-64
         // twin, compile_primary(), for the full rationale/issue #632. a64 has
         // no static-method-call support to fall back from in the first place
         // (a separate, larger, pre-existing a64 gap, not addressed here) —
-        // this only adds the "unrecognized prefix falls through to a bare
-        // call" behavior, mirroring x86's outcome for the same source shape.)
+        // this resolves the prefix through the authored direct-import edge.)
         if TK[EP as usize] == 51 {
+            let single_qualifier_ns_a64 = ns
+            let single_qualifier_ne_a64 = ne
             EP = EP + 1
             let vns = TS[EP as usize]
             let vne = TE[EP as usize]
@@ -32492,6 +32568,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             mstatic_fi_a64 = fn_find_method(vns, vne, eh)
             ns = vns
             ne = vne
+            if mstatic_fi_a64 < 0 {
+                call_is_qualified_a64 = 1
+                call_qualifier_ns_a64 = single_qualifier_ns_a64
+                call_qualifier_ne_a64 = single_qualifier_ne_a64
+            }
         }
         // Generic resolution
         if TK[EP as usize] == 23 && EP + 2 < TC && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 24 {
@@ -32516,7 +32597,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if g_found == 1 { EP = EP + 3 }
         }
-        let ident_fi = if mstatic_fi_a64 >= 0 { mstatic_fi_a64 } else { fn_find(ns, ne) }
+        var ident_fi = if mstatic_fi_a64 >= 0 { mstatic_fi_a64 } else { fn_find(ns, ne) }
+        if mstatic_fi_a64 < 0 && call_is_qualified_a64 == 1 {
+            ident_fi = fn_find_qualified(TS[name_tok as usize], call_qualifier_ns_a64, call_qualifier_ne_a64, ns, ne)
+        }
         // Function call: ident(args). Disambiguate (mirror of x86 :~12130): if `(`
         // is on a line below the ident, it's a NEW statement, not a call — so
         // `let x = a + b \n (x, y)` isn't misparsed as `let x = a + b(x, y)` (which
@@ -33275,7 +33359,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
-            let math_intrinsic_allowed_a64 = math_intrinsic_call_allowed(ident_fi)
+            let math_intrinsic_allowed_a64 = call_is_qualified_a64 == 0 && math_intrinsic_call_allowed(ident_fi)
             if math_intrinsic_allowed_a64 && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -37640,6 +37724,33 @@ fn imp_register_named_bindings(from_source: i64, to_source: i64, is_public: i64)
     }
 }
 
+fn imp_register_qualifier_binding(from_source: i64, to_source: i64, ns: i64, ne: i64) with IO, Mut, Panic {
+    if ns < 0 || ne <= ns { return }
+    let name_len = ne - ns
+    if IMP_QUAL_COUNT >= 16384 {
+        IMPORT_RESOLUTION_FAILED = 1
+        print("error: qualified import binding table full\n")
+        return
+    }
+    if IMP_QUAL_NAME_USED + name_len > 262144 {
+        IMPORT_RESOLUTION_FAILED = 1
+        print("error: qualified import name table full\n")
+        return
+    }
+    let qi = IMP_QUAL_COUNT
+    IMP_QUAL_FROM[qi as usize] = from_source
+    IMP_QUAL_TO[qi as usize] = to_source
+    IMP_QUAL_NAME_OFF[qi as usize] = IMP_QUAL_NAME_USED
+    IMP_QUAL_NAME_LEN[qi as usize] = name_len
+    var i: i64 = 0
+    while i < name_len {
+        IMP_QUAL_NAME_BUF[(IMP_QUAL_NAME_USED + i) as usize] = SRC[(ns + i) as usize]
+        i = i + 1
+    }
+    IMP_QUAL_NAME_USED = IMP_QUAL_NAME_USED + name_len
+    IMP_QUAL_COUNT = IMP_QUAL_COUNT + 1
+}
+
 fn print_imp_path() with IO, Mut, Panic {
     var i: i64 = 0
     while i < 4096 && IMP_PATH[i as usize] != 0 {
@@ -38167,6 +38278,12 @@ fn resolve_imports() with IO, Mut, Panic, Div {
             var path_start: i64 = pos
             var path_end: i64 = pos
             var is_braced_import: i64 = 0
+            var use_qualifier_ns: i64 = -1
+            var use_qualifier_ne: i64 = -1
+            var use_previous_segment_ns: i64 = -1
+            var use_previous_segment_ne: i64 = -1
+            var use_qualifier_is_alias: i64 = 0
+            var named_symbol_path_stripped: i64 = 0
             // Bug C: a glob (`::*`) or braced (`::{...}`) import unambiguously
             // marks where the file path ends. A bare named import
             // (`use pkg::mod::symbol`) has no such marker — `symbol` is
@@ -38248,12 +38365,25 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 // occurrences). The path-building loop below used to silently
                 // DROP every space instead of treating it as a terminator, so
                 // this built the garbled path `pkg/modasalias.sio` (issue #632).
-                // The alias name itself needs no separate table: the module's
-                // symbols are still resolved by bare name once the file loads
-                // correctly, and a single-`::` call through the alias falls
-                // through to that bare lookup (see the call-site companion fix).
+                // Preserve the alias text for qualified call resolution after
+                // the module is loaded.
                 if sb(pos) == 32 && pos + 3 < SRC_LEN && sb(pos+1) == 97 && sb(pos+2) == 115 && sb(pos+3) == 32 {
                     path_end = pos
+                    var alias_s = pos + 4
+                    while alias_s < SRC_LEN && (sb(alias_s) == 32 || sb(alias_s) == 9) { alias_s = alias_s + 1 }
+                    var alias_e = alias_s
+                    while alias_e < SRC_LEN {
+                        let ac = sb(alias_e)
+                        if (ac >= 65 && ac <= 90) || (ac >= 97 && ac <= 122) ||
+                           (ac >= 48 && ac <= 57) || ac == 95 {
+                            alias_e = alias_e + 1
+                        } else {
+                            break
+                        }
+                    }
+                    use_qualifier_ns = alias_s
+                    use_qualifier_ne = alias_e
+                    use_qualifier_is_alias = 1
                     // Unambiguous: `as alias` always names the whole preceding
                     // path as a module/file, never "the last segment is really
                     // an exported symbol" (that ambiguity, is_named_import's
@@ -38266,6 +38396,26 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 }
                 pos = pos + 1
                 path_end = pos
+            }
+            if use_qualifier_is_alias == 0 {
+                var segment_s = path_start
+                var qscan = path_start
+                while qscan < path_end {
+                    if sb(qscan) == 58 && qscan + 1 < path_end && sb(qscan + 1) == 58 {
+                        use_previous_segment_ns = use_qualifier_ns
+                        use_previous_segment_ne = use_qualifier_ne
+                        use_qualifier_ns = segment_s
+                        use_qualifier_ne = qscan
+                        qscan = qscan + 2
+                        segment_s = qscan
+                    } else {
+                        qscan = qscan + 1
+                    }
+                }
+                use_previous_segment_ns = use_qualifier_ns
+                use_previous_segment_ne = use_qualifier_ne
+                use_qualifier_ns = segment_s
+                use_qualifier_ne = path_end
             }
             // Preserve prior behavior for public globs, aliases, and bare
             // imports. This issue only grants loading/forwarding to braced
@@ -38715,6 +38865,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         copy_len = str_len(raw)
                         fsz = file_size(IMP_PATH)
                     }
+                    if copy_len > 0 { named_symbol_path_stripped = 1 }
                 }
             }
             if copy_len <= 0 {
@@ -38812,8 +38963,15 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                 }
                 let target_source = imp_path_loaded_index(fp_len)
-                if target_source >= 0 && IMP_NAMED_SCRATCH_COUNT > 0 {
-                    imp_register_named_bindings(use_from_source, target_source, use_is_public)
+                if target_source >= 0 {
+                    if named_symbol_path_stripped == 1 && use_qualifier_is_alias == 0 && use_previous_segment_ns >= 0 {
+                        use_qualifier_ns = use_previous_segment_ns
+                        use_qualifier_ne = use_previous_segment_ne
+                    }
+                    imp_register_qualifier_binding(use_from_source, target_source, use_qualifier_ns, use_qualifier_ne)
+                    if IMP_NAMED_SCRATCH_COUNT > 0 {
+                        imp_register_named_bindings(use_from_source, target_source, use_is_public)
+                    }
                 }
             }
         }
