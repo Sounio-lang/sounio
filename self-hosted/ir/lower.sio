@@ -5701,6 +5701,22 @@ impl Lowerer {
             if self.expr_result_is_float_ref(e) {
                 return 2
             }
+            // String concat (`s + t` / `s ++ t`) is a string result — keep it on
+            // the char* printer. Remaining non-float binary ops are integer
+            // arithmetic/bitwise; without this positive kind-1 mark, `print(x+1)`
+            // and `let y = x + 1; print(y)` fall to kind 0 → strlen(char*) SEGV.
+            if self.expr_result_is_string_ref(e) {
+                return 3
+            }
+            return 1
+        }
+        // Unary integer negation / bitwise-not of an int yields int. Float
+        // unary is already covered by expr_result_is_float_ref below.
+        if (*e).kind == ExprKind::ExprUnary {
+            if self.expr_result_is_float_ref(e) {
+                return 2
+            }
+            return 1
         }
         if self.expr_result_is_float_ref(e) {
             return 2
@@ -7439,6 +7455,16 @@ impl Lowerer {
                         // trait dispatch result). Restricted to Call/MethodCall so an
                         // indexed struct element cannot be misclassified as int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
+                        // `let y = x + 1` / `let y = 0 - x` without an i64 annotation:
+                        // expr_result_scalar_kind_ref now positively returns 1 for int
+                        // arith (and 2/3 for float/string). Bind that kind so a later
+                        // `print(y)` / `println(y)` routes to print_int rather than
+                        // strlen-as-char* (SEGV on the integer payload).
+                        let sk_bin = lo.expr_result_scalar_kind_ref(&(*expr_box_sk))
+                        if sk_bin == 1 || sk_bin == 2 || sk_bin == 3 {
+                            lo = lo.bind_local_scalar_kind(s.name, sk_bin)
+                        }
                     }
                 }
                 _ => {}
