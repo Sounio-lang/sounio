@@ -38,7 +38,7 @@ output="$(
   run_coord claim --agent agent-a --lane parser --ttl-seconds 600 \
     --intent 'parser ownership' --files 'self-hosted/parser/**'
 )"
-rg -q '^CLAIMED claim_id=agent-a--parser$' <<< "$output" || fail 'first claim was not created'
+grep -qE '^CLAIMED claim_id=agent-a--parser$' <<< "$output" || fail 'first claim was not created'
 
 if (
   cd "$TEST_ROOT/second-worktree"
@@ -53,13 +53,13 @@ output="$(
   run_coord claim --agent agent-b --lane codegen --ttl-seconds 600 \
     --intent 'disjoint ownership' --files 'self-hosted/codegen/**'
 )"
-rg -q '^CLAIMED claim_id=agent-b--codegen$' <<< "$output" || fail 'disjoint claim was rejected'
+grep -qE '^CLAIMED claim_id=agent-b--codegen$' <<< "$output" || fail 'disjoint claim was rejected'
 
 output="$(
   cd "$TEST_ROOT/second-worktree"
   run_coord brief --max-rows 4
 )"
-rg -q 'ACTIVE claim_id=agent-a--parser' <<< "$output" || fail 'claim was not visible across worktrees'
+grep -qE 'ACTIVE claim_id=agent-a--parser' <<< "$output" || fail 'claim was not visible across worktrees'
 
 if (
   cd "$TEST_ROOT/second-worktree"
@@ -72,30 +72,30 @@ output="$(
   cd "$REPO"
   run_coord heartbeat --agent agent-a --lane parser
 )"
-rg -q '^HEARTBEAT claim_id=agent-a--parser' <<< "$output" || fail 'heartbeat failed'
+grep -qE '^HEARTBEAT claim_id=agent-a--parser' <<< "$output" || fail 'heartbeat failed'
 
 output="$(
   cd "$REPO"
   run_coord check --brief --max-rows 4
 )"
-rg -q '^COORDINATION_CHECK=PASS$' <<< "$output" || fail 'coordination check failed'
+grep -qE '^COORDINATION_CHECK=PASS$' <<< "$output" || fail 'coordination check failed'
 
 output="$(
   cd "$REPO"
   run_coord release --agent agent-a --lane parser --reason 'selftest complete'
 )"
-rg -q '^RELEASED claim_id=agent-a--parser' <<< "$output" || fail 'first release failed'
+grep -qE '^RELEASED claim_id=agent-a--parser' <<< "$output" || fail 'first release failed'
 
 output="$(
   cd "$TEST_ROOT/second-worktree"
   run_coord release --agent agent-b --lane codegen --reason 'selftest complete'
 )"
-rg -q '^RELEASED claim_id=agent-b--codegen' <<< "$output" || fail 'second release failed'
+grep -qE '^RELEASED claim_id=agent-b--codegen' <<< "$output" || fail 'second release failed'
 
 output="$(
   cd "$REPO"
   run_coord brief --max-rows 4
 )"
-rg -q '^summary=active_claims:0 stale_claims:0 conflicts:0$' <<< "$output" || fail 'claims remained active'
+grep -qE '^summary=active_claims:0 stale_claims:0 conflicts:0$' <<< "$output" || fail 'claims remained active'
 
 echo 'sounio-coord-selftest: PASS'
