@@ -76,6 +76,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | shift_by (1M rows, 1000 dense keys, periods=1) | | ~13.5 | ~22.0 | **0.62x — Sounio wins** | dense stack tracker; fwd lag / rev lead ring for \|p\|>1 |
 | ffill_by / bfill_by (1M rows, 1000 dense keys) | | ~30.7 | ~96.3 | **0.32x — Sounio wins (3.1x)** | dense last/next-valid tracker; sentinel-marked NA |
 | winsorize_by (1M rows, 1000 groups, q=[.05,.95]) | | ~1220 | ~1010 | **~1.2x — near-parity loss** | counting-sort + 2 quickselects/group; quantile-bound, C3 select would close it |
+| sample_n_by (1M rows, 1000 groups, n=10) | | ~732 | ~1193 | **0.61x — Sounio wins** | seeded hash-priority top-n; pandas groupby.sample is slow |
+| sample_n_by (1M rows, 1000 groups, n=100) | | ~1564 | ~1298 | **~1.2x — loss** | O(sz·n) bounded buffer at large n; quickselect-threshold would flatten |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
