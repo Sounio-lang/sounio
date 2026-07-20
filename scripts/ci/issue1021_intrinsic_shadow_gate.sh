@@ -31,6 +31,11 @@ CASE_NAMES=(
   extern_c_math
   extern_local_collision
   method_exp_overload
+  scalar_free_math_control
+  scalar_method_math_control
+  forward_exp
+  recursive_exp
+  generic_exp
 )
 CASE_SOURCES=(
   "$FIXTURE_DIR/epistemic_exp.sio"
@@ -43,6 +48,11 @@ CASE_SOURCES=(
   "$FIXTURE_DIR/extern_c_math.sio"
   "$FIXTURE_DIR/extern_local_collision.sio"
   "$FIXTURE_DIR/method_exp_overload.sio"
+  "$FIXTURE_DIR/scalar_free_math_control.sio"
+  "$FIXTURE_DIR/scalar_method_math_control.sio"
+  "$FIXTURE_DIR/forward_exp.sio"
+  "$FIXTURE_DIR/recursive_exp.sio"
+  "$FIXTURE_DIR/generic_exp.sio"
 )
 CASE_MARKERS=(
   ISSUE1021_EPISTEMIC_EXP_OK
@@ -55,7 +65,14 @@ CASE_MARKERS=(
   ISSUE1021_EXTERN_C_MATH_OK
   ISSUE1021_EXTERN_LOCAL_COLLISION_OK
   ISSUE1021_METHOD_EXP_OVERLOAD_OK
+  ISSUE1021_SCALAR_FREE_MATH_CONTROL_OK
+  ISSUE1021_SCALAR_METHOD_MATH_CONTROL_OK
+  ISSUE1021_FORWARD_EXP_OK
+  ISSUE1021_RECURSIVE_EXP_OK
+  ISSUE1021_GENERIC_EXP_OK
 )
+WRONG_NAMESPACE_SOURCE="$FIXTURE_DIR/wrong_namespace_exp.sio"
+WRONG_NAMESPACE_DIAGNOSTIC='error: unknown identifier `wrong_namespace` at '
 
 fail() {
   local stage="$1"
@@ -113,6 +130,7 @@ assert_source_contract() {
   [[ -f "$SOURCE" ]] || fail source_contract compiler_source_missing
   [[ -d "$FIXTURE_DIR" ]] || fail source_contract fixture_directory_missing
   [[ -f "$FIXTURE_DIR/imported_exp_leaf.sio" ]] || fail source_contract imported_leaf_missing
+  [[ -f "$WRONG_NAMESPACE_SOURCE" ]] || fail source_contract wrong_namespace_fixture_missing
 
   grep -Fq 'fn math_intrinsic_call_allowed(fi: i64) -> bool' "$SOURCE" || fail source_contract helper_missing
   grep -Fq 'EXTERN_STUB_GEN_NS[si as usize] == fn_ns' "$SOURCE" || fail source_contract extern_exact_start_identity_missing
@@ -128,6 +146,11 @@ assert_source_contract() {
   grep -Fq 'if math_intrinsic_allowed_a64 && src_match(ns, ne - ns, "abs")' "$SOURCE" || fail source_contract aarch64_abs_guard_missing
   [[ "$(grep -Fc 'declared_math_mm = fn_find_expr_method' "$SOURCE")" -eq 1 ]] || fail source_contract x86_method_shadow_guard_missing
   [[ "$(grep -Fc 'declared_math_mm_a = fn_find_expr_method' "$SOURCE")" -eq 1 ]] || fail source_contract aarch64_method_shadow_guard_missing
+  grep -Fq 'fn fn_find_qualified(call_pos: i64, qns: i64, qne: i64, ns: i64, ne: i64)' "$SOURCE" || fail source_contract qualified_lookup_missing
+  grep -Fq 'IMP_QUAL_NAME_BUF[(IMP_QUAL_NAME_USED + i) as usize] = SRC[(ns + i) as usize]' "$SOURCE" || fail source_contract stable_qualifier_sidecar_missing
+  grep -Fq 'imp_register_qualifier_binding(use_from_source, target_source, use_qualifier_ns, use_qualifier_ne)' "$SOURCE" || fail source_contract qualified_import_registration_missing
+  grep -Fq 'let math_intrinsic_allowed = call_is_qualified == 0 && math_intrinsic_call_allowed(ident_fi)' "$SOURCE" || fail source_contract x86_qualified_intrinsic_guard_missing
+  grep -Fq 'let math_intrinsic_allowed_a64 = call_is_qualified_a64 == 0 && math_intrinsic_call_allowed(ident_fi)' "$SOURCE" || fail source_contract aarch64_qualified_intrinsic_guard_missing
 
   local i
   for i in "${!CASE_NAMES[@]}"; do
@@ -139,6 +162,11 @@ assert_source_contract() {
   grep -Fq 'fn exp(x: f64, shift: f64)' "$FIXTURE_DIR/extern_local_collision.sio" || fail source_contract extern_collision_witness_missing
   grep -Fq 'impl LeftValue' "$FIXTURE_DIR/method_exp_overload.sio" || fail source_contract method_left_overload_missing
   grep -Fq 'impl RightValue' "$FIXTURE_DIR/method_exp_overload.sio" || fail source_contract method_right_overload_missing
+  grep -Fq 'wrong_namespace::exp(2.0)' "$WRONG_NAMESPACE_SOURCE" || fail source_contract wrong_namespace_collision_missing
+  grep -Fq 'let value = exp::<i64>(42)' "$FIXTURE_DIR/generic_exp.sio" || fail source_contract generic_resolution_witness_missing
+  grep -Fq 'n + exp(n - 1)' "$FIXTURE_DIR/recursive_exp.sio" || fail source_contract recursive_resolution_witness_missing
+  grep -Fq 'let value = exp(2.0)' "$FIXTURE_DIR/forward_exp.sio" || fail source_contract forward_resolution_witness_missing
+  grep -Fq 'let raised = one.exp()' "$FIXTURE_DIR/scalar_method_math_control.sio" || fail source_contract scalar_method_control_missing
 }
 
 make_workdir() {
@@ -199,6 +227,23 @@ assert_compile_success() {
   assert_elf "$stage" "$CASE_ELF" "$machine"
 }
 
+assert_compile_rejection() {
+  local stage="$1"
+  local expected_diagnostic="$2"
+
+  [[ "$CASE_RC" -eq 1 ]] || fail "$stage" "expected_compile_exit_1_got_$CASE_RC"
+  [[ "$(artifact_state "$CASE_ELF")" == absent ]] || fail "$stage" rejected_case_left_elf
+  assert_no_fallback_log "$stage" "$CASE_LOG"
+  [[ "$(grep -Ec '^error:' "$CASE_LOG" || true)" -eq 1 ]] || fail "$stage" unexpected_error_diagnostic_count
+  grep -Fq "$expected_diagnostic" "$CASE_LOG" || {
+    show_tail "$CASE_LOG"
+    fail "$stage" expected_diagnostic_missing
+  }
+  if grep -Eiq 'segmentation fault|sigsegv|aborted|core dumped|internal compiler|timed out' "$CASE_LOG"; then
+    fail "$stage" compiler_crash_or_internal_error_observed
+  fi
+}
+
 run_runtime() {
   local label="$1"
   local elf="$2"
@@ -248,29 +293,33 @@ run_old_sigsegv_case() {
   assert_compile_success "${name}_compile" 62
   run_runtime "$name" "$elf" "${CASE_MARKERS[$index]}"
   [[ "$RUNTIME_RC" -eq 139 ]] || fail "${name}_runtime" "expected_sigsegv_139_got_$RUNTIME_RC"
-  ! grep -Fq "${CASE_MARKERS[$index]}" "$RUNTIME_STDOUT" || fail "${name}_runtime" unexpected_pass_marker
+  [[ ! -s "$RUNTIME_STDOUT" ]] || fail "${name}_runtime" runtime_stdout_not_empty
+  [[ ! -s "$RUNTIME_STDERR" ]] || fail "${name}_runtime" runtime_stderr_not_empty
   printf 'ISSUE1021_OLD_SEED_NEGATIVE_PASS case=%s compile=pass runtime_exit=139 signal=SIGSEGV marker=absent elf_sha256=%s\n' \
     "$name" "$(sha256sum "$elf" | awk '{print $1}')"
 }
 
-run_old_shadow_failure() {
+run_old_semantic_bug_case() {
   local index="$1"
   local name="${CASE_NAMES[$index]}"
   local elf="$WORK/$name.old-seed.elf"
   run_compile "$name" "${CASE_SOURCES[$index]}" "$elf"
-  if [[ "$CASE_RC" -ne 0 ]]; then
-    [[ "$(artifact_state "$elf")" == absent ]] || fail "${name}_compile" rejected_case_left_elf
-    printf 'ISSUE1021_OLD_SEED_NEGATIVE_PASS case=%s compile=reject compile_exit=%s final_elf=absent marker=absent\n' \
-      "$name" "$CASE_RC"
-    return
-  fi
   assert_compile_success "${name}_compile" 62
   run_runtime "$name" "$elf" "${CASE_MARKERS[$index]}"
-  [[ "$RUNTIME_RC" -ne 0 ]] || fail "${name}_runtime" old_seed_unexpectedly_passed
-  [[ "$RUNTIME_RC" -ne 124 ]] || fail "${name}_runtime" runtime_timeout
-  ! grep -Fq "${CASE_MARKERS[$index]}" "$RUNTIME_STDOUT" || fail "${name}_runtime" unexpected_pass_marker
-  printf 'ISSUE1021_OLD_SEED_NEGATIVE_PASS case=%s compile=pass runtime_exit=%s marker=absent elf_sha256=%s\n' \
-    "$name" "$RUNTIME_RC" "$(sha256sum "$elf" | awk '{print $1}')"
+  [[ "$RUNTIME_RC" -eq 1 ]] || fail "${name}_runtime" "expected_semantic_exit_1_got_$RUNTIME_RC"
+  [[ ! -s "$RUNTIME_STDOUT" ]] || fail "${name}_runtime" runtime_stdout_not_empty
+  [[ ! -s "$RUNTIME_STDERR" ]] || fail "${name}_runtime" runtime_stderr_not_empty
+  printf 'ISSUE1021_OLD_SEED_NEGATIVE_PASS case=%s compile=pass runtime_exit=1 failure=wrong_intrinsic_dispatch marker=absent elf_sha256=%s\n' \
+    "$name" "$(sha256sum "$elf" | awk '{print $1}')"
+}
+
+run_wrong_namespace_rejection() {
+  local target="$1"
+  local label="wrong_namespace_${target}"
+  local elf="$WORK/$label.elf"
+  run_compile "$label" "$WRONG_NAMESPACE_SOURCE" "$elf" "$target"
+  assert_compile_rejection "${label}_compile" "$WRONG_NAMESPACE_DIAGNOSTIC"
+  printf 'ISSUE1021_WRONG_NAMESPACE_REJECT_PASS target=%s compile_exit=1 diagnostic=unknown_qualified_identifier final_elf=absent fallback=none\n' "$target"
 }
 
 run_aarch64_compile_case() {
@@ -298,7 +347,7 @@ if [[ "$MODE" == source-only ]]; then
   if find "$WORK" -type f \( -name '*.elf' -o -name '*.out' \) -print -quit | grep -q .; then
     fail source_only unexpected_executable_artifact
   fi
-  printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=source-only source_sha256=%s source_contract=pass fixtures=10 x86_guard=pass aarch64_guard=pass runtime=not_run aarch64_runtime=unavailable compiler=not_run compiler_sha256=not_applicable final_elf=absent fallback=none\n' "$SOURCE_SHA256"
+  printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=source-only source_sha256=%s source_contract=pass positive_fixtures=%s rejection_fixtures=1 x86_guard=pass aarch64_guard=pass runtime=not_run aarch64_runtime=unavailable compiler=not_run compiler_sha256=not_applicable final_elf=absent fallback=none\n' "$SOURCE_SHA256" "${#CASE_NAMES[@]}"
   printf 'ISSUE1021_INTRINSIC_SHADOW_PASS mode=source-only\n'
   exit 0
 fi
@@ -327,14 +376,14 @@ if [[ "$MODE" == old-seed-negative ]]; then
   run_old_sigsegv_case 2
   run_positive_case 3
   run_positive_case 4
-  run_old_shadow_failure 5
-  run_old_shadow_failure 6
+  run_old_semantic_bug_case 5
+  run_old_semantic_bug_case 6
   run_positive_case 7
-  run_old_shadow_failure 8
-  run_old_shadow_failure 9
+  run_old_semantic_bug_case 8
+  run_old_semantic_bug_case 9
 
   [[ "$(sha256sum "$COMPILER" | awk '{print $1}')" == "$INITIAL_COMPILER_SHA256" ]] || fail final compiler_changed_during_gate
-  printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=old-seed-negative compiler_sha256=%s core_regressions=3xSIGSEGV139 controls=3xpass shadow_regressions=4xnegative aarch64=not_run final_elf=case_dependent fallback=none\n' "$COMPILER_SHA256"
+  printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=old-seed-negative compiler_sha256=%s authority=legacy_bug_witness_only abi_regressions=3xSIGSEGV139 semantic_regressions=4xexit1 controls=3xpass aarch64=not_run final_elf=case_dependent fallback=none\n' "$COMPILER_SHA256"
   printf 'ISSUE1021_INTRINSIC_SHADOW_PASS mode=old-seed-negative\n'
   exit 0
 fi
@@ -355,8 +404,10 @@ done
 for i in "${!CASE_NAMES[@]}"; do
   run_aarch64_compile_case "$i"
 done
+run_wrong_namespace_rejection x86_64-linux
+run_wrong_namespace_rejection aarch64-linux
 
 [[ "$(sha256sum "$COMPILER" | awk '{print $1}')" == "$INITIAL_COMPILER_SHA256" ]] || fail final compiler_changed_during_gate
-printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=source-fresh compiler_sha256=%s source_sha256=%s x86_runtime_cases=10 aarch64_compile_cases=10 aarch64_runtime=unavailable final_elf=present fallback=none\n' \
-  "$COMPILER_SHA256" "$SOURCE_SHA256"
+printf 'ISSUE1021_INTRINSIC_SHADOW_RECEIPT mode=source-fresh compiler_sha256=%s source_sha256=%s x86_runtime_cases=%s aarch64_compile_cases=%s qualified_rejections=2 aarch64_runtime=unavailable final_elf=case_dependent fallback=none\n' \
+  "$COMPILER_SHA256" "$SOURCE_SHA256" "${#CASE_NAMES[@]}" "${#CASE_NAMES[@]}"
 printf 'ISSUE1021_INTRINSIC_SHADOW_PASS mode=source-fresh\n'
