@@ -1724,20 +1724,72 @@ fn nc_emit_mov_rsp_rbp(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xec)
 }
 
+// Linux x86-64 stack growth: the kernel only maps stack pages on demand.
+// A bare `sub rsp, large` leaves rsp in unmapped VA; the first deep store or
+// push can MAPERR if it skips past the guard gap. For frames ≥ one page we
+// allocate page-by-page with an explicit touch so each page faults in under
+// the current rsp (GCC/LLVM -fstack-clash-protection style). Clobbers r11
+// (caller-saved; free at prologue before param spill).
+//
+// Live callers: compile_ir_function_v2_core_ir_into, native_v2_core_begin_fn_spill_into.
+fn nc_emit_stack_probe_after_sub(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // lean_single twin — no-op when frame < 4 KiB (rax steps below rsp immediately):
+    //   mov rax, rbp
+    // .L: sub rax, 0x1000 ; cmp rax, rsp ; jbe .E ; or byte ptr [rax], 0 ; jmp .L
+    // .E:
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xe8)  // mov rax, rbp
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x2d); nc_emit_u32_le(nc, 0x1000)  // sub rax, 0x1000
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xe0)  // cmp rax, rsp
+    nc_emit_byte(nc, 0x76); nc_emit_byte(nc, 0x05)                         // jbe +5
+    nc_emit_byte(nc, 0x80); nc_emit_byte(nc, 0x08); nc_emit_byte(nc, 0x00)  // or byte ptr [rax], 0
+    nc_emit_byte(nc, 0xeb); nc_emit_byte(nc, 0xf0)                         // jmp -16
+}
+
 fn nc_emit_sub_rsp_imm32(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
-    // 48 81 ec <imm32> — sub rsp, imm32
-    //
-    // Large-frame note (2026-07-20): full unrolled oct_mul (~0x23e0 spill frame)
-    // SEGV's under default Madaros on shallow user stacks. Stack-probe variants
-    // (post-sub lean_single loop, page-by-page sub+touch, pre-sub [rbp-k*page]
-    // touches) were measured and still MAPERR when the first unmapped page is
-    // touched from a fresh process stack. Mitigation for algebra::octonion is
-    // to split the multiply body (oct_mul_lo/hi) so each frame stays ≤ ~0x1200.
-    // Live path: compile_ir_function_v2_core_ir_into → this helper.
-    nc_emit_byte(nc, 0x48)
-    nc_emit_byte(nc, 0x81)
-    nc_emit_byte(nc, 0xec)
+    if val <= 0 {
+        return
+    }
+    // Page size 4096. Below one page: single sub + post-probe (probe is a no-op
+    // when rbp-rsp < 4K). At/above one page: rsp-frontier page walk so each
+    // new page is touched with rsp already on that page (Linux grows on fault).
+    if val < 4096 {
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x81)
+        nc_emit_byte(nc, 0xec)
+        nc_emit_u32_le(nc, val)
+        nc_emit_stack_probe_after_sub(nc)
+        return
+    }
+    // mov r11, val
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0xc3)
     nc_emit_u32_le(nc, val)
+    // .L:
+    // cmp r11, 0x1000
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xfb)
+    nc_emit_u32_le(nc, 0x1000)
+    // jb .Lrest  (+21)
+    nc_emit_byte(nc, 0x72); nc_emit_byte(nc, 0x15)
+    // sub rsp, 0x1000
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xec)
+    nc_emit_u32_le(nc, 0x1000)
+    // or qword ptr [rsp], 0
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x00)
+    // sub r11, 0x1000
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xeb)
+    nc_emit_u32_le(nc, 0x1000)
+    // jmp .L  (-30)
+    nc_emit_byte(nc, 0xeb); nc_emit_byte(nc, 0xe2)
+    // .Lrest: sub rsp, r11
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x29); nc_emit_byte(nc, 0xdc)
+    // test r11, r11
+    nc_emit_byte(nc, 0x4d); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xdb)
+    // jz .Ldone (+5)
+    nc_emit_byte(nc, 0x74); nc_emit_byte(nc, 0x05)
+    // or qword ptr [rsp], 0
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x00)
+    // .Ldone:
 }
 
 fn nc_emit_add_rsp_imm32(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
