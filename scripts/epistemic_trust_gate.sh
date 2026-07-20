@@ -28,6 +28,12 @@ runproof "gum: value + u_c"          tests/epistemic_trust/gum_trust.sio        
 runproof "correlation: covariance"   tests/epistemic_trust/correlation_trust.sio CORRELATION_TRUST_OK
 runproof "knightian: p-box"          tests/epistemic_trust/knightian_trust.sio   KNIGHTIAN_TRUST_OK
 runproof "knowledge: free Epistemic" tests/epistemic_trust/knowledge_trust.sio   KNOWLEDGE_TRUST_OK
+# CPC N=4 exact-spread leaf (2026-07-20): self-contained OsOct path; no algebra:: use.
+runproof "order_spread4: CPC N=4"    tests/epistemic_trust/order_spread_trust.sio ORDER_SPREAD_TRUST_OK
+# Structural nonassoc variance leaf (2026-07-20): self-contained PnOct path; no algebra:: use.
+runproof "product_nonassoc: fano/nonfano" tests/epistemic_trust/product_nonassoc_trust.sio PRODUCT_NONASSOC_TRUST_OK
+# Full propagate delta-method + value-style LCG MC (2026-07-20): exp_delta/product + MC kernels.
+runproof "propagate: exp_delta/product/MC" tests/epistemic_trust/propagate_trust.sio PROPAGATE_TRUST_OK
 
 echo "### B. KNOWN-CORRUPTED trip-wire (informational) ###"
 echo "== gum k95 coverage factor (should be 2776 = t95(4); bug gives 1960) =="
@@ -44,10 +50,9 @@ if $SOUC compile tests/epistemic_trust/witness_import_knowledge_method.sio -o "$
   echo "!! method-call knowledge now COMPILES — Root 2 may be FIXED; update trust map"
 else echo "CONFIRMED unimportable (method-call form, as documented)"; fi
 
-echo "== witness_import_order_spread (trip-wire; may compile after knowledge free-API) =="
-if $SOUC compile tests/epistemic_trust/witness_import_order_spread.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
-  echo "NOTE: order_spread_exact COMPILES under native import — re-classify in trust map when numeric gate exists"
-else echo "CONFIRMED unimportable (native compile fails, as documented)"; fi
+# order_spread_exact + product_nonassoc promoted to Section A.
+# Residual multi-module: algebra::associator_field / algebra::octonion exclusive-ref
+# import chain still SEGV at runtime under Madaros — do not reintroduce algebra:: uses.
 
 # Legacy free-function witness should now succeed (informational flip)
 echo "== witness_import_knowledge free API (expected: now COMPILES) =="

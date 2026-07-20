@@ -2,24 +2,33 @@
 # scripts/madaros_dual_import_gate.sh
 #
 # Dual-module import under default Madaros: epistemic::gum + epistemic::knowledge
-# in one program must type-check and (when the native path is live) run.
+# in one program must type-check, compile, and run with DUAL_GUM_KNOWLEDGE_OK.
 #
-# Pre-fix: 51× false E175 on private helpers that share names across the two
-# stdlib modules (chk / near / test_combine). Each module alone was fine.
-# Fix: self-hosted/check/defs.sio fn_sig_table_find_prefer_module +
+# Check path (pre-#1245): 51× false E175 on private helpers that share names
+# across the two stdlib modules (chk / near / test_combine). Fix:
+# self-hosted/check/defs.sio fn_sig_table_find_prefer_module +
 # self-hosted/check/check.sio checker_fn_sigs_find_inplace.
+#
+# Run path (pre-2026-07-20): witness called non-existent e.mean(); multi-module
+# check accepted it and native lower SEGV'd at lower_array:seed_begin. Correct
+# API is e.val() (or ep_val free fn). Dual modules with real methods already
+# compile+run; gate now *requires* run success (no longer best-effort WARN).
 #
 # Also re-runs knowledge-alone, gum-alone, and Root 2 multi-module method so a
 # dual-import patch cannot regress those gates. Does NOT touch clinical/ousadia.
 #
 # Requires a current-source Madaros (artifacts/self-hosted/madaros or
-# MADAROS_RAW_BIN). Checked-in bin/madaros-linux-x86_64 may predate the fix.
+# MADAROS_RAW_BIN). Checked-in bin/madaros-linux-x86_64 may predate the check fix.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 unset SOUNIO_SOUC_ENGINE || true
+
+# Dual multi-module lower+codegen needs ~120000 KiB soft stack (65536 KiB
+# lowers cleanly then fails to emit ELF). Prefer unlimited; fall back to 128 MiB.
+ulimit -s unlimited 2>/dev/null || ulimit -s 131072 2>/dev/null || true
 
 SOUC="${SOUC:-$ROOT/bin/souc}"
 OUT="$(mktemp -d)"
@@ -78,7 +87,7 @@ cat >"$OUT/knowledge_alone.sio" <<'EOF'
 use epistemic::knowledge::{Epistemic}
 fn main() -> i64 with IO, Mut, Div, Panic {
     let e = Epistemic::measured(10.0, 0.5)
-    let m = e.mean()
+    let m = e.val()
     if m > 0.0 { 0 } else { 1 }
 }
 EOF
@@ -115,27 +124,50 @@ else
   fi
 fi
 
-# Best-effort run of dual witness (native multi-module may still be fragile)
-echo "== run (best-effort): dual gum+knowledge =="
-if "$SOUC" compile tests/run-pass/madaros_dual_gum_knowledge.sio -o "$OUT/dual.elf" >"$OUT/compile.log" 2>&1; then
+# Required run of dual witness (native multi-module compile + execute)
+echo "== run (required): dual gum+knowledge =="
+run_ok=0
+if ! "$SOUC" compile tests/run-pass/madaros_dual_gum_knowledge.sio -o "$OUT/dual.elf" >"$OUT/compile.log" 2>&1; then
+  echo "FAIL: dual compile (native multi-module)"
+  # SEGV during lower often exits 139 with log ending at lower_array:seed_begin
+  if grep -q 'lower_array: seed_begin' "$OUT/compile.log" 2>/dev/null \
+     && ! grep -q 'lower_array: seed_done\|Written to\|Compilation successful' "$OUT/compile.log" 2>/dev/null; then
+    echo "  (log ends at lower_array:seed_begin — missing method / Root-2 residual?)"
+  fi
+  tail -20 "$OUT/compile.log" || true
+  fail=1
+else
   chmod +x "$OUT/dual.elf"
-  if "$OUT/dual.elf" >"$OUT/run.log" 2>&1 && grep -q 'DUAL_GUM_KNOWLEDGE_OK' "$OUT/run.log"; then
+  set +e
+  "$OUT/dual.elf" >"$OUT/run.log" 2>&1
+  run_ec=$?
+  set -e
+  if [[ $run_ec -eq 0 ]] && grep -q 'DUAL_GUM_KNOWLEDGE_OK' "$OUT/run.log"; then
     echo "PASS: run dual gum+knowledge"
     cat "$OUT/run.log" || true
+    run_ok=1
   else
-    echo "WARN: compile ok but run missing DUAL_GUM_KNOWLEDGE_OK (native residual; check still required)"
+    echo "FAIL: dual run exit=$run_ec (expected 0 and DUAL_GUM_KNOWLEDGE_OK)"
     cat "$OUT/run.log" 2>/dev/null || true
-    # Do not fail the gate on native run residual — the bug under repair is E175 preflight.
+    fail=1
   fi
-else
-  echo "WARN: dual compile failed (native multi-module residual; check still required)"
-  tail -10 "$OUT/compile.log" || true
 fi
 
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 STATUS=fail
 [[ $fail -eq 0 ]] && STATUS=pass
+CLAIMS_JSON='[
+    "dual_gum_knowledge_check_ok",
+    "knowledge_alone_check_ok",
+    "gum_alone_check_ok",
+    "private_cross_module_still_e175"'
+if [[ $run_ok -eq 1 ]]; then
+  CLAIMS_JSON+=',
+    "dual_gum_knowledge_native_run_ok"'
+fi
+CLAIMS_JSON+='
+  ]'
 cat >"$ROOT/artifacts/compiler/madaros_dual_import_receipt.v1.json" <<EOF
 {
   "schema": "madaros_dual_import_receipt.v1",
@@ -143,15 +175,11 @@ cat >"$ROOT/artifacts/compiler/madaros_dual_import_receipt.v1.json" <<EOF
   "engine": "madaros_default",
   "commit": "$COMMIT",
   "raw_elf": "$RAW",
-  "claims": [
-    "dual_gum_knowledge_check_ok",
-    "knowledge_alone_check_ok",
-    "gum_alone_check_ok",
-    "private_cross_module_still_e175"
-  ],
+  "native_run": $run_ok,
+  "claims": $CLAIMS_JSON,
   "claims_not_made": [
-    "native_run_guaranteed",
     "all_stdlib_dual_pairs",
+    "unknown_method_rejected_at_check",
     "scalar_kind_global_change"
   ]
 }

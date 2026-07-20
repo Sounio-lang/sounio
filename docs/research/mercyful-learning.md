@@ -226,3 +226,36 @@ maximin paid `0.460` (bottleneck algorithms return an arbitrary representative o
 **Honest reframing (owed).** "The algebra does not determine the ethics" is a conceptual thesis the figure
 *illustrates*, not proves. What the figure *demonstrates* is the §1 Proposition — a stronger and citable
 result. State it that way.
+
+## μ*, L_lex, and the field taxonomy (third review)
+
+**The price of mercy is a decision threshold, not "cheap."** For a decider with peak-aversion `μ`, criterion
+`K = ∫s + μ·max s`: the aggregative path costs `0.098 + 2.713μ`, the leximin costs `0.144 + 0.552μ`, so
+leximin wins iff `μ > 0.046/2.161 = 0.021`. The "price of mercy" **is** `μ*`, the **critical peak-aversion**,
+and the aggregative criterion is exactly `μ = 0`. Publishable form:
+
+> Choosing the aggregative trajectory on this field requires holding that one unit of *peak* suffering is
+> worth **less than 2.1%** of one unit of accumulated suffering — a position no reflective agent and no
+> clinical protocol sustains. Aggregationism is defeated not by moral appeal but by **revealed preference
+> over a computed threshold**: "is your peak-aversion above 0.021?" — obviously yes.
+
+**Missing number, now reported:** the leximin path length `L_lex = 1.128`. It is obligatory — without it the
+reader cannot reconstruct `J(λ) = L + λ∫s` or verify dominance. And the dominance is **structural, not
+lucky**: `J_lex − J_straight = (L_lex − 0.842) + λ(0.144 − 0.098)`; the straight segment is the Euclidean
+length-minimizer so any deviation has `ΔL > 0` by definition, and `Δ∫s > 0` too, so the horizontal λ-sweep
+is guaranteed by geometry.
+
+**The taxonomy the frontier authorizes** (diagnosable from the field *before* choosing an ethics; barrier
+cross-section `∼H·w` and detour geometry are independent):
+
+| barrier | detour | consequence |
+|---|---|---|
+| thin | cheap | aggregation crosses the agony; maximin protection ~free — *the 2D-toy regime* |
+| thin | expensive | the criteria diverge and it matters — the hard case |
+| thick | cheap | both avoid; nothing to discuss |
+| thick | expensive | both accept the pain; the question is only *where* to cross |
+
+So the strong thesis is not "the algebra makes ethics explicit" but: **the geometry of the field determines
+whether the ethical choice is consequential**, and there is a regime where Rawlsian protection comes at
+utilitarian price. Which regime the *real* algebraic locus (`composition-failure-field.md`) occupies is the
+open question that computation, not rhetoric, must answer.

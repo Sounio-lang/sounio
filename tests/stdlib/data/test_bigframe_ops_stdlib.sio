@@ -699,6 +699,141 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     var kud2 = bf_get(&ku, 4999, 0) - (0.0 - 0.990208)
     if kud2 < 0.0 { kud2 = 0.0 - kud2 }
     if kud2 > 0.00001 { print("FAIL rkurt_4999\n"); return 250 }
+    // ROLLING QUANTILE. col=i, window 101 -> window [i-100,i] already sorted; q*100 integer for
+    // these q so exact: q0=i-100, q0.25=i-75, q0.5=i-50, q0.9=i-10, q1=i.
+    var rqf = bf_new(1, 16)
+    var rqi: i64 = 0
+    while rqi < 5000 { var rqr:[f64;64]=[0.0;64]; rqr[0]=rqi as f64; bf_push_row(&!rqf,&rqr,1); rqi=rqi+1 }
+    let q0  = bf_rolling_quantile(&rqf, 0, 101, 0.0, 0.0 - 1.0)
+    let q25 = bf_rolling_quantile(&rqf, 0, 101, 0.25, 0.0 - 1.0)
+    let q50 = bf_rolling_quantile(&rqf, 0, 101, 0.5, 0.0 - 1.0)
+    let q90 = bf_rolling_quantile(&rqf, 0, 101, 0.9, 0.0 - 1.0)
+    let q1  = bf_rolling_quantile(&rqf, 0, 101, 1.0, 0.0 - 1.0)
+    if bf_nrows(&q50) != 5000 { print("FAIL rq_n\n"); return 251 }
+    if bf_get(&q50, 99, 0) != (0.0 - 1.0) { print("FAIL rq_fill\n"); return 252 }   // window not full
+    if !approx_eq(bf_get(&q0, 500, 0), 400.0) { print("FAIL rq0\n"); return 253 }
+    if !approx_eq(bf_get(&q25, 500, 0), 425.0) { print("FAIL rq25\n"); return 254 }
+    if !approx_eq(bf_get(&q50, 500, 0), 450.0) { print("FAIL rq50\n"); return 255 }
+    if !approx_eq(bf_get(&q90, 500, 0), 490.0) { print("FAIL rq90\n"); return 256 }
+    if !approx_eq(bf_get(&q1, 500, 0), 500.0) { print("FAIL rq1\n"); return 257 }
+    // DIFFERENTIAL: rolling_quantile(0.5) must equal the shipped rolling_median on scrambled data.
+    var rqs = bf_new(1, 16)
+    var rqsi: i64 = 0
+    while rqsi < 3000 { var rsr:[f64;64]=[0.0;64]; rsr[0]=((rqsi*2654435761)%100) as f64; bf_push_row(&!rqs,&rsr,1); rqsi=rqsi+1 }
+    let rqm = bf_rolling_quantile(&rqs, 0, 51, 0.5, 0.0 - 1.0)   // odd window -> median = win[mid]
+    let rmd = bf_rolling_median(&rqs, 0, 51, 0.0 - 1.0)
+    var rqd: i64 = 0; var rqj: i64 = 0
+    while rqj < 3000 { if bf_get(&rqm, rqj, 0) != bf_get(&rmd, rqj, 0) { rqd = rqd + 1 } rqj = rqj + 1 }
+    if rqd != 0 { print("FAIL rq_vs_median\n"); return 258 }
+    // GROUPED ROLLING SUM. key=i%1000, val=i, window 3. Per group k (rows k, k+1000, ...):
+    // the j-th occurrence sums vals of occurrences j-2..j; occurrence j=i/1000 has val=i.
+    var gsf = bf_new(2, 16)
+    var gsi: i64 = 0
+    while gsi < 100000 { var gsr:[f64;64]=[0.0;64]; gsr[0]=(gsi%1000) as f64; gsr[1]=gsi as f64; bf_push_row(&!gsf,&gsr,2); gsi=gsi+1 }
+    let gs = bf_rolling_sum_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_nrows(&gs) != 100000 { print("FAIL rsumby_n\n"); return 259 }
+    if bf_get(&gs, 1000, 0) != (0.0 - 1.0) { print("FAIL rsumby_fill\n"); return 260 }   // group 0 occ 1, window not full
+    if !approx_eq(bf_get(&gs, 2000, 0), 3000.0) { print("FAIL rsumby_2000\n"); return 261 }  // 0+1000+2000
+    if !approx_eq(bf_get(&gs, 3000, 0), 6000.0) { print("FAIL rsumby_3000\n"); return 262 }  // 1000+2000+3000
+    if !approx_eq(bf_get(&gs, 99500, 0), 295500.0) { print("FAIL rsumby_last\n"); return 263 } // group 500 last window
+    // total: each group contributes sum over its rows minus the first 2 occurrences per group.
+    // spot a second group: row 7 (group 7 occ 0) -> fill; row 2007 (group 7 occ 2) -> 7+1007+2007=3021.
+    if bf_get(&gs, 7, 0) != (0.0 - 1.0) { print("FAIL rsumby_g7fill\n"); return 264 }
+    if !approx_eq(bf_get(&gs, 2007, 0), 3021.0) { print("FAIL rsumby_g7\n"); return 265 }
+    // GROUPED ROLLING MEAN = the grouped rolling sum / window. Same frame, window 3.
+    let gm = bf_rolling_mean_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_get(&gm, 1000, 0) != (0.0 - 1.0) { print("FAIL rmeanby_fill\n"); return 266 }
+    if !approx_eq(bf_get(&gm, 2000, 0), 1000.0) { print("FAIL rmeanby_2000\n"); return 267 }  // mean(0,1000,2000)
+    if !approx_eq(bf_get(&gm, 3000, 0), 2000.0) { print("FAIL rmeanby_3000\n"); return 268 }
+    if !approx_eq(bf_get(&gm, 2007, 0), 1007.0) { print("FAIL rmeanby_g7\n"); return 269 }    // mean(7,1007,2007)
+    // consistency: mean == sum/window for a full window.
+    if !approx_eq(bf_get(&gm, 3000, 0), bf_get(&gs, 3000, 0) / 3.0) { print("FAIL rmeanby_consistency\n"); return 270 }
+    // GROUPED ROLLING MAX/MIN. key=i%1000, val=i (increasing within group), window 3:
+    // max_by = current value = i; min_by[occ jj] = val at occ jj-2 = i-2000.
+    let gmx = bf_rolling_max_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    let gmn = bf_rolling_min_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_get(&gmx, 1000, 0) != (0.0 - 1.0) { print("FAIL rmaxby_fill\n"); return 271 }   // occ 1
+    if !approx_eq(bf_get(&gmx, 2000, 0), 2000.0) { print("FAIL rmaxby_2000\n"); return 272 } // max(0,1000,2000)
+    if !approx_eq(bf_get(&gmn, 2000, 0), 0.0) { print("FAIL rminby_2000\n"); return 273 }    // min(0,1000,2000)
+    if !approx_eq(bf_get(&gmn, 3000, 0), 1000.0) { print("FAIL rminby_3000\n"); return 274 } // min(1000,2000,3000)
+    // CROSS-CHECK: a single-group frame -> grouped rolling max == ungrouped bf_rolling_max.
+    var sgf = bf_new(2, 16)
+    var sgi: i64 = 0
+    while sgi < 3000 { var sgr:[f64;64]=[0.0;64]; sgr[0]=0.0; sgr[1]=((sgi*13)%37) as f64; bf_push_row(&!sgf,&sgr,2); sgi=sgi+1 }
+    let gone = bf_rolling_max_by(&sgf, 0, 1, 50, 0.0 - 1.0)   // 1 group
+    let uone = bf_rolling_max(&sgf, 1, 50, 0.0 - 1.0)          // ungrouped, shipped
+    var sgd: i64 = 0; var sgj: i64 = 0
+    while sgj < 3000 { if bf_get(&gone, sgj, 0) != bf_get(&uone, sgj, 0) { sgd = sgd + 1 } sgj = sgj + 1 }
+    if sgd != 0 { print("FAIL rmaxby_vs_ungrouped\n"); return 275 }
+    // GROUPED ROLLING VAR/STD. 2 groups: key=i%2; val = the row index within group *1.0 so each
+    // group sees consecutive integers -> window-3 var of 3 consecutive ints = 1, std = 1.
+    var vbf = bf_new(2, 16)
+    var vbi: i64 = 0
+    while vbi < 6000 { var vbr:[f64;64]=[0.0;64]; vbr[0]=(vbi%2) as f64; vbr[1]=(vbi/2) as f64; bf_push_row(&!vbf,&vbr,2); vbi=vbi+1 }
+    let rvb = bf_rolling_var_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    let rsb = bf_rolling_std_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    if bf_nrows(&rvb) != 6000 { print("FAIL rvarby_n\n"); return 276 }
+    // group 0 (rows 0,2,4,...) has vals 0,1,2,3,...; occurrence 2 (row 4) window {0,1,2} var=1.
+    if bf_get(&rvb, 2, 0) != (0.0 - 999.0) { print("FAIL rvarby_fill\n"); return 277 }   // group 0 occ 1 (row 2)
+    if !approx_eq(bf_get(&rvb, 4, 0), 1.0) { print("FAIL rvarby_val\n"); return 278 }    // var(0,1,2)
+    if !approx_eq(bf_get(&rsb, 4, 0), 1.0) { print("FAIL rstdby_val\n"); return 279 }    // sqrt(1)
+    if !approx_eq(bf_get(&rvb, 100, 0), 1.0) { print("FAIL rvarby_val2\n"); return 280 } // any full window of consec ints
+    // CROSS-CHECK: single-group frame -> grouped rolling std == ungrouped bf_rolling_std.
+    let sgstd = bf_rolling_std_by(&sgf, 0, 1, 50, 0.0 - 999.0)   // sgf = 1-group frame from above
+    let ustd = bf_rolling_std(&sgf, 1, 50, 0.0 - 999.0)
+    var stdd: i64 = 0; var stdj: i64 = 0
+    while stdj < 3000 { if bf_get(&sgstd, stdj, 0) != bf_get(&ustd, stdj, 0) { stdd = stdd + 1 } stdj = stdj + 1 }
+    if stdd != 0 { print("FAIL rstdby_vs_ungrouped\n"); return 281 }
+    // GROUPED ROLLING MEDIAN. reuse vbf: group 0 (rows 0,2,4,...) sees consecutive ints
+    // 0,1,2,3,...; window-3 median at occurrence 2 (row 4) over {0,1,2} = 1.
+    let rmb = bf_rolling_median_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    if bf_nrows(&rmb) != 6000 { print("FAIL rmedby_n\n"); return 282 }
+    if bf_get(&rmb, 2, 0) != (0.0 - 999.0) { print("FAIL rmedby_fill\n"); return 283 }  // occ 1, not full
+    if !approx_eq(bf_get(&rmb, 4, 0), 1.0) { print("FAIL rmedby_val\n"); return 284 }   // median(0,1,2)
+    if !approx_eq(bf_get(&rmb, 100, 0), 49.0) { print("FAIL rmedby_val2\n"); return 285 } // median(48,49,50)
+    // CROSS-CHECK: single-group frame -> grouped rolling median == ungrouped bf_rolling_median.
+    let sgmed = bf_rolling_median_by(&sgf, 0, 1, 51, 0.0 - 999.0)
+    let umed = bf_rolling_median(&sgf, 1, 51, 0.0 - 999.0)
+    var medd: i64 = 0; var medj: i64 = 0
+    while medj < 3000 { if bf_get(&sgmed, medj, 0) != bf_get(&umed, medj, 0) { medd = medd + 1 } medj = medj + 1 }
+    if medd != 0 { print("FAIL rmedby_vs_ungrouped\n"); return 286 }
+    // GROUPED ROLLING QUANTILE. reuse vbf: group 0 sees consecutive ints 0,1,2,...; window
+    // 5, q=0.5 at occurrence 4 (row 8) over {0,1,2,3,4} -> median 2; q=0.0 -> 0; q=1.0 -> 4.
+    let rqb50 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.5, 0.0 - 999.0)
+    let rqb00 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.0, 0.0 - 999.0)
+    let rqb100 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 1.0, 0.0 - 999.0)
+    if bf_nrows(&rqb50) != 6000 { print("FAIL rqby_n\n"); return 287 }
+    if bf_get(&rqb50, 6, 0) != (0.0 - 999.0) { print("FAIL rqby_fill\n"); return 288 }   // occ 3, not full
+    if !approx_eq(bf_get(&rqb50, 8, 0), 2.0) { print("FAIL rqby_q50\n"); return 289 }    // median(0,1,2,3,4)
+    if !approx_eq(bf_get(&rqb00, 8, 0), 0.0) { print("FAIL rqby_q00\n"); return 290 }    // min
+    if !approx_eq(bf_get(&rqb100, 8, 0), 4.0) { print("FAIL rqby_q100\n"); return 291 }  // max
+    // interpolation: window 5 q=0.25 -> pos=1.0 -> exactly win[1]=1; group 0 occ 4 -> 1.0
+    let rqb25 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.25, 0.0 - 999.0)
+    if !approx_eq(bf_get(&rqb25, 8, 0), 1.0) { print("FAIL rqby_q25\n"); return 292 }
+    // CROSS-CHECK: q=0.5 grouped quantile == grouped median at the SAME window (both interp).
+    let rmb5 = bf_rolling_median_by(&vbf, 0, 1, 5, 0.0 - 999.0)
+    var qmd: i64 = 0; var qmj: i64 = 0
+    while qmj < 6000 { if bf_get(&rqb50, qmj, 0) != bf_get(&rmb5, qmj, 0) { qmd = qmd + 1 } qmj = qmj + 1 }
+    if qmd != 0 { print("FAIL rqby_vs_median\n"); return 293 }
+    // GROUPED NLARGEST / NSMALLEST. 3 groups (key=r/10), each vals 0..9 (val=r%10, distinct
+    // per group). nlargest(3) -> vals 9,8,7 at rows 10g+9,10g+8,10g+7; nsmallest(3) -> 0,1,2.
+    var ntf = bf_new(2, 16)
+    var nti: i64 = 0
+    while nti < 30 { var ntr:[f64;64]=[0.0;64]; ntr[0]=(nti/10) as f64; ntr[1]=(nti-10*(nti/10)) as f64; bf_push_row(&!ntf,&ntr,2); nti=nti+1 }
+    let nlg = bf_nlargest_by(&ntf, 0, 1, 3)
+    if bf_nrows(&nlg) != 9 { print("FAIL nlargest_n\n"); return 294 }        // 3 groups * 3
+    if bf_ncols(&nlg) != 3 { print("FAIL nlargest_cols\n"); return 295 }
+    // first row = group 0 top value: key 0, row 9, value 9 (descending)
+    if bf_get(&nlg, 0, 0) != 0.0 || bf_get(&nlg, 0, 1) != 9.0 || bf_get(&nlg, 0, 2) != 9.0 { print("FAIL nlargest_top\n"); return 296 }
+    if bf_get(&nlg, 2, 2) != 7.0 { print("FAIL nlargest_3rd\n"); return 297 }  // 3rd largest val = 7
+    let nsm = bf_nsmallest_by(&ntf, 0, 1, 3)
+    if bf_nrows(&nsm) != 9 { print("FAIL nsmallest_n\n"); return 298 }
+    // first row = group 0 smallest: key 0, row 0, value 0 (ascending)
+    if bf_get(&nsm, 0, 0) != 0.0 || bf_get(&nsm, 0, 1) != 0.0 || bf_get(&nsm, 0, 2) != 0.0 { print("FAIL nsmallest_bot\n"); return 299 }
+    if bf_get(&nsm, 2, 2) != 2.0 { print("FAIL nsmallest_3rd\n"); return 300 } // 3rd smallest val = 2
+    // n >= group size returns the whole group sorted (10 per group -> 30 rows for n=100)
+    let nlgall = bf_nlargest_by(&ntf, 0, 1, 100)
+    if bf_nrows(&nlgall) != 30 { print("FAIL nlargest_all\n"); return 301 }
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")
