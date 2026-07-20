@@ -816,6 +816,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.solver-proof-profile-acceptance-2026-06-23 | historical | docs/research/solver-proof-profile-acceptance-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-proof-profile-dispatch-envelope-2026-06-24 | historical | docs/research/solver-proof-profile-dispatch-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.solver-proofchecker-sota-2026-06-22 | historical | docs/research/solver-proofchecker-sota-2026-06-22.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.spectral-signature | historical | docs/research/spectral-signature.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-cohort-orc | historical | docs/research/subptx_abide_cohort_orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-cross-arch-repro | historical | docs/research/subptx_abide_cross_arch_repro.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-abide-orc-sweep | historical | docs/research/subptx_abide_orc_sweep.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
