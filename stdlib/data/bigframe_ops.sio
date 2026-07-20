@@ -11,7 +11,8 @@
 // rolling variance / std, rolling median, cumulative product, and
 // per-group distinct-count (nunique), per-group idxmax / idxmin, per-group mode,
 // rolling correlation, rolling covariance / skewness / kurtosis, rolling quantile,
-// and grouped rolling sum / mean / max / min / var / std / median / quantile.
+// and grouped rolling sum / mean / max / min / var / std / median / quantile;
+// grouped nlargest / nsmallest.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -3304,4 +3305,142 @@ pub fn bf_rolling_quantile_by(src: &BigFrame, key_col: i64, val_col: i64, window
     heap_free(cursor as *mut i8)
     heap_free(flat as *mut i8)
     out
+}
+
+/// Per-group top-n selection engine shared by bf_nlargest_by / bf_nsmallest_by. Orders by
+/// cmpval = sgn*val (sgn=+1 keeps the LARGEST n, sgn=-1 the SMALLEST n). O(n_rows * n) via
+/// the counting-sort grouping (as in bf_rolling_sum_by) + a bounded size-n insertion buffer
+/// per group region (keep the running top-n; strictly-greater eviction so ties keep the
+/// earlier row). Returns a NON-row-aligned 3-column BigFrame [key, row_index, value] with up
+/// to n rows per group, grouped in first-seen key order, DESCENDING by cmpval within a group
+/// (largest-first for nlargest, smallest-first for nsmallest). NATIVE + lean_single only.
+fn bf_ntop_by(src: &BigFrame, key_col: i64, val_col: i64, n: i64, sgn: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || nr <= 0 || n <= 0 { return bf_new(3, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hid = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let id = heap_alloc(nr * 8) as *mut i64
+    let sizes = heap_alloc(nr * 8) as *mut i64
+    var gcount: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let k = read_f64(kp, r)
+        var slot = bf_ghash(k, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, k)
+                write_f64(hid, slot, gcount as f64)
+                write_i64(id, r, gcount)
+                write_i64(sizes, gcount, 1)
+                gcount = gcount + 1
+                done = true
+            } else {
+                if read_f64(hk, slot) == k {
+                    let g = read_f64(hid, slot) as i64
+                    write_i64(id, r, g)
+                    write_i64(sizes, g, read_i64(sizes, g) + 1)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    let offsets = heap_alloc(nr * 8) as *mut i64
+    let cursor = heap_alloc(nr * 8) as *mut i64
+    var acc: i64 = 0
+    var g: i64 = 0
+    while g < gcount {
+        write_i64(offsets, g, acc)
+        write_i64(cursor, g, acc)
+        acc = acc + read_i64(sizes, g)
+        g = g + 1
+    }
+    let flat = heap_alloc(nr * 8) as *mut i64
+    r = 0
+    while r < nr {
+        let g2 = read_i64(id, r)
+        let p = read_i64(cursor, g2)
+        write_i64(flat, p, r)
+        write_i64(cursor, g2, p + 1)
+        r = r + 1
+    }
+    let bc = heap_alloc(n * 8) as *mut f64     // cmpvals kept, ascending (slot 0 = smallest kept = evict candidate)
+    let br = heap_alloc(n * 8) as *mut i64     // parallel original row index
+    var out = bf_new(3, gcount * n)
+    g = 0
+    while g < gcount {
+        let base = read_i64(offsets, g)
+        let sz = read_i64(sizes, g)
+        let gkey = read_f64(kp, read_i64(flat, base))
+        var cnt: i64 = 0
+        var jj: i64 = 0
+        while jj < sz {
+            let row = read_i64(flat, base + jj)
+            let cv = sgn * read_f64(vp, row)
+            if cnt < n {                                // buffer not full: insertion-sort the new value in
+                var ins = cnt
+                while ins > 0 && read_f64(bc, ins - 1) > cv {
+                    write_f64(bc, ins, read_f64(bc, ins - 1)); write_i64(br, ins, read_i64(br, ins - 1)); ins = ins - 1
+                }
+                write_f64(bc, ins, cv); write_i64(br, ins, row); cnt = cnt + 1
+            } else {
+                if cv > read_f64(bc, 0) {               // beats the smallest kept: evict bc[0], insert cv sorted
+                    var pos = 0
+                    while pos < n - 1 && read_f64(bc, pos + 1) < cv {
+                        write_f64(bc, pos, read_f64(bc, pos + 1)); write_i64(br, pos, read_i64(br, pos + 1)); pos = pos + 1
+                    }
+                    write_f64(bc, pos, cv); write_i64(br, pos, row)
+                }
+            }
+            jj = jj + 1
+        }
+        var e = cnt - 1                                 // emit descending cmpval (largest cmpval first)
+        while e >= 0 {
+            var rw: [f64; 64] = [0.0; 64]
+            rw[0] = gkey
+            rw[1] = read_i64(br, e) as f64
+            rw[2] = sgn * read_f64(bc, e)
+            bf_push_row(&!out, &rw, 3)
+            e = e - 1
+        }
+        g = g + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hid as *mut i8)
+    heap_free(id as *mut i8)
+    heap_free(sizes as *mut i8)
+    heap_free(offsets as *mut i8)
+    heap_free(cursor as *mut i8)
+    heap_free(flat as *mut i8)
+    heap_free(bc as *mut i8)
+    heap_free(br as *mut i8)
+    out
+}
+
+/// Per-group N LARGEST values (like pandas df.groupby(key)[val].nlargest(n)): for each
+/// distinct `key_col`, the n rows with the largest `val_col`, sorted DESCENDING by value
+/// (ties keep the earlier original row). Returns a 3-column BigFrame [key, row_index, value]
+/// with up to n rows per group. O(n_rows * n). NATIVE + lean_single only (heap).
+pub fn bf_nlargest_by(src: &BigFrame, key_col: i64, val_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_ntop_by(src, key_col, val_col, n, 1.0)
+}
+
+/// Per-group N SMALLEST values (like pandas df.groupby(key)[val].nsmallest(n)): for each
+/// distinct `key_col`, the n rows with the smallest `val_col`, sorted ASCENDING by value
+/// (ties keep the earlier original row). Returns a 3-column BigFrame [key, row_index, value]
+/// with up to n rows per group. O(n_rows * n). NATIVE + lean_single only (heap).
+pub fn bf_nsmallest_by(src: &BigFrame, key_col: i64, val_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_ntop_by(src, key_col, val_col, n, 0.0 - 1.0)
 }
