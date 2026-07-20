@@ -93,8 +93,9 @@ for sidecar in \
   MF_EXTERN_BINDING_QUALIFIER_PATHS; do
   grep -Fq "var $sidecar: [string; 2048]" "$FRONTEND" || fail "binding_sidecar_${sidecar}_missing"
 done
-grep -Fq 'let selected_path = str_concat(' "$FRONTEND" || fail qualified_exact_path_selection_missing
-grep -Fq 'str_eq(call_path_text, selected_path)' "$FRONTEND" || fail qualified_exact_path_comparison_missing
+grep -Fq 'fn module_frontend_call_text_selects_binding(' "$FRONTEND" || fail qualified_exact_path_selection_missing
+grep -Fq 'call_len != qualifier_len + 2 + export_len' "$FRONTEND" || fail qualified_exact_path_length_missing
+grep -Fq 'str_char_at(call_path, qualifier_len) != 58' "$FRONTEND" || fail qualified_separator_comparison_missing
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
   fail checker_stub_adapter_missing
 grep -Fq 'visibility_is_pub((*item).visibility)' "$FRONTEND" || fail checker_stub_public_guard_missing
