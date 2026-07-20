@@ -159,7 +159,7 @@ verdict=0. Private-fn negative control still E175.
 
 - Exhaustive census of all same-named private helpers across stdlib
 - Resolution of #854 (EISA E5 multi-module E175 graph) beyond the name-collision class
-- **Unknown method calls rejected at multi-module check** (still accepted; lower SEGV residual)
+- ~~**Unknown method calls rejected at multi-module check**~~ — closed by `fix/madaros-unknown-method-check` (associated `Type::method` return typing + E011); gate `scripts/madaros_unknown_method_check_gate.sh`
 - Compact emitter / remaining imported-module native defects (D1–D4 residual classes)
 - lean_single fixed-point identity after the checker change
 - Native run for every dual stdlib pair beyond gum+knowledge

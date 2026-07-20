@@ -55,6 +55,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rolling_skew (1M rows, window 100) | | ~130 | ~35 | **~3.8x** | per-element sqrt-bound |
 | rolling_kurt (1M rows, window 100) | | ~78 | ~28 | **~2.7x** | 4th-power sums; pandas Cython roll_kurt |
 | rolling_quantile (1M rows, window 100, q=0.9) | | 305 | 402 | **0.76x — Sounio wins** | sorted-window vs skip-list |
+| rolling_sum_by (1M rows, 1000 groups, window 100) | | ~57 | ~180 | **0.32x — Sounio wins** | vs pandas groupby().rolling() |
+| rolling_mean_by (1M rows, 1000 groups, window 100) | | ~59 | ~163 | **0.36x — Sounio wins** | vs pandas groupby().rolling() |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
