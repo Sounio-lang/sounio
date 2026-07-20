@@ -16,7 +16,8 @@
 // grouped cumulative min / max; grouped rank; grouped ngroup / descending cumcount;
 // grouped pct_change; grouped diff; grouped shift; grouped ffill / bfill;
 // grouped winsorize (quantile-clip); grouped sample; grouped reverse cumsum;
-// grouped expanding sum / mean / var / std.
+// grouped expanding sum / mean / var / std / max / min; grouped cumprod;
+// grouped zscore / demean / minmax-scale / sem / range; grouped head / tail mask.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -4605,4 +4606,181 @@ pub fn bf_expanding_var_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
 /// index Welford + bf_sqrt (see bf_expanding_by). NATIVE + lean_single only.
 pub fn bf_expanding_std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     bf_expanding_by(src, key_col, val_col, 2)
+}
+
+/// Per-group EXPANDING max (pandas .expanding().max()) -- identical to the per-group
+/// running maximum, so it delegates to bf_cummax_by. NATIVE + lean_single only.
+pub fn bf_expanding_max_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cummax_by(src, key_col, val_col)
+}
+
+/// Per-group EXPANDING min (pandas .expanding().min()) -- identical to the per-group
+/// running minimum, so it delegates to bf_cummin_by. NATIVE + lean_single only.
+pub fn bf_expanding_min_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cummin_by(src, key_col, val_col)
+}
+
+/// Per-group cumulative PRODUCT (pandas df.groupby(key)[val].cumprod()): out[i] = the
+/// product of val over row i's group from its start to i (overflows to inf, as in pandas).
+/// DENSE direct-index running product over keys 0..1023 (no hashing -- the same fast
+/// dense-key contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own
+/// value). O(n), one pass. NATIVE + lean_single only (heap).
+pub fn bf_cumprod_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var acc: [f64; 1024] = [1.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i)
+        if k >= 0 && k < 1024 { acc[k] = acc[k] * v; write_f64(op, i, acc[k]) }   // acc starts 1 -> first row = v
+        else { write_f64(op, i, v) }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group STATISTIC BROADCAST engine shared by bf_zscore_by / bf_demean_by /
+/// bf_minmax_scale_by / bf_sem_by / bf_range_by: computes a per-group statistic (a
+/// dense two-pass over keys 0..1023 -- pass 1 accumulates count/mean/M2 (Welford) and
+/// min/max per group, pass 2 broadcasts the derived value to every row). mode 0 zscore
+/// (v-mean)/std, 1 demean v-mean, 2 minmax (v-min)/(max-min) in [0,1], 3 sem std/sqrt(n),
+/// 4 range max-min. Sample std (ddof=1); a degenerate group (std 0 / range 0 / count 1)
+/// yields 0 where pandas yields NaN. DENSE keys 0..1023 (no hashing). O(n). NATIVE +
+/// lean_single only.
+fn bf_group_stat_bcast(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt:  [f64; 1024] = [0.0; 1024]
+    var mean: [f64; 1024] = [0.0; 1024]
+    var m2:   [f64; 1024] = [0.0; 1024]
+    var mn:   [f64; 1024] = [0.0; 1024]
+    var mx:   [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let v = read_f64(vp, i)
+            if cnt[k] == 0.0 { mn[k] = v; mx[k] = v } else { if v < mn[k] { mn[k] = v } if v > mx[k] { mx[k] = v } }
+            cnt[k] = cnt[k] + 1.0
+            let d = v - mean[k]
+            mean[k] = mean[k] + d / cnt[k]
+            m2[k] = m2[k] + d * (v - mean[k])
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let v = read_f64(vp, i)
+            var r = 0.0
+            if mode == 1 { r = v - mean[k] }
+            else { if mode == 4 { r = mx[k] - mn[k] }
+            else { if mode == 2 { let rng = mx[k] - mn[k]; if rng > 0.0 { r = (v - mn[k]) / rng } else { r = 0.0 } }
+            else {
+                var sd = 0.0
+                if cnt[k] > 1.0 { let va = m2[k] / (cnt[k] - 1.0); sd = bf_sqrt(va, sc) }
+                if mode == 0 { if sd > 0.0 { r = (v - mean[k]) / sd } else { r = 0.0 } }
+                else { if cnt[k] > 1.0 { r = sd / bf_sqrt(cnt[k], sc) } else { r = 0.0 } }   // mode 3 sem
+            } } }
+            write_f64(op, i, r)
+        } else {
+            write_f64(op, i, read_f64(vp, i))
+        }
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Per-group Z-SCORE broadcast (pandas transform (v-mean)/std, ddof=1): each row gets
+/// (val - group_mean) / group_std. The canonical per-group standardisation. Dense two-pass
+/// (see bf_group_stat_bcast); a zero-variance group yields 0. NATIVE + lean_single only.
+pub fn bf_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_stat_bcast(src, key_col, val_col, 0)
+}
+
+/// Per-group DEMEAN / centering (pandas transform v - v.mean()): each row gets
+/// val - group_mean. Dense two-pass. NATIVE + lean_single only.
+pub fn bf_demean_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_stat_bcast(src, key_col, val_col, 1)
+}
+
+/// Per-group MIN-MAX SCALE (pandas transform (v-min)/(max-min)): each row is rescaled to
+/// [0,1] within its group (a constant group yields 0). Dense two-pass. NATIVE + lean_single.
+pub fn bf_minmax_scale_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_stat_bcast(src, key_col, val_col, 2)
+}
+
+/// Per-group STANDARD ERROR OF THE MEAN broadcast (pandas transform('sem') = std/sqrt(n),
+/// ddof=1): each row gets its group's SEM. Dense two-pass. NATIVE + lean_single only.
+pub fn bf_sem_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_stat_bcast(src, key_col, val_col, 3)
+}
+
+/// Per-group RANGE broadcast (pandas transform max - min): each row gets its group's
+/// (max - min) span. Dense two-pass. NATIVE + lean_single only.
+pub fn bf_range_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_stat_bcast(src, key_col, val_col, 4)
+}
+
+/// Per-group HEAD / TAIL row mask shared by bf_head_mask_by / bf_tail_mask_by: out[i] =
+/// 1.0 if row i is among the FIRST (istail=0) / LAST (istail=1) `nn` rows of its group in
+/// input order, else 0.0 (like a mask for pandas df.groupby(key).head(nn) / .tail(nn)).
+/// DENSE integer keys 0..1023 (direct-index per-group counter, no hashing). O(n), one pass
+/// (forward for head, backward for tail). Returns a 1-column mask BigFrame of length n.
+/// NATIVE + lean_single only (heap).
+fn bf_headtail_mask(src: &BigFrame, key_col: i64, nn: i64, istail: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [i64; 1024] = [0; 1024]
+    let n = bf_nrows(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 || nn <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var z: i64 = 0
+    while z < n { write_f64(op, z, 0.0); z = z + 1 }
+    if istail == 0 {
+        var i: i64 = 0
+        while i < n {
+            let k = read_f64(kp, i) as i64
+            if k >= 0 && k < 1024 { if cnt[k] < nn { write_f64(op, i, 1.0); cnt[k] = cnt[k] + 1 } }
+            i = i + 1
+        }
+    } else {
+        var i: i64 = n - 1
+        while i >= 0 {
+            let k = read_f64(kp, i) as i64
+            if k >= 0 && k < 1024 { if cnt[k] < nn { write_f64(op, i, 1.0); cnt[k] = cnt[k] + 1 } }
+            i = i - 1
+        }
+    }
+    out
+}
+
+/// Per-group HEAD mask (pandas df.groupby(key).head(n)): out[i] = 1.0 iff row i is among
+/// the first `n` rows of its group in input order. Dense direct-index. NATIVE + lean_single.
+pub fn bf_head_mask_by(src: &BigFrame, key_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_headtail_mask(src, key_col, n, 0)
+}
+
+/// Per-group TAIL mask (pandas df.groupby(key).tail(n)): out[i] = 1.0 iff row i is among
+/// the last `n` rows of its group in input order. Dense direct-index (backward pass).
+/// NATIVE + lean_single only.
+pub fn bf_tail_mask_by(src: &BigFrame, key_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_headtail_mask(src, key_col, n, 1)
 }

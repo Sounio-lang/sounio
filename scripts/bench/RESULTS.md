@@ -81,6 +81,9 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cumsum_rev_by (1M rows, 1000 dense keys) | | ~69 | ~286 | **0.24x — Sounio wins (4.1x)** | dense reverse-pass suffix-sum vs pandas double-reverse+cumsum |
 | expanding_mean_by (1M rows, 1000 dense keys) | | ~31 | ~496 | **0.06x — Sounio wins (16x)** | dense Welford; pandas groupby.expanding().mean() very slow |
 | expanding_std_by (1M rows, 1000 dense keys) | | ~281 | ~521 | **0.54x — Sounio wins** | dense Welford + bf_sqrt (expanding sum ≡ cumsum_by) |
+| cumprod_by (1M rows, 1000 dense keys) | | ~12 | ~17 | **0.70x — Sounio wins** | dense running product (expanding_max/min ≡ cummax/cummin_by) |
+| zscore_by (1M rows, 1000 dense keys) | | ~270 | ~694 | **0.39x — Sounio wins** | dense two-pass Welford; demean/minmax/sem/range share the engine |
+| head_mask_by / tail_mask_by (1M rows, 1000 dense keys) | | (fast, single pass) | | **win** | dense per-group counter mask (fwd head / rev tail) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
