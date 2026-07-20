@@ -34,10 +34,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 >   close→return buffer ptr). **Verified:** `read_file`+`str_len`+`str_char_at` byte-exact over a
 >   multi-line CSV; `str_from_bytes(buf,n)` intact; 0/40 run-pass compile regressions.
 >
-> **⚠️ READER LANDMINE:** `raw[i]` (array-index syntax) on `read_file`'s string result **still
-> SIGSEGVs** — a SEPARATE, unfixed string-index-operator bug. `frd_open` uses the `raw[i]` form and it
-> works *in-compiler*, so the idiomatic-looking form is exactly the trap. **File readers MUST use
-> `str_char_at(s,i)` + `str_len(s)`, never `raw[i]`,** until the string-index bug is fixed.
+> **✅ READER LANDMINE FIXED (2026-07-20)** on `fix/madaros-string-index-native-v2`: `raw[i]` /
+> `s[i]` on packed strings (`read_file` / `str_from_bytes` / string lit) was lowered as a GC-handle
+> array load (resolve + `[base+idx*8]`) → SIGSEGV. Lower now routes string bases to
+> `IrIndexGet` `label_id=3` (raw byte load). Gate:
+> `scripts/native_string_index_packed_gate.sh` (needs current-source Madaros). `str_char_at` /
+> `str_len` remain valid alternatives.
 >
 > **Remaining siblings (NOT fixed; separate items):** (1) ~~`write_file`~~ — **FIXED 2026-07-19** on
 > `fix/madaros-write-file-handle-abi`: `emit_builtin_write_file` now resolves the native-v2 GC handle
@@ -45,9 +47,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 > `write_file(path, buf, n)` handle-by-value; `write_file(path, &buf, n)` remains wrong and must not
 > be "fixed" by adding a deref. Gate: `scripts/native_write_file_handle_abi_gate.sh` (needs
 > current-source Madaros). (2) The `self-hosted/native/codegen.sio` old-backend copy of
-> `emit_builtin_read_file` (reachable via wide/render drivers, not the default path). (3) The `raw[i]`
-> string-index-operator crash above. (4) `file_size`/`read_file` fail on some ABSOLUTE paths but work
-> on relative ones (path-length or cwd resolution — unconfirmed).
+> `emit_builtin_read_file` (reachable via wide/render drivers, not the default path). (3) ~~The
+> `raw[i]` string-index-operator crash~~ — **FIXED 2026-07-20** (see above). (4) `file_size`/
+> `read_file` fail on some ABSOLUTE paths but work on relative ones (path-length or cwd resolution —
+> unconfirmed).
 >
 > Net: the "`&local_array` into builtin" root cause below is not the bug. `str_from_bytes`/`file_size`
 > work; `read_file` and `write_file` are FIXED (native-v2 user path; shipping prebuilt lags until
