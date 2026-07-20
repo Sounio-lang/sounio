@@ -7840,17 +7840,45 @@ fn ocp_const_fold_pass_b(
 // Pass 2: Dead code elimination (mark-sweep)
 // ============================================================================
 
+fn ocp_mark_used_reg(used: &! [bool; 256], reg: i64) with Mut {
+    if reg >= 0 && reg < 256 {
+        used[reg as usize] = true
+    }
+}
+
+// IrCall operands live in a boxed list rather than src1/src2. Keep every
+// argument definition live; otherwise DCE can erase the value while the call
+// still names its register.
+fn ocp_mark_call_args_used(
+    used: &! [bool; 256],
+    args: Option<Box<IrRegList>>,
+) with Mut, Div, Panic {
+    var cur = args
+    var count: i64 = 0
+    while count < 256 {
+        match cur {
+            Some(node) => {
+                ocp_mark_used_reg(used, (*node).head)
+                cur = (*node).tail
+                count = count + 1
+            }
+            _ => { return }
+        }
+    }
+}
+
 // Mark which registers are used as source operands across the function.
 fn ocp_mark_used(func: &IrFunction) -> [bool; 256] with Mut, Div, Panic {
     var used: [bool; 256] = [false; 256]
     var i: i64 = 0
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
-        if instr.src1 >= 0 && instr.src1 < 256 {
-            used[instr.src1 as usize] = true
-        }
-        if instr.src2 >= 0 && instr.src2 < 256 {
-            used[instr.src2 as usize] = true
+        ocp_mark_used_reg(&! used, instr.src1)
+        ocp_mark_used_reg(&! used, instr.src2)
+        ocp_mark_call_args_used(&! used, instr.call_args)
+        // IrIndexSet stores its value operand in imm_i64.
+        if instr.op == IrOpcode::IrIndexSet {
+            ocp_mark_used_reg(&! used, instr.imm_i64)
         }
         i = i + 1
     }
@@ -8473,6 +8501,27 @@ fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // again and last_write is still set, the earlier write is a dead store — NOP it.
 // Skips side-effecting instructions (calls, stores, branches, labels, returns).
 // SOTA: Cooper & Torczon §8.4; Bodik, Gupta & Soffa PLDI 1998.
+fn ocp_dse_mark_call_args_read(
+    last_write: &! [i64; 256],
+    args: Option<Box<IrRegList>>,
+) with Mut, Div, Panic {
+    var cur = args
+    var count: i64 = 0
+    while count < 256 {
+        match cur {
+            Some(node) => {
+                let reg = (*node).head
+                if reg >= 0 && reg < 256 {
+                    last_write[reg as usize] = -1
+                }
+                cur = (*node).tail
+                count = count + 1
+            }
+            _ => { return }
+        }
+    }
+}
+
 fn ocp_dse(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // last_write[r] = instruction index of most recent write to r, or -1.
@@ -8488,6 +8537,10 @@ fn ocp_dse(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         // Mark src2 as read → its store is live.
         if instr.src2 >= 0 && instr.src2 < 256 {
             last_write[instr.src2 as usize] = -1
+        }
+        ocp_dse_mark_call_args_read(&! last_write, instr.call_args)
+        if instr.op == IrOpcode::IrIndexSet && instr.imm_i64 >= 0 && instr.imm_i64 < 256 {
+            last_write[instr.imm_i64 as usize] = -1
         }
 
         // Check if this instruction writes to dst.
@@ -8983,7 +9036,26 @@ fn opt_cleanup_function_with_algebras_and_audit(
 // Label references (label_id) are symbolic, not positional, so no remapping.
 // Reduces instr_count, improving downstream codegen and pass performance.
 // SOTA: standard peephole post-pass; Muchnick §13.1.
+fn ocp_has_boxed_call_operands(func: &IrFunction) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if instr.arg_count > 0 { return true }
+        match instr.call_args {
+            Some(_) => { return true }
+            _ => {}
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    // Moving an IrInstr also moves its Box<IrRegList> owner. The current
+    // cleanup pass has no re-box/remap phase, so retain stable instruction
+    // slots for call-bearing functions instead of claiming safe compaction.
+    if ocp_has_boxed_call_operands(&func) { return func }
+
     var result = func
     var write: i64 = 0
     var read: i64 = 0
