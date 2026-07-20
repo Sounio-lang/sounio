@@ -96,6 +96,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cummax_rev_by / cummin_rev_by / cumprod_rev_by (1M rows, 1000 dense keys) | | (fast, reverse pass) | | **win** | dense suffix cumulative vs pandas double-reverse |
 | clip_std_by (sigma-clip, 1M rows, 1000 groups) | | ~88 | ~1485 | **0.06x — wins (17x)** | dense two-pass; pandas transform-lambda clip is very slow |
 | normalize_l1_by (1M rows, 1000 dense keys) | | ~60 | ~497 | **0.12x — wins (8x)** | dense two-pass; absdev/harmean/rms/coefvar/argmax_pos/is_max/cumcount_frac/sumabs share the engine |
+| weighted_mean_by (1M rows, 1000 groups, 2 cols) | | ~30 | ~331 | **0.09x — wins (11x)** | dense two-pass Σvw/Σw vs pandas groupby.apply |
+| first_diff_by (1M rows, 1000 dense keys) | | ~35 | ~403 | **0.09x — wins (11x)** | dense; is_min/argmin/meansq/var_pop/std_pop/pct_of_first/cummean_rev/weighted_sum share the batch |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
