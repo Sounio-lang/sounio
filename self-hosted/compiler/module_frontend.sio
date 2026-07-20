@@ -509,12 +509,55 @@ fn module_frontend_resolve_ast_import_relpath(rel_path: string, cur_dir: string)
     module_frontend_resolve_import_relpath(str_slice(rel_path, offset, rel_len), base_dir)
 }
 
+// Strip the final path segment of a ".sio" relpath produced by
+// module_frontend_ast_import_relpath. Used as the named-import fallback for
+// bare `use module::symbol` forms that are token-identical to whole-file
+// imports: when `mod/half.sio` does not exist, retry `mod.sio`.
+// Returns "" when there is no parent segment to strip.
+fn module_frontend_relpath_strip_last_segment(rel_path: string) -> string with Mut, Panic, Div {
+    let len = str_len(rel_path)
+    if len < 5 {
+        return ""
+    }
+    var last_slash: i64 = 0 - 1
+    var i: i64 = 0
+    while i < len {
+        if str_char_at(rel_path, i) == 47 {
+            last_slash = i
+        }
+        i = i + 1
+    }
+    if last_slash < 0 {
+        return ""
+    }
+    str_concat(str_slice(rel_path, 0, last_slash), ".sio")
+}
+
 fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
     let rel_path = module_frontend_ast_import_relpath(path)
     if str_len(rel_path) == 0 {
         return ""
     }
-    module_frontend_resolve_ast_import_relpath(rel_path, cur_dir)
+    let resolved = module_frontend_resolve_ast_import_relpath(rel_path, cur_dir)
+    if file_exists(resolved) {
+        return resolved
+    }
+    // Named-import fallback (Madaros port of lean_single Bug C / #601):
+    // `use mod::half` is ambiguous with whole-file `use mod::half` where the
+    // last segment is a real file. Prefer the whole-file hit above; only when
+    // that misses, drop the last segment and retry so the parent module file
+    // loads. See docs/audit/LEAN_SINGLE_NAMED_USE_IMPORT_2026-07-05.md and
+    // docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md defect 1.
+    if path.seg_count >= 2 {
+        let parent_rel = module_frontend_relpath_strip_last_segment(rel_path)
+        if str_len(parent_rel) > 0 {
+            let parent_resolved = module_frontend_resolve_ast_import_relpath(parent_rel, cur_dir)
+            if file_exists(parent_resolved) {
+                return parent_resolved
+            }
+        }
+    }
+    resolved
 }
 
 fn mf_empty_program() -> Program {
@@ -2205,7 +2248,19 @@ pub fn module_frontend_import_files_from_source(path: string) -> ImportPathList 
             if path_start >= 0 {
                 let rel_path = module_frontend_extract_relpath_from_loaded(path_start, line_end)
                 if str_len(rel_path) > 0 {
-                    let dep_path = module_frontend_resolve_import_relpath(rel_path, cur_dir)
+                    var dep_path = module_frontend_resolve_import_relpath(rel_path, cur_dir)
+                    // Named-import fallback: bare `use pkg::mod::sym` embeds the
+                    // symbol as a path segment; strip it when the full relpath
+                    // does not exist on disk (same rule as resolve_import_file_path).
+                    if !file_exists(dep_path) {
+                        let parent_rel = module_frontend_relpath_strip_last_segment(rel_path)
+                        if str_len(parent_rel) > 0 {
+                            let parent_dep = module_frontend_resolve_import_relpath(parent_rel, cur_dir)
+                            if file_exists(parent_dep) {
+                                dep_path = parent_dep
+                            }
+                        }
+                    }
                     if file_exists(dep_path) && !import_path_list_contains(imports, dep_path) {
                         imports.paths[imports.count] = dep_path
                         imports.count = imports.count + 1
