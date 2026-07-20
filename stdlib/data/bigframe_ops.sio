@@ -17,7 +17,8 @@
 // grouped pct_change; grouped diff; grouped shift; grouped ffill / bfill;
 // grouped winsorize (quantile-clip); grouped sample; grouped reverse cumsum;
 // grouped expanding sum / mean / var / std / max / min; grouped cumprod;
-// grouped zscore / demean / minmax-scale / sem / range; grouped head / tail mask.
+// grouped zscore / demean / minmax-scale / sem / range; grouped head / tail mask;
+// grouped mad / skew / kurt; grouped prod / first / last broadcast; any / all + cumany / cumall.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -4783,4 +4784,218 @@ pub fn bf_head_mask_by(src: &BigFrame, key_col: i64, n: i64) -> BigFrame with Al
 /// NATIVE + lean_single only.
 pub fn bf_tail_mask_by(src: &BigFrame, key_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     bf_headtail_mask(src, key_col, n, 1)
+}
+
+// Absolute value of an f64.
+fn bf_fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// Per-group central-MOMENT broadcast engine shared by bf_mad_by / bf_skew_by /
+/// bf_kurt_by: mode 0 = mean absolute deviation mean(|v-mean|), 1 = skewness (pandas'
+/// adjusted Fisher-Pearson G1), 2 = excess kurtosis (pandas' Fisher G2). A dense three-
+/// pass over keys 0..1023 (sum->mean; then Σ|d| or Σd²/Σd³/Σd⁴; then broadcast). Sample
+/// convention: skew needs count>2, kurt count>3, else 0 (pandas NaN). DENSE keys 0..1023
+/// (no hashing -- the bf_groupby_sum contract). O(n). NATIVE + lean_single only.
+fn bf_group_moment(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var mean: [f64; 1024] = [0.0; 1024]
+    var s2: [f64; 1024] = [0.0; 1024]
+    var s3: [f64; 1024] = [0.0; 1024]
+    var s4: [f64; 1024] = [0.0; 1024]
+    var ad: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { cnt[k] = cnt[k] + 1.0; mean[k] = mean[k] + read_f64(vp, i) } i = i + 1 }
+    var g: i64 = 0
+    while g < 1024 { if cnt[g] > 0.0 { mean[g] = mean[g] / cnt[g] } g = g + 1 }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let d = read_f64(vp, i) - mean[k]
+            if mode == 0 { ad[k] = ad[k] + bf_fabs(d) }
+            else { let d2 = d * d; s2[k] = s2[k] + d2; s3[k] = s3[k] + d2 * d; s4[k] = s4[k] + d2 * d2 }
+        }
+        i = i + 1
+    }
+    g = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nn = cnt[g]
+            if mode == 0 { res[g] = ad[g] / nn }
+            else {
+                if mode == 1 {
+                    if nn > 2.0 { let m2 = s2[g] / nn; let m3 = s3[g] / nn; let den = m2 * bf_sqrt(m2, sc)
+                        if den > 0.0 { res[g] = (m3 / den) * bf_sqrt(nn * (nn - 1.0), sc) / (nn - 2.0) } else { res[g] = 0.0 }
+                    } else { res[g] = 0.0 }
+                } else {
+                    if nn > 3.0 { let m2 = s2[g] / nn; let m4 = s4[g] / nn
+                        if m2 > 0.0 { let g2 = m4 / (m2 * m2) - 3.0; res[g] = ((nn + 1.0) * g2 + 6.0) * (nn - 1.0) / ((nn - 2.0) * (nn - 3.0)) } else { res[g] = 0.0 }
+                    } else { res[g] = 0.0 }
+                }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Per-group MEAN ABSOLUTE DEVIATION broadcast (mean of |val - group_mean|): each row gets
+/// its group's MAD, a robust spread measure. Dense (see bf_group_moment). WIN vs pandas'
+/// lambda. NATIVE + lean_single only.
+pub fn bf_mad_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_moment(src, key_col, val_col, 0)
+}
+
+/// Per-group SKEWNESS broadcast (pandas transform('skew'), adjusted Fisher-Pearson G1):
+/// each row gets its group's skewness (0 for count<=2). Dense (see bf_group_moment).
+/// NATIVE + lean_single only.
+pub fn bf_skew_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_moment(src, key_col, val_col, 1)
+}
+
+/// Per-group excess KURTOSIS broadcast (pandas transform(kurt), Fisher G2): each row gets
+/// its group's excess kurtosis (0 for count<=3). Dense (see bf_group_moment). WIN vs
+/// pandas' lambda. NATIVE + lean_single only.
+pub fn bf_kurt_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_moment(src, key_col, val_col, 2)
+}
+
+/// Per-group VALUE broadcast engine shared by bf_group_prod_by / bf_group_first_by /
+/// bf_group_last_by / bf_any_by / bf_all_by: mode 0 product, 1 first value, 2 last value,
+/// 3 any (1 if any val != 0), 4 all (1 if every val != 0). A dense one-pass reduce over
+/// keys 0..1023 followed by a broadcast pass. DENSE keys 0..1023 (no hashing). O(n).
+/// NATIVE + lean_single only.
+fn bf_group_value_bcast(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var prod:  [f64; 1024] = [1.0; 1024]
+    var first: [f64; 1024] = [0.0; 1024]
+    var last:  [f64; 1024] = [0.0; 1024]
+    var anyf:  [i64; 1024] = [0; 1024]
+    var allf:  [i64; 1024] = [1; 1024]
+    var seen:  [i64; 1024] = [0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let v = read_f64(vp, i)
+            prod[k] = prod[k] * v
+            if seen[k] == 0 { seen[k] = 1; first[k] = v }
+            last[k] = v
+            if v != 0.0 { anyf[k] = 1 } else { allf[k] = 0 }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            if mode == 0 { write_f64(op, i, prod[k]) }
+            else { if mode == 1 { write_f64(op, i, first[k]) }
+            else { if mode == 2 { write_f64(op, i, last[k]) }
+            else { if mode == 3 { write_f64(op, i, anyf[k] as f64) }
+            else { write_f64(op, i, allf[k] as f64) } } } }
+        } else {
+            write_f64(op, i, read_f64(vp, i))
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group PRODUCT broadcast (pandas transform('prod')): each row gets its group's
+/// product of val. Dense (see bf_group_value_bcast). NATIVE + lean_single only.
+pub fn bf_group_prod_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_value_bcast(src, key_col, val_col, 0)
+}
+
+/// Per-group FIRST value broadcast (pandas transform('first')): each row gets its group's
+/// first val in input order. Dense (see bf_group_value_bcast). NATIVE + lean_single only.
+pub fn bf_group_first_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_value_bcast(src, key_col, val_col, 1)
+}
+
+/// Per-group LAST value broadcast (pandas transform('last')): each row gets its group's
+/// last val in input order. Dense (see bf_group_value_bcast). NATIVE + lean_single only.
+pub fn bf_group_last_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_value_bcast(src, key_col, val_col, 2)
+}
+
+/// Per-group ANY broadcast (pandas groupby(key)[val].transform('any') on `val != 0`): each
+/// row gets 1.0 if any value in its group is non-zero, else 0.0. Dense one pass + broadcast
+/// (see bf_group_value_bcast). NATIVE + lean_single only.
+pub fn bf_any_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_value_bcast(src, key_col, val_col, 3)
+}
+
+/// Per-group ALL broadcast (pandas groupby(key)[val].transform('all') on `val != 0`): each
+/// row gets 1.0 if every value in its group is non-zero, else 0.0. Dense (see
+/// bf_group_value_bcast). NATIVE + lean_single only.
+pub fn bf_all_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_group_value_bcast(src, key_col, val_col, 4)
+}
+
+/// Per-group running boolean shared by bf_cumany_by / bf_cumall_by: out[i] = the running
+/// OR (istany=1, cumany) / AND (istany=0, cumall) of `val != 0` over row i's group up to
+/// and including i -- once a group's cumany turns 1 it stays 1; once its cumall turns 0 it
+/// stays 0. DENSE keys 0..1023 (direct-index running flag, no hashing). O(n), one pass.
+/// NATIVE + lean_single only.
+fn bf_cumbool_by(src: &BigFrame, key_col: i64, val_col: i64, istany: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var st: [i64; 1024] = [0; 1024]
+    var seen: [i64; 1024] = [0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            var b: i64 = 0
+            if read_f64(vp, i) != 0.0 { b = 1 }
+            if seen[k] == 0 { seen[k] = 1; st[k] = b }
+            else { if istany == 1 { if b == 1 { st[k] = 1 } } else { if b == 0 { st[k] = 0 } } }
+            write_f64(op, i, st[k] as f64)
+        } else {
+            write_f64(op, i, read_f64(vp, i))
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group cumulative ANY (running OR of `val != 0`, pandas (val!=0).cummax() per group):
+/// each row gets 1.0 once a non-zero has appeared in its group at or before it. Dense (see
+/// bf_cumbool_by). NATIVE + lean_single only.
+pub fn bf_cumany_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cumbool_by(src, key_col, val_col, 1)
+}
+
+/// Per-group cumulative ALL (running AND of `val != 0`, pandas (val!=0).cummin() per group):
+/// each row gets 1.0 while every value in its group up to it has been non-zero. Dense (see
+/// bf_cumbool_by). NATIVE + lean_single only.
+pub fn bf_cumall_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_cumbool_by(src, key_col, val_col, 0)
 }
